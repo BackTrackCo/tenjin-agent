@@ -55,7 +55,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
     json = JSON.parse(raw);
   } catch (err) {
     throw new CliError('WALLET_INVALID_KEY', `The wallet file at ${path} is not valid JSON.`, {
-      fix: `Move ${path} aside, then run \`tenjin wallet create\` or \`tenjin wallet import\`.`,
+      fix: `Move ${path} aside, then run \`tenjin wallet create\`.`,
       cause: err,
     });
   }
@@ -65,7 +65,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
       'WALLET_INVALID_KEY',
       `The wallet file at ${path} is not a valid wallet record.`,
       {
-        fix: `Move ${path} aside, then run \`tenjin wallet create\` or \`tenjin wallet import\`.`,
+        fix: `Move ${path} aside, then run \`tenjin wallet create\`.`,
         details: parsed.error.issues,
       },
     );

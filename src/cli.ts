@@ -11,8 +11,8 @@ import type { CommandContext, CommandRun, GlobalFlags } from './context';
  * Global flags, validated. The merged options object (`cmd.optsWithGlobals()`) is
  * loosely typed; parsing it through zod both gives us a typed GlobalFlags and
  * coerces `--timeout` (a string from commander) into a positive integer, so a bad
- * `--timeout abc` fails as USAGE. Unknown keys (e.g. `wallet import`'s
- * `--from-env`) are stripped by the default object parse.
+ * `--timeout abc` fails as USAGE. Any non-global keys a leaf command merges in via
+ * optsWithGlobals() are stripped by the default object parse.
  */
 const GlobalOptsSchema = z.object({
   json: z.boolean().default(false),
@@ -171,15 +171,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runCommand('wallet.balance', this, async (ctx) => {
         const { runWalletBalance } = await import('./commands/wallet');
         return runWalletBalance(ctx);
-      });
-    });
-  addGlobalFlags(wallet.command('import'))
-    .description('Import a private key from stdin or --from-env')
-    .option('--from-env', 'read the key from TENJIN_WALLET_KEY')
-    .action(async function (this: Command, options: { fromEnv?: boolean }) {
-      await runCommand('wallet.import', this, async (ctx) => {
-        const { runWalletImport } = await import('./commands/wallet');
-        return runWalletImport({ fromEnv: options.fromEnv === true }, ctx);
       });
     });
 

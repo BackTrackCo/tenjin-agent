@@ -17,13 +17,7 @@ vi.mock('../lib/usdc', () => ({
 }));
 
 import { getUsdcBalance } from '../lib/usdc';
-import {
-  runWalletCreate,
-  runWalletShow,
-  runWalletBalance,
-  runWalletImport,
-  type ReadStdin,
-} from './wallet';
+import { runWalletCreate, runWalletShow, runWalletBalance } from './wallet';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const isWindows = process.platform === 'win32';
@@ -141,22 +135,6 @@ describe('runWalletCreate', () => {
     const winner = (winners[0] as PromiseFulfilledResult<{ data: { address: string } }>).value.data;
     expect((await readStored()).address).toBe(winner.address);
   });
-
-  it('concurrent create vs import: one wins, the other is WALLET_EXISTS, no clobber', async () => {
-    const ctx = makeCtx();
-    const key = generatePrivateKey();
-    const results = await Promise.allSettled([
-      runWalletCreate(ctx),
-      runWalletImport({ fromEnv: false }, ctx, async () => key),
-    ]);
-    const winners = results.filter((r) => r.status === 'fulfilled');
-    const losers = results.filter((r) => r.status === 'rejected');
-    expect(winners).toHaveLength(1);
-    expect(losers).toHaveLength(1);
-    expect(((losers[0] as PromiseRejectedResult).reason as CliError).code).toBe('WALLET_EXISTS');
-    const winner = (winners[0] as PromiseFulfilledResult<{ data: { address: string } }>).value.data;
-    expect((await readStored()).address).toBe(winner.address);
-  });
 });
 
 describe('runWalletShow', () => {
@@ -266,56 +244,5 @@ describe('runWalletBalance', () => {
     const res = await runWalletBalance(makeCtx(), { provider });
     expect((res.data as { balance: { usd: string } }).balance.usd).toBe('1');
     expect(getSigner).not.toHaveBeenCalled();
-  });
-});
-
-describe('runWalletImport', () => {
-  const stdinOf =
-    (value: string | null): ReadStdin =>
-    async () =>
-      value;
-
-  it('imports a piped key and persists it', async () => {
-    const key = generatePrivateKey();
-    const res = await runWalletImport({ fromEnv: false }, makeCtx(), stdinOf(key));
-    const address = privateKeyToAccount(key).address;
-    expect(res.data).toMatchObject({ address, source: 'stdin', walletPath: walletFile() });
-    expect((await readStored()).privateKey).toBe(key);
-  });
-
-  it('rejects an invalid key (WALLET_INVALID_KEY)', async () => {
-    const err = await catchCliError(
-      runWalletImport({ fromEnv: false }, makeCtx(), stdinOf('not-a-key')),
-    );
-    expect(err.code).toBe('WALLET_INVALID_KEY');
-  });
-
-  it('exits USAGE (2) when stdin is a TTY with no input', async () => {
-    const err = await catchCliError(runWalletImport({ fromEnv: false }, makeCtx(), stdinOf(null)));
-    expect(err.code).toBe('USAGE');
-    expect(err.exitCode).toBe(2);
-    expect(err.fix).toContain('--from-env');
-  });
-
-  it('refuses to overwrite an existing wallet (WALLET_EXISTS)', async () => {
-    await runWalletCreate(makeCtx());
-    const err = await catchCliError(
-      runWalletImport({ fromEnv: false }, makeCtx(), stdinOf(generatePrivateKey())),
-    );
-    expect(err.code).toBe('WALLET_EXISTS');
-    expect(err.exitCode).toBe(3);
-  });
-
-  it('reads the key from TENJIN_WALLET_KEY with --from-env', async () => {
-    const key = generatePrivateKey();
-    vi.stubEnv('TENJIN_WALLET_KEY', key);
-    const res = await runWalletImport({ fromEnv: true }, makeCtx(), stdinOf(null));
-    expect(res.data).toMatchObject({ address: privateKeyToAccount(key).address, source: 'env' });
-  });
-
-  it('exits USAGE when --from-env is set but the env var is missing', async () => {
-    const err = await catchCliError(runWalletImport({ fromEnv: true }, makeCtx(), stdinOf(null)));
-    expect(err.code).toBe('USAGE');
-    expect(err.exitCode).toBe(2);
   });
 });

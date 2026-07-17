@@ -82,11 +82,11 @@ tenjin doctor                    # verify Node floor, API reachability, contract
 
 Shipping today:
 
-| Command                                         | Purpose                                                              |
-| ----------------------------------------------- | -------------------------------------------------------------------- |
-| `tenjin doctor`                                 | Environment, API reachability, contract, and wallet checks           |
-| `tenjin config [get\|set]`                      | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists |
-| `tenjin wallet [create\|show\|balance\|import]` | Local Base wallet; the key never leaves the machine                  |
+| Command                                 | Purpose                                                              |
+| --------------------------------------- | -------------------------------------------------------------------- |
+| `tenjin doctor`                         | Environment, API reachability, contract, and wallet checks           |
+| `tenjin config [get\|set]`              | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists |
+| `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                  |
 
 Next: `lookup` / `inspect` / `buy` / `outcome` against the marketplace lookup
 API, `publish --draft`, an `install` command that auto-wires Claude Code and

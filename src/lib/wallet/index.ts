@@ -4,7 +4,7 @@ import type { CommandContext } from '../../context';
 import type { WalletDescription, WalletProvider } from './provider';
 
 export * from './provider';
-export { createLocalWallet, importLocalWallet, type LocalWalletInfo } from './local';
+export { createLocalWallet, type LocalWalletInfo } from './local';
 
 export interface ResolveWalletProviderOptions {
   /** Test-injection seam: bypass the local provider with a fake (e.g. a remote stub). */
