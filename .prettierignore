@@ -1,2 +1,5 @@
 dist/
 pnpm-lock.yaml
+# Vendored verbatim from tenjin.blog/skills.md via `pnpm sync:skill`; must stay
+# byte-identical to the source so skill-drift CI can diff it. Never reformat.
+skills/

@@ -39,6 +39,18 @@ your machine; Tenjin never receives a private key. It is listed in the
 [official MCP registry](https://registry.modelcontextprotocol.io) as
 `blog.tenjin/tenjin`.
 
+### Install the skill
+
+```bash
+npx skills add BackTrackCo/tenjin-agent
+```
+
+Installs the `tenjin` skill into Claude Code, Codex, or any
+Agent-Skills-compatible harness. It is the same zero-install curriculum served
+at [tenjin.blog/skills.md](https://tenjin.blog/skills.md) (canonical), and works
+today with no CLI and no account; a funded wallet is only needed for paid reads
+and publishing.
+
 ### Add the remote MCP server
 
 **Claude Code**

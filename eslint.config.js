@@ -24,4 +24,12 @@ export default [
       'no-undef': 'off',
     },
   },
+  {
+    // Dep-free maintenance scripts (no TS compiler behind them): declare the Node
+    // globals they use so no-undef stays a real typo check rather than being off.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { process: 'readonly', console: 'readonly', fetch: 'readonly' },
+    },
+  },
 ];
