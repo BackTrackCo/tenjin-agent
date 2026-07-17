@@ -1,0 +1,12 @@
+# pnpm 11 config file (single-package repo, no workspace globs).
+
+# Security pin mirrored from the tenjin repo — dropping it reddens
+# `pnpm audit` (ws is pulled in via viem).
+overrides:
+  'ws@>=8.0.0 <8.21.0': '8.21.0'
+
+# pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
+# entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
+# native binary comes from its platform optional-deps.
+allowBuilds:
+  esbuild: false

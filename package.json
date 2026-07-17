@@ -1,0 +1,63 @@
+{
+  "name": "tenjin-cli",
+  "version": "0.1.0-alpha.0",
+  "type": "module",
+  "description": "Tenjin agent CLI for the x402 knowledge marketplace.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BackTrackCo/tenjin-agent.git"
+  },
+  "homepage": "https://tenjin.blog/agents",
+  "bugs": "https://github.com/BackTrackCo/tenjin-agent/issues",
+  "keywords": [
+    "x402",
+    "usdc",
+    "base",
+    "ai-agents",
+    "agent-payments",
+    "mcp",
+    "knowledge-marketplace",
+    "micropayments",
+    "claude",
+    "codex",
+    "cli"
+  ],
+  "bin": {
+    "tenjin": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "NOTICE.md"
+  ],
+  "packageManager": "pnpm@11.11.0",
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm run build && pnpm run test",
+    "pack-smoke": "bash scripts/pack-smoke.sh",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@types/node": "^25",
+    "commander": "^14.0.1",
+    "eslint": "^9",
+    "eslint-config-prettier": "^10",
+    "prettier": "^3",
+    "tsup": "^8.5.0",
+    "typescript": "^6",
+    "typescript-eslint": "^8",
+    "viem": "^2.53.1",
+    "vitest": "^4.1.9",
+    "zod": "^4.4.3"
+  }
+}

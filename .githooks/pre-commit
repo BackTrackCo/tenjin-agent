@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Local mirror of the CI Prettier gate. Auto-wired by the package.json
+# "prepare" script (sets git config core.hooksPath .githooks on install).
+echo "tenjin-agent pre-commit: prettier format check"
+if ! pnpm format:check; then
+  echo
+  echo "✗ Prettier found unformatted files. Run 'pnpm format', re-stage, then commit again."
+  exit 1
+fi
