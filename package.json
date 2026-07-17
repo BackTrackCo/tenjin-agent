@@ -24,7 +24,7 @@
     "cli"
   ],
   "bin": {
-    "tenjin": "./dist/index.js"
+    "tenjin": "dist/index.js"
   },
   "engines": {
     "node": ">=22"
