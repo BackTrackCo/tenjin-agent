@@ -89,7 +89,7 @@ describe('createLocalProvider.describe', () => {
     const provider = createLocalProvider({ dir: dataDir, env: {} });
     const err = (await provider.describe().catch((e) => e)) as CliError;
     expect(err.code).toBe('WALLET_INVALID_KEY');
-    expect(err.fix).toContain('re-import');
+    expect(err.fix).toContain('TENJIN_WALLET_KEY');
   });
 
   it('rejects a file record whose key is outside the curve order', async () => {

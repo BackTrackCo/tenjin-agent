@@ -143,7 +143,7 @@ function accountForCredential(cred: Credential): PrivateKeyAccount {
     throw new CliError('WALLET_INVALID_KEY', 'The private key is not a valid secp256k1 key.', {
       fix:
         cred.source === 'file'
-          ? 'Move the wallet file aside, then re-import the intended key.'
+          ? 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.'
           : 'Set TENJIN_WALLET_KEY to a valid 0x-prefixed 32-byte hex key.',
       cause: err,
     });
@@ -152,7 +152,9 @@ function accountForCredential(cred: Credential): PrivateKeyAccount {
     throw new CliError(
       'WALLET_INVALID_KEY',
       `The wallet file's stored address ${cred.address} does not match its private key (derives ${account.address}).`,
-      { fix: 'Move the wallet file aside, then re-import the intended key.' },
+      {
+        fix: 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
+      },
     );
   }
   return account;
