@@ -98,36 +98,13 @@ export interface LocalWalletInfo {
 
 /**
  * Generate a fresh key and persist it NO-CLOBBER, returning the address and path.
- * The write, not a caller's pre-check, is the authority: a lost create/import
- * race throws WALLET_EXISTS rather than overwriting a funded key.
+ * The write, not a caller's pre-check, is the authority: a lost create race throws
+ * WALLET_EXISTS rather than overwriting a funded key.
  */
 export async function createLocalWallet(dir: string): Promise<LocalWalletInfo> {
   const key = generatePrivateKey();
   const address = privateKeyToAccount(key).address;
   await writeWalletRecord(dir, walletRecord(address, key));
-  return { address, walletPath: walletPath(dir) };
-}
-
-/**
- * Validate an imported key and persist it NO-CLOBBER. WALLET_INVALID_KEY for a
- * bad format or an out-of-range scalar; WALLET_EXISTS if a wallet already exists.
- */
-export async function importLocalWallet(dir: string, key: string): Promise<LocalWalletInfo> {
-  if (!PRIVATE_KEY_RE.test(key)) {
-    throw new CliError('WALLET_INVALID_KEY', 'The provided key is not a valid private key.', {
-      fix: 'Provide a 0x-prefixed 32-byte hex private key.',
-    });
-  }
-  let address: Address;
-  try {
-    address = privateKeyToAccount(key as Hex).address;
-  } catch (err) {
-    throw new CliError('WALLET_INVALID_KEY', 'The provided key is not a valid secp256k1 key.', {
-      fix: 'Provide a 0x-prefixed 32-byte hex key within the curve order.',
-      cause: err,
-    });
-  }
-  await writeWalletRecord(dir, walletRecord(address, key as Hex));
   return { address, walletPath: walletPath(dir) };
 }
 
@@ -166,7 +143,7 @@ function accountForCredential(cred: Credential): PrivateKeyAccount {
     throw new CliError('WALLET_INVALID_KEY', 'The private key is not a valid secp256k1 key.', {
       fix:
         cred.source === 'file'
-          ? 'Move the wallet file aside, then re-import the intended key.'
+          ? 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.'
           : 'Set TENJIN_WALLET_KEY to a valid 0x-prefixed 32-byte hex key.',
       cause: err,
     });
@@ -175,7 +152,9 @@ function accountForCredential(cred: Credential): PrivateKeyAccount {
     throw new CliError(
       'WALLET_INVALID_KEY',
       `The wallet file's stored address ${cred.address} does not match its private key (derives ${account.address}).`,
-      { fix: 'Move the wallet file aside, then re-import the intended key.' },
+      {
+        fix: 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
+      },
     );
   }
   return account;

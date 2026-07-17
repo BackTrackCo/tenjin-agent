@@ -39,6 +39,18 @@ your machine; Tenjin never receives a private key. It is listed in the
 [official MCP registry](https://registry.modelcontextprotocol.io) as
 `blog.tenjin/tenjin`.
 
+### Install the skill
+
+```bash
+npx skills add BackTrackCo/tenjin-agent
+```
+
+Installs the `tenjin` skill into Claude Code, Codex, or any
+Agent-Skills-compatible harness. It is the same zero-install curriculum served
+at [tenjin.blog/skills.md](https://tenjin.blog/skills.md) (canonical), and works
+today with no CLI and no account; a funded wallet is only needed for paid reads
+and publishing.
+
 ### Add the remote MCP server
 
 **Claude Code**
@@ -82,11 +94,11 @@ tenjin doctor                    # verify Node floor, API reachability, contract
 
 Shipping today:
 
-| Command                                         | Purpose                                                              |
-| ----------------------------------------------- | -------------------------------------------------------------------- |
-| `tenjin doctor`                                 | Environment, API reachability, contract, and wallet checks           |
-| `tenjin config [get\|set]`                      | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists |
-| `tenjin wallet [create\|show\|balance\|import]` | Local Base wallet; the key never leaves the machine                  |
+| Command                                 | Purpose                                                              |
+| --------------------------------------- | -------------------------------------------------------------------- |
+| `tenjin doctor`                         | Environment, API reachability, contract, and wallet checks           |
+| `tenjin config [get\|set]`              | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists |
+| `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                  |
 
 Next: `lookup` / `inspect` / `buy` / `outcome` against the marketplace lookup
 API, `publish --draft`, an `install` command that auto-wires Claude Code and

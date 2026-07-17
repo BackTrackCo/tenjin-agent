@@ -7,7 +7,7 @@ import type { Hex } from 'viem';
 import { CliError } from '../errors';
 import { walletPath } from '../paths';
 import { readWalletRecord, writeWalletRecord, type WalletRecord } from './store';
-import { createLocalProvider, createLocalWallet, importLocalWallet } from './local';
+import { createLocalProvider, createLocalWallet } from './local';
 
 let tmp: string;
 let dataDir: string;
@@ -89,7 +89,7 @@ describe('createLocalProvider.describe', () => {
     const provider = createLocalProvider({ dir: dataDir, env: {} });
     const err = (await provider.describe().catch((e) => e)) as CliError;
     expect(err.code).toBe('WALLET_INVALID_KEY');
-    expect(err.fix).toContain('re-import');
+    expect(err.fix).toContain('TENJIN_WALLET_KEY');
   });
 
   it('rejects a file record whose key is outside the curve order', async () => {
@@ -125,24 +125,12 @@ describe('createLocalProvider.getSigner', () => {
   });
 });
 
-describe('createLocalWallet / importLocalWallet', () => {
+describe('createLocalWallet', () => {
   it('createLocalWallet persists a key that derives the reported address', async () => {
     const { address, walletPath: path } = await createLocalWallet(dataDir);
     expect(path).toBe(walletPath(dataDir));
     const record = await readWalletRecord(dataDir);
     expect(privateKeyToAccount(record!.privateKey as Hex).address).toBe(address);
-  });
-
-  it('importLocalWallet stores a valid key and reports its address', async () => {
-    const key = generatePrivateKey();
-    const { address } = await importLocalWallet(dataDir, key);
-    expect(address).toBe(privateKeyToAccount(key).address);
-    expect((await readWalletRecord(dataDir))!.privateKey).toBe(key);
-  });
-
-  it('importLocalWallet rejects a malformed key with WALLET_INVALID_KEY', async () => {
-    const err = (await importLocalWallet(dataDir, 'nope').catch((e) => e)) as CliError;
-    expect(err.code).toBe('WALLET_INVALID_KEY');
   });
 
   it('createLocalWallet refuses to clobber an existing wallet (WALLET_EXISTS)', async () => {

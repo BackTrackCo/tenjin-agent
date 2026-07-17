@@ -6,7 +6,6 @@ import { getUsdcBalance } from '../lib/usdc';
 import {
   createLocalWallet,
   describeWallet,
-  importLocalWallet,
   resolveWalletProvider,
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
@@ -15,19 +14,6 @@ import type { CommandContext, CommandResult } from '../context';
 
 const FUNDING_LINE = 'Send USDC on Base. $5 covers ~50 typical resources.';
 const isWindows = process.platform === 'win32';
-
-/** Injectable stdin reader for `import`. Null means "no piped input" (a TTY, or an
- * empty pipe): the default never blocks on a TTY, so the command turns null into a
- * USAGE error instead of hanging. Tests inject a stub to drive every branch. */
-export type ReadStdin = () => Promise<string | null>;
-
-export const readStdinDefault: ReadStdin = async () => {
-  if (process.stdin.isTTY) return null;
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  const data = Buffer.concat(chunks).toString('utf8').trim();
-  return data.length > 0 ? data : null;
-};
 
 export async function runWalletCreate(ctx: CommandContext): Promise<CommandResult> {
   await refuseIfWalletExists(ctx.dataDir);
@@ -102,44 +88,7 @@ export async function runWalletBalance(
   };
 }
 
-export async function runWalletImport(
-  args: { fromEnv: boolean },
-  ctx: CommandContext,
-  readStdin: ReadStdin = readStdinDefault,
-): Promise<CommandResult> {
-  await refuseIfWalletExists(ctx.dataDir);
-
-  let key: string;
-  let source: 'env' | 'stdin';
-  if (args.fromEnv) {
-    const envKey = process.env.TENJIN_WALLET_KEY;
-    if (envKey === undefined || envKey.trim().length === 0) {
-      throw new CliError('USAGE', 'TENJIN_WALLET_KEY is not set.', {
-        fix: 'Set TENJIN_WALLET_KEY, or pipe the key: `echo $KEY | tenjin wallet import`.',
-      });
-    }
-    key = envKey.trim();
-    source = 'env';
-  } else {
-    const input = await readStdin();
-    if (input === null) {
-      throw new CliError('USAGE', 'No private key on stdin.', {
-        fix: 'Pipe the key (`echo $KEY | tenjin wallet import`) or use `--from-env`.',
-      });
-    }
-    key = input;
-    source = 'stdin';
-  }
-
-  const { address, walletPath: path } = await importLocalWallet(ctx.dataDir, key);
-
-  return {
-    data: { address, walletPath: path, source },
-    humanLines: [`Imported wallet: ${address}`],
-  };
-}
-
-/** create and import both refuse to overwrite: keys are non-recoverable and may hold funds. */
+/** create refuses to overwrite: keys are non-recoverable and may hold funds. */
 async function refuseIfWalletExists(dir: string): Promise<void> {
   if (!(await walletFileExists(dir))) return;
   const path = walletPath(dir);
