@@ -39,7 +39,9 @@ function fail(message) {
   process.exit(1);
 }
 
-const res = await fetch(SOURCE_URL).catch((err) =>
+// Bounded so a hung connection fails a local run instead of hanging it; CI has its
+// own 5-minute job timeout on top.
+const res = await fetch(SOURCE_URL, { signal: AbortSignal.timeout(30_000) }).catch((err) =>
   fail(`could not fetch ${SOURCE_URL}: ${err.message}`),
 );
 if (!res.ok) fail(`fetching ${SOURCE_URL} returned HTTP ${res.status} ${res.statusText}`);
