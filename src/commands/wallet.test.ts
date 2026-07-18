@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
+import * as Keystore from 'ox/Keystore';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import type { WalletProvider } from '../lib/wallet';
@@ -64,6 +65,14 @@ const readStored = async () =>
     address: string;
     keystore: { version: number };
   };
+
+/** Decrypt the on-disk wallet keystore with `passphrase` and return the address it derives. */
+async function addressFromWalletFile(passphrase: string): Promise<string> {
+  const rec = JSON.parse(await readFile(walletFile(), 'utf8')) as { keystore: Keystore.Keystore };
+  const derived = await Keystore.toKeyAsync(rec.keystore, { password: passphrase });
+  const key = Keystore.decrypt(rec.keystore, derived);
+  return privateKeyToAccount(key).address;
+}
 
 /** A remote-style provider: describe() works, getSigner() must never be called by show/balance. */
 function fakeRemoteProvider(
@@ -177,8 +186,9 @@ describe('runWalletCreate', () => {
     expect(err.fix).toContain('TENJIN_WALLET_PASSPHRASE');
   });
 
-  // The friendly pre-check can pass in both racers before either writes; the
-  // exclusive write is the real guard, so exactly one wins and no key is clobbered.
+  // Serialized by the create lock: the loser blocks until the winner commits, then
+  // trips the exclusive pre-check and surfaces WALLET_EXISTS — never a clobber. The
+  // exclusive write stays the final authority for the single-process crash window.
   it('two concurrent creates: one wins, the other is WALLET_EXISTS, no clobber', async () => {
     const ctx = makeCtx();
     const results = await Promise.allSettled([runWalletCreate(ctx), runWalletCreate(ctx)]);
@@ -189,7 +199,64 @@ describe('runWalletCreate', () => {
     expect(((losers[0] as PromiseRejectedResult).reason as CliError).code).toBe('WALLET_EXISTS');
     const winner = (winners[0] as PromiseFulfilledResult<{ data: { address: string } }>).value.data;
     expect((await readStored()).address).toBe(winner.address);
-  });
+  }, 15000);
+
+  // The store-write race the lock actually closes: with NO env passphrase each racer
+  // auto-generates a distinct passphrase and persists it to the (shared, last-writer-
+  // wins) OS store BEFORE the no-clobber file write. Unserialized, the store could end
+  // up holding the LOSER's passphrase while the winner's wallet is on disk — orphaning
+  // the wallet from any passphrase that decrypts it. The lock forces one full create at
+  // a time, so the store's final passphrase must decrypt the written wallet.
+  it('two concurrent creates without env: the stored passphrase decrypts the winner wallet', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', ''); // clear env; force the OS-store path
+
+    // One shared fake "OS store" (a macOS keychain), last-writer-wins across both
+    // racers; each racer gets its OWN recording exec so we can see who actually stored.
+    const keychain: { value: string | null } = { value: null };
+    const storedByCall: string[] = [];
+    const makeExec = (): ExecFn => async (file, args, stdin) => {
+      expect(file).toBe('security');
+      if (args[0] === '-i') {
+        // Write: the generated passphrase arrives on stdin, never argv.
+        const pass = stdin?.match(/-w '([^']+)'/)?.[1];
+        expect(pass).toBeDefined();
+        storedByCall.push(pass as string);
+        keychain.value = pass as string; // last store-writer wins the shared store
+        return { stdout: '', stderr: '' };
+      }
+      // Read (find-generic-password -w): serve the shared store's current value.
+      return { stdout: keychain.value !== null ? `${keychain.value}\n` : '', stderr: '' };
+    };
+    const run = () =>
+      runWalletCreate(makeCtx(), {
+        passphrase: { platform: 'darwin', isTTY: false, exec: makeExec() },
+      });
+
+    const results = await Promise.allSettled([run(), run()]);
+    const winners = results.filter((r) => r.status === 'fulfilled');
+    const losers = results.filter((r) => r.status === 'rejected');
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(((losers[0] as PromiseRejectedResult).reason as CliError).code).toBe('WALLET_EXISTS');
+
+    // The lock means only the winner ever reached passphrase generation + store; the
+    // loser blocked, then exited WALLET_EXISTS without generating or storing anything.
+    expect(storedByCall).toHaveLength(1);
+
+    const winner = (
+      winners[0] as PromiseFulfilledResult<{
+        data: { address: string; passphraseSource: string };
+      }>
+    ).value.data;
+    expect(winner.passphraseSource).toBe('keychain');
+    expect((await readStored()).address).toBe(winner.address);
+
+    // The heart of the regression: the passphrase now sitting in the shared store must
+    // decrypt the wallet that actually landed on disk (deriving its stored address).
+    expect(keychain.value).not.toBeNull();
+    const derived = await addressFromWalletFile(keychain.value as string);
+    expect(derived.toLowerCase()).toBe(winner.address.toLowerCase());
+  }, 20000);
 });
 
 describe('runWalletShow', () => {

@@ -1,5 +1,8 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { CliError } from '../lib/errors';
 import { walletPath } from '../lib/paths';
+import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
@@ -27,14 +30,7 @@ export async function runWalletCreate(
   ctx: CommandContext,
   opts: WalletCreateOptions = {},
 ): Promise<CommandResult> {
-  await refuseIfWalletExists(ctx.dataDir);
-
-  const { passphrase, source } = await resolvePassphraseForCreate({
-    env: process.env,
-    dir: ctx.dataDir,
-    ...opts.passphrase,
-  });
-  const { address, walletPath: path } = await createLocalWallet(ctx.dataDir, passphrase);
+  const { address, walletPath: path, source } = await createWalletLocked(ctx.dataDir, opts);
 
   const warnings = custodyWarnings();
   return {
@@ -55,6 +51,52 @@ export async function runWalletCreate(
       ...warnings,
     ],
   };
+}
+
+/**
+ * Run the whole create critical section under a cross-process file lock: the
+ * existence pre-check, the passphrase generate-and-store, and the no-clobber
+ * write. Without the lock these interleave across two concurrent creates — each
+ * generates a distinct passphrase and persists it to the OS store (which is
+ * last-writer-wins on every platform) BEFORE the exclusive file write, so a
+ * different process can win the file, orphaning the winning wallet from the
+ * passphrase the store now holds (which then decrypts nothing, unrecoverably).
+ * Serializing means the loser blocks until the winner commits, then trips
+ * refuseIfWalletExists and exits WALLET_EXISTS having never generated or stored a
+ * passphrase. The store-before-write ordering stays (it still guards the
+ * single-process crash window), and the exclusive write stays the final authority.
+ */
+async function createWalletLocked(
+  dir: string,
+  opts: WalletCreateOptions,
+): Promise<{ address: string; walletPath: string; source: PassphraseSource }> {
+  // Ensure the data dir exists so the lock's own mkdir has a parent on a fresh
+  // install; the exclusive wallet write below re-ensures it at 0700 regardless.
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const lockPath = join(dir, 'wallet.create.lock');
+  try {
+    return await withFileLock(lockPath, async () => {
+      await refuseIfWalletExists(dir);
+      const { passphrase, source } = await resolvePassphraseForCreate({
+        env: process.env,
+        dir,
+        ...opts.passphrase,
+      });
+      const { address, walletPath: path } = await createLocalWallet(dir, passphrase);
+      return { address, walletPath: path, source };
+    });
+  } catch (err) {
+    // A lock timeout is not the user's error; surface it as INTERNAL with the one
+    // manual step (there is no auto-steal), keeping the JSON error contract. Every
+    // other error — notably the loser's WALLET_EXISTS — propagates unchanged.
+    if (err instanceof LockTimeoutError) {
+      throw new CliError('INTERNAL', err.message, {
+        fix: `If no other tenjin process is running, remove ${lockPath} and retry.`,
+        cause: err,
+      });
+    }
+    throw err;
+  }
 }
 
 /** Where the encryption passphrase lives, and what the user must remember. */
