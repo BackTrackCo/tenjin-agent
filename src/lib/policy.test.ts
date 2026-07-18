@@ -19,7 +19,7 @@ const req = (over: Partial<Parameters<typeof evaluateSpendPolicy>[1]> = {}) => (
   ...over,
 });
 
-describe('evaluateSpendPolicy — price cap (--max-price)', () => {
+describe('evaluateSpendPolicy, price cap (--max-price)', () => {
   it('denies when the amount exceeds the cap', () => {
     const r = evaluateSpendPolicy(
       policy(),
@@ -35,7 +35,7 @@ describe('evaluateSpendPolicy — price cap (--max-price)', () => {
     );
     expect(r.decision).toBe('allow');
   });
-  it('a price cap is a hard deny — not reduced to confirm even under a loose confirm policy', () => {
+  it('a price cap is a hard deny, not reduced to confirm even under a loose confirm policy', () => {
     const r = evaluateSpendPolicy(
       policy({ confirm: { mode: 'always' } }),
       req({ amountAtomic: 5n, maxPriceAtomic: 4n }),
@@ -45,7 +45,7 @@ describe('evaluateSpendPolicy — price cap (--max-price)', () => {
   });
 });
 
-describe('evaluateSpendPolicy — allowlistCreators', () => {
+describe('evaluateSpendPolicy, allowlistCreators', () => {
   it('denies a creator not on a non-empty allowlist', () => {
     const r = evaluateSpendPolicy(
       policy({ allowlistCreators: ['alice'] }),
@@ -67,7 +67,7 @@ describe('evaluateSpendPolicy — allowlistCreators', () => {
   });
 });
 
-describe('evaluateSpendPolicy — sessionBudget', () => {
+describe('evaluateSpendPolicy, sessionBudget', () => {
   it('0 disables the ceiling', () => {
     const r = evaluateSpendPolicy(
       policy({ sessionBudgetAtomic: 0n }),
@@ -92,7 +92,7 @@ describe('evaluateSpendPolicy — sessionBudget', () => {
   });
 });
 
-describe('evaluateSpendPolicy — maxAutoSpend + confirm', () => {
+describe('evaluateSpendPolicy, maxAutoSpend + confirm', () => {
   it('default posture (maxAutoSpend 0, confirm always) requires confirmation for any spend', () => {
     const r = evaluateSpendPolicy(
       policy({ maxAutoSpendAtomic: 0n, confirm: { mode: 'always' } }),
@@ -154,7 +154,7 @@ describe('evaluateSpendPolicy — maxAutoSpend + confirm', () => {
   });
 });
 
-describe('evaluateSpendPolicy — gate ordering', () => {
+describe('evaluateSpendPolicy, gate ordering', () => {
   it('price cap is checked before allowlist', () => {
     const r = evaluateSpendPolicy(
       policy({ allowlistCreators: ['alice'] }),

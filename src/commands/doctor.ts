@@ -191,8 +191,8 @@ async function checkApiContract(
 
 /**
  * WARN-level (never fails doctor): is the A2 lookup endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates A2 — the buy/lookup path will
- * not work against it yet. Warn-only because doctor's job is a working READ path,
+ * OpenAPI doc? Absent means the deployment predates A2 (the buy/lookup path will
+ * not work against it yet). Warn-only because doctor's job is a working READ path,
  * and lookup is additive.
  */
 async function checkLookupContract(

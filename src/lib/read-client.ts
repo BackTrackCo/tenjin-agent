@@ -7,23 +7,29 @@ import { CLIENT_HEADER } from './client-meta';
 import { SIWX_HEADER } from './siwx';
 
 /**
- * The read-route (`GET /api/read/<handle>/<slug>`) client — always JSON/x402, so
+ * The read-route (`GET /api/read/<handle>/<slug>`) client, always JSON/x402, so
  * it is the robust agent target (llms-full). It surfaces the three outcomes the
- * buy flow branches on: `entitled` (200 with the full body — free post, SIWX
+ * buy flow branches on: `entitled` (200 with the full body, free post, SIWX
  * re-read, or freshly paid), `payment_required` (402 with the decoded
  * PAYMENT-REQUIRED header + the leak-safe preview body), and `already_purchased`
- * (409 owned-re-pay gate — nothing charged). Purchase attribution rides
+ * (409 owned-re-pay gate, nothing charged). Purchase attribution rides
  * `X-Tenjin-Client` always and `X-Tenjin-Lookup-Id` when a lookup preceded the buy.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
 const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
 
+// id/slug become filesystem path segments (the local library), so they are
+// validated as a uuid + the server's slug charset HERE, at the trust boundary, so
+// a hostile id='../../evil' or slug fails as CONTRACT_MISMATCH before delivery.
+const RESOURCE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
 /** The full essay body a 200 returns (loose: require what the CLI reads, keep the rest). */
 const readBodySchema = z
   .object({
-    id: z.string(),
-    slug: z.string(),
+    id: z.string().regex(RESOURCE_ID_RE, 'resource id must be a uuid'),
+    slug: z.string().regex(SLUG_RE, 'unsafe slug').max(80),
     title: z.string(),
     bodyMd: z.string(),
     price: z.string(),
@@ -38,7 +44,7 @@ const readBodySchema = z
 
 export type ReadBody = z.infer<typeof readBodySchema>;
 
-/** The leak-safe 402 preview body — never the paid content. */
+/** The leak-safe 402 preview body, never the paid content. */
 const previewSchema = z
   .object({
     id: z.string().optional(),

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBuy } from './buy';
@@ -34,27 +34,44 @@ function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContex
 
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 
-/** A spend authorizer whose decision is fixed; records authorize/commit calls. */
+const RESERVATION = 'rsv-test';
+
+/** A spend authorizer whose decision is fixed; records authorize/commit/release. */
 function fakeAuthorizer(
   decision: SpendAuthorization['decision'],
   reason = 'within_policy',
 ): SpendAuthorizer {
   return {
     policyEnforcement: 'client-only',
-    authorize: vi.fn(async (): Promise<SpendAuthorization> => ({
+    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
       decision,
       reason: reason as SpendAuthorization['reason'],
       message: 'test',
-      amountAtomic: 100_000n,
+      amountAtomic: req.amountAtomic,
       sessionSpentAtomic: 0n,
       sessionBudgetAtomic: 0n,
       policyEnforcement: 'client-only',
+      ...(decision === 'deny' ? {} : { reservationId: RESERVATION }),
     })),
     commit: vi.fn(async () => undefined),
+    release: vi.fn(async () => undefined),
   };
 }
 
-describe('runBuy — free resource', () => {
+/** Write a config that auto-approves spends up to $1 with no prompt (for the
+ *  real-authorizer wiring tests: the only remaining gate is the price cap). */
+async function writeAutoApproveConfig(): Promise<void> {
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      maxAutoSpend: '1000000',
+      sessionBudget: '0',
+      confirm: 'above:1000000',
+    }),
+  );
+}
+
+describe('runBuy, free resource', () => {
   it('delivers a free 200 without a wallet and without any payment', async () => {
     const { fetch, calls } = makeReadServer({
       plain: () => reply.entitled(readBody({ price: '0' })),
@@ -67,7 +84,7 @@ describe('runBuy — free resource', () => {
   });
 });
 
-describe('runBuy — entitlement re-check is SIWX-first and NEVER pays when entitled', () => {
+describe('runBuy, entitlement re-check is SIWX-first and NEVER pays when entitled', () => {
   it('re-reads free via SIWX and never consults spend policy or pays', async () => {
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
@@ -90,7 +107,7 @@ describe('runBuy — entitlement re-check is SIWX-first and NEVER pays when enti
   });
 });
 
-describe('runBuy — paid path', () => {
+describe('runBuy, paid path', () => {
   it('pays only after SIWX shows unentitled, then commits the session ledger', async () => {
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
@@ -109,7 +126,9 @@ describe('runBuy — paid path', () => {
     expect(data.paid?.atomic).toBe('100000');
     expect(calls.map((c) => c.phase)).toEqual(['plain', 'siwx', 'payment']);
     expect(authorizer.authorize).toHaveBeenCalledOnce();
-    expect(authorizer.commit).toHaveBeenCalledWith(100_000n);
+    // The FRESH 402's amount reaches the policy, and settlement commits the reservation.
+    expect(vi.mocked(authorizer.authorize).mock.calls[0]?.[0]?.amountAtomic).toBe(100_000n);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION);
   });
 
   it('attaches X-Tenjin-Client on every request and X-Tenjin-Lookup-Id after a lookup', async () => {
@@ -138,7 +157,7 @@ describe('runBuy — paid path', () => {
   });
 });
 
-describe('runBuy — library idempotence', () => {
+describe('runBuy, library idempotence', () => {
   it('re-delivers an already-delivered resource from disk with no network and no pay', async () => {
     const body = readBody();
     await saveDelivery(dir, {
@@ -172,7 +191,7 @@ describe('runBuy — library idempotence', () => {
   });
 });
 
-describe('runBuy — spend policy', () => {
+describe('runBuy, spend policy', () => {
   it('a hard deny (e.g. price cap) refuses with exit-3 POLICY_REFUSED and never pays', async () => {
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
@@ -240,7 +259,7 @@ describe('runBuy — spend policy', () => {
   });
 });
 
-describe('runBuy — owned-re-pay 409 gate', () => {
+describe('runBuy, owned-re-pay 409 gate', () => {
   it('a rejected re-pay falls back to a free SIWX re-read and never commits a spend', async () => {
     const pr = buildPaymentRequired();
     let siwxCalls = 0;
@@ -263,5 +282,81 @@ describe('runBuy — owned-re-pay 409 gate', () => {
     expect((result.data as { entitlement: string }).entitlement).toBe('entitled');
     expect(calls.map((c) => c.phase)).toEqual(['plain', 'siwx', 'payment', 'siwx']);
     expect(authorizer.commit).not.toHaveBeenCalled();
+    expect(authorizer.release).toHaveBeenCalledWith(RESERVATION);
+  });
+
+  it('when the post-409 SIWX re-read STILL fails, it is PAYMENT_FAILED with no commit', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr), // never entitled, even after the 409
+      payment: () => reply.alreadyPurchased(),
+    });
+    const authorizer = fakeAuthorizer('allow');
+    await expect(
+      runBuy({ ref: URL_ }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_FAILED', exitCode: 4 });
+    expect(authorizer.commit).not.toHaveBeenCalled();
+    expect(authorizer.release).toHaveBeenCalled();
+  });
+});
+
+describe('runBuy, fresh-402 price guard', () => {
+  it('refuses to sign when the price increased between the first look and the re-check', async () => {
+    const cheap = buildPaymentRequired({ amount: '100000' });
+    const dear = buildPaymentRequired({ amount: '200000' });
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(cheap),
+      siwx: () => reply.paymentRequired(dear), // the fresh 402 costs more
+      payment: () => reply.entitled(readBody()),
+    });
+    await expect(
+      runBuy({ ref: URL_, yes: true }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
+    // No signature was ever produced: no payment request left the client.
+    expect(calls.some((c) => c.phase === 'payment')).toBe(false);
+  });
+});
+
+describe('runBuy, real spend authorizer wiring (resolveSpendAuthorizer)', () => {
+  it('the 402 amount reaches the price cap: an overcharging server is refused without signing', async () => {
+    await writeAutoApproveConfig();
+    const pr = buildPaymentRequired({ amount: '200000' }); // server wants $0.20
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+    await expect(
+      // --max-price 0.10 is below the advertised 0.20 → the price cap must deny.
+      runBuy({ ref: URL_, maxPrice: '0.10' }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_REFUSED', exitCode: 3 });
+    expect(calls.some((c) => c.phase === 'payment')).toBe(false);
+  });
+
+  it('within the price cap and policy, the real authorizer allows the pay', async () => {
+    await writeAutoApproveConfig();
+    const pr = buildPaymentRequired({ amount: '200000' });
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody({ price: '200000' })),
+    });
+    const result = await runBuy({ ref: URL_, maxPrice: '0.30' }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+    });
+    expect((result.data as { entitlement: string }).entitlement).toBe('purchased');
   });
 });

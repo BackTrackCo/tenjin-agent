@@ -55,4 +55,36 @@ describe('fetchRead', () => {
     const { fetch } = makeReadServer({ plain: () => new Response('{}', { status: 402 }) });
     await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
+
+  it('a 200 missing required fields is CONTRACT_MISMATCH (never delivered)', async () => {
+    const { fetch } = makeReadServer({
+      plain: () =>
+        new Response(JSON.stringify({ id: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee', title: 'x' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    });
+    await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('a 200 with a non-JSON body is CONTRACT_MISMATCH (never delivered)', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => new Response('<html>not json</html>', { status: 200 }),
+    });
+    await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('a 200 whose id is a path-traversal string is CONTRACT_MISMATCH (trust boundary)', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => reply.entitled(readBody({ id: '../../../../etc/passwd' })),
+    });
+    await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('a 200 whose slug escapes the slug charset is CONTRACT_MISMATCH', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => reply.entitled(readBody({ slug: '../../evil' })),
+    });
+    await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
 });

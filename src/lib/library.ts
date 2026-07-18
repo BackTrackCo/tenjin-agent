@@ -1,14 +1,25 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
+import { CliError } from './errors';
 import { writeFileAtomic } from './atomic-json';
+
+/**
+ * Filesystem identity is server-controlled (the read body's id + slug), so it is
+ * hostile input to a path. resourceId must be a uuid and slug must match the
+ * server's slug charset (lib/posts.ts slugify: lowercase a-z0-9 groups joined by
+ * single hyphens, no leading/trailing hyphen, <=80 chars). This is the primary
+ * guard; assertContained is the defense-in-depth backstop.
+ */
+const RESOURCE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
  * Local library delivery (spec 10): purchased or freely-read bodies are saved
  * under `<dataDir>/library/<resourceId>/<slug>.md` with a sidecar `receipt.json`
  * carrying the entitlement + payment identity. A `buy` on already-delivered
- * content re-delivers FROM DISK — the receipt is the local entitlement record, so
+ * content re-delivers FROM DISK, the receipt is the local entitlement record, so
  * a repeat buy never re-pays and never re-fetches. `contentHash` is the sha256 the
  * outcome endpoint expects, computed over the exact saved bytes.
  */
@@ -38,6 +49,35 @@ export function resourceDir(dataDir: string, resourceId: string): string {
   return join(libraryDir(dataDir), resourceId);
 }
 
+/** True when `resourceId` is a uuid and `slug` matches the server's slug charset,
+ *  so neither can carry a path separator or `..`. */
+export function isSafeIdentity(resourceId: string, slug: string): boolean {
+  return RESOURCE_ID_RE.test(resourceId) && slug.length <= 80 && SLUG_RE.test(slug);
+}
+
+/**
+ * Defense-in-depth: refuse a delivery whose identity is malformed OR whose
+ * resolved write path escapes the library root. A malicious server returning
+ * id='../../etc' or slug='../../evil' is rejected as a contract violation before
+ * any bytes (or directories) are written.
+ */
+function assertContained(dataDir: string, resourceId: string, slug: string): void {
+  if (!isSafeIdentity(resourceId, slug)) {
+    throw new CliError('CONTRACT_MISMATCH', 'The server returned an unsafe resource identity.', {
+      fix: 'Update tenjin-cli or report the resource; the id/slug is not a valid identity.',
+      details: { resourceId, slug },
+    });
+  }
+  const root = resolve(libraryDir(dataDir));
+  const target = resolve(bodyPath(dataDir, resourceId, slug));
+  const rel = relative(root, target);
+  if (rel.startsWith('..') || isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) {
+    throw new CliError('CONTRACT_MISMATCH', 'The delivery path escapes the library directory.', {
+      fix: 'Update tenjin-cli; the resource identity is unsafe.',
+    });
+  }
+}
+
 export function bodyPath(dataDir: string, resourceId: string, slug: string): string {
   return join(resourceDir(dataDir, resourceId), `${slug}.md`);
 }
@@ -58,11 +98,14 @@ export interface DeliveredResource {
 }
 
 /** Return the on-disk delivery for a resource, or null when nothing is saved yet
- *  (or the sidecar is unreadable/corrupt — treated as absent, never a hard error). */
+ *  (or the sidecar is unreadable/corrupt, treated as absent, never a hard error). */
 export async function findDelivered(
   dataDir: string,
   resourceId: string,
 ): Promise<DeliveredResource | null> {
+  // A non-uuid resourceId can never have been a saved directory; treat it as
+  // absent rather than probing an attacker-shaped path.
+  if (!RESOURCE_ID_RE.test(resourceId)) return null;
   let receiptRaw: string;
   try {
     receiptRaw = await readFile(receiptPath(dataDir, resourceId), 'utf8');
@@ -79,6 +122,50 @@ export async function findDelivered(
     return null;
   }
   return { receipt: parsed.data, bodyMd, bodyPath: path };
+}
+
+/** The (handle, slug) a read URL points at, path-only so base-url/trailing-slash
+ *  differences never matter. Null when the URL is not a read-route URL. */
+export function parseReadPath(url: string): { handle: string; slug: string } | null {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  const m = /\/api\/read\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
+  if (m === null || m[1] === undefined || m[2] === undefined) return null;
+  return { handle: decodeURIComponent(m[1]), slug: decodeURIComponent(m[2]) };
+}
+
+/**
+ * Find a delivered resource by its READ URL (handle/slug), for the double-pay
+ * guard on a `buy <url>` where the resourceId isn't known up front. Scans the
+ * library's receipts and matches on the URL's handle+slug path, so a repeat buy
+ * of an owned resource re-delivers from disk before any network or payment.
+ */
+export async function findDeliveredByUrl(
+  dataDir: string,
+  url: string,
+): Promise<DeliveredResource | null> {
+  const target = parseReadPath(url);
+  if (target === null) return null;
+  let entries: string[];
+  try {
+    entries = await readdir(libraryDir(dataDir));
+  } catch {
+    return null;
+  }
+  for (const resourceId of entries) {
+    if (!RESOURCE_ID_RE.test(resourceId)) continue;
+    const delivered = await findDelivered(dataDir, resourceId);
+    if (delivered === null) continue;
+    const saved = parseReadPath(delivered.receipt.url);
+    if (saved !== null && saved.handle === target.handle && saved.slug === target.slug) {
+      return delivered;
+    }
+  }
+  return null;
 }
 
 export interface SaveDeliveryInput {
@@ -104,6 +191,7 @@ export async function saveDelivery(
   dataDir: string,
   input: SaveDeliveryInput,
 ): Promise<SavedDelivery> {
+  assertContained(dataDir, input.resourceId, input.slug);
   const path = bodyPath(dataDir, input.resourceId, input.slug);
   const receipt: Receipt = {
     schemaVersion: 1,
@@ -133,7 +221,7 @@ export interface Heading {
 }
 
 /**
- * Deterministic ATX-heading outline for the stdout summary — never the body, so
+ * Deterministic ATX-heading outline for the stdout summary, never the body, so
  * agent transcripts stay small (spec 10). Skips fenced code blocks so a `#`
  * comment inside a code sample is not mistaken for a heading.
  */

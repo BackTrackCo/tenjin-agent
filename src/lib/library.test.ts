@@ -6,11 +6,15 @@ import {
   bodyPath,
   contentHash,
   findDelivered,
+  findDeliveredByUrl,
   headingOutline,
+  isSafeIdentity,
+  parseReadPath,
   receiptPath,
   resourceDir,
   saveDelivery,
 } from './library';
+import { CliError } from './errors';
 
 let dir: string;
 beforeEach(async () => {
@@ -79,6 +83,67 @@ describe('saveDelivery + findDelivered', () => {
     await saveDelivery(dir, input({ entitlement: 'purchased' }));
     const found = await findDelivered(dir, RESOURCE);
     expect(found?.receipt.entitlement).toBe('purchased');
+  });
+});
+
+describe('saveDelivery, path-traversal defense', () => {
+  it('refuses a resourceId that escapes the library (CONTRACT_MISMATCH), writes nothing', async () => {
+    const err = await saveDelivery(dir, input({ resourceId: '../../../../etc' })).catch(
+      (e) => e as CliError,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+    // No directory was created outside the library.
+    expect(await findDelivered(dir, '../../../../etc')).toBeNull();
+  });
+
+  it('refuses a slug carrying a traversal (CONTRACT_MISMATCH)', async () => {
+    const err = await saveDelivery(dir, input({ slug: '../../evil' })).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+  });
+
+  it('refuses a slug with a path separator', async () => {
+    const err = await saveDelivery(dir, input({ slug: 'a/b' })).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('CONTRACT_MISMATCH');
+  });
+});
+
+describe('isSafeIdentity', () => {
+  it('accepts a uuid + a valid slug', () => {
+    expect(isSafeIdentity(RESOURCE, 'my-slug')).toBe(true);
+  });
+  it('rejects traversal vectors', () => {
+    expect(isSafeIdentity('../../x', 'my-slug')).toBe(false);
+    expect(isSafeIdentity(RESOURCE, '../../evil')).toBe(false);
+    expect(isSafeIdentity(RESOURCE, 'a/b')).toBe(false);
+    expect(isSafeIdentity(RESOURCE, 'UPPER')).toBe(false);
+  });
+});
+
+describe('parseReadPath + findDeliveredByUrl', () => {
+  it('parses handle/slug from a read URL, ignoring base-url differences', () => {
+    expect(parseReadPath('https://tenjin.blog/api/read/iris/my-slug')).toEqual({
+      handle: 'iris',
+      slug: 'my-slug',
+    });
+    expect(parseReadPath('http://localhost:3000/api/read/iris/my-slug/')).toEqual({
+      handle: 'iris',
+      slug: 'my-slug',
+    });
+    expect(parseReadPath('https://tenjin.blog/not-a-read')).toBeNull();
+  });
+
+  it('finds a delivered resource by URL (the buy <url> double-pay guard)', async () => {
+    await saveDelivery(dir, input());
+    const found = await findDeliveredByUrl(dir, 'https://other-host.example/api/read/iris/my-slug');
+    expect(found?.receipt.resourceId).toBe(RESOURCE);
+  });
+
+  it('returns null when no saved receipt matches the URL', async () => {
+    await saveDelivery(dir, input());
+    expect(
+      await findDeliveredByUrl(dir, 'https://tenjin.blog/api/read/iris/other-slug'),
+    ).toBeNull();
   });
 });
 

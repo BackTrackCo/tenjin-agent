@@ -11,7 +11,7 @@ import type { TenjinSigner } from './wallet/provider';
  * viem). Given the server's decoded PAYMENT-REQUIRED and a structural signer, it
  * produces the `PAYMENT-SIGNATURE` header the paid re-request carries. The base
  * exact flow needs only `address` + `signTypedData` (no RPC), so this never
- * touches the network — the signature is an offline EIP-712/EIP-3009 authorization
+ * touches the network, the signature is an offline EIP-712/EIP-3009 authorization
  * the facilitator settles.
  */
 
@@ -55,14 +55,17 @@ export async function buildExactPayment(
   }
 
   const core = new x402Client();
-  // Register the exact-EVM scheme for the advertised network; createPaymentPayload
-  // then selects the matching requirement and signs it.
   core.register(requirement.network, new ExactEvmScheme(toClientSigner(signer)));
   const http = new x402HTTPClient(core);
 
+  // Sign EXACTLY the requirement the price check ran against: pass a single-accept
+  // challenge so createPaymentPayload cannot re-select a different (e.g. costlier)
+  // accepts entry between the check and the signature.
+  const bound: PaymentRequired = { ...paymentRequired, accepts: [requirement] };
+
   let headers: Record<string, string>;
   try {
-    const payload = await http.createPaymentPayload(paymentRequired);
+    const payload = await http.createPaymentPayload(bound);
     headers = http.encodePaymentSignatureHeader(payload);
   } catch (err) {
     throw new CliError('PAYMENT_FAILED', 'Could not build the x402 payment authorization.', {

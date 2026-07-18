@@ -9,7 +9,7 @@ import { withFileLock } from './lock';
  * recent one and `buy <resourceId>` can resolve the payable read URL a candidate
  * carried (the read route is keyed by handle/slug, not id, so an id alone can't
  * build the URL). Bounded and best-effort: a corrupt file reads as empty rather
- * than blocking a command. NOT an entitlement record — that is the library receipt.
+ * than blocking a command. NOT an entitlement record, that is the library receipt.
  */
 
 const MAX_ENTRIES = 50;

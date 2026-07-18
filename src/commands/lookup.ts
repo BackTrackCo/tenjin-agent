@@ -6,7 +6,7 @@ import { recordLookup } from '../lib/lookup-store';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin lookup "<question>"` — one POST to /api/agent/lookup. Prints the compact
+ * `tenjin lookup "<question>"`, one POST to /api/agent/lookup. Prints the compact
  * CANDIDATES/MISS response verbatim (spec 10), and records the lookupId +
  * candidates locally so `outcome --last` and `buy <resourceId>` can use them. No
  * wallet, no signing: lookup is anonymous.
@@ -63,10 +63,10 @@ export async function runLookup(
 
   const humanLines =
     response.decision === 'MISS'
-      ? [`MISS — no candidates (lookupId ${response.lookupId})`]
+      ? [`MISS, no candidates (lookupId ${response.lookupId})`]
       : [
           `${candidates.length} candidate(s) (lookupId ${response.lookupId}):`,
-          ...candidates.map((c, i) => `  ${i + 1}. ${c.title} — ${c.price} atomic — ${c.url}`),
+          ...candidates.map((c, i) => `  ${i + 1}. ${c.title}, ${c.price} atomic, ${c.url}`),
         ];
 
   return { data: response, humanLines };

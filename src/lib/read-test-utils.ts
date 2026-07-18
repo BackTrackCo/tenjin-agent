@@ -121,9 +121,9 @@ export interface RecordedCall {
 }
 
 /**
- * A read-route mock that classifies each request by its headers — a
+ * A read-route mock that classifies each request by its headers, a
  * PAYMENT-SIGNATURE is a `payment` attempt, a SIGN-IN-WITH-X is a `siwx`
- * re-check, otherwise a plain GET — and returns the configured Response for that
+ * re-check, otherwise a plain GET, and returns the configured Response for that
  * phase. Records every call so a test can assert the exact ORDER of attempts and
  * that (e.g.) a payment was never attempted.
  */

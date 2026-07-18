@@ -5,7 +5,7 @@ import { latestLookup } from '../lib/lookup-store';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin outcome --lookup-id <id> --status <s>` — POST to
+ * `tenjin outcome --lookup-id <id> --status <s>`, POST to
  * /api/agent/lookups/:id/outcomes, closing the reuse loop (used / partially_used
  * / rejected / regenerated / purchase_declined). The lookupId is the capability,
  * so no wallet is needed; `--last` sugar targets the most recent local lookup.

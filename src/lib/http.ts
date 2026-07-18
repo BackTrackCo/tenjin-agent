@@ -122,7 +122,7 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
 
 /**
  * A full HTTP round trip that surfaces the STATUS, headers, and best-effort JSON
- * body for ANY status — unlike fetchJson (2xx-only), the B2 read/pay flow needs
+ * body for ANY status. Unlike fetchJson (2xx-only), the B2 read/pay flow needs
  * the body on a 402 (the leak-safe preview) and a 409 (the owned-re-pay gate),
  * and lookup/outcome need a 4xx validation envelope. A transport/timeout failure
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.

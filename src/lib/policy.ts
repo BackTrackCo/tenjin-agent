@@ -2,7 +2,7 @@
  * Spend-policy evaluation, pure and provider-agnostic. The wallet provider layer
  * (lib/wallet/spend.ts) owns the ledger and calls this; a future hosted provider
  * (Privy, B5) reuses the same decision rules, so the knobs live in exactly one
- * place. Nothing here does IO — the caller supplies the already-spent total and
+ * place. Nothing here does IO, the caller supplies the already-spent total and
  * decides how to satisfy a `confirm` decision (a `--yes`, a TTY prompt, or a
  * non-interactive refusal).
  */
@@ -26,7 +26,7 @@ export interface SpendPolicy {
 
 export interface SpendRequest {
   amountAtomic: bigint;
-  /** Creator identity from the 402 preview / candidate — handle or 0x address. */
+  /** Creator identity from the 402 preview / candidate, handle or 0x address. */
   creator: string;
   /** The caller's `--max-price` cap, if given. A hard ceiling, never bypassable. */
   maxPriceAtomic?: bigint;
@@ -35,7 +35,7 @@ export interface SpendRequest {
 }
 
 /**
- * `allow`: within policy, proceed silently. `confirm`: an approval is required —
+ * `allow`: within policy, proceed silently. `confirm`: an approval is required ,
  * the caller satisfies it with `--yes`, an interactive prompt, or refuses. `deny`:
  * a hard gate blocked it (price cap, allowlist, session budget); NOT satisfiable
  * by `--yes` or a prompt.

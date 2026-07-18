@@ -5,7 +5,7 @@ import { headingOutline } from '../lib/library';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin inspect <resource-url-or-id>` — fetch the pre-purchase answer card /
+ * `tenjin inspect <resource-url-or-id>`, fetch the pre-purchase answer card /
  * preview from the read route's 402 body WITHOUT paying (spec 10). A free
  * resource returns 200 with the whole body; a paid one returns the leak-safe
  * preview plus the advertised price/network. Never signs, never pays, never saves.
@@ -43,7 +43,7 @@ export async function runInspect(
         price: toMoney(body.price),
         headings: headingOutline(body.bodyMd),
       },
-      humanLines: [`${body.title} — free (${body.price} atomic). Read it with \`tenjin buy\`.`],
+      humanLines: [`${body.title}, free (${body.price} atomic). Read it with \`tenjin buy\`.`],
     };
   }
 
@@ -69,7 +69,7 @@ export async function runInspect(
         preview: result.preview,
       },
       humanLines: [
-        `Paid resource${price !== undefined ? ` — ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
+        `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
         'This is the pre-purchase card; run `tenjin buy` to pay and read.',
       ],
     };

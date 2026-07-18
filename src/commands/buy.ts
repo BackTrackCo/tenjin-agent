@@ -9,6 +9,7 @@ import { buildSiwxHeader } from '../lib/siwx';
 import { buildExactPayment } from '../lib/x402-pay';
 import {
   findDelivered,
+  findDeliveredByUrl,
   headingOutline,
   saveDelivery,
   type Entitlement,
@@ -25,11 +26,11 @@ import {
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin buy <resource-url-or-id>` — the paid read. The ordering is the whole
+ * `tenjin buy <resource-url-or-id>`, the paid read. The ordering is the whole
  * point and is enforced here, never in the wallet:
  *   1. local library (already delivered → re-deliver from disk, no network, no pay)
  *   2. first GET → a FREE resource delivers immediately (no wallet)
- *   3. a PAID resource: SIWX-authenticated re-read FIRST — an entitled wallet
+ *   3. a PAID resource: SIWX-authenticated re-read FIRST, an entitled wallet
  *      re-reads free and NEVER pays twice
  *   4. only a genuinely-unentitled paid read reaches spend policy (provider-side)
  *   5. x402 exact payment, then save + commit the session ledger
@@ -65,13 +66,16 @@ export async function runBuy(
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
   const ref = await resolveResourceRef(args.ref, ctx.dataDir);
 
-  // 1. Library idempotence: a known-id resource already on disk re-delivers with
-  //    zero network and zero spend.
-  if (ref.resourceId !== undefined) {
-    const delivered = await findDelivered(ctx.dataDir, ref.resourceId);
-    if (delivered !== null) {
-      return deliverExisting(delivered, args.printBody === true);
-    }
+  // 1. Library idempotence, BEFORE any network or pay: a resource already on disk
+  //    re-delivers from disk. Works for both an id ref and a url ref (the url is
+  //    matched to a saved receipt by its handle/slug), so a repeat buy of an owned
+  //    resource never re-pays regardless of how it is addressed.
+  const existing =
+    ref.resourceId !== undefined
+      ? await findDelivered(ctx.dataDir, ref.resourceId)
+      : await findDeliveredByUrl(ctx.dataDir, ref.url);
+  if (existing !== null) {
+    return deliverExisting(existing, args.printBody === true);
   }
 
   const lookupId =
@@ -101,17 +105,15 @@ export async function runBuy(
     });
   }
 
-  // A paid resource. From here a wallet is required.
-  const paymentRequired = first.paymentRequired;
-  const requirement = paymentRequired.accepts[0];
-  if (requirement === undefined) {
+  // A paid resource. From here a wallet is required. Capture the FIRST-SEEN amount
+  // (and the chain to sign SIWX over) so a later price bump is detectable.
+  const firstRequirement = first.paymentRequired.accepts[0];
+  if (firstRequirement === undefined) {
     throw new CliError('PAYMENT_FAILED', 'The 402 advertised no payment requirements.', {
       fix: 'Try another candidate; this resource looks misconfigured.',
     });
   }
-  const network = requirement.network;
-  const amountAtomic = BigInt(requirement.amount);
-  const creator = creatorFrom(first.preview);
+  const firstSeenAmount = BigInt(firstRequirement.amount);
 
   const provider = resolveWalletProvider(
     ctx,
@@ -121,8 +123,13 @@ export async function runBuy(
   await describeWallet(provider);
   const signer = await provider.getSigner();
 
-  // 3. Entitlement re-check FIRST (SIWX): an entitled wallet re-reads free.
-  const siwxHeader = await buildSiwxHeader(signer, { baseUrl: settings.baseUrl, chainId: network });
+  // 3. Entitlement re-check FIRST (SIWX): an entitled wallet re-reads free. This
+  //    request is ALSO the fresh 402 refetch, so the challenge signed below is the
+  //    latest one, never the stale first look.
+  const siwxHeader = await buildSiwxHeader(signer, {
+    baseUrl: settings.baseUrl,
+    chainId: firstRequirement.network,
+  });
   const recheck = await fetchRead(ref.url, { ...fetchOpts, siwxHeader });
   if (recheck.kind === 'entitled') {
     return await deliverFresh(
@@ -134,8 +141,41 @@ export async function runBuy(
       args.printBody === true,
     );
   }
+  if (recheck.kind !== 'payment_required') {
+    throw new CliError(
+      'API_UNREACHABLE',
+      'Unexpected read response during the entitlement re-check.',
+      {
+        fix: 'Retry; if it persists, update tenjin-cli.',
+      },
+    );
+  }
 
-  // 4. Genuinely unentitled: spend policy, provider-side, BEFORE any payment.
+  // The FRESH challenge the payment is built and priced against.
+  const paymentRequired = recheck.paymentRequired;
+  const requirement = paymentRequired.accepts[0];
+  if (requirement === undefined) {
+    throw new CliError('PAYMENT_FAILED', 'The fresh 402 advertised no payment requirements.', {
+      fix: 'Try another candidate; this resource looks misconfigured.',
+    });
+  }
+  const amountAtomic = BigInt(requirement.amount);
+  // Refuse a price bump between the first look and signing: never sign a challenge
+  // that costs more than what was first advertised.
+  if (amountAtomic > firstSeenAmount) {
+    throw new CliError('PAYMENT_FAILED', 'The price increased before signing; refusing to pay.', {
+      fix: 'Re-run `tenjin buy` to review the new price, and set --max-price to cap it.',
+      details: {
+        firstSeenAtomic: firstSeenAmount.toString(),
+        currentAtomic: amountAtomic.toString(),
+      },
+    });
+  }
+  const network = requirement.network;
+  const creator = creatorFrom(recheck.preview);
+
+  // 4. Genuinely unentitled: spend policy, provider-side, on the FRESH amount,
+  //    BEFORE any payment. A proceeding decision reserves budget atomically.
   const authorizer = resolveSpendAuthorizer(
     ctx,
     settings.policy,
@@ -152,9 +192,11 @@ export async function runBuy(
       details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
     });
   }
+  const reservationId = authorization.reservationId;
   if (authorization.decision === 'confirm') {
     const approved = await confirmSpend(ctx, deps, args.yes === true, amountAtomic, creator);
     if (!approved) {
+      await authorizer.release(reservationId);
       throw new CliError('POLICY_REFUSED', 'Purchase not confirmed.', {
         fix: 'Re-run with --yes, or set a policy that auto-approves this spend.',
         details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
@@ -162,38 +204,47 @@ export async function runBuy(
     }
   }
 
-  // 5. Pay: build the exact-scheme authorization and re-request with it.
-  const payment = await buildExactPayment(paymentRequired, signer);
-  const paid = await fetchRead(ref.url, { ...fetchOpts, paymentHeaders: payment.headers });
+  // 5. Pay: build the exact-scheme authorization (bound to the FRESH requirement)
+  //    and re-request with it. Any non-settlement outcome releases the reservation.
+  try {
+    const payment = await buildExactPayment(paymentRequired, signer);
+    const paid = await fetchRead(ref.url, { ...fetchOpts, paymentHeaders: payment.headers });
 
-  if (paid.kind === 'entitled') {
-    await authorizer.commit(payment.amountAtomic);
-    return await deliverFresh(
-      ctx,
-      ref.url,
-      paid.body,
-      'purchased',
-      { paidAtomic: payment.amountAtomic, settlementTxHash: paid.settlementTxHash },
-      args.printBody === true,
-    );
+    if (paid.kind === 'entitled') {
+      await authorizer.commit(reservationId);
+      return await deliverFresh(
+        ctx,
+        ref.url,
+        paid.body,
+        'purchased',
+        { paidAtomic: payment.amountAtomic, settlementTxHash: paid.settlementTxHash },
+        args.printBody === true,
+      );
+    }
+    if (paid.kind === 'already_purchased') {
+      // The owned-re-pay gate fired: nothing charged. Release the reservation and
+      // recover the body free via SIWX.
+      await authorizer.release(reservationId);
+      return await siwxRedeliver(
+        ctx,
+        ref.url,
+        settings.baseUrl,
+        signer,
+        fetchOpts,
+        args.printBody === true,
+        network,
+      );
+    }
+    // Still 402 after paying: the payment was not accepted (the catch releases).
+    throw new CliError('PAYMENT_FAILED', 'Payment was not accepted by the read route.', {
+      fix: 'Check the wallet balance and network, then retry.',
+      details: paid.paymentRequired.error,
+    });
+  } catch (err) {
+    // A build/settlement failure must not leave budget reserved.
+    await authorizer.release(reservationId);
+    throw err;
   }
-  if (paid.kind === 'already_purchased') {
-    // The owned-re-pay gate fired: nothing charged. Recover the body free via SIWX.
-    return await siwxRedeliver(
-      ctx,
-      ref.url,
-      settings.baseUrl,
-      signer,
-      fetchOpts,
-      args.printBody === true,
-      network,
-    );
-  }
-  // Still 402 after paying: the payment was not accepted.
-  throw new CliError('PAYMENT_FAILED', 'Payment was not accepted by the read route.', {
-    fix: 'Check the wallet balance and network, then retry.',
-    details: paid.paymentRequired.error,
-  });
 }
 
 interface PurchaseInfo {

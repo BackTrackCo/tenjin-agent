@@ -5,7 +5,7 @@ import { CLIENT_HEADER } from './client-meta';
 
 /**
  * The lookup + outcome HTTP contract (A2, tenjin#370). Request building and
- * response validation live here; the wire shape is validated defensively — an
+ * response validation live here; the wire shape is validated defensively, an
  * unknown `schemaVersion` degrades to a parse refusal rather than a guess, and
  * unrecognized candidate fields are ignored (forward-compatible), per spec 10.
  *

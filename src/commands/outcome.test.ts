@@ -67,6 +67,14 @@ describe('runOutcome', () => {
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
+  it('rejects passing neither --lookup-id nor --last', async () => {
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ status: 'used' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
   it('rejects passing both --lookup-id and --last', async () => {
     const { fetch } = stub();
     await expect(
