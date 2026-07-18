@@ -26,6 +26,9 @@ importers:
       eslint-config-prettier:
         specifier: ^10
         version: 10.1.8(eslint@9.39.5)
+      ox:
+        specifier: 0.14.30
+        version: 0.14.30(typescript@6.0.3)(zod@4.4.3)
       prettier:
         specifier: ^3
         version: 3.9.5

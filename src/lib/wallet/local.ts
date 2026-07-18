@@ -1,6 +1,7 @@
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
+import * as Keystore from 'ox/Keystore';
 import { CliError } from '../errors';
 import { walletPath } from '../paths';
 import {
@@ -10,6 +11,7 @@ import {
   writeWalletRecord,
   type WalletRecord,
 } from './store';
+import { resolvePassphrase, type PassphraseDeps } from './passphrase';
 import type {
   TenjinSigner,
   WalletDescription,
@@ -17,19 +19,32 @@ import type {
   WalletProvider,
 } from './provider';
 
+/** Passphrase seams the local provider forwards to the resolver (env comes from `deps.env`). */
+export type PassphraseOverrides = Omit<PassphraseDeps, 'env'>;
+
 export interface LocalProviderDeps {
   dir: string;
   env: NodeJS.ProcessEnv;
+  /** Test seam for keychain exec / TTY prompt / platform during decryption. */
+  passphrase?: PassphraseOverrides;
 }
 
 const isWindows = process.platform === 'win32';
+const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
+
+/**
+ * A one-shot decrypt cache. The CLI is a single invocation, so a signer derived
+ * once (scrypt is deliberately slow) is reused for the rest of the process.
+ * Keyed by the keystore's unique id, so distinct wallets never collide.
+ */
+const signerCache = new Map<string, PrivateKeyAccount>();
 
 /**
  * The only real B1 provider: a local viem account whose key comes from the env
- * override or the wallet file. Together with the lifecycle helpers below, this is
- * the ONLY module that knows raw keys exist — `describe()` returns just the
- * address and posture, so `show`/`balance` stay keyless; `getSigner()` is the
- * single door to the key material.
+ * override or the encrypted wallet file. `describe()` returns just the address
+ * and posture WITHOUT a passphrase (the address is stored cleartext on purpose);
+ * `getSigner()` is the single door to the key material and the only path that
+ * decrypts the keystore.
  */
 export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
   return {
@@ -37,10 +52,10 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
     async describe(): Promise<WalletDescription> {
       const cred = resolveCredentialOrThrow(await loadCredential(deps));
       return {
-        // A stored address is only a claim; accountForCredential derives from the
-        // key and rejects a record whose address does not match, so show/balance
-        // can never display an address the key would not sign as.
-        address: accountForCredential(cred).address,
+        // A file credential's address is stored cleartext and returned as-is —
+        // no decryption. An env credential derives (and thereby validates) its
+        // key. getSigner is where a file wallet's key/address match is checked.
+        address: cred.source === 'env' ? accountFromKey(cred.key, 'env').address : cred.address,
         provider: 'local',
         credentialSource: cred.source,
         policyEnforcement: 'client-only',
@@ -48,7 +63,7 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
     },
     async getSigner(): Promise<TenjinSigner> {
       const cred = resolveCredentialOrThrow(await loadCredential(deps));
-      const account = accountForCredential(cred);
+      const account = await accountForSigning(cred, deps);
       return {
         address: account.address,
         signMessage: (args) => account.signMessage({ message: args.message }),
@@ -63,10 +78,10 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
 
 /**
  * File-custody warnings for the local provider: an env key shadowing the file,
- * non-0600 perms, and the Windows "perms not checkable" note. Keyless. walletPath
- * is reported only when the file actually exists, so a pure-env caller advertises
- * no on-disk path. This is the ONLY place these local-only signals live — `show`
- * and `doctor` render what the active provider returns, never their own fs probe.
+ * non-0600 perms, and the Windows "perms not checkable" note. Keyless. Also
+ * reports the at-rest key protection (`keyStorage`) and — only when it is cheap
+ * and side-effect-free (the env passphrase) — the passphrase source, so `show`
+ * can surface custody posture without decrypting or probing the keychain.
  */
 export async function localWalletDiagnostics(deps: LocalProviderDeps): Promise<WalletDiagnostics> {
   const mode = await walletFileMode(deps.dir);
@@ -88,7 +103,15 @@ export async function localWalletDiagnostics(deps: LocalProviderDeps): Promise<W
       );
     }
   }
-  return { ...(fileExists ? { walletPath: path } : {}), warnings };
+  const passphraseSource =
+    deps.env.TENJIN_WALLET_PASSPHRASE !== undefined && deps.env.TENJIN_WALLET_PASSPHRASE.length > 0
+      ? 'TENJIN_WALLET_PASSPHRASE'
+      : undefined;
+  return {
+    ...(fileExists ? { walletPath: path, keyStorage: KEY_STORAGE } : {}),
+    ...(fileExists && passphraseSource !== undefined ? { passphraseSource } : {}),
+    warnings,
+  };
 }
 
 export interface LocalWalletInfo {
@@ -97,18 +120,22 @@ export interface LocalWalletInfo {
 }
 
 /**
- * Generate a fresh key and persist it NO-CLOBBER, returning the address and path.
- * The write, not a caller's pre-check, is the authority: a lost create race throws
- * WALLET_EXISTS rather than overwriting a funded key.
+ * Generate a fresh key, encrypt it into a Keystore v3 document with `passphrase`,
+ * and persist the record NO-CLOBBER. The raw key exists only in memory here and
+ * is never written to disk in cleartext. The write, not a caller's pre-check, is
+ * the authority: a lost create race throws WALLET_EXISTS rather than overwriting
+ * a funded key.
  */
-export async function createLocalWallet(dir: string): Promise<LocalWalletInfo> {
+export async function createLocalWallet(dir: string, passphrase: string): Promise<LocalWalletInfo> {
   const key = generatePrivateKey();
   const address = privateKeyToAccount(key).address;
-  await writeWalletRecord(dir, walletRecord(address, key));
+  const keystore = await encryptToKeystore(key, passphrase);
+  await writeWalletRecord(dir, walletRecord(address, keystore));
   return { address, walletPath: walletPath(dir) };
 }
 
-type Credential = { source: 'env'; key: Hex } | { source: 'file'; key: Hex; address: Address };
+type Credential =
+  { source: 'env'; key: Hex } | { source: 'file'; keystore: Keystore.Keystore; address: Address };
 
 /** Env override beats the wallet file (CI + ephemeral agents); null when neither exists. */
 async function loadCredential(deps: LocalProviderDeps): Promise<Credential | null> {
@@ -124,40 +151,75 @@ async function loadCredential(deps: LocalProviderDeps): Promise<Credential | nul
   }
   const record = await readWalletRecord(deps.dir);
   if (record !== null) {
-    return { source: 'file', key: record.privateKey as Hex, address: record.address as Address };
+    return { source: 'file', keystore: record.keystore, address: record.address as Address };
   }
   return null;
 }
 
 /**
- * Build the viem account from a credential, mapping viem's throw on an invalid
- * key to WALLET_INVALID_KEY. For a FILE credential, also require the stored
- * address to match what the key derives (EIP-55 normalized): a stale or tampered
- * record that would show address A but sign as B is rejected, not trusted.
+ * Build the viem account for SIGNING. An env credential uses its raw key; a file
+ * credential decrypts the keystore with the resolved passphrase, then verifies
+ * the recovered key derives the stored cleartext address (a tamper signal) before
+ * trusting it. A wrong passphrase or corrupt keystore surfaces as
+ * WALLET_INVALID_KEY that names where the passphrase comes from.
  */
-function accountForCredential(cred: Credential): PrivateKeyAccount {
-  let account: PrivateKeyAccount;
+async function accountForSigning(
+  cred: Credential,
+  deps: LocalProviderDeps,
+): Promise<PrivateKeyAccount> {
+  if (cred.source === 'env') return accountFromKey(cred.key, 'env');
+
+  const cached = signerCache.get(cred.keystore.id);
+  if (cached !== undefined) return cached;
+
+  const { passphrase } = await resolvePassphrase({
+    env: deps.env,
+    dir: deps.dir,
+    ...deps.passphrase,
+  });
+  let key: Hex;
   try {
-    account = privateKeyToAccount(cred.key);
+    const derived = await Keystore.toKeyAsync(cred.keystore, { password: passphrase });
+    key = Keystore.decrypt(cred.keystore, derived);
+  } catch (err) {
+    throw new CliError('WALLET_INVALID_KEY', 'Could not decrypt the wallet keystore.', {
+      fix: 'Check the passphrase: TENJIN_WALLET_PASSPHRASE, the macOS keychain (service tenjin-cli), or the one you enter when prompted.',
+      cause: err,
+    });
+  }
+  const account = accountFromKey(key, 'file');
+  if (account.address.toLowerCase() !== cred.address.toLowerCase()) {
+    throw new CliError(
+      'WALLET_INVALID_KEY',
+      `The decrypted key derives ${account.address}, not the wallet file's stored address ${cred.address}.`,
+      {
+        fix: 'The wallet file may be tampered. Move it aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
+      },
+    );
+  }
+  signerCache.set(cred.keystore.id, account);
+  return account;
+}
+
+/** viem account from a raw key, mapping viem's throw on a bad key to WALLET_INVALID_KEY. */
+function accountFromKey(key: Hex, source: 'env' | 'file'): PrivateKeyAccount {
+  try {
+    return privateKeyToAccount(key);
   } catch (err) {
     throw new CliError('WALLET_INVALID_KEY', 'The private key is not a valid secp256k1 key.', {
       fix:
-        cred.source === 'file'
+        source === 'file'
           ? 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.'
           : 'Set TENJIN_WALLET_KEY to a valid 0x-prefixed 32-byte hex key.',
       cause: err,
     });
   }
-  if (cred.source === 'file' && account.address.toLowerCase() !== cred.address.toLowerCase()) {
-    throw new CliError(
-      'WALLET_INVALID_KEY',
-      `The wallet file's stored address ${cred.address} does not match its private key (derives ${account.address}).`,
-      {
-        fix: 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
-      },
-    );
-  }
-  return account;
+}
+
+/** Encrypt a raw key into a Keystore v3 document using ox's default scrypt parameters. */
+async function encryptToKeystore(key: Hex, passphrase: string): Promise<Keystore.Keystore> {
+  const [derivedKey, opts] = await Keystore.scryptAsync({ password: passphrase });
+  return Keystore.encrypt(key, derivedKey, opts);
 }
 
 function resolveCredentialOrThrow(cred: Credential | null): Credential {
@@ -169,12 +231,12 @@ function resolveCredentialOrThrow(cred: Credential | null): Credential {
   return cred;
 }
 
-function walletRecord(address: Address, privateKey: Hex): WalletRecord {
+function walletRecord(address: Address, keystore: Keystore.Keystore): WalletRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     provider: 'local',
     address,
-    privateKey,
+    keystore,
     createdAt: new Date().toISOString(),
   };
 }

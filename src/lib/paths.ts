@@ -19,3 +19,12 @@ export function configPath(dir: string = dataDir()): string {
 export function walletPath(dir: string = dataDir()): string {
   return join(dir, 'wallet.json');
 }
+
+/**
+ * Where the Windows DPAPI-protected wallet passphrase blob lives. The file holds
+ * a DPAPI CurrentUser ciphertext, not the passphrase in plaintext, and is only
+ * ever written on win32; other platforms use their own OS store.
+ */
+export function passphraseBlobPath(dir: string = dataDir()): string {
+  return join(dir, 'passphrase.dpapi');
+}

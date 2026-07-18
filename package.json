@@ -53,6 +53,7 @@
     "commander": "^14.0.1",
     "eslint": "^9",
     "eslint-config-prettier": "^10",
+    "ox": "0.14.30",
     "prettier": "^3",
     "tsup": "^8.5.0",
     "typescript": "^6",
