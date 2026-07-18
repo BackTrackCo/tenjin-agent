@@ -31,6 +31,7 @@ export async function runWalletCreate(
 
   const { passphrase, source } = await resolvePassphraseForCreate({
     env: process.env,
+    dir: ctx.dataDir,
     ...opts.passphrase,
   });
   const { address, walletPath: path } = await createLocalWallet(ctx.dataDir, passphrase);
@@ -61,6 +62,10 @@ function passphraseNote(source: PassphraseSource): string {
   switch (source) {
     case 'keychain':
       return 'Passphrase saved to your macOS keychain (service tenjin-cli); signing will be transparent on this machine.';
+    case 'dpapi':
+      return 'Passphrase saved to a DPAPI-encrypted file, readable only by you on this Windows machine; signing will be transparent here.';
+    case 'secret-service':
+      return 'Passphrase saved to your Linux keyring (Secret Service, service tenjin-cli); signing will be transparent on this machine.';
     case 'env':
       return 'Encrypted with TENJIN_WALLET_PASSPHRASE; keep that value to sign.';
     case 'prompt':

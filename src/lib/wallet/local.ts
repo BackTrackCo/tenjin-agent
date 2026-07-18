@@ -172,7 +172,11 @@ async function accountForSigning(
   const cached = signerCache.get(cred.keystore.id);
   if (cached !== undefined) return cached;
 
-  const { passphrase } = await resolvePassphrase({ env: deps.env, ...deps.passphrase });
+  const { passphrase } = await resolvePassphrase({
+    env: deps.env,
+    dir: deps.dir,
+    ...deps.passphrase,
+  });
   let key: Hex;
   try {
     const derived = await Keystore.toKeyAsync(cred.keystore, { password: passphrase });

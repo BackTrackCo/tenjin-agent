@@ -146,12 +146,13 @@ describe('runWalletCreate', () => {
 
   it('auto-generates and stores a keychain passphrase on macOS when env is unset', async () => {
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', ''); // clear the env passphrase
-    let stored: string | undefined;
-    const exec: ExecFn = async (file, args) => {
+    let seenArgs: string[] | undefined;
+    let seenStdin: string | undefined;
+    const exec: ExecFn = async (file, args, stdin) => {
+      // The write goes through `security -i`: the secret is on stdin, never argv.
       expect(file).toBe('security');
-      expect(args).toContain('add-generic-password');
-      const wIndex = args.indexOf('-w');
-      stored = args[wIndex + 1];
+      seenArgs = args;
+      seenStdin = stdin;
       return { stdout: '', stderr: '' };
     };
     const res = await runWalletCreate(makeCtx(), {
@@ -159,9 +160,12 @@ describe('runWalletCreate', () => {
     });
     expect((res.data as { passphraseSource: string }).passphraseSource).toBe('keychain');
     expect(res.humanLines?.some((l) => l.includes('keychain'))).toBe(true);
-    // A strong random passphrase was generated and handed to `security`.
+    // argv is exactly ['-i']; the generated base64url passphrase lives only in stdin.
+    expect(seenArgs).toEqual(['-i']);
+    const stored = seenStdin?.match(/-w '([^']+)'/)?.[1];
     expect(stored).toBeDefined();
     expect((stored as string).length).toBeGreaterThanOrEqual(32);
+    expect(stored as string).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
   it('errors USAGE when no passphrase source is available (headless, non-mac)', async () => {
