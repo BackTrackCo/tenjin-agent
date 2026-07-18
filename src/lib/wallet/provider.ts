@@ -40,6 +40,18 @@ export interface WalletDescription {
  */
 export interface WalletDiagnostics {
   walletPath?: string;
+  /**
+   * Human description of how the key is protected at rest, e.g.
+   * "encrypted (keystore v3, scrypt)". Present only for an on-disk encrypted
+   * wallet; a remote or env-only credential has no at-rest file to describe.
+   */
+  keyStorage?: string;
+  /**
+   * Where the decryption passphrase resolves from, when it is cheap and
+   * side-effect-free to know (the env passphrase). Omitted when reporting it
+   * would require a keychain or TTY probe — `show` must never trigger one.
+   */
+  passphraseSource?: string;
   warnings: string[];
 }
 

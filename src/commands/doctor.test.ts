@@ -8,6 +8,7 @@ import { runDoctor } from './doctor';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
+import { fakeRecord } from '../lib/wallet/test-support';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import type { WalletProvider } from '../lib/wallet';
@@ -18,8 +19,9 @@ const balanceMock = vi.mocked(getUsdcBalance);
 
 const OPENAPI_OK = { openapi: '3.1.0', info: { title: 'Tenjin', version: '0.1.0' } };
 const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
-// The provider cross-checks the file's stored address against its key, so the
-// fixture must be coherent: derive the address from the key, don't fabricate one.
+// doctor reads the wallet file's cleartext top-level address without decrypting,
+// so the fixture just needs a real address; PRIVATE_KEY is kept only to assert it
+// never appears in any output.
 const PRIVATE_KEY = `0x${'de'.repeat(32)}` as `0x${string}`;
 const ADDRESS = privateKeyToAccount(PRIVATE_KEY).address;
 
@@ -87,16 +89,7 @@ function find(checks: CheckResult[], name: string): CheckResult {
 
 async function writeWallet(mode: number): Promise<void> {
   const path = join(dir, 'wallet.json');
-  await writeFile(
-    path,
-    JSON.stringify({
-      schemaVersion: 1,
-      provider: 'local',
-      address: ADDRESS,
-      privateKey: PRIVATE_KEY,
-      createdAt: '2026-07-16T00:00:00.000Z',
-    }),
-  );
+  await writeFile(path, JSON.stringify(fakeRecord({ address: ADDRESS })));
   await chmod(path, mode);
 }
 

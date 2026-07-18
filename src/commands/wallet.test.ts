@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, stat, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile, stat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -7,6 +7,7 @@ import type { Address } from 'viem';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import type { WalletProvider } from '../lib/wallet';
+import type { ExecFn } from '../lib/wallet/passphrase';
 
 // Balance is the only path that hits the chain; mock the RPC read so the whole
 // suite stays offline and deterministic. viem's key derivation stays real.
@@ -21,15 +22,17 @@ import { runWalletCreate, runWalletShow, runWalletBalance } from './wallet';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const isWindows = process.platform === 'win32';
+const PASSPHRASE = 'test-passphrase-123';
 
 let tmp: string;
 let dataDir: string;
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), 'tenjin-wallet-'));
-  // A nested, not-yet-created dir so the atomic writer creates it 0700 itself
-  // (mkdtemp's own dir would mask that).
+  // A nested, not-yet-created dir so the atomic writer creates it 0700 itself.
   dataDir = join(tmp, '.tenjin');
   mockedBalance.mockReset();
+  // Encrypt via the env passphrase by default: deterministic, no keychain/TTY.
+  vi.stubEnv('TENJIN_WALLET_PASSPHRASE', PASSPHRASE);
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -56,7 +59,11 @@ async function catchCliError(p: Promise<unknown>): Promise<CliError> {
 
 const walletFile = () => join(dataDir, 'wallet.json');
 const readStored = async () =>
-  JSON.parse(await readFile(walletFile(), 'utf8')) as { address: string; privateKey: string };
+  JSON.parse(await readFile(walletFile(), 'utf8')) as {
+    schemaVersion: number;
+    address: string;
+    keystore: { version: number };
+  };
 
 /** A remote-style provider: describe() works, getSigner() must never be called by show/balance. */
 function fakeRemoteProvider(
@@ -91,18 +98,34 @@ describe('runWalletCreate', () => {
     expect((await stat(dataDir)).mode & 0o777).toBe(0o700);
   });
 
-  it('stores a key that derives the reported address', async () => {
+  it('stores an encrypted keystore v2 record and never the raw key', async () => {
     const res = await runWalletCreate(makeCtx());
     const address = (res.data as { address: string }).address;
     expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
     const stored = await readStored();
-    expect(privateKeyToAccount(stored.privateKey as `0x${string}`).address).toBe(address);
-    expect(res.data).toMatchObject({ provider: 'local', policyEnforcement: 'client-only' });
+    expect(stored.schemaVersion).toBe(2);
+    expect(stored.keystore.version).toBe(3);
+    expect(stored.address).toBe(address);
+    expect(res.data).toMatchObject({
+      provider: 'local',
+      policyEnforcement: 'client-only',
+      keyStorage: 'encrypted (keystore v3, scrypt)',
+      passphraseSource: 'env',
+    });
+    // The plaintext private key must never be written to disk.
+    const raw = await readFile(walletFile(), 'utf8');
+    expect(raw).not.toMatch(/0x[0-9a-f]{64}/i);
+    expect(raw).not.toContain('privateKey');
   });
 
   it('emits the exact funding line', async () => {
     const res = await runWalletCreate(makeCtx());
     expect(res.humanLines).toContain('Send USDC on Base. $5 covers ~50 typical resources.');
+  });
+
+  it('reports that the key is stored encrypted', async () => {
+    const res = await runWalletCreate(makeCtx());
+    expect(res.humanLines?.some((l) => l.includes('keystore v3'))).toBe(true);
   });
 
   it('refuses to overwrite an existing wallet (WALLET_EXISTS, exit 3)', async () => {
@@ -121,9 +144,37 @@ describe('runWalletCreate', () => {
     expect(res.humanLines?.some((l) => l.includes('TENJIN_WALLET_KEY'))).toBe(true);
   });
 
+  it('auto-generates and stores a keychain passphrase on macOS when env is unset', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', ''); // clear the env passphrase
+    let stored: string | undefined;
+    const exec: ExecFn = async (file, args) => {
+      expect(file).toBe('security');
+      expect(args).toContain('add-generic-password');
+      const wIndex = args.indexOf('-w');
+      stored = args[wIndex + 1];
+      return { stdout: '', stderr: '' };
+    };
+    const res = await runWalletCreate(makeCtx(), {
+      passphrase: { platform: 'darwin', isTTY: false, exec },
+    });
+    expect((res.data as { passphraseSource: string }).passphraseSource).toBe('keychain');
+    expect(res.humanLines?.some((l) => l.includes('keychain'))).toBe(true);
+    // A strong random passphrase was generated and handed to `security`.
+    expect(stored).toBeDefined();
+    expect((stored as string).length).toBeGreaterThanOrEqual(32);
+  });
+
+  it('errors USAGE when no passphrase source is available (headless, non-mac)', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    const err = await catchCliError(
+      runWalletCreate(makeCtx(), { passphrase: { platform: 'linux', isTTY: false } }),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.fix).toContain('TENJIN_WALLET_PASSPHRASE');
+  });
+
   // The friendly pre-check can pass in both racers before either writes; the
-  // exclusive write is the real guard, so exactly one wins and the stored key is
-  // the winner's, never silently clobbered.
+  // exclusive write is the real guard, so exactly one wins and no key is clobbered.
   it('two concurrent creates: one wins, the other is WALLET_EXISTS, no clobber', async () => {
     const ctx = makeCtx();
     const results = await Promise.allSettled([runWalletCreate(ctx), runWalletCreate(ctx)]);
@@ -138,7 +189,7 @@ describe('runWalletCreate', () => {
 });
 
 describe('runWalletShow', () => {
-  it('returns the describe() shape from the file provider', async () => {
+  it('returns the describe() shape plus custody posture from the file provider', async () => {
     const created = await runWalletCreate(makeCtx());
     const res = await runWalletShow(makeCtx());
     expect(res.data).toMatchObject({
@@ -147,16 +198,35 @@ describe('runWalletShow', () => {
       credentialSource: 'file',
       policyEnforcement: 'client-only',
       walletPath: walletFile(),
+      keyStorage: 'encrypted (keystore v3, scrypt)',
+      passphraseSource: 'TENJIN_WALLET_PASSPHRASE',
     });
   });
 
-  it('never leaks the private key in the serialized result', async () => {
+  it('does not decrypt and never leaks a private key', async () => {
     await runWalletCreate(makeCtx());
-    const { privateKey } = await readStored();
     const res = await runWalletShow(makeCtx());
     const serialized = JSON.stringify(res);
-    expect(serialized).not.toContain(privateKey);
     expect(serialized).not.toContain('privateKey');
+    expect(serialized).not.toContain('ciphertext');
+    expect(serialized).not.toMatch(/0x[0-9a-f]{64}/i);
+  });
+
+  it('rejects a pre-encryption v1 wallet file with the recreate fix', async () => {
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      walletFile(),
+      JSON.stringify({
+        schemaVersion: 1,
+        provider: 'local',
+        address: privateKeyToAccount(generatePrivateKey()).address,
+        privateKey: generatePrivateKey(),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const err = await catchCliError(runWalletShow(makeCtx()));
+    expect(err.code).toBe('WALLET_INVALID_KEY');
+    expect(err.message).toContain('predates encrypted storage');
   });
 
   it.skipIf(isWindows)('warns when file permissions are not 0600', async () => {
@@ -197,26 +267,27 @@ describe('runWalletShow', () => {
   });
 
   it('remote provider ignores a stale local wallet.json + env key (no contamination, no leak)', async () => {
-    // A local wallet exists with wrong perms and an env key is set — all of which
-    // would warn if show consulted local state. With a remote provider active, show
-    // must render ONLY the provider's own diagnostics: remote address, no local
-    // path, no warnings, and never the on-disk key.
     await runWalletCreate(makeCtx());
     await chmod(walletFile(), 0o644);
     vi.stubEnv('TENJIN_WALLET_KEY', generatePrivateKey());
-    const { privateKey } = await readStored();
 
     const remoteAddress = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(remoteAddress);
     const res = await runWalletShow(makeCtx(), { provider });
 
-    const data = res.data as { address: string; walletPath?: string; warnings: string[] };
+    const data = res.data as {
+      address: string;
+      walletPath?: string;
+      keyStorage?: string;
+      warnings: string[];
+    };
     expect(data.address).toBe(remoteAddress);
     expect(data.walletPath).toBeUndefined();
+    expect(data.keyStorage).toBeUndefined();
     expect(data.warnings).toEqual([]);
     const serialized = JSON.stringify(res);
-    expect(serialized).not.toContain(privateKey);
     expect(serialized).not.toContain('privateKey');
+    expect(serialized).not.toMatch(/0x[0-9a-f]{64}/i);
   });
 });
 

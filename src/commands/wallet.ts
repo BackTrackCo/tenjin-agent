@@ -10,15 +10,30 @@ import {
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
+import { resolvePassphraseForCreate, type PassphraseSource } from '../lib/wallet/passphrase';
+import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
 
 const FUNDING_LINE = 'Send USDC on Base. $5 covers ~50 typical resources.';
+const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 const isWindows = process.platform === 'win32';
 
-export async function runWalletCreate(ctx: CommandContext): Promise<CommandResult> {
+export interface WalletCreateOptions {
+  /** Test seam for passphrase resolution (keychain exec, TTY prompt, platform). */
+  passphrase?: PassphraseOverrides;
+}
+
+export async function runWalletCreate(
+  ctx: CommandContext,
+  opts: WalletCreateOptions = {},
+): Promise<CommandResult> {
   await refuseIfWalletExists(ctx.dataDir);
 
-  const { address, walletPath: path } = await createLocalWallet(ctx.dataDir);
+  const { passphrase, source } = await resolvePassphraseForCreate({
+    env: process.env,
+    ...opts.passphrase,
+  });
+  const { address, walletPath: path } = await createLocalWallet(ctx.dataDir, passphrase);
 
   const warnings = custodyWarnings();
   return {
@@ -27,10 +42,30 @@ export async function runWalletCreate(ctx: CommandContext): Promise<CommandResul
       walletPath: path,
       provider: 'local',
       policyEnforcement: 'client-only',
+      keyStorage: KEY_STORAGE,
+      passphraseSource: source,
       warnings,
     },
-    humanLines: [`Wallet created: ${address}`, FUNDING_LINE, ...warnings],
+    humanLines: [
+      `Wallet created: ${address}`,
+      `Key stored ${KEY_STORAGE}.`,
+      passphraseNote(source),
+      FUNDING_LINE,
+      ...warnings,
+    ],
   };
+}
+
+/** Where the encryption passphrase lives, and what the user must remember. */
+function passphraseNote(source: PassphraseSource): string {
+  switch (source) {
+    case 'keychain':
+      return 'Passphrase saved to your macOS keychain (service tenjin-cli); signing will be transparent on this machine.';
+    case 'env':
+      return 'Encrypted with TENJIN_WALLET_PASSPHRASE; keep that value to sign.';
+    case 'prompt':
+      return 'Remember your passphrase: it is required to sign and cannot be recovered.';
+  }
 }
 
 export async function runWalletShow(
@@ -41,8 +76,14 @@ export async function runWalletShow(
   const desc = await describeWallet(provider);
   // Diagnostics are the provider's own: a remote provider reports no local file
   // path or perms warning, so `show` never contaminates a remote wallet's output
-  // with a stale local wallet.json's state.
-  const { walletPath: path, warnings } = await provider.diagnostics();
+  // with a stale local wallet.json's state. keyStorage/passphraseSource are the
+  // custody posture reported without decrypting or requiring a passphrase.
+  const { walletPath: path, keyStorage, passphraseSource, warnings } = await provider.diagnostics();
+
+  const humanLines = [`Address: ${desc.address}`, `Key source: ${desc.credentialSource}`];
+  if (keyStorage !== undefined) humanLines.push(`Key storage: ${keyStorage}`);
+  if (passphraseSource !== undefined) humanLines.push(`Passphrase: ${passphraseSource}`);
+  humanLines.push(...warnings);
 
   return {
     data: {
@@ -51,9 +92,11 @@ export async function runWalletShow(
       credentialSource: desc.credentialSource,
       policyEnforcement: desc.policyEnforcement,
       ...(path !== undefined ? { walletPath: path } : {}),
+      ...(keyStorage !== undefined ? { keyStorage } : {}),
+      ...(passphraseSource !== undefined ? { passphraseSource } : {}),
       warnings,
     },
-    humanLines: [`Address: ${desc.address}`, `Key source: ${desc.credentialSource}`, ...warnings],
+    humanLines,
   };
 }
 
