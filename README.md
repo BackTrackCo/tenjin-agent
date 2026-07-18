@@ -116,8 +116,15 @@ refusal, `4` payment failure (reserved).
 
 - Default maximum automatic spend is **zero**. Nothing pays without explicit
   approval or an explicitly configured policy.
-- Keys are generated locally and stored at `~/.tenjin/wallet.json` (mode
-  `0600`); signing is local; the CLI talks only to the configured base URL.
+- Keys are generated locally and stored **encrypted at rest** in
+  `~/.tenjin/wallet.json` (Keystore v3, scrypt), mode `0600`. The plaintext key
+  is never written to disk. The wallet address stays readable, so `show`,
+  `balance`, and `doctor` work without a passphrase; only signing decrypts.
+  Signing is local and the CLI talks only to the configured base URL.
+- The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE` for
+  headless use, then the macOS login keychain (a strong random passphrase is
+  generated and saved there on `wallet create`), then an interactive prompt. The
+  key never leaves the machine.
 - Fund small: this is a pocket-money wallet by design.
 - Purchased content is untrusted data, never instructions.
 
