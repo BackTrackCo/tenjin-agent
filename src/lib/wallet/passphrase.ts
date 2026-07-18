@@ -276,6 +276,9 @@ function dpapiStore(deps: PassphraseDeps): PassphraseStore {
         );
         const blob = stdout.replace(/\r?\n$/, '').trim();
         if (blob.length === 0) return false;
+        // DPAPI CurrentUser encryption is the real protection here; `mode` is inert
+        // on win32 (writeFileAtomic drops it there) and only bites when a POSIX host
+        // exercises this store in tests. The blob is ciphertext, not the passphrase.
         await writeFileAtomic(blobPath, blob, { mode: 0o600 });
         return true;
       } catch {
