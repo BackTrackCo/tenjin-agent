@@ -174,7 +174,94 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  addGlobalFlags(program.command('lookup <question>'))
+    .description('Ask for payable candidates or an honest MISS (POST /api/agent/lookup)')
+    .option('--max-price <usd>', 'only candidates at or below this decimal-USD price')
+    .option('--fresh-within <window>', 'freshness window, e.g. P30D, P2W, P1Y')
+    .option('--limit <n>', 'maximum candidates (1-10, default 5)')
+    .option('--applies-to <pair>', 'applicability filter key=value (repeatable)', collect, [])
+    .action(async function (this: Command, question: string) {
+      await runCommand('lookup', this, async (ctx) => {
+        const o = this.opts();
+        const { runLookup } = await import('./commands/lookup');
+        return runLookup(
+          {
+            question,
+            ...(typeof o.maxPrice === 'string' ? { maxPrice: o.maxPrice } : {}),
+            ...(typeof o.freshWithin === 'string' ? { freshWithin: o.freshWithin } : {}),
+            ...(typeof o.limit === 'string' ? { limit: o.limit } : {}),
+            ...(Array.isArray(o.appliesTo) && o.appliesTo.length > 0
+              ? { appliesTo: o.appliesTo as string[] }
+              : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
+  addGlobalFlags(program.command('inspect <resource>'))
+    .description("Show a candidate's pre-purchase card / preview without paying")
+    .action(async function (this: Command, resource: string) {
+      await runCommand('inspect', this, async (ctx) => {
+        const { runInspect } = await import('./commands/inspect');
+        return runInspect({ ref: resource }, ctx);
+      });
+    });
+
+  addGlobalFlags(program.command('buy <resource>'))
+    .description('Pay to read (x402 exact) with an entitlement re-check first')
+    .option('--max-price <usd>', 'hard price cap in decimal USD (never bypassed by --yes)')
+    .option('--yes', 'bypass the interactive confirm only (not the price cap)')
+    .option('--print-body', 'include the full body in the machine output')
+    .action(async function (this: Command, resource: string) {
+      await runCommand('buy', this, async (ctx) => {
+        const o = this.opts();
+        const { runBuy } = await import('./commands/buy');
+        return runBuy(
+          {
+            ref: resource,
+            ...(typeof o.maxPrice === 'string' ? { maxPrice: o.maxPrice } : {}),
+            ...(o.yes === true ? { yes: true } : {}),
+            ...(o.printBody === true ? { printBody: true } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
+  addGlobalFlags(program.command('outcome'))
+    .description('Report a lookup outcome (POST /api/agent/lookups/:id/outcomes)')
+    .option('--lookup-id <id>', 'the lookup to report against')
+    .option('--last', 'target the most recent local lookup')
+    .requiredOption(
+      '--status <status>',
+      'used | partially_used | rejected | regenerated | purchase_declined',
+    )
+    .option('--resource <id>', 'the resourceId the outcome concerns')
+    .option('--content-hash <hash>', 'sha256:<64hex> of the exact body read')
+    .action(async function (this: Command) {
+      await runCommand('outcome', this, async (ctx) => {
+        const o = this.opts();
+        const { runOutcome } = await import('./commands/outcome');
+        return runOutcome(
+          {
+            status: String(o.status),
+            ...(typeof o.lookupId === 'string' ? { lookupId: o.lookupId } : {}),
+            ...(o.last === true ? { last: true } : {}),
+            ...(typeof o.resource === 'string' ? { resource: o.resource } : {}),
+            ...(typeof o.contentHash === 'string' ? { contentHash: o.contentHash } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
   return program;
+}
+
+/** commander option collector for a repeatable flag (accumulates into an array). */
+function collect(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 /**

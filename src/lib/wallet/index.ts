@@ -1,10 +1,18 @@
 import { CliError } from '../errors';
 import { createLocalProvider } from './local';
+import { createLocalSpendAuthorizer, type SpendAuthorizer } from './spend';
+import type { SpendPolicy } from '../policy';
 import type { CommandContext } from '../../context';
 import type { WalletDescription, WalletProvider } from './provider';
 
 export * from './provider';
 export { createLocalWallet, type LocalWalletInfo } from './local';
+export {
+  createLocalSpendAuthorizer,
+  type SpendAuthorizer,
+  type SpendAuthorization,
+  type SpendRequest,
+} from './spend';
 
 export interface ResolveWalletProviderOptions {
   /** Test-injection seam: bypass the local provider with a fake (e.g. a remote stub). */
@@ -23,6 +31,26 @@ export function resolveWalletProvider(
 ): WalletProvider {
   if (opts.provider !== undefined) return opts.provider;
   return createLocalProvider({ dir: ctx.dataDir, env: process.env });
+}
+
+export interface ResolveSpendAuthorizerOptions {
+  /** Test-injection seam: bypass the local authorizer (e.g. a provider-enforced stub). */
+  authorizer?: SpendAuthorizer;
+}
+
+/**
+ * The commands' one entry to spend enforcement. Production gets the local
+ * (client-only) authorizer bound to the context's data dir and the resolved
+ * policy; a future hosted provider returns its own provider-enforced authorizer
+ * here, and every spend path already routes through it.
+ */
+export function resolveSpendAuthorizer(
+  ctx: CommandContext,
+  policy: SpendPolicy,
+  opts: ResolveSpendAuthorizerOptions = {},
+): SpendAuthorizer {
+  if (opts.authorizer !== undefined) return opts.authorizer;
+  return createLocalSpendAuthorizer({ dir: ctx.dataDir, policy });
 }
 
 /**

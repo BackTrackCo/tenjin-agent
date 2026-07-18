@@ -28,6 +28,14 @@ export const ErrorCodeSchema = z.enum([
   'NETWORK_ERROR',
   'INTERNAL',
   'NOT_IMPLEMENTED',
+  // B2 (lookup/inspect/buy/outcome): a policy refusal (exit 3) has its own code
+  // so an agent can distinguish a spend-cap block from a generic REFUSED; a
+  // payment that failed after approval (exit 4) is PAYMENT_FAILED; the read
+  // route's own coded failures (402 preview parse, 409 gate) surface as these.
+  'POLICY_REFUSED',
+  'PAYMENT_FAILED',
+  'RESOURCE_NOT_FOUND',
+  'LOOKUP_NOT_FOUND',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 
