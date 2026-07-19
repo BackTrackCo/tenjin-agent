@@ -3,6 +3,7 @@ import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildLookupRequest, postLookup, type LookupInput } from '../lib/agent-api';
 import { recordLookup } from '../lib/lookup-store';
+import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -44,6 +45,7 @@ export async function runLookup(
   const response = await postLookup(request, {
     baseUrl: settings.baseUrl,
     timeoutMs: ctx.flags.timeout,
+    evalCohort: settings.evalCohort,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
@@ -66,7 +68,10 @@ export async function runLookup(
       ? [`MISS, no candidates (lookupId ${response.lookupId})`]
       : [
           `${candidates.length} candidate(s) (lookupId ${response.lookupId}):`,
-          ...candidates.map((c, i) => `  ${i + 1}. ${c.title}, ${c.price} atomic, ${c.url}`),
+          ...candidates.map(
+            (c, i) =>
+              `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${c.price} atomic, ${sanitizeForTerminal(c.url)}`,
+          ),
         ];
 
   return { data: response, humanLines };

@@ -115,7 +115,15 @@ Marketplace commands (need the Track A2 lookup API deployed to your `--base-url`
 `buy` re-reads an entitled resource for free before ever paying, re-delivers
 already-bought content from the local library without paying again, and refuses to
 sign if the price rose since it first saw the 402. Spend policy is enforced in the
-wallet provider layer before any payment.
+wallet provider layer before any payment. The default output carries a heading
+outline, never the body: `--print-body` includes it, and `--sections <tokens>`
+includes the leading sections within a token budget (a deterministic heading
+split, no model calls).
+
+The lookup question must be **generalized public text**: derive the smallest
+public phrasing of your task and never include secrets or private context. By
+default the server stores no query text at all; `tenjin config set evalCohort
+true` opts into 90-day retention of the question for retrieval evaluation.
 
 > **Money units.** `--max-price` (and the spend-policy config values) are entered
 > in **decimal USD** at the CLI edge (e.g. `--max-price 0.10`), and emitted in

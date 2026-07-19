@@ -46,7 +46,8 @@ describe('runConfigList', () => {
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
-    expect(humanLines).toHaveLength(6);
+    expect(d.evalCohort).toEqual({ value: false, source: 'default' });
+    expect(humanLines).toHaveLength(7);
   });
 
   it('exposes the confirm threshold in dual form when above:', async () => {
@@ -270,3 +271,17 @@ describe('runConfigSet — persistence', () => {
 function atomicToUsd(atomic: string): string {
   return atomic === '250000' ? '0.25' : atomic === '5000000' ? '5' : '0';
 }
+
+describe('evalCohort key', () => {
+  it.each(['true', 'false'] as const)('round-trips %s through set/get', async (value) => {
+    await runConfigSet({ key: 'evalCohort', value }, makeCtx());
+    const { data } = await runConfigGet({ key: 'evalCohort' }, makeCtx());
+    expect(data).toMatchObject({ key: 'evalCohort', value: value === 'true', source: 'file' });
+  });
+
+  it.each(['1', '0', 'True', 'yes', ''])('rejects %j as USAGE', async (bad) => {
+    const err = await caught(() => runConfigSet({ key: 'evalCohort', value: bad }, makeCtx()));
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+  });
+});

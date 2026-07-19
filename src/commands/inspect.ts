@@ -2,6 +2,7 @@ import { resolveResourceRef } from '../lib/resource-ref';
 import { fetchRead } from '../lib/read-client';
 import { toMoney } from '../lib/money';
 import { headingOutline } from '../lib/library';
+import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -43,7 +44,9 @@ export async function runInspect(
         price: toMoney(body.price),
         headings: headingOutline(body.bodyMd),
       },
-      humanLines: [`${body.title}, free (${body.price} atomic). Read it with \`tenjin buy\`.`],
+      humanLines: [
+        `${sanitizeForTerminal(body.title)}, free (${body.price} atomic). Read it with \`tenjin buy\`.`,
+      ],
     };
   }
 
@@ -78,6 +81,6 @@ export async function runInspect(
   // already_purchased without a payment header is unexpected; report it plainly.
   return {
     data: { url: ref.url, access: 'entitled', message: result.message },
-    humanLines: [result.message],
+    humanLines: [sanitizeForTerminal(result.message)],
   };
 }

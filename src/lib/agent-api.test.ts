@@ -109,6 +109,45 @@ describe('buildLookupRequest', () => {
   });
 });
 
+describe('buildLookupRequest bounds (server strictObject mirror)', () => {
+  it.each(['P0D', 'P0W', 'P00M', 'P0000Y'])('rejects the zero-valued window %s', (w) => {
+    expect(() => buildLookupRequest({ question: 'q', freshWithin: w })).toThrowError(
+      expect.objectContaining({ code: 'USAGE' }),
+    );
+  });
+
+  it('rejects an applies-to value over 120 chars, an empty value, >20 values, and >8 keys', () => {
+    expect(() =>
+      buildLookupRequest({ question: 'q', appliesTo: { products: ['v'.repeat(121)] } }),
+    ).toThrowError(expect.objectContaining({ code: 'USAGE' }));
+    expect(() => buildLookupRequest({ question: 'q', appliesTo: { products: [''] } })).toThrowError(
+      expect.objectContaining({ code: 'USAGE' }),
+    );
+    expect(() =>
+      buildLookupRequest({
+        question: 'q',
+        appliesTo: { products: Array.from({ length: 21 }, (_, i) => `v${i}`) },
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'USAGE' }));
+    expect(() =>
+      buildLookupRequest({
+        question: 'q',
+        appliesTo: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`key_${i}`, ['v']])),
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'USAGE' }));
+  });
+
+  it('accepts a nonzero window and in-bounds appliesTo', () => {
+    const body = buildLookupRequest({
+      question: 'q',
+      freshWithin: 'P30D',
+      appliesTo: { products: ['Vercel'] },
+    });
+    expect(body.freshWithin).toBe('P30D');
+    expect(body.appliesTo).toEqual({ products: ['Vercel'] });
+  });
+});
+
 describe('postLookup', () => {
   it('POSTs the request with the client-attribution header and parses CANDIDATES', async () => {
     const { fetch, calls } = stubFetch(json(200, CANDIDATES));
@@ -128,6 +167,63 @@ describe('postLookup', () => {
       limit: 5,
     });
   });
+  it('omits the eval-cohort header by default and sends it when opted in', async () => {
+    const a = stubFetch(json(200, CANDIDATES));
+    await postLookup(buildLookupRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: a.fetch,
+    });
+    const aHeaders = a.calls[0]?.init.headers as Record<string, string>;
+    expect(aHeaders['x-tenjin-eval-cohort']).toBeUndefined();
+
+    const b = stubFetch(json(200, CANDIDATES));
+    await postLookup(buildLookupRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      evalCohort: true,
+      fetchImpl: b.fetch,
+    });
+    const bHeaders = b.calls[0]?.init.headers as Record<string, string>;
+    expect(bHeaders['x-tenjin-eval-cohort']).toBe('1');
+  });
+
+  it('re-applies the server card bounds to an oversized candidate', async () => {
+    const bloated = {
+      ...CANDIDATES,
+      candidates: [
+        {
+          ...(CANDIDATES.candidates?.[0] as object),
+          title: 'T'.repeat(1000),
+          scope: 'S'.repeat(1000),
+          questionsAnswered: Array.from({ length: 50 }, () => 'q'.repeat(500)),
+          matchReasons: Array.from({ length: 20 }, () => 'r'.repeat(300)),
+          appliesTo: Object.fromEntries(
+            Array.from({ length: 12 }, (_, i) => [
+              `key_${i}`,
+              Array.from({ length: 15 }, () => 'v'.repeat(200)),
+            ]),
+          ),
+        },
+      ],
+    };
+    const { fetch } = stubFetch(json(200, bloated));
+    const res = await postLookup(buildLookupRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    const c = res.candidates?.[0];
+    expect(c?.title).toHaveLength(200);
+    expect(c?.scope).toHaveLength(240);
+    expect(c?.questionsAnswered).toHaveLength(4);
+    expect(c?.questionsAnswered[0]).toHaveLength(160);
+    expect(c?.matchReasons).toHaveLength(3);
+    expect(c?.matchReasons[0]).toHaveLength(80);
+    expect(Object.keys(c?.appliesTo ?? {})).toHaveLength(6);
+    expect(Object.values(c?.appliesTo ?? {})[0]).toHaveLength(5);
+  });
+
   it('parses a MISS with no candidates', async () => {
     const { fetch } = stubFetch(
       json(200, { schemaVersion: 1, lookupId: 'x', decision: 'MISS', calibration: 'lexical-v1' }),

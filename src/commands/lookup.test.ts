@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runLookup } from './lookup';
@@ -100,5 +100,37 @@ describe('runLookup', () => {
     await expect(
       runLookup({ question: 'q', appliesTo: ['noequals'] }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+});
+
+describe('evalCohort threading', () => {
+  function headerStub(): { fetch: typeof fetch; headers: Array<Record<string, string>> } {
+    const headers: Array<Record<string, string>> = [];
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      headers.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          decision: 'MISS',
+          calibration: 'lexical-v1',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, headers };
+  }
+
+  it('sends no eval-cohort header by default', async () => {
+    const { fetch, headers } = headerStub();
+    await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect(headers[0]?.['x-tenjin-eval-cohort']).toBeUndefined();
+  });
+
+  it('sends X-Tenjin-Eval-Cohort: 1 when config.json opts in', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ evalCohort: true }));
+    const { fetch, headers } = headerStub();
+    await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect(headers[0]?.['x-tenjin-eval-cohort']).toBe('1');
   });
 });

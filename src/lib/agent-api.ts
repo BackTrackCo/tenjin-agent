@@ -13,7 +13,7 @@ import { CLIENT_HEADER } from './client-meta';
  * `X-Tenjin-Client`, which attributes a later purchase back to the lookup flow.
  */
 
-const FRESH_WITHIN_RE = /^P\d{1,4}[DWMY]$/;
+const FRESH_WITHIN_RE = /^P(\d{1,4})[DWMY]$/;
 const ATOMIC_RE = /^\d{1,39}$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
@@ -43,10 +43,15 @@ export function buildLookupRequest(input: LookupInput): LookupRequestBody {
       fix: 'Pass a non-empty question under 512 characters.',
     });
   }
-  if (input.freshWithin !== undefined && !FRESH_WITHIN_RE.test(input.freshWithin)) {
-    throw new CliError('USAGE', `Invalid --fresh-within: ${JSON.stringify(input.freshWithin)}`, {
-      fix: 'Use an ISO-like window P<n>[DWMY], e.g. P30D, P2W, P1Y.',
-    });
+  if (input.freshWithin !== undefined) {
+    // The server rejects ANY zero-valued duration (P0D, P0W, P00M, ...), so a
+    // zero window fails here as USAGE instead of a remote 400.
+    const digits = FRESH_WITHIN_RE.exec(input.freshWithin)?.[1];
+    if (digits === undefined || Number(digits) === 0) {
+      throw new CliError('USAGE', `Invalid --fresh-within: ${JSON.stringify(input.freshWithin)}`, {
+        fix: 'Use a nonzero ISO-like window P<n>[DWMY], e.g. P30D, P2W, P1Y.',
+      });
+    }
   }
   if (input.maxPrice !== undefined && !ATOMIC_RE.test(input.maxPrice)) {
     throw new CliError('USAGE', `Invalid --max-price: ${JSON.stringify(input.maxPrice)}`, {
@@ -60,6 +65,12 @@ export function buildLookupRequest(input: LookupInput): LookupRequestBody {
     });
   }
   if (input.appliesTo !== undefined) {
+    // Mirror the server's strictObject bounds (<=8 keys, <=20 values/key,
+    // 1..120 chars/value) so a bad filter fails locally, never as a remote 400.
+    const keys = Object.keys(input.appliesTo);
+    if (keys.length > 8) {
+      throw new CliError('USAGE', 'Too many --applies-to keys (max 8).');
+    }
     for (const [key, values] of Object.entries(input.appliesTo)) {
       if (!CANONICAL_KEY_RE.test(key)) {
         throw new CliError('USAGE', `Invalid appliesTo key: ${JSON.stringify(key)}`, {
@@ -70,6 +81,17 @@ export function buildLookupRequest(input: LookupInput): LookupRequestBody {
         throw new CliError('USAGE', `appliesTo key ${JSON.stringify(key)} has no values`, {
           fix: 'Give each --applies-to key at least one value.',
         });
+      }
+      if (values.length > 20) {
+        throw new CliError('USAGE', `Too many --applies-to values for ${key} (max 20).`);
+      }
+      for (const value of values) {
+        if (value.length === 0 || value.length > 120) {
+          throw new CliError(
+            'USAGE',
+            `Invalid --applies-to value for ${key}: must be 1 to 120 characters.`,
+          );
+        }
       }
     }
   }
@@ -86,7 +108,7 @@ export function buildLookupRequest(input: LookupInput): LookupRequestBody {
 // Response schemas. `.passthrough()` on the candidate keeps unknown future fields
 // instead of stripping them (forward-compatible), while still requiring the
 // contract fields this CLI reads. `decision` is uppercase on the wire.
-const lookupCandidateSchema = z
+export const lookupCandidateSchema = z
   .object({
     resourceId: z.string(),
     url: z.string(),
@@ -109,7 +131,7 @@ const lookupCandidateSchema = z
 
 export type LookupCandidate = z.infer<typeof lookupCandidateSchema>;
 
-const lookupResponseSchema = z.object({
+export const lookupResponseSchema = z.object({
   schemaVersion: z.literal(1),
   lookupId: z.string(),
   decision: z.enum(['CANDIDATES', 'MISS']),
@@ -123,6 +145,8 @@ export interface AgentApiOptions {
   baseUrl: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  /** Spec 09 §3 evaluation-cohort opt-in: sends X-Tenjin-Eval-Cohort: 1. */
+  evalCohort?: boolean;
 }
 
 function trimSlash(url: string): string {
@@ -160,7 +184,10 @@ export async function postLookup(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
-    headers: { 'x-tenjin-client': CLIENT_HEADER },
+    headers: {
+      'x-tenjin-client': CLIENT_HEADER,
+      ...(opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {}),
+    },
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
   });
@@ -182,7 +209,58 @@ export async function postLookup(
       details: parsed.error.issues,
     });
   }
-  return parsed.data;
+  return truncateResponse(parsed.data);
+}
+
+/**
+ * The server bounds every card string (response budget ~1k tokens, spec 09);
+ * re-apply the same caps defensively so a misbehaving server cannot blow up an
+ * agent transcript through the CLI (spec 10 response-size discipline).
+ */
+const CAND_BOUNDS = {
+  title: 200,
+  scope: 240,
+  exclusions: 240,
+  listItems: 4,
+  listItemChars: 160,
+  matchReasons: 3,
+  matchReasonChars: 80,
+  appliesToKeys: 6,
+  appliesToValues: 5,
+  appliesToValueChars: 80,
+} as const;
+
+function truncateResponse(res: LookupResponse): LookupResponse {
+  if (res.candidates === undefined) return res;
+  return { ...res, candidates: res.candidates.map(truncateCandidate) };
+}
+
+function truncateCandidate(c: LookupCandidate): LookupCandidate {
+  const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
+  const capList = (list: string[], items: number, chars: number): string[] =>
+    list.slice(0, items).map((s) => cap(s, chars));
+  const appliesTo: Record<string, string[]> = {};
+  for (const key of Object.keys(c.appliesTo).slice(0, CAND_BOUNDS.appliesToKeys)) {
+    appliesTo[cap(key, CAND_BOUNDS.appliesToValueChars)] = capList(
+      c.appliesTo[key] ?? [],
+      CAND_BOUNDS.appliesToValues,
+      CAND_BOUNDS.appliesToValueChars,
+    );
+  }
+  return {
+    ...c,
+    title: cap(c.title, CAND_BOUNDS.title),
+    scope: c.scope === null ? null : cap(c.scope, CAND_BOUNDS.scope),
+    exclusions: c.exclusions === null ? null : cap(c.exclusions, CAND_BOUNDS.exclusions),
+    questionsAnswered: capList(
+      c.questionsAnswered,
+      CAND_BOUNDS.listItems,
+      CAND_BOUNDS.listItemChars,
+    ),
+    tasksSupported: capList(c.tasksSupported, CAND_BOUNDS.listItems, CAND_BOUNDS.listItemChars),
+    matchReasons: capList(c.matchReasons, CAND_BOUNDS.matchReasons, CAND_BOUNDS.matchReasonChars),
+    appliesTo,
+  };
 }
 
 const OUTCOME_STATUSES = [

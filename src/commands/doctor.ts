@@ -2,6 +2,7 @@ import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { fetchJson } from '../lib/http';
+import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -148,7 +149,11 @@ async function checkApiContract(
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    headers: { 'x-tenjin-client': CLIENT_HEADER },
+  });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -201,7 +206,11 @@ async function checkLookupContract(
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    headers: { 'x-tenjin-client': CLIENT_HEADER },
+  });
   if (!res.ok) {
     return {
       result: {
@@ -248,7 +257,11 @@ async function checkReadPath(
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    headers: { 'x-tenjin-client': CLIENT_HEADER },
+  });
   if (!res.ok) {
     return {
       result: {

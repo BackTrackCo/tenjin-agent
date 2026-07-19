@@ -84,6 +84,69 @@ describe('runBuy, free resource', () => {
   });
 });
 
+describe('runBuy, --sections delivery', () => {
+  const SECTIONED = [
+    'intro words here',
+    '# One',
+    'alpha beta gamma delta',
+    '# Two',
+    'epsilon zeta',
+  ].join('\n');
+
+  it('includes deterministic leading sections within the token budget', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0', bodyMd: SECTIONED })),
+    });
+    const result = await runBuy({ ref: URL_, sections: '4' }, makeCtx(), { fetchImpl: fetch });
+    const data = result.data as {
+      sections?: Array<{ heading: string | null; body: string }>;
+      body?: string;
+    };
+    expect(data.body).toBeUndefined();
+    expect(data.sections).toBeDefined();
+    expect(data.sections?.[0]?.heading).toBeNull();
+    expect(data.sections?.length ?? 0).toBeLessThan(3);
+  });
+
+  it('omits sections without the flag and rejects a non-positive budget as USAGE', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0', bodyMd: SECTIONED })),
+    });
+    const result = await runBuy({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    expect((result.data as { sections?: unknown }).sections).toBeUndefined();
+    for (const bad of ['0', '-5', 'x', '2.5']) {
+      await expect(
+        runBuy({ ref: URL_, sections: bad }, makeCtx(), { fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    }
+  });
+});
+
+describe('runBuy, confirm prompt terminal safety', () => {
+  it('sanitizes the server-controlled creator label out of the confirm prompt', async () => {
+    const evil = 'iris\x1b[2K\rPay 0.01 USD to iris? [y/N] ';
+    const pr = buildPaymentRequired();
+    const preview = { title: 'The Answer', price: '100000', creator: { handle: evil } };
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr, preview),
+      siwx: () => reply.paymentRequired(pr, preview),
+    });
+    let seenPrompt = '';
+    await runBuy({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('confirm', 'confirm_always'),
+      confirm: async (prompt: string) => {
+        seenPrompt = prompt;
+        return false;
+      },
+    }).catch(() => undefined);
+    expect(seenPrompt).not.toBe('');
+    // eslint-disable-next-line no-control-regex
+    expect(seenPrompt).not.toMatch(/[\x00-\x08\x0a-\x1f\x1b]/);
+  });
+});
+
 describe('runBuy, entitlement re-check is SIWX-first and NEVER pays when entitled', () => {
   it('re-reads free via SIWX and never consults spend policy or pays', async () => {
     const pr = buildPaymentRequired();

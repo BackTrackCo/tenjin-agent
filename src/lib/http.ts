@@ -11,6 +11,8 @@ export interface FetchJsonOptions {
   timeoutMs: number;
   /** Override global fetch (tests inject a stub returning canned Responses). */
   fetchImpl?: typeof fetch;
+  /** Optional request headers (doctor sends the X-Tenjin-Client label). */
+  headers?: Record<string, string>;
 }
 
 /** A successful 2xx whose body parsed as JSON. */
@@ -52,7 +54,10 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
   try {
     let res: Response;
     try {
-      res = await doFetch(url, { signal: controller.signal });
+      res = await doFetch(url, {
+        signal: controller.signal,
+        ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
+      });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
       // from an organic one so the caller can say "timed out" rather than a raw

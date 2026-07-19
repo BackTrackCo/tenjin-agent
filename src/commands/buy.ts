@@ -12,6 +12,8 @@ import {
   findDeliveredByUrl,
   headingOutline,
   saveDelivery,
+  selectSections,
+  splitSections,
   type Entitlement,
   type SavedDelivery,
 } from '../lib/library';
@@ -23,6 +25,7 @@ import {
   type TenjinSigner,
   type WalletProvider,
 } from '../lib/wallet';
+import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -46,6 +49,8 @@ export interface BuyArgs {
   yes?: boolean;
   /** Include the full body in the machine output (default: outline only). */
   printBody?: boolean;
+  /** Include leading sections within this token budget (deterministic split). */
+  sections?: string;
 }
 
 export interface BuyDeps {
@@ -62,6 +67,7 @@ export async function runBuy(
   deps: BuyDeps = {},
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
+  const sectionsBudget = parseSectionsBudget(args.sections);
   const maxPriceAtomic =
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
   const ref = await resolveResourceRef(args.ref, ctx.dataDir);
@@ -74,8 +80,9 @@ export async function runBuy(
     ref.resourceId !== undefined
       ? await findDelivered(ctx.dataDir, ref.resourceId)
       : await findDeliveredByUrl(ctx.dataDir, ref.url);
+  const presentOpts: PresentOpts = { printBody: args.printBody === true, sectionsBudget };
   if (existing !== null) {
-    return deliverExisting(existing, args.printBody === true);
+    return deliverExisting(existing, presentOpts);
   }
 
   const lookupId =
@@ -94,7 +101,7 @@ export async function runBuy(
   const first = await fetchRead(ref.url, fetchOpts);
   if (first.kind === 'entitled') {
     // A free resource (no payment challenge was issued).
-    return await deliverFresh(ctx, ref.url, first.body, 'free', undefined, args.printBody === true);
+    return await deliverFresh(ctx, ref.url, first.body, 'free', undefined, presentOpts);
   }
   if (first.kind === 'already_purchased') {
     // A plain GET does not carry a payment header, so the read route cannot answer
@@ -132,14 +139,7 @@ export async function runBuy(
   });
   const recheck = await fetchRead(ref.url, { ...fetchOpts, siwxHeader });
   if (recheck.kind === 'entitled') {
-    return await deliverFresh(
-      ctx,
-      ref.url,
-      recheck.body,
-      'entitled',
-      undefined,
-      args.printBody === true,
-    );
+    return await deliverFresh(ctx, ref.url, recheck.body, 'entitled', undefined, presentOpts);
   }
   if (recheck.kind !== 'payment_required') {
     throw new CliError(
@@ -218,7 +218,7 @@ export async function runBuy(
         paid.body,
         'purchased',
         { paidAtomic: payment.amountAtomic, settlementTxHash: paid.settlementTxHash },
-        args.printBody === true,
+        presentOpts,
       );
     }
     if (paid.kind === 'already_purchased') {
@@ -231,7 +231,7 @@ export async function runBuy(
         settings.baseUrl,
         signer,
         fetchOpts,
-        args.printBody === true,
+        presentOpts,
         network,
       );
     }
@@ -252,13 +252,30 @@ interface PurchaseInfo {
   settlementTxHash?: string;
 }
 
+interface PresentOpts {
+  printBody: boolean;
+  /** Token budget for the deterministic section selection; null = no sections. */
+  sectionsBudget: number | null;
+}
+
+function parseSectionsBudget(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const budget = Number(raw);
+  if (!Number.isInteger(budget) || budget <= 0) {
+    throw new CliError('USAGE', `Invalid --sections value: ${JSON.stringify(raw)}`, {
+      fix: 'Pass a positive integer token budget, e.g. --sections 800.',
+    });
+  }
+  return budget;
+}
+
 async function deliverFresh(
   ctx: CommandContext,
   url: string,
   body: ReadBody,
   entitlement: Entitlement,
   purchase: PurchaseInfo | undefined,
-  printBody: boolean,
+  presentOpts: PresentOpts,
 ): Promise<CommandResult> {
   const handle = body.creator.handle ?? body.creator.walletAddress ?? 'unknown';
   const saved = await saveDelivery(ctx.dataDir, {
@@ -274,7 +291,7 @@ async function deliverFresh(
       ? { settlementTxHash: purchase.settlementTxHash }
       : {}),
   });
-  return present(saved, body.bodyMd, purchase, printBody);
+  return present(saved, body.bodyMd, purchase, presentOpts);
 }
 
 async function siwxRedeliver(
@@ -283,7 +300,7 @@ async function siwxRedeliver(
   baseUrl: string,
   signer: TenjinSigner,
   fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch; lookupId?: string },
-  printBody: boolean,
+  presentOpts: PresentOpts,
   network: string,
 ): Promise<CommandResult> {
   const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: network });
@@ -293,13 +310,13 @@ async function siwxRedeliver(
       fix: 'Retry; if it persists the entitlement may not have propagated yet.',
     });
   }
-  return await deliverFresh(ctx, url, res.body, 'entitled', undefined, printBody);
+  return await deliverFresh(ctx, url, res.body, 'entitled', undefined, presentOpts);
 }
 
 /** Re-deliver from an existing on-disk receipt (no network, no spend). */
 function deliverExisting(
   delivered: { receipt: import('../lib/library').Receipt; bodyMd: string; bodyPath: string },
-  printBody: boolean,
+  presentOpts: PresentOpts,
 ): CommandResult {
   const r = delivered.receipt;
   return {
@@ -314,25 +331,37 @@ function deliverExisting(
       contentHash: r.contentHash,
       bodyPath: delivered.bodyPath,
       headings: headingOutline(delivered.bodyMd),
-      ...(printBody ? { body: delivered.bodyMd } : {}),
+      ...(presentOpts.printBody ? { body: delivered.bodyMd } : {}),
+      ...sectionsField(delivered.bodyMd, presentOpts),
     },
-    humanLines: [`Already in your library: ${r.title} (${delivered.bodyPath}). No payment made.`],
+    humanLines: [
+      `Already in your library: ${sanitizeForTerminal(r.title)} (${delivered.bodyPath}). No payment made.`,
+    ],
   };
+}
+
+function sectionsField(
+  bodyMd: string,
+  presentOpts: PresentOpts,
+): { sections?: ReturnType<typeof selectSections> } {
+  if (presentOpts.sectionsBudget === null) return {};
+  return { sections: selectSections(splitSections(bodyMd), presentOpts.sectionsBudget) };
 }
 
 function present(
   saved: SavedDelivery,
   bodyMd: string,
   purchase: PurchaseInfo | undefined,
-  printBody: boolean,
+  presentOpts: PresentOpts,
 ): CommandResult {
   const r = saved.receipt;
+  const title = sanitizeForTerminal(r.title);
   const human =
     r.entitlement === 'purchased'
-      ? `Bought ${r.title} for ${toMoney(r.priceAtomic).usd} USD → ${saved.bodyPath}`
+      ? `Bought ${title} for ${toMoney(r.priceAtomic).usd} USD → ${saved.bodyPath}`
       : r.entitlement === 'entitled'
-        ? `Re-read ${r.title} free (already owned) → ${saved.bodyPath}`
-        : `Read ${r.title} free → ${saved.bodyPath}`;
+        ? `Re-read ${title} free (already owned) → ${saved.bodyPath}`
+        : `Read ${title} free → ${saved.bodyPath}`;
   return {
     data: {
       resourceId: r.resourceId,
@@ -346,7 +375,8 @@ function present(
       contentHash: r.contentHash,
       bodyPath: saved.bodyPath,
       headings: headingOutline(bodyMd),
-      ...(printBody ? { body: bodyMd } : {}),
+      ...(presentOpts.printBody ? { body: bodyMd } : {}),
+      ...sectionsField(bodyMd, presentOpts),
     },
     humanLines: [human],
   };
@@ -384,18 +414,29 @@ async function confirmSpend(
   creator: string,
 ): Promise<boolean> {
   if (yes) return true;
-  const prompt = `Pay ${toMoney(amountAtomic.toString()).usd} USD to ${creator || 'this creator'}? [y/N] `;
+  // The creator label is server-controlled: sanitize so escape sequences cannot
+  // repaint the price the human is approving. The price renders last.
+  const prompt = `Pay ${toMoney(amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(creator) || 'this creator'}? [y/N] `;
   if (deps.confirm !== undefined) return deps.confirm(prompt);
   if (!ctx.io.isTTY) return false; // non-interactive without --yes: refuse (exit 3)
+  // The real prompt reads stdin, so stdin must be interactive too: at EOF the
+  // question could never be answered and the process would exit with no answer.
+  if (!process.stdin.isTTY) return false;
   return promptYesNo(prompt);
 }
 
+/** stdin closing mid-prompt (ctrl-D) resolves as decline, never a hang. */
 function promptYesNo(prompt: string): Promise<boolean> {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
-    rl.question(prompt, (answer) => {
+    let settled = false;
+    const settle = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
       rl.close();
-      resolve(/^y(es)?$/i.test(answer.trim()));
-    });
+      resolve(value);
+    };
+    rl.once('close', () => settle(false));
+    rl.question(prompt, (answer) => settle(/^y(es)?$/i.test(answer.trim())));
   });
 }

@@ -213,6 +213,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--max-price <usd>', 'hard price cap in decimal USD (never bypassed by --yes)')
     .option('--yes', 'bypass the interactive confirm only (not the price cap)')
     .option('--print-body', 'include the full body in the machine output')
+    .option(
+      '--sections <tokens>',
+      'include leading sections within a token budget (deterministic, no model calls)',
+    )
     .action(async function (this: Command, resource: string) {
       await runCommand('buy', this, async (ctx) => {
         const o = this.opts();
@@ -223,6 +227,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.maxPrice === 'string' ? { maxPrice: o.maxPrice } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(o.printBody === true ? { printBody: true } : {}),
+            ...(typeof o.sections === 'string' ? { sections: o.sections } : {}),
           },
           ctx,
         );

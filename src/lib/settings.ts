@@ -11,6 +11,8 @@ export interface ResolvedSettings {
   baseUrl: string;
   rpcUrl: string;
   policy: SpendPolicy;
+  /** Lookup-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
+  evalCohort: boolean;
 }
 
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
@@ -19,6 +21,7 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
   return {
     baseUrl: s.baseUrl.value,
     rpcUrl: s.rpcUrl.value,
+    evalCohort: s.evalCohort.value,
     policy: {
       maxAutoSpendAtomic: BigInt(s.maxAutoSpend.value),
       sessionBudgetAtomic: BigInt(s.sessionBudget.value),
