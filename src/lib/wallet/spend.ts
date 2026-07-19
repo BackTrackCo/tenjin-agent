@@ -57,8 +57,14 @@ export interface SpendAuthorizer {
   /** Evaluate a spend against policy + the rolling session ledger, atomically
    *  reserving budget when the spend may proceed. */
   authorize(req: SpendRequest): Promise<SpendAuthorization>;
-  /** Finalize a reservation into committed spend after settlement. */
-  commit(reservationId: string | undefined): Promise<void>;
+  /**
+   * Finalize a reservation into committed spend after settlement. Runs only
+   * post-settlement, so `amountAtomic` is authoritative: if the reservation
+   * TTL-expired mid-confirm (a human can out-wait RESERVATION_TTL_MS at the
+   * prompt), the settled amount is still recorded rather than silently lost
+   * from the rolling budget.
+   */
+  commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
 }
@@ -160,17 +166,22 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         return { ...base, reservationId: reservation.id };
       });
     },
-    async commit(reservationId: string | undefined): Promise<void> {
-      if (reservationId === undefined) return;
+    async commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void> {
+      // No reservation id means no budget ceiling was in force at authorize
+      // time; the settled spend still counts against any FUTURE budget window.
       await withLedger(async (ledger) => {
-        const reservation = ledger.reservations.find((r) => r.id === reservationId);
-        if (reservation === undefined) return; // already released or expired
+        const reservation =
+          reservationId !== undefined
+            ? ledger.reservations.find((r) => r.id === reservationId)
+            : undefined;
+        const settled = reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic;
         await persist({
           ...ledger,
-          committedAtomic: (
-            BigInt(ledger.committedAtomic) + BigInt(reservation.amountAtomic)
-          ).toString(),
-          reservations: ledger.reservations.filter((r) => r.id !== reservationId),
+          committedAtomic: (BigInt(ledger.committedAtomic) + settled).toString(),
+          reservations:
+            reservationId !== undefined
+              ? ledger.reservations.filter((r) => r.id !== reservationId)
+              : ledger.reservations,
         });
       });
     },

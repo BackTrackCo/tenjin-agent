@@ -43,7 +43,7 @@ const CANDIDATES = {
   candidates: [
     {
       resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
-      url: 'https://tenjin.blog/api/read/iris/slug',
+      url: 'https://preview.example/api/read/iris/slug',
       title: 'A resource',
       artifactType: 'document',
       price: '100000',
@@ -85,11 +85,16 @@ describe('runLookup', () => {
     await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     const latest = await latestLookup(dir);
     expect(latest?.lookupId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
-    expect(latest?.candidates[0]?.url).toBe('https://tenjin.blog/api/read/iris/slug');
+    expect(latest?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
   });
 
   it('returns the MISS verbatim and records it', async () => {
-    const miss = { schemaVersion: 1, lookupId: 'm', decision: 'MISS', calibration: 'lexical-v1' };
+    const miss = {
+      schemaVersion: 1,
+      lookupId: '0197aaaa-bbbb-cccc-dddd-000000000009',
+      decision: 'MISS',
+      calibration: 'lexical-v1',
+    };
     const { fetch } = stub(miss);
     const res = await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect((res.data as { decision: string }).decision).toBe('MISS');
@@ -132,5 +137,23 @@ describe('evalCohort threading', () => {
     const { fetch, headers } = headerStub();
     await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(headers[0]?.['x-tenjin-eval-cohort']).toBe('1');
+  });
+});
+
+describe('candidate URL origin ingest boundary', () => {
+  it('refuses a response whose candidate URL points off the configured base URL', async () => {
+    const offOrigin = {
+      ...CANDIDATES,
+      candidates: [
+        {
+          ...(CANDIDATES.candidates[0] as object),
+          url: 'https://evil.example/api/read/iris/slug',
+        },
+      ],
+    };
+    const { fetch } = stub(offOrigin);
+    await expect(
+      runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
   });
 });

@@ -3,6 +3,7 @@ import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildLookupRequest, postLookup, type LookupInput } from '../lib/agent-api';
 import { recordLookup } from '../lib/lookup-store';
+import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -50,6 +51,20 @@ export async function runLookup(
   });
 
   const candidates = response.candidates ?? [];
+  // Ingest trust boundary: a candidate url that points off the configured origin
+  // would later route a wallet-signed SIWX header and payment to that host via
+  // `buy <resourceId>`. Refuse the whole response as a contract violation.
+  for (const c of candidates) {
+    try {
+      assertOnBaseOrigin(c.url, settings.baseUrl, 'lookup candidate URL');
+    } catch (err) {
+      throw new CliError(
+        'CONTRACT_MISMATCH',
+        `Lookup candidate ${c.resourceId} points off the configured base URL.`,
+        { cause: err },
+      );
+    }
+  }
   await recordLookup(ctx.dataDir, {
     lookupId: response.lookupId,
     at: new Date().toISOString(),

@@ -53,7 +53,7 @@ describe('createLocalSpendAuthorizer', () => {
       policy: policy({ sessionBudgetAtomic: 500_000n }),
     });
     const first = await authA.authorize({ amountAtomic: 300_000n, creator: 'iris' });
-    await authA.commit(first.reservationId);
+    await authA.commit(first.reservationId, 300_000n);
 
     // A brand-new authorizer instance (a fresh CLI process) must read the
     // accumulated spend from disk, not any in-memory closure.
@@ -72,7 +72,7 @@ describe('createLocalSpendAuthorizer', () => {
       policy: policy({ sessionBudgetAtomic: 500_000n }),
     });
     const first = await auth.authorize({ amountAtomic: 450_000n, creator: 'iris' });
-    await auth.commit(first.reservationId);
+    await auth.commit(first.reservationId, 450_000n);
     const second = await auth.authorize({ amountAtomic: 100_000n, creator: 'iris' });
     expect(second.decision).toBe('deny');
     expect(second.reason).toBe('session_budget_exceeded');
@@ -112,7 +112,7 @@ describe('createLocalSpendAuthorizer', () => {
       now: () => now,
     });
     const a = await auth.authorize({ amountAtomic: 400_000n, creator: 'iris' });
-    await auth.commit(a.reservationId);
+    await auth.commit(a.reservationId, 400_000n);
     now += 2000; // past the window
     const b = await auth.authorize({ amountAtomic: 400_000n, creator: 'iris' });
     expect(b.sessionSpentAtomic).toBe(0n);
@@ -133,16 +133,46 @@ describe('createLocalSpendAuthorizer', () => {
     expect(b.decision).not.toBe('deny');
   });
 
-  it('commit/release of an unknown or undefined id are no-ops (idempotent)', async () => {
+  it('release of an unknown or undefined id is a no-op (idempotent)', async () => {
     const auth = createLocalSpendAuthorizer({
       dir,
       policy: policy({ sessionBudgetAtomic: 500_000n }),
     });
-    await auth.commit('nope');
     await auth.release('nope');
-    await auth.commit(undefined);
     await auth.release(undefined);
     const authz = await auth.authorize({ amountAtomic: 1n, creator: 'iris' });
     expect(authz.sessionSpentAtomic).toBe(0n);
+    expect(authz.decision).not.toBe('deny');
+  });
+
+  // Minor 5 from the B2 review: a human can out-wait the reservation TTL at the
+  // confirm prompt; the settled amount must still land in the committed ledger.
+  it('commit records the settled amount even when the reservation TTL-expired', async () => {
+    let now = 1_000_000_000_000;
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 500_000n }),
+      now: () => now,
+    });
+    const a = await auth.authorize({ amountAtomic: 400_000n, creator: 'iris' });
+    now += 11 * 60_000; // reservation evicted by freshen()
+    await auth.commit(a.reservationId, 400_000n);
+    const b = await auth.authorize({ amountAtomic: 200_000n, creator: 'iris' });
+    expect(b.sessionSpentAtomic).toBe(400_000n);
+    expect(b.decision).toBe('deny');
+  });
+
+  it('commit with no reservation id (budget was off) still counts toward a future budget', async () => {
+    const off = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 0n }) });
+    const authz = await off.authorize({ amountAtomic: 300_000n, creator: 'iris' });
+    expect(authz.reservationId).toBeUndefined();
+    await off.commit(undefined, 300_000n);
+    const on = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ sessionBudgetAtomic: 500_000n }),
+    });
+    const next = await on.authorize({ amountAtomic: 300_000n, creator: 'iris' });
+    expect(next.sessionSpentAtomic).toBe(300_000n);
+    expect(next.decision).toBe('deny');
   });
 });

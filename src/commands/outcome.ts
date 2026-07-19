@@ -58,7 +58,7 @@ async function resolveLookupId(args: OutcomeArgs, ctx: CommandContext): Promise<
   if (args.last === true) {
     const latest = await latestLookup(ctx.dataDir);
     if (latest === null) {
-      throw new CliError('USAGE', 'No local lookup to target with --last.', {
+      throw new CliError('LOOKUP_NOT_FOUND', 'No local lookup to target with --last.', {
         fix: 'Run `tenjin lookup` first, or pass --lookup-id <id>.',
       });
     }

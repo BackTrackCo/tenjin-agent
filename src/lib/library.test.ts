@@ -7,14 +7,13 @@ import {
   contentHash,
   findDelivered,
   findDeliveredByUrl,
-  headingOutline,
   isSafeIdentity,
   parseReadPath,
   receiptPath,
   resourceDir,
   saveDelivery,
 } from './library';
-import { estimateTokens, selectSections, splitSections } from './library';
+import { estimateTokens, headingOutline, selectSections, splitSections } from './markdown';
 import { CliError } from './errors';
 
 let dir: string;

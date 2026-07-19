@@ -1,7 +1,8 @@
 import { resolveResourceRef } from '../lib/resource-ref';
+import { resolveContextSettings } from '../lib/settings';
 import { fetchRead } from '../lib/read-client';
 import { toMoney } from '../lib/money';
-import { headingOutline } from '../lib/library';
+import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -25,7 +26,8 @@ export async function runInspect(
   ctx: CommandContext,
   deps: InspectDeps = {},
 ): Promise<CommandResult> {
-  const ref = await resolveResourceRef(args.ref, ctx.dataDir);
+  const settings = await resolveContextSettings(ctx);
+  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl);
 
   const result = await fetchRead(ref.url, {
     timeoutMs: ctx.flags.timeout,

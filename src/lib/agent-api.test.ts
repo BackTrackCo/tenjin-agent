@@ -226,7 +226,12 @@ describe('postLookup', () => {
 
   it('parses a MISS with no candidates', async () => {
     const { fetch } = stubFetch(
-      json(200, { schemaVersion: 1, lookupId: 'x', decision: 'MISS', calibration: 'lexical-v1' }),
+      json(200, {
+        schemaVersion: 1,
+        lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        decision: 'MISS',
+        calibration: 'lexical-v1',
+      }),
     );
     const res = await postLookup(buildLookupRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',

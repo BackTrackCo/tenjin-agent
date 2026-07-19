@@ -191,7 +191,7 @@ describe('runBuy, paid path', () => {
     expect(authorizer.authorize).toHaveBeenCalledOnce();
     // The FRESH 402's amount reaches the policy, and settlement commits the reservation.
     expect(vi.mocked(authorizer.authorize).mock.calls[0]?.[0]?.amountAtomic).toBe(100_000n);
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION);
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100_000n);
   });
 
   it('attaches X-Tenjin-Client on every request and X-Tenjin-Lookup-Id after a lookup', async () => {
@@ -215,7 +215,13 @@ describe('runBuy, paid path', () => {
     });
     for (const call of calls) {
       expect(call.headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
-      expect(call.headers['x-tenjin-lookup-id']).toBe('0197aaaa-bbbb-cccc-dddd-abcabcabcabc');
+    }
+    // The attribution header rides ONLY the paid re-request (spec 09 §3), so a
+    // lookup that never converts is not over-counted by probe/SIWX reads.
+    const paidCall = calls.find((c) => c.phase === 'payment');
+    expect(paidCall?.headers['x-tenjin-lookup-id']).toBe('0197aaaa-bbbb-cccc-dddd-abcabcabcabc');
+    for (const call of calls.filter((c) => c.phase !== 'payment')) {
+      expect(call.headers['x-tenjin-lookup-id']).toBeUndefined();
     }
   });
 });

@@ -22,8 +22,7 @@ const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
 // id/slug become filesystem path segments (the local library), so they are
 // validated as a uuid + the server's slug charset HERE, at the trust boundary, so
 // a hostile id='../../evil' or slug fails as CONTRACT_MISMATCH before delivery.
-const RESOURCE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+import { SLUG_RE, UUID_RE as RESOURCE_ID_RE } from './ids';
 
 /** The full essay body a 200 returns (loose: require what the CLI reads, keep the rest). */
 const readBodySchema = z
@@ -55,6 +54,28 @@ const previewSchema = z
   .passthrough();
 
 export type Preview = z.infer<typeof previewSchema>;
+
+// The decoded PAYMENT-REQUIRED is money-path input: validate the fields the pay
+// path consumes (amount as an atomic integer, CAIP-2 network, 0x asset/payTo)
+// at THIS boundary instead of trusting raw base64 JSON. Loose otherwise so new
+// server fields never break an older CLI.
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const paymentRequiredSchema = z
+  .object({
+    x402Version: z.literal(2),
+    accepts: z.array(
+      z
+        .object({
+          scheme: z.string(),
+          network: z.string().regex(/^eip155:\d+$/, 'network must be CAIP-2 eip155'),
+          asset: z.string().regex(ADDRESS_RE, 'asset must be a 0x address'),
+          amount: z.string().regex(/^\d{1,39}$/, 'amount must be an atomic integer string'),
+          payTo: z.string().regex(ADDRESS_RE, 'payTo must be a 0x address'),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
 
 export type ReadResult =
   | { kind: 'entitled'; body: ReadBody; settlementTxHash?: string }
@@ -122,15 +143,27 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
         fix: 'The server may be misconfigured; try another resource or update tenjin-cli.',
       });
     }
-    let paymentRequired: PaymentRequired;
+    let decoded: PaymentRequired;
     try {
-      paymentRequired = decodePaymentRequiredHeader(encoded);
+      decoded = decodePaymentRequiredHeader(encoded);
     } catch (err) {
       throw new CliError('CONTRACT_MISMATCH', 'Could not decode the PAYMENT-REQUIRED header', {
         fix: 'Update tenjin-cli; the x402 header format may have changed.',
         cause: err,
       });
     }
+    const validated = paymentRequiredSchema.safeParse(decoded);
+    if (!validated.success) {
+      throw new CliError(
+        'CONTRACT_MISMATCH',
+        'The 402 challenge is not a valid x402 v2 payment declaration.',
+        {
+          fix: 'Update tenjin-cli, or check --base-url points at a Tenjin deployment.',
+          details: validated.error.issues,
+        },
+      );
+    }
+    const paymentRequired = decoded;
     const preview = previewSchema.safeParse(res.json);
     return {
       kind: 'payment_required',

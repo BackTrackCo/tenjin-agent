@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { httpRequest, type HttpResult } from './http';
 import { CLIENT_HEADER } from './client-meta';
+import { ATOMIC_RE, UUID_RE } from './ids';
 
 /**
  * The lookup + outcome HTTP contract (A2, tenjin#370). Request building and
@@ -13,8 +14,7 @@ import { CLIENT_HEADER } from './client-meta';
  * `X-Tenjin-Client`, which attributes a later purchase back to the lookup flow.
  */
 
-const FRESH_WITHIN_RE = /^P(\d{1,4})[DWMY]$/;
-const ATOMIC_RE = /^\d{1,39}$/;
+const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
 /** Client-side lookup request (mirrors lib/lookup.ts lookupRequestSchema bounds
@@ -110,11 +110,11 @@ export function buildLookupRequest(input: LookupInput): LookupRequestBody {
 // contract fields this CLI reads. `decision` is uppercase on the wire.
 export const lookupCandidateSchema = z
   .object({
-    resourceId: z.string(),
+    resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
     url: z.string(),
     title: z.string(),
     artifactType: z.string(),
-    price: z.string(),
+    price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
     asOf: z.string().nullable(),
     validUntil: z.string().nullable(),
     temporalMode: z.string(),
@@ -133,7 +133,7 @@ export type LookupCandidate = z.infer<typeof lookupCandidateSchema>;
 
 export const lookupResponseSchema = z.object({
   schemaVersion: z.literal(1),
-  lookupId: z.string(),
+  lookupId: z.string().regex(UUID_RE, 'lookupId must be a uuid'),
   decision: z.enum(['CANDIDATES', 'MISS']),
   calibration: z.string(),
   candidates: z.array(lookupCandidateSchema).optional(),
@@ -159,6 +159,24 @@ function apiFailure(url: string, result: Exclude<HttpResult, { ok: true }>): Cli
     result.kind === 'network' || result.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
   return new CliError(code, `${url}: ${result.message}`, {
     fix: 'Check --base-url and your network, then retry.',
+  });
+}
+
+/** 429 with Retry-After: a recoverable pause, not an outage; agents branch on it. */
+export function rateLimitError(
+  url: string,
+  header: (name: string) => string | undefined,
+): CliError {
+  const retryAfter = header('retry-after');
+  const seconds = retryAfter !== undefined ? Number(retryAfter) : undefined;
+  return new CliError('RATE_LIMITED', `${url}: rate limited by the server.`, {
+    fix:
+      seconds !== undefined && Number.isFinite(seconds)
+        ? `Retry after ${seconds}s.`
+        : 'Back off and retry shortly.',
+    details: {
+      ...(seconds !== undefined && Number.isFinite(seconds) ? { retryAfterSeconds: seconds } : {}),
+    },
   });
 }
 
@@ -192,6 +210,7 @@ export async function postLookup(
     fetchImpl: opts.fetchImpl,
   });
   if (!res.ok) throw apiFailure(url, res);
+  if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   if (res.status !== 200) {
     throw new CliError(
       'API_UNREACHABLE',
@@ -274,7 +293,6 @@ export type OutcomeStatus = (typeof OUTCOME_STATUSES)[number];
 export const OUTCOME_STATUS_VALUES: readonly string[] = OUTCOME_STATUSES;
 
 const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface OutcomeInput {
   status: string;
@@ -337,6 +355,7 @@ export async function postOutcomes(
     fetchImpl: opts.fetchImpl,
   });
   if (!res.ok) throw apiFailure(url, res);
+  if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   // 202 is the only success; the body is a uniform { accepted } regardless of
   // whether the lookupId existed (no existence oracle, by design).
   if (res.status !== 202) {

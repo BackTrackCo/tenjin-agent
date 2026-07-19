@@ -60,11 +60,11 @@ describe('runOutcome', () => {
     expect(urls[0]).toContain(LOOKUP);
   });
 
-  it('--last with no local lookup is a usage error', async () => {
+  it('--last with no local lookup is a LOOKUP_NOT_FOUND error', async () => {
     const { fetch } = stub();
     await expect(
       runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+    ).rejects.toMatchObject({ code: 'LOOKUP_NOT_FOUND', exitCode: 1 });
   });
 
   it('rejects passing neither --lookup-id nor --last', async () => {

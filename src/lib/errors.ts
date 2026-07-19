@@ -44,6 +44,7 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   PAYMENT_FAILED: 4,
   RESOURCE_NOT_FOUND: 1,
   LOOKUP_NOT_FOUND: 1,
+  RATE_LIMITED: 1,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {
