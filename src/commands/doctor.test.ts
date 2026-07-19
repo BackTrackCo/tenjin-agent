@@ -281,7 +281,10 @@ describe('runDoctor — injected remote provider', () => {
       authorizeSpend: async () => {
         throw new Error('doctor must never authorize a spend');
       },
-      recordSpend: async () => {
+      reserveSpend: async () => {
+        throw new Error('doctor must never reserve a spend');
+      },
+      releaseSpend: async () => {
         throw new Error('doctor must never record a spend');
       },
     };

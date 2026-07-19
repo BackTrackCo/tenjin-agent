@@ -91,6 +91,11 @@ export interface SpendDecision {
   reasons: string[];
 }
 
+/** Handle for a ledger entry written by reserveSpend, releasable if no money moves. */
+export interface SpendReservation {
+  id: string;
+}
+
 export interface WalletProvider {
   id: string;
   describe(): Promise<WalletDescription>;
@@ -99,6 +104,15 @@ export interface WalletProvider {
   diagnostics(): Promise<WalletDiagnostics>;
   /** Evaluate a proposed spend against policy. Never signs, never prompts. */
   authorizeSpend(req: SpendRequest): Promise<SpendDecision>;
-  /** Record a settled spend into the session ledger (after settlement succeeds). */
-  recordSpend(req: { amountAtomic: string; resourceId?: string }): Promise<void>;
+  /**
+   * Atomically re-check the session budget and append a ledger entry, BEFORE any
+   * payment is signed. Concurrent buys serialize on the ledger lock here, so the
+   * budget cannot be overshot by parallel invocations racing an unlocked read.
+   * Throws REFUSED when the budget would be exceeded. The entry stays if money
+   * moves (or might have); releaseSpend undoes it when payment definitely
+   * did not settle.
+   */
+  reserveSpend(req: { amountAtomic: string; resourceId?: string }): Promise<SpendReservation>;
+  /** Remove a reservation whose payment is KNOWN not to have settled. */
+  releaseSpend(reservation: SpendReservation): Promise<void>;
 }

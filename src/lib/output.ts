@@ -49,6 +49,27 @@ export function emitSuccess(
 }
 
 /**
+ * Strip C0/C1 control characters and ANSI escape sequences from a string headed
+ * for a terminal. Commands apply this to every SERVER-sourced string (titles,
+ * handles) they put into human lines or the buy confirm prompt; without it a
+ * malicious deployment could use cursor-movement escapes to overwrite the very
+ * price a human is being asked to confirm. It is not applied to whole human
+ * lines here because trusted callers (doctor) paint their own ANSI colors. JSON
+ * stdout is untouched (JSON.stringify escapes control characters itself).
+ */
+export function sanitizeForTerminal(text: string): string {
+  return (
+    text
+      // CSI/OSC/charset escape sequences first, then any stray ESC and the rest
+      // of C0 (except \t) plus DEL and the C1 range.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, '')
+  );
+}
+
+/**
  * Emit exactly one pretty-printed failure envelope to stdout and (on a TTY, with
  * --json off) a red error line plus a `fix` line to stderr. Accepts a CliError or
  * any thrown value; anything that is not a CliError normalizes to INTERNAL.
@@ -69,8 +90,12 @@ export function emitFailure(
   };
   writeJson(io.stdout, { schemaVersion: SCHEMA_VERSION, command, ok: false, error });
   if (shouldRenderHuman(io, opts)) {
-    const lines = [paint(io, 'red', `error: ${cliErr.message}`)];
-    if (cliErr.fix !== undefined) lines.push(paint(io, 'dim', `fix: ${cliErr.fix}`));
+    // Error messages can embed server-sourced text (api error passthrough) and
+    // never carry intentional ANSI, so sanitize before painting.
+    const lines = [paint(io, 'red', `error: ${sanitizeForTerminal(cliErr.message)}`)];
+    if (cliErr.fix !== undefined) {
+      lines.push(paint(io, 'dim', `fix: ${sanitizeForTerminal(cliErr.fix)}`));
+    }
     writeLines(io.stderr, lines);
   }
   return cliErr;

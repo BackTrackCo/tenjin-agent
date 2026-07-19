@@ -1,11 +1,12 @@
 import { CliError } from '../lib/errors';
-import { fetchResponse, fetchFailureToCliError } from '../lib/http';
+import { fetchResponse, fetchFailureToCliError, trimSlash } from '../lib/http';
 import type { FetchResponseOptions } from '../lib/http';
 import { LookupResponseSchema, apiErrorFrom, baseHeaders, parseBody } from '../lib/api';
 import type { LookupCandidate, LookupResponse } from '../lib/api';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { atomicToUsd, parseUsdToAtomic } from '../lib/money';
 import { recordLookup } from '../lib/state';
+import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -32,7 +33,7 @@ export interface LookupDeps {
   fetchImpl?: typeof fetch;
 }
 
-const FRESH_WITHIN_RE = /^P\d{1,4}[DWMY]$/;
+const FRESH_WITHIN_RE = /^P(\d{1,4})[DWMY]$/;
 
 /** Server-side card bounds, re-applied defensively so a misbehaving server cannot blow up an agent transcript. */
 const CAND_BOUNDS = {
@@ -65,12 +66,14 @@ export async function runLookup(
   }
   const body: Record<string, unknown> = { schemaVersion: 1, question };
   if (args.freshWithin !== undefined) {
-    if (!FRESH_WITHIN_RE.test(args.freshWithin) || args.freshWithin === 'P0D') {
+    // The server rejects ANY zero-valued duration (P0W, P00D, ...), not just P0D.
+    const digits = args.freshWithin.match(FRESH_WITHIN_RE)?.[1];
+    if (digits === undefined || Number(digits) === 0) {
       throw new CliError(
         'USAGE',
         `Invalid --fresh-within value: ${JSON.stringify(args.freshWithin)}`,
         {
-          fix: 'Use an ISO 8601 duration like P30D, P2W, P6M, or P1Y.',
+          fix: 'Use a nonzero ISO 8601 duration like P30D, P2W, P6M, or P1Y.',
         },
       );
     }
@@ -94,7 +97,7 @@ export async function runLookup(
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
   });
-  const url = `${settings.baseUrl.value.replace(/\/+$/, '')}/api/agent/lookup`;
+  const url = `${trimSlash(settings.baseUrl.value)}/api/agent/lookup`;
   const opts: FetchResponseOptions = {
     timeoutMs: ctx.flags.timeout,
     method: 'POST',
@@ -136,18 +139,19 @@ export async function runLookup(
           `${(parsed.candidates ?? []).length} candidate(s) (lookup ${parsed.lookupId}):`,
           ...(parsed.candidates ?? []).map(
             (c, i) =>
-              `  ${i + 1}. ${c.title} (${c.creator.handle}) $${atomicToUsd(c.price)}  ${c.url}`,
+              `  ${i + 1}. ${sanitizeForTerminal(c.title)} (${sanitizeForTerminal(c.creator.handle)}) $${atomicToUsd(c.price)}  ${sanitizeForTerminal(c.url)}`,
           ),
         ];
   return { data: parsed, humanLines };
 }
 
+/** Mirror the server's strictObject bounds so a bad filter fails as a local USAGE error, not a remote 400. */
 function parseAppliesTo(pairs: string[]): Record<string, string[]> | null {
   if (pairs.length === 0) return null;
   const out: Record<string, string[]> = {};
   for (const pair of pairs) {
     const eq = pair.indexOf('=');
-    if (eq <= 0 || eq === pair.length - 1) {
+    if (eq <= 0) {
       throw new CliError('USAGE', `Invalid --applies-to entry: ${JSON.stringify(pair)}`, {
         fix: 'Use key=value, e.g. --applies-to products=Vercel. Repeat the flag for more.',
       });
@@ -159,7 +163,23 @@ function parseAppliesTo(pairs: string[]): Record<string, string[]> | null {
         fix: 'Keys are lowercase snake_case, e.g. products, versions, platforms, networks.',
       });
     }
-    (out[key] ??= []).push(value);
+    if (value.length === 0 || value.length > 120) {
+      throw new CliError(
+        'USAGE',
+        `Invalid --applies-to value for ${key}: must be 1 to 120 characters.`,
+        {
+          fix: 'Use key=value with a nonempty value, e.g. --applies-to products=Vercel.',
+        },
+      );
+    }
+    const values = (out[key] ??= []);
+    values.push(value);
+    if (values.length > 20) {
+      throw new CliError('USAGE', `Too many --applies-to values for ${key} (max 20).`);
+    }
+  }
+  if (Object.keys(out).length > 8) {
+    throw new CliError('USAGE', 'Too many --applies-to keys (max 8).');
   }
   return out;
 }

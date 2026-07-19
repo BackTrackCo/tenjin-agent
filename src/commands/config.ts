@@ -214,13 +214,23 @@ async function persist(
 
 function formatLine(key: string, entry: RenderedSetting): string {
   const label = key.padEnd(KEY_WIDTH);
-  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}`;
+  return `  ${label}  ${displayValue(key, entry)}  ${styleText('dim', `(${entry.source})`)}`;
 }
 
-function displayValue(entry: RenderedSetting): string {
+function displayValue(key: string, entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
+  // sessionBudget's zero is a sentinel (no cap), the opposite of maxAutoSpend's
+  // zero (strictest); say so instead of printing a misleading "0 USD" budget.
+  if (
+    key === 'sessionBudget' &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.atomic === '0'
+  ) {
+    return 'no cap (0 disables the session budget)';
+  }
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   if (entry.threshold !== undefined) return `above ${entry.threshold.usd} USD`; // confirm
   return value; // 'always', baseUrl, rpcUrl

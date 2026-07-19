@@ -116,6 +116,12 @@ configured spend policy in the wallet-provider layer, and writes the body to
 settlement hash, and a heading outline, not the body (`--print-body` or
 `--sections <tokens>` opt in). BYO key is `TENJIN_WALLET_KEY` env only.
 
+Spend policy semantics: `maxAutoSpend` caps what a buy may spend without any
+confirmation (default `0` = strictest: everything needs approval), while
+`sessionBudget` is a rolling 24h cumulative cap that even `--yes` cannot bypass.
+Its `0` default is a sentinel meaning **no session cap**, not a zero budget; to
+freeze all spending leave `maxAutoSpend` at 0 and simply do not pass `--yes`.
+
 Next: `publish --draft`, an `install` command that auto-wires Claude Code and
 Codex, a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
 stdio server over the same core).

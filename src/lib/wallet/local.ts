@@ -12,6 +12,8 @@ import {
   type WalletRecord,
 } from './store';
 import { resolvePassphrase, type PassphraseDeps } from './passphrase';
+import { loadConfig } from '../config';
+import { evaluateSpend, releaseSpend, reserveSpend, spentInWindow } from './policy';
 import type {
   TenjinSigner,
   WalletDescription,
@@ -74,14 +76,15 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
       return localWalletDiagnostics(deps);
     },
     async authorizeSpend(req) {
-      const { loadConfig } = await import('../config');
-      const { evaluateSpend, spentInWindow } = await import('./policy');
       const config = await loadConfig(deps.dir);
       return evaluateSpend(config, req, await spentInWindow(deps.dir));
     },
-    async recordSpend(req) {
-      const { appendSpend } = await import('./policy');
-      await appendSpend(deps.dir, req);
+    async reserveSpend(req) {
+      const config = await loadConfig(deps.dir);
+      return reserveSpend(deps.dir, req, config.sessionBudget);
+    },
+    releaseSpend(reservation) {
+      return releaseSpend(deps.dir, reservation.id);
     },
   };
 }

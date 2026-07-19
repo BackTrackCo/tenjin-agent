@@ -17,6 +17,8 @@ import {
 } from './state';
 import type { StoredLookup, LibraryMeta } from './state';
 
+const RES_ID = '11111111-2222-4333-8444-555555555555';
+
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-state-'));
@@ -32,7 +34,7 @@ function fakeLookup(overrides: Partial<StoredLookup> = {}): StoredLookup {
     at: overrides.at ?? new Date().toISOString(),
     candidates: overrides.candidates ?? [
       {
-        resourceId: 'res-1',
+        resourceId: RES_ID,
         url: 'https://tenjin.blog/api/read/alice/piece-one',
         title: 'Piece One',
         price: '0.05',
@@ -45,7 +47,7 @@ function fakeLibraryMeta(
   overrides: Partial<Omit<LibraryMeta, 'contentHash' | 'savedAt'>> = {},
 ): Omit<LibraryMeta, 'contentHash' | 'savedAt'> {
   return {
-    resourceId: overrides.resourceId ?? 'res-1',
+    resourceId: overrides.resourceId ?? RES_ID,
     slug: overrides.slug ?? 'piece-one',
     title: overrides.title ?? 'Piece One',
     url: overrides.url ?? 'https://tenjin.blog/api/read/alice/piece-one',
@@ -122,15 +124,15 @@ describe('lastLookup', () => {
 describe('findCandidate', () => {
   it('matches by resourceId', async () => {
     await recordLookup(dir, fakeLookup());
-    const hit = await findCandidate(dir, 'res-1');
-    expect(hit?.candidate.resourceId).toBe('res-1');
+    const hit = await findCandidate(dir, RES_ID);
+    expect(hit?.candidate.resourceId).toBe(RES_ID);
     expect(hit?.lookup.lookupId).toBe('lookup-1');
   });
 
   it('matches by url', async () => {
     await recordLookup(dir, fakeLookup());
     const hit = await findCandidate(dir, 'https://tenjin.blog/api/read/alice/piece-one');
-    expect(hit?.candidate.resourceId).toBe('res-1');
+    expect(hit?.candidate.resourceId).toBe(RES_ID);
   });
 
   it('returns null when nothing matches', async () => {
@@ -145,7 +147,7 @@ describe('findCandidate', () => {
         lookupId: 'older',
         candidates: [
           {
-            resourceId: 'res-1',
+            resourceId: RES_ID,
             url: 'https://tenjin.blog/api/read/alice/old-slug',
             title: 'Old',
             price: '0.05',
@@ -159,7 +161,7 @@ describe('findCandidate', () => {
         lookupId: 'newer',
         candidates: [
           {
-            resourceId: 'res-1',
+            resourceId: RES_ID,
             url: 'https://tenjin.blog/api/read/alice/new-slug',
             title: 'New',
             price: '0.05',
@@ -167,7 +169,7 @@ describe('findCandidate', () => {
         ],
       }),
     );
-    const hit = await findCandidate(dir, 'res-1');
+    const hit = await findCandidate(dir, RES_ID);
     expect(hit?.lookup.lookupId).toBe('newer');
     expect(hit?.candidate.url).toBe('https://tenjin.blog/api/read/alice/new-slug');
   });
@@ -177,11 +179,11 @@ describe('saveLibraryItem / readLibraryMeta / findLibraryByResource', () => {
   it('writes the body and a meta sidecar, and returns the completed meta', async () => {
     const body = '# Piece One\n\nBody text.\n';
     const meta = await saveLibraryItem(dir, fakeLibraryMeta(), body);
-    expect(meta.resourceId).toBe('res-1');
+    expect(meta.resourceId).toBe(RES_ID);
     expect(meta.slug).toBe('piece-one');
     expect(typeof meta.savedAt).toBe('string');
 
-    const paths = libraryItemPaths(dir, 'res-1', 'piece-one');
+    const paths = libraryItemPaths(dir, RES_ID, 'piece-one');
     expect(await readFile(paths.md, 'utf8')).toBe(body);
     expect(JSON.parse(await readFile(paths.meta, 'utf8'))).toEqual(meta);
   });
@@ -196,27 +198,51 @@ describe('saveLibraryItem / readLibraryMeta / findLibraryByResource', () => {
 
   it('readLibraryMeta round-trips what saveLibraryItem wrote', async () => {
     const saved = await saveLibraryItem(dir, fakeLibraryMeta(), 'body');
-    const read = await readLibraryMeta(dir, 'res-1', 'piece-one');
+    const read = await readLibraryMeta(dir, RES_ID, 'piece-one');
     expect(read).toEqual(saved);
   });
 
   it('readLibraryMeta returns null when absent', async () => {
-    expect(await readLibraryMeta(dir, 'res-1', 'piece-one')).toBeNull();
+    expect(await readLibraryMeta(dir, RES_ID, 'piece-one')).toBeNull();
   });
 
   it('readLibraryMeta returns null on corrupt meta JSON', async () => {
     await saveLibraryItem(dir, fakeLibraryMeta(), 'body');
-    await writeFile(libraryItemPaths(dir, 'res-1', 'piece-one').meta, '{ not json');
-    expect(await readLibraryMeta(dir, 'res-1', 'piece-one')).toBeNull();
+    await writeFile(libraryItemPaths(dir, RES_ID, 'piece-one').meta, '{ not json');
+    expect(await readLibraryMeta(dir, RES_ID, 'piece-one')).toBeNull();
   });
 
   it('findLibraryByResource finds the meta for a resource without knowing the slug', async () => {
     const saved = await saveLibraryItem(dir, fakeLibraryMeta(), 'body');
-    const found = await findLibraryByResource(dir, 'res-1');
+    const found = await findLibraryByResource(dir, RES_ID);
     expect(found).toEqual(saved);
   });
 
   it('findLibraryByResource returns null when the resource directory is absent', async () => {
     expect(await findLibraryByResource(dir, 'res-does-not-exist')).toBeNull();
+  });
+});
+
+describe('libraryItemPaths server-input validation', () => {
+  const base = '/tmp/tenjin-state-validation';
+
+  it('rejects a non-uuid resource id (path traversal guard)', () => {
+    expect(() => libraryItemPaths(base, '../../../etc', 'slug')).toThrowError(
+      expect.objectContaining({ code: 'CONTRACT_MISMATCH' }),
+    );
+  });
+
+  it.each(['../escape', 'a/b', '.hidden', 'nul\u0000byte', ''])(
+    'rejects unsafe slug %j',
+    (slug) => {
+      expect(() => libraryItemPaths(base, RES_ID, slug)).toThrowError(
+        expect.objectContaining({ code: 'CONTRACT_MISMATCH' }),
+      );
+    },
+  );
+
+  it('accepts a normal kebab slug', () => {
+    const paths = libraryItemPaths(base, RES_ID, 'a-normal-slug.v2');
+    expect(paths.md.endsWith('/a-normal-slug.v2.md')).toBe(true);
   });
 });

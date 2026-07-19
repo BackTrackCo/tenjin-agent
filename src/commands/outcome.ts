@@ -1,8 +1,9 @@
 import { CliError } from '../lib/errors';
-import { fetchResponse, fetchFailureToCliError } from '../lib/http';
+import { fetchResponse, fetchFailureToCliError, trimSlash } from '../lib/http';
 import { OutcomeAcceptedSchema, apiErrorFrom, baseHeaders, parseBody } from '../lib/api';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { findLibraryByResource, lastLookup } from '../lib/state';
+import { UUID_RE } from '../lib/resource-ref';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -33,7 +34,6 @@ export const OUTCOME_STATUSES = [
   'purchase_declined',
 ] as const;
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
 export async function runOutcome(
@@ -101,7 +101,7 @@ export async function runOutcome(
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
   });
-  const url = `${settings.baseUrl.value.replace(/\/+$/, '')}/api/agent/lookups/${lookupId}/outcomes`;
+  const url = `${trimSlash(settings.baseUrl.value)}/api/agent/lookups/${lookupId}/outcomes`;
   const res = await fetchResponse(url, {
     timeoutMs: ctx.flags.timeout,
     method: 'POST',

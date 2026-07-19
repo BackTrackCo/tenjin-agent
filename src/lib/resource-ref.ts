@@ -1,4 +1,5 @@
 import { CliError } from './errors';
+import { trimSlash } from './http';
 import { findCandidate, findLibraryByResource } from './state';
 
 /**
@@ -13,11 +14,11 @@ export interface ResourceRef {
   slug: string;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HANDLE_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
 
 export function readApiUrl(baseUrl: string, handle: string, slug: string): string {
-  return `${baseUrl.replace(/\/+$/, '')}/api/read/${handle}/${slug}`;
+  return `${trimSlash(baseUrl)}/api/read/${handle}/${slug}`;
 }
 
 /**

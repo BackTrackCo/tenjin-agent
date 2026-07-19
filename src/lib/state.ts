@@ -1,9 +1,10 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, readdir, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic } from './atomic-json';
 import { withFileLock } from './lock';
+import { CliError } from './errors';
 
 /**
  * Local lookup history: what powers `outcome --last` and the automatic
@@ -110,11 +111,34 @@ export function libraryDir(dir: string): string {
   return join(dir, 'library');
 }
 
+/**
+ * Both path segments come from a SERVER RESPONSE BODY, and writeFileAtomic
+ * mkdir-recurses whatever it is given, so an unvalidated id or slug would let a
+ * malicious deployment write markdown anywhere on disk (e.g. over a repo's
+ * CLAUDE.md). Require the id to be a uuid and the slug a single conservative
+ * path segment; anything else is a server contract violation, not a fixable
+ * user input.
+ */
+const RESOURCE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SLUG_SEGMENT_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,200}$/;
+
 export function libraryItemPaths(
   dir: string,
   resourceId: string,
   slug: string,
 ): { md: string; meta: string } {
+  if (!RESOURCE_ID_RE.test(resourceId)) {
+    throw new CliError(
+      'CONTRACT_MISMATCH',
+      `The server returned a resource id that is not a uuid: ${JSON.stringify(resourceId.slice(0, 80))}`,
+    );
+  }
+  if (!SLUG_SEGMENT_RE.test(slug) || slug.includes('..')) {
+    throw new CliError(
+      'CONTRACT_MISMATCH',
+      `The server returned a slug that is not a safe path segment: ${JSON.stringify(slug.slice(0, 80))}`,
+    );
+  }
   const itemDir = join(libraryDir(dir), resourceId);
   return { md: join(itemDir, `${slug}.md`), meta: join(itemDir, `${slug}.meta.json`) };
 }
@@ -161,7 +185,6 @@ export async function findLibraryByResource(
   dir: string,
   resourceId: string,
 ): Promise<LibraryMeta | null> {
-  const { readdir } = await import('node:fs/promises');
   let entries: string[];
   try {
     entries = await readdir(join(libraryDir(dir), resourceId));

@@ -37,87 +37,35 @@ export interface FetchJsonFailure {
 
 export type FetchJsonResult = FetchJsonSuccess | FetchJsonFailure;
 
-export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<FetchJsonResult> {
-  const doFetch = opts.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  let timedOut = false;
-  // The timer stays armed until the body is fully consumed (cleared in the outer
-  // finally), so a server that sends headers then stalls the body still trips the
-  // deadline instead of hanging forever on res.json().
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, opts.timeoutMs);
+/** Strip trailing slashes so URL building is identical everywhere. */
+export function trimSlash(url: string): string {
+  return url.replace(/\/+$/, '');
+}
 
-  try {
-    let res: Response;
-    try {
-      res = await doFetch(url, { signal: controller.signal });
-    } catch (err) {
-      // A timeout is a network failure the AbortController induced; distinguish it
-      // from an organic one so the caller can say "timed out" rather than a raw
-      // AbortError message.
-      return timedOut
-        ? timeoutFailure(url, opts.timeoutMs)
-        : { ok: false, kind: 'network', message: `Request to ${url} failed: ${errorMessage(err)}` };
-    }
-
+export async function fetchJson(
+  url: string,
+  opts: FetchJsonOptions & { headers?: Record<string, string> },
+): Promise<FetchJsonResult> {
+  return withDeadline(url, opts, async (res, wasTimeout) => {
     const requestId = res.headers.get('x-request-id') ?? undefined;
-
     if (!res.ok) {
       return {
-        ok: false,
-        kind: 'http',
+        ok: false as const,
+        kind: 'http' as const,
         status: res.status,
         ...(requestId !== undefined ? { requestId } : {}),
         message: `Request to ${url} failed with status ${res.status}`,
       };
     }
-
-    let json: unknown;
-    try {
-      json = await res.json();
-    } catch (err) {
-      // The body read can fail three ways. A timeout wins first: the abort fires
-      // synchronously with `timedOut`, so any abort-induced rejection here is our
-      // deadline. Otherwise a SyntaxError is a genuine parse failure (invalid
-      // JSON); anything else is a transport failure mid-body (network).
-      if (timedOut) return timeoutFailure(url, opts.timeoutMs);
-      if (err instanceof SyntaxError) {
-        return {
-          ok: false,
-          kind: 'invalid-json',
-          status: res.status,
-          ...(requestId !== undefined ? { requestId } : {}),
-          message: `Response from ${url} was not valid JSON`,
-        };
-      }
-      return {
-        ok: false,
-        kind: 'network',
-        status: res.status,
-        ...(requestId !== undefined ? { requestId } : {}),
-        message: `Request to ${url} failed while reading the response body: ${errorMessage(err)}`,
-      };
-    }
-
+    const body = await readJsonBody(res, url, opts.timeoutMs, wasTimeout);
+    if ('failure' in body) return body.failure;
     return {
-      ok: true,
+      ok: true as const,
       status: res.status,
-      json,
+      json: body.json,
       ...(requestId !== undefined ? { requestId } : {}),
     };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
-  return {
-    ok: false,
-    kind: 'timeout',
-    message: `Request to ${url} timed out after ${timeoutMs}ms`,
-  };
+  });
 }
 
 /**
@@ -149,6 +97,30 @@ export async function fetchResponse(
   url: string,
   opts: FetchResponseOptions,
 ): Promise<FetchResponseResult> {
+  return withDeadline(url, opts, async (res, wasTimeout) => {
+    const requestId = res.headers.get('x-request-id') ?? undefined;
+    const body = await readJsonBody(res, url, opts.timeoutMs, wasTimeout);
+    if ('failure' in body) return body.failure;
+    return {
+      ok: true as const,
+      status: res.status,
+      json: body.json,
+      header: (name: string) => res.headers.get(name),
+      ...(requestId !== undefined ? { requestId } : {}),
+    };
+  });
+}
+
+/**
+ * Shared request core: one AbortController whose timer stays armed until the
+ * handler (which reads the body) returns, so a server that sends headers then
+ * stalls the body still trips the deadline instead of hanging on res.json().
+ */
+async function withDeadline<T>(
+  url: string,
+  opts: FetchResponseOptions,
+  handle: (res: Response, wasTimeout: () => boolean) => Promise<T | FetchJsonFailure>,
+): Promise<T | FetchJsonFailure> {
   const doFetch = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
   let timedOut = false;
@@ -167,45 +139,65 @@ export async function fetchResponse(
         ...(opts.body !== undefined ? { body: opts.body } : {}),
       });
     } catch (err) {
+      // A timeout is a network failure the AbortController induced; distinguish it
+      // from an organic one so the caller can say "timed out" rather than a raw
+      // AbortError message.
       return timedOut
         ? timeoutFailure(url, opts.timeoutMs)
         : { ok: false, kind: 'network', message: `Request to ${url} failed: ${errorMessage(err)}` };
     }
+    return await handle(res, () => timedOut);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
-    const requestId = res.headers.get('x-request-id') ?? undefined;
-    let json: unknown;
-    try {
-      json = await res.json();
-    } catch (err) {
-      if (timedOut) return timeoutFailure(url, opts.timeoutMs);
-      if (err instanceof SyntaxError) {
-        return {
+/**
+ * The body read can fail three ways. A timeout wins first: the abort fires
+ * synchronously with the timedOut flag, so any abort-induced rejection here is
+ * our deadline. Otherwise a SyntaxError is a genuine parse failure (invalid
+ * JSON); anything else is a transport failure mid-body (network).
+ */
+async function readJsonBody(
+  res: Response,
+  url: string,
+  timeoutMs: number,
+  wasTimeout: () => boolean,
+): Promise<{ json: unknown } | { failure: FetchJsonFailure }> {
+  const requestId = res.headers.get('x-request-id') ?? undefined;
+  try {
+    return { json: await res.json() };
+  } catch (err) {
+    if (wasTimeout()) return { failure: timeoutFailure(url, timeoutMs) };
+    if (err instanceof SyntaxError) {
+      return {
+        failure: {
           ok: false,
           kind: 'invalid-json',
           status: res.status,
           ...(requestId !== undefined ? { requestId } : {}),
           message: `Response from ${url} was not valid JSON`,
-        };
-      }
-      return {
+        },
+      };
+    }
+    return {
+      failure: {
         ok: false,
         kind: 'network',
         status: res.status,
         ...(requestId !== undefined ? { requestId } : {}),
         message: `Request to ${url} failed while reading the response body: ${errorMessage(err)}`,
-      };
-    }
-
-    return {
-      ok: true,
-      status: res.status,
-      json,
-      header: (name) => res.headers.get(name),
-      ...(requestId !== undefined ? { requestId } : {}),
+      },
     };
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
+  return {
+    ok: false,
+    kind: 'timeout',
+    message: `Request to ${url} timed out after ${timeoutMs}ms`,
+  };
 }
 
 export interface FailureToCliErrorOptions {

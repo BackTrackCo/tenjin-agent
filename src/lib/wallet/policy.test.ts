@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendSpend, evaluateSpend, ledgerPath, spentInWindow } from './policy';
+import { evaluateSpend, ledgerPath, releaseSpend, reserveSpend, spentInWindow } from './policy';
 import type { SpendRequest } from './provider';
 import type { Config } from '../config';
 
@@ -174,7 +174,7 @@ describe('spentInWindow', () => {
   });
 });
 
-describe('appendSpend', () => {
+describe('reserveSpend / releaseSpend', () => {
   it('prunes entries older than 24h and appends the new one', async () => {
     const now = new Date('2026-07-19T12:00:00.000Z');
     await mkdir(dir, { recursive: true });
@@ -189,20 +189,20 @@ describe('appendSpend', () => {
         ],
       }),
     );
-    await appendSpend(dir, { amountAtomic: '500000', resourceId: 'r1' }, now);
+    await reserveSpend(dir, { amountAtomic: '500000', resourceId: 'r1' }, '0', now);
     const raw = JSON.parse(await readFile(ledgerPath(dir), 'utf8')) as {
       entries: Array<{ atomic: string; at: string; resourceId?: string }>;
     };
     expect(raw.entries).toEqual([
       { atomic: '300000', at: '2026-07-19T10:00:00.000Z' },
-      { atomic: '500000', at: now.toISOString(), resourceId: 'r1' },
+      { id: expect.any(String), atomic: '500000', at: now.toISOString(), resourceId: 'r1' },
     ]);
   });
 
   it('a corrupt ledger degrades to empty and the append still lands', async () => {
     await mkdir(dir, { recursive: true });
     await writeFile(ledgerPath(dir), '{ not json');
-    await appendSpend(dir, { amountAtomic: '100' });
+    await reserveSpend(dir, { amountAtomic: '100' }, '0');
     const raw = JSON.parse(await readFile(ledgerPath(dir), 'utf8')) as {
       entries: Array<{ atomic: string }>;
     };
@@ -210,10 +210,41 @@ describe('appendSpend', () => {
   });
 
   it('omits resourceId when not given', async () => {
-    await appendSpend(dir, { amountAtomic: '100' });
+    await reserveSpend(dir, { amountAtomic: '100' }, '0');
     const raw = JSON.parse(await readFile(ledgerPath(dir), 'utf8')) as {
       entries: Array<Record<string, unknown>>;
     };
     expect(raw.entries[0]).not.toHaveProperty('resourceId');
+  });
+
+  it('refuses inside the critical section when the budget would be exceeded', async () => {
+    await reserveSpend(dir, { amountAtomic: '600000' }, '1000000');
+    await expect(reserveSpend(dir, { amountAtomic: '600000' }, '1000000')).rejects.toMatchObject({
+      code: 'REFUSED',
+      exitCode: 3,
+    });
+    const raw = JSON.parse(await readFile(ledgerPath(dir), 'utf8')) as { entries: unknown[] };
+    expect(raw.entries).toHaveLength(1);
+  });
+
+  it('parallel reservations against one budget serialize: only one of two wins', async () => {
+    const results = await Promise.allSettled([
+      reserveSpend(dir, { amountAtomic: '600000' }, '1000000'),
+      reserveSpend(dir, { amountAtomic: '600000' }, '1000000'),
+    ]);
+    const wins = results.filter((r) => r.status === 'fulfilled');
+    expect(wins).toHaveLength(1);
+    const raw = JSON.parse(await readFile(ledgerPath(dir), 'utf8')) as { entries: unknown[] };
+    expect(raw.entries).toHaveLength(1);
+  });
+
+  it('releaseSpend removes exactly the reserved entry', async () => {
+    const first = await reserveSpend(dir, { amountAtomic: '100' }, '0');
+    await reserveSpend(dir, { amountAtomic: '200' }, '0');
+    await releaseSpend(dir, first.id);
+    const raw = JSON.parse(await readFile(ledgerPath(dir), 'utf8')) as {
+      entries: Array<{ atomic: string }>;
+    };
+    expect(raw.entries).toEqual([expect.objectContaining({ atomic: '200' })]);
   });
 });

@@ -12,17 +12,18 @@ import {
 } from '../lib/api';
 import type { ArticleUnlocked } from '../lib/api';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { resolveResourceRef } from '../lib/resource-ref';
+import { UUID_RE, resolveResourceRef } from '../lib/resource-ref';
 import { buildPaymentHeader, decodeChallenge, decodeSettlement } from '../lib/pay';
 import type { DecodedChallenge } from '../lib/pay';
 import { buildSiwxHeader } from '../lib/siwx';
 import { atomicToUsd, parseUsdToAtomic, toMoney } from '../lib/money';
 import { estimateTokens, outline, selectSections, splitSections } from '../lib/markdown';
-import { findCandidate, saveLibraryItem } from '../lib/state';
+import { findCandidate, libraryItemPaths, saveLibraryItem } from '../lib/state';
 import type { LibraryMeta } from '../lib/state';
 import { resolveWalletProvider } from '../lib/wallet';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
+import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 
 /**
@@ -56,8 +57,6 @@ export interface BuyDeps {
   /** Interactive confirm seam; defaults to a stderr readline y/N prompt. */
   confirmFn?: (question: string) => Promise<boolean>;
 }
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function runBuy(
   args: BuyArgs,
@@ -169,7 +168,29 @@ export async function runBuy(
     );
   }
 
-  const paymentHeader = await buildPaymentHeader(signer, challenge);
+  // Reserve the spend BEFORE signing: the reservation is the atomic budget gate
+  // (parallel invocations serialize on the ledger lock inside), and once the
+  // paid request is on the wire we can no longer know that money did NOT move,
+  // so the entry stays unless a branch below proves no settlement happened.
+  const reservation = await provider.reserveSpend({
+    amountAtomic: challenge.amountAtomic,
+    resourceId: preview.id,
+  });
+  const release = async (): Promise<void> => {
+    try {
+      await provider.releaseSpend(reservation);
+    } catch {
+      // A stuck release just overcounts the 24h budget; never mask the real error.
+    }
+  };
+
+  let paymentHeader: string;
+  try {
+    paymentHeader = await buildPaymentHeader(signer, challenge);
+  } catch (err) {
+    await release();
+    throw err;
+  }
   const lookupId = args.lookupId ?? (await attributedLookupId(ctx.dataDir, preview.id, ref.url));
   const paid = await fetchResponse(ref.url, {
     ...fetchOpts,
@@ -178,13 +199,14 @@ export async function runBuy(
       ...(lookupId !== null ? { 'x-tenjin-lookup-id': lookupId } : {}),
     }),
   });
+  // A transport failure after the request went out is ambiguous (the server may
+  // have settled and the response was lost), so the reservation stays.
   if (!paid.ok) throw fetchFailureToCliError(paid);
 
   if (paid.status === 200) {
     const article = parseBody(ArticleUnlockedSchema, paid, 'read');
     const settleHeader = paid.header('payment-response');
     const txHash = settleHeader !== null ? decodeSettlement(settleHeader).txHash : null;
-    await provider.recordSpend({ amountAtomic: challenge.amountAtomic, resourceId: article.id });
     return deliver(ctx, args, ref.url, article, {
       entitlement: 'paid',
       paidAtomic: challenge.amountAtomic,
@@ -196,6 +218,7 @@ export async function runBuy(
   // 409 owned re-pay: the wallet already bought this post (e.g. a precheck the
   // server could not match). Nothing settled; re-read free via a fresh SIWX.
   if (paid.status === 409 && serverError(paid)?.code === 'already_purchased') {
+    await release();
     const reread = await fetchResponse(ref.url, {
       ...fetchOpts,
       headers: baseHeaders({
@@ -223,6 +246,9 @@ export async function runBuy(
     );
   }
 
+  // Both 402 shapes prove no funds moved (verify rejected, or settle attempted
+  // and failed), so the reservation can be returned to the budget.
+  if (paid.status === 402) await release();
   throw paymentFailure(paid);
 }
 
@@ -279,13 +305,19 @@ async function confirmInteractively(
   challenge: DecodedChallenge,
   reasons: string[],
 ): Promise<void> {
-  const summary = `Buy "${title}"${creatorHandle !== null ? ` by ${creatorHandle}` : ''} for ${atomicToUsd(challenge.amountAtomic)} USD?`;
+  // Title and handle are server-controlled: sanitize so escape sequences cannot
+  // repaint the price the human is approving. The price itself renders last.
+  const summary = `Buy "${sanitizeForTerminal(title)}"${creatorHandle !== null ? ` by ${sanitizeForTerminal(creatorHandle)}` : ''} for ${atomicToUsd(challenge.amountAtomic)} USD?`;
   const machineRefusal = (): CliError =>
     new CliError('REFUSED', `Spend requires confirmation: ${reasons.join('; ')}`, {
       fix: 'Re-run with --yes to approve this purchase, or set maxAutoSpend/confirm policy via `tenjin config set`.',
       details: { reasons, price: toMoney(challenge.amountAtomic) },
     });
   if (ctx.flags.json || !ctx.io.isTTY) throw machineRefusal();
+  // The real prompt reads stdin, so it also needs stdin to be interactive: at
+  // EOF the question could never be answered. An injected confirmFn (tests, a
+  // future embedding) supplies its own interactivity.
+  if (deps.confirmFn === undefined && !process.stdin.isTTY) throw machineRefusal();
   const confirm = deps.confirmFn ?? ((q: string) => promptYesNo(ctx.io, q));
   if (!(await confirm(summary))) {
     throw new CliError('REFUSED', 'Purchase declined at the confirmation prompt.', {
@@ -294,11 +326,18 @@ async function confirmInteractively(
   }
 }
 
-/** y/N prompt on stderr so stdout stays a single JSON envelope. */
+/**
+ * y/N prompt on stderr so stdout stays a single JSON envelope. stdin closing
+ * mid-prompt (ctrl-D) resolves as decline rather than leaving the question
+ * pending with no envelope emitted.
+ */
 async function promptYesNo(io: Io, question: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: io.stderr });
   try {
-    const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+    const closed = new Promise<string>((resolve) => rl.once('close', () => resolve('')));
+    const answer = (await Promise.race([rl.question(`${question} [y/N] `), closed]))
+      .trim()
+      .toLowerCase();
     return answer === 'y' || answer === 'yes';
   } finally {
     rl.close();
@@ -344,7 +383,6 @@ async function deliver(
     },
     article.bodyMd,
   );
-  const { libraryItemPaths } = await import('../lib/state');
   const paths = libraryItemPaths(ctx.dataDir, article.id, article.slug);
 
   const data: Record<string, unknown> = {
@@ -382,7 +420,7 @@ async function deliver(
         : 'Free resource: nothing was paid.';
   return {
     data,
-    humanLines: [`Saved ${article.title} to ${paths.md}`, paidLine],
+    humanLines: [`Saved ${sanitizeForTerminal(article.title)} to ${paths.md}`, paidLine],
   };
 }
 

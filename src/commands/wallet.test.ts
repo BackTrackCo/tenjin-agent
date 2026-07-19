@@ -99,8 +99,11 @@ function fakeRemoteProvider(
     authorizeSpend: async () => {
       throw new Error('authorizeSpend must not be called by show/balance');
     },
-    recordSpend: async () => {
-      throw new Error('recordSpend must not be called by show/balance');
+    reserveSpend: async () => {
+      throw new Error('reserveSpend must not be called by show/balance');
+    },
+    releaseSpend: async () => {
+      throw new Error('releaseSpend must not be called by show/balance');
     },
   };
   return { provider, getSigner };

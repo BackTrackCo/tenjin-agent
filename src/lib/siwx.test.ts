@@ -1,5 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { describe, it, expect } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
 import { verifyMessage } from 'viem';
 import {
@@ -11,26 +10,6 @@ import type { SIWxPayload } from '@x402/extensions/sign-in-with-x';
 import { buildSiwxHeader, DEFAULT_CHAIN_ID } from './siwx';
 import { CliError } from './errors';
 import type { TenjinSigner } from './wallet/provider';
-
-// The SIWE encoder the SDK signs through (siwe-parser) requires an alphanumeric
-// nonce; siwx.ts mints one with base64url, whose `-`/`_` alphabet members it
-// rejects (~49% of real 16-byte draws per the base64url character distribution).
-// Pin randomBytes to fixed alnum-only draws so these tests exercise the real
-// signing path deterministically instead of flaking on the source's nonce bug
-// (see the report for the precise repro).
-vi.mock('node:crypto', () => ({ randomBytes: vi.fn() }));
-const randomBytesMock = vi.mocked(randomBytes);
-const SAFE_NONCE_BYTES_A = Buffer.from([
-  0, 13, 26, 39, 52, 65, 78, 91, 104, 117, 130, 143, 156, 169, 182, 195,
-]); // -> 'AA0aJzRBTltodYKPnKm2ww'
-const SAFE_NONCE_BYTES_B = Buffer.from([
-  7, 20, 33, 46, 59, 72, 85, 98, 111, 124, 137, 150, 163, 176, 189, 202,
-]); // -> 'BxQhLjtIVWJvfImWo7C9yg'
-
-beforeEach(() => {
-  randomBytesMock.mockReset();
-  randomBytesMock.mockReturnValue(SAFE_NONCE_BYTES_A as unknown as ReturnType<typeof randomBytes>);
-});
 
 const TEST_KEY = `0x${'ab'.repeat(32)}` as const;
 const account = privateKeyToAccount(TEST_KEY);
@@ -102,15 +81,19 @@ describe('buildSiwxHeader', () => {
   });
 
   it('mints a fresh nonce every call, even for the same base URL', async () => {
-    randomBytesMock.mockReturnValueOnce(
-      SAFE_NONCE_BYTES_A as unknown as ReturnType<typeof randomBytes>,
-    );
-    randomBytesMock.mockReturnValueOnce(
-      SAFE_NONCE_BYTES_B as unknown as ReturnType<typeof randomBytes>,
-    );
     const a = decode(await buildSiwxHeader(signer, { baseUrl: 'https://tenjin.blog' }));
     const b = decode(await buildSiwxHeader(signer, { baseUrl: 'https://tenjin.blog' }));
     expect(a.nonce).not.toBe(b.nonce);
+  });
+
+  // EIP-4361 restricts the nonce to alphanumerics; hex satisfies it on every
+  // draw. Loop enough real (unmocked) builds that a re-introduced unsafe
+  // alphabet (the original base64url bug hit ~half of draws) cannot slip by.
+  it('every real nonce is EIP-4361-safe lowercase hex', async () => {
+    for (let i = 0; i < 8; i += 1) {
+      const payload = decode(await buildSiwxHeader(signer, { baseUrl: 'https://tenjin.blog' }));
+      expect(payload.nonce).toMatch(/^[0-9a-f]{32}$/);
+    }
   });
 
   it('stamps issuedAt as a parseable ISO timestamp close to now', async () => {

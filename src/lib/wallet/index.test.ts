@@ -23,7 +23,10 @@ const stubProvider = (describe: WalletProvider['describe']): WalletProvider => (
   authorizeSpend: async () => {
     throw new Error('unused');
   },
-  recordSpend: async () => {
+  reserveSpend: async () => {
+    throw new Error('unused');
+  },
+  releaseSpend: async () => {
     throw new Error('unused');
   },
 });

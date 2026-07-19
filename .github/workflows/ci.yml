@@ -37,6 +37,13 @@ jobs:
       - run: pnpm typecheck
       # check = build + test.
       - run: pnpm run check
+      # Live contract drift: re-run the contract pins against the deployed
+      # openapi.json (acceptance item 44; the committed fixture covers offline
+      # runs, this catches the server moving under a released CLI).
+      - name: Contract drift vs live deploy
+        run: pnpm vitest run src/contract.test.ts
+        env:
+          TENJIN_CONTRACT_BASE_URL: https://tenjin.blog
       # Blocking supply-chain gate (fails on high/critical). Runs after
       # build/test so an advisory/network flake can't mask their signal.
       - run: pnpm audit --audit-level=high

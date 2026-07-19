@@ -168,7 +168,7 @@ describe('createLocalProvider.getSigner', () => {
   });
 });
 
-describe('createLocalProvider — authorizeSpend / recordSpend', () => {
+describe('createLocalProvider — authorizeSpend / reserveSpend', () => {
   it("authorizeSpend reads policy from the config file and returns evaluateSpend's decision", async () => {
     const provider = createLocalProvider({ dir: dataDir, env: {} });
     // No config.json yet: defaults apply (maxAutoSpend 0, confirm always), so any
@@ -191,14 +191,38 @@ describe('createLocalProvider — authorizeSpend / recordSpend', () => {
     expect(allowed).toEqual({ decision: 'allow', reasons: ['within policy'] });
   });
 
-  it('recordSpend appends a settled spend to <dir>/spend-ledger.json', async () => {
+  it('reserveSpend appends a ledger entry that releaseSpend removes', async () => {
     const provider = createLocalProvider({ dir: dataDir, env: {} });
-    await provider.recordSpend({ amountAtomic: '250000', resourceId: 'r1' });
-    const ledger = JSON.parse(await readFile(join(dataDir, 'spend-ledger.json'), 'utf8')) as {
-      entries: Array<{ atomic: string; resourceId?: string }>;
+    const reservation = await provider.reserveSpend({ amountAtomic: '250000', resourceId: 'r1' });
+    let ledger = JSON.parse(await readFile(join(dataDir, 'spend-ledger.json'), 'utf8')) as {
+      entries: Array<{ id?: string; atomic: string; resourceId?: string }>;
     };
     expect(ledger.entries).toHaveLength(1);
-    expect(ledger.entries[0]).toMatchObject({ atomic: '250000', resourceId: 'r1' });
+    expect(ledger.entries[0]).toMatchObject({
+      id: reservation.id,
+      atomic: '250000',
+      resourceId: 'r1',
+    });
+    await provider.releaseSpend(reservation);
+    ledger = JSON.parse(await readFile(join(dataDir, 'spend-ledger.json'), 'utf8')) as {
+      entries: Array<{ id?: string; atomic: string }>;
+    };
+    expect(ledger.entries).toHaveLength(0);
+  });
+
+  it('reserveSpend refuses atomically when sessionBudget would be exceeded', async () => {
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, 'config.json'), JSON.stringify({ sessionBudget: '400000' }));
+    const provider = createLocalProvider({ dir: dataDir, env: {} });
+    await provider.reserveSpend({ amountAtomic: '250000' });
+    await expect(provider.reserveSpend({ amountAtomic: '250000' })).rejects.toMatchObject({
+      code: 'REFUSED',
+      exitCode: 3,
+    });
+    const ledger = JSON.parse(await readFile(join(dataDir, 'spend-ledger.json'), 'utf8')) as {
+      entries: unknown[];
+    };
+    expect(ledger.entries).toHaveLength(1);
   });
 });
 

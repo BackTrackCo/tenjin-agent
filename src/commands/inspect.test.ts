@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,15 +10,6 @@ import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
-
-// siwx.ts mints its nonce as randomBytes(16).toString('base64url'), but the SIWE
-// grammar only allows an alphanumeric nonce, so roughly half of real nonces make
-// createSIWxPayload throw (a genuine src bug, reported separately). Zero bytes
-// encode to all-'A' base64url, which keeps the probe deterministic here.
-vi.mock('node:crypto', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:crypto')>();
-  return { ...actual, randomBytes: (size: number) => Buffer.alloc(size) };
-});
 
 const BASE = 'https://tenjin.blog';
 const READ_URL = `${BASE}/api/read/alice/post-1`;
@@ -158,9 +149,13 @@ function fakeProvider(signer?: TenjinSigner): {
       calls.authorize += 1;
       throw new Error('inspect must never call authorizeSpend');
     },
-    recordSpend: async () => {
+    reserveSpend: async () => {
       calls.record += 1;
-      throw new Error('inspect must never call recordSpend');
+      throw new Error('inspect must never call reserveSpend');
+    },
+    releaseSpend: async () => {
+      calls.record += 1;
+      throw new Error('inspect must never call releaseSpend');
     },
   };
   return { provider, calls };

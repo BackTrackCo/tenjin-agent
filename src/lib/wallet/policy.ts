@@ -1,8 +1,10 @@
 import { readFile, mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic } from '../atomic-json';
 import { withFileLock } from '../lock';
+import { CliError } from '../errors';
 import { atomicToUsd } from '../money';
 import type { Config } from '../config';
 import type { SpendDecision, SpendRequest } from './provider';
@@ -31,6 +33,7 @@ export const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const LedgerSchema = z.object({
   entries: z.array(
     z.object({
+      id: z.string().optional(),
       atomic: z.string().regex(/^\d+$/),
       at: z.string(),
       resourceId: z.string().optional(),
@@ -65,13 +68,24 @@ export async function spentInWindow(dir: string, now: Date = new Date()): Promis
   return sum;
 }
 
-export async function appendSpend(
+/**
+ * The atomic budget gate: prune, re-sum, check, and append happen in ONE
+ * critical section, so N parallel buys serialize here and the (check, record)
+ * pair cannot interleave. Called BEFORE any payment is signed; the reservation
+ * conservatively counts against the budget until releaseSpend removes it, and a
+ * crash between reserve and settle leaves it counted for the 24h window
+ * (overcounting on a crash beats a budget that forgets in-flight spends).
+ * Throws REFUSED when the budget (nonzero) would be exceeded.
+ */
+export async function reserveSpend(
   dir: string,
   entry: { amountAtomic: string; resourceId?: string },
+  sessionBudgetAtomic: string,
   now: Date = new Date(),
-): Promise<void> {
+): Promise<{ id: string }> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = ledgerPath(dir);
+  const id = randomUUID();
   await withFileLock(`${path}.lock`, async () => {
     const ledger = await readLedger(dir);
     const cutoff = now.getTime() - SESSION_WINDOW_MS;
@@ -79,11 +93,37 @@ export async function appendSpend(
       const at = Date.parse(e.at);
       return !Number.isNaN(at) && at >= cutoff;
     });
+    const budget = BigInt(sessionBudgetAtomic);
+    if (budget > 0n) {
+      let spent = 0n;
+      for (const e of entries) spent += BigInt(e.atomic);
+      if (spent + BigInt(entry.amountAtomic) > budget) {
+        throw new CliError(
+          'REFUSED',
+          `sessionBudget exhausted: ${atomicToUsd(spent.toString())} USD spent or reserved in the last 24h, budget is ${atomicToUsd(sessionBudgetAtomic)} USD, this buy is ${atomicToUsd(entry.amountAtomic)} USD.`,
+        );
+      }
+    }
     entries.push({
+      id,
       atomic: entry.amountAtomic,
       at: now.toISOString(),
       ...(entry.resourceId !== undefined ? { resourceId: entry.resourceId } : {}),
     });
+    await writeFileAtomic(path, `${JSON.stringify({ entries }, null, 2)}\n`, {
+      mode: 0o644,
+      dirMode: 0o700,
+    });
+  });
+  return { id };
+}
+
+/** Remove a reservation whose payment is known not to have settled. */
+export async function releaseSpend(dir: string, id: string): Promise<void> {
+  const path = ledgerPath(dir);
+  await withFileLock(`${path}.lock`, async () => {
+    const ledger = await readLedger(dir);
+    const entries = ledger.entries.filter((e) => e.id !== id);
     await writeFileAtomic(path, `${JSON.stringify({ entries }, null, 2)}\n`, {
       mode: 0o644,
       dirMode: 0o700,

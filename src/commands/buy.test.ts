@@ -18,16 +18,6 @@ import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import type { SpendDecision, WalletProvider } from '../lib/wallet';
 
-// src/lib/siwx.ts mints the SIWX nonce as randomBytes(16).toString('base64url'),
-// which can contain '-'/'_'; the EIP-4361 grammar only allows an alphanumeric
-// nonce, so header building fails intermittently on real randomness (source bug,
-// reported separately). Pin randomBytes to bytes whose base64url is alphanumeric
-// so every SIWX build here is deterministic while still exercising the real path.
-vi.mock('node:crypto', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:crypto')>();
-  return { ...actual, randomBytes: (size: number) => Buffer.alloc(size, 0xab) };
-});
-
 const BASE_URL = 'https://tenjin.test';
 const READ_URL = `${BASE_URL}/api/read/alice/hello`;
 const POST_ID = '11111111-2222-4333-8444-555555555555';
@@ -160,13 +150,15 @@ function buyFetch(routes: BuyRoutes): { fetchImpl: typeof fetch; requests: SeenR
 function fakeProvider(opts: { decision?: SpendDecision; getSignerError?: CliError } = {}): {
   provider: WalletProvider;
   authorizeSpend: ReturnType<typeof vi.fn>;
-  recordSpend: ReturnType<typeof vi.fn>;
+  reserveSpend: ReturnType<typeof vi.fn>;
+  releaseSpend: ReturnType<typeof vi.fn>;
   getSigner: ReturnType<typeof vi.fn>;
 } {
   const authorizeSpend = vi.fn(
     async () => opts.decision ?? { decision: 'allow' as const, reasons: [] },
   );
-  const recordSpend = vi.fn(async () => undefined);
+  const reserveSpend = vi.fn(async () => ({ id: 'reservation-1' }));
+  const releaseSpend = vi.fn(async () => undefined);
   const getSigner = vi.fn(async () => {
     if (opts.getSignerError !== undefined) throw opts.getSignerError;
     return {
@@ -184,9 +176,10 @@ function fakeProvider(opts: { decision?: SpendDecision; getSignerError?: CliErro
     diagnostics: async () => ({ warnings: [] }),
     getSigner,
     authorizeSpend,
-    recordSpend,
+    reserveSpend,
+    releaseSpend,
   };
-  return { provider, authorizeSpend, recordSpend, getSigner };
+  return { provider, authorizeSpend, reserveSpend, releaseSpend, getSigner };
 }
 
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {
@@ -329,8 +322,8 @@ describe('runBuy confirm step', () => {
 });
 
 describe('runBuy paid path', () => {
-  it('signs the live challenge amount, saves the body, and records the spend', async () => {
-    const { provider, recordSpend } = fakeProvider();
+  it('signs the live challenge amount, saves the body, and keeps the reservation', async () => {
+    const { provider, reserveSpend, releaseSpend } = fakeProvider();
     const { fetchImpl, requests } = buyFetch({
       bare: () => challenge402('250000'),
       siwx: () => challenge402('250000'),
@@ -352,10 +345,11 @@ describe('runBuy paid path', () => {
     expect(data.entitlement).toBe('paid');
     expect(data.txHash).toBe(TX_HASH);
     expect(data.paid).toEqual({ atomic: '250000', usd: '0.25' });
-    expect(recordSpend).toHaveBeenCalledExactlyOnceWith({
+    expect(reserveSpend).toHaveBeenCalledExactlyOnceWith({
       amountAtomic: '250000',
       resourceId: POST_ID,
     });
+    expect(releaseSpend).not.toHaveBeenCalled();
     expect(await readFile(libraryMdPath(), 'utf8')).toBe(BODY_MD);
     const expectedHash = `sha256:${createHash('sha256').update(BODY_MD, 'utf8').digest('hex')}`;
     expect(data.contentHash).toBe(expectedHash);
@@ -363,7 +357,7 @@ describe('runBuy paid path', () => {
   });
 
   it('falls back to a free SIWX re-read on a 409 already_purchased envelope', async () => {
-    const { provider, recordSpend } = fakeProvider();
+    const { provider, releaseSpend } = fakeProvider();
     let siwxCalls = 0;
     const { fetchImpl } = buyFetch({
       bare: () => challenge402('250000'),
@@ -381,7 +375,7 @@ describe('runBuy paid path', () => {
     const data = res.data as Record<string, unknown>;
     expect(data.entitlement).toBe('already-entitled');
     expect(data.txHash).toBeNull();
-    expect(recordSpend).not.toHaveBeenCalled();
+    expect(releaseSpend).toHaveBeenCalledExactlyOnceWith({ id: 'reservation-1' });
     expect(siwxCalls).toBe(2);
   });
 });
@@ -439,7 +433,7 @@ describe('runBuy payment failures', () => {
       transaction: '',
       network: 'eip155:8453',
     });
-    const { provider, recordSpend } = fakeProvider();
+    const { provider, releaseSpend } = fakeProvider();
     const { fetchImpl } = buyFetch({
       bare: () => challenge402('250000'),
       siwx: () => challenge402('250000'),
@@ -449,7 +443,7 @@ describe('runBuy payment failures', () => {
     expect(err.code).toBe('PAYMENT_FAILED');
     expect(err.exitCode).toBe(4);
     expect(err.fix).toContain('balance');
-    expect(recordSpend).not.toHaveBeenCalled();
+    expect(releaseSpend).toHaveBeenCalledExactlyOnceWith({ id: 'reservation-1' });
   });
 
   it('a 402 re-challenge carrying an error is PAYMENT_FAILED exit 4 with the reason', async () => {
