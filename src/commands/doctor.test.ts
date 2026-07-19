@@ -17,7 +17,11 @@ import type { WalletProvider } from '../lib/wallet';
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
 const balanceMock = vi.mocked(getUsdcBalance);
 
-const OPENAPI_OK = { openapi: '3.1.0', info: { title: 'Tenjin', version: '0.1.0' } };
+const OPENAPI_OK = {
+  openapi: '3.1.0',
+  info: { title: 'Tenjin', version: '0.1.0' },
+  paths: { '/api/agent/lookup': { post: {} } },
+};
 const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // doctor reads the wallet file's cleartext top-level address without decrypting,
 // so the fixture just needs a real address; PRIVATE_KEY is kept only to assert it
@@ -273,6 +277,12 @@ describe('runDoctor — injected remote provider', () => {
       diagnostics: async () => ({ warnings: [] }),
       getSigner: async () => {
         throw new Error('doctor must never acquire a signer');
+      },
+      authorizeSpend: async () => {
+        throw new Error('doctor must never authorize a spend');
+      },
+      recordSpend: async () => {
+        throw new Error('doctor must never record a spend');
       },
     };
   }

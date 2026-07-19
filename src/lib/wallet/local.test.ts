@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -165,6 +165,40 @@ describe('createLocalProvider.getSigner', () => {
     });
     const signer = await provider.getSigner();
     expect(signer.address).toBe(privateKeyToAccount(key).address);
+  });
+});
+
+describe('createLocalProvider — authorizeSpend / recordSpend', () => {
+  it("authorizeSpend reads policy from the config file and returns evaluateSpend's decision", async () => {
+    const provider = createLocalProvider({ dir: dataDir, env: {} });
+    // No config.json yet: defaults apply (maxAutoSpend 0, confirm always), so any
+    // nonzero spend confirms.
+    const confirmed = await provider.authorizeSpend({
+      amountAtomic: '100',
+      explicitApproval: false,
+    });
+    expect(confirmed.decision).toBe('confirm');
+
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '1000000', confirm: 'above:2000000', allowlistCreators: [] }),
+    );
+    const allowed = await provider.authorizeSpend({
+      amountAtomic: '500000',
+      explicitApproval: false,
+    });
+    expect(allowed).toEqual({ decision: 'allow', reasons: ['within policy'] });
+  });
+
+  it('recordSpend appends a settled spend to <dir>/spend-ledger.json', async () => {
+    const provider = createLocalProvider({ dir: dataDir, env: {} });
+    await provider.recordSpend({ amountAtomic: '250000', resourceId: 'r1' });
+    const ledger = JSON.parse(await readFile(join(dataDir, 'spend-ledger.json'), 'utf8')) as {
+      entries: Array<{ atomic: string; resourceId?: string }>;
+    };
+    expect(ledger.entries).toHaveLength(1);
+    expect(ledger.entries[0]).toMatchObject({ atomic: '250000', resourceId: 'r1' });
   });
 });
 

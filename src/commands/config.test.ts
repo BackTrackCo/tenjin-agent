@@ -46,7 +46,8 @@ describe('runConfigList', () => {
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
-    expect(humanLines).toHaveLength(6);
+    expect(d.evalCohort).toEqual({ value: false, source: 'default' });
+    expect(humanLines).toHaveLength(7);
   });
 
   it('exposes the confirm threshold in dual form when above:', async () => {
@@ -58,6 +59,13 @@ describe('runConfigList', () => {
       source: 'file',
       threshold: { atomic: '250000', usd: '0.25' },
     });
+  });
+
+  it('reports evalCohort as file provenance once set', async () => {
+    await runConfigSet({ key: 'evalCohort', value: 'true' }, makeCtx());
+    const { data } = await runConfigList(makeCtx());
+    const d = data as Record<string, { value: unknown; source: string }>;
+    expect(d.evalCohort).toEqual({ value: true, source: 'file' });
   });
 
   describe('baseUrl precedence', () => {
@@ -189,6 +197,23 @@ describe('runConfigSet — allowlistCreators', () => {
     const err = await caught(() =>
       runConfigSet({ key: 'allowlistCreators', value: 'alice bob' }, makeCtx()),
     );
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+  });
+});
+
+describe('runConfigSet — evalCohort', () => {
+  it.each(['true', 'false'])('round-trips %s', async (bool) => {
+    const { data } = await runConfigSet({ key: 'evalCohort', value: bool }, makeCtx());
+    expect(data).toEqual({ key: 'evalCohort', value: bool === 'true', source: 'file' });
+    expect(await readRawFile()).toEqual({ evalCohort: bool === 'true' });
+
+    const got = await runConfigGet({ key: 'evalCohort' }, makeCtx());
+    expect(got.data).toEqual({ key: 'evalCohort', value: bool === 'true', source: 'file' });
+  });
+
+  it.each(['1', '0', 'True', 'yes', ''])('rejects %j as USAGE', async (bad) => {
+    const err = await caught(() => runConfigSet({ key: 'evalCohort', value: bad }, makeCtx()));
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
   });

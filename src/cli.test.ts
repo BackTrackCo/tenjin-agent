@@ -95,6 +95,40 @@ describe('global flags are position-independent', () => {
     expect(parsed.command).toBe('wallet.show');
   });
 
+  // Each B2 leaf is driven to the same dispatcher-level USAGE failure (bad
+  // trailing --timeout, rejected in buildContext before the lazy body import),
+  // so the envelope's `command` field proves the argv routed to that leaf
+  // without any command body, network, or filesystem running.
+  it.each([
+    { argv: ['lookup', 'what does base gas cost?', '--timeout', 'abc'], command: 'lookup' },
+    { argv: ['inspect', 'alice/base-fees', '--timeout', 'abc'], command: 'inspect' },
+    { argv: ['buy', 'alice/base-fees', '--timeout', 'abc'], command: 'buy' },
+    { argv: ['outcome', '--status', 'used', '--timeout', 'abc'], command: 'outcome' },
+  ])(
+    '$command routes to its leaf and fails USAGE on a bad trailing --timeout',
+    async ({ argv, command }) => {
+      const cap = captureIo();
+      const code = await main(argv, cap.io);
+      expect(code).toBe(2);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.command).toBe(command);
+    },
+  );
+
+  it('outcome without --status is a USAGE parse error (required option)', async () => {
+    const cap = captureIo();
+    const code = await main(['outcome', '--last'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe('USAGE');
+    // A missing required option fires during commander parsing, before any leaf
+    // action runs, so the envelope carries the parse-error command 'tenjin'.
+    expect(parsed.command).toBe('tenjin');
+  });
+
   it('trailing --json suppresses stderr on a TTY, exactly like leading --json', async () => {
     const lead = captureIo(true);
     await main(['--json', 'doctor', '--timeout', 'abc'], lead.io);

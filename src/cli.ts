@@ -110,6 +110,131 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // handleParseError turns into the USAGE contract.
     .exitOverride();
 
+  addGlobalFlags(
+    program
+      .command('lookup <question>')
+      .description(
+        'Ask the marketplace for paid answers to a generalized PUBLIC question (never include secrets or private context)',
+      )
+      .option(
+        '--fresh-within <duration>',
+        'only snapshots newer than this ISO 8601 duration, e.g. P30D',
+      )
+      .option('--max-price <usd>', 'only candidates at or under this decimal-USD price')
+      .option('--limit <n>', 'max candidates to return (1-10)')
+      .option('--applies-to <k=v...>', 'applicability filter, repeatable, e.g. products=Vercel'),
+  ).action(async function (this: Command, question: string) {
+    await runCommand('lookup', this, async (ctx) => {
+      const { runLookup } = await import('./commands/lookup');
+      const opts = this.opts<{
+        freshWithin?: string;
+        maxPrice?: string;
+        limit?: string;
+        appliesTo?: string[];
+      }>();
+      return runLookup(
+        {
+          question,
+          ...(opts.freshWithin !== undefined ? { freshWithin: opts.freshWithin } : {}),
+          ...(opts.maxPrice !== undefined ? { maxPrice: opts.maxPrice } : {}),
+          ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+          ...(opts.appliesTo !== undefined ? { appliesTo: opts.appliesTo } : {}),
+        },
+        ctx,
+      );
+    });
+  });
+
+  addGlobalFlags(
+    program
+      .command('inspect <resource>')
+      .description('Preview a resource (price, freshness, entitlement) without ever paying'),
+  ).action(async function (this: Command, resource: string) {
+    await runCommand('inspect', this, async (ctx) => {
+      const { runInspect } = await import('./commands/inspect');
+      return runInspect({ ref: resource }, ctx);
+    });
+  });
+
+  addGlobalFlags(
+    program
+      .command('buy <resource>')
+      .description('Buy a resource with x402 (entitlement re-check first; refuses above policy)')
+      .option(
+        '--max-price <usd>',
+        'hard price cap in decimal USD; never bypassed, not even by --yes',
+      )
+      .option('--yes', 'approve this purchase explicitly (bypasses the interactive confirm only)')
+      .option(
+        '--lookup-id <id>',
+        'attribute this buy to a lookup id (defaults to the most recent matching local lookup)',
+      )
+      .option('--print-body', 'include the purchased body in the JSON output')
+      .option(
+        '--sections <tokens>',
+        'include leading sections within a token budget (deterministic, no model calls)',
+      ),
+  ).action(async function (this: Command, resource: string) {
+    await runCommand('buy', this, async (ctx) => {
+      const { runBuy } = await import('./commands/buy');
+      const opts = this.opts<{
+        maxPrice?: string;
+        yes?: boolean;
+        lookupId?: string;
+        printBody?: boolean;
+        sections?: string;
+      }>();
+      return runBuy(
+        {
+          ref: resource,
+          ...(opts.maxPrice !== undefined ? { maxPrice: opts.maxPrice } : {}),
+          ...(opts.yes !== undefined ? { yes: opts.yes } : {}),
+          ...(opts.lookupId !== undefined ? { lookupId: opts.lookupId } : {}),
+          ...(opts.printBody !== undefined ? { printBody: opts.printBody } : {}),
+          ...(opts.sections !== undefined ? { sections: opts.sections } : {}),
+        },
+        ctx,
+      );
+    });
+  });
+
+  addGlobalFlags(
+    program
+      .command('outcome')
+      .description(
+        'Report how a lookup ended (used, partially_used, rejected, regenerated, purchase_declined)',
+      )
+      .option('--lookup-id <id>', 'the lookupId to report on')
+      .option('--last', 'target the most recent local lookup')
+      .requiredOption('--status <status>', 'outcome status')
+      .option('--resource <id>', 'the candidate resourceId the outcome refers to')
+      .option(
+        '--content-hash <hash>',
+        'sha256:<hex> of the exact purchased body (auto-filled from the library when omitted)',
+      ),
+  ).action(async function (this: Command) {
+    await runCommand('outcome', this, async (ctx) => {
+      const { runOutcome } = await import('./commands/outcome');
+      const opts = this.opts<{
+        lookupId?: string;
+        last?: boolean;
+        status: string;
+        resource?: string;
+        contentHash?: string;
+      }>();
+      return runOutcome(
+        {
+          status: opts.status,
+          ...(opts.lookupId !== undefined ? { lookupId: opts.lookupId } : {}),
+          ...(opts.last !== undefined ? { last: opts.last } : {}),
+          ...(opts.resource !== undefined ? { resource: opts.resource } : {}),
+          ...(opts.contentHash !== undefined ? { contentHash: opts.contentHash } : {}),
+        },
+        ctx,
+      );
+    });
+  });
+
   addGlobalFlags(program.command('doctor'))
     .description('Check the local environment and Tenjin API reachability')
     .action(async function (this: Command) {

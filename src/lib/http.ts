@@ -120,6 +120,94 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
   };
 }
 
+/**
+ * The status-agnostic sibling of fetchJson for endpoints where non-2xx statuses
+ * are protocol, not failure: the read route's 402 challenge (PAYMENT-REQUIRED
+ * header + preview body), the 409 owned-re-pay refusal, and rate-limit 429s all
+ * carry meaning in both body and headers. Any HTTP response with a JSON body is
+ * `ok: true` here; only transport problems and a non-JSON body are failures.
+ */
+export interface FetchResponseOptions extends FetchJsonOptions {
+  method?: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  /** JSON-serialized request body; callers stringify so the wire form is exact. */
+  body?: string;
+}
+
+export interface FetchResponseSuccess {
+  ok: true;
+  status: number;
+  json: unknown;
+  /** Case-insensitive response-header getter (null when absent). */
+  header: (name: string) => string | null;
+  requestId?: string;
+}
+
+export type FetchResponseResult = FetchResponseSuccess | FetchJsonFailure;
+
+export async function fetchResponse(
+  url: string,
+  opts: FetchResponseOptions,
+): Promise<FetchResponseResult> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, opts.timeoutMs);
+
+  try {
+    let res: Response;
+    try {
+      res = await doFetch(url, {
+        method: opts.method ?? 'GET',
+        signal: controller.signal,
+        ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
+        ...(opts.body !== undefined ? { body: opts.body } : {}),
+      });
+    } catch (err) {
+      return timedOut
+        ? timeoutFailure(url, opts.timeoutMs)
+        : { ok: false, kind: 'network', message: `Request to ${url} failed: ${errorMessage(err)}` };
+    }
+
+    const requestId = res.headers.get('x-request-id') ?? undefined;
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch (err) {
+      if (timedOut) return timeoutFailure(url, opts.timeoutMs);
+      if (err instanceof SyntaxError) {
+        return {
+          ok: false,
+          kind: 'invalid-json',
+          status: res.status,
+          ...(requestId !== undefined ? { requestId } : {}),
+          message: `Response from ${url} was not valid JSON`,
+        };
+      }
+      return {
+        ok: false,
+        kind: 'network',
+        status: res.status,
+        ...(requestId !== undefined ? { requestId } : {}),
+        message: `Request to ${url} failed while reading the response body: ${errorMessage(err)}`,
+      };
+    }
+
+    return {
+      ok: true,
+      status: res.status,
+      json,
+      header: (name) => res.headers.get(name),
+      ...(requestId !== undefined ? { requestId } : {}),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface FailureToCliErrorOptions {
   fix?: string;
   details?: unknown;

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { fetchJson, fetchFailureToCliError } from './http';
+import { fetchJson, fetchFailureToCliError, fetchResponse } from './http';
 import { CliError } from './errors';
-import type { FetchJsonFailure } from './http';
+import type { FetchJsonFailure, FetchResponseSuccess } from './http';
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { status: 200, ...init });
@@ -76,6 +76,90 @@ describe('fetchJson', () => {
       fetchImpl: stalledFetch,
     });
     expect(res).toMatchObject({ ok: false, kind: 'timeout' });
+  });
+});
+
+describe('fetchResponse', () => {
+  it.each([200, 402, 409, 429])(
+    'returns ok:true with json/header/requestId for any status (%i)',
+    async (status) => {
+      const fetchImpl: typeof fetch = async () =>
+        new Response(JSON.stringify({ hello: 'world' }), {
+          status,
+          headers: { 'x-request-id': 'req-9', 'x-foo': 'bar' },
+        });
+      const res = (await fetchResponse('https://x.example/api', {
+        timeoutMs: 1000,
+        fetchImpl,
+      })) as FetchResponseSuccess;
+      expect(res.ok).toBe(true);
+      expect(res.status).toBe(status);
+      expect(res.json).toEqual({ hello: 'world' });
+      expect(res.requestId).toBe('req-9');
+      expect(res.header('x-foo')).toBe('bar');
+      expect(res.header('X-Foo')).toBe('bar'); // case-insensitive getter
+      expect(res.header('missing')).toBeNull();
+    },
+  );
+
+  it('sends the method, headers, and body through to fetchImpl unchanged', async () => {
+    let seenInit: RequestInit | undefined;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      seenInit = init;
+      return new Response(JSON.stringify({ ok: 1 }), { status: 200 });
+    };
+    await fetchResponse('https://x.example/api', {
+      timeoutMs: 1000,
+      fetchImpl,
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-tenjin-client': 'tenjin-cli/0.1.0' },
+      body: JSON.stringify({ q: 'hello' }),
+    });
+    expect(seenInit?.method).toBe('POST');
+    expect(seenInit?.headers).toEqual({
+      'content-type': 'application/json',
+      'x-tenjin-client': 'tenjin-cli/0.1.0',
+    });
+    expect(seenInit?.body).toBe(JSON.stringify({ q: 'hello' }));
+  });
+
+  it('defaults to GET with no body when method/body are omitted', async () => {
+    let seenInit: RequestInit | undefined;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      seenInit = init;
+      return new Response(JSON.stringify({ ok: 1 }), { status: 200 });
+    };
+    await fetchResponse('https://x.example/api', { timeoutMs: 1000, fetchImpl });
+    expect(seenInit?.method).toBe('GET');
+    expect(seenInit?.body).toBeUndefined();
+  });
+
+  it('reports a timeout as kind:timeout on a hanging request', async () => {
+    const hangingFetch: typeof fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('The operation was aborted', 'AbortError')),
+        );
+      });
+    const res = await fetchResponse('https://x.example/api', {
+      timeoutMs: 10,
+      fetchImpl: hangingFetch,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'timeout' });
+  });
+
+  it('flags a non-JSON body as invalid-json, carrying the status', async () => {
+    const fetchImpl: typeof fetch = async () => new Response('not json{', { status: 402 });
+    const res = await fetchResponse('https://x.example/api', { timeoutMs: 1000, fetchImpl });
+    expect(res).toMatchObject({ ok: false, kind: 'invalid-json', status: 402 });
+  });
+
+  it('flags a rejected fetch as a network failure', async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw new TypeError('fetch failed');
+    };
+    const res = await fetchResponse('https://x.example/api', { timeoutMs: 1000, fetchImpl });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
   });
 });
 

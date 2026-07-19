@@ -73,6 +73,16 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
     diagnostics(): Promise<WalletDiagnostics> {
       return localWalletDiagnostics(deps);
     },
+    async authorizeSpend(req) {
+      const { loadConfig } = await import('../config');
+      const { evaluateSpend, spentInWindow } = await import('./policy');
+      const config = await loadConfig(deps.dir);
+      return evaluateSpend(config, req, await spentInWindow(deps.dir));
+    },
+    async recordSpend(req) {
+      const { appendSpend } = await import('./policy');
+      await appendSpend(deps.dir, req);
+    },
   };
 }
 

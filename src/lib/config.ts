@@ -20,6 +20,12 @@ export const ConfigSchema = z.object({
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
   rpcUrl: z.url(),
+  /**
+   * Evaluation-cohort opt-in (spec 09 §3): when true, lookup sends
+   * X-Tenjin-Eval-Cohort: 1 and the server stores the generalized question for
+   * 90 days. Off by default; no query text is retained server-side without it.
+   */
+  evalCohort: z.boolean(),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -34,6 +40,7 @@ export const CONFIG_DEFAULTS: Config = {
   allowlistCreators: [],
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
+  evalCohort: false,
 };
 
 export const CONFIG_KEYS = Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>;
@@ -94,6 +101,7 @@ export interface EffectiveSettings {
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
+  evalCohort: ResolvedSetting<boolean>;
 }
 
 /** CLI flags that participate in settings precedence (global `--base-url`). */
@@ -122,6 +130,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
+    evalCohort: fileOrDefault('evalCohort', config),
   };
 }
 

@@ -36,6 +36,8 @@ export interface CheckResult {
 interface BuiltCheck {
   result: CheckResult;
   failCode?: ErrorCode;
+  /** Set by api-contract when the fetched OpenAPI document lacks the A2 lookup path. */
+  lookupMissing?: boolean;
 }
 
 export interface DoctorDeps {
@@ -58,10 +60,12 @@ export async function runDoctor(
   const settings = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env });
   const baseUrl = settings.baseUrl.value;
 
+  const apiContract = await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl);
   const built: BuiltCheck[] = [
     checkNode(),
     configCheck,
-    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    apiContract,
+    { result: lookupContractCheck(apiContract) },
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
   ];
 
@@ -182,7 +186,45 @@ async function checkApiContract(
       required: true,
       detail: `Tenjin API ${version} at ${baseUrl}`,
     },
+    ...(hasLookupPath(res.json) ? {} : { lookupMissing: true }),
   };
+}
+
+/**
+ * The B2 lookup contract, derived from the SAME openapi fetch as api-contract
+ * (no second request). Warn-level: an older deployment without /api/agent/lookup
+ * still serves reads and buys; only `tenjin lookup` would 404 against it.
+ */
+function lookupContractCheck(apiContract: BuiltCheck): CheckResult {
+  if (apiContract.result.status !== 'ok') {
+    return {
+      name: 'lookup-contract',
+      status: 'warn',
+      required: false,
+      detail: 'Skipped: the OpenAPI document was not readable',
+    };
+  }
+  if (apiContract.lookupMissing === true) {
+    return {
+      name: 'lookup-contract',
+      status: 'warn',
+      required: false,
+      detail: 'This deployment does not advertise POST /api/agent/lookup',
+      fix: 'Point --base-url at a deployment with the A2 lookup contract, or skip `tenjin lookup`.',
+    };
+  }
+  return {
+    name: 'lookup-contract',
+    status: 'ok',
+    required: false,
+    detail: 'POST /api/agent/lookup is advertised',
+  };
+}
+
+function hasLookupPath(json: unknown): boolean {
+  if (!isRecord(json)) return false;
+  const paths = json.paths;
+  return isRecord(paths) && isRecord(paths['/api/agent/lookup']);
 }
 
 async function checkReadPath(
@@ -312,6 +354,8 @@ function walletWarn(err: unknown): CheckResult {
  * must never fail doctor. viem loads only here, via a lazy import, so a doctor
  * run without a wallet never parses the viem chunk.
  */
+const POCKET_MONEY_ATOMIC = 20_000_000n;
+
 async function checkBalance(address: string, rpcUrl: string): Promise<CheckResult> {
   try {
     const { getUsdcBalance } = await import('../lib/usdc');
@@ -326,6 +370,18 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
       };
     }
     const money = toMoney(balance.toString());
+    // Pocket-money posture (D34): the balance, not key secrecy, is the real
+    // security boundary of a hot agent wallet, so holding much more than you
+    // plan to spend is the warning condition.
+    if (balance > POCKET_MONEY_ATOMIC) {
+      return {
+        name: 'balance',
+        status: 'warn',
+        required: false,
+        detail: `Balance ${money.usd} USDC exceeds the ~$20 pocket-money posture`,
+        fix: 'Keep only what you plan to spend in this wallet; sweep the rest to a wallet you control.',
+      };
+    }
     return {
       name: 'balance',
       status: 'ok',

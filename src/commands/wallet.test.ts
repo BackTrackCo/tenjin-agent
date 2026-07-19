@@ -96,6 +96,12 @@ function fakeRemoteProvider(
     getSigner,
     // A remote provider has no local file: no path, no perms/shadow warnings.
     diagnostics: async () => ({ warnings: [] }),
+    authorizeSpend: async () => {
+      throw new Error('authorizeSpend must not be called by show/balance');
+    },
+    recordSpend: async () => {
+      throw new Error('recordSpend must not be called by show/balance');
+    },
   };
   return { provider, getSigner };
 }

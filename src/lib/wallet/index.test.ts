@@ -20,6 +20,12 @@ const stubProvider = (describe: WalletProvider['describe']): WalletProvider => (
     throw new Error('unused');
   },
   diagnostics: async () => ({ warnings: [] }),
+  authorizeSpend: async () => {
+    throw new Error('unused');
+  },
+  recordSpend: async () => {
+    throw new Error('unused');
+  },
 });
 
 describe('resolveWalletProvider', () => {

@@ -66,10 +66,39 @@ export interface TenjinSigner {
   signTypedData(args: TypedDataDefinition): Promise<Hex>;
 }
 
+/**
+ * One proposed spend, evaluated by the provider BEFORE any signing happens.
+ * Policy enforcement lives here (D35): the local provider evaluates the config
+ * guardrails, and a hosted provider can refuse server-side through the same
+ * seam. `explicitApproval` marks a caller-carried human/agent approval
+ * (`--yes`), which substitutes for the confirm step but never for the budget.
+ */
+export interface SpendRequest {
+  amountAtomic: string;
+  creatorHandle?: string;
+  resourceId?: string;
+  title?: string;
+  explicitApproval: boolean;
+}
+
+export interface SpendDecision {
+  /**
+   * `allow`: within policy, proceed with no prompt. `confirm`: out of the quiet
+   * policy but permissible with an interactive confirmation. `refuse`: never
+   * proceed (budget exhausted), regardless of confirmation.
+   */
+  decision: 'allow' | 'confirm' | 'refuse';
+  reasons: string[];
+}
+
 export interface WalletProvider {
   id: string;
   describe(): Promise<WalletDescription>;
   getSigner(): Promise<TenjinSigner>;
   /** Provider-owned custody warnings; keyless, safe for `show`/`doctor`. */
   diagnostics(): Promise<WalletDiagnostics>;
+  /** Evaluate a proposed spend against policy. Never signs, never prompts. */
+  authorizeSpend(req: SpendRequest): Promise<SpendDecision>;
+  /** Record a settled spend into the session ledger (after settlement succeeds). */
+  recordSpend(req: { amountAtomic: string; resourceId?: string }): Promise<void>;
 }

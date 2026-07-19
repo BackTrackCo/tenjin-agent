@@ -17,9 +17,9 @@ already been produced, read free essays, buy valuable answers with USDC, and
 publish their own reusable research. This repo is the home of the `tenjin-cli`
 npm package and, soon, the Claude Code plugin and agent skills that wrap it.
 
-> **Status: early preview.** The CLI ships `doctor`, `config`, and `wallet`
-> today; `lookup`, `inspect`, `buy`, `outcome`, and `publish` are landing next.
-> Everything under "zero install" below is complete and live now; start there.
+> **Status: early preview.** The CLI ships `doctor`, `config`, `wallet`,
+> `lookup`, `inspect`, `buy`, and `outcome` today; `publish` and `install` are
+> landing next. Everything under "zero install" below is complete and live now.
 
 ## Use Tenjin today, zero install
 
@@ -94,14 +94,29 @@ tenjin doctor                    # verify Node floor, API reachability, contract
 
 Shipping today:
 
-| Command                                 | Purpose                                                              |
-| --------------------------------------- | -------------------------------------------------------------------- |
-| `tenjin doctor`                         | Environment, API reachability, contract, and wallet checks           |
-| `tenjin config [get\|set]`              | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists |
-| `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                  |
+| Command                                             | Purpose                                                                            |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `tenjin lookup "<question>"`                        | Ask the marketplace for paid answers; honest `MISS` is a free, successful result   |
+| `tenjin inspect <resource>`                         | Preview price, freshness, and entitlement from the 402 challenge; never pays       |
+| `tenjin buy <resource> [--max-price <usd>] [--yes]` | Entitlement re-check, x402 exact payment, delivery to `~/.tenjin/library/`         |
+| `tenjin outcome --last --status used`               | Close the loop: report `used`, `rejected`, `regenerated`, ... for a lookup         |
+| `tenjin doctor`                                     | Environment, API reachability, contract, lookup-contract, and wallet checks        |
+| `tenjin config [get\|set]`                          | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists, `evalCohort` |
+| `tenjin wallet [create\|show\|balance]`             | Local Base wallet; the key never leaves the machine                                |
 
-Next: `lookup` / `inspect` / `buy` / `outcome` against the marketplace lookup
-API, `publish --draft`, an `install` command that auto-wires Claude Code and
+The lookup question must be **generalized public text**: derive the smallest
+public phrasing of your task and never include secrets or private context. By
+default the server stores no query text at all; `tenjin config set evalCohort
+true` opts into 90-day retention of the question for retrieval evaluation.
+
+`buy` re-checks entitlement first (a returning buyer never double-pays), refuses
+anything above `--max-price` (never bypassed, not even by `--yes`), enforces the
+configured spend policy in the wallet-provider layer, and writes the body to
+`~/.tenjin/library/<resourceId>/<slug>.md`. Stdout carries the path, price paid,
+settlement hash, and a heading outline, not the body (`--print-body` or
+`--sections <tokens>` opt in). BYO key is `TENJIN_WALLET_KEY` env only.
+
+Next: `publish --draft`, an `install` command that auto-wires Claude Code and
 Codex, a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
 stdio server over the same core).
 
@@ -109,8 +124,8 @@ stdio server over the same core).
 
 Every invocation prints exactly one JSON envelope to stdout
 (`{schemaVersion, command, ok, data | error}`); human rendering goes to stderr
-only. Exit codes: `0` success, `1` runtime/network, `2` usage, `3` policy
-refusal, `4` payment failure (reserved).
+only. Exit codes: `0` success (including an honest `MISS`), `1` runtime/network,
+`2` usage, `3` policy refusal, `4` payment failure after approval.
 
 ### Safety model
 
