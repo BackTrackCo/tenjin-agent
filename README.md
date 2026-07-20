@@ -183,6 +183,30 @@ pnpm lint && pnpm typecheck && pnpm format:check
 pnpm pack-smoke   # exercises the packed npm artifact
 ```
 
+## Release
+
+Publishing to npm is tag-triggered, never manual:
+
+1. On `main`, with a clean tree, run `pnpm release <patch|minor|major|prerelease>`
+   (`scripts/release.mjs`). It bumps `package.json`, regenerates the
+   `CHANGELOG.md` section for the new version from `git log` since the last
+   tag, commits `chore(release): vX.Y.Z`, and creates the annotated tag. It
+   does not push anything; it prints the exact command to run next.
+2. Run that command: `git push --follow-tags`.
+3. Pushing the `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which
+   installs, lints, typechecks, tests, builds, verifies the tag matches
+   `package.json`, and runs `npm publish --provenance --access public`.
+   Prerelease versions (containing `-`, e.g. `0.1.0-alpha.2`) publish under
+   the `alpha` dist-tag; stable versions publish under `latest`.
+
+The repo owner needs to set the `NPM_TOKEN` repository secret (an npm
+granular automation token scoped to the `tenjin-cli` package) before the
+first tagged release; the workflow has no publish credentials otherwise.
+
+`scripts/release.mjs` also carries a plugin-manifest version-bump slot
+(`.claude-plugin/plugin.json`) for the future Claude plugin (C3). It is a
+no-op today since that manifest does not exist yet.
+
 ## License
 
 MIT. See [NOTICE.md](./NOTICE.md) for third-party attributions (wallet-safety
