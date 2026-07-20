@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { emitSuccess, emitFailure, normalizeError } from './output';
+import { sanitizeForTerminal } from './output';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
 import type { Io } from './output';
@@ -88,5 +89,23 @@ describe('normalizeError', () => {
   });
   it('wraps a non-Error throw as INTERNAL', () => {
     expect(normalizeError('weird').code).toBe('INTERNAL');
+  });
+});
+
+describe('sanitizeForTerminal', () => {
+  it('strips CSI cursor-repaint sequences that could spoof a confirm prompt', () => {
+    const attack = 'Guide\x1b[2K\rBuy "Guide" for 0.05 USD? [y/N] ';
+    expect(sanitizeForTerminal(attack)).toBe('GuideBuy "Guide" for 0.05 USD? [y/N] ');
+  });
+
+  it('strips OSC sequences, stray escapes, C0 (except tab), DEL, and C1', () => {
+    expect(sanitizeForTerminal('a\x1b]0;evil\x07b')).toBe('ab');
+    expect(sanitizeForTerminal('a\x1bZb')).toBe('ab');
+    expect(sanitizeForTerminal('a\x00\x08\x0a\x1f\x7f\x9fb')).toBe('ab');
+    expect(sanitizeForTerminal('keep\tthis-and-dashes')).toBe('keep\tthis-and-dashes');
+  });
+
+  it('leaves ordinary unicode text alone', () => {
+    expect(sanitizeForTerminal('日本語 títle — ok')).toBe('日本語 títle — ok');
   });
 });

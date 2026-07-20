@@ -11,6 +11,8 @@ export interface FetchJsonOptions {
   timeoutMs: number;
   /** Override global fetch (tests inject a stub returning canned Responses). */
   fetchImpl?: typeof fetch;
+  /** Optional request headers (doctor sends the X-Tenjin-Client label). */
+  headers?: Record<string, string>;
 }
 
 /** A successful 2xx whose body parsed as JSON. */
@@ -52,7 +54,10 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
   try {
     let res: Response;
     try {
-      res = await doFetch(url, { signal: controller.signal });
+      res = await doFetch(url, {
+        signal: controller.signal,
+        ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
+      });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
       // from an organic one so the caller can say "timed out" rather than a raw
@@ -118,6 +123,103 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
     kind: 'timeout',
     message: `Request to ${url} timed out after ${timeoutMs}ms`,
   };
+}
+
+/**
+ * A full HTTP round trip that surfaces the STATUS, headers, and best-effort JSON
+ * body for ANY status. Unlike fetchJson (2xx-only), the B2 read/pay flow needs
+ * the body on a 402 (the leak-safe preview) and a 409 (the owned-re-pay gate),
+ * and lookup/outcome need a 4xx validation envelope. A transport/timeout failure
+ * still returns the discriminated FetchJsonFailure so callers map it uniformly.
+ */
+export interface HttpRequestOptions {
+  method?: 'GET' | 'POST';
+  timeoutMs: number;
+  headers?: Record<string, string>;
+  /** A JSON body (POST); serialized with a content-type header set automatically. */
+  jsonBody?: unknown;
+  fetchImpl?: typeof fetch;
+}
+
+export interface HttpResponse {
+  ok: true;
+  status: number;
+  /** Case-insensitive header lookup over the response. */
+  header(name: string): string | undefined;
+  /** Parsed JSON body, or undefined when the body was empty or not JSON. */
+  json: unknown;
+  requestId?: string;
+}
+
+export type HttpResult = HttpResponse | FetchJsonFailure;
+
+export async function httpRequest(url: string, opts: HttpRequestOptions): Promise<HttpResult> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, opts.timeoutMs);
+
+  try {
+    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+    let body: string | undefined;
+    if (opts.jsonBody !== undefined) {
+      body = JSON.stringify(opts.jsonBody);
+      headers['content-type'] = 'application/json';
+    }
+    if (opts.method === 'POST' || body !== undefined) headers['accept'] ??= 'application/json';
+
+    let res: Response;
+    try {
+      res = await doFetch(url, {
+        method: opts.method ?? 'GET',
+        headers,
+        body,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      return timedOut
+        ? timeoutFailure(url, opts.timeoutMs)
+        : { ok: false, kind: 'network', message: `Request to ${url} failed: ${errorMessage(err)}` };
+    }
+
+    const requestId = res.headers.get('x-request-id') ?? undefined;
+    // Read the raw text once; parse best-effort. A non-JSON body (empty 202, an
+    // HTML error page) yields `undefined` rather than a thrown parse, because a
+    // 402/409 caller keys off the STATUS and only some statuses carry JSON.
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      if (timedOut) return timeoutFailure(url, opts.timeoutMs);
+      return {
+        ok: false,
+        kind: 'network',
+        status: res.status,
+        ...(requestId !== undefined ? { requestId } : {}),
+        message: `Request to ${url} failed while reading the response body: ${errorMessage(err)}`,
+      };
+    }
+    let json: unknown;
+    if (text.length > 0) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = undefined;
+      }
+    }
+    return {
+      ok: true,
+      status: res.status,
+      header: (name) => res.headers.get(name) ?? undefined,
+      json,
+      ...(requestId !== undefined ? { requestId } : {}),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface FailureToCliErrorOptions {

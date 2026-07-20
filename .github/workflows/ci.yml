@@ -35,7 +35,9 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      # check = build + test.
+      # check = build + test. Offline contract pins (src/contract.test.ts against
+      # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
+      # (scheduled + dispatch) so a server blip can never red an unrelated PR.
       - run: pnpm run check
       # Blocking supply-chain gate (fails on high/critical). Runs after
       # build/test so an advisory/network flake can't mask their signal.

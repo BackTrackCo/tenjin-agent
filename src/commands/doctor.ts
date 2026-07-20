@@ -2,6 +2,7 @@ import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { fetchJson } from '../lib/http';
+import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -26,6 +27,9 @@ export interface CheckResult {
   detail: string;
   fix?: string;
 }
+
+/** ~$20 in atomic USDC (6 decimals). Above this, the pocket-money wallet warns. */
+const POCKET_MONEY_CEILING_ATOMIC = 20_000_000n;
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
@@ -63,6 +67,7 @@ export async function runDoctor(
     configCheck,
     await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    await checkLookupContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -144,7 +149,11 @@ async function checkApiContract(
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    headers: { 'x-tenjin-client': CLIENT_HEADER },
+  });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -185,6 +194,59 @@ async function checkApiContract(
   };
 }
 
+/**
+ * WARN-level (never fails doctor): is the A2 lookup endpoint advertised in the
+ * OpenAPI doc? Absent means the deployment predates A2 (the buy/lookup path will
+ * not work against it yet). Warn-only because doctor's job is a working READ path,
+ * and lookup is additive.
+ */
+async function checkLookupContract(
+  baseUrl: string,
+  timeoutMs: number,
+  fetchImpl?: typeof fetch,
+): Promise<BuiltCheck> {
+  const url = `${trimSlash(baseUrl)}/openapi.json`;
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    headers: { 'x-tenjin-client': CLIENT_HEADER },
+  });
+  if (!res.ok) {
+    return {
+      result: {
+        name: 'lookup-contract',
+        status: 'warn',
+        required: false,
+        detail: `Could not confirm the lookup endpoint at ${url}`,
+        fix: 'Check --base-url; lookup/buy need the A2 endpoints deployed.',
+      },
+    };
+  }
+  const present = hasLookupPath(res.json);
+  return {
+    result: present
+      ? {
+          name: 'lookup-contract',
+          status: 'ok',
+          required: false,
+          detail: 'Lookup endpoint advertised',
+        }
+      : {
+          name: 'lookup-contract',
+          status: 'warn',
+          required: false,
+          detail: 'This deployment does not advertise POST /api/agent/lookup (A2 not deployed)',
+          fix: 'lookup/buy need A2 deployed; point --base-url at a deploy that has it.',
+        },
+  };
+}
+
+function hasLookupPath(json: unknown): boolean {
+  if (!isRecord(json)) return false;
+  const paths = json.paths;
+  return isRecord(paths) && '/api/agent/lookup' in paths;
+}
+
 async function checkReadPath(
   baseUrl: string,
   timeoutMs: number,
@@ -195,7 +257,11 @@ async function checkReadPath(
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    headers: { 'x-tenjin-client': CLIENT_HEADER },
+  });
   if (!res.ok) {
     return {
       result: {
@@ -326,6 +392,17 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
       };
     }
     const money = toMoney(balance.toString());
+    // Pocket-money posture (roadmap B2): a plaintext-adjacent local key should
+    // hold only small change, so a balance over ~$20 is a warn, not an error.
+    if (balance > POCKET_MONEY_CEILING_ATOMIC) {
+      return {
+        name: 'balance',
+        status: 'warn',
+        required: false,
+        detail: `Balance ${money.usd} USDC is above the ~$20 pocket-money ceiling`,
+        fix: 'Keep only small change in the CLI wallet; sweep the excess to cold storage.',
+      };
+    }
     return {
       name: 'balance',
       status: 'ok',

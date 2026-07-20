@@ -17,7 +17,13 @@ import type { WalletProvider } from '../lib/wallet';
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
 const balanceMock = vi.mocked(getUsdcBalance);
 
-const OPENAPI_OK = { openapi: '3.1.0', info: { title: 'Tenjin', version: '0.1.0' } };
+const OPENAPI_OK = {
+  openapi: '3.1.0',
+  info: { title: 'Tenjin', version: '0.1.0' },
+  // A healthy deploy advertises the A2 lookup endpoint, so the lookup-contract
+  // check is ok (no extra fix line): "all required checks green" stays true.
+  paths: { '/api/agent/lookup': {} },
+};
 const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // doctor reads the wallet file's cleartext top-level address without decrypting,
 // so the fixture just needs a real address; PRIVATE_KEY is kept only to assert it
@@ -100,7 +106,19 @@ describe('runDoctor — passing outcomes', () => {
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
+    expect(find(data.checks, 'lookup-contract').status).toBe('ok');
     expect(res.humanLines).toHaveLength(data.checks.length + 1); // wallet warn adds a fix line
+  });
+
+  it('lookup-contract warns (never fails doctor) when the deploy omits the lookup path', async () => {
+    const noLookup = routeFetch({
+      '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
+      '/api/articles': { body: ARTICLES_OK },
+    });
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: noLookup });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    expect(data.status).toBe('pass'); // still passes: lookup-contract is not required
+    expect(find(data.checks, 'lookup-contract').status).toBe('warn');
   });
 
   it('wallet present but not 0600: warns on perms, still passes', async () => {

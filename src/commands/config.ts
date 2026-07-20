@@ -17,7 +17,7 @@ import type { CommandContext, CommandResult } from '../context';
  * so an agent reads the dollar amount without re-parsing the string.
  */
 interface RenderedValue {
-  value: Money | string | string[];
+  value: Money | string | string[] | boolean;
   threshold?: Money;
 }
 interface RenderedSetting extends RenderedValue {
@@ -86,14 +86,14 @@ function assertKey(key: string): keyof Config {
 
 function renderSetting(
   key: keyof Config,
-  stored: string | string[],
+  stored: string | string[] | boolean,
   source: Provenance,
 ): RenderedSetting {
   return { ...renderValue(key, stored), source };
 }
 
-function renderValue(key: keyof Config, stored: string | string[]): RenderedValue {
-  if (Array.isArray(stored)) return { value: stored }; // allowlistCreators
+function renderValue(key: keyof Config, stored: string | string[] | boolean): RenderedValue {
+  if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'confirm' && stored.startsWith(CONFIRM_ABOVE)) {
     return { value: stored, threshold: toMoney(stored.slice(CONFIRM_ABOVE.length)) };
@@ -102,7 +102,7 @@ function renderValue(key: keyof Config, stored: string | string[]): RenderedValu
 }
 
 /** Per-key edge parsing. Returns the persisted form; throws USAGE on bad input. */
-function parseValue(key: keyof Config, value: string): string | string[] {
+function parseValue(key: keyof Config, value: string): string | string[] | boolean {
   switch (key) {
     case 'maxAutoSpend':
     case 'sessionBudget':
@@ -114,7 +114,17 @@ function parseValue(key: keyof Config, value: string): string | string[] {
     case 'baseUrl':
     case 'rpcUrl':
       return parseHttpUrl(value);
+    case 'evalCohort':
+      return parseBoolean(value);
   }
+}
+
+function parseBoolean(value: string): boolean {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new CliError('USAGE', `Invalid boolean value: ${JSON.stringify(value)}`, {
+    fix: 'Use "true" or "false".',
+  });
 }
 
 function parseConfirm(value: string): string {
@@ -172,7 +182,11 @@ function parseHttpUrl(value: string): string {
  * drops the other's update (worst case, a zeroed maxAutoSpend resurrected). The
  * data dir is ensured first so the lock's mkdir has a parent on a fresh install.
  */
-async function persist(dir: string, key: keyof Config, stored: string | string[]): Promise<void> {
+async function persist(
+  dir: string,
+  key: keyof Config,
+  stored: string | string[] | boolean,
+): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const lockPath = `${configPath(dir)}.lock`;
   try {
@@ -206,6 +220,7 @@ function formatLine(key: string, entry: RenderedSetting): string {
 function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
+  if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   if (entry.threshold !== undefined) return `above ${entry.threshold.usd} USD`; // confirm
   return value; // 'always', baseUrl, rpcUrl
