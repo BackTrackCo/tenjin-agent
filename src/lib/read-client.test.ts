@@ -51,6 +51,16 @@ describe('fetchRead', () => {
     });
   });
 
+  it('maps a 429 on the paid-read path to RATE_LIMITED with retryAfterSeconds (backoff, not outage)', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => new Response('{}', { status: 429, headers: { 'retry-after': '30' } }),
+    });
+    await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      details: { retryAfterSeconds: 30 },
+    });
+  });
+
   it('flags a 402 with no PAYMENT-REQUIRED header as a contract mismatch', async () => {
     const { fetch } = makeReadServer({ plain: () => new Response('{}', { status: 402 }) });
     await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });

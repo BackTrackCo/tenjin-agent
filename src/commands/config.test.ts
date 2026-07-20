@@ -61,6 +61,16 @@ describe('runConfigList', () => {
     });
   });
 
+  it('preserves an unknown key (e.g. a newer CLI block) through set', async () => {
+    // An older binary must not strip a config block a newer CLI wrote (e.g. B3's
+    // publish.*): set a known key and assert the unknown one still round-trips.
+    await writeFile(configFile(), JSON.stringify({ publish: { visibility: 'unlisted' } }));
+    await runConfigSet({ key: 'confirm', value: 'always' }, makeCtx());
+    const raw = (await readRawFile()) as Record<string, unknown>;
+    expect(raw.publish).toEqual({ visibility: 'unlisted' });
+    expect(raw.confirm).toBe('always');
+  });
+
   describe('baseUrl precedence', () => {
     it('reads file provenance', async () => {
       await writeFile(configFile(), JSON.stringify({ baseUrl: 'https://file.example' }));

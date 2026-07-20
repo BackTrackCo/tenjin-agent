@@ -29,8 +29,14 @@ export const ConfigSchema = z.object({
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
-/** Values as they may appear in config.json — every key optional; absent = default. */
-export const RawConfigSchema = ConfigSchema.partial();
+/**
+ * Values as they may appear in config.json — every known key optional; absent =
+ * default. `.passthrough()` PRESERVES unknown keys through load + persist: without
+ * it an older binary's `config set` would strip (and re-serialize away) any newer
+ * block a later CLI wrote, e.g. B3's `publish.*`. Known keys are still validated;
+ * unknown keys ride along untouched.
+ */
+export const RawConfigSchema = ConfigSchema.partial().passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
 
 export const CONFIG_DEFAULTS: Config = {

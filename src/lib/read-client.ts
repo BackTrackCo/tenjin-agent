@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import type { PaymentRequired } from '@x402/core/types';
 import { CliError } from './errors';
+import { rateLimitError } from './agent-api';
 import { httpRequest } from './http';
 import { CLIENT_HEADER } from './client-meta';
 import { SIWX_HEADER } from './siwx';
@@ -183,6 +184,12 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
       fix: 'Check the handle/slug or resource id.',
     });
   }
+
+  // 429 on the paid-read path is a recoverable pause, not an outage: surface
+  // RATE_LIMITED + retryAfterSeconds like postLookup/postOutcomes do, so a looping
+  // agent (the caller most likely to hit this) can back off instead of treating it
+  // as API_UNREACHABLE.
+  if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
 
   throw new CliError(
     'API_UNREACHABLE',
