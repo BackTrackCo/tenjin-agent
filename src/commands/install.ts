@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile, readdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { delimiter, join, relative } from 'node:path';
@@ -315,27 +315,36 @@ function treesEqual(a: Map<string, string>, b: Map<string, string> | null): bool
 }
 
 /**
- * Ensure the AGENTS.md pointer line is present exactly once. Target selection
- * follows what Codex actually reads: prefer an existing ~/.agents/AGENTS.md, else
- * an existing ~/.codex/AGENTS.md, else create the one whose home dir exists, else
- * fall back to ~/.agents/AGENTS.md alongside the shared skills.
+ * Ensure the AGENTS.md pointer line is present exactly once. Append-once is GLOBAL
+ * across both locations Codex/harnesses read (~/.agents/AGENTS.md and Codex's own
+ * ~/.codex/AGENTS.md): if either already carries the marker we stop, so a pointer
+ * already in ~/.codex/AGENTS.md is never duplicated into a later-created
+ * ~/.agents/AGENTS.md. When neither has it, target selection follows what Codex
+ * actually reads: prefer an existing ~/.agents/AGENTS.md, else an existing
+ * ~/.codex/AGENTS.md, else create the one whose home dir exists, else fall back to
+ * ~/.agents/AGENTS.md alongside the shared skills.
  */
 async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsMdResult> {
-  const path = agentsMdPath(plan.home);
+  const shared = join(plan.home, '.agents', 'AGENTS.md');
+  const codex = join(plan.home, '.codex', 'AGENTS.md');
   const line = `${AGENTS_MARKER} Tenjin agent skills are installed at ${plan.skillsDir} (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
-  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
-  if (existing !== null && existing.includes(AGENTS_MARKER)) {
-    return { path, status: 'already-present' };
+  for (const path of [shared, codex]) {
+    if (existsSync(path) && (await readFile(path, 'utf8')).includes(AGENTS_MARKER)) {
+      return { path, status: 'already-present' };
+    }
   }
+
+  const path = chooseAgentsMdPath(plan.home);
   if (dryRun) return { path, status: 'would-append' };
 
+  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
   const prefix = existing === null || existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
   await writeFileAtomic(path, `${existing ?? ''}${prefix}${line}\n`);
   return { path, status: 'appended' };
 }
 
-function agentsMdPath(home: string): string {
+function chooseAgentsMdPath(home: string): string {
   const shared = join(home, '.agents', 'AGENTS.md');
   const codex = join(home, '.codex', 'AGENTS.md');
   if (existsSync(shared)) return shared;
@@ -346,13 +355,33 @@ function agentsMdPath(home: string): string {
 
 // --- PATH probe ------------------------------------------------------------------
 
+/**
+ * Is `bin` a real executable file on PATH? Gates on statSync().isFile() so a
+ * same-named DIRECTORY on PATH never false-positives as the binary, and probes the
+ * PATHEXT extensions on win32 where the real binary is `claude.cmd`/`claude.exe`
+ * rather than a bare `claude`.
+ */
 function onPath(bin: string, env: NodeJS.ProcessEnv): boolean {
   const raw = env.PATH ?? '';
+  const exts =
+    process.platform === 'win32'
+      ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e.length > 0)]
+      : [''];
   for (const part of raw.split(delimiter)) {
     if (part.length === 0) continue;
-    if (existsSync(join(part, bin))) return true;
+    for (const ext of exts) {
+      if (isFile(join(part, bin + ext))) return true;
+    }
   }
   return false;
+}
+
+function isFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // --- Human rendering -------------------------------------------------------------

@@ -233,6 +233,112 @@ describe('runInstall: canonical overwrite', () => {
     const written = await readFile(join(dest, 'SKILL.md'), 'utf8');
     expect(written).toBe(source);
   });
+
+  it('removes stray local files so the packaged copy is exactly what lands', async () => {
+    const dest = join(home, '.claude', 'skills', 'tenjin');
+    await mkdir(dest, { recursive: true });
+    await writeFile(join(dest, 'SKILL.md'), 'stale\n');
+    await writeFile(join(dest, 'stray.txt'), 'orphan\n');
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(existsSync(join(dest, 'stray.txt'))).toBe(false);
+    expect(existsSync(join(dest, 'SKILL.md'))).toBe(true);
+  });
+
+  it('dry-run over a drifted copy reports would-update and warns, writing nothing', async () => {
+    const dest = join(home, '.claude', 'skills', 'tenjin');
+    await mkdir(dest, { recursive: true });
+    await writeFile(join(dest, 'SKILL.md'), 'stale\n');
+
+    const { data: d } = await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('would-update');
+    expect(h.warnings.length).toBeGreaterThan(0);
+    expect(await readFile(join(dest, 'SKILL.md'), 'utf8')).toBe('stale\n');
+  });
+});
+
+describe('runInstall: Codex AGENTS.md target', () => {
+  it('writes to ~/.codex/AGENTS.md when the codex home exists and ~/.agents/AGENTS.md does not', async () => {
+    await mkdir(join(home, '.codex'), { recursive: true });
+
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.agentsMd?.path).toBe(join(home, '.codex', 'AGENTS.md'));
+    expect(h.agentsMd?.status).toBe('appended');
+    const codexAgents = await readFile(join(home, '.codex', 'AGENTS.md'), 'utf8');
+    expect(codexAgents.split(MARKER).length - 1).toBe(1);
+    // The shared file was never touched.
+    expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
+
+    // Re-run dedupes in ~/.codex/AGENTS.md.
+    const again = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(again.data).harnesses[0]!.agentsMd?.status).toBe('already-present');
+    const after = await readFile(join(home, '.codex', 'AGENTS.md'), 'utf8');
+    expect(after.split(MARKER).length - 1).toBe(1);
+  });
+
+  it('prefers an existing ~/.agents/AGENTS.md over ~/.codex/AGENTS.md', async () => {
+    await mkdir(join(home, '.codex'), { recursive: true });
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), '# shared\n');
+
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.agentsMd?.path).toBe(join(home, '.agents', 'AGENTS.md'));
+    expect(existsSync(join(home, '.codex', 'AGENTS.md'))).toBe(false);
+    const shared = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    expect(shared.startsWith('# shared\n')).toBe(true);
+    expect(shared.split(MARKER).length - 1).toBe(1);
+  });
+
+  it('does not duplicate the pointer across locations: a marker in ~/.codex stops a later ~/.agents append', async () => {
+    // First install with only ~/.codex present lands the marker there.
+    await mkdir(join(home, '.codex'), { recursive: true });
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(existsSync(join(home, '.codex', 'AGENTS.md'))).toBe(true);
+
+    // Now ~/.agents/AGENTS.md appears (empty). The global append-once check must
+    // see the marker already in ~/.codex and NOT append a second copy anywhere.
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), '# later\n');
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
+
+    const shared = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    expect(shared.split(MARKER).length - 1).toBe(0);
+    const codex = await readFile(join(home, '.codex', 'AGENTS.md'), 'utf8');
+    expect(codex.split(MARKER).length - 1).toBe(1);
+  });
+});
+
+describe('runInstall: default PATH binary probe', () => {
+  it('detects a real file on PATH but ignores a same-named directory', async () => {
+    const bin = await mkdtemp(join(tmpdir(), 'tenjin-bin-'));
+    try {
+      // A DIRECTORY named claude on PATH must not count as the binary.
+      await mkdir(join(bin, 'claude'), { recursive: true });
+      const notDetected = await runInstall(
+        {},
+        makeCtx(),
+        deps({ which: undefined, env: { PATH: bin } }),
+      );
+      expect(asData(notDetected.data).harnesses[0]!.harness).toBe('shared');
+
+      // A real FILE named codex does count.
+      await writeFile(join(bin, 'codex'), '#!/bin/sh\n');
+      const detected = await runInstall(
+        {},
+        makeCtx(),
+        deps({ which: undefined, env: { PATH: bin } }),
+      );
+      const names = asData(detected.data).harnesses.map((h) => h.harness);
+      expect(names).toContain('codex');
+      expect(names).not.toContain('claude');
+    } finally {
+      await rm(bin, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('runInstall: doctor as the final step', () => {
