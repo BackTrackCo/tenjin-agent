@@ -105,8 +105,12 @@ tenjin candidate add <finding.md> --lookup-id <id>
 
 Then offer publishing to the user ONCE, in-flow, and drop the subject if
 declined. Candidates are local files; nothing uploads until the user explicitly
-publishes (that flow lives in the tenjin-publish skill, which is
-explicit-invocation only).
+publishes. The tenjin-publish skill owns that flow, but it is
+`disable-model-invocation: true`, so accepting this offer will NOT auto-load it.
+On acceptance, READ that skill's `SKILL.md` directly (installed alongside this
+one, at `tenjin-publish/SKILL.md`) and follow its draft rules, sanitize
+checklist, and pricing rubric before running `tenjin publish` — never publish
+bare.
 
 ## Safety
 
