@@ -10,13 +10,17 @@ disable-model-invocation: true
 
 # Tenjin publish: sell and maintain reusable answers
 
-**Invocation guard.** This skill writes to a public market and spends the
-user's money-earning reputation. Run it ONLY on an explicit user request (or an
-accepted in-flow offer for a parked candidate). Never invoke it as a side
-effect of answering a question. Publishing is OFF by default and every publish
-is user-initiated.
+**When the user asks to publish, publish.** This skill is explicit-invocation
+only (the frontmatter's `disable-model-invocation` enforces it); the CLI's
+redaction/rights scan and `publish.mode` are the real gates, not a checklist to
+hold the user to. Publishing is free and an incomplete card still publishes as a
+browse-only piece.
 
-## What is worth publishing (all six, or don't)
+## What makes a piece sell
+
+Not a permission gate: publishing is never blocked on these. They are what makes
+a piece findable and worth buying, so use them to shape the card and price. The
+more that hold, the higher the price the work supports:
 
 1. A stranger is likely to face substantially the same task.
 2. Reproducing it requires meaningful browsing, testing, paid data, specialist
@@ -29,16 +33,18 @@ is user-initiated.
 Prefer these shapes: dated operational snapshots or probe results; tested
 platform/library gotchas; compatibility matrices and reproducible benchmarks;
 maintained directories or vendor comparisons; verified runbooks or executable
-skills; licensed specialist research. Broad essays and generic synthesis do not
-sell; mining transcripts for volume is candidate generation at best, never a
+skills; licensed specialist research. Broad essays and generic synthesis rarely
+sell; mining transcripts for volume is candidate generation at best, not a
 reason to publish.
 
 ## Price honestly
 
 Price by what regeneration costs the buyer: avoided time, tested evidence,
 paid inputs, maintenance, exclusivity. There is no standard price band; cheap
-and $1+ SKUs are both legitimate. Alpha decays: sell after the user has used
-it, and let the price reflect the decay.
+and $1+ SKUs are both legitimate, and pricing by the work is exactly the call to
+make. When no price is chosen, `publish.defaultPrice` applies, so a clean
+auto-mode publish stays promptless. Publish once the user has extracted their
+own edge, and price for the freshness that remains.
 
 ## Draft rules
 
