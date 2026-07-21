@@ -81,7 +81,7 @@ The repo ships three skills:
   not installed.
 - **`tenjin-search`**: thin adapter over `tenjin lookup/inspect/buy/outcome`
   with a deliberately narrow trigger (public, durable, costly-to-reproduce
-  questions). Requires the CLI.
+  questions). Requires the CLI below.
 - **`tenjin-publish`**: explicit-invocation-only publishing rubric and
   `tenjin publish` adapter. Never triggers on its own.
 

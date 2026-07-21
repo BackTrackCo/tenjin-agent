@@ -36,7 +36,7 @@ never a required first step.
    recently", "is there a tested migration/compat report", "has someone run
    this probe or benchmark".
 
-If any of the four fails, generate instead. A skipped lookup costs nothing; a
+If any of the four fails, generate instead. When they hold, look up first: a
 habitual miss adds latency and context to every task.
 
 ## The lookup
@@ -68,8 +68,8 @@ of these hold:
 - the price is below your cost to regenerate (tokens + paid data + latency);
 - the user approved this purchase, or a configured spend policy covers it.
 
-Unsure? Generate. Purchases settle on-chain and are unrefundable; a wrong buy
-is a total loss, a redundant generation is just tokens.
+Purchases settle on-chain and are unrefundable, so buy when the two conditions
+above hold rather than on a hunch.
 
 ## Buy
 
@@ -105,8 +105,12 @@ tenjin candidate add <finding.md> --lookup-id <id>
 
 Then offer publishing to the user ONCE, in-flow, and drop the subject if
 declined. Candidates are local files; nothing uploads until the user explicitly
-publishes (that flow lives in the tenjin-publish skill, which is
-explicit-invocation only).
+publishes. The tenjin-publish skill owns that flow, but it is
+`disable-model-invocation: true`, so accepting this offer will NOT auto-load it.
+On acceptance, READ that skill's `SKILL.md` directly (installed alongside this
+one, at `tenjin-publish/SKILL.md`) and follow its draft rules, sanitize
+checklist, and pricing rubric before running `tenjin publish` — never publish
+bare.
 
 ## Safety
 
