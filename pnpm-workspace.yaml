@@ -2,8 +2,13 @@
 
 # Security pin mirrored from the tenjin repo — dropping it reddens
 # `pnpm audit` (ws is pulled in via viem).
+#
+# fast-uri pin covers two HIGH advisories published the same day against the
+# same 3.x line (transitive via @x402/extensions>ajv>fast-uri): GHSA-4c8g-83qw-93j6
+# (patched 3.1.3) and GHSA-v2hh-gcrm-f6hx (patched 3.1.4). 3.1.4 clears both.
 overrides:
   'ws@>=8.0.0 <8.21.0': '8.21.0'
+  'fast-uri@>=3.0.0 <3.1.4': '3.1.4'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
