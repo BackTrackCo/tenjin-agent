@@ -185,40 +185,53 @@ pnpm pack-smoke   # exercises the packed npm artifact
 
 ## Release
 
-Publishing to npm is tag-triggered, never manual:
+Publishing to npm uses **Changesets** + **npm Trusted Publishing (OIDC)**,
+driven by the two-job `workflow_dispatch`-only `.github/workflows/release.yml`.
+This mirrors the house template in `BackTrackCo/x402r-sdk`. Nothing auto-fires
+from a push or a tag: a maintainer clicks Run workflow at each step.
 
-1. On `main`, with a clean tree, run `pnpm release <patch|minor|major|prerelease>`
-   (`scripts/release.mjs`). It bumps `package.json`, regenerates the
-   `CHANGELOG.md` section for the new version from `git log` since the last
-   tag, commits `chore(release): vX.Y.Z`, and creates the annotated tag. It
-   does not push anything; it prints the exact command to run next.
-2. Run that command: `git push --follow-tags`.
-3. Pushing the `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which
-   installs, lints, typechecks, tests, builds, verifies the tag matches
-   `package.json`, and runs `npm publish --provenance --access public`.
-   Prerelease versions (containing `-`, e.g. `0.1.0-alpha.2`) publish under
-   the `alpha` dist-tag; stable versions publish under `latest`.
+Day to day, add a changeset in the same PR as any shippable change:
 
-Publishing uses npm **OIDC trusted publishing**, so there is no long-lived
-`NPM_TOKEN` secret to manage: `release.yml` mints a short-lived OIDC token
-that the registry exchanges at publish time. Before the first tagged release
-the repo owner must, one time:
+```sh
+pnpm changeset   # pick the bump type, write a summary; commit the .md
+```
 
-1. Do the **initial** `tenjin-cli` publish manually (`npm publish --access public`
-   from a clean checkout with a token). npm's trusted-publisher UI can only be
-   configured on a package that already exists, so OIDC cannot do the very
-   first publish of a brand-new name.
-2. On npmjs.com, open the `tenjin-cli` package settings and add a **Trusted
-   Publisher**: provider GitHub Actions, organization `BackTrackCo`, repository
-   `tenjin-agent`, workflow filename `release.yml`, environment `npm`.
-3. In the GitHub repo, create an Environment named `npm` (Settings ->
+To cut a release (two clicks):
+
+1. **Dispatch (click 1)**: Actions -> Release -> Run workflow -> `main`. The
+   `version` job runs `changeset version` (consumes `.changeset/*.md`, bumps
+   `package.json`, regenerates `CHANGELOG.md`) and opens the
+   **"chore(release): version packages"** PR. Nothing is published yet.
+2. **Review and merge** that PR (its final state is what ships; edit the
+   version or changelog directly if needed).
+3. **Dispatch (click 2)**: same path. With no pending changesets, the `publish`
+   job builds, runs the check suite + `pnpm audit` + the packed-artifact smoke
+   as a pre-publish gate, then `changeset publish` ships `tenjin-cli` with
+   provenance and creates the GitHub release. Prereleases use Changesets' pre
+   mode (`pnpm changeset pre enter alpha`) and publish to that dist-tag; stable
+   goes to `latest`.
+
+Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived,
+per-run token, so there is **no `NPM_TOKEN`** to store or rotate.
+
+### One-time owner setup
+
+`tenjin-cli` already exists on npm (published `0.1.0-alpha.1`), so no manual
+first publish is needed. The owner must, one time:
+
+1. **Install the release-bot GitHub App on `BackTrackCo/tenjin-agent`** (the
+   same `x402r-release-bot` App used by `x402r-sdk`, or an equivalent), then
+   set repo **variable** `RELEASE_APP_CLIENT_ID` and repo **secret**
+   `RELEASE_APP_PRIVATE_KEY`. Required because Changesets' version PR must be
+   opened by an App identity to trigger CI (the default `GITHUB_TOKEN` cannot,
+   by GitHub's anti-recursion rule). Neither the variable nor the secret is
+   set on this repo yet, so `release.yml` will fail at the token step until
+   they exist.
+2. **Add a Trusted Publisher** to `tenjin-cli` on npmjs.com: provider GitHub
+   Actions, organization `BackTrackCo`, repository `tenjin-agent`, workflow
+   filename `release.yml`, environment `npm-publish`.
+3. **Create a GitHub Environment named `npm-publish`** (Settings ->
    Environments), optionally with required reviewers to gate each publish.
-
-After that, every `vX.Y.Z` tag publishes with no stored credentials.
-
-`scripts/release.mjs` also carries a plugin-manifest version-bump slot
-(`.claude-plugin/plugin.json`) for the future Claude plugin (C3). It is a
-no-op today since that manifest does not exist yet.
 
 ## License
 
