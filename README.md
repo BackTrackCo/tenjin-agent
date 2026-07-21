@@ -199,9 +199,22 @@ Publishing to npm is tag-triggered, never manual:
    Prerelease versions (containing `-`, e.g. `0.1.0-alpha.2`) publish under
    the `alpha` dist-tag; stable versions publish under `latest`.
 
-The repo owner needs to set the `NPM_TOKEN` repository secret (an npm
-granular automation token scoped to the `tenjin-cli` package) before the
-first tagged release; the workflow has no publish credentials otherwise.
+Publishing uses npm **OIDC trusted publishing**, so there is no long-lived
+`NPM_TOKEN` secret to manage: `release.yml` mints a short-lived OIDC token
+that the registry exchanges at publish time. Before the first tagged release
+the repo owner must, one time:
+
+1. Do the **initial** `tenjin-cli` publish manually (`npm publish --access public`
+   from a clean checkout with a token). npm's trusted-publisher UI can only be
+   configured on a package that already exists, so OIDC cannot do the very
+   first publish of a brand-new name.
+2. On npmjs.com, open the `tenjin-cli` package settings and add a **Trusted
+   Publisher**: provider GitHub Actions, organization `BackTrackCo`, repository
+   `tenjin-agent`, workflow filename `release.yml`, environment `npm`.
+3. In the GitHub repo, create an Environment named `npm` (Settings ->
+   Environments), optionally with required reviewers to gate each publish.
+
+After that, every `vX.Y.Z` tag publishes with no stored credentials.
 
 `scripts/release.mjs` also carries a plugin-manifest version-bump slot
 (`.claude-plugin/plugin.json`) for the future Claude plugin (C3). It is a

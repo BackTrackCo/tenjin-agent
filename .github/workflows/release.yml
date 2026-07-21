@@ -4,22 +4,37 @@ name: release
 # `git push --follow-tags` per the printed instructions; nothing pushes a tag
 # on its own). Re-runs the full check suite against the tagged commit rather
 # than trusting whatever CI said on the PR, then publishes to npm.
+#
+# Auth is npm OIDC trusted publishing (no long-lived NPM_TOKEN): the job's
+# short-lived id-token is exchanged with the registry at publish time. Same
+# shape as x402-foundation/x402's publish_npm_scoped_x402_* workflows. The
+# owner must register this repo + workflow + `npm` environment as a Trusted
+# Publisher on npmjs.com first (see README Release section).
 on:
   push:
     tags:
       - 'v*'
 
-# Default-deny; the job opts into only what it needs. id-token: write is for
-# npm provenance (OIDC-signed attestation, no long-lived signing key).
+# Default-deny; the job opts into only what it needs.
 permissions: {}
 
 jobs:
   release:
     name: release (publish tenjin-cli)
+    # Don't run on forks that happen to carry a matching tag; the OIDC subject
+    # is scoped to this repo, so a fork could never publish anyway, but fail
+    # fast rather than burn a run and confuse the logs.
+    if: github.repository == 'BackTrackCo/tenjin-agent'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # GitHub Environment named in the npmjs.com Trusted Publisher config. Also
+    # the hook for manual publish approval / branch protection if the owner
+    # wants a human gate before a tag can publish.
+    environment: npm
     permissions:
       contents: read
+      # OIDC token minting for trusted publishing (and provenance). This is the
+      # only write-ish grant; there is no registry secret in this workflow.
       id-token: write
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -69,6 +84,16 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
 
+      # Trusted publishing needs npm >= 11.5.1 (Node 24 ships an older 11.x).
+      # Pinned to match the sibling x402 repo's publish jobs.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@11.14.1 --ignore-scripts
+      # setup-node writes an .npmrc with an (empty) _authToken line; the OIDC
+      # exchange supersedes it, but drop stale always-auth so npm doesn't try
+      # token auth before falling through to trusted publishing.
+      - name: Clear stale npm auth config
+        run: npm config delete always-auth 2>/dev/null || true
+
       # Prerelease versions (anything with a `-`, e.g. 0.1.0-alpha.2) publish
       # under the `alpha` dist-tag so `npm install tenjin-cli` never resolves
       # one; stable versions get `latest`.
@@ -80,7 +105,8 @@ jobs:
             echo "NPM_TAG=latest" >> "$GITHUB_ENV"
           fi
 
-      - name: Publish to npm
+      # No NODE_AUTH_TOKEN: auth is the OIDC id-token exchanged with the
+      # registry. --provenance is redundant under trusted publishing (npm
+      # attests automatically) but kept explicit as intent.
+      - name: Publish to npm (OIDC trusted publishing)
         run: npm publish --provenance --access public --tag "$NPM_TAG"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
