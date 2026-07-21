@@ -258,6 +258,45 @@ describe('runInstall: canonical overwrite', () => {
   });
 });
 
+describe('runInstall: binary skill assets', () => {
+  it('round-trips a non-UTF-8 file byte-for-byte and reports it up-to-date on re-run', async () => {
+    // A future skill could ship a non-text asset. Bytes below are not valid UTF-8
+    // (a lone continuation byte, a lone leading byte with no continuation): decoding
+    // then re-encoding via 'utf8' replaces them with U+FFFD, corrupting the file and
+    // making two different corrupted binaries falsely compare equal.
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-install-src-'));
+    for (const name of SKILL_NAMES) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), `# ${name}\n`);
+    }
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x80, 0x00, 0x01]);
+    await writeFile(join(src, 'tenjin', 'asset.bin'), binary);
+
+    try {
+      const { data: d } = await runInstall(
+        { harness: ['claude'] },
+        makeCtx(),
+        deps({ skillsSourceDir: src }),
+      );
+      const h = asData(d).harnesses[0]!;
+      expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('installed');
+
+      const written = await readFile(join(home, '.claude', 'skills', 'tenjin', 'asset.bin'));
+      expect(written.equals(binary)).toBe(true);
+
+      const second = await runInstall(
+        { harness: ['claude'] },
+        makeCtx(),
+        deps({ skillsSourceDir: src }),
+      );
+      const h2 = asData(second.data).harnesses[0]!;
+      expect(h2.skills.find((s) => s.name === 'tenjin')?.status).toBe('up-to-date');
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('runInstall: Codex AGENTS.md target', () => {
   it('writes to ~/.codex/AGENTS.md when the codex home exists and ~/.agents/AGENTS.md does not', async () => {
     await mkdir(join(home, '.codex'), { recursive: true });

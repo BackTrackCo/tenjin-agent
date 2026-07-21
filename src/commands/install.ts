@@ -292,24 +292,31 @@ async function installSkill(
   };
 }
 
-/** Read a directory tree into a rel-path -> content map, or null when it does not exist. */
-async function readTree(dir: string): Promise<Map<string, string> | null> {
+/**
+ * Read a directory tree into a rel-path -> content map, or null when it does not
+ * exist. Reads as raw `Buffer`, not `utf8`: today's skills are markdown-only, but
+ * this is a general recursive dir-copy, and decoding to a string here would
+ * silently corrupt a future non-text asset (an image, a font) on write, or worse,
+ * make two different corrupted binaries both decode to U+FFFD and compare equal.
+ */
+async function readTree(dir: string): Promise<Map<string, Buffer> | null> {
   if (!existsSync(dir)) return null;
   const entries = await readdir(dir, { recursive: true, withFileTypes: true });
-  const files = new Map<string, string>();
+  const files = new Map<string, Buffer>();
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const full = join(entry.parentPath, entry.name);
-    files.set(relative(dir, full), await readFile(full, 'utf8'));
+    files.set(relative(dir, full), await readFile(full));
   }
   return files;
 }
 
-function treesEqual(a: Map<string, string>, b: Map<string, string> | null): boolean {
+function treesEqual(a: Map<string, Buffer>, b: Map<string, Buffer> | null): boolean {
   if (b === null) return false;
   if (a.size !== b.size) return false;
   for (const [k, v] of a) {
-    if (b.get(k) !== v) return false;
+    const other = b.get(k);
+    if (other === undefined || !v.equals(other)) return false;
   }
   return true;
 }
