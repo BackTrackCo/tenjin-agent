@@ -60,6 +60,59 @@ describe('scan — block detectors', () => {
   });
 });
 
+describe('scan — 0x-64-hex is a key or a hash by context', () => {
+  it('demotes a tx hash inside a basescan URL to a warn, not a block', async () => {
+    const url = `https://basescan.org/tx/0x${HEX64}`;
+    const found = scan(url);
+    expect(found.map((f) => f.check)).toContain('hex32-value');
+    expect(found.map((f) => f.check)).not.toContain('raw-private-key');
+    const f = found.find((x) => x.check === 'hex32-value');
+    expect(f?.severity).toBe('warn');
+    expect(f?.excerpt).not.toContain(HEX64);
+  });
+
+  it('demotes a labelled hash (txHash:, hash =) to a warn', async () => {
+    expect(checks(`txHash: 0x${HEX64}`)).toContain('hex32-value');
+    expect(checks(`txHash: 0x${HEX64}`)).not.toContain('raw-private-key');
+    expect(checks(`blockhash = 0x${HEX64}`)).toContain('hex32-value');
+  });
+
+  it('blocks a bare, uncontextualized 64-hex as a raw private key', async () => {
+    const found = scan(`0x${HEX64}`);
+    const f = found.find((x) => x.check === 'raw-private-key');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).not.toContain(HEX64);
+    expect(found.map((x) => x.check)).not.toContain('hex32-value');
+  });
+
+  it('still blocks a 64-hex assigned to a secret-named key', async () => {
+    const found = scan(`PRIVATE_KEY=0x${HEX64}`);
+    // raw-private-key (no hash context) blocks; secret-assignment also fires.
+    expect(found.map((f) => f.check)).toContain('raw-private-key');
+    expect(found.every((f) => f.severity === 'block')).toBe(true);
+  });
+});
+
+describe('scan — secret-assignment skips placeholder values', () => {
+  it.each([
+    'API_KEY=<your-key>',
+    'PASSWORD=${DB_PASSWORD}',
+    'SECRET=changeme',
+    'API_KEY=your-key-here',
+    'AUTH_TOKEN=xxxxxx',
+    'AUTH_TOKEN=example-value',
+  ])('does not block a placeholder: %s', async (line) => {
+    expect(checks(line)).not.toContain('secret-assignment');
+  });
+
+  it.each(['API_KEY=sk9f8a7dh25lqz', 'DB_PASSWORD=hunter2hunter2', 'SECRET=r3alV4lu3Here'])(
+    'still blocks a real-looking value: %s',
+    async (line) => {
+      expect(checks(line)).toContain('secret-assignment');
+    },
+  );
+});
+
 describe('scan — warn detectors', () => {
   it('flags a 40-hex wallet address as warn, abbreviated', async () => {
     const f = find(`send to 0x${HEX40}`, 'wallet-address');

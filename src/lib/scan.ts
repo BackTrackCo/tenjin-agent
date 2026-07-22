@@ -36,6 +36,7 @@ const LONG_QUOTE_WORDS = 80;
 export function scan(text: string): ScanFinding[] {
   const lines = text.split('\n');
   const findings: ScanFinding[] = [
+    ...scanHex64(lines),
     ...scanLineDetectors(lines),
     ...scanPemBlocks(lines),
     ...scanLongVerbatim(lines),
@@ -59,18 +60,14 @@ interface LineDetector {
   re: RegExp;
   /** Build the (possibly masked) excerpt from a single match. */
   excerpt: (m: RegExpExecArray) => string;
+  /** Drop this match without a finding (e.g. a placeholder value). */
+  skip?: (m: RegExpExecArray) => boolean;
 }
 
 const LINE_DETECTORS: LineDetector[] = [
   // Secrets/keys — severity block, excerpt always masked. Provider patterns
-  // adapted from gitleaks (MIT); the 0x-64-hex EVM key continues the
-  // BlockRun-credited wallet-key scanner. See the file header + NOTICE.md.
-  {
-    check: 'raw-private-key',
-    severity: 'block',
-    re: /(?<![0-9a-fx])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])/gi,
-    excerpt: (m) => maskKeeping(m[0], 2),
-  },
+  // adapted from gitleaks (MIT). The 0x-64-hex EVM key is handled separately
+  // (scanHex64) so a tx/block hash is not hard-blocked. See header + NOTICE.md.
   {
     check: 'aws-access-key',
     severity: 'block',
@@ -113,6 +110,9 @@ const LINE_DETECTORS: LineDetector[] = [
     // value. The value (group 2) is masked, never the key name.
     re: /\b([A-Z0-9_]*(?:API_KEY|SECRET|ACCESS_KEY|PRIVATE_KEY|PASSWORD|PASSWD|AUTH_TOKEN)[A-Z0-9_]*)\s*[:=]\s*["']?([^\s"']{6,})/gi,
     excerpt: (m) => `${m[1]}=[redacted ${m[2]?.length ?? 0} chars]`,
+    // Runbooks legitimately show placeholder examples (<your-key>, ${VAR},
+    // changeme). Don't hard-block those; a real-looking value still blocks.
+    skip: (m) => isPlaceholder(m[2] ?? ''),
   },
   // Wallet addresses — warn (a contract address may be intentional). Not a secret,
   // shown abbreviated. viem's checksum validation is deliberately NOT used to gate
@@ -160,18 +160,67 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
-        out.push({
-          check: detector.check,
-          severity: detector.severity,
-          line: i + 1,
-          span: [m.index, m.index + m[0].length],
-          excerpt: detector.excerpt(m),
-        });
-        if (m[0].length === 0) detector.re.lastIndex++; // guard a zero-width match
+        const zeroWidth = m[0].length === 0;
+        if (!detector.skip?.(m)) {
+          out.push({
+            check: detector.check,
+            severity: detector.severity,
+            line: i + 1,
+            span: [m.index, m.index + m[0].length],
+            excerpt: detector.excerpt(m),
+          });
+        }
+        if (zeroWidth) detector.re.lastIndex++; // guard a zero-width match
       }
     }
   }
   return out;
+}
+
+/** A secret-assignment value that is an obvious placeholder, not a live secret. */
+function isPlaceholder(value: string): boolean {
+  if (/^[<${%]/.test(value)) return true; // <your-key>, ${VAR}, {{x}}, %ENV%
+  return /^(?:your[-_]?|my[-_]?|xxx+$|example|placeholder|redacted|changeme|dummy|sample|\*+$|\.\.\.)/i.test(
+    value,
+  );
+}
+
+// EVM raw private key (0x + 64 hex) vs. a 32-byte hash. On Base the two are
+// syntactically identical, and a block finding is permanently non-bypassable, so
+// a post carrying an x402 receipt / basescan tx hash must not be hard-blocked.
+// A 64-hex is demoted to a warn 'hex32-value' when the context reads as a hash:
+// it sits inside an http(s) URL token, or is labelled tx/txhash/txn/hash/
+// blockhash just before it. A bare, uncontextualized 64-hex stays a block
+// 'raw-private-key' (continuing the BlockRun-credited wallet-key scanner).
+const HEX64_RE = /(?<![0-9a-fx])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])/gi;
+const HASH_LABEL_RE = /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash)[\s/:=]*$/i;
+
+function scanHex64(lines: string[]): ScanFinding[] {
+  const out: ScanFinding[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    HEX64_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = HEX64_RE.exec(line)) !== null) {
+      const hash = isHashContext(line, m.index);
+      out.push({
+        check: hash ? 'hex32-value' : 'raw-private-key',
+        severity: hash ? 'warn' : 'block',
+        line: i + 1,
+        span: [m.index, m.index + m[0].length],
+        excerpt: hash ? `${m[0].slice(0, 6)}…${m[0].slice(-4)}` : maskKeeping(m[0], 2),
+      });
+    }
+  }
+  return out;
+}
+
+function isHashContext(line: string, matchIndex: number): boolean {
+  const before = line.slice(0, matchIndex);
+  if (HASH_LABEL_RE.test(before)) return true;
+  // The whitespace-delimited token containing the match starts with http(s)://.
+  const prefix = /(\S*)$/.exec(before)?.[1] ?? '';
+  return /^https?:\/\//.test(line.slice(matchIndex - prefix.length));
 }
 
 // gitleaks private-key marker (RSA/EC/OPENSSH/PGP variants, optional BLOCK).
