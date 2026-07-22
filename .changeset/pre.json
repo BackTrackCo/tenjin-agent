@@ -4,5 +4,7 @@
   "initialVersions": {
     "tenjin-cli": "0.1.0-alpha.1"
   },
-  "changesets": []
+  "changesets": [
+    "b3-publish"
+  ]
 }
