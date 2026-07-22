@@ -47,9 +47,28 @@ describe('scan — block detectors', () => {
     expect(checks(`t=sk_live_${'A'.repeat(24)}`)).toContain('stripe-token');
   });
 
-  it('flags a secret-named assignment', async () => {
-    expect(checks('API_KEY=supersecretvalue123')).toContain('secret-assignment');
-    expect(checks('DB_PASSWORD: hunter2hunter2')).toContain('secret-assignment');
+  it('flags OpenAI, Anthropic, Google, and npm keys', async () => {
+    expect(checks(`key=sk-${'a'.repeat(48)}`)).toContain('openai-key');
+    expect(checks(`key=sk-proj-${'B'.repeat(40)}`)).toContain('openai-key');
+    expect(checks(`key=sk-ant-api03-${'C'.repeat(30)}`)).toContain('anthropic-key');
+    expect(checks(`key=sk-ant-api03-${'C'.repeat(30)}`)).not.toContain('openai-key');
+    expect(checks(`key=AIza${'d'.repeat(35)}`)).toContain('google-key');
+    expect(checks(`secret=GOCSPX-${'e'.repeat(28)}`)).toContain('google-key');
+    expect(checks(`token=npm_${'f'.repeat(36)}`)).toContain('npm-token');
+  });
+
+  it('flags a DB connection URI with an embedded password, masking the password', async () => {
+    const f = find('postgres://admin:s3cr3tpass@db.example.com:5432/app', 'db-connection-uri');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).toContain('postgres://admin:[redacted]@db.example.com');
+    expect(f?.excerpt).not.toContain('s3cr3tpass');
+  });
+
+  it('flags Authorization: Bearer with a live token, but not a placeholder', async () => {
+    const f = find('Authorization: Bearer abc123def456ghi789', 'bearer-token');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).not.toContain('abc123def456ghi789');
+    expect(checks('Authorization: Bearer <token>')).not.toContain('bearer-token');
   });
 
   it('does not flag benign near-misses', async () => {
@@ -87,30 +106,61 @@ describe('scan — 0x-64-hex is a key or a hash by context', () => {
 
   it('still blocks a 64-hex assigned to a secret-named key', async () => {
     const found = scan(`PRIVATE_KEY=0x${HEX64}`);
-    // raw-private-key (no hash context) blocks; secret-assignment also fires.
-    expect(found.map((f) => f.check)).toContain('raw-private-key');
-    expect(found.every((f) => f.severity === 'block')).toBe(true);
+    // raw-private-key (no hash context) blocks; secret-assignment also fires (warn).
+    const raw = found.find((f) => f.check === 'raw-private-key');
+    expect(raw?.severity).toBe('block');
+    expect(raw?.excerpt).not.toContain(HEX64);
   });
 });
 
-describe('scan — secret-assignment skips placeholder values', () => {
-  it.each([
-    'API_KEY=<your-key>',
-    'PASSWORD=${DB_PASSWORD}',
-    'SECRET=changeme',
-    'API_KEY=your-key-here',
-    'AUTH_TOKEN=xxxxxx',
-    'AUTH_TOKEN=example-value',
-  ])('does not block a placeholder: %s', async (line) => {
-    expect(checks(line)).not.toContain('secret-assignment');
+describe('scan — secret-assignment is a warn, not a hard block', () => {
+  it('reports a real-looking assignment as a masked warn (forces confirmation)', async () => {
+    const f = find('API_KEY=supersecretvalue123', 'secret-assignment');
+    expect(f?.severity).toBe('warn');
+    expect(f?.excerpt).not.toContain('supersecretvalue123');
+    expect(f?.excerpt).toContain('[redacted');
   });
 
-  it.each(['API_KEY=sk9f8a7dh25lqz', 'DB_PASSWORD=hunter2hunter2', 'SECRET=r3alV4lu3Here'])(
-    'still blocks a real-looking value: %s',
-    async (line) => {
-      expect(checks(line)).toContain('secret-assignment');
-    },
-  );
+  it('does not hard-block benign config or prose (regression: review round 1)', async () => {
+    for (const line of [
+      'SECRET_NAME=prod-db-credentials',
+      'MYSQL_ROOT_PASSWORD=password',
+      'Password: correcthorsebatterystaple',
+    ]) {
+      const blocks = scan(line).filter((x) => x.severity === 'block');
+      expect(blocks).toEqual([]);
+    }
+  });
+
+  it('skips structural values (paths, URLs, regex literals) entirely', async () => {
+    expect(checks('PRIVATE_KEY_PATH=/etc/ssl/server.key')).not.toContain('secret-assignment');
+    expect(checks('AUTH_TOKEN_URL=https://example.com/callback')).not.toContain(
+      'secret-assignment',
+    );
+    expect(checks('PASSWORD_REGEX=^[A-Z]{3}[0-9]+$')).not.toContain('secret-assignment');
+  });
+
+  it('skips placeholder values', async () => {
+    for (const line of [
+      'API_KEY=<your-key>',
+      'PASSWORD=${DB_PASSWORD}',
+      'SECRET=changeme',
+      'API_KEY=your-key-here',
+      'AUTH_TOKEN=xxxxxx',
+      'AUTH_TOKEN=example-value',
+    ]) {
+      expect(checks(line)).not.toContain('secret-assignment');
+    }
+  });
+
+  it('broadened keys (camelCase, token, credential) and quoted values with spaces', async () => {
+    expect(checks('apiKey=liveSecret12345')).toContain('secret-assignment');
+    expect(checks('accessToken: aVeryRealToken99')).toContain('secret-assignment');
+    expect(checks('db_credential=realvalue123')).toContain('secret-assignment');
+    const f = find('API_KEY="R3al Secret W1th Spaces"', 'secret-assignment');
+    expect(f?.severity).toBe('warn');
+    expect(f?.excerpt).not.toContain('R3al Secret W1th Spaces');
+  });
 });
 
 describe('scan — warn detectors', () => {
@@ -159,19 +209,28 @@ describe('scan — warn detectors', () => {
 });
 
 describe('scan — secrets are never echoed verbatim', () => {
-  it('masks every block finding so the matched secret does not appear in its excerpt', async () => {
+  it('masks every secret finding so the matched secret does not appear in its excerpt', async () => {
     const secrets: Array<[string, string]> = [
       [`0x${HEX64}`, `0x${HEX64}`],
       ['AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
       [`ghp_${'Z'.repeat(36)}`, `ghp_${'Z'.repeat(36)}`],
       ['xoxb-123456789012-secrettail99', 'xoxb-123456789012-secrettail99'],
       [`sk_live_${'Q'.repeat(24)}`, `sk_live_${'Q'.repeat(24)}`],
+      [`sk-${'a'.repeat(48)}`, `sk-${'a'.repeat(48)}`],
+      [`sk-ant-api03-${'C'.repeat(30)}`, `sk-ant-api03-${'C'.repeat(30)}`],
+      [`AIza${'d'.repeat(35)}`, `AIza${'d'.repeat(35)}`],
+      [`npm_${'f'.repeat(36)}`, `npm_${'f'.repeat(36)}`],
+      ['postgres://admin:s3cr3tpass@db.example.com', 's3cr3tpass'],
+      ['Authorization: Bearer abc123def456ghi789', 'abc123def456ghi789'],
+      // secret-assignment is a warn now, but its value is still masked.
       ['API_KEY=topsecretvalue999', 'topsecretvalue999'],
     ];
     for (const [text, secret] of secrets) {
-      for (const f of scan(text).filter((x) => x.severity === 'block')) {
-        expect(f.excerpt).not.toContain(secret);
-      }
+      const masked = scan(text).filter(
+        (x) => x.severity === 'block' || x.check === 'secret-assignment',
+      );
+      expect(masked.length).toBeGreaterThan(0);
+      for (const f of masked) expect(f.excerpt).not.toContain(secret);
     }
   });
 });
