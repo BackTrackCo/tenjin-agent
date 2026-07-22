@@ -1,5 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { readFile, readdir, rm } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { delimiter, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -9,6 +10,9 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import { loadRawConfig, PublishModeSchema } from '../lib/config';
+import type { PublishMode } from '../lib/config';
+import { persistPublishMode } from './config';
 import { collectDoctorChecks, renderDoctorHuman } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import type { Io } from '../lib/output';
@@ -20,8 +24,18 @@ type Harness = (typeof HARNESSES)[number];
 const InstallInputSchema = z.object({
   harness: z.array(z.string()).optional(),
   dryRun: z.boolean().optional(),
+  publishMode: z.string().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
+
+/** A visible text-prompt seam (like passphrase's PromptFn); injected in tests. */
+export type PromptFn = (label: string) => Promise<string>;
+
+type PublishModeSource = 'flag' | 'existing' | 'prompt' | 'default-skipped';
+interface PublishModeSelection {
+  value: PublishMode;
+  source: PublishModeSource;
+}
 
 /**
  * The one line `install` keeps in an AGENTS.md so Codex (which reads AGENTS.md as
@@ -74,6 +88,10 @@ export interface InstallDeps {
   collectChecks?: (ctx: CommandContext) => Promise<DoctorChecks>;
   /** Deps forwarded to the default doctor collector (e.g. a canned fetch). */
   doctorDeps?: DoctorDeps;
+  /** Interactive text-prompt seam for the publish-mode question; defaults to a stdin reader. */
+  promptMode?: PromptFn;
+  /** Whether an interactive prompt is possible; defaults to the TTY facts. */
+  isInteractive?: boolean;
 }
 
 /**
@@ -97,6 +115,10 @@ export async function runInstall(
     });
   }
   const dryRun = parsed.data.dryRun === true;
+  // Validate --publish-mode UP FRONT so a bad value fails before any wiring, even
+  // though the mode is only settled (and persisted) after the doctor phase below.
+  const publishModeFlag =
+    parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
@@ -116,13 +138,107 @@ export async function runInstall(
   const doctor = await collect(ctx);
   const doctorStatus = doctor.failure !== undefined ? 'fail' : 'pass';
 
+  // After wiring + doctor, settle the publish consent mode: a flag sets it, an
+  // already-configured mode is left alone, and an interactive setup asks once
+  // (plain enter keeps the default WITHOUT writing, so `config get` stays truthful).
+  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun);
+
   const data = {
     dryRun,
     skillsSource,
     harnesses,
     doctor: { status: doctorStatus, checks: doctor.checks },
+    publishMode,
   };
-  return { data, humanLines: renderHuman(ctx.io, harnesses, doctor, dryRun) };
+  const humanLines = renderHuman(ctx.io, harnesses, doctor, dryRun);
+  humanLines.push(publishModeLine(ctx.io, publishMode, dryRun));
+  return { data, humanLines };
+}
+
+// --- Publish-mode selection (D38 setup) ------------------------------------------
+
+const PUBLISH_MODE_PROMPT =
+  'Publish consent mode? review = always ask / auto = ask only on findings / full-auto = only hard blocks stop it [auto]: ';
+
+/**
+ * Resolve (and, for an explicit choice, persist) the publish consent mode at
+ * install time. Precedence: `--publish-mode` flag > an already-configured global
+ * mode > an interactive prompt > the untouched default. Only an explicit choice
+ * writes: a plain enter, a non-interactive run, `--dry-run`, or an unrecognized
+ * answer all leave `publish.mode` unset so its provenance stays `default`.
+ */
+async function selectPublishMode(
+  flag: PublishMode | undefined,
+  ctx: CommandContext,
+  deps: InstallDeps,
+  dryRun: boolean,
+): Promise<PublishModeSelection> {
+  if (flag !== undefined) {
+    if (!dryRun) await persistPublishMode(ctx.dataDir, flag); // --dry-run: would-set only
+    return { value: flag, source: 'flag' };
+  }
+
+  // Only the GLOBAL config file counts as "already configured" for setup: env/flag
+  // are per-run and a project `.tenjin.json` is not this machine's global choice.
+  const config = await loadRawConfig(ctx.dataDir);
+  if (config.publish?.mode !== undefined) {
+    return { value: config.publish.mode, source: 'existing' };
+  }
+
+  const interactive = deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY));
+  if (dryRun || !interactive) return { value: 'auto', source: 'default-skipped' };
+
+  const prompt = deps.promptMode ?? defaultPromptMode;
+  // Ask, allow ONE reprompt on an unrecognized answer, then fall back to auto.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const answer = (await prompt(PUBLISH_MODE_PROMPT)).trim();
+    if (answer.length === 0) return { value: 'auto', source: 'default-skipped' }; // enter: no write
+    const parsed = PublishModeSchema.safeParse(answer);
+    if (parsed.success) {
+      await persistPublishMode(ctx.dataDir, parsed.data);
+      return { value: parsed.data, source: 'prompt' };
+    }
+  }
+  ctx.io.stderr.write(
+    'Unrecognized mode; keeping the default (auto). Change it with `tenjin config set publish.mode`.\n',
+  );
+  return { value: 'auto', source: 'default-skipped' };
+}
+
+function parseModeFlag(value: string): PublishMode {
+  const parsed = PublishModeSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new CliError('USAGE', `Invalid --publish-mode ${JSON.stringify(value)}`, {
+      fix: 'Use "review", "auto", or "full-auto".',
+    });
+  }
+  return parsed.data;
+}
+
+/** A visible line-reader (prompt on stderr so stdout stays a single JSON object). */
+function defaultPromptMode(label: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    let settled = false;
+    const settle = (value: string): void => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve(value);
+    };
+    rl.once('close', () => settle('')); // ctrl-D mid-prompt reads as the default
+    rl.question(label, (answer) => settle(answer));
+  });
+}
+
+function publishModeLine(io: Io, selection: PublishModeSelection, dryRun: boolean): string {
+  const detail: Record<PublishModeSource, string> = {
+    flag: dryRun ? 'would set from --publish-mode' : 'set from --publish-mode',
+    existing: 'already configured',
+    prompt: 'saved',
+    'default-skipped': 'default; run interactively or pass --publish-mode to change',
+  };
+  return paint(io, 'bold', `publish mode: ${selection.value} (${detail[selection.source]})`);
 }
 
 // --- Detection + planning --------------------------------------------------------

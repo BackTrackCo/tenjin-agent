@@ -121,6 +121,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       [],
     )
     .option('--dry-run', 'print what would change without writing anything')
+    .option(
+      '--publish-mode <mode>',
+      'set the publish consent mode non-interactively: review | auto | full-auto',
+    )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
@@ -131,6 +135,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
               ? { harness: o.harness as string[] }
               : {}),
             ...(o.dryRun === true ? { dryRun: true } : {}),
+            ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
           },
           ctx,
         );

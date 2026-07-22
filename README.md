@@ -186,7 +186,8 @@ on every publish, then applies your `publish.mode`:
 
 `--yes` clears the warning findings and the review confirm; it never clears a hard
 block. Set the mode with `tenjin config set publish.mode <mode>`, or per run with
-`--mode`.
+`--mode`. `tenjin install` asks once on an interactive setup and otherwise leaves
+the default (auto); change it any time with `tenjin config set publish.mode`.
 
 Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultPrice`
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is

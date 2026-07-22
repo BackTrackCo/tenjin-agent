@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall } from './install';
-import type { InstallDeps } from './install';
+import type { InstallDeps, PromptFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
@@ -405,5 +405,141 @@ describe('runInstall: doctor as the final step', () => {
     const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const out = asData(d) as Data & { doctor: { status: string } };
     expect(out.doctor.status).toBe('pass');
+  });
+});
+
+describe('runInstall: publish-mode selection', () => {
+  type ModeData = { publishMode: { value: string; source: string } };
+  const modeOf = (d: unknown) => (d as ModeData).publishMode;
+
+  async function persistedMode(): Promise<string | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    return (JSON.parse(raw) as { publish?: { mode?: string } }).publish?.mode;
+  }
+
+  function promptSpy(answers: string[]): { fn: PromptFn; calls: () => number } {
+    let i = 0;
+    let n = 0;
+    return {
+      calls: () => n,
+      fn: async () => {
+        n++;
+        return answers[i++] ?? '';
+      },
+    };
+  }
+
+  it('an interactive prompt persists an explicit choice (source prompt)', async () => {
+    const spy = promptSpy(['review']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(1);
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'prompt' });
+    expect(await persistedMode()).toBe('review');
+  });
+
+  it('a plain enter keeps auto WITHOUT writing (provenance stays default)', async () => {
+    const spy = promptSpy(['']); // enter
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(await persistedMode()).toBeUndefined(); // no config write
+  });
+
+  it('re-prompts once on an unrecognized answer, then persists the valid retry', async () => {
+    const spy = promptSpy(['nope', 'full-auto']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(2);
+    expect(modeOf(d)).toEqual({ value: 'full-auto', source: 'prompt' });
+    expect(await persistedMode()).toBe('full-auto');
+  });
+
+  it('falls back to auto (no write) after two unrecognized answers', async () => {
+    const spy = promptSpy(['nope', 'still-nope']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(2);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('does not prompt or write on a non-interactive run', async () => {
+    const spy = promptSpy(['review']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: false, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('does not prompt when a global mode is already configured (source existing)', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ publish: { mode: 'review' } }));
+    const spy = promptSpy(['full-auto']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'existing' });
+    expect(await persistedMode()).toBe('review'); // untouched
+  });
+
+  it('--publish-mode sets it non-interactively and suppresses the prompt', async () => {
+    const spy = promptSpy(['review']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'], publishMode: 'full-auto' },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'full-auto', source: 'flag' });
+    expect(await persistedMode()).toBe('full-auto');
+  });
+
+  it('--publish-mode rejects a bad value as USAGE', async () => {
+    const err = await caught(() =>
+      runInstall({ harness: ['claude'], publishMode: 'someday' }, makeCtx(), deps()),
+    );
+    expect(err.code).toBe('USAGE');
+  });
+
+  it('--dry-run with --publish-mode is would-set (no write)', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'], dryRun: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'flag' });
+    expect(await persistedMode()).toBeUndefined(); // dry run wrote nothing
+  });
+
+  it('--dry-run does not prompt', async () => {
+    const spy = promptSpy(['review']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: spy.fn }),
+    );
+    expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(await persistedMode()).toBeUndefined();
   });
 });

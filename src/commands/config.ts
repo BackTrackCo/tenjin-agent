@@ -14,6 +14,7 @@ import type {
   PartialConfig,
   Provenance,
   PublishConfigKey,
+  PublishMode,
   ScalarConfigKey,
 } from '../lib/config';
 import { loadProjectConfig } from '../lib/settings';
@@ -147,6 +148,19 @@ function parsePublishMode(value: string): string {
   throw new CliError('USAGE', `Invalid publish mode: ${JSON.stringify(value)}`, {
     fix: 'Use "review", "auto", or "full-auto".',
   });
+}
+
+/**
+ * Persist just `publish.mode` into the global config through the same locked
+ * merge-write every `config set` uses (never a raw overwrite), so a sibling
+ * subkey or an unknown block a newer CLI wrote is preserved. Used by `install`'s
+ * setup prompt; the mode is a validated PublishMode.
+ */
+export async function persistPublishMode(dir: string, mode: PublishMode): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    publish: { ...existing.publish, mode },
+  }));
 }
 
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
