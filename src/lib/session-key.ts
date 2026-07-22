@@ -1,7 +1,8 @@
 import { createHash, randomBytes, webcrypto } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { z } from 'zod';
 import { CliError } from './errors';
+import { hasCode } from './errno';
 import { sessionPath } from './paths';
 import { writeFileAtomic } from './atomic-json';
 import { buildSiwxHeader } from './siwx';
@@ -67,11 +68,6 @@ export interface SessionKeyDeps {
   now?: () => number;
   /** Per-request nonce (≥16-byte CSPRNG hex). */
   nonce?: () => string;
-  /** P-256 keypair generator seam (tests pin a fixed key). */
-  generateKeyPair?: () => Promise<webcrypto.CryptoKeyPair>;
-  /** File reader/writer seams default to the 0600-cached session.json. */
-  loadFile?: () => Promise<SessionFile | null>;
-  saveFile?: (file: SessionFile) => Promise<void>;
 }
 
 export interface SessionKeyConfig {
@@ -153,7 +149,7 @@ export function signatureBase(input: SignatureParamsInput): string {
 // Key material.
 // ---------------------------------------------------------------------------
 
-function defaultGenerateKeyPair(): Promise<webcrypto.CryptoKeyPair> {
+function generateP256KeyPair(): Promise<webcrypto.CryptoKeyPair> {
   return subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
     'sign',
     'verify',
@@ -206,8 +202,7 @@ export async function establishSession(
   deps: SessionKeyDeps = {},
 ): Promise<SessionFile> {
   const now = deps.now ?? Date.now;
-  const generate = deps.generateKeyPair ?? defaultGenerateKeyPair;
-  const pair = await generate();
+  const pair = await generateP256KeyPair();
   const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
   const publicKeyRaw = toBase64Url(rawPub);
   const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as Record<string, unknown>;
@@ -229,8 +224,7 @@ export async function establishSession(
     publicKeyRaw,
     privateKeyJwk: jwk,
   };
-  const save = deps.saveFile ?? ((f) => saveSessionFile(config.dataDir, f));
-  await save(file);
+  await saveSessionFile(config.dataDir, file);
   return file;
 }
 
@@ -267,15 +261,26 @@ export async function signWithSession(
 // ---------------------------------------------------------------------------
 
 export async function loadSessionFile(dir: string): Promise<SessionFile | null> {
+  const path = sessionPath(dir);
+  // Fail closed on a loosened cache (ssh's posture for a private key): the key is
+  // written 0600, so if it is now group- or world-readable it was tampered with
+  // out of band — refuse it and re-establish rather than sign with a key others
+  // can read. No-op on win32, which has no unix mode.
+  if (process.platform !== 'win32') {
+    try {
+      const mode = (await stat(path)).mode & 0o077;
+      if (mode !== 0) return null;
+    } catch (err) {
+      if (hasCode(err, 'ENOENT')) return null;
+      throw sessionReadError(path, err);
+    }
+  }
   let raw: string;
   try {
-    raw = await readFile(sessionPath(dir), 'utf8');
+    raw = await readFile(path, 'utf8');
   } catch (err) {
-    if (isNotFound(err)) return null;
-    throw new CliError('INTERNAL', `Could not read the session cache at ${sessionPath(dir)}`, {
-      fix: `Check file permissions on ${sessionPath(dir)}, or delete it to re-establish.`,
-      cause: err,
-    });
+    if (hasCode(err, 'ENOENT')) return null;
+    throw sessionReadError(path, err);
   }
   let json: unknown;
   try {
@@ -285,6 +290,13 @@ export async function loadSessionFile(dir: string): Promise<SessionFile | null> 
   }
   const parsed = SessionFileSchema.safeParse(json);
   return parsed.success ? parsed.data : null;
+}
+
+function sessionReadError(path: string, cause: unknown): CliError {
+  return new CliError('INTERNAL', `Could not read the session cache at ${path}`, {
+    fix: `Check file permissions on ${path}, or delete it to re-establish.`,
+    cause,
+  });
 }
 
 export async function saveSessionFile(dir: string, file: SessionFile): Promise<void> {
@@ -338,7 +350,6 @@ export function createSessionKeyAuth(
   deps: SessionKeyDeps = {},
 ): WriteAuth {
   const now = deps.now ?? Date.now;
-  const loadFile = deps.loadFile ?? (() => loadSessionFile(config.dataDir));
   let cached: SessionFile | null = null;
   let forceReestablish = false;
 
@@ -351,7 +362,7 @@ export function createSessionKeyAuth(
       return cached;
     }
     if (!forceReestablish) {
-      const onDisk = await loadFile();
+      const onDisk = await loadSessionFile(config.dataDir);
       if (onDisk !== null && isSessionUsable(onDisk, config.signer.address, now())) {
         cached = onDisk;
         return cached;
@@ -401,13 +412,4 @@ export function createSiwxAuth(config: SessionKeyConfig): WriteAuth {
       return code === 'nonce_already_used' || code === 'invalid_proof' || code === 'proof_expired';
     },
   };
-}
-
-function isNotFound(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === 'ENOENT'
-  );
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, mkdir, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { webcrypto } from 'node:crypto';
@@ -11,6 +11,7 @@ import {
   establishSession,
   isSessionUsable,
   loadSessionFile,
+  saveSessionFile,
   recoveryFor,
   signWithSession,
   signatureBase,
@@ -392,5 +393,101 @@ describe('createSiwxAuth (plain-SIWX fallback)', () => {
     expect(n).toBe(1);
     expect(await auth.recover('nonce_already_used')).toBe(true);
     expect(await auth.recover('session_key_unbound')).toBe(false);
+  });
+});
+
+describe('loadSessionFile degradation branches', () => {
+  let d: string;
+  beforeEach(async () => {
+    d = await mkdtemp(join(tmpdir(), 'tenjin-session-load-'));
+  });
+  afterEach(async () => {
+    await rm(d, { recursive: true, force: true });
+  });
+
+  it('returns null when the cache is absent', async () => {
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+
+  it('returns null on invalid JSON (a corrupt cache re-establishes, not throws)', async () => {
+    await mkdir(d, { recursive: true });
+    await writeFile(sessionPath(d), 'not json {{{', { mode: 0o600 });
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+
+  it('returns null on a schema mismatch (tampered/partial file)', async () => {
+    await mkdir(d, { recursive: true });
+    await writeFile(sessionPath(d), JSON.stringify({ address: '0xabc' }), { mode: 0o600 });
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+
+  it('fails closed on a group/world-readable cache (ssh posture)', async () => {
+    if (process.platform === 'win32') return;
+    const { file } = await realKeyFile();
+    await saveSessionFile(d, file); // 0600
+    await chmod(sessionPath(d), 0o644); // loosened out of band
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+});
+
+describe('createSessionKeyAuth recovers from a bad on-disk session', () => {
+  let d: string;
+  beforeEach(async () => {
+    d = await mkdtemp(join(tmpdir(), 'tenjin-session-recover-'));
+  });
+  afterEach(async () => {
+    await rm(d, { recursive: true, force: true });
+  });
+
+  function countingSigner(): { signer: TenjinSigner; count: () => number } {
+    const inner = testSigner();
+    let n = 0;
+    return {
+      count: () => n,
+      signer: {
+        address: inner.address,
+        signMessage: (a) => {
+          n++;
+          return inner.signMessage(a);
+        },
+        signTypedData: (a) => inner.signTypedData(a),
+      },
+    };
+  }
+
+  const req = { method: 'POST' as const, url: 'https://tenjin.blog/api/posts', body: '{}' };
+
+  it('re-establishes exactly once from a corrupt session.json', async () => {
+    await mkdir(d, { recursive: true });
+    await writeFile(sessionPath(d), 'garbage', { mode: 0o600 });
+    const { signer, count } = countingSigner();
+    const auth = createSessionKeyAuth({
+      signer,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: d,
+    });
+    await auth.headersFor(req);
+    expect(count()).toBe(1); // one fresh establish
+    await auth.headersFor(req);
+    expect(count()).toBe(1); // then reuses the freshly written session
+  });
+
+  it('re-establishes from an expired on-disk session', async () => {
+    const { signer, count } = countingSigner();
+    const { file } = await realKeyFile();
+    await saveSessionFile(d, {
+      ...file,
+      address: signer.address.toLowerCase(),
+      exp: new Date(Date.now() - 1000).toISOString(), // already expired
+    });
+    const auth = createSessionKeyAuth({
+      signer,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: d,
+    });
+    await auth.headersFor(req);
+    expect(count()).toBe(1);
   });
 });

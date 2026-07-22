@@ -113,6 +113,12 @@ function baseArgs(file: string, over: Partial<PublishArgs> = {}): PublishArgs {
   return { file, ...over };
 }
 
+/** Hermetic deps: an empty env and a temp cwd so tests never read the ambient
+ *  process.env (TENJIN_PUBLISH_MODE / TENJIN_NO_SESSION) or a stray .tenjin.json. */
+function hermetic(over: PublishDeps = {}): PublishDeps {
+  return { env: {}, cwd: dir, ...over };
+}
+
 describe('runPublish — consent matrix (mode × content × --yes)', () => {
   type Outcome = 'success' | 'NEEDS_CONFIRMATION' | 'PUBLISH_BLOCKED';
   const cases: Array<{ mode: string; content: string; yes: boolean; want: Outcome }> = [
@@ -123,6 +129,7 @@ describe('runPublish — consent matrix (mode × content × --yes)', () => {
     { mode: 'review', content: CLEAN, yes: false, want: 'NEEDS_CONFIRMATION' },
     { mode: 'review', content: CLEAN, yes: true, want: 'success' },
     { mode: 'review', content: WARN, yes: false, want: 'NEEDS_CONFIRMATION' },
+    { mode: 'review', content: WARN, yes: true, want: 'success' },
     { mode: 'full-auto', content: WARN, yes: false, want: 'success' },
     { mode: 'full-auto', content: CLEAN, yes: false, want: 'success' },
     { mode: 'auto', content: BLOCK, yes: true, want: 'PUBLISH_BLOCKED' },
@@ -134,8 +141,8 @@ describe('runPublish — consent matrix (mode × content × --yes)', () => {
     it(`${c.mode} × ${label(c.content)} × yes=${c.yes} → ${c.want}`, async () => {
       const file = await writeDoc(c.content);
       const { fetch, calls } = stubServer();
-      const { provider } = spyProvider();
-      const deps: PublishDeps = { fetchImpl: fetch, provider };
+      const { provider, signCount } = spyProvider();
+      const deps = hermetic({ fetchImpl: fetch, provider });
       const args = baseArgs(file, { mode: c.mode, ...(c.yes ? { yes: true } : {}) });
 
       if (c.want === 'success') {
@@ -145,6 +152,10 @@ describe('runPublish — consent matrix (mode × content × --yes)', () => {
       } else {
         await expect(runPublish(args, makeCtx(), deps)).rejects.toMatchObject({ code: c.want });
         expect(calls).toHaveLength(0); // a refused publish never writes
+        // And never touches the wallet: consent gates BEFORE the session establish
+        // that would call signMessage. A regression moving establish above the gate
+        // would flip this from 0.
+        expect(signCount()).toBe(0);
       }
     });
   }
@@ -158,7 +169,7 @@ describe('runPublish — exit-code conformance', () => {
   it('PUBLISH_BLOCKED and NEEDS_CONFIRMATION are exit 3, unreadable file is exit 2', async () => {
     const { provider } = spyProvider();
     const { fetch } = stubServer();
-    const deps = { fetchImpl: fetch, provider };
+    const deps = hermetic({ fetchImpl: fetch, provider });
     await expect(
       runPublish(baseArgs(await writeDoc(BLOCK)), makeCtx(), deps),
     ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
@@ -183,7 +194,11 @@ describe('runPublish — receipt + card echo', () => {
       resource: { cacheEligible: false, cacheEligibleMissing: ['scope', 'exclusions'] },
     });
     const { provider } = spyProvider();
-    const res = await runPublish(baseArgs(file), makeCtx(), { fetchImpl: fetch, provider });
+    const res = await runPublish(
+      baseArgs(file),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
     expect(res.data).toMatchObject({
       resourceId: CREATED.id,
       url: CREATED.url,
@@ -201,10 +216,11 @@ describe('runPublish — receipt + card echo', () => {
   it('an ineligible-but-published post still succeeds (browse-only document)', async () => {
     const { fetch } = stubServer(CREATED); // no resource echo
     const { provider } = spyProvider();
-    const res = await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), {
-      fetchImpl: fetch,
-      provider,
-    });
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN)),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
     expect((res.data as { cacheEligible: boolean }).cacheEligible).toBe(false);
     expect((res.data as { missing: string[] }).missing).toEqual([]);
   });
@@ -214,7 +230,7 @@ describe('runPublish — session key mint-once', () => {
   it('the first publish mints the session (one wallet sig); the second reuses it (zero)', async () => {
     const { provider, signCount } = spyProvider();
     const { fetch } = stubServer();
-    const deps = { fetchImpl: fetch, provider };
+    const deps = hermetic({ fetchImpl: fetch, provider });
 
     await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
     expect(signCount()).toBe(1);
@@ -226,7 +242,7 @@ describe('runPublish — session key mint-once', () => {
   it('the plain-SIWX fallback signs each write with the wallet (no session cached)', async () => {
     const { provider, signCount } = spyProvider();
     const { fetch } = stubServer();
-    const deps = { fetchImpl: fetch, provider, useSession: false };
+    const deps = hermetic({ fetchImpl: fetch, provider, useSession: false });
 
     await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
     await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
@@ -239,7 +255,11 @@ describe('runPublish — default-mode notice', () => {
     const { provider } = spyProvider();
     const { fetch } = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
-    await runPublish(baseArgs(await writeDoc(CLEAN)), ctx, { fetchImpl: fetch, provider });
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN)),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    );
     expect(stderr()).toContain(
       'publish.mode: auto (default) - a clean scan publishes at $0.10 without asking.',
     );
@@ -250,10 +270,11 @@ describe('runPublish — default-mode notice', () => {
     const { provider } = spyProvider();
     const { fetch } = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
-    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), ctx, {
-      fetchImpl: fetch,
-      provider,
-    });
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    );
     expect(stderr()).not.toContain('(default)');
   });
 });
@@ -264,7 +285,11 @@ describe('runPublish — the needs_confirmation payload', () => {
     const { provider } = spyProvider();
     const { fetch } = stubServer();
     try {
-      await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), { fetchImpl: fetch, provider });
+      await runPublish(
+        baseArgs(file, { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      );
       throw new Error('expected a throw');
     } catch (err) {
       const e = err as { code?: string; details?: Record<string, unknown> };
@@ -283,6 +308,126 @@ describe('runPublish — the needs_confirmation payload', () => {
       );
       expect(d.card.cacheEligible).toBe(false);
       expect(d.target).toEqual({ status: 'published', titlePreview: 'The Answer' });
+    }
+  });
+});
+
+describe('runPublish — --mode edge validation', () => {
+  it('rejects an unrecognized --mode as USAGE before any wallet or write', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    const deps = hermetic({ fetchImpl: fetch, provider });
+    for (const bad of ['Review', 'reveiw', 'full_auto', '']) {
+      await expect(
+        runPublish(baseArgs(await writeDoc(CLEAN), { mode: bad }), makeCtx(), deps),
+      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    }
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+  });
+});
+
+describe('runPublish — TENJIN_PUBLISH_MODE', () => {
+  it('warns and falls back when the env var is a mistyped value', async () => {
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    // A bad env var must not silently degrade: it warns and uses the fallback.
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN)),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider, env: { TENJIN_PUBLISH_MODE: 'reveiw' } }),
+    );
+    expect(stderr()).toContain('Ignoring invalid TENJIN_PUBLISH_MODE="reveiw"');
+  });
+
+  it('honors a valid env mode (review → needs_confirmation on a clean file)', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN)),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider, env: { TENJIN_PUBLISH_MODE: 'review' } }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('runPublish — card-flag values pass the scan', () => {
+  // A block-tier secret (AWS key); secret-assignment is only warn-tier since B3.1.
+  const SECRET = 'AKIAIOSFODNN7EXAMPLE';
+
+  it('a secret in --provenance hard-blocks in every mode, like an in-file secret', async () => {
+    for (const mode of ['auto', 'full-auto', 'review']) {
+      const { fetch, calls } = stubServer();
+      const { provider, signCount } = spyProvider();
+      await expect(
+        runPublish(
+          baseArgs(await writeDoc(CLEAN), { mode, yes: true, provenance: SECRET }),
+          makeCtx(),
+          hermetic({ fetchImpl: fetch, provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+      expect(calls).toHaveLength(0);
+      expect(signCount()).toBe(0);
+    }
+  });
+
+  it('the same secret in-file and via-flag behave identically (both block)', async () => {
+    const viaFlag = runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'full-auto', yes: true, scope: SECRET }),
+      makeCtx(),
+      hermetic({ ...stubDeps(), provider: spyProvider().provider }),
+    );
+    await expect(viaFlag).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+
+    const inFile = runPublish(
+      baseArgs(await writeDoc(`# T\n\n${SECRET}\n`), { mode: 'full-auto', yes: true }),
+      makeCtx(),
+      hermetic({ ...stubDeps(), provider: spyProvider().provider }),
+    );
+    await expect(inFile).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+  });
+});
+
+function stubDeps(): { fetchImpl: typeof fetch } {
+  return { fetchImpl: stubServer().fetch };
+}
+
+describe('runPublish — draft end to end', () => {
+  it('maps --draft to a draft POST and echoes the draft receipt', async () => {
+    const draftPost = {
+      ...CREATED,
+      status: 'draft',
+      url: 'https://preview.example/a/iris/the-answer',
+    };
+    const { fetch, calls } = stubServer(draftPost);
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { draft: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(calls).toHaveLength(1);
+    expect((res.data as { status: string }).status).toBe('draft');
+  });
+
+  it('a --draft needs_confirmation carries target.status "draft"', async () => {
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    try {
+      await runPublish(
+        baseArgs(await writeDoc(WARN), { draft: true, mode: 'review' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      );
+      throw new Error('expected a throw');
+    } catch (err) {
+      const e = err as { code?: string; details?: { target?: { status?: string } } };
+      expect(e.code).toBe('NEEDS_CONFIRMATION');
+      expect(e.details?.target?.status).toBe('draft');
     }
   });
 });

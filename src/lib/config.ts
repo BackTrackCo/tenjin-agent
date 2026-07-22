@@ -12,6 +12,19 @@ export const PublishModeSchema = z.enum(['review', 'auto', 'full-auto']);
 export type PublishMode = z.infer<typeof PublishModeSchema>;
 
 /**
+ * Validate a publish-mode value at a command edge (`--mode`, `--publish-mode`):
+ * an unrecognized value is USAGE (exit 2), never silently dropped. `flagName` is
+ * woven into the message so the failing flag is named.
+ */
+export function parsePublishModeFlag(value: string, flagName: string): PublishMode {
+  const parsed = PublishModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "review", "auto", or "full-auto".',
+  });
+}
+
+/**
  * The publish block (B3): `mode` governs the confirm cascade a `publish` runs,
  * `defaultPrice` is the atomic USDC price a card is published at when no
  * per-publish price is given. Stored atomic like the spend keys.

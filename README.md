@@ -180,9 +180,9 @@ on every publish, then applies your `publish.mode`:
   finding stops and asks; a hard block (a live secret or private key) always
   refuses.
 - **`full-auto`** does not stop for warnings, only for hard blocks. It is honored
-  only from an env var, a flag, or a gitignored `.tenjin.json`. A committed
-  `.tenjin.json` asking for `full-auto` is downgraded to `auto`, so cloning a repo
-  can never enable silent auto-publishing.
+  from your global config, an env var, a flag, or a gitignored `.tenjin.json`. Only
+  a committed `.tenjin.json` asking for `full-auto` is downgraded to `auto`, so
+  cloning a repo can never enable silent auto-publishing.
 
 `--yes` clears the warning findings and the review confirm; it never clears a hard
 block. Set the mode with `tenjin config set publish.mode <mode>`, or per run with

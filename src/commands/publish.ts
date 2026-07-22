@@ -2,9 +2,11 @@ import { readFile } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
+import { PublishModeSchema, parsePublishModeFlag } from '../lib/config';
 import { scan, type ScanFinding } from '../lib/scan';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal } from '../lib/output';
+import { trimSlash } from '../lib/url';
 import {
   deriveCard,
   localCardEligibility,
@@ -13,15 +15,21 @@ import {
   parseFrontmatter,
   type CardFlags,
   type Frontmatter,
+  type ResourceCardInput,
 } from '../lib/card';
-import { publishPost, type PublishInput, type PublishStatus } from '../lib/posts-api';
 import {
-  createSessionKeyAuth,
-  createSiwxAuth,
-  type SessionKeyDeps,
-  type WriteAuth,
-} from '../lib/session-key';
-import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
+  publishPost,
+  PUBLISH_STATUSES,
+  type PublishInput,
+  type PublishStatus,
+} from '../lib/posts-api';
+import { createSessionKeyAuth, createSiwxAuth, type WriteAuth } from '../lib/session-key';
+import {
+  describeWallet,
+  resolveWalletProvider,
+  type TenjinSigner,
+  type WalletProvider,
+} from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -38,13 +46,12 @@ import type { CommandContext, CommandResult } from '../context';
 
 /** Writes require Base mainnet per the server's SIWX chain constraint. */
 const WRITE_CHAIN_ID = 'eip155:8453';
-const STATUSES: readonly string[] = ['draft', 'published', 'unlisted'];
 
 export interface PublishArgs {
   file: string;
   draft?: boolean;
   yes?: boolean;
-  /** Raw `--mode` (review|auto|full-auto); validated during resolution. */
+  /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
   mode?: string;
   /** Top-level post price, decimal USD at the edge (O1). */
   price?: string;
@@ -64,10 +71,12 @@ export interface PublishArgs {
 export interface PublishDeps {
   fetchImpl?: typeof fetch;
   provider?: WalletProvider;
-  /** Force the plain-SIWX write path (default: session key). Also TENJIN_NO_SESSION=1. */
+  /** Force the plain-SIWX write path (default: session key unless TENJIN_NO_SESSION=1). */
   useSession?: boolean;
-  /** Session-key seams (clock/nonce/keygen/cache) for deterministic tests. */
-  sessionDeps?: SessionKeyDeps;
+  /** Environment seam (mode, base-url, TENJIN_NO_SESSION); defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
+  /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
+  cwd?: string;
 }
 
 export async function runPublish(
@@ -75,6 +84,13 @@ export async function runPublish(
   ctx: CommandContext,
   deps: PublishDeps = {},
 ): Promise<CommandResult> {
+  const env = deps.env ?? process.env;
+  const cwd = deps.cwd ?? process.cwd();
+  // Validate --mode at the edge (USAGE, exit 2) BEFORE any consent resolution: a
+  // typo like `--mode Review` must never be silently dropped onto a looser mode
+  // and publish unconfirmed. Mirrors install's --publish-mode edge check.
+  if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
+
   const raw = await readMarkdown(args.file);
   const { frontmatter, body } = parseFrontmatter(raw);
 
@@ -89,12 +105,24 @@ export async function runPublish(
   // full-auto loosening gate. Its downgrade warnings go to stderr, not the receipt.
   const settings = await resolvePublishSettings({
     dataDir: ctx.dataDir,
-    cwd: process.cwd(),
+    cwd,
     ...(args.mode !== undefined ? { flag: args.mode } : {}),
-    env: process.env,
+    env,
   });
   for (const warning of settings.warnings) {
     ctx.io.stderr.write(`${warning}\n`);
+  }
+  // A mistyped TENJIN_PUBLISH_MODE degrades silently otherwise (the resolver
+  // ignores an unrecognized env value); warn on stderr so the discard is visible.
+  const envMode = env.TENJIN_PUBLISH_MODE;
+  if (
+    envMode !== undefined &&
+    envMode.length > 0 &&
+    !PublishModeSchema.safeParse(envMode).success
+  ) {
+    ctx.io.stderr.write(
+      `Ignoring invalid TENJIN_PUBLISH_MODE=${JSON.stringify(envMode)}; using ${settings.mode} (${settings.modeSource}).\n`,
+    );
   }
   // When the mode was never configured, say once (on stderr, invisible to JSON
   // consumers) what the default does and how to change it, so an unconfigured
@@ -108,9 +136,12 @@ export async function runPublish(
   const priceAtomic = resolvePrice(args, frontmatter, settings.defaultPriceAtomic);
 
   // The scan runs in EVERY mode (D38): it gates the gate, it does not replace it.
-  // Scan the whole file so a secret in frontmatter (a public card field) is caught
-  // too, not only the body.
-  const findings = scan(raw);
+  // Scan the whole file AND the derived card's text, so a secret reaches the same
+  // gates whether it arrives in the body, in frontmatter, or via a card-authoring
+  // flag (--provenance, --scope, …) — the card ships to the PUBLIC card, so a flag
+  // secret must block exactly like an in-file one. Dedupe by check+excerpt so a
+  // frontmatter value (present in both raw and the card) is not double-counted.
+  const findings = dedupeFindings([...scan(raw), ...scan(cardScanText(card))]);
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 
@@ -157,7 +188,7 @@ export async function runPublish(
   );
   await describeWallet(provider); // surfaces WALLET_MISSING with its own fix
   const signer = await provider.getSigner();
-  const auth = resolveWriteAuth(signer, runtime.baseUrl, ctx.dataDir, deps);
+  const auth = resolveWriteAuth(signer, runtime.baseUrl, ctx.dataDir, deps, env);
 
   const input: PublishInput = {
     ...(title !== undefined ? { title } : {}),
@@ -227,7 +258,7 @@ function resolveStatus(args: PublishArgs, frontmatter: Frontmatter): PublishStat
   if (args.draft === true) return 'draft';
   const fm = frontmatter.status;
   if (fm === undefined) return 'published';
-  if (typeof fm !== 'string' || !STATUSES.includes(fm)) {
+  if (typeof fm !== 'string' || !(PUBLISH_STATUSES as readonly string[]).includes(fm)) {
     throw new CliError('USAGE', `Invalid status ${JSON.stringify(fm)} in frontmatter.`, {
       fix: 'Use status: draft | published | unlisted, or pass --draft.',
     });
@@ -298,14 +329,55 @@ function cardFlagsFrom(args: PublishArgs): CardFlags {
 }
 
 function resolveWriteAuth(
-  signer: import('../lib/wallet').TenjinSigner,
+  signer: TenjinSigner,
   baseUrl: string,
   dataDir: string,
   deps: PublishDeps,
+  env: NodeJS.ProcessEnv,
 ): WriteAuth {
   const config = { signer, baseUrl, chainId: WRITE_CHAIN_ID, dataDir };
-  const useSession = deps.useSession ?? process.env.TENJIN_NO_SESSION !== '1';
-  return useSession ? createSessionKeyAuth(config, deps.sessionDeps ?? {}) : createSiwxAuth(config);
+  const useSession = deps.useSession ?? env.TENJIN_NO_SESSION !== '1';
+  return useSession ? createSessionKeyAuth(config) : createSiwxAuth(config);
+}
+
+/**
+ * The derived card's free-text values as one newline-joined document, so the scan
+ * covers card-flag input (which never touches the file) at the same severity as
+ * the body. Empty when there is no card.
+ */
+function cardScanText(card: ResourceCardInput | undefined): string {
+  if (card === undefined) return '';
+  const parts: string[] = [];
+  const add = (v: string | undefined): void => {
+    if (v !== undefined) parts.push(v);
+  };
+  add(card.scope);
+  add(card.exclusions);
+  add(card.provenanceSummary);
+  add(card.methodologySummary);
+  add(card.mediaType);
+  add(card.maintenanceCadence);
+  add(card.asOf);
+  add(card.validUntil);
+  add(card.estimatedPaidInputCost);
+  if (card.questionsAnswered !== undefined) parts.push(...card.questionsAnswered);
+  if (card.tasksSupported !== undefined) parts.push(...card.tasksSupported);
+  if (card.appliesTo !== undefined) {
+    for (const values of Object.values(card.appliesTo)) parts.push(...values);
+  }
+  return parts.join('\n');
+}
+
+/** Collapse findings that share a check + excerpt (a frontmatter value scanned in
+ *  both the file and the derived card) to one, keeping the first (the file-line). */
+function dedupeFindings(findings: ScanFinding[]): ScanFinding[] {
+  const seen = new Set<string>();
+  return findings.filter((f) => {
+    const key = `${f.check}:${f.excerpt}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +403,4 @@ function confirmMessage(warnCount: number, priceUsd: string): string {
   return warnCount > 0
     ? `Publish needs confirmation: ${warnCount} finding(s), price $${priceUsd}.`
     : `Publish needs confirmation: price $${priceUsd}.`;
-}
-
-function trimSlash(url: string): string {
-  return url.replace(/\/+$/, '');
 }

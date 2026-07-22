@@ -4,6 +4,7 @@ import { CliError } from '../lib/errors';
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
+import { trimSlash } from '../lib/url';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
@@ -477,8 +478,4 @@ function infoVersion(json: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
-}
-
-function trimSlash(url: string): string {
-  return url.replace(/\/+$/, '');
 }

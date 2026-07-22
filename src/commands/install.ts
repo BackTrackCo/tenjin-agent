@@ -10,7 +10,7 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
-import { loadRawConfig, PublishModeSchema } from '../lib/config';
+import { loadRawConfig, PublishModeSchema, parsePublishModeFlag } from '../lib/config';
 import type { PublishMode } from '../lib/config';
 import { persistPublishMode } from './config';
 import { collectDoctorChecks, renderDoctorHuman } from './doctor';
@@ -211,13 +211,7 @@ async function selectPublishMode(
 }
 
 function parseModeFlag(value: string): PublishMode {
-  const parsed = PublishModeSchema.safeParse(value);
-  if (!parsed.success) {
-    throw new CliError('USAGE', `Invalid --publish-mode ${JSON.stringify(value)}`, {
-      fix: 'Use "review", "auto", or "full-auto".',
-    });
-  }
-  return parsed.data;
+  return parsePublishModeFlag(value, '--publish-mode');
 }
 
 /** A visible line-reader (prompt on stderr so stdout stays a single JSON object). */

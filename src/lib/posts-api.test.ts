@@ -86,8 +86,27 @@ describe('buildPostCreateBody — bounds', () => {
     expect(() => buildPostCreateBody({ status: 'published', title: 'x' })).toThrow(/body/);
   });
 
-  it('a draft may omit title and body', () => {
-    expect(buildPostCreateBody({ status: 'draft' })).toEqual({ status: 'draft' });
+  it('a draft may omit EITHER title or body, but not both', () => {
+    expect(buildPostCreateBody({ status: 'draft', title: 'Just a title' })).toEqual({
+      title: 'Just a title',
+      status: 'draft',
+    });
+    expect(buildPostCreateBody({ status: 'draft', bodyMd: 'just a body' })).toEqual({
+      bodyMd: 'just a body',
+      status: 'draft',
+    });
+    // An all-empty draft is refused locally, matching the server superRefine.
+    expect(() => buildPostCreateBody({ status: 'draft' })).toThrow(/title or a body/);
+    expect(() => buildPostCreateBody({ status: 'draft', title: '  ', bodyMd: '  ' })).toThrow();
+  });
+
+  it('rejects a reserved or address-shaped handle', () => {
+    expect(() => buildPostCreateBody({ status: 'draft', title: 't', handle: 'latest' })).toThrow(
+      /Reserved/,
+    );
+    expect(() => buildPostCreateBody({ status: 'draft', title: 't', handle: '0xdead' })).toThrow(
+      /Reserved/,
+    );
   });
 
   it('rejects out-of-bound top-level fields', () => {

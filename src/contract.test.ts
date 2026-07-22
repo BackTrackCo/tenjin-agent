@@ -240,6 +240,22 @@ function cardInputProps(doc: unknown): unknown {
   return get(postCreateProps(doc), 'resource', 'properties');
 }
 
+/**
+ * The nullable card fields are declared as `anyOf: [<schema>, {type:'null'}]`, so
+ * their bounds live one level in. Return the non-null branch (or the node itself
+ * for a plain, non-nullable field) so a single `bound()` reads either shape.
+ */
+function nonNull(node: unknown): unknown {
+  const anyOf = get(node, 'anyOf');
+  if (Array.isArray(anyOf)) {
+    return anyOf.find((b) => get(b, 'type') !== 'null') ?? node;
+  }
+  return node;
+}
+function bound(props: unknown, field: string, ...path: (string | number)[]): unknown {
+  return get(nonNull(get(props, field)), ...path);
+}
+
 function assertPublishContract(doc: unknown): void {
   // PostCreate is strict and declares every top-level field the CLI sends.
   expect(get(doc, 'components', 'schemas', 'PostCreate', 'additionalProperties')).toBe(false);
@@ -251,12 +267,41 @@ function assertPublishContract(doc: unknown): void {
   for (const field of CARD_INPUT_FIELDS) {
     expect(get(cardInputProps(doc), field), `resource.${field} missing`).toBeDefined();
   }
-  // The bounds the CLI mirrors locally must equal the server's.
-  expect(get(cardInputProps(doc), 'mediaType', 'maxLength')).toBe(100);
-  expect(get(cardInputProps(doc), 'questionsAnswered', 'items', 'maxLength')).toBe(200);
-  expect(get(cardInputProps(doc), 'appliesTo', 'additionalProperties', 'items', 'maxLength')).toBe(
-    120,
-  );
+  // The full bounds block the CLI hard-codes as literals. A server move on any of
+  // these regenerates the fixture but silently diverges from the CLI, so pin the
+  // lot — a mismatch here is the drift.
+  const top = postCreateProps(doc);
+  expect(bound(top, 'title', 'maxLength')).toBe(200);
+  expect(bound(top, 'bodyMd', 'maxLength')).toBe(200000);
+  expect(bound(top, 'excerpt', 'maxLength')).toBe(500);
+  expect(bound(top, 'tags', 'maxItems')).toBe(5);
+  expect(bound(top, 'tags', 'items', 'minLength')).toBe(1);
+  expect(bound(top, 'tags', 'items', 'maxLength')).toBe(50);
+  expect(bound(top, 'price', 'pattern')).toBe('^(0|[1-9]\\d{0,12})$');
+  expect(bound(top, 'handle', 'pattern')).toBe('^[a-z0-9-]{2,32}$');
+  expect(bound(top, 'status', 'enum')).toEqual(['draft', 'published', 'unlisted']);
+
+  const card = cardInputProps(doc);
+  expect(bound(card, 'mediaType', 'maxLength')).toBe(100);
+  expect(bound(card, 'mediaType', 'pattern')).toBe('^[a-z0-9]+\\/[a-z0-9][a-z0-9.+-]*$');
+  expect(bound(card, 'artifactType', 'enum')).toEqual(['document', 'skill', 'dataset']);
+  expect(bound(card, 'temporalMode', 'enum')).toEqual(['snapshot', 'maintained', 'evergreen']);
+  for (const f of ['scope', 'exclusions', 'provenanceSummary', 'methodologySummary']) {
+    expect(bound(card, f, 'maxLength'), `resource.${f} maxLength`).toBe(500);
+  }
+  for (const f of ['questionsAnswered', 'tasksSupported']) {
+    expect(bound(card, f, 'maxItems'), `resource.${f} maxItems`).toBe(10);
+    expect(bound(card, f, 'items', 'maxLength'), `resource.${f} items`).toBe(200);
+  }
+  expect(bound(card, 'maintenanceCadence', 'maxLength')).toBe(120);
+  expect(bound(card, 'reproductionMinutes', 'minimum')).toBe(0);
+  expect(bound(card, 'reproductionMinutes', 'maximum')).toBe(1000000);
+  expect(bound(card, 'appliesTo', 'additionalProperties', 'items', 'maxLength')).toBe(120);
+  // The CLI's own appliesTo 8-KEY cap is local-stricter: the server accepts up to
+  // 8 keys but the fixture declares no `maxProperties`, so this divergence has NO
+  // fixture counterpart and cannot be pinned here — asserted only in card.test.ts.
+  expect(bound(card, 'appliesTo', 'maxProperties')).toBeUndefined();
+
   // The echo the CLI reads back.
   const echo = get(doc, 'components', 'schemas', 'ResourceCard', 'properties');
   expect(get(echo, 'cacheEligible'), 'ResourceCard.cacheEligible missing').toBeDefined();

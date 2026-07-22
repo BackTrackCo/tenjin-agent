@@ -3,6 +3,7 @@ import { CliError } from './errors';
 import { httpRequest, type HttpResponse, type HttpResult } from './http';
 import { CLIENT_HEADER } from './client-meta';
 import { rateLimitError } from './agent-api';
+import { trimSlash } from './url';
 import type { ResourceCardInput } from './card';
 import type { WriteAuth } from './session-key';
 
@@ -17,7 +18,9 @@ import type { WriteAuth } from './session-key';
  * by default, plain SIWX as a fallback); a 401 is recovered per the auth's rules.
  */
 
-export type PublishStatus = 'draft' | 'published' | 'unlisted';
+/** The status vocabulary; the as-const source the PublishStatus union derives from. */
+export const PUBLISH_STATUSES = ['draft', 'published', 'unlisted'] as const;
+export type PublishStatus = (typeof PUBLISH_STATUSES)[number];
 
 export interface PublishInput {
   title?: string;
@@ -46,23 +49,36 @@ export interface PostCreateBody {
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
 const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
+// A handle the server refuses beyond the charset rule: an address-shaped handle
+// (0x-prefixed) collides with the address form of a creator, and `latest` is the
+// reserved newest-post alias. The full reserved set is server-authoritative — a
+// 400/409 still catches any others — but these two are documented and mirrored.
+const RESERVED_HANDLES = new Set(['latest']);
 
 /**
  * Assemble + locally validate the create body against the server's bounds so a
  * malformed post fails as USAGE (exit 2) before any network round trip. A
- * non-draft publish requires a title AND body; a draft may omit either.
+ * non-draft publish requires a title AND body; a draft needs at least one of the
+ * two (an all-empty draft is refused, matching the server's superRefine).
  */
 export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   const isDraft = input.status === 'draft';
   const title = input.title?.trim();
   const bodyMd = input.bodyMd;
+  const hasTitle = title !== undefined && title.length > 0;
+  const hasBody = bodyMd !== undefined && bodyMd.trim().length > 0;
 
-  if (!isDraft && (title === undefined || title.length === 0)) {
+  if (isDraft && !hasTitle && !hasBody) {
+    throw new CliError('USAGE', 'A draft needs a title or a body.', {
+      fix: 'Add a `title:` or some Markdown; a completely empty draft is rejected.',
+    });
+  }
+  if (!isDraft && !hasTitle) {
     throw new CliError('USAGE', 'A published post needs a title.', {
       fix: 'Add a `title:` to the frontmatter or a leading `# Heading`, or pass --draft.',
     });
   }
-  if (!isDraft && (bodyMd === undefined || bodyMd.trim().length === 0)) {
+  if (!isDraft && !hasBody) {
     throw new CliError('USAGE', 'A published post needs a body.', {
       fix: 'Add Markdown below the frontmatter, or pass --draft.',
     });
@@ -89,10 +105,17 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
       fix: 'A price is an atomic USDC integer up to 13 digits, e.g. 100000 for $0.10.',
     });
   }
-  if (input.handle !== undefined && !HANDLE_RE.test(input.handle)) {
-    throw new CliError('USAGE', `Invalid handle: ${JSON.stringify(input.handle)}`, {
-      fix: 'A handle is 2 to 32 chars of a-z, 0-9, or hyphen.',
-    });
+  if (input.handle !== undefined) {
+    if (!HANDLE_RE.test(input.handle)) {
+      throw new CliError('USAGE', `Invalid handle: ${JSON.stringify(input.handle)}`, {
+        fix: 'A handle is 2 to 32 chars of a-z, 0-9, or hyphen.',
+      });
+    }
+    if (input.handle.startsWith('0x') || RESERVED_HANDLES.has(input.handle)) {
+      throw new CliError('USAGE', `Reserved handle: ${JSON.stringify(input.handle)}`, {
+        fix: 'Pick a handle that is not 0x-prefixed and not a reserved word (e.g. latest).',
+      });
+    }
   }
 
   return {
@@ -152,10 +175,6 @@ export interface PublishClientOptions {
 
 /** Bounded 401 recovery: the initial attempt plus at most this many re-signs. */
 const MAX_RECOVERIES = 3;
-
-function trimSlash(url: string): string {
-  return url.replace(/\/+$/, '');
-}
 
 /**
  * Create + publish a post. Signs each attempt through `auth`; on a 401 it reads

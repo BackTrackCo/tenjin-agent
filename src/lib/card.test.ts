@@ -104,16 +104,22 @@ describe('deriveCard — every bound, dotted resource.<field> errors', () => {
     expectUsage(() => deriveCard({}, { temporalMode: 'someday' }), 'temporalMode');
   });
 
-  it('mediaType must be a MIME shape ≤100', () => {
+  it('mediaType must be a MIME shape ≤100, case-insensitive (RFC 2045)', () => {
     expect(deriveCard({ mediaType: 'text/markdown' }, {})?.mediaType).toBe('text/markdown');
+    // Server-valid mixed case is accepted locally (the fixture pattern is lossy on /i).
+    expect(deriveCard({ mediaType: 'text/Markdown' }, {})?.mediaType).toBe('text/Markdown');
     expectUsage(() => deriveCard({ mediaType: 'not a mime' }, {}), 'mediaType');
     expectUsage(() => deriveCard({ mediaType: `text/${'x'.repeat(200)}` }, {}), 'mediaType');
   });
 
-  it('asOf/validUntil must be ISO-8601 with an offset, and validUntil ≥ asOf', () => {
+  it('asOf/validUntil must be ISO-8601 with an offset (seconds optional), validUntil ≥ asOf', () => {
     const ok = deriveCard({}, { asOf: '2026-07-01T00:00:00Z', validUntil: '2026-08-01T00:00:00Z' });
     expect(ok?.asOf).toBe('2026-07-01T00:00:00Z');
+    // Seconds are optional per the server's date-time pattern.
+    expect(deriveCard({}, { asOf: '2026-07-01T00:00Z' })?.asOf).toBe('2026-07-01T00:00Z');
+    expect(deriveCard({}, { asOf: '2026-07-01T00:00+05:30' })?.asOf).toBe('2026-07-01T00:00+05:30');
     expectUsage(() => deriveCard({}, { asOf: '2026-07-01' }), 'asOf'); // no time/offset
+    expectUsage(() => deriveCard({}, { asOf: '2026-07-01T00:00:00' }), 'asOf'); // no offset
     expectUsage(
       () => deriveCard({}, { asOf: '2026-08-01T00:00:00Z', validUntil: '2026-07-01T00:00:00Z' }),
       'validUntil',
@@ -237,5 +243,17 @@ describe('cacheEligible echo', () => {
       { question: ['q'], scope: 's', exclusions: 'e', provenance: 'p', temporalMode: 'snapshot' },
     );
     expect(localCardEligibility(noAsOf).missing).toEqual(missingSentences(['asOf']));
+  });
+
+  it('treats a whitespace-only field as MISSING (trim parity with the server)', () => {
+    // deriveCard accepts a spaces-only scope (only >500 is rejected), but the
+    // eligibility preview must not claim it present, or the human confirms against
+    // a wrong cacheEligible:true.
+    const card = deriveCard(
+      {},
+      { question: ['q'], scope: '   ', exclusions: 'e', provenance: 'p' },
+    );
+    expect(card?.scope).toBe('   '); // stored as given
+    expect(localCardEligibility(card).missing).toEqual(missingSentences(['scope']));
   });
 });

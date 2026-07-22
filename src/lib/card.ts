@@ -195,9 +195,13 @@ function unquote(value: string): string {
 
 const ARTIFACT_TYPES = ['document', 'skill', 'dataset'] as const;
 const TEMPORAL_MODES = ['snapshot', 'maintained', 'evergreen'] as const;
-const MEDIA_TYPE_RE = /^[a-z0-9]+\/[a-z0-9][a-z0-9.+-]*$/;
+// Case-insensitive per RFC 2045 (the server's regex carries /i; the OpenAPI
+// pattern can't express the flag, so `text/Markdown` is contract-legal).
+const MEDIA_TYPE_RE = /^[a-z0-9]+\/[a-z0-9][a-z0-9.+-]*$/i;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
-const ISO_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+// Seconds (and fractional seconds) are OPTIONAL, matching the server's date-time
+// pattern; the offset (Z or ±hh:mm) is required.
+const ISO_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
 /** Collects field errors under dotted `resource.<field>` keys, then throws once. */
 class CardErrors {
@@ -468,16 +472,26 @@ export function localCardEligibility(card: ResourceCardInput | undefined): {
   missing: string[];
 } {
   const tokens: string[] = [];
+  // Parity with the server rubric: presence is trim().length > 0, so a bare
+  // `scope:` ('' after parse) or `--scope " "` counts as MISSING, not present —
+  // otherwise the needs_confirmation preview claims eligible for a card the
+  // server will echo ineligible.
   const hasQuestionsOrTasks =
-    (card?.questionsAnswered?.length ?? 0) > 0 || (card?.tasksSupported?.length ?? 0) > 0;
+    (card?.questionsAnswered?.some(hasText) ?? false) ||
+    (card?.tasksSupported?.some(hasText) ?? false);
   if (!hasQuestionsOrTasks) tokens.push('questionsOrTasks');
-  if (card?.scope === undefined) tokens.push('scope');
-  if (card?.exclusions === undefined) tokens.push('exclusions');
-  if (card?.temporalMode === 'snapshot' && card.asOf === undefined) tokens.push('asOf');
-  if (card?.provenanceSummary === undefined && card?.methodologySummary === undefined) {
+  if (!hasText(card?.scope)) tokens.push('scope');
+  if (!hasText(card?.exclusions)) tokens.push('exclusions');
+  if (card?.temporalMode === 'snapshot' && !hasText(card.asOf)) tokens.push('asOf');
+  if (!hasText(card?.provenanceSummary) && !hasText(card?.methodologySummary)) {
     tokens.push('provenanceOrMethodology');
   }
   return { cacheEligible: tokens.length === 0, missing: missingSentences(tokens) };
+}
+
+/** The server's presence rubric: a non-empty value after trimming. */
+function hasText(value: string | undefined): boolean {
+  return value !== undefined && value.trim().length > 0;
 }
 
 function usage(message: string): CliError {
