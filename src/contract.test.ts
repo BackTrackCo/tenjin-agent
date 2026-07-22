@@ -3,6 +3,8 @@ import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { lookupCandidateSchema, lookupResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
+import { buildPostCreateBody } from './lib/posts-api';
+import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
 // (generated from tenjin main af607b3, the A2 merge). Every assertion here is a
@@ -201,6 +203,117 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   });
 });
 
+// The publish surface (A3, tenjin#382): the CLI sends a strictObject PostCreate
+// with an optional strictObject `resource` card and reads the cacheEligible echo.
+// Every field the CLI emits must be declared by the fixture, and the card bounds
+// the CLI validates locally must match the server's, or the drift fails here.
+const POST_CREATE_FIELDS = ['title', 'bodyMd', 'excerpt', 'tags', 'price', 'handle', 'status'];
+const CARD_INPUT_FIELDS = [
+  'artifactType',
+  'mediaType',
+  'temporalMode',
+  'asOf',
+  'validUntil',
+  'supersedesPostId',
+  'questionsAnswered',
+  'tasksSupported',
+  'scope',
+  'exclusions',
+  'appliesTo',
+  'provenanceSummary',
+  'methodologySummary',
+  'maintenanceCadence',
+  'reproductionMinutes',
+  'estimatedPaidInputCost',
+];
+
+function assertPostPaths(doc: unknown): void {
+  expect(get(doc, 'paths', '/api/posts', 'post', 'operationId')).toBe('createPost');
+  expect(get(doc, 'paths', '/api/posts/{id}', 'put', 'operationId')).toBe('updatePost');
+}
+
+function postCreateProps(doc: unknown): unknown {
+  return get(doc, 'components', 'schemas', 'PostCreate', 'properties');
+}
+function cardInputProps(doc: unknown): unknown {
+  return get(postCreateProps(doc), 'resource', 'properties');
+}
+
+function assertPublishContract(doc: unknown): void {
+  // PostCreate is strict and declares every top-level field the CLI sends.
+  expect(get(doc, 'components', 'schemas', 'PostCreate', 'additionalProperties')).toBe(false);
+  for (const field of POST_CREATE_FIELDS) {
+    expect(get(postCreateProps(doc), field), `PostCreate.${field} missing`).toBeDefined();
+  }
+  // The resource card is a strictObject declaring every card field the CLI emits.
+  expect(get(postCreateProps(doc), 'resource', 'additionalProperties')).toBe(false);
+  for (const field of CARD_INPUT_FIELDS) {
+    expect(get(cardInputProps(doc), field), `resource.${field} missing`).toBeDefined();
+  }
+  // The bounds the CLI mirrors locally must equal the server's.
+  expect(get(cardInputProps(doc), 'mediaType', 'maxLength')).toBe(100);
+  expect(get(cardInputProps(doc), 'questionsAnswered', 'items', 'maxLength')).toBe(200);
+  expect(get(cardInputProps(doc), 'appliesTo', 'additionalProperties', 'items', 'maxLength')).toBe(
+    120,
+  );
+  // The echo the CLI reads back.
+  const echo = get(doc, 'components', 'schemas', 'ResourceCard', 'properties');
+  expect(get(echo, 'cacheEligible'), 'ResourceCard.cacheEligible missing').toBeDefined();
+  expect(
+    get(echo, 'cacheEligibleMissing'),
+    'ResourceCard.cacheEligibleMissing missing',
+  ).toBeDefined();
+}
+
+describe('contract fixture pins the publish endpoints', () => {
+  it('declares POST /api/posts and PUT /api/posts/{id}', () => {
+    assertPostPaths(fixtureDoc);
+  });
+
+  it('the PostCreate + resource card shape the CLI sends is fully declared', () => {
+    assertPublishContract(fixtureDoc);
+  });
+
+  it('every field buildPostCreateBody emits is a declared PostCreate field', () => {
+    const body = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      excerpt: 'e',
+      tags: ['x'],
+      priceAtomic: '100000',
+      handle: 'iris',
+    });
+    const declared = postCreateProps(fixtureDoc);
+    for (const key of Object.keys(body)) {
+      expect(get(declared, key), `fixture does not declare PostCreate field ${key}`).toBeDefined();
+    }
+  });
+
+  it('every field deriveCard emits is a declared resource field', () => {
+    const card = deriveCard(
+      {},
+      {
+        artifactType: 'document',
+        temporalMode: 'snapshot',
+        asOf: '2026-07-01T00:00:00Z',
+        validUntil: '2026-08-01T00:00:00Z',
+        question: ['q'],
+        task: ['t'],
+        scope: 's',
+        exclusions: 'x',
+        provenance: 'p',
+        methodology: 'm',
+        appliesTo: { products: ['Vercel'] },
+      },
+    );
+    const declared = cardInputProps(fixtureDoc);
+    for (const key of Object.keys(card ?? {})) {
+      expect(get(declared, key), `fixture does not declare resource field ${key}`).toBeDefined();
+    }
+  });
+});
+
 // The only network-touching section in the whole suite, and only when
 // TENJIN_CONTRACT_BASE_URL is set: fetch the live openapi.json and re-run the
 // structural pins (assertions 1-4) against the deployment itself.
@@ -231,6 +344,11 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
 
     it('LookupOutcomeSubmit status enum matches the CLI', () => {
       assertOutcomeStatusEnum(liveDoc);
+    });
+
+    it('declares the publish endpoints and the resource-card shape the CLI sends', () => {
+      assertPostPaths(liveDoc);
+      assertPublishContract(liveDoc);
     });
   },
 );

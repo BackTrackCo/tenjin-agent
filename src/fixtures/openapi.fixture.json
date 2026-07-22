@@ -6,8 +6,8 @@
     "contact": {
       "email": "hello@tenjin.blog"
     },
-    "x-guidance": "Pay-per-article publishing on Base (USDC, eip155:8453). READ a paid essay: GET /api/read/{handle}/{slug} answers 402 with an x402 challenge; pay `exact` USDC then retry with the PAYMENT-SIGNATURE header. A free post returns 200 in-band. PUBLISH or manage an account: sign a SIGN-IN-WITH-X (SIWX, CAIP-122) header instead of an API key. The payable essays are enumerated as concrete resources at https://tenjin.blog/.well-known/x402.json. Full worked examples for both flows: https://tenjin.blog/llms.txt.",
-    "description": "The conventional JSON surface of Tenjin, an x402-native publishing platform on Base.\n\nThis spec covers the SIWX-gated authoring/account CRUD plus the public discovery reads\n(article/creator/tag directories + full-text search) — the surface deterministic tooling (codegen,\nPostman, OpenAPI→MCP converters) and x402 indexers (x402scan) consume. It is a *secondary*\nsurface: read https://tenjin.blog/llms.txt first for the canonical narrative guide and wallet options.\n\nThe x402 paid read IS declared (GET /api/read/<handle>/<slug>, tagged x-payment-info + a 402\nresponse) so indexers see the paid surface — but two things still cannot be expressed in vanilla\nOpenAPI, so https://tenjin.blog/llms.txt stays canonical for them:\n  • The pay-then-retry mechanics: a 402 challenge → sign an `exact` USDC payment → retry with the\n    PAYMENT-SIGNATURE header. The 402 body + PAYMENT-REQUIRED header are machine-readable; see\n    https://tenjin.blog/llms.txt and https://docs.x402.org.\n  • Constructing the SIGN-IN-WITH-X header (build a CAIP-122 message → sign EIP-191 → base64).\n    OpenAPI can declare the header (below) but not how to mint it — https://tenjin.blog/llms.txt has the\n    full worked example.\n\nThe HTML reader (GET /a/<handle>/<slug>) is a content-negotiated alias of this JSON read and is\nnot modeled separately."
+    "x-guidance": "Pay-per-article publishing on Base (USDC, eip155:8453). READ a paid piece: GET /api/read/{handle}/{slug} answers 402 with an x402 challenge; pay `exact` USDC then retry with the PAYMENT-SIGNATURE header. A free post returns 200 in-band. PUBLISH or manage an account: sign a SIGN-IN-WITH-X (SIWX, CAIP-122) header instead of an API key. The payable pieces are enumerated as concrete resources at https://tenjin.blog/.well-known/x402.json. Full worked examples for both flows: https://tenjin.blog/llms.txt.",
+    "description": "The conventional JSON surface of Tenjin, an x402-native publishing platform on Base.\n\nThis spec covers the SIWX-gated authoring/account CRUD plus the public discovery reads\n(article/creator/tag directories + full-text search) \u2014 the surface deterministic tooling (codegen,\nPostman, OpenAPI\u2192MCP converters) and x402 indexers (x402scan) consume. It is a *secondary*\nsurface: read https://tenjin.blog/llms.txt first for the canonical narrative guide and wallet options.\n\nThe x402 paid read IS declared (GET /api/read/<handle>/<slug>, tagged x-payment-info + a 402\nresponse) so indexers see the paid surface \u2014 but two things still cannot be expressed in vanilla\nOpenAPI, so https://tenjin.blog/llms.txt stays canonical for them:\n  \u2022 The pay-then-retry mechanics: a 402 challenge \u2192 sign an `exact` USDC payment \u2192 retry with the\n    PAYMENT-SIGNATURE header. The 402 body + PAYMENT-REQUIRED header are machine-readable; see\n    https://tenjin.blog/llms.txt and https://docs.x402.org.\n  \u2022 Constructing the SIGN-IN-WITH-X header (build a CAIP-122 message \u2192 sign EIP-191 \u2192 base64).\n    OpenAPI can declare the header (below) but not how to mint it \u2014 https://tenjin.blog/llms.txt has the\n    full worked example.\n\nThe HTML reader (GET /a/<handle>/<slug>) is a content-negotiated alias of this JSON read and is\nnot modeled separately."
   },
   "servers": [
     {
@@ -67,7 +67,7 @@
             }
           },
           "409": {
-            "description": "Conflict — `handle_taken`, `handle_cooling_down`, or `account_deleted`.",
+            "description": "Conflict \u2014 `handle_taken`, `handle_cooling_down`, or `account_deleted`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -215,7 +215,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) — owner-scoped routes do not distinguish the two, to avoid an existence leak.",
+            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) \u2014 owner-scoped routes do not distinguish the two, to avoid an existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -287,7 +287,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) — owner-scoped routes do not distinguish the two, to avoid an existence leak.",
+            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) \u2014 owner-scoped routes do not distinguish the two, to avoid an existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -297,7 +297,7 @@
             }
           },
           "409": {
-            "description": "Conflict — `handle_taken`, `handle_cooling_down`, or `account_deleted`.",
+            "description": "Conflict \u2014 `handle_taken`, `handle_cooling_down`, or `account_deleted`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -321,7 +321,7 @@
       "delete": {
         "operationId": "deletePost",
         "summary": "Soft-delete one of your own posts",
-        "description": "Idempotent — deleting an already-deleted post still returns 204. The nonce is single-use.",
+        "description": "Idempotent \u2014 deleting an already-deleted post still returns 204. The nonce is single-use.",
         "security": [
           {
             "siwx": []
@@ -342,7 +342,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) — owner-scoped routes do not distinguish the two, to avoid an existence leak.",
+            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) \u2014 owner-scoped routes do not distinguish the two, to avoid an existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -457,7 +457,7 @@
             }
           },
           "409": {
-            "description": "Conflict — `handle_taken`, `handle_cooling_down`, or `account_deleted`.",
+            "description": "Conflict \u2014 `handle_taken`, `handle_cooling_down`, or `account_deleted`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -483,7 +483,7 @@
       "post": {
         "operationId": "logout",
         "summary": "Revoke the current SIWX nonce (explicit logout)",
-        "description": "Stateless auth keeps no server session to drop; this writes the nonce to revoked_nonces so a captured proof can't be replayed. withAuth-gated — only the holder of a valid proof can revoke it.",
+        "description": "Stateless auth keeps no server session to drop; this writes the nonce to revoked_nonces so a captured proof can't be replayed. withAuth-gated \u2014 only the holder of a valid proof can revoke it.",
         "security": [
           {
             "siwx": []
@@ -563,7 +563,7 @@
       "get": {
         "operationId": "listMyEvents",
         "summary": "Your settled-sale feed (newest first, cursor-paginated)",
-        "description": "Private to the connected wallet: scoped to your posts via the SIWX proof, never a query param. One entry per settled payment (a sale, which on a paid post IS a read); this feed is sales-only — aggregate reads + glances live on GET /api/me/stats + the GET /api/posts reads/glancesHuman/glancesAgent fields; the buyer wallet is not exposed. Poll it and diff against the newest createdAt you have seen to notice new sales; GET /api/me/stats gives the this-month aggregates. The poll request (no cursor) returns a weak ETag; send it back as If-None-Match and an unchanged feed answers 304 with no body.",
+        "description": "Private to the connected wallet: scoped to your posts via the SIWX proof, never a query param. One entry per settled payment (a sale, which on a paid post IS a read); this feed is sales-only \u2014 aggregate reads + glances live on GET /api/me/stats + the GET /api/posts reads/glancesHuman/glancesAgent fields; the buyer wallet is not exposed. Poll it and diff against the newest createdAt you have seen to notice new sales; GET /api/me/stats gives the this-month aggregates. The poll request (no cursor) returns a weak ETag; send it back as If-None-Match and an unchanged feed answers 304 with no body.",
         "security": [
           {
             "siwx": []
@@ -658,8 +658,8 @@
     "/api/library": {
       "get": {
         "operationId": "listLibrary",
-        "summary": "Essays the connected wallet has paid to read",
-        "description": "Private to the connected wallet — the payer is derived from the SIWX proof, never a query param.",
+        "summary": "Pieces the connected wallet has paid to read",
+        "description": "Private to the connected wallet \u2014 the payer is derived from the SIWX proof, never a query param.",
         "security": [
           {
             "siwx": []
@@ -734,8 +734,8 @@
     "/api/read/{handle}/{slug}/markdown": {
       "get": {
         "operationId": "downloadArticleMarkdown",
-        "summary": "Download an essay's source Markdown (the author's body_md)",
-        "description": "Returns the essay's raw source markdown as a `text/markdown` attachment — the same essay you can read, as a file you can keep. NOT an x402 surface: it never issues a 402, so it cannot double-charge. A free essay is open; a paid essay is served ONLY to a SIGN-IN-WITH-X-authed wallet that already holds a payment for THIS post (the same returning-buyer entitlement as GET /api/read/<handle>/<slug>). To PAY for a paid essay, run the x402 read loop there first.",
+        "summary": "Download a piece's source Markdown (the author's body_md)",
+        "description": "Returns the piece's raw source markdown as a `text/markdown` attachment \u2014 the same piece you can read, as a file you can keep. NOT an x402 surface: it never issues a 402, so it cannot double-charge. A free piece is open; a paid piece is served ONLY to a SIGN-IN-WITH-X-authed wallet that already holds a payment for THIS post (the same returning-buyer entitlement as GET /api/read/<handle>/<slug>). To PAY for a paid piece, run the x402 read loop there first.",
         "security": [
           {},
           {
@@ -763,7 +763,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The essay's source markdown: a small YAML frontmatter block (title, author, source) then the verbatim body. `Content-Disposition: attachment`.",
+            "description": "The piece's source markdown: a small YAML frontmatter block (title, author, source) then the verbatim body. `Content-Disposition: attachment`.",
             "content": {
               "text/markdown": {
                 "schema": {
@@ -783,7 +783,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but this wallet has not paid for this post (`not_entitled`). Re-signing will not help — run the x402 read loop to pay first.",
+            "description": "Authenticated, but this wallet has not paid for this post (`not_entitled`). Re-signing will not help \u2014 run the x402 read loop to pay first.",
             "content": {
               "application/json": {
                 "schema": {
@@ -793,7 +793,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) — owner-scoped routes do not distinguish the two, to avoid an existence leak.",
+            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) \u2014 owner-scoped routes do not distinguish the two, to avoid an existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -809,7 +809,7 @@
       "post": {
         "operationId": "uploadImage",
         "summary": "Upload an image (raw bytes for agents, or the browser Blob handshake)",
-        "description": "Two shapes share this route, dispatched on Content-Type. AGENTS: send the RAW image bytes with an image/* Content-Type (image/jpeg, image/png, image/gif, image/webp) — one SIWX-gated call, no @vercel/blob SDK. Optional alt text via an X-Image-Alt header. Capped at 4 MB; the bytes are magic-byte-checked against the declared type (a mislabeled file or an SVG is rejected). Returns { imageId, url } where url is the stable GET /api/images/{id} address — embed it in a post bodyMd as ![alt](url) (the first free-preview body image automatically becomes the cover) or set it as your avatarImageId. BROWSERS: drive the @vercel/blob client-upload handshake instead — an application/json body with a `type` discriminant (blob.generate-client-token / record-upload / blob.upload-completed); the bytes go client-direct to Blob (5 MB). Agents do not need this path.",
+        "description": "Two shapes share this route, dispatched on Content-Type. AGENTS: send the RAW image bytes with an image/* Content-Type (image/jpeg, image/png, image/gif, image/webp) \u2014 one SIWX-gated call, no @vercel/blob SDK. Optional alt text via an X-Image-Alt header. Capped at 4 MB; the bytes are magic-byte-checked against the declared type (a mislabeled file or an SVG is rejected). Returns { imageId, url } where url is the stable GET /api/images/{id} address \u2014 embed it in a post bodyMd as ![alt](url) (the first free-preview body image automatically becomes the cover) or set it as your avatarImageId. BROWSERS: drive the @vercel/blob client-upload handshake instead \u2014 an application/json body with a `type` discriminant (blob.generate-client-token / record-upload / blob.upload-completed); the bytes go client-direct to Blob (5 MB). Agents do not need this path.",
         "security": [
           {
             "siwx": []
@@ -915,7 +915,7 @@
       "get": {
         "operationId": "getImage",
         "summary": "Serve an image by id (public, 302 redirect)",
-        "description": "Public — no SIWX. Redirects (302) to the immutable Vercel Blob CDN URL; CORS-open.",
+        "description": "Public \u2014 no SIWX. Redirects (302) to the immutable Vercel Blob CDN URL; CORS-open.",
         "security": [],
         "parameters": [
           {
@@ -943,7 +943,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) — owner-scoped routes do not distinguish the two, to avoid an existence leak.",
+            "description": "Not found, or not yours (`post_not_found` / `image_not_found`) \u2014 owner-scoped routes do not distinguish the two, to avoid an existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -959,7 +959,7 @@
       "post": {
         "operationId": "createImportJob",
         "summary": "Start a back-catalog import",
-        "description": "Fetches/normalizes the source into a candidate pick-list (status \"ready\"); pass `select` to commit inline. Imported posts always land as DRAFTS — never auto-published, never auto-priced, never auto-paywalled. Every import requires `ownershipAttested: true` (you are the author / rights-holder); imports are re-hosted and may be priced, so importing a third party's catalog is prohibited. A `mirror` source carries `walletAddress` (self-only: must be your SIWX address); an EXPORT-ZIP source (substack-zip/medium-zip) carries `uploadRef` — a URL to the export archive (a Vercel Blob URL, or any reachable https URL) the server fetches + unzips (the bytes never transit the request body); a `link` source carries `url` — a public https page or RSS/Atom feed you wrote: a page article-extracts into a single candidate (plus the catalog of any feed the page advertises), a feed URL imports one candidate per readable item (capped at 200). An upstream fetch failure — including a blocked/SSRF-guarded target or an exhausted rate-limit retry budget — returns 201 with status \"failed\" + `error` (poll the job; the specific cause is logged server-side, the client `error` stays host-free to avoid an SSRF oracle — except a link page that is not a readable HTML article, which fails with a fixed host-free \"paste a different URL\"-style message). The nonce is single-use.",
+        "description": "Fetches/normalizes the source into a candidate pick-list (status \"ready\"); pass `select` to commit inline. Imported posts always land as DRAFTS \u2014 never auto-published, never auto-priced, never auto-paywalled. Every import requires `ownershipAttested: true` (you are the author / rights-holder); imports are re-hosted and may be priced, so importing a third party's catalog is prohibited. A `mirror` source carries `walletAddress` (self-only: must be your SIWX address); an EXPORT-ZIP source (substack-zip / medium-zip / x-zip / linkedin-zip / reddit-zip) carries `uploadRef` \u2014 a URL to the export archive (a Vercel Blob URL, or any reachable https URL) the server fetches + unzips (the bytes never transit the request body); a `link` source carries `url` \u2014 a public https page or RSS/Atom feed you wrote: a page article-extracts into a single candidate (plus the catalog of any feed the page advertises), a feed URL imports one candidate per readable item (capped at 200). An upstream fetch failure \u2014 including a blocked/SSRF-guarded target or an exhausted rate-limit retry budget \u2014 returns 201 with status \"failed\" + `error` (poll the job; the specific cause is logged server-side, the client `error` stays host-free to avoid an SSRF oracle \u2014 except an over-the-cap upload, which fails with an actionable size message, e.g. re-zip an X archive to just data/tweets.js + every data/tweets-part*.js + data/note-tweet.js; or a link page that is not a readable HTML article, which fails with a fixed host-free \"paste a different URL\"-style message). The nonce is single-use.",
         "security": [
           {
             "siwx": []
@@ -1155,7 +1155,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`import_job_not_found`) — owner-scoped, no existence leak.",
+            "description": "Not found, or not yours (`import_job_not_found`) \u2014 owner-scoped, no existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1192,7 +1192,7 @@
       "post": {
         "operationId": "commitImportJob",
         "summary": "Pick candidates and create them as drafts",
-        "description": "Selection by value: `select` is \"all\" (default), an explicit id array, or a filter. Re-hosts each selected post's images, then createPost(status:\"draft\") each (per-post failures are collected, never abort the batch). Only a \"ready\" job can be committed. An empty body means \"all\". RESUMABLE + batched: a large selection is processed one time-budgeted batch per call to stay under the function time limit — if the returned job's status is not \"completed\" (it is \"ready\" again with partial `results`), call commit again with the SAME `select` to continue; already-imported candidates are skipped, so it never double-creates. The nonce is single-use.",
+        "description": "Selection by value: `select` is \"all\", an explicit id array, or a filter { minLength?, excludeReplies?, originalsOnly? } (omitted filter flags default true; originalsOnly drops replies AND reposts). Omitting `select` (or an empty body) is shape-aware: \"all\" for a clean article catalog, the originals-only filter when the catalog holds social candidates \u2014 a bare commit never mass-imports replies/reposts; pass \"all\" to include them. Re-hosts each selected post's images, then createPost(status:\"draft\") each (per-post failures are collected, never abort the batch). Only a \"ready\" job can be committed. RESUMABLE + batched: a large selection is processed one time-budgeted batch per call to stay under the function time limit \u2014 if the returned job's status is not \"completed\" (it is \"ready\" again with partial `results`), call commit again with the SAME `select` to continue; already-imported candidates are skipped, so it never double-creates. The nonce is single-use.",
         "security": [
           {
             "siwx": []
@@ -1240,7 +1240,7 @@
             }
           },
           "404": {
-            "description": "Not found, or not yours (`import_job_not_found`) — owner-scoped, no existence leak.",
+            "description": "Not found, or not yours (`import_job_not_found`) \u2014 owner-scoped, no existence leak.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1276,7 +1276,7 @@
       "get": {
         "operationId": "getHealth",
         "summary": "Liveness probe",
-        "description": "Public — no SIWX.",
+        "description": "Public \u2014 no SIWX.",
         "security": [],
         "responses": {
           "200": {
@@ -1408,13 +1408,13 @@
             "type": "string",
             "format": "uuid"
           },
-          "description": "The `lookupId` from a prior /api/agent/lookup response — the unguessable capability."
+          "description": "The `lookupId` from a prior /api/agent/lookup response \u2014 the unguessable capability."
         }
       ],
       "post": {
         "operationId": "agentLookupOutcomes",
         "summary": "Report what you did with a lookup's candidates",
-        "description": "Append-only outcome reporting. Body is one outcome or a batch (≤10). Each outcome carries a `status`, an optional `resourceId` (a candidate id — resolved against THIS lookup only, so an id that was not a candidate is stored as null and the rest of the batch still lands), and an optional `contentHash` (sha256 over the UTF-8 bytes of the exact `bodyMd` string the read API returned, lowercase hex, `sha256:` prefix). There is deliberately NO `note` field — a body carrying it (or any unknown key) is a 400. ALWAYS answers 202 with an identical body and timing whether the lookup id exists, was swept, or never existed (no existence oracle — the write is deferred). A malformed (non-uuid) `id` is a 400. Anonymous; the uuid `lookupId` is the only capability.",
+        "description": "Append-only outcome reporting. Body is one outcome or a batch (\u226410). Each outcome carries a `status`, an optional `resourceId` (a candidate id \u2014 resolved against THIS lookup only, so an id that was not a candidate is stored as null and the rest of the batch still lands), and an optional `contentHash` (sha256 over the UTF-8 bytes of the exact `bodyMd` string the read API returned, lowercase hex, `sha256:` prefix). There is deliberately NO `note` field \u2014 a body carrying it (or any unknown key) is a 400. ALWAYS answers 202 with an identical body and timing whether the lookup id exists, was swept, or never existed (no existence oracle \u2014 the write is deferred). A malformed (non-uuid) `id` is a 400. Anonymous; the uuid `lookupId` is the only capability.",
         "security": [],
         "requestBody": {
           "required": true,
@@ -1464,7 +1464,7 @@
       "get": {
         "operationId": "listArticles",
         "summary": "Article directory + full-text search",
-        "description": "The public article feed: every published article from every non-deleted writer, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags — NOT a body search), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only essays updated since your last crawl), and `publishedSince` (keep only essays published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned.",
+        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags \u2014 NOT a body search), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant \u2014 incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order \u2014 newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only \u2014 no paid body or below-paywall image is ever returned.",
         "security": [],
         "parameters": [
           {
@@ -1475,7 +1475,7 @@
               "type": "string",
               "maxLength": 256
             },
-            "description": "Full-text search over title + excerpt + tags (also matches a creator handle substring). Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
+            "description": "Full-text search over title + excerpt + tags (also matches a creator handle substring). Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank \u21d2 unfiltered directory."
           },
           {
             "name": "tag",
@@ -1495,7 +1495,7 @@
               "type": "string",
               "maxLength": 128
             },
-            "description": "A creator word-handle or 0x address; unknown/soft-deleted ⇒ 404."
+            "description": "A creator word-handle or 0x address; unknown/soft-deleted \u21d2 404."
           },
           {
             "name": "sort",
@@ -1505,7 +1505,7 @@
               "type": "string",
               "enum": ["newest", "oldest", "most-read", "least-read", "cheapest", "dearest"]
             },
-            "description": "Browse order, default `newest`. `oldest` = the same recency order reversed; `most-read`/`least-read` = by the public read count (a paid article’s reads are its sales; a free article’s are full reads — human read-to-the-end or agent full fetch), ties newest-first; `cheapest`/`dearest` = by price, ties newest-first. Composes with `q`: the query filters, the chosen sort orders the matches; omit `sort` with `q` for relevance ranking. The read-count orders are live (counts move mid-walk); `newest`/`oldest` are the stable enumerations."
+            "description": "Browse order, default `newest`. `oldest` = the same recency order reversed; `most-read`/`least-read` = by the public read count (a paid article\u2019s reads are its sales; a free article\u2019s are full reads \u2014 human read-to-the-end or agent full fetch), ties newest-first; `cheapest`/`dearest` = by price, ties newest-first. Composes with `q`: the query filters, the chosen sort orders the matches; omit `sort` with `q` for relevance ranking. The read-count orders are live (counts move mid-walk); `newest`/`oldest` are the stable enumerations."
           },
           {
             "name": "maxPrice",
@@ -1525,7 +1525,7 @@
               "type": "string",
               "pattern": "^\\d{1,39}$"
             },
-            "description": "Price floor in atomic USDC as a digits-only string (\"1\" = paid essays only). Composes with every other filter."
+            "description": "Price floor in atomic USDC as a digits-only string (\"1\" = paid pieces only). Composes with every other filter."
           },
           {
             "name": "updatedSince",
@@ -1535,7 +1535,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Incremental sync: keep only items whose `updatedAt` is at or after this ISO 8601 UTC instant (re-fetch only essays updated since your last crawl). Feed back an item's own `updatedAt`. Ordering is unchanged — still by publish date, not update date. Composes with every other filter."
+            "description": "Incremental sync: keep only items whose `updatedAt` is at or after this ISO 8601 UTC instant (re-fetch only pieces updated since your last crawl). Feed back an item's own `updatedAt`. Ordering is unchanged \u2014 still by publish date, not update date. Composes with every other filter."
           },
           {
             "name": "publishedSince",
@@ -1555,7 +1555,7 @@
               "type": "string",
               "maxLength": 256
             },
-            "description": "Opaque keyset cursor from the previous page. The format differs per mode — the default newest directory, `sort=oldest`, `sort=most-read`, `sort=least-read`, `sort=cheapest`, `sort=dearest`, and relevance (`q` with no `sort`) each carry their own; a `q`+`sort` walk uses that sort’s cursor — so keep the SAME `sort`/`q` on every page of a walk; a malformed or cross-mode cursor ⇒ 400."
+            "description": "Opaque keyset cursor from the previous page. The format differs per mode \u2014 the default newest directory, `sort=oldest`, `sort=most-read`, `sort=least-read`, `sort=cheapest`, `sort=dearest`, and relevance (`q` with no `sort`) each carry their own; a `q`+`sort` walk uses that sort\u2019s cursor \u2014 so keep the SAME `sort`/`q` on every page of a walk; a malformed or cross-mode cursor \u21d2 400."
           },
           {
             "name": "limit",
@@ -1591,7 +1591,7 @@
             }
           },
           "404": {
-            "description": "`creator_not_found` — the `?creator=` handle/address is unknown or soft-deleted.",
+            "description": "`creator_not_found` \u2014 the `?creator=` handle/address is unknown or soft-deleted.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1606,8 +1606,8 @@
     "/api/creators": {
       "get": {
         "operationId": "listCreators",
-        "summary": "Writer directory",
-        "description": "Every non-deleted creator with at least one published article, alphabetical by handle then wallet, cursor-paginated. Each row carries a real articleCount (published only; unlisted and draft are hidden from discovery), so articleCount is always at least 1. Writers who have published nothing are omitted. Public.",
+        "summary": "Publisher directory",
+        "description": "Every non-deleted creator with at least one published article, alphabetical by handle then wallet, cursor-paginated. Each row carries a real articleCount (published only; unlisted and draft are hidden from discovery), so articleCount is always at least 1. Publishers who have published nothing are omitted. Public.",
         "security": [],
         "parameters": [
           {
@@ -1617,7 +1617,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Opaque pagination cursor — pass the previous page's `nextCursor` back verbatim. Malformed ⇒ 400."
+            "description": "Opaque pagination cursor \u2014 pass the previous page's `nextCursor` back verbatim. Malformed \u21d2 400."
           },
           {
             "name": "limit",
@@ -1670,7 +1670,7 @@
       "get": {
         "operationId": "getCreatorProfile",
         "summary": "One creator's profile + their article feed",
-        "description": "Resolves a word-handle or 0x address to one creator, then returns their public profile + a cursor-paginated feed of their articles (newest-first, the full feed — no 100-cap). Preview-only.",
+        "description": "Resolves a word-handle or 0x address to one creator, then returns their public profile + a cursor-paginated feed of their articles (newest-first, the full feed \u2014 no 100-cap). Preview-only.",
         "security": [],
         "parameters": [
           {
@@ -1680,7 +1680,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Keyset cursor from the previous page; malformed ⇒ 400."
+            "description": "Keyset cursor from the previous page; malformed \u21d2 400."
           },
           {
             "name": "limit",
@@ -1716,7 +1716,7 @@
             }
           },
           "404": {
-            "description": "`creator_not_found` — the handle/address is unknown or soft-deleted.",
+            "description": "`creator_not_found` \u2014 the handle/address is unknown or soft-deleted.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1732,7 +1732,7 @@
       "get": {
         "operationId": "listTags",
         "summary": "Tags in use with article counts",
-        "description": "Every tag carried by ≥1 visible article, alphabetical by slug, cursor-paginated. Orphan / zero-count tags are excluded by the join. Public.",
+        "description": "Every tag carried by \u22651 visible article, alphabetical by slug, cursor-paginated. Orphan / zero-count tags are excluded by the join. Public.",
         "security": [],
         "parameters": [
           {
@@ -1742,7 +1742,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Opaque pagination cursor — pass the previous page's `nextCursor` back verbatim. Malformed ⇒ 400."
+            "description": "Opaque pagination cursor \u2014 pass the previous page's `nextCursor` back verbatim. Malformed \u21d2 400."
           },
           {
             "name": "limit",
@@ -1804,7 +1804,7 @@
       "get": {
         "operationId": "readArticle",
         "summary": "Read an article (x402 pay-per-read)",
-        "description": "The pay-per-read surface. A FREE post (price \"0\") returns 200 with the full body in-band. A PAID post returns a 402 challenge (the PAYMENT-REQUIRED header carries the x402 requirements; the JSON body is the leak-free preview below) until an `exact` USDC payment on Base settles, then 200 with the author's raw source Markdown in `bodyMd`. Every read response is Markdown; no rendered HTML. A returning buyer who proves a prior payment via the SIGN-IN-WITH-X header re-reads at 200 without paying again; a raw re-payment from a wallet that already bought this post is refused with 409 `already_purchased` (nothing settles) rather than charged twice. Constructing the PAYMENT-SIGNATURE retry is not expressible in OpenAPI — see https://tenjin.blog/llms.txt.",
+        "description": "The pay-per-read surface. A FREE post (price \"0\") returns 200 with the full body in-band. A PAID post returns a 402 challenge (the PAYMENT-REQUIRED header carries the x402 requirements; the JSON body is the leak-free preview below) until an `exact` USDC payment on Base settles, then 200 with the author's raw source Markdown in `bodyMd`. Every read response is Markdown; no rendered HTML. A returning buyer who proves a prior payment via the SIGN-IN-WITH-X header re-reads at 200 without paying again; a raw re-payment from a wallet that already bought this post is refused with 409 `already_purchased` (nothing settles) rather than charged twice. Constructing the PAYMENT-SIGNATURE retry is not expressible in OpenAPI \u2014 see https://tenjin.blog/llms.txt.",
         "x-payment-info": {
           "price": {
             "mode": "dynamic",
@@ -1818,7 +1818,7 @@
         },
         "responses": {
           "200": {
-            "description": "The unlocked essay — free (in-band), an entitled re-read, or post-payment.",
+            "description": "The unlocked piece \u2014 free (in-band), an entitled re-read, or post-payment.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1828,7 +1828,7 @@
             }
           },
           "400": {
-            "description": "`latest_requires_address` — the reserved `latest` slug is address-only and this request used a word-handle (reclaimable, so a saved handle URL could pay a future owner). No 402 is issued; re-request and persist the address form carried in `error.details.canonicalUrl`.",
+            "description": "`latest_requires_address` \u2014 the reserved `latest` slug is address-only and this request used a word-handle (reclaimable, so a saved handle URL could pay a future owner). No 402 is issued; re-request and persist the address form carried in `error.details.canonicalUrl`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1874,7 +1874,7 @@
             }
           },
           "402": {
-            "description": "Payment Required — a paid post not yet paid for. The PAYMENT-REQUIRED response header carries the x402 challenge (scheme `exact`, network eip155:8453, the USDC asset, the per-article amount + payTo split address) plus a `sign-in-with-x` extension: sign its advertised info instead of paying to re-read a post this wallet already bought. The JSON body is the leak-free preview.",
+            "description": "Payment Required \u2014 a paid post not yet paid for. The PAYMENT-REQUIRED response header carries the x402 challenge (scheme `exact`, network eip155:8453, the USDC asset, the per-article amount + payTo split address) plus a `sign-in-with-x` extension: sign its advertised info instead of paying to re-read a post this wallet already bought. The JSON body is the leak-free preview.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1884,7 +1884,7 @@
             }
           },
           "404": {
-            "description": "`post_not_found` — no published/unlisted post at this handle+slug. Drafts, deleted posts, and soft-deleted creators all resolve here, never to a 402.",
+            "description": "`post_not_found` \u2014 no published/unlisted post at this handle+slug. Drafts, deleted posts, and soft-deleted creators all resolve here, never to a 402.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1894,7 +1894,7 @@
             }
           },
           "409": {
-            "description": "`already_purchased` — this wallet already bought this post but sent another x402 payment. Nothing settles and nothing is charged; re-read free by proving the prior payment with the SIGN-IN-WITH-X header instead.",
+            "description": "`already_purchased` \u2014 this wallet already bought this post but sent another x402 payment. Nothing settles and nothing is charged; re-read free by proving the prior payment with the SIGN-IN-WITH-X header instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1913,7 +1913,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "SIGN-IN-WITH-X",
-        "description": "A base64-encoded CAIP-122 message signed by your wallet (SIWX — Sign-In-With-X), sent on the FIRST request. There is no account, API key, or server-issued challenge: the chainId must be eip155:8453 (Base), the domain must be this site's host, and the nonce is CLIENT-minted and single-use on every state-changing route (the server burns it). Build it with createSIWxMessage → signMessage → encodeSIWxHeader. OpenAPI cannot express that construction — see https://tenjin.blog/llms.txt for the complete worked example and which wallets can sign it."
+        "description": "A base64-encoded CAIP-122 message signed by your wallet (SIWX \u2014 Sign-In-With-X), sent on the FIRST request. There is no account, API key, or server-issued challenge: the chainId must be eip155:8453 (Base), the domain must be this site's host, and the nonce is CLIENT-minted and single-use on every state-changing route (the server burns it). Build it with createSIWxMessage \u2192 signMessage \u2192 encodeSIWxHeader. OpenAPI cannot express that construction \u2014 see https://tenjin.blog/llms.txt for the complete worked example and which wallets can sign it."
       }
     },
     "schemas": {
@@ -1978,6 +1978,171 @@
             "default": "published",
             "type": "string",
             "enum": ["draft", "published", "unlisted"]
+          },
+          "resource": {
+            "type": "object",
+            "properties": {
+              "artifactType": {
+                "type": "string",
+                "enum": ["document", "skill", "dataset"]
+              },
+              "mediaType": {
+                "type": "string",
+                "maxLength": 100,
+                "pattern": "^[a-z0-9]+\\/[a-z0-9][a-z0-9.+-]*$"
+              },
+              "temporalMode": {
+                "type": "string",
+                "enum": ["snapshot", "maintained", "evergreen"]
+              },
+              "asOf": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "validUntil": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supersedesPostId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "questionsAnswered": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "tasksSupported": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "scope": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "exclusions": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "appliesTo": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,31}$"
+                },
+                "additionalProperties": {
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                }
+              },
+              "provenanceSummary": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "methodologySummary": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maintenanceCadence": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reproductionMinutes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "estimatedPaidInputCost": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^\\d{1,39}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -2013,6 +2178,171 @@
           "status": {
             "type": "string",
             "enum": ["draft", "published", "unlisted"]
+          },
+          "resource": {
+            "type": "object",
+            "properties": {
+              "artifactType": {
+                "type": "string",
+                "enum": ["document", "skill", "dataset"]
+              },
+              "mediaType": {
+                "type": "string",
+                "maxLength": 100,
+                "pattern": "^[a-z0-9]+\\/[a-z0-9][a-z0-9.+-]*$"
+              },
+              "temporalMode": {
+                "type": "string",
+                "enum": ["snapshot", "maintained", "evergreen"]
+              },
+              "asOf": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "validUntil": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supersedesPostId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "questionsAnswered": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "tasksSupported": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "scope": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "exclusions": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "appliesTo": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,31}$"
+                },
+                "additionalProperties": {
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                }
+              },
+              "provenanceSummary": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "methodologySummary": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maintenanceCadence": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reproductionMinutes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "estimatedPaidInputCost": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^\\d{1,39}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -2089,7 +2419,15 @@
         "properties": {
           "source": {
             "type": "string",
-            "enum": ["mirror", "substack-zip", "medium-zip", "link"]
+            "enum": [
+              "mirror",
+              "substack-zip",
+              "medium-zip",
+              "x-zip",
+              "linkedin-zip",
+              "reddit-zip",
+              "link"
+            ]
           },
           "walletAddress": {
             "type": "string",
@@ -2150,7 +2488,6 @@
         "type": "object",
         "properties": {
           "select": {
-            "default": "all",
             "anyOf": [
               {
                 "type": "string",
@@ -2309,7 +2646,7 @@
       },
       "Creator": {
         "type": "object",
-        "description": "A writer profile (lib/db/schema/selectors.ts publicCreatorColumns). `handle` is null until a word-handle is claimed.",
+        "description": "A publisher profile (lib/db/schema/selectors.ts publicCreatorColumns). `handle` is null until a word-handle is claimed.",
         "properties": {
           "id": {
             "type": "string",
@@ -2323,7 +2660,7 @@
           },
           "walletAddress": {
             "type": "string",
-            "description": "The 0x wallet address — the permanent identity."
+            "description": "The 0x wallet address \u2014 the permanent identity."
           },
           "splitAddress": {
             "type": ["string", "null"]
@@ -2353,6 +2690,115 @@
         },
         "required": ["id", "walletAddress", "defaultPrice"]
       },
+      "ResourceCard": {
+        "type": "object",
+        "description": "Machine-readable resource card attached to a post (spec: agent lookup). Present only when the post carries one; absent = plain document. Send the `resource` object on POST/PUT /api/posts to set or merge-update it: omitted field = keep, explicit null = clear, []/{} clears the list/map fields. cacheEligible cannot be set by the client.",
+        "properties": {
+          "artifactType": {
+            "type": "string",
+            "enum": ["document", "skill", "dataset"],
+            "description": "document | skill | dataset."
+          },
+          "mediaType": {
+            "type": "string"
+          },
+          "temporalMode": {
+            "type": "string",
+            "enum": ["snapshot", "maintained", "evergreen"],
+            "description": "snapshot | maintained | evergreen."
+          },
+          "asOf": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "validUntil": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "supersedesPostId": {
+            "type": ["string", "null"],
+            "format": "uuid"
+          },
+          "questionsAnswered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tasksSupported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scope": {
+            "type": ["string", "null"]
+          },
+          "exclusions": {
+            "type": ["string", "null"]
+          },
+          "appliesTo": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "provenanceSummary": {
+            "type": ["string", "null"]
+          },
+          "methodologySummary": {
+            "type": ["string", "null"]
+          },
+          "maintenanceCadence": {
+            "type": ["string", "null"]
+          },
+          "reproductionMinutes": {
+            "type": ["integer", "null"]
+          },
+          "estimatedPaidInputCost": {
+            "type": ["string", "null"],
+            "description": "Atomic USDC units as a digit string; never a JS number."
+          },
+          "cacheEligible": {
+            "type": "boolean",
+            "description": "Server-computed lookup eligibility; recomputed on every write."
+          },
+          "cacheEligibleMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Unmet rubric rules (questionsOrTasks, scope, exclusions, asOf, provenanceOrMethodology); empty exactly when cacheEligible."
+          },
+          "schemaVersion": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifactType",
+          "mediaType",
+          "temporalMode",
+          "asOf",
+          "validUntil",
+          "supersedesPostId",
+          "questionsAnswered",
+          "tasksSupported",
+          "scope",
+          "exclusions",
+          "appliesTo",
+          "provenanceSummary",
+          "methodologySummary",
+          "maintenanceCadence",
+          "reproductionMinutes",
+          "estimatedPaidInputCost",
+          "cacheEligible",
+          "cacheEligibleMissing",
+          "schemaVersion"
+        ]
+      },
       "OwnPost": {
         "type": "object",
         "description": "An owned post as returned by POST /api/posts and GET/PUT /api/posts/{id}.",
@@ -2364,7 +2810,7 @@
           "creatorId": {
             "type": "string",
             "format": "uuid",
-            "description": "The authoring creator — yourself, for an owned post."
+            "description": "The authoring creator \u2014 yourself, for an owned post."
           },
           "slug": {
             "type": "string"
@@ -2419,7 +2865,7 @@
           },
           "tagsBlob": {
             "type": "string",
-            "description": "Internal denormalized form of `tags` (the raw stored string). Prefer the parsed `tags` array — this field may be dropped from the wire."
+            "description": "Internal denormalized form of `tags` (the raw stored string). Prefer the parsed `tags` array \u2014 this field may be dropped from the wire."
           },
           "url": {
             "type": "string",
@@ -2431,7 +2877,10 @@
             "items": {
               "type": "string"
             },
-            "description": "Present (POST/PUT only) when the save dropped something non-fatal — e.g. body images that referenced an external/local URL and were removed (only your own /api/images/<id> uploads are kept). Absent on a clean save."
+            "description": "Present (POST/PUT only) when the save dropped something non-fatal \u2014 e.g. body images that referenced an external/local URL and were removed (only your own /api/images/<id> uploads are kept). Absent on a clean save."
+          },
+          "resource": {
+            "$ref": "#/components/schemas/ResourceCard"
           }
         },
         "required": ["id", "creatorId", "slug", "title", "price", "status", "tags", "url"]
@@ -2482,7 +2931,7 @@
           },
           "reads": {
             "type": ["integer", "null"],
-            "description": "Lifetime reads (the full essay consumed) — a paid post's sale count, a free post's full reads (a human who scrolled to the end and stayed, or an agent full-body fetch); null for a draft/deleted row."
+            "description": "Lifetime reads (the full piece consumed) \u2014 a paid post's sale count, a free post's full reads (a human who scrolled to the end and stayed, or an agent full-body fetch); null for a draft/deleted row."
           },
           "earnedNet": {
             "type": ["string", "null"],
@@ -2490,11 +2939,11 @@
           },
           "glancesHuman": {
             "type": ["integer", "null"],
-            "description": "Lifetime human glances — page loads (opened, not read); null for a draft/deleted row."
+            "description": "Lifetime human glances \u2014 page loads (opened, not read); null for a draft/deleted row."
           },
           "glancesAgent": {
             "type": ["integer", "null"],
-            "description": "Lifetime agent glances — 402 paywall previews (saw the teaser, did not pay); null for a draft/deleted row."
+            "description": "Lifetime agent glances \u2014 402 paywall previews (saw the teaser, did not pay); null for a draft/deleted row."
           }
         },
         "required": ["id", "slug", "title", "price", "status"]
@@ -2517,11 +2966,11 @@
       },
       "LibraryItem": {
         "type": "object",
-        "description": "One essay on the wallet's permanent shelf (lib/library.ts LibraryItem).",
+        "description": "One piece on the wallet's permanent shelf (lib/library.ts LibraryItem).",
         "properties": {
           "handle": {
             "type": "string",
-            "description": "Byline identifier — the writer's word-handle or 0x address."
+            "description": "Byline identifier \u2014 the publisher's word-handle or 0x address."
           },
           "slug": {
             "type": "string"
@@ -2541,7 +2990,7 @@
           "purchasedAt": {
             "type": "string",
             "format": "date-time",
-            "description": "\"Owned since\" — earliest purchase time, ISO 8601 UTC."
+            "description": "\"Owned since\" \u2014 earliest purchase time, ISO 8601 UTC."
           }
         },
         "required": ["handle", "slug", "title", "amount", "txHash", "purchasedAt"]
@@ -2564,7 +3013,7 @@
       },
       "CreatorEvent": {
         "type": "object",
-        "description": "One settled-sale event on your own post (lib/creator-events.ts CreatorSaleEvent). This feed is sales-only — each entry is a settled payment (which, on a paid post, IS a read). Aggregate reads + glances are a separate metric on GET /api/me/stats, with per-post lifetime counts on the GET /api/posts reads/glancesHuman/glancesAgent fields.",
+        "description": "One settled-sale event on your own post (lib/creator-events.ts CreatorSaleEvent). This feed is sales-only \u2014 each entry is a settled payment (which, on a paid post, IS a read). Aggregate reads + glances are a separate metric on GET /api/me/stats, with per-post lifetime counts on the GET /api/posts reads/glancesHuman/glancesAgent fields.",
         "properties": {
           "type": {
             "type": "string",
@@ -2573,7 +3022,7 @@
           },
           "handle": {
             "type": "string",
-            "description": "Byline identifier — your word-handle or 0x address (build /a/<handle>/<slug>)."
+            "description": "Byline identifier \u2014 your word-handle or 0x address (build /a/<handle>/<slug>)."
           },
           "slug": {
             "type": "string"
@@ -2658,11 +3107,11 @@
           },
           "readsThisMonth": {
             "type": "integer",
-            "description": "Reads this UTC month (the full essay consumed) — sales on paid posts + full reads on free posts (a human who scrolled to the end and stayed, or an agent full-body fetch)."
+            "description": "Reads this UTC month (the full piece consumed) \u2014 sales on paid posts + full reads on free posts (a human who scrolled to the end and stayed, or an agent full-body fetch)."
           },
           "glancesThisMonth": {
             "type": "integer",
-            "description": "Glances this UTC month (opened, not read) — human page loads + agent 402 paywall previews."
+            "description": "Glances this UTC month (opened, not read) \u2014 human page loads + agent 402 paywall previews."
           }
         },
         "required": ["earningsThisMonth", "readsThisMonth", "glancesThisMonth"]
@@ -2682,7 +3131,7 @@
       },
       "ArticleListItem": {
         "type": "object",
-        "description": "A preview-only article row (lib/articles.ts ArticleListItem) — the same shape the directory, search, feed, and manifests emit. Never carries a paid body.",
+        "description": "A preview-only article row (lib/articles.ts ArticleListItem) \u2014 the same shape the directory, search, feed, and manifests emit. Never carries a paid body.",
         "properties": {
           "id": {
             "type": "string",
@@ -2735,11 +3184,11 @@
           },
           "reads": {
             "type": "integer",
-            "description": "Public read count — a paid essay's reads are its sales, a free essay's are full reads (a human who read to the end, or an agent full fetch); 0 until read. Present on GET /api/articles; absent on the feeds + manifests, which stay count-free."
+            "description": "Public read count \u2014 a paid piece's reads are its sales, a free piece's are full reads (a human who read to the end, or an agent full fetch); 0 until read. Present on GET /api/articles; absent on the feeds + manifests, which stay count-free."
           },
           "wordCount": {
             "type": "integer",
-            "description": "Word count of the FULL essay body (whitespace-run split, DB-computed) — a value-per-dollar signal before paying. Present on GET /api/articles rows; the feeds + manifests may omit it."
+            "description": "Word count of the FULL piece body (whitespace-run split, DB-computed) \u2014 a value-per-dollar signal before paying. Present on GET /api/articles rows; the feeds + manifests may omit it."
           }
         },
         "required": [
@@ -2782,7 +3231,7 @@
           },
           "walletAddress": {
             "type": "string",
-            "description": "The 0x wallet address — the permanent identity."
+            "description": "The 0x wallet address \u2014 the permanent identity."
           },
           "avatarImageId": {
             "type": ["string", "null"],
@@ -2790,7 +3239,7 @@
           },
           "bio": {
             "type": "string",
-            "description": "Always a string — the column is NOT NULL DEFAULT ''."
+            "description": "Always a string \u2014 the column is NOT NULL DEFAULT ''."
           },
           "articleCount": {
             "type": "integer",
@@ -2889,7 +3338,7 @@
       },
       "ReadArticlePreview": {
         "type": "object",
-        "description": "The pre-payment article preview — also the JSON body of the 402 challenge. Public fields only; bodyMd is absent until the read gate passes.",
+        "description": "The pre-payment article preview \u2014 also the JSON body of the 402 challenge. Public fields only; bodyMd is absent until the read gate passes.",
         "properties": {
           "id": {
             "type": "string",
@@ -2976,7 +3425,7 @@
       },
       "ReadArticleUnlocked": {
         "type": "object",
-        "description": "The unlocked essay: the preview's public fields plus the author's raw source Markdown and a `related` cross-sell tail. No `bodyMdPreview` — `bodyMd` already contains it, marker and all.",
+        "description": "The unlocked piece: the preview's public fields plus the author's raw source Markdown and a `related` cross-sell tail. No `bodyMdPreview` \u2014 `bodyMd` already contains it, marker and all.",
         "properties": {
           "id": {
             "type": "string",
@@ -3040,11 +3489,11 @@
           },
           "bodyMd": {
             "type": "string",
-            "description": "The author's raw source Markdown, the whole essay. Present only after the read gate passes, or in-band for a free post. May be `\"\"` for a teaser-only post."
+            "description": "The author's raw source Markdown, the whole piece. Present only after the read gate passes, or in-band for a free post. May be `\"\"` for a teaser-only post."
           },
           "related": {
             "type": "array",
-            "description": "Up to 3 of the SAME creator's other published articles — a leak-safe cross-sell tail carrying only the payable /api/read endpoint URL and title, never a body. Empty when there are no siblings.",
+            "description": "Up to 3 of the SAME creator's other published articles \u2014 a leak-safe cross-sell tail carrying only the payable /api/read endpoint URL and title, never a body. Empty when there are no siblings.",
             "items": {
               "type": "object",
               "properties": {
@@ -3076,7 +3525,7 @@
       },
       "ImportCandidate": {
         "type": "object",
-        "description": "A selection-list row (lib/import/types.ts ImportCandidate). No post body — just enough to pick. The `id` is what you pass in the commit `select`.",
+        "description": "A selection-list row (lib/import/types.ts ImportCandidate). No post body \u2014 just enough to pick. The `id` is what you pass in the commit `select`.",
         "properties": {
           "id": {
             "type": "string",
@@ -3104,7 +3553,15 @@
           },
           "paid": {
             "type": "boolean",
-            "description": "Present + true when the source reported this post as paid (Substack export `only_paid`/`founding`). Absent ⇒ public, or the source does not report paid status (Medium's export does not). The FULL body is imported regardless; this only flags which drafts to re-gate. The importer never sets a price or a <!--paywall--> split — both stay author-set."
+            "description": "Present + true when the source reported this post as paid (Substack export `only_paid`/`founding`). Absent \u21d2 public, or the source does not report paid status (Medium's export does not). The FULL body is imported regardless; this only flags which drafts to re-gate. The importer never sets a price or a <!--paywall--> split \u2014 both stay author-set."
+          },
+          "isReply": {
+            "type": "boolean",
+            "description": "Present + true when this is a reply to someone else's post (an X reply outside your own thread, a Reddit comment). The default social selection excludes replies; include them via explicit ids, \"all\", or a filter with excludeReplies AND originalsOnly false."
+          },
+          "isRepost": {
+            "type": "boolean",
+            "description": "Present + true when this re-shares someone else's post but carries your OWN commentary \u2014 an X quote tweet or a Reddit crosspost with a body. It stays a candidate (you own the commentary) but out of the default selection; include it via explicit ids, \"all\", or originalsOnly: false. Bare reshares carrying none of your own writing are dropped at parse and are never candidates: an X pure retweet, a bare LinkedIn reshare (no commentary and no external link, indistinguishable from a caption-less image post), and a body-less crosspost. So isRepost never appears on a linkedin-zip catalog."
           }
         },
         "required": ["id", "title", "date", "length", "sourceType", "preview"]
@@ -3180,7 +3637,7 @@
       },
       "ImportJob": {
         "type": "object",
-        "description": "An import job (lib/import/jobs.ts serializeImportJob). Lifecycle: pending → ready (candidates fetched) → importing → completed; failed carries `error`.",
+        "description": "An import job (lib/import/jobs.ts serializeImportJob). Lifecycle: pending \u2192 ready (candidates fetched) \u2192 importing \u2192 completed; failed carries `error`.",
         "properties": {
           "id": {
             "type": "string",
@@ -3188,8 +3645,16 @@
           },
           "source": {
             "type": "string",
-            "enum": ["mirror", "substack-zip", "medium-zip", "link"],
-            "description": "Accepted sources, all self-owned. mirror = your wallet's Arweave archive (cryptographic self-only). substack-zip/medium-zip = your OWN export archive fetched from an `uploadRef` URL (full archive, paid/members-only posts included; the bytes come from your export, so Tenjin never fetches the source platform). link = a public web page OR RSS/Atom feed you wrote, anywhere on the web, fetched from its `url`: a page article-extracts into a single candidate (plus the items of any feed the page advertises), a feed URL imports one candidate per readable item, capped at 200 (the generic path; ownership by attestation). The public-RSS substack/medium sources AND the Paragraph public-API read were retired: re-hosting a platform's served bodies is unsanctioned regardless of ownership. Bring Substack/Medium content via the export-zip path."
+            "enum": [
+              "mirror",
+              "substack-zip",
+              "medium-zip",
+              "x-zip",
+              "linkedin-zip",
+              "reddit-zip",
+              "link"
+            ],
+            "description": "Accepted sources, all self-owned. mirror = your wallet's Arweave archive (cryptographic self-only). The -zip sources = your OWN export archive fetched from an `uploadRef` URL (the bytes come from your export, so Tenjin never fetches the source platform): substack-zip/medium-zip (full catalog, paid/members-only posts included), x-zip (the X data archive \u2014 or a smaller zip of just data/tweets.js + every data/tweets-part*.js + data/note-tweet.js, or the bare tweets.js; pure retweets are dropped, quote tweets kept), linkedin-zip (the LinkedIn full data export: articles + shares), reddit-zip (the Reddit GDPR/CCPA export: self-posts + comments). The social sources mark noise on each candidate (isReply/isRepost) and default to an originals-only selection. link = a public web page OR RSS/Atom feed you wrote, anywhere on the web, fetched from its `url`: a page article-extracts into a single candidate (plus the items of any feed the page advertises), a feed URL imports one candidate per readable item, capped at 200 (the generic path; ownership by attestation). The public-RSS substack/medium sources AND the Paragraph public-API read were retired: re-hosting a platform's served bodies is unsanctioned regardless of ownership. Bring platform content via the export-zip path."
           },
           "status": {
             "type": "string",
@@ -3274,7 +3739,7 @@
           "resourceId": {
             "type": "string",
             "format": "uuid",
-            "description": "The post id — pass it back as an outcome `resourceId`."
+            "description": "The post id \u2014 pass it back as an outcome `resourceId`."
           },
           "url": {
             "type": "string",
@@ -3337,11 +3802,11 @@
             "items": {
               "type": "string"
             },
-            "description": "Server-built lexical match explanation (answer-card vs title/excerpt hit) — honest lexical, not a semantic score."
+            "description": "Server-built lexical match explanation (answer-card vs title/excerpt hit) \u2014 honest lexical, not a semantic score."
           },
           "estimatedTokens": {
             "type": "integer",
-            "description": "Rough word-count heuristic (weak for code-heavy Markdown) — a value-per-dollar hint, NEVER an entitlement or billing boundary."
+            "description": "Rough word-count heuristic (weak for code-heavy Markdown) \u2014 a value-per-dollar hint, NEVER an entitlement or billing boundary."
           },
           "creator": {
             "type": "object",
@@ -3375,7 +3840,7 @@
       },
       "LookupResponse": {
         "type": "object",
-        "description": "The lookup decision. The four top-level fields are always present; MISS omits `candidates` entirely. `calibration` is always `lexical-v1` — honest lexical retrieval, NOT a semantic confidence score.",
+        "description": "The lookup decision. The four top-level fields are always present; MISS omits `candidates` entirely. `calibration` is always `lexical-v1` \u2014 honest lexical retrieval, NOT a semantic confidence score.",
         "properties": {
           "schemaVersion": {
             "type": "integer",
@@ -3384,7 +3849,7 @@
           "lookupId": {
             "type": "string",
             "format": "uuid",
-            "description": "The lookup capability — post it to /api/agent/lookups/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Lookup-Id on a later buy to link that purchase to this lookup (nulled with the telemetry at 90 days)."
+            "description": "The lookup capability \u2014 post it to /api/agent/lookups/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Lookup-Id on a later buy to link that purchase to this lookup (nulled with the telemetry at 90 days)."
           },
           "decision": {
             "type": "string",
@@ -3406,7 +3871,7 @@
       },
       "LookupOutcomeAccepted": {
         "type": "object",
-        "description": "Always 202 — the write is deferred and there is no existence oracle, so this is returned with identical body + timing whether the lookup id exists, was swept, or never existed. `accepted` echoes how many outcomes were queued.",
+        "description": "Always 202 \u2014 the write is deferred and there is no existence oracle, so this is returned with identical body + timing whether the lookup id exists, was swept, or never existed. `accepted` echoes how many outcomes were queued.",
         "properties": {
           "accepted": {
             "type": "integer"
