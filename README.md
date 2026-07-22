@@ -252,7 +252,7 @@ pnpm pack-smoke   # exercises the packed npm artifact
 
 Publishing to npm uses **Changesets** + **npm Trusted Publishing (OIDC)**,
 driven by the two-job `workflow_dispatch`-only `.github/workflows/release.yml`.
-This mirrors the house template in `BackTrackCo/x402r-sdk`. Nothing auto-fires
+Adapted from the house template in `BackTrackCo/x402r-sdk`. Nothing auto-fires
 from a push or a tag: a maintainer clicks Run workflow at each step.
 
 Day to day, add a changeset in the same PR as any shippable change:
@@ -284,8 +284,8 @@ per-run token, so there is **no `NPM_TOKEN`** to store or rotate.
 `tenjin-cli` already exists on npm (published `0.1.0-alpha.1`), so no manual
 first publish is needed. The owner must, one time:
 
-1. **Install the release-bot GitHub App on `BackTrackCo/tenjin-agent`** (the
-   same `x402r-release-bot` App used by `x402r-sdk`, or an equivalent), then
+1. **Install a dedicated release-bot GitHub App on `BackTrackCo/tenjin-agent`**
+   (permissions: Contents write, Pull requests write; no webhook needed), then
    set repo **variable** `RELEASE_APP_CLIENT_ID` and repo **secret**
    `RELEASE_APP_PRIVATE_KEY`. Required because Changesets' version PR must be
    opened by an App identity to trigger CI (the default `GITHUB_TOKEN` cannot,

@@ -1,10 +1,10 @@
 name: Release
 
-# Changesets + npm Trusted Publishing (OIDC), workflow_dispatch only. Modeled
-# on BackTrackCo/x402r-sdk's release.yml (the house template); see that repo's
-# x402r-notes/sdk/RELEASING.md for the operator runbook. Nothing auto-fires:
-# a maintainer clicks Run workflow once to open the version PR, merges it, then
-# clicks again to publish.
+# Changesets + npm Trusted Publishing (OIDC), workflow_dispatch only. Adapted
+# from BackTrackCo/x402r-sdk's release.yml (the house template); the operator
+# runbook is the Release section of this repo's own README.md. Nothing
+# auto-fires: a maintainer clicks Run workflow once to open the version PR,
+# merges it, then clicks again to publish.
 on:
   workflow_dispatch:
 
@@ -146,9 +146,10 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       # Build + validate BEFORE publishing so a broken build or failing test
-      # can't ship. (x402r validates with publint + attw via test:pkg; tenjin
-      # doesn't carry those yet, so we gate on the existing check suite plus the
-      # packed-artifact smoke, which exercises the real published tarball.)
+      # can't ship. (The house template validates with publint + attw via
+      # test:pkg; tenjin doesn't carry those yet, so we gate on the existing
+      # check suite plus the packed-artifact smoke, which exercises the real
+      # published tarball.)
       - name: Build + validate
         run: |
           pnpm run check
