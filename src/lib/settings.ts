@@ -11,6 +11,7 @@ import {
   resolveSettings,
 } from './config';
 import type { Provenance, ProjectPublishLayer } from './config';
+import { parseUsdToAtomic } from './money';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
 
@@ -57,20 +58,19 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
 export const PROJECT_CONFIG_FILE = '.tenjin.json';
 
 /**
- * The per-project override file. `publish.defaultPrice` is atomic USDC (the same
- * stored form as config.json), not decimal, so the layer feeds the resolvers
- * unchanged. Partial + passthrough: forward-compatible with subkeys a newer CLI
- * adds, same posture as the global config.
+ * The per-project override file. `publish.defaultPrice` is DECIMAL USD ("0.10"),
+ * because a hand-edited project file is a human edge (O1) — unlike config.json,
+ * which stores atomic because `config set` converts at the command edge. The
+ * decimal string is converted to atomic at load via the same money util the
+ * config command uses. Partial + passthrough: forward-compatible with subkeys a
+ * newer CLI adds, same posture as the global config.
  */
 const ProjectConfigSchema = z
   .object({
     publish: z
       .object({
         mode: PublishModeSchema.optional(),
-        defaultPrice: z
-          .string()
-          .regex(/^\d+$/, 'expected an atomic USDC integer string')
-          .optional(),
+        defaultPrice: z.string().optional(),
       })
       .passthrough()
       .optional(),
@@ -163,14 +163,32 @@ export async function loadProjectConfig(
   const gitignored = await isGitignored(path);
   const layer: ProjectPublishLayer = { gitignored };
   if (parsed.data.publish !== undefined) {
+    const { mode, defaultPrice } = parsed.data.publish;
     layer.publish = {
-      ...(parsed.data.publish.mode !== undefined ? { mode: parsed.data.publish.mode } : {}),
-      ...(parsed.data.publish.defaultPrice !== undefined
-        ? { defaultPrice: parsed.data.publish.defaultPrice }
+      ...(mode !== undefined ? { mode } : {}),
+      ...(defaultPrice !== undefined
+        ? { defaultPrice: parseProjectPrice(defaultPrice, path) }
         : {}),
     };
   }
   return { path, layer };
+}
+
+/**
+ * Convert a `.tenjin.json` decimal-USD price to atomic via the shared money
+ * parser. parseUsdToAtomic throws USAGE on a bad amount; re-raise as
+ * CONFIG_INVALID naming the file, so it reads like the file's other errors.
+ */
+function parseProjectPrice(decimalUsd: string, path: string): string {
+  try {
+    return parseUsdToAtomic(decimalUsd);
+  } catch (err) {
+    throw new CliError(
+      'CONFIG_INVALID',
+      `${PROJECT_CONFIG_FILE} at ${path} has an invalid publish.defaultPrice`,
+      { fix: 'Use a non-negative decimal USD amount like "0.10".', cause: err },
+    );
+  }
 }
 
 async function findProjectConfigFile(cwd: string): Promise<string | null> {

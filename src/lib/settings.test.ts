@@ -58,9 +58,10 @@ describe('resolvePublishSettings — precedence', () => {
     expect(r.defaultPriceSource).toBe('file');
   });
 
-  it('project .tenjin.json overrides global config (project source)', async () => {
+  it('project .tenjin.json overrides global config (project source), decimal USD', async () => {
     await writeGlobal({ mode: 'review', defaultPrice: '200000' });
-    await writeProject({ publish: { mode: 'auto', defaultPrice: '50000' } });
+    // .tenjin.json price is DECIMAL USD (human edge, O1); converted to atomic.
+    await writeProject({ publish: { mode: 'auto', defaultPrice: '0.05' } });
     const r = await resolvePublishSettings(input(), committed);
     expect(r.mode).toBe('auto');
     expect(r.modeSource).toBe('project');
@@ -178,6 +179,17 @@ describe('loadProjectConfig — discovery and validation', () => {
     await writeProject({ publish: { mode: 'sometimes' } });
     const err = await loadProjectConfig(projectDir, committed).catch((e: unknown) => e);
     expect((err as CliError).code).toBe('CONFIG_INVALID');
+  });
+
+  it('converts a decimal defaultPrice to atomic and rejects an invalid one', async () => {
+    await writeProject({ publish: { defaultPrice: '0.25' } });
+    const ok = await loadProjectConfig(projectDir, committed);
+    expect(ok?.layer.publish?.defaultPrice).toBe('250000');
+
+    await writeProject({ publish: { defaultPrice: 'free' } });
+    const err = await loadProjectConfig(projectDir, committed).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('CONFIG_INVALID');
+    expect((err as CliError).message).toContain('.tenjin.json');
   });
 });
 
