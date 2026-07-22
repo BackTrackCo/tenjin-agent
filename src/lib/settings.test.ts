@@ -191,6 +191,44 @@ describe('loadProjectConfig — discovery and validation', () => {
     expect((err as CliError).code).toBe('CONFIG_INVALID');
     expect((err as CliError).message).toContain('.tenjin.json');
   });
+
+  it('surfaces an unreadable project file (a directory named .tenjin.json) as CONFIG_INVALID', async () => {
+    await mkdir(join(projectDir, '.tenjin.json'));
+    const err = await loadProjectConfig(projectDir, committed).catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('CONFIG_INVALID');
+  });
+});
+
+describe('loadProjectConfig — walk-up trust boundary', () => {
+  it('never walks above $HOME, so a config outside home is not honored', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'tenjin-home-'));
+    try {
+      const home = join(base, 'home');
+      const cwd = join(home, 'proj', 'sub');
+      await mkdir(cwd, { recursive: true });
+      // Planted above $HOME — must never be discovered.
+      await writeFile(
+        join(base, '.tenjin.json'),
+        JSON.stringify({ publish: { mode: 'full-auto' } }),
+      );
+      expect(await loadProjectConfig(cwd, { ...committed, homeDir: home })).toBeNull();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a .tenjin.json not owned by the current user, with a stderr warning', async () => {
+    await writeProject({ publish: { mode: 'full-auto' } });
+    const warnings: string[] = [];
+    const loaded = await loadProjectConfig(projectDir, {
+      isGitignored: async () => true,
+      isForeignOwned: async () => true,
+      warn: (m) => warnings.push(m),
+      homeDir: projectDir, // bound the walk so it stops instead of wandering tmp
+    });
+    expect(loaded).toBeNull();
+    expect(warnings.some((w) => w.includes('.tenjin.json') && w.includes('not owned'))).toBe(true);
+  });
 });
 
 describe('loadProjectConfig — real git check-ignore seam', () => {

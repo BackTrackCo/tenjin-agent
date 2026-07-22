@@ -131,10 +131,13 @@ const LINE_DETECTORS: LineDetector[] = [
     check: 'openai-key',
     severity: 'block',
     // gitleaks openai-api-key: classic sk- plus the modern sk-proj-/sk-svcacct-/
-    // sk-admin- keys, whose bodies carry _ and - separators. `(?!ant-)` keeps an
-    // Anthropic key from matching here; the token boundary is a lookahead (not \b)
-    // so a trailing separator in the body doesn't truncate the match.
-    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_-])/g,
+    // sk-admin- keys. The body is base62 and MUST contain a digit (real keys are
+    // high-entropy), which keeps sk- kebab identifiers (sk-user-profile-updated…)
+    // from hard-blocking. `(?!ant-)` keeps an Anthropic key out. Only the base62
+    // leading run of a modern key is matched — enough to flag it. The run is
+    // terminated by a non-base62 lookahead (not \b, which a trailing `_` — a word
+    // char — would not fire), so an underscore-adjacent key still matches.
+    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])/g,
     excerpt: (m) => maskKeeping(m[0], 3),
   },
   {
@@ -187,8 +190,12 @@ const LINE_DETECTORS: LineDetector[] = [
     re: /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\s*[:=]\s*("[^"]{6,}"|'[^']{6,}'|[^\s"']{6,})/gi,
     excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
     skip: (m) => {
-      const value = dequote(m[2] ?? '');
-      return isPlaceholder(value) || isStructural(value);
+      const raw = m[2] ?? '';
+      const value = dequote(raw);
+      if (isPlaceholder(value) || isStructural(value)) return true;
+      // A code RHS (config.clientSecret, hashAndSalt(input), a bare identifier)
+      // is not a literal — but only when UNQUOTED; a quoted string is a literal.
+      return raw === value && isCodeExpression(value);
     },
   },
   // Wallet addresses — warn (a contract address may be intentional). Not a secret,
@@ -237,7 +244,6 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
-        const zeroWidth = m[0].length === 0;
         if (!detector.skip?.(m)) {
           out.push({
             check: detector.check,
@@ -247,7 +253,8 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
             excerpt: detector.excerpt(m),
           });
         }
-        if (zeroWidth) detector.re.lastIndex++; // guard a zero-width match
+        // Every detector pattern matches at least one character, so a global
+        // exec() always advances lastIndex — no zero-width-match loop guard needed.
       }
     }
   }
@@ -266,12 +273,38 @@ function dequote(value: string): string {
   return m !== null ? (m[1] ?? m[2] ?? '') : value;
 }
 
+// Placeholder tokens must match the WHOLE value, never merely a prefix: an early
+// prefix-anchored version let real secrets through (mySecretP@ss123,
+// yourCompanyProdKey_abc123, exampleRealKey99) and, because isPlaceholder also
+// gates the block-tier bearer/db-uri detectors, that was a block bypass.
+const PLACEHOLDER_WORD =
+  /^(?:xxx+|example|example-value|placeholder|redacted|changeme|dummy|sample|todo|tbd|none|null|secret|test|\*+|\.{3,})$/i;
+// your-/my- style kebab or snake placeholders (your-api-key, my_secret,
+// your-key-here) — lowercase words only, so a camelCase/digit-bearing real value
+// (yourCompanyProdKey_abc123) is NOT treated as a placeholder.
+const PLACEHOLDER_PREFIX = /^(?:your|my)[-_][a-z]+(?:[-_][a-z]+)*$/i;
+
 /** A secret-assignment value that is an obvious placeholder, not a live secret. */
 function isPlaceholder(value: string): boolean {
   if (/^[<${%]/.test(value)) return true; // <your-key>, ${VAR}, {{x}}, %ENV%
-  return /^(?:your[-_]?|my[-_]?|xxx+$|example|placeholder|redacted|changeme|dummy|sample|\*+$|\.\.\.)/i.test(
-    value,
-  );
+  return PLACEHOLDER_WORD.test(value) || PLACEHOLDER_PREFIX.test(value);
+}
+
+/**
+ * A right-hand side that is code, not a literal secret: a member/property access
+ * (user.password), a call (hashAndSalt(input)), or a bare lowercase/snake-case
+ * identifier reference (password, db_password). Only applied to UNQUOTED values —
+ * a quoted string is a literal. camelCase / digit-bearing tokens are NOT code
+ * (they read as opaque secrets), so a real value still fires.
+ */
+function isCodeExpression(value: string): boolean {
+  // Trailing code punctuation the value capture drags in (process.env.KEY, ).
+  const v = value.replace(/[,;]+$/, '');
+  if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(v)) return true; // a.b.c
+  if (/^[A-Za-z_$][\w$.]*\([^)]*\)$/.test(v)) return true; // f(...)
+  // A call truncated at a quoted arg by the value capture: os.environ.get(
+  if (/\($/.test(v)) return true;
+  return /^[a-z_$][a-z_$]*$/.test(v); // bare lowercase identifier
 }
 
 /** A structural value (path, URL, or regex literal), not a literal secret. */

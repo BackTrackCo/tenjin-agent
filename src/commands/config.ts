@@ -16,6 +16,7 @@ import type {
   PublishConfigKey,
   ScalarConfigKey,
 } from '../lib/config';
+import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -35,14 +36,6 @@ interface RenderedValue {
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
-  /**
-   * `'global'` on the publish keys: this readout reflects the global config.json
-   * layer only. A real `publish` additionally resolves the per-project
-   * `.tenjin.json`, env, and flag cascade (see settings.resolvePublishSettings),
-   * so the effective publish-time mode/price may differ. Kept cheap on purpose —
-   * config does not walk the project tree.
-   */
-  scope?: 'global';
 }
 
 const CONFIRM_ABOVE = 'above:';
@@ -121,8 +114,8 @@ async function setPublishKey(
 ): Promise<CommandResult> {
   const entry: RenderedSetting =
     key === 'publish.mode'
-      ? { value: parsePublishMode(value), source: 'file', scope: 'global' }
-      : { value: toMoney(parseUsdToAtomic(value)), source: 'file', scope: 'global' };
+      ? { value: parsePublishMode(value), source: 'file' }
+      : { value: toMoney(parseUsdToAtomic(value)), source: 'file' };
   const subkey = key === 'publish.mode' ? 'mode' : 'defaultPrice';
   const stored = key === 'publish.mode' ? (entry.value as string) : (entry.value as Money).atomic;
   await persist(ctx.dataDir, (existing) => ({
@@ -142,7 +135,15 @@ function parsePublishMode(value: string): string {
 
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
-  return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
+  // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
+  // real `publish` would resolve (project/env included), not a global-only guess.
+  const project = await loadProjectConfig(process.cwd());
+  return resolveSettings({
+    config,
+    flags: { baseUrl: ctx.flags.baseUrl },
+    env: process.env,
+    project: project?.layer,
+  });
 }
 
 function assertKey(key: string): ScalarConfigKey {
@@ -162,21 +163,16 @@ function renderSetting(
 
 /**
  * The list/get shape for a publish key, read from the resolved effective
- * settings. Tagged `scope: 'global'`: config reads the global layer only, while a
- * real publish resolves the project/env/flag cascade (see RenderedSetting.scope).
+ * settings, which now include the per-project `.tenjin.json` layer (see
+ * resolveFromContext) so the source reflects what a publish would actually use.
  */
 function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings): RenderedSetting {
   if (key === 'publish.mode') {
-    return {
-      value: settings.publishMode.value,
-      source: settings.publishMode.source,
-      scope: 'global',
-    };
+    return { value: settings.publishMode.value, source: settings.publishMode.source };
   }
   return {
     value: toMoney(settings.publishDefaultPrice.value),
     source: settings.publishDefaultPrice.source,
-    scope: 'global',
   };
 }
 
@@ -301,10 +297,7 @@ async function persist(
 
 function formatLine(key: string, entry: RenderedSetting): string {
   const label = key.padEnd(KEY_WIDTH);
-  // The publish keys carry `scope: 'global'` — flag that this is the global layer,
-  // not the effective publish-time value (which resolves the project cascade).
-  const scope = entry.scope === 'global' ? ` ${styleText('dim', '[global layer]')}` : '';
-  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}${scope}`;
+  return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}`;
 }
 
 function displayValue(entry: RenderedSetting): string {
