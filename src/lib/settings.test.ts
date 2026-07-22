@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { loadProjectConfig, resolvePublishSettings } from './publish-settings';
+import { loadProjectConfig, resolvePublishSettings } from './settings';
 import { CliError } from './errors';
 
 const run = promisify(execFile);

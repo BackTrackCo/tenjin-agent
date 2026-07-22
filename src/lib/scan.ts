@@ -8,6 +8,12 @@
  * A `block` excerpt is ALWAYS masked: the matched secret is never echoed
  * verbatim, only a short type-identifying prefix plus a redaction. `warn`
  * excerpts (wallet addresses, PII, quotes) show the caller their own content.
+ *
+ * The provider token-shape patterns (AWS, GitHub, Slack, Stripe, JWT, PEM) are
+ * adapted from the gitleaks ruleset (MIT); the EVM raw-key (0x + 64 hex) and
+ * wallet-address checks continue the BlockRun-credited wallet-key leak scanner.
+ * Both are attributed in NOTICE.md. No pattern set is vendored as a dependency —
+ * this is a wallet-holding CLI, kept offline with a tight dep tree by design.
  */
 
 export type ScanSeverity = 'block' | 'warn';
@@ -56,7 +62,9 @@ interface LineDetector {
 }
 
 const LINE_DETECTORS: LineDetector[] = [
-  // Secrets/keys — severity block, excerpt always masked.
+  // Secrets/keys — severity block, excerpt always masked. Provider patterns
+  // adapted from gitleaks (MIT); the 0x-64-hex EVM key continues the
+  // BlockRun-credited wallet-key scanner. See the file header + NOTICE.md.
   {
     check: 'raw-private-key',
     severity: 'block',
@@ -66,42 +74,50 @@ const LINE_DETECTORS: LineDetector[] = [
   {
     check: 'aws-access-key',
     severity: 'block',
-    re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+    // gitleaks aws-access-token.
+    re: /\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g,
     excerpt: (m) => maskKeeping(m[0], 4),
   },
   {
     check: 'jwt',
     severity: 'block',
-    re: /\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g,
+    // gitleaks jwt (three base64url segments, header starts eyJ).
+    re: /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g,
     excerpt: (m) => maskKeeping(m[0], 3),
   },
   {
     check: 'github-token',
     severity: 'block',
-    re: /\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b/g,
+    // gitleaks github-pat / -oauth / -app / -refresh (36 chars) + fine-grained pat.
+    re: /\b(?:gh[posru]_[0-9A-Za-z]{36}|github_pat_[0-9A-Za-z_]{82})\b/g,
     excerpt: (m) => maskKeeping(m[0], 4),
   },
   {
     check: 'slack-token',
     severity: 'block',
-    re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+    // gitleaks slack tokens (bot/user/app/refresh/legacy prefixes).
+    re: /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g,
     excerpt: (m) => maskKeeping(m[0], 5),
   },
   {
     check: 'stripe-token',
     severity: 'block',
-    re: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
+    // gitleaks stripe-access-token.
+    re: /\b[sr]k_(?:live|test)_[0-9A-Za-z]{10,99}\b/g,
     excerpt: (m) => maskKeeping(m[0], 8),
   },
   {
     check: 'secret-assignment',
     severity: 'block',
-    // A secret-named key = a non-placeholder value. The value (group 2) is masked.
+    // gitleaks generic-api-key posture: a secret-named key = a non-placeholder
+    // value. The value (group 2) is masked, never the key name.
     re: /\b([A-Z0-9_]*(?:API_KEY|SECRET|ACCESS_KEY|PRIVATE_KEY|PASSWORD|PASSWD|AUTH_TOKEN)[A-Z0-9_]*)\s*[:=]\s*["']?([^\s"']{6,})/gi,
     excerpt: (m) => `${m[1]}=[redacted ${m[2]?.length ?? 0} chars]`,
   },
   // Wallet addresses — warn (a contract address may be intentional). Not a secret,
-  // but shown abbreviated for readability.
+  // shown abbreviated. viem's checksum validation is deliberately NOT used to gate
+  // this: EIP-55 strict validation rejects the valid all-lowercase/all-uppercase
+  // forms, which a scanner must still surface, so shape matching is the right test.
   {
     check: 'wallet-address',
     severity: 'warn',
@@ -158,7 +174,8 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
   return out;
 }
 
-const PEM_BEGIN = /-----BEGIN (?:[A-Z0-9 ]*)?PRIVATE KEY-----/;
+// gitleaks private-key marker (RSA/EC/OPENSSH/PGP variants, optional BLOCK).
+const PEM_BEGIN = /-----BEGIN[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
 
 /** A PEM private-key block is a single block finding on its BEGIN marker line. */
 function scanPemBlocks(lines: string[]): ScanFinding[] {
