@@ -41,7 +41,23 @@ export function scan(text: string): ScanFinding[] {
     ...scanPemBlocks(lines),
     ...scanLongVerbatim(lines),
   ];
-  return dedupeAndSort(findings);
+  return dedupeAndSort(suppressEmailsInDbUris(findings));
+}
+
+/**
+ * A db-connection-uri already masks the embedded password; the email detector,
+ * however, would match `password@host` and echo the password verbatim in its
+ * excerpt. Drop any email finding whose span sits inside a db-connection-uri
+ * span on the same line so the masking cannot be bypassed.
+ */
+function suppressEmailsInDbUris(findings: ScanFinding[]): ScanFinding[] {
+  const uris = findings.filter((f) => f.check === 'db-connection-uri');
+  if (uris.length === 0) return findings;
+  return findings.filter(
+    (f) =>
+      f.check !== 'email' ||
+      !uris.some((u) => u.line === f.line && f.span[0] >= u.span[0] && f.span[1] <= u.span[1]),
+  );
 }
 
 /**
@@ -104,15 +120,83 @@ const LINE_DETECTORS: LineDetector[] = [
     excerpt: (m) => maskKeeping(m[0], 8),
   },
   {
-    check: 'secret-assignment',
+    check: 'anthropic-key',
     severity: 'block',
-    // gitleaks generic-api-key posture: a secret-named key = a non-placeholder
-    // value. The value (group 2) is masked, never the key name.
-    re: /\b([A-Z0-9_]*(?:API_KEY|SECRET|ACCESS_KEY|PRIVATE_KEY|PASSWORD|PASSWD|AUTH_TOKEN)[A-Z0-9_]*)\s*[:=]\s*["']?([^\s"']{6,})/gi,
-    excerpt: (m) => `${m[1]}=[redacted ${m[2]?.length ?? 0} chars]`,
-    // Runbooks legitimately show placeholder examples (<your-key>, ${VAR},
-    // changeme). Don't hard-block those; a real-looking value still blocks.
-    skip: (m) => isPlaceholder(m[2] ?? ''),
+    // gitleaks anthropic-api-key. Ordered before openai so sk-ant- isn't
+    // mis-typed as a bare OpenAI sk- key.
+    re: /\bsk-ant-[0-9A-Za-z_-]{20,}\b/g,
+    excerpt: (m) => maskKeeping(m[0], 7),
+  },
+  {
+    check: 'openai-key',
+    severity: 'block',
+    // gitleaks openai-api-key: classic sk- plus the modern sk-proj-/sk-svcacct-/
+    // sk-admin- keys. The body is base62 and MUST contain a digit (real keys are
+    // high-entropy), which keeps sk- kebab identifiers (sk-user-profile-updated…)
+    // from hard-blocking. `(?!ant-)` keeps an Anthropic key out. Only the base62
+    // leading run of a modern key is matched — enough to flag it. The run is
+    // terminated by a non-base62 lookahead (not \b, which a trailing `_` — a word
+    // char — would not fire), so an underscore-adjacent key still matches.
+    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])/g,
+    excerpt: (m) => maskKeeping(m[0], 3),
+  },
+  {
+    check: 'google-key',
+    severity: 'block',
+    // gitleaks gcp-api-key (AIza) and gcp-oauth-client-secret (GOCSPX-).
+    re: /\b(?:AIza[0-9A-Za-z_-]{35}|GOCSPX-[0-9A-Za-z_-]{20,})\b/g,
+    excerpt: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
+  },
+  {
+    check: 'npm-token',
+    severity: 'block',
+    // gitleaks npm-access-token.
+    re: /\bnpm_[0-9A-Za-z]{36}\b/g,
+    excerpt: (m) => maskKeeping(m[0], 4),
+  },
+  {
+    check: 'db-connection-uri',
+    severity: 'block',
+    // A connection string with an embedded password (scheme://user:pass@host).
+    // Only the password (group 3) is secret; the excerpt masks it and keeps the
+    // rest so the finding is legible. Placeholder-gated like the other high-
+    // confidence shapes so a docs example (postgres://postgres:postgres@…,
+    // ://user:<password>@…) doesn't hard-block; a real password still blocks.
+    re: /\b([a-z][a-z0-9+.-]*):\/\/([^\s:@/]+):([^\s@/]+)@([^\s/:]+)/gi,
+    excerpt: (m) => `${m[1]}://${m[2]}:[redacted]@${m[4]}`,
+    skip: (m) => isPlaceholder(m[3] ?? '') || isExamplePassword(m[3] ?? ''),
+  },
+  {
+    check: 'bearer-token',
+    severity: 'block',
+    // An Authorization: Bearer header carrying a live token; placeholder-gated
+    // like secret-assignment so `Bearer <token>` examples don't hard-block.
+    re: /\bAuthorization:\s*Bearer\s+(\S{8,})/gi,
+    excerpt: (m) => `Authorization: Bearer [redacted ${m[1]?.length ?? 0} chars]`,
+    skip: (m) => isPlaceholder(m[1] ?? ''),
+  },
+  // Generic secret-named assignment — WARN, not block (review): a keyword match is
+  // lower-confidence than a structured shape, and warn still forces confirmation
+  // in default auto mode, so nothing publishes unseen while benign config
+  // (SECRET_NAME=…, MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. The
+  // excerpt stays masked. Placeholder and structural (path/URL/regex) values are
+  // skipped entirely.
+  {
+    check: 'secret-assignment',
+    severity: 'warn',
+    // Key: api[_-]?key, secret, access/private key, passw(or)?d, token,
+    // credential(s), auth token — camelCase-insensitive. Value: a quoted string
+    // (interior spaces allowed) or an unquoted run, ≥6 chars. Value is masked.
+    re: /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\s*[:=]\s*("[^"]{6,}"|'[^']{6,}'|[^\s"']{6,})/gi,
+    excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
+    skip: (m) => {
+      const raw = m[2] ?? '';
+      const value = dequote(raw);
+      if (isPlaceholder(value) || isStructural(value)) return true;
+      // A code RHS (config.clientSecret, hashAndSalt(input), a bare identifier)
+      // is not a literal — but only when UNQUOTED; a quoted string is a literal.
+      return raw === value && isCodeExpression(value);
+    },
   },
   // Wallet addresses — warn (a contract address may be intentional). Not a secret,
   // shown abbreviated. viem's checksum validation is deliberately NOT used to gate
@@ -160,7 +244,6 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
-        const zeroWidth = m[0].length === 0;
         if (!detector.skip?.(m)) {
           out.push({
             check: detector.check,
@@ -170,19 +253,84 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
             excerpt: detector.excerpt(m),
           });
         }
-        if (zeroWidth) detector.re.lastIndex++; // guard a zero-width match
+        // Every detector pattern matches at least one character, so a global
+        // exec() always advances lastIndex — no zero-width-match loop guard needed.
       }
     }
   }
   return out;
 }
 
+// Accepted alpha gaps (owner call, tracked for post-alpha): BIP-39 mnemonic
+// phrases (12/24 dictionary words) are NOT detected — a wordlist match is
+// high-false-positive against prose and deferred. Headerless base64/DER-encoded
+// private keys (no -----BEGIN----- marker) are likewise NOT detected; only the
+// PEM-armored form and the 0x-64-hex form are.
+
+/** Strip a single matching pair of surrounding quotes from a captured value. */
+function dequote(value: string): string {
+  const m = /^"([^"]*)"$|^'([^']*)'$/.exec(value);
+  return m !== null ? (m[1] ?? m[2] ?? '') : value;
+}
+
+// Placeholder tokens must match the WHOLE value, never merely a prefix: an early
+// prefix-anchored version let real secrets through (mySecretP@ss123,
+// yourCompanyProdKey_abc123, exampleRealKey99) and, because isPlaceholder also
+// gates the block-tier bearer/db-uri detectors, that was a block bypass.
+const PLACEHOLDER_WORD =
+  /^(?:xxx+|example|example-value|placeholder|redacted|changeme|dummy|sample|todo|tbd|none|null|secret|test|\*+|\.{3,})$/i;
+// your-/my- style kebab or snake placeholders (your-api-key, my_secret,
+// your-key-here) — lowercase words only, so a camelCase/digit-bearing real value
+// (yourCompanyProdKey_abc123) is NOT treated as a placeholder.
+const PLACEHOLDER_PREFIX = /^(?:your|my)[-_][a-z]+(?:[-_][a-z]+)*$/i;
+
 /** A secret-assignment value that is an obvious placeholder, not a live secret. */
 function isPlaceholder(value: string): boolean {
   if (/^[<${%]/.test(value)) return true; // <your-key>, ${VAR}, {{x}}, %ENV%
-  return /^(?:your[-_]?|my[-_]?|xxx+$|example|placeholder|redacted|changeme|dummy|sample|\*+$|\.\.\.)/i.test(
-    value,
-  );
+  return PLACEHOLDER_WORD.test(value) || PLACEHOLDER_PREFIX.test(value);
+}
+
+/**
+ * A right-hand side that is code, not a literal secret: a member/property access
+ * (user.password), a call (hashAndSalt(input)), or a bare lowercase/snake-case
+ * identifier reference (password, db_password). Only applied to UNQUOTED values —
+ * a quoted string is a literal. camelCase / digit-bearing tokens are NOT code
+ * (they read as opaque secrets), so a real value still fires.
+ */
+function isCodeExpression(value: string): boolean {
+  // Trailing code punctuation the value capture drags in (process.env.KEY, ).
+  const v = value.replace(/[,;]+$/, '');
+  if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(v)) return true; // a.b.c
+  if (/^[A-Za-z_$][\w$.]*\([^)]*\)$/.test(v)) return true; // f(...)
+  // A call truncated at a quoted arg by the value capture: os.environ.get(
+  if (/\($/.test(v)) return true;
+  return /^[a-z_$][a-z_$]*$/.test(v); // bare lowercase identifier
+}
+
+/** A structural value (path, URL, or regex literal), not a literal secret. */
+function isStructural(value: string): boolean {
+  return /^(?:\.?\.?\/|~\/|https?:\/\/|\^)/.test(value);
+}
+
+// Well-known example/default DB passwords — a connection string using one is a
+// docs snippet, not a leaked credential.
+const EXAMPLE_PASSWORDS = new Set([
+  'password',
+  'postgres',
+  'mysql',
+  'root',
+  'admin',
+  'changeme',
+  'example',
+  'secret',
+  'test',
+  'guest',
+  'toor',
+]);
+
+/** A db-connection-uri password that is an obvious example/default, not a secret. */
+function isExamplePassword(password: string): boolean {
+  return EXAMPLE_PASSWORDS.has(password.toLowerCase());
 }
 
 // EVM raw private key (0x + 64 hex) vs. a 32-byte hash. On Base the two are

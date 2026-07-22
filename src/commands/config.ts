@@ -16,6 +16,7 @@ import type {
   PublishConfigKey,
   ScalarConfigKey,
 } from '../lib/config';
+import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -134,7 +135,15 @@ function parsePublishMode(value: string): string {
 
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
-  return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
+  // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
+  // real `publish` would resolve (project/env included), not a global-only guess.
+  const project = await loadProjectConfig(process.cwd());
+  return resolveSettings({
+    config,
+    flags: { baseUrl: ctx.flags.baseUrl },
+    env: process.env,
+    project: project?.layer,
+  });
 }
 
 function assertKey(key: string): ScalarConfigKey {
@@ -152,7 +161,11 @@ function renderSetting(
   return { ...renderValue(key, stored), source };
 }
 
-/** The list/get shape for a publish key, read from the resolved effective settings. */
+/**
+ * The list/get shape for a publish key, read from the resolved effective
+ * settings, which now include the per-project `.tenjin.json` layer (see
+ * resolveFromContext) so the source reflects what a publish would actually use.
+ */
 function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings): RenderedSetting {
   if (key === 'publish.mode') {
     return { value: settings.publishMode.value, source: settings.publishMode.source };

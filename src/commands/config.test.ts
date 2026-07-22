@@ -368,3 +368,24 @@ describe('forward compatibility', () => {
     expect(raw.publish).toEqual({ visibility: 'unlisted', mode: 'review' });
   });
 });
+
+describe('publish readout reflects the per-project .tenjin.json layer', () => {
+  it('config get publish.mode shows the project source when a .tenjin.json sets it', async () => {
+    // dataDir has no publish config (→ default), but the cwd's .tenjin.json does:
+    // the readout must show what a real publish resolves, sourced 'project'.
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'review' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
+      expect(data).toMatchObject({ key: 'publish.mode', value: 'review', source: 'project' });
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
+  });
+});
