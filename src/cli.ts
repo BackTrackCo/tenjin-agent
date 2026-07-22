@@ -352,6 +352,51 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // Group-level flags so `tenjin candidate --json list` parses like the wallet
+  // group. Appended after the existing groups to keep merge friction with the
+  // parallel publish work minimal.
+  const candidate = addGlobalFlags(
+    program
+      .command('candidate')
+      .description(
+        'Manage local publish candidates (parked drafts; nothing uploads until publish)',
+      ),
+  );
+  addGlobalFlags(candidate.command('add <file>'))
+    .description('Park a Markdown draft as a publish candidate, tied to a lookup')
+    .requiredOption('--lookup-id <id>', 'the lookup whose unmet demand this draft answers')
+    .option('--question <q>', 'the question this draft answers')
+    .action(async function (this: Command, file: string) {
+      await runCommand('candidate.add', this, async (ctx) => {
+        const o = this.opts();
+        const { runCandidateAdd } = await import('./commands/candidate');
+        return runCandidateAdd(
+          {
+            file,
+            lookupId: String(o.lookupId),
+            ...(typeof o.question === 'string' ? { question: o.question } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+  addGlobalFlags(candidate.command('list'))
+    .description('List pending candidates, newest first')
+    .action(async function (this: Command) {
+      await runCommand('candidate.list', this, async (ctx) => {
+        const { runCandidateList } = await import('./commands/candidate');
+        return runCandidateList(ctx);
+      });
+    });
+  addGlobalFlags(candidate.command('drop <id>'))
+    .description('Discard a pending candidate (never auto-deleted)')
+    .action(async function (this: Command, id: string) {
+      await runCommand('candidate.drop', this, async (ctx) => {
+        const { runCandidateDrop } = await import('./commands/candidate');
+        return runCandidateDrop({ id }, ctx);
+      });
+    });
+
   return program;
 }
 

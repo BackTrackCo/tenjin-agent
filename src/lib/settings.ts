@@ -248,7 +248,9 @@ async function defaultIsForeignOwned(filePath: string): Promise<boolean> {
   }
 }
 
-async function pathExists(path: string): Promise<boolean> {
+/** True when a path exists (of any type). Shared with the candidate command's
+ *  repo-root walk so the two `.git`/file probes stay one implementation. */
+export async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;

@@ -1,0 +1,183 @@
+import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { join } from 'node:path';
+import { z } from 'zod';
+import { writeFileAtomicExclusive } from './atomic-json';
+import { hasCode } from './errno';
+import { newId, UUID_RE } from './ids';
+
+/**
+ * The D40 candidate store: publish drafts parked locally that never touch the
+ * network and never upload — only a later `tenjin publish --candidate <id>`
+ * sends one, under the D38 consent scan. Each candidate is its OWN directory
+ * `~/.tenjin/candidates/<id>/` holding the draft markdown plus a meta.json.
+ *
+ * Custody mirrors the wallet key discipline: the candidates tree is 0700 and
+ * every file 0600, written create-once through writeFileAtomicExclusive so a
+ * reader sees a complete file or none and a uuid collision is loud, never a
+ * silent overwrite. Unlike lookup-store's single shared ledger, there is no shared
+ * mutable file here — a fresh uuid per add means two concurrent adds land in two
+ * distinct dirs and cannot contend — so no cross-process lock is needed. The
+ * meta.json is written LAST and atomically, making it the commit point: `list`
+ * skips any dir whose meta is absent or unreadable, so a torn or half-written
+ * add reads as not-yet-there rather than a broken candidate, the same
+ * best-effort posture loadLookups takes on a corrupt store. A crash mid-add is
+ * cleaned up eagerly (the dir is removed on any write failure), and `drop` can
+ * still remove a metaless orphan by id so a leaked draft is never stranded.
+ */
+
+const DRAFT_FILE = 'draft.md';
+const META_FILE = 'meta.json';
+
+const CandidateMetaSchema = z.object({
+  schemaVersion: z.literal(1),
+  lookupId: z.string(),
+  question: z.string().optional(),
+  // Fixed-width UTC ISO-8601 (a trailing Z, never an offset): listCandidates
+  // sorts newest-first lexicographically on this string, which is only a valid
+  // proxy for chronological order when every value is same-zone UTC. z.iso
+  // .datetime() rejects offsets and non-datetime strings, pinning that invariant.
+  created: z.iso.datetime(),
+  /** The repo root the add ran in, or the cwd when not in a repo. */
+  sourceProject: z.string(),
+});
+export type CandidateMeta = z.infer<typeof CandidateMetaSchema>;
+
+export interface CandidateRecord {
+  id: string;
+  meta: CandidateMeta;
+  /** Absolute path of the candidate directory. */
+  dir: string;
+  /** Absolute path of the draft markdown inside the directory. */
+  draftPath: string;
+}
+
+export interface CreateCandidateInput {
+  /** The draft markdown, copied verbatim into the candidate. */
+  draft: string;
+  lookupId: string;
+  question?: string;
+  /** ISO-8601 creation time; the command supplies it via its clock seam. */
+  created: string;
+  sourceProject: string;
+}
+
+function candidatesDir(dataDir: string): string {
+  return join(dataDir, 'candidates');
+}
+
+function candidateDir(dataDir: string, id: string): string {
+  return join(candidatesDir(dataDir), id);
+}
+
+/** Park a draft as a new candidate and return the created record. Both files are
+ *  written create-once (no-clobber, fsynced) at a fresh uuid path, meta.json
+ *  last, so the candidate is either fully present to `list`/`read` or absent,
+ *  never half-there. */
+export async function createCandidate(
+  dataDir: string,
+  input: CreateCandidateInput,
+): Promise<CandidateRecord> {
+  const id = newId();
+  const dir = candidateDir(dataDir, id);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+
+  const draftPath = join(dir, DRAFT_FILE);
+  const meta: CandidateMeta = {
+    schemaVersion: 1,
+    lookupId: input.lookupId,
+    ...(input.question !== undefined ? { question: input.question } : {}),
+    created: input.created,
+    sourceProject: input.sourceProject,
+  };
+  try {
+    // Exclusive (create-or-EEXIST, fsynced) so a uuid collision is loud, not a
+    // silent overwrite of an existing candidate, and the crash-durable commit of
+    // meta.json is the last, atomic step.
+    await writeFileAtomicExclusive(draftPath, input.draft, { mode: 0o600, dirMode: 0o700 });
+    await writeFileAtomicExclusive(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`, {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+  } catch (err) {
+    // An EEXIST means something already lived at this fresh-uuid path (a real
+    // collision, astronomically unlikely): surface it loudly and NEVER delete
+    // what was already there. Any other failure is a partial write of our own
+    // fresh dir — remove it so a crash mid-add can't strand a hidden dir holding
+    // the (secrets-adjacent) draft that `list` skips and no one can name to `drop`.
+    if (!hasCode(err, 'EEXIST')) {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    throw err;
+  }
+
+  return { id, meta, dir, draftPath };
+}
+
+/** One candidate by id, or null when it is unknown (or the id is malformed, so a
+ *  stray argument can never traverse out of the store). */
+export async function readCandidate(dataDir: string, id: string): Promise<CandidateRecord | null> {
+  if (!UUID_RE.test(id)) return null;
+  const dir = candidateDir(dataDir, id);
+  const meta = await readMeta(dir);
+  if (meta === null) return null;
+  return { id, meta, dir, draftPath: join(dir, DRAFT_FILE) };
+}
+
+/** Every pending candidate, newest first by `created` (no auto-expiry — stale
+ *  candidates stay visible, D40). Tie-broken on id so the order is total. */
+export async function listCandidates(dataDir: string): Promise<CandidateRecord[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(candidatesDir(dataDir), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const records: CandidateRecord[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !UUID_RE.test(entry.name)) continue;
+    const record = await readCandidate(dataDir, entry.name);
+    if (record !== null) records.push(record);
+  }
+  records.sort((a, b) => {
+    if (a.meta.created !== b.meta.created) return a.meta.created < b.meta.created ? 1 : -1;
+    return a.id < b.id ? 1 : -1;
+  });
+  return records;
+}
+
+/** Discard one candidate by id. Returns false when the id is malformed or no
+ *  such dir exists, so the command can surface a clean not-found; nothing is
+ *  ever auto-deleted. Removes the dir even when its meta is absent or corrupt,
+ *  so a crash-orphaned candidate can still be cleaned up by id (the id is
+ *  UUID-gated first, so a stray argument can never target a path outside the
+ *  store). */
+export async function dropCandidate(dataDir: string, id: string): Promise<boolean> {
+  if (!UUID_RE.test(id)) return false;
+  const dir = candidateDir(dataDir, id);
+  try {
+    if (!(await stat(dir)).isDirectory()) return false;
+  } catch {
+    return false; // no such candidate
+  }
+  await rm(dir, { recursive: true, force: true });
+  return true;
+}
+
+/** Read and validate a candidate's meta.json; null on any absence/corruption. */
+async function readMeta(dir: string): Promise<CandidateMeta | null> {
+  let raw: string;
+  try {
+    raw = await readFile(join(dir, META_FILE), 'utf8');
+  } catch {
+    return null;
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const parsed = CandidateMetaSchema.safeParse(json);
+  return parsed.success ? parsed.data : null;
+}
