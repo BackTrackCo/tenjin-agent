@@ -2,9 +2,9 @@ import type { ErrorCode } from '../schemas';
 
 /**
  * The process exit code is API (spec 10): 0 success, 1 runtime/network, 2 usage,
- * 3 policy refusal, 4 payment failure. 4 is reserved for B2 (spend/settlement)
- * and never produced in B1, but it stays in the type so the mapping table is
- * total and B2 adds codes without widening the union.
+ * 3 understood-but-refused (policy refusal, publish confirmation/hard-block), 4 a
+ * failure AFTER an approved spend or write (a settlement that failed, a publish
+ * that failed post-consent).
  */
 export type ExitCode = 1 | 2 | 3 | 4;
 
@@ -45,6 +45,12 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   RESOURCE_NOT_FOUND: 1,
   LOOKUP_NOT_FOUND: 1,
   RATE_LIMITED: 1,
+  // A publish awaiting confirmation or hard-blocked is understood-but-refused (3),
+  // the same posture as POLICY_REFUSED; a write that failed after approval is a
+  // settlement-class failure (4), like PAYMENT_FAILED.
+  NEEDS_CONFIRMATION: 3,
+  PUBLISH_BLOCKED: 3,
+  PUBLISH_FAILED: 4,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {

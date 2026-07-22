@@ -25,6 +25,9 @@ const EXPECTED: Record<ErrorCode, ExitCode> = {
   RESOURCE_NOT_FOUND: 1,
   LOOKUP_NOT_FOUND: 1,
   RATE_LIMITED: 1,
+  NEEDS_CONFIRMATION: 3,
+  PUBLISH_BLOCKED: 3,
+  PUBLISH_FAILED: 4,
 };
 
 describe('exitCodeFor', () => {
@@ -46,7 +49,7 @@ describe('CliError', () => {
     expect(new CliError('RPC_ERROR', 'x').exitCode).toBe(1);
   });
 
-  it('allows overriding the exit code (4 reserved for B2 payment failures)', () => {
+  it('allows overriding the exit code (4 = a failure after an approved spend/write)', () => {
     expect(new CliError('PROVIDER_ERROR', 'x', { exitCode: 4 }).exitCode).toBe(4);
   });
 

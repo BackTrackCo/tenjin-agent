@@ -53,3 +53,14 @@ export function atomicToUsd(atomic: string): string {
 export function toMoney(atomic: string): Money {
   return { atomic, usd: atomicToUsd(atomic) };
 }
+
+/**
+ * Canonical USD for human COPY (a price a person reads): always at least two
+ * decimals ("0.10", "5.00"), keeping any finer precision below a cent
+ * ("0.000001"). Distinct from `atomicToUsd`, which trims to the shortest exact
+ * form for machine output; use this only where a dollar amount is shown to a human.
+ */
+export function formatUsdDisplay(atomic: string): string {
+  const [whole, frac = ''] = atomicToUsd(atomic).split('.');
+  return `${whole}.${frac.padEnd(2, '0')}`;
+}

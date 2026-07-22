@@ -45,10 +45,12 @@
     "check": "pnpm run build && pnpm run test",
     "sync:skill": "node scripts/sync-skill.mjs",
     "pack-smoke": "bash scripts/pack-smoke.sh",
+    "changeset": "changeset",
+    "prepublishOnly": "pnpm run build",
     "prepare": "git config core.hooksPath .githooks || true"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@changesets/cli": "^2.31.1",
     "@eslint/js": "^9",
     "@types/node": "^25",
     "@x402/core": "2.17.0",

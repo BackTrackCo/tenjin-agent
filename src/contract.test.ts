@@ -3,13 +3,16 @@ import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { lookupCandidateSchema, lookupResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
+import { buildPostCreateBody } from './lib/posts-api';
+import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
-// (generated from tenjin main af607b3, the A2 merge). Every assertion here is a
-// pure walk of the OpenAPI document, so a server-side rename or removal that
-// would break the CLI fails THIS suite before it fails in production. The
-// env-gated section at the bottom re-runs the same walks against a live
-// deployment and is the only test allowed to touch the network.
+// (the live tenjin.blog/openapi.json, the A3 publish deploy: it carries the
+// resource card + the cacheEligible echo alongside the A2 agent-lookup surface).
+// Every assertion here is a pure walk of the OpenAPI document, so a server-side
+// rename or removal that would break the CLI fails THIS suite before it fails in
+// production. The env-gated section at the bottom re-runs the same walks against a
+// live deployment and is the only test allowed to touch the network.
 
 const fixtureDoc: unknown = fixtureJson;
 
@@ -201,6 +204,162 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   });
 });
 
+// The publish surface (A3, tenjin#382): the CLI sends a strictObject PostCreate
+// with an optional strictObject `resource` card and reads the cacheEligible echo.
+// Every field the CLI emits must be declared by the fixture, and the card bounds
+// the CLI validates locally must match the server's, or the drift fails here.
+const POST_CREATE_FIELDS = ['title', 'bodyMd', 'excerpt', 'tags', 'price', 'handle', 'status'];
+const CARD_INPUT_FIELDS = [
+  'artifactType',
+  'mediaType',
+  'temporalMode',
+  'asOf',
+  'validUntil',
+  'supersedesPostId',
+  'questionsAnswered',
+  'tasksSupported',
+  'scope',
+  'exclusions',
+  'appliesTo',
+  'provenanceSummary',
+  'methodologySummary',
+  'maintenanceCadence',
+  'reproductionMinutes',
+  'estimatedPaidInputCost',
+];
+
+function assertPostPaths(doc: unknown): void {
+  expect(get(doc, 'paths', '/api/posts', 'post', 'operationId')).toBe('createPost');
+  expect(get(doc, 'paths', '/api/posts/{id}', 'put', 'operationId')).toBe('updatePost');
+}
+
+function postCreateProps(doc: unknown): unknown {
+  return get(doc, 'components', 'schemas', 'PostCreate', 'properties');
+}
+function cardInputProps(doc: unknown): unknown {
+  return get(postCreateProps(doc), 'resource', 'properties');
+}
+
+/**
+ * The nullable card fields are declared as `anyOf: [<schema>, {type:'null'}]`, so
+ * their bounds live one level in. Return the non-null branch (or the node itself
+ * for a plain, non-nullable field) so a single `bound()` reads either shape.
+ */
+function nonNull(node: unknown): unknown {
+  const anyOf = get(node, 'anyOf');
+  if (Array.isArray(anyOf)) {
+    return anyOf.find((b) => get(b, 'type') !== 'null') ?? node;
+  }
+  return node;
+}
+function bound(props: unknown, field: string, ...path: (string | number)[]): unknown {
+  return get(nonNull(get(props, field)), ...path);
+}
+
+function assertPublishContract(doc: unknown): void {
+  // PostCreate is strict and declares every top-level field the CLI sends.
+  expect(get(doc, 'components', 'schemas', 'PostCreate', 'additionalProperties')).toBe(false);
+  for (const field of POST_CREATE_FIELDS) {
+    expect(get(postCreateProps(doc), field), `PostCreate.${field} missing`).toBeDefined();
+  }
+  // The resource card is a strictObject declaring every card field the CLI emits.
+  expect(get(postCreateProps(doc), 'resource', 'additionalProperties')).toBe(false);
+  for (const field of CARD_INPUT_FIELDS) {
+    expect(get(cardInputProps(doc), field), `resource.${field} missing`).toBeDefined();
+  }
+  // The full bounds block the CLI hard-codes as literals. A server move on any of
+  // these regenerates the fixture but silently diverges from the CLI, so pin the
+  // lot — a mismatch here is the drift.
+  const top = postCreateProps(doc);
+  expect(bound(top, 'title', 'maxLength')).toBe(200);
+  expect(bound(top, 'bodyMd', 'maxLength')).toBe(200000);
+  expect(bound(top, 'excerpt', 'maxLength')).toBe(500);
+  expect(bound(top, 'tags', 'maxItems')).toBe(5);
+  expect(bound(top, 'tags', 'items', 'minLength')).toBe(1);
+  expect(bound(top, 'tags', 'items', 'maxLength')).toBe(50);
+  expect(bound(top, 'price', 'pattern')).toBe('^(0|[1-9]\\d{0,12})$');
+  expect(bound(top, 'handle', 'pattern')).toBe('^[a-z0-9-]{2,32}$');
+  expect(bound(top, 'status', 'enum')).toEqual(['draft', 'published', 'unlisted']);
+
+  const card = cardInputProps(doc);
+  expect(bound(card, 'mediaType', 'maxLength')).toBe(100);
+  expect(bound(card, 'mediaType', 'pattern')).toBe('^[a-z0-9]+\\/[a-z0-9][a-z0-9.+-]*$');
+  expect(bound(card, 'artifactType', 'enum')).toEqual(['document', 'skill', 'dataset']);
+  expect(bound(card, 'temporalMode', 'enum')).toEqual(['snapshot', 'maintained', 'evergreen']);
+  for (const f of ['scope', 'exclusions', 'provenanceSummary', 'methodologySummary']) {
+    expect(bound(card, f, 'maxLength'), `resource.${f} maxLength`).toBe(500);
+  }
+  for (const f of ['questionsAnswered', 'tasksSupported']) {
+    expect(bound(card, f, 'maxItems'), `resource.${f} maxItems`).toBe(10);
+    expect(bound(card, f, 'items', 'maxLength'), `resource.${f} items`).toBe(200);
+  }
+  expect(bound(card, 'maintenanceCadence', 'maxLength')).toBe(120);
+  expect(bound(card, 'reproductionMinutes', 'minimum')).toBe(0);
+  expect(bound(card, 'reproductionMinutes', 'maximum')).toBe(1000000);
+  expect(bound(card, 'appliesTo', 'additionalProperties', 'items', 'maxLength')).toBe(120);
+  // The CLI's own appliesTo 8-KEY cap is local-stricter: the server accepts up to
+  // 8 keys but the fixture declares no `maxProperties`, so this divergence has NO
+  // fixture counterpart and cannot be pinned here — asserted only in card.test.ts.
+  expect(bound(card, 'appliesTo', 'maxProperties')).toBeUndefined();
+
+  // The echo the CLI reads back.
+  const echo = get(doc, 'components', 'schemas', 'ResourceCard', 'properties');
+  expect(get(echo, 'cacheEligible'), 'ResourceCard.cacheEligible missing').toBeDefined();
+  expect(
+    get(echo, 'cacheEligibleMissing'),
+    'ResourceCard.cacheEligibleMissing missing',
+  ).toBeDefined();
+}
+
+describe('contract fixture pins the publish endpoints', () => {
+  it('declares POST /api/posts and PUT /api/posts/{id}', () => {
+    assertPostPaths(fixtureDoc);
+  });
+
+  it('the PostCreate + resource card shape the CLI sends is fully declared', () => {
+    assertPublishContract(fixtureDoc);
+  });
+
+  it('every field buildPostCreateBody emits is a declared PostCreate field', () => {
+    const body = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      excerpt: 'e',
+      tags: ['x'],
+      priceAtomic: '100000',
+      handle: 'iris',
+    });
+    const declared = postCreateProps(fixtureDoc);
+    for (const key of Object.keys(body)) {
+      expect(get(declared, key), `fixture does not declare PostCreate field ${key}`).toBeDefined();
+    }
+  });
+
+  it('every field deriveCard emits is a declared resource field', () => {
+    const card = deriveCard(
+      {},
+      {
+        artifactType: 'document',
+        temporalMode: 'snapshot',
+        asOf: '2026-07-01T00:00:00Z',
+        validUntil: '2026-08-01T00:00:00Z',
+        question: ['q'],
+        task: ['t'],
+        scope: 's',
+        exclusions: 'x',
+        provenance: 'p',
+        methodology: 'm',
+        appliesTo: { products: ['Vercel'] },
+      },
+    );
+    const declared = cardInputProps(fixtureDoc);
+    for (const key of Object.keys(card ?? {})) {
+      expect(get(declared, key), `fixture does not declare resource field ${key}`).toBeDefined();
+    }
+  });
+});
+
 // The only network-touching section in the whole suite, and only when
 // TENJIN_CONTRACT_BASE_URL is set: fetch the live openapi.json and re-run the
 // structural pins (assertions 1-4) against the deployment itself.
@@ -231,6 +390,11 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
 
     it('LookupOutcomeSubmit status enum matches the CLI', () => {
       assertOutcomeStatusEnum(liveDoc);
+    });
+
+    it('declares the publish endpoints and the resource-card shape the CLI sends', () => {
+      assertPostPaths(liveDoc);
+      assertPublishContract(liveDoc);
     });
   },
 );
