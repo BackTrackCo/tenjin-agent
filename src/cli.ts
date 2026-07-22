@@ -267,6 +267,57 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  addGlobalFlags(program.command('publish <file>'))
+    .description(
+      'Publish a Markdown file as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
+    )
+    .option('--draft', 'save as a private draft instead of publishing')
+    .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
+    .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
+    .option('--price <usd>', 'post price in decimal USD (defaults to publish.defaultPrice)')
+    .option('--question <text>', 'a question this piece answers (repeatable)', collect, [])
+    .option('--task <text>', 'a task this piece supports (repeatable)', collect, [])
+    .option('--scope <text>', 'what the piece covers (card scope)')
+    .option('--exclusions <text>', 'what the piece does not cover (card exclusions)')
+    .option('--applies-to <pair>', 'applicability key=value (repeatable)', collect, [])
+    .option('--as-of <iso>', 'as-of timestamp, ISO-8601 with offset')
+    .option('--valid-until <iso>', 'valid-until timestamp, ISO-8601 with offset')
+    .option('--artifact-type <type>', 'document | skill | dataset')
+    .option('--temporal-mode <mode>', 'snapshot | maintained | evergreen')
+    .option('--provenance <text>', 'provenance summary (card)')
+    .option('--methodology <text>', 'methodology summary (card)')
+    .action(async function (this: Command, file: string) {
+      await runCommand('publish', this, async (ctx) => {
+        const o = this.opts();
+        const { runPublish } = await import('./commands/publish');
+        return runPublish(
+          {
+            file,
+            ...(o.draft === true ? { draft: true } : {}),
+            ...(o.yes === true ? { yes: true } : {}),
+            ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
+            ...(typeof o.price === 'string' ? { price: o.price } : {}),
+            ...(Array.isArray(o.question) && o.question.length > 0
+              ? { question: o.question as string[] }
+              : {}),
+            ...(Array.isArray(o.task) && o.task.length > 0 ? { task: o.task as string[] } : {}),
+            ...(typeof o.scope === 'string' ? { scope: o.scope } : {}),
+            ...(typeof o.exclusions === 'string' ? { exclusions: o.exclusions } : {}),
+            ...(Array.isArray(o.appliesTo) && o.appliesTo.length > 0
+              ? { appliesTo: o.appliesTo as string[] }
+              : {}),
+            ...(typeof o.asOf === 'string' ? { asOf: o.asOf } : {}),
+            ...(typeof o.validUntil === 'string' ? { validUntil: o.validUntil } : {}),
+            ...(typeof o.artifactType === 'string' ? { artifactType: o.artifactType } : {}),
+            ...(typeof o.temporalMode === 'string' ? { temporalMode: o.temporalMode } : {}),
+            ...(typeof o.provenance === 'string' ? { provenance: o.provenance } : {}),
+            ...(typeof o.methodology === 'string' ? { methodology: o.methodology } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
   addGlobalFlags(program.command('outcome'))
     .description(
       'Report how a lookup ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a lookup; this closes the loop the marketplace learns from',
