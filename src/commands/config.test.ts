@@ -47,11 +47,10 @@ describe('runConfigList', () => {
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
-    expect(d['publish.mode']).toEqual({ value: 'auto', source: 'default', scope: 'global' });
+    expect(d['publish.mode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['publish.defaultPrice']).toEqual({
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
-      scope: 'global',
     });
     expect(humanLines).toHaveLength(9);
   });
@@ -307,19 +306,9 @@ describe('publish.mode key', () => {
     'round-trips %s through set/get',
     async (mode) => {
       const set = await runConfigSet({ key: 'publish.mode', value: mode }, makeCtx());
-      expect(set.data).toEqual({
-        key: 'publish.mode',
-        value: mode,
-        source: 'file',
-        scope: 'global',
-      });
+      expect(set.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
       const get = await runConfigGet({ key: 'publish.mode' }, makeCtx());
-      expect(get.data).toEqual({
-        key: 'publish.mode',
-        value: mode,
-        source: 'file',
-        scope: 'global',
-      });
+      expect(get.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
       expect(await readRawFile()).toEqual({ publish: { mode } });
     },
   );
@@ -338,14 +327,12 @@ describe('publish.defaultPrice key', () => {
       key: 'publish.defaultPrice',
       value: { atomic: '250000', usd: '0.25' },
       source: 'file',
-      scope: 'global',
     });
     const get = await runConfigGet({ key: 'publish.defaultPrice' }, makeCtx());
     expect(get.data).toEqual({
       key: 'publish.defaultPrice',
       value: { atomic: '250000', usd: '0.25' },
       source: 'file',
-      scope: 'global',
     });
     expect(await readRawFile()).toEqual({ publish: { defaultPrice: '250000' } });
   });
@@ -379,5 +366,26 @@ describe('forward compatibility', () => {
     await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
     const raw = (await readRawFile()) as { publish: Record<string, unknown> };
     expect(raw.publish).toEqual({ visibility: 'unlisted', mode: 'review' });
+  });
+});
+
+describe('publish readout reflects the per-project .tenjin.json layer', () => {
+  it('config get publish.mode shows the project source when a .tenjin.json sets it', async () => {
+    // dataDir has no publish config (→ default), but the cwd's .tenjin.json does:
+    // the readout must show what a real publish resolves, sourced 'project'.
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'review' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
+      expect(data).toMatchObject({ key: 'publish.mode', value: 'review', source: 'project' });
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
   });
 });
