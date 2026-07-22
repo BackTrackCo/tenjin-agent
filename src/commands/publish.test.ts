@@ -85,7 +85,9 @@ async function writeDoc(content: string): Promise<string> {
 
 const CLEAN = '# The Answer\n\nA plain body with nothing sensitive.\n';
 const WARN = '# The Answer\n\nSend to 0x' + 'b'.repeat(40) + ' today.\n';
-const BLOCK = '# The Answer\n\nAPI_KEY=supersecretvalue123 do not share.\n';
+// A bare, uncontextualized 0x-64-hex raw private key: a hard block in every mode,
+// and it stays a block through B3.1's secret-assignment→warn demotion.
+const BLOCK = '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
 
 function baseArgs(file: string, over: Partial<PublishArgs> = {}): PublishArgs {
   return { file, ...over };
