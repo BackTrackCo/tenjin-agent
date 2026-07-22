@@ -53,10 +53,21 @@ export interface DoctorDeps {
   provider?: WalletProvider;
 }
 
-export async function runDoctor(
+/**
+ * The full check list plus the first required failure, if any. `install` reuses
+ * this to run the doctor checks as its last step and EMBED the summary without
+ * throwing (D39: doctor is diagnostics, it never blocks the caller); `runDoctor`
+ * wraps it and turns a required failure into the thrown failure envelope.
+ */
+export interface DoctorChecks {
+  checks: CheckResult[];
+  failure?: { code: ErrorCode; result: CheckResult };
+}
+
+export async function collectDoctorChecks(
   ctx: CommandContext,
   deps: DoctorDeps = {},
-): Promise<CommandResult> {
+): Promise<DoctorChecks> {
   const env = deps.env ?? process.env;
   const { config, check: configCheck } = await loadConfigForDoctor(ctx.dataDir);
   const settings = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env });
@@ -78,15 +89,24 @@ export async function runDoctor(
 
   const checks = built.map((b) => b.result);
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
-  if (firstFail !== undefined) {
-    const r = firstFail.result;
-    throw new CliError(firstFail.failCode ?? 'INTERNAL', r.detail, {
+  if (firstFail === undefined) return { checks };
+  return { checks, failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result } };
+}
+
+export async function runDoctor(
+  ctx: CommandContext,
+  deps: DoctorDeps = {},
+): Promise<CommandResult> {
+  const { checks, failure } = await collectDoctorChecks(ctx, deps);
+  if (failure !== undefined) {
+    const r = failure.result;
+    throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
       details: { checks },
     });
   }
 
-  return { data: { status: 'pass', checks }, humanLines: renderHuman(ctx.io, checks) };
+  return { data: { status: 'pass', checks }, humanLines: renderDoctorHuman(ctx.io, checks) };
 }
 
 function checkNode(): BuiltCheck {
@@ -420,7 +440,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
   }
 }
 
-function renderHuman(io: Io, checks: CheckResult[]): string[] {
+export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
   const nameWidth = Math.max(...checks.map((c) => c.name.length));
   const lines: string[] = [];
   for (const c of checks) {

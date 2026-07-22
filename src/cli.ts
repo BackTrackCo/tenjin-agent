@@ -110,6 +110,33 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // handleParseError turns into the USAGE contract.
     .exitOverride();
 
+  addGlobalFlags(program.command('install'))
+    .description(
+      'Detect installed harnesses (Claude Code, Codex), wire the Tenjin skills, then run the doctor checks last',
+    )
+    .option(
+      '--harness <name>',
+      'target a specific harness: claude | codex | shared (repeatable; overrides detection)',
+      collect,
+      [],
+    )
+    .option('--dry-run', 'print what would change without writing anything')
+    .action(async function (this: Command) {
+      await runCommand('install', this, async (ctx) => {
+        const o = this.opts();
+        const { runInstall } = await import('./commands/install');
+        return runInstall(
+          {
+            ...(Array.isArray(o.harness) && o.harness.length > 0
+              ? { harness: o.harness as string[] }
+              : {}),
+            ...(o.dryRun === true ? { dryRun: true } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
   addGlobalFlags(program.command('doctor'))
     .description('Check the local environment and Tenjin API reachability')
     .action(async function (this: Command) {

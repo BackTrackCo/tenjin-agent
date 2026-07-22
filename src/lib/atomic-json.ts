@@ -26,7 +26,7 @@ export interface AtomicWriteOptions {
  */
 export async function writeFileAtomic(
   targetPath: string,
-  data: string,
+  data: string | Buffer,
   opts: AtomicWriteOptions = {},
 ): Promise<void> {
   const dir = dirname(targetPath);
