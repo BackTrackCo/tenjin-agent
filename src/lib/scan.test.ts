@@ -47,9 +47,15 @@ describe('scan — block detectors', () => {
     expect(checks(`t=sk_live_${'A'.repeat(24)}`)).toContain('stripe-token');
   });
 
-  it('flags OpenAI, Anthropic, Google, and npm keys', async () => {
+  it('flags OpenAI (classic + modern), Anthropic, Google, and npm keys', async () => {
     expect(checks(`key=sk-${'a'.repeat(48)}`)).toContain('openai-key');
     expect(checks(`key=sk-proj-${'B'.repeat(40)}`)).toContain('openai-key');
+    // Modern keys carry _ and - separators in the body.
+    expect(checks(`key=sk-proj-${'a'.repeat(10)}_${'b'.repeat(10)}-${'c'.repeat(10)}`)).toContain(
+      'openai-key',
+    );
+    expect(checks(`key=sk-svcacct-${'d'.repeat(30)}`)).toContain('openai-key');
+    expect(checks(`key=sk-admin-${'e'.repeat(30)}`)).toContain('openai-key');
     expect(checks(`key=sk-ant-api03-${'C'.repeat(30)}`)).toContain('anthropic-key');
     expect(checks(`key=sk-ant-api03-${'C'.repeat(30)}`)).not.toContain('openai-key');
     expect(checks(`key=AIza${'d'.repeat(35)}`)).toContain('google-key');
@@ -57,11 +63,17 @@ describe('scan — block detectors', () => {
     expect(checks(`token=npm_${'f'.repeat(36)}`)).toContain('npm-token');
   });
 
-  it('flags a DB connection URI with an embedded password, masking the password', async () => {
+  it('flags a DB connection URI with a real password, masking it, but not examples', async () => {
     const f = find('postgres://admin:s3cr3tpass@db.example.com:5432/app', 'db-connection-uri');
     expect(f?.severity).toBe('block');
     expect(f?.excerpt).toContain('postgres://admin:[redacted]@db.example.com');
     expect(f?.excerpt).not.toContain('s3cr3tpass');
+    // Example/default and placeholder passwords do not hard-block (review round 2).
+    expect(checks('postgres://postgres:postgres@localhost:5432/db')).not.toContain(
+      'db-connection-uri',
+    );
+    expect(checks('mongodb://admin:changeme@mongo')).not.toContain('db-connection-uri');
+    expect(checks('postgres://user:<password>@host')).not.toContain('db-connection-uri');
   });
 
   it('flags Authorization: Bearer with a live token, but not a placeholder', async () => {
@@ -69,6 +81,14 @@ describe('scan — block detectors', () => {
     expect(f?.severity).toBe('block');
     expect(f?.excerpt).not.toContain('abc123def456ghi789');
     expect(checks('Authorization: Bearer <token>')).not.toContain('bearer-token');
+  });
+
+  it('suppresses the email finding inside a db URI so the password cannot leak', async () => {
+    const uri = 'postgres://admin:S3cretP4ss99@db.example.com';
+    const found = scan(uri);
+    expect(found.map((f) => f.check)).toContain('db-connection-uri');
+    expect(found.map((f) => f.check)).not.toContain('email');
+    for (const f of found) expect(f.excerpt).not.toContain('S3cretP4ss99');
   });
 
   it('does not flag benign near-misses', async () => {

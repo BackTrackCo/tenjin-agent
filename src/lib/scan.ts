@@ -41,7 +41,23 @@ export function scan(text: string): ScanFinding[] {
     ...scanPemBlocks(lines),
     ...scanLongVerbatim(lines),
   ];
-  return dedupeAndSort(findings);
+  return dedupeAndSort(suppressEmailsInDbUris(findings));
+}
+
+/**
+ * A db-connection-uri already masks the embedded password; the email detector,
+ * however, would match `password@host` and echo the password verbatim in its
+ * excerpt. Drop any email finding whose span sits inside a db-connection-uri
+ * span on the same line so the masking cannot be bypassed.
+ */
+function suppressEmailsInDbUris(findings: ScanFinding[]): ScanFinding[] {
+  const uris = findings.filter((f) => f.check === 'db-connection-uri');
+  if (uris.length === 0) return findings;
+  return findings.filter(
+    (f) =>
+      f.check !== 'email' ||
+      !uris.some((u) => u.line === f.line && f.span[0] >= u.span[0] && f.span[1] <= u.span[1]),
+  );
 }
 
 /**
@@ -114,8 +130,11 @@ const LINE_DETECTORS: LineDetector[] = [
   {
     check: 'openai-key',
     severity: 'block',
-    // gitleaks openai-api-key (classic sk- and project sk-proj- keys).
-    re: /\bsk-(?:proj-)?[0-9A-Za-z]{20,}\b/g,
+    // gitleaks openai-api-key: classic sk- plus the modern sk-proj-/sk-svcacct-/
+    // sk-admin- keys, whose bodies carry _ and - separators. `(?!ant-)` keeps an
+    // Anthropic key from matching here; the token boundary is a lookahead (not \b)
+    // so a trailing separator in the body doesn't truncate the match.
+    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_-])/g,
     excerpt: (m) => maskKeeping(m[0], 3),
   },
   {
@@ -137,9 +156,12 @@ const LINE_DETECTORS: LineDetector[] = [
     severity: 'block',
     // A connection string with an embedded password (scheme://user:pass@host).
     // Only the password (group 3) is secret; the excerpt masks it and keeps the
-    // rest so the finding is legible.
+    // rest so the finding is legible. Placeholder-gated like the other high-
+    // confidence shapes so a docs example (postgres://postgres:postgres@…,
+    // ://user:<password>@…) doesn't hard-block; a real password still blocks.
     re: /\b([a-z][a-z0-9+.-]*):\/\/([^\s:@/]+):([^\s@/]+)@([^\s/:]+)/gi,
     excerpt: (m) => `${m[1]}://${m[2]}:[redacted]@${m[4]}`,
+    skip: (m) => isPlaceholder(m[3] ?? '') || isExamplePassword(m[3] ?? ''),
   },
   {
     check: 'bearer-token',
@@ -255,6 +277,27 @@ function isPlaceholder(value: string): boolean {
 /** A structural value (path, URL, or regex literal), not a literal secret. */
 function isStructural(value: string): boolean {
   return /^(?:\.?\.?\/|~\/|https?:\/\/|\^)/.test(value);
+}
+
+// Well-known example/default DB passwords — a connection string using one is a
+// docs snippet, not a leaked credential.
+const EXAMPLE_PASSWORDS = new Set([
+  'password',
+  'postgres',
+  'mysql',
+  'root',
+  'admin',
+  'changeme',
+  'example',
+  'secret',
+  'test',
+  'guest',
+  'toor',
+]);
+
+/** A db-connection-uri password that is an obvious example/default, not a secret. */
+function isExamplePassword(password: string): boolean {
+  return EXAMPLE_PASSWORDS.has(password.toLowerCase());
 }
 
 // EVM raw private key (0x + 64 hex) vs. a 32-byte hash. On Base the two are
