@@ -47,10 +47,11 @@ describe('runConfigList', () => {
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
-    expect(d['publish.mode']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['publish.mode']).toEqual({ value: 'auto', source: 'default', scope: 'global' });
     expect(d['publish.defaultPrice']).toEqual({
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
+      scope: 'global',
     });
     expect(humanLines).toHaveLength(9);
   });
@@ -306,9 +307,19 @@ describe('publish.mode key', () => {
     'round-trips %s through set/get',
     async (mode) => {
       const set = await runConfigSet({ key: 'publish.mode', value: mode }, makeCtx());
-      expect(set.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
+      expect(set.data).toEqual({
+        key: 'publish.mode',
+        value: mode,
+        source: 'file',
+        scope: 'global',
+      });
       const get = await runConfigGet({ key: 'publish.mode' }, makeCtx());
-      expect(get.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
+      expect(get.data).toEqual({
+        key: 'publish.mode',
+        value: mode,
+        source: 'file',
+        scope: 'global',
+      });
       expect(await readRawFile()).toEqual({ publish: { mode } });
     },
   );
@@ -327,12 +338,14 @@ describe('publish.defaultPrice key', () => {
       key: 'publish.defaultPrice',
       value: { atomic: '250000', usd: '0.25' },
       source: 'file',
+      scope: 'global',
     });
     const get = await runConfigGet({ key: 'publish.defaultPrice' }, makeCtx());
     expect(get.data).toEqual({
       key: 'publish.defaultPrice',
       value: { atomic: '250000', usd: '0.25' },
       source: 'file',
+      scope: 'global',
     });
     expect(await readRawFile()).toEqual({ publish: { defaultPrice: '250000' } });
   });
