@@ -104,15 +104,70 @@ const LINE_DETECTORS: LineDetector[] = [
     excerpt: (m) => maskKeeping(m[0], 8),
   },
   {
-    check: 'secret-assignment',
+    check: 'anthropic-key',
     severity: 'block',
-    // gitleaks generic-api-key posture: a secret-named key = a non-placeholder
-    // value. The value (group 2) is masked, never the key name.
-    re: /\b([A-Z0-9_]*(?:API_KEY|SECRET|ACCESS_KEY|PRIVATE_KEY|PASSWORD|PASSWD|AUTH_TOKEN)[A-Z0-9_]*)\s*[:=]\s*["']?([^\s"']{6,})/gi,
-    excerpt: (m) => `${m[1]}=[redacted ${m[2]?.length ?? 0} chars]`,
-    // Runbooks legitimately show placeholder examples (<your-key>, ${VAR},
-    // changeme). Don't hard-block those; a real-looking value still blocks.
-    skip: (m) => isPlaceholder(m[2] ?? ''),
+    // gitleaks anthropic-api-key. Ordered before openai so sk-ant- isn't
+    // mis-typed as a bare OpenAI sk- key.
+    re: /\bsk-ant-[0-9A-Za-z_-]{20,}\b/g,
+    excerpt: (m) => maskKeeping(m[0], 7),
+  },
+  {
+    check: 'openai-key',
+    severity: 'block',
+    // gitleaks openai-api-key (classic sk- and project sk-proj- keys).
+    re: /\bsk-(?:proj-)?[0-9A-Za-z]{20,}\b/g,
+    excerpt: (m) => maskKeeping(m[0], 3),
+  },
+  {
+    check: 'google-key',
+    severity: 'block',
+    // gitleaks gcp-api-key (AIza) and gcp-oauth-client-secret (GOCSPX-).
+    re: /\b(?:AIza[0-9A-Za-z_-]{35}|GOCSPX-[0-9A-Za-z_-]{20,})\b/g,
+    excerpt: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
+  },
+  {
+    check: 'npm-token',
+    severity: 'block',
+    // gitleaks npm-access-token.
+    re: /\bnpm_[0-9A-Za-z]{36}\b/g,
+    excerpt: (m) => maskKeeping(m[0], 4),
+  },
+  {
+    check: 'db-connection-uri',
+    severity: 'block',
+    // A connection string with an embedded password (scheme://user:pass@host).
+    // Only the password (group 3) is secret; the excerpt masks it and keeps the
+    // rest so the finding is legible.
+    re: /\b([a-z][a-z0-9+.-]*):\/\/([^\s:@/]+):([^\s@/]+)@([^\s/:]+)/gi,
+    excerpt: (m) => `${m[1]}://${m[2]}:[redacted]@${m[4]}`,
+  },
+  {
+    check: 'bearer-token',
+    severity: 'block',
+    // An Authorization: Bearer header carrying a live token; placeholder-gated
+    // like secret-assignment so `Bearer <token>` examples don't hard-block.
+    re: /\bAuthorization:\s*Bearer\s+(\S{8,})/gi,
+    excerpt: (m) => `Authorization: Bearer [redacted ${m[1]?.length ?? 0} chars]`,
+    skip: (m) => isPlaceholder(m[1] ?? ''),
+  },
+  // Generic secret-named assignment — WARN, not block (review): a keyword match is
+  // lower-confidence than a structured shape, and warn still forces confirmation
+  // in default auto mode, so nothing publishes unseen while benign config
+  // (SECRET_NAME=…, MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. The
+  // excerpt stays masked. Placeholder and structural (path/URL/regex) values are
+  // skipped entirely.
+  {
+    check: 'secret-assignment',
+    severity: 'warn',
+    // Key: api[_-]?key, secret, access/private key, passw(or)?d, token,
+    // credential(s), auth token — camelCase-insensitive. Value: a quoted string
+    // (interior spaces allowed) or an unquoted run, ≥6 chars. Value is masked.
+    re: /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\s*[:=]\s*("[^"]{6,}"|'[^']{6,}'|[^\s"']{6,})/gi,
+    excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
+    skip: (m) => {
+      const value = dequote(m[2] ?? '');
+      return isPlaceholder(value) || isStructural(value);
+    },
   },
   // Wallet addresses — warn (a contract address may be intentional). Not a secret,
   // shown abbreviated. viem's checksum validation is deliberately NOT used to gate
@@ -177,12 +232,29 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
   return out;
 }
 
+// Accepted alpha gaps (owner call, tracked for post-alpha): BIP-39 mnemonic
+// phrases (12/24 dictionary words) are NOT detected — a wordlist match is
+// high-false-positive against prose and deferred. Headerless base64/DER-encoded
+// private keys (no -----BEGIN----- marker) are likewise NOT detected; only the
+// PEM-armored form and the 0x-64-hex form are.
+
+/** Strip a single matching pair of surrounding quotes from a captured value. */
+function dequote(value: string): string {
+  const m = /^"([^"]*)"$|^'([^']*)'$/.exec(value);
+  return m !== null ? (m[1] ?? m[2] ?? '') : value;
+}
+
 /** A secret-assignment value that is an obvious placeholder, not a live secret. */
 function isPlaceholder(value: string): boolean {
   if (/^[<${%]/.test(value)) return true; // <your-key>, ${VAR}, {{x}}, %ENV%
   return /^(?:your[-_]?|my[-_]?|xxx+$|example|placeholder|redacted|changeme|dummy|sample|\*+$|\.\.\.)/i.test(
     value,
   );
+}
+
+/** A structural value (path, URL, or regex literal), not a literal secret. */
+function isStructural(value: string): boolean {
+  return /^(?:\.?\.?\/|~\/|https?:\/\/|\^)/.test(value);
 }
 
 // EVM raw private key (0x + 64 hex) vs. a 32-byte hash. On Base the two are
