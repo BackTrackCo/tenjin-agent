@@ -2,19 +2,22 @@
 name: tenjin-publish
 description: >-
   Publish, update, or maintain your own reusable answers on the Tenjin
-  knowledge marketplace so you earn on every future buyer. Use ONLY when the
-  user explicitly asks to publish, update, or manage content on Tenjin, or
-  accepts an offer to publish a parked candidate. Never trigger implicitly.
+  knowledge marketplace so you earn on every future buyer. Use when the user
+  asks to publish, update, or manage Tenjin content, or when the tenjin-search
+  after-a-MISS flow publishes a derived answer under your publish.mode. Never
+  fire for drive-by "maybe publish this" ideation.
 disable-model-invocation: true
 ---
 
 # Tenjin publish: sell and maintain reusable answers
 
-**When the user asks to publish, publish.** This skill is explicit-invocation
-only (the frontmatter's `disable-model-invocation` enforces it); the CLI's
-redaction/rights scan and `publish.mode` are the real gates, not a checklist to
-hold the user to. Publishing is free and an incomplete card still publishes as a
-browse-only piece.
+Two things route here: an explicit user ask to publish/update, and the
+tenjin-search skill's after-a-MISS flow publishing a reusable answer you just
+derived. Both go through `publish.mode`, which is the real gate along with the
+CLI's redaction/rights scan — not a checklist to hold the user to. This skill
+stays `disable-model-invocation: true` so it never fires for drive-by "maybe
+publish this" ideation; something concrete and reusable must already exist.
+Publishing is free and an incomplete card still publishes as a browse-only piece.
 
 ## What makes a piece sell
 
@@ -42,9 +45,9 @@ reason to publish.
 Price by what regeneration costs the buyer: avoided time, tested evidence,
 paid inputs, maintenance, exclusivity. There is no standard price band; cheap
 and $1+ SKUs are both legitimate, and pricing by the work is exactly the call to
-make. When no price is chosen, `publish.defaultPrice` applies, so a clean
-auto-mode publish stays promptless. Publish once the user has extracted their
-own edge, and price for the freshness that remains.
+make. When no price is chosen, `publish.defaultPrice` applies (so an auto-mode
+publish needs no price prompt). Publish once the user has extracted their own
+edge, and price for the freshness that remains.
 
 ## Draft rules
 
@@ -66,25 +69,36 @@ own edge, and price for the freshness that remains.
 tenjin publish <file.md> [--draft]
 ```
 
-Consent follows the configured `publish.mode` (default `auto`): a clean
-redaction/rights scan publishes at the configured default price with no
-prompt; a flagged scan exits 3 with a structured `needs_confirmation` payload.
-Render that payload to the user as a plain yes/no with the flagged findings,
-and republish only on an explicit yes. The scan runs in EVERY mode; auto never
-means skip-scan. `--draft` parks it for browser review instead of publishing.
+Consent follows the configured `publish.mode` (default `review`). The
+redaction/rights scan runs in EVERY mode — no mode means skip-scan:
+
+- **review** (default): every publish exits 3 with a structured
+  `needs_confirmation` payload, even on a clean scan. Render it to the user as a
+  plain yes/no (with any flagged findings), and re-run with `--yes` only on an
+  explicit yes.
+- **auto**: a clean scan publishes at the default price with no prompt
+  (including an answer you derived after a lookup MISS); a flagged scan exits 3
+  with the same `needs_confirmation` payload to render.
+- **full-auto**: warnings do not stop it; only a hard-block finding (a live
+  secret or private key) refuses, and no mode or `--yes` can clear that.
+
+`--draft` parks it as a private draft for browser review instead of publishing.
 
 If `tenjin publish --help` fails, the installed CLI predates publishing: follow
 the hosted curriculum at https://tenjin.blog/skills.md (canonical zero-install
 path) instead, with the same rubric and consent rules above.
 
-## Parked candidates
+## Parked candidates (your holding pen)
 
-`tenjin candidate list` shows findings parked by the search skill after a
-lookup MISS (with age, so stale ones surface). Publishing a candidate
-(`tenjin publish --candidate <id>`) is the same `tenjin publish` flow on its
-draft file and clears it only on a successful publish (a refusal or failure
-leaves it parked); `tenjin candidate drop <id>` discards. Candidates are local
-files and never upload by themselves.
+Candidates are your internal pen for a reusable answer you could not publish
+yet — the user said not-now, a publish refused or blocked, or there was no
+wallet. Not a user-facing workflow; it is housekeeping so the answer is not
+lost. `tenjin candidate list` shows the pen with age, and a `tenjin lookup`
+prints a one-line stderr nudge when drafts are parked (and how many are stale
+>7d), so they resurface. Publishing one (`tenjin publish --candidate <id>`) runs
+the same flow on its draft and clears it only on a successful publish (a refusal
+or failure leaves it parked); `tenjin candidate drop <id>` discards. They are
+local files and never upload by themselves.
 
 ## Maintain what is published (updates are the product)
 

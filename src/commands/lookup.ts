@@ -3,6 +3,7 @@ import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildLookupRequest, postLookup, type LookupInput } from '../lib/agent-api';
 import { recordLookup } from '../lib/lookup-store';
+import { listCandidates } from '../lib/candidate-store';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -78,6 +79,11 @@ export async function runLookup(
     })),
   });
 
+  // A parked-candidate nudge on stderr (not in the machine JSON): a MISS is the
+  // moment to publish the answer you are about to derive, and stale drafts should
+  // not rot unseen. One line, any lookup outcome, only when something is parked.
+  await emitCandidateNudge(ctx);
+
   const humanLines =
     response.decision === 'MISS'
       ? [`MISS, no candidates (lookupId ${response.lookupId})`]
@@ -90,6 +96,20 @@ export async function runLookup(
         ];
 
   return { data: response, humanLines };
+}
+
+const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** One stderr line naming parked candidates (and how many are stale >7d), so a
+ *  lookup is a reminder to publish/tidy the local pen. Silent when none parked. */
+async function emitCandidateNudge(ctx: CommandContext): Promise<void> {
+  const records = await listCandidates(ctx.dataDir);
+  if (records.length === 0) return;
+  const now = Date.now();
+  const stale = records.filter((r) => now - Date.parse(r.meta.created) > STALE_MS).length;
+  ctx.io.stderr.write(
+    `${records.length} candidate(s) parked (${stale} stale >7d) - tenjin candidate list\n`,
+  );
 }
 
 function parseLimit(raw: string): number {

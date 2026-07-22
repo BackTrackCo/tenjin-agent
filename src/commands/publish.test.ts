@@ -196,7 +196,7 @@ describe('runPublish — receipt + card echo', () => {
     });
     const { provider } = spyProvider();
     const res = await runPublish(
-      baseArgs(file),
+      baseArgs(file, { mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -218,7 +218,7 @@ describe('runPublish — receipt + card echo', () => {
     const { fetch } = stubServer(CREATED); // no resource echo
     const { provider } = spyProvider();
     const res = await runPublish(
-      baseArgs(await writeDoc(CLEAN)),
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -233,10 +233,10 @@ describe('runPublish — session key mint-once', () => {
     const { fetch } = stubServer();
     const deps = hermetic({ fetchImpl: fetch, provider });
 
-    await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
     expect(signCount()).toBe(1);
 
-    await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
     expect(signCount()).toBe(1); // cached session.json reused, no second popup
   });
 
@@ -245,8 +245,8 @@ describe('runPublish — session key mint-once', () => {
     const { fetch } = stubServer();
     const deps = hermetic({ fetchImpl: fetch, provider, useSession: false });
 
-    await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
-    await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
     expect(signCount()).toBe(2); // one SIWX signature per write
   });
 });
@@ -256,15 +256,15 @@ describe('runPublish — default-mode notice', () => {
     const { provider } = spyProvider();
     const { fetch } = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
+    // --yes clears review so the clean publish proceeds; the default-source notice
+    // still fires (source stays 'default' — --yes does not change the mode source).
     await runPublish(
-      baseArgs(await writeDoc(CLEAN)),
+      baseArgs(await writeDoc(CLEAN), { yes: true }),
       ctx,
       hermetic({ fetchImpl: fetch, provider }),
     );
-    expect(stderr()).toContain(
-      'publish.mode: auto (default) - a clean scan publishes at $0.10 without asking.',
-    );
-    expect(stderr()).toContain('tenjin config set publish.mode review');
+    expect(stderr()).toContain('publish.mode: review (default) - each publish asks you once.');
+    expect(stderr()).toContain('tenjin config set publish.mode auto');
   });
 
   it('omits the notice when the mode is set (source is a flag, not default)', async () => {
@@ -333,9 +333,10 @@ describe('runPublish — TENJIN_PUBLISH_MODE', () => {
     const { fetch } = stubServer();
     const { provider } = spyProvider();
     const { ctx, stderr } = makeCtxCapturingStderr();
-    // A bad env var must not silently degrade: it warns and uses the fallback.
+    // A bad env var must not silently degrade: it warns and uses the fallback
+    // (default review); --yes lets the clean publish through so we reach the warn.
     await runPublish(
-      baseArgs(await writeDoc(CLEAN)),
+      baseArgs(await writeDoc(CLEAN), { yes: true }),
       ctx,
       hermetic({ fetchImpl: fetch, provider, env: { TENJIN_PUBLISH_MODE: 'reveiw' } }),
     );
@@ -407,7 +408,7 @@ describe('runPublish — draft end to end', () => {
     const { fetch, calls } = stubServer(draftPost);
     const { provider } = spyProvider();
     const res = await runPublish(
-      baseArgs(await writeDoc(CLEAN), { draft: true }),
+      baseArgs(await writeDoc(CLEAN), { draft: true, mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -468,7 +469,7 @@ describe('runPublish — publish --candidate', () => {
     const { fetch, calls } = stubServer();
     const { provider } = spyProvider();
     const res = await runPublish(
-      baseArgs(undefined, { candidate: id }),
+      baseArgs(undefined, { candidate: id, mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -485,7 +486,7 @@ describe('runPublish — publish --candidate', () => {
     const { fetch, body } = bodyServer();
     const { provider } = spyProvider();
     await runPublish(
-      baseArgs(undefined, { candidate: id }),
+      baseArgs(undefined, { candidate: id, mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -497,7 +498,7 @@ describe('runPublish — publish --candidate', () => {
     const id2 = await park({ question: 'meta question' });
     const server2 = bodyServer();
     await runPublish(
-      baseArgs(undefined, { candidate: id2, question: ['flag question'] }),
+      baseArgs(undefined, { candidate: id2, question: ['flag question'], mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: server2.fetch, provider: spyProvider().provider }),
     );
@@ -543,7 +544,7 @@ describe('runPublish — publish --candidate', () => {
     const { fetch } = stubServer({ ...CREATED, status: 'draft' });
     const { provider } = spyProvider();
     const res = await runPublish(
-      baseArgs(undefined, { candidate: id, draft: true }),
+      baseArgs(undefined, { candidate: id, draft: true, mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -591,7 +592,7 @@ describe('runPublish — publish --candidate', () => {
     });
     const { fetch, body } = bodyServer();
     await runPublish(
-      baseArgs(undefined, { candidate: id }),
+      baseArgs(undefined, { candidate: id, mode: 'auto' }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
@@ -660,7 +661,7 @@ describe('runPublish — publish --candidate', () => {
     await chmod(join(dir, 'candidates'), 0o500);
     try {
       const res = await runPublish(
-        baseArgs(undefined, { candidate: id }),
+        baseArgs(undefined, { candidate: id, mode: 'auto' }),
         ctx,
         hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
       );

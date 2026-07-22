@@ -442,14 +442,14 @@ describe('runInstall: publish-mode selection', () => {
     expect(await persistedMode()).toBe('review');
   });
 
-  it('a plain enter keeps auto WITHOUT writing (provenance stays default)', async () => {
+  it('a plain enter keeps review WITHOUT writing (provenance stays default)', async () => {
     const spy = promptSpy(['']); // enter
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true, promptMode: spy.fn }),
     );
-    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined(); // no config write
   });
 
@@ -465,7 +465,7 @@ describe('runInstall: publish-mode selection', () => {
     expect(await persistedMode()).toBe('full-auto');
   });
 
-  it('falls back to auto (no write) after two unrecognized answers', async () => {
+  it('falls back to review (no write) after two unrecognized answers', async () => {
     const spy = promptSpy(['nope', 'still-nope']);
     const { data: d } = await runInstall(
       { harness: ['claude'] },
@@ -473,7 +473,7 @@ describe('runInstall: publish-mode selection', () => {
       deps({ isInteractive: true, promptMode: spy.fn }),
     );
     expect(spy.calls()).toBe(2);
-    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
 
@@ -485,7 +485,7 @@ describe('runInstall: publish-mode selection', () => {
       deps({ isInteractive: false, promptMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
-    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
 
@@ -539,7 +539,7 @@ describe('runInstall: publish-mode selection', () => {
       deps({ isInteractive: true, promptMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
-    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
 
@@ -551,7 +551,7 @@ describe('runInstall: publish-mode selection', () => {
       deps({ isInteractive: true, promptMode: spy.fn }), // json overrides isInteractive
     );
     expect(spy.calls()).toBe(0);
-    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
 

@@ -10,7 +10,12 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
-import { loadRawConfig, PublishModeSchema, parsePublishModeFlag } from '../lib/config';
+import {
+  CONFIG_DEFAULTS,
+  loadRawConfig,
+  PublishModeSchema,
+  parsePublishModeFlag,
+} from '../lib/config';
 import type { PublishMode } from '../lib/config';
 import { persistPublishMode } from './config';
 import { collectDoctorChecks, renderDoctorHuman } from './doctor';
@@ -157,8 +162,16 @@ export async function runInstall(
 
 // --- Publish-mode selection (D38 setup) ------------------------------------------
 
-const PUBLISH_MODE_PROMPT =
-  'Publish consent mode? review = always ask / auto = ask only on findings / full-auto = only hard blocks stop it [auto]: ';
+/** The default consent mode (also what a plain enter keeps, without writing). */
+const DEFAULT_MODE: PublishMode = CONFIG_DEFAULTS.publish.mode;
+
+const PUBLISH_MODE_PROMPT = [
+  'Publish consent mode?',
+  '  review     - asks a yes/no for every publish',
+  '  auto       - publishes automatically when the secret-scan is clean (including answers your agent derives)',
+  '  full-auto  - publishes even past warnings; only detected secrets stop it',
+  `[${DEFAULT_MODE}]: `,
+].join('\n');
 
 /**
  * Resolve (and, for an explicit choice, persist) the publish consent mode at
@@ -191,13 +204,13 @@ async function selectPublishMode(
   const interactive =
     ctx.flags.json !== true &&
     (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
-  if (dryRun || !interactive) return { value: 'auto', source: 'default-skipped' };
+  if (dryRun || !interactive) return { value: DEFAULT_MODE, source: 'default-skipped' };
 
   const prompt = deps.promptMode ?? defaultPromptMode;
-  // Ask, allow ONE reprompt on an unrecognized answer, then fall back to auto.
+  // Ask, allow ONE reprompt on an unrecognized answer, then fall back to the default.
   for (let attempt = 0; attempt < 2; attempt++) {
     const answer = (await prompt(PUBLISH_MODE_PROMPT)).trim();
-    if (answer.length === 0) return { value: 'auto', source: 'default-skipped' }; // enter: no write
+    if (answer.length === 0) return { value: DEFAULT_MODE, source: 'default-skipped' }; // enter: no write
     const parsed = PublishModeSchema.safeParse(answer);
     if (parsed.success) {
       await persistPublishMode(ctx.dataDir, parsed.data);
@@ -205,9 +218,9 @@ async function selectPublishMode(
     }
   }
   ctx.io.stderr.write(
-    'Unrecognized mode; keeping the default (auto). Change it with `tenjin config set publish.mode`.\n',
+    `Unrecognized mode; keeping the default (${DEFAULT_MODE}). Change it with \`tenjin config set publish.mode\`.\n`,
   );
-  return { value: 'auto', source: 'default-skipped' };
+  return { value: DEFAULT_MODE, source: 'default-skipped' };
 }
 
 function parseModeFlag(value: string): PublishMode {
