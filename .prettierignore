@@ -3,3 +3,6 @@ pnpm-lock.yaml
 # Vendored verbatim from tenjin.blog/skills.md via `pnpm sync:skill`; must stay
 # byte-identical to the source so skill-drift CI can diff it. Never reformat.
 skills/
+# Rewritten by the changesets release action in its own JSON style
+# (multi-line arrays), which prettier disagrees with. Bot-owned, not ours.
+.changeset/pre.json
