@@ -137,6 +137,12 @@ const LINE_DETECTORS: LineDetector[] = [
     // leading run of a modern key is matched — enough to flag it. The run is
     // terminated by a non-base62 lookahead (not \b, which a trailing `_` — a word
     // char — would not fire), so an underscore-adjacent key still matches.
+    // Assumption + chosen tradeoff: a real key opens with a >=20-char base62 run,
+    // so the {20,} floor is what separates a key from a kebab identifier. A key
+    // whose FIRST segment is shorter than 20 (e.g. `sk-proj-abc123_` then more,
+    // broken up by underscores) slips past this BARE-PASTE detector; that is
+    // accepted, because such a value in an assignment still warns via
+    // secret-assignment — the bare-paste path is the only gap.
     re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])/g,
     excerpt: (m) => maskKeeping(m[0], 3),
   },
@@ -263,9 +269,13 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
 
 // Accepted alpha gaps (owner call, tracked for post-alpha): BIP-39 mnemonic
 // phrases (12/24 dictionary words) are NOT detected — a wordlist match is
-// high-false-positive against prose and deferred. Headerless base64/DER-encoded
-// private keys (no -----BEGIN----- marker) are likewise NOT detected; only the
-// PEM-armored form and the 0x-64-hex form are.
+// high-false-positive against prose and deferred. An all-lowercase, digit-free
+// literal (a diceware/xkcd passphrase, e.g. PASSWORD=correcthorsebatterystaple)
+// parses as a bare identifier and yields NO finding for the same reason — a
+// dictionary-word run is indistinguishable from prose; chosen, warn-tier, and
+// filed next to BIP-39. Headerless base64/DER-encoded private keys (no
+// -----BEGIN----- marker) are likewise NOT detected; only the PEM-armored form
+// and the 0x-64-hex form are.
 
 /** Strip a single matching pair of surrounding quotes from a captured value. */
 function dequote(value: string): string {

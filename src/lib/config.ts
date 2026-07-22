@@ -174,11 +174,9 @@ export interface EffectiveSettings {
   publishDefaultPrice: ResolvedSetting<string>;
 }
 
-/** CLI flags that participate in settings precedence (`--base-url`, `--mode`). */
+/** CLI flags that participate in settings precedence (`--base-url`). */
 export interface SettingsFlags {
   baseUrl?: string;
-  /** Raw `--mode` value; coerced/validated during resolution (invalid → ignored). */
-  publishMode?: string;
 }
 
 export interface ResolveSettingsInput {
@@ -206,7 +204,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
-    publishMode: resolvePublishMode({ config, project, env, flag: flags.publishMode }),
+    publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
   };
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runConfigList, runConfigGet, runConfigSet } from './config';
@@ -394,6 +395,50 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
       process.chdir(projectCwd);
       const { data } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
       expect(data).toMatchObject({ key: 'publish.mode', value: 'review', source: 'project' });
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('notes the downgrade when a committed .tenjin.json asks for full-auto', async () => {
+    // A non-gitignored (committed) full-auto project file is demoted to auto by
+    // the loosening gate; the human line must say so, while data stays unchanged.
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'full-auto' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data, humanLines } = await runConfigList(makeCtx());
+      const d = data as Record<string, { value: unknown; source: string }>;
+      expect(d['publish.mode']).toMatchObject({ value: 'auto', source: 'project' });
+      const line = (humanLines ?? []).find((l) => l.includes('publish.mode'));
+      expect(line).toContain('downgraded from full-auto');
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('honors a gitignored .tenjin.json full-auto with no downgrade note', async () => {
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    execFileSync('git', ['init', '-q'], { cwd: projectCwd });
+    await writeFile(join(projectCwd, '.gitignore'), '.tenjin.json\n');
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'full-auto' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data, humanLines } = await runConfigList(makeCtx());
+      const d = data as Record<string, { value: unknown; source: string }>;
+      expect(d['publish.mode']).toMatchObject({ value: 'full-auto', source: 'project' });
+      const line = (humanLines ?? []).find((l) => l.includes('publish.mode'));
+      expect(line).not.toContain('downgraded');
     } finally {
       process.chdir(prev);
       await rm(projectCwd, { recursive: true, force: true });

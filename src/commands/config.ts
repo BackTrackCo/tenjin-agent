@@ -80,7 +80,7 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
   for (const key of PUBLISH_CONFIG_KEYS) {
     const entry = renderPublishSetting(key, settings);
     data[key] = entry;
-    humanLines.push(describedLine(key, entry));
+    humanLines.push(describedLine(key, entry, downgradeNote(key, settings)));
   }
   return { data, humanLines };
 }
@@ -93,7 +93,10 @@ export async function runConfigGet(
   if (isPublishKey(key)) {
     const settings = await resolveFromContext(ctx);
     const entry = renderPublishSetting(key, settings);
-    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+    return {
+      data: { key, ...entry },
+      humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
+    };
   }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
@@ -330,11 +333,29 @@ function formatLine(key: string, entry: RenderedSetting): string {
   return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}`;
 }
 
-/** The list-only variant: the value line plus a dim one-line description. */
-function describedLine(key: string, entry: RenderedSetting): string {
+/** The list variant: the value line, a dim description, and an optional dim note. */
+function describedLine(key: string, entry: RenderedSetting, note?: string): string {
   const description = KEY_DESCRIPTIONS[key];
-  const line = formatLine(key, entry);
-  return description !== undefined ? `${line}  ${styleText('dim', `- ${description}`)}` : line;
+  let line = formatLine(key, entry);
+  if (description !== undefined) line += `  ${styleText('dim', `- ${description}`)}`;
+  return withNote(line, note);
+}
+
+/** Append a dim parenthetical note (e.g. the full-auto downgrade) when present. */
+function withNote(line: string, note?: string): string {
+  return note !== undefined ? `${line}  ${styleText('dim', `(${note})`)}` : line;
+}
+
+/**
+ * The `publish.mode` line gains a downgrade note when the effective mode came from
+ * a committed `.tenjin.json` asking for `full-auto` (the loosening gate demoted it
+ * to `auto`). Human-only; the machine `data` shape is unchanged.
+ */
+function downgradeNote(key: PublishConfigKey, settings: EffectiveSettings): string | undefined {
+  if (key !== 'publish.mode' || settings.publishMode.downgradedWarning === undefined) {
+    return undefined;
+  }
+  return 'downgraded from full-auto: committed .tenjin.json (gitignore it to opt in)';
 }
 
 function displayValue(entry: RenderedSetting): string {
