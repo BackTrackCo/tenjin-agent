@@ -14,7 +14,7 @@ disable-model-invocation: true
 Two things route here: an explicit user ask to publish/update, and the
 tenjin-search skill's after-a-MISS flow publishing a reusable answer you just
 derived. Both go through `publish.mode`, which is the real gate along with the
-CLI's redaction/rights scan — not a checklist to hold the user to. This skill
+CLI's redaction/rights scan, not a checklist to hold the user to. This skill
 stays `disable-model-invocation: true` so it never fires for drive-by "maybe
 publish this" ideation; something concrete and reusable must already exist.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
@@ -70,7 +70,8 @@ tenjin publish <file.md> [--draft]
 ```
 
 Consent follows the configured `publish.mode` (default `review`). The
-redaction/rights scan runs in EVERY mode — no mode means skip-scan:
+redaction/rights scan runs in every mode; no mode ever skips the scan (not even
+full-auto):
 
 - **review** (default): every publish exits 3 with a structured
   `needs_confirmation` payload, even on a clean scan. Render it to the user as a
@@ -91,7 +92,7 @@ path) instead, with the same rubric and consent rules above.
 ## Parked candidates (your holding pen)
 
 Candidates are your internal pen for a reusable answer you could not publish
-yet — the user said not-now, a publish refused or blocked, or there was no
+yet: the user said not-now, a publish refused or blocked, or there was no
 wallet. Not a user-facing workflow; it is housekeeping so the answer is not
 lost. `tenjin candidate list` shows the pen with age, and a `tenjin lookup`
 prints a one-line stderr nudge when drafts are parked (and how many are stale

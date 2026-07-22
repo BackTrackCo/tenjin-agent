@@ -251,6 +251,22 @@ describe('runPublish — session key mint-once', () => {
   });
 });
 
+describe('runPublish — review is the default', () => {
+  it('a clean publish with no mode, empty env, and no --yes needs confirmation', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN)),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(calls).toHaveLength(0); // review asks before any write
+    expect(signCount()).toBe(0);
+  });
+});
+
 describe('runPublish — default-mode notice', () => {
   it('prints one stderr notice when publish.mode is unconfigured (source default)', async () => {
     const { provider } = spyProvider();

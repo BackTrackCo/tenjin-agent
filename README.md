@@ -173,8 +173,8 @@ true` opts into 90-day retention of the question for retrieval evaluation.
 
 ### Consent modes and pricing
 
-`publish.mode` governs ALL publishing uniformly — a piece you asked for and a
-reusable answer your agent derived after a lookup both go through it — after a
+`publish.mode` governs ALL publishing uniformly. A piece you asked for and a
+reusable answer your agent derived after a lookup both go through it, after a
 deterministic local scan (secrets, keys, PII, wallet addresses) that runs in
 every mode:
 

@@ -100,15 +100,17 @@ rights-clean finding, publishing it back is the point of the marketplace. Act by
 the resolved `publish.mode`. The tenjin-publish skill owns the mechanics and is
 `disable-model-invocation: true`, so on any path that publishes, READ its
 `SKILL.md` (installed alongside this one, at `tenjin-publish/SKILL.md`) first and
-follow its draft, sanitize, and pricing rules — never publish bare.
+follow its draft, sanitize, and pricing rules; never publish bare.
 
 - **review** (the default): draft the piece and ask the user the one-click
   yes/no right then. Only on "not now", park it:
   `tenjin candidate add <finding.md> --lookup-id <id>`.
 - **auto / full-auto**: build the answer card and run `tenjin publish` directly.
-  Park it as a candidate instead only if it refuses (a finding it will not
-  clear), blocks, or there is no wallet. Then tell the user what was published,
-  with the URL.
+  In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
+  `needs_confirmation` payload, which you render as the same one-click yes/no and
+  re-run with `--yes` on a yes. Park as a candidate only when the publish cannot
+  proceed at all: a hard block, or no wallet. Then tell the user what was
+  published, with the URL.
 
 Candidates are local files that never upload on their own; `tenjin candidate
 list` shows the pen, and a later `tenjin publish --candidate <id>` sends one
