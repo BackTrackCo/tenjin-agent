@@ -2,8 +2,16 @@
 
 # Security pin mirrored from the tenjin repo — dropping it reddens
 # `pnpm audit` (ws is pulled in via viem).
+#
+# fast-uri: GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx. Drop once ajv's own
+# fast-uri floor clears 3.1.4.
+#
+# esbuild: GHSA-g7r4-m6w7-qqqr. Drop once tsup/vitest bump their esbuild
+# floor past 0.28.1.
 overrides:
   'ws@>=8.0.0 <8.21.0': '8.21.0'
+  'fast-uri@>=3.0.0 <3.1.4': '3.1.4'
+  'esbuild@>=0.27.3 <0.28.1': '0.28.1'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
