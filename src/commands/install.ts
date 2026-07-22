@@ -185,7 +185,12 @@ async function selectPublishMode(
     return { value: config.publish.mode, source: 'existing' };
   }
 
-  const interactive = deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY));
+  // --json implies non-interactive: a machine consumer must never sit behind a
+  // prompt, even one on stderr. It overrides an injected isInteractive too, so the
+  // only ways to set the mode under --json are --publish-mode or a prior config.
+  const interactive =
+    ctx.flags.json !== true &&
+    (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
   if (dryRun || !interactive) return { value: 'auto', source: 'default-skipped' };
 
   const prompt = deps.promptMode ?? defaultPromptMode;

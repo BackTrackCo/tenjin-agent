@@ -542,4 +542,26 @@ describe('runInstall: publish-mode selection', () => {
     expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
+
+  it('--json implies non-interactive: no prompt even on a TTY', async () => {
+    const spy = promptSpy(['review']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({ isInteractive: true, promptMode: spy.fn }), // json overrides isInteractive
+    );
+    expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'default-skipped' });
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('--json still honors --publish-mode', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'], publishMode: 'review' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'flag' });
+    expect(await persistedMode()).toBe('review');
+  });
 });

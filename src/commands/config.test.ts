@@ -3,7 +3,7 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runConfigList, runConfigGet, runConfigSet } from './config';
+import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -75,6 +75,25 @@ describe('runConfigList', () => {
       value: 'above:250000',
       source: 'file',
       threshold: { atomic: '250000', usd: '0.25' },
+    });
+  });
+
+  it('persistPublishMode preserves pre-existing sibling keys', async () => {
+    // Seed a config with unrelated scalars and a sibling publish subkey, then set
+    // only publish.mode: the locked merge-write must not clobber any of them.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        baseUrl: 'https://seeded.example',
+        maxAutoSpend: '500000',
+        publish: { defaultPrice: '250000' },
+      }),
+    );
+    await persistPublishMode(dir, 'review');
+    expect(await readRawFile()).toEqual({
+      baseUrl: 'https://seeded.example',
+      maxAutoSpend: '500000',
+      publish: { defaultPrice: '250000', mode: 'review' },
     });
   });
 
