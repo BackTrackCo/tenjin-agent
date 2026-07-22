@@ -14,6 +14,7 @@ import type {
   PartialConfig,
   Provenance,
   PublishConfigKey,
+  PublishMode,
   ScalarConfigKey,
 } from '../lib/config';
 import { loadProjectConfig } from '../lib/settings';
@@ -41,6 +42,22 @@ interface RenderedSetting extends RenderedValue {
 const CONFIRM_ABOVE = 'above:';
 const KEY_WIDTH = Math.max(...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].map((key) => key.length));
 
+/**
+ * A one-line human description per key, appended (dim) to the bare `config`
+ * listing only. Machine `data` is unchanged; these are humanLines decoration.
+ */
+const KEY_DESCRIPTIONS: Record<string, string> = {
+  maxAutoSpend: 'auto-approve a read up to this amount',
+  sessionBudget: 'cap on total auto-spend per session',
+  confirm: 'when to ask before paying',
+  allowlistCreators: 'only auto-pay these creators (empty = any)',
+  baseUrl: 'Tenjin API base URL',
+  rpcUrl: 'Base RPC endpoint for balance reads',
+  evalCohort: 'opt in to the lookup evaluation cohort',
+  'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
+  'publish.defaultPrice': 'price used when none is given',
+};
+
 function isPublishKey(key: string): key is PublishConfigKey {
   return (PUBLISH_CONFIG_KEYS as readonly string[]).includes(key);
 }
@@ -58,12 +75,12 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
   for (const key of CONFIG_KEYS) {
     const entry = renderSetting(key, settings[key].value, settings[key].source);
     data[key] = entry;
-    humanLines.push(formatLine(key, entry));
+    humanLines.push(describedLine(key, entry));
   }
   for (const key of PUBLISH_CONFIG_KEYS) {
     const entry = renderPublishSetting(key, settings);
     data[key] = entry;
-    humanLines.push(formatLine(key, entry));
+    humanLines.push(describedLine(key, entry, downgradeNote(key, settings)));
   }
   return { data, humanLines };
 }
@@ -76,7 +93,10 @@ export async function runConfigGet(
   if (isPublishKey(key)) {
     const settings = await resolveFromContext(ctx);
     const entry = renderPublishSetting(key, settings);
-    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+    return {
+      data: { key, ...entry },
+      humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
+    };
   }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
@@ -131,6 +151,19 @@ function parsePublishMode(value: string): string {
   throw new CliError('USAGE', `Invalid publish mode: ${JSON.stringify(value)}`, {
     fix: 'Use "review", "auto", or "full-auto".',
   });
+}
+
+/**
+ * Persist just `publish.mode` into the global config through the same locked
+ * merge-write every `config set` uses (never a raw overwrite), so a sibling
+ * subkey or an unknown block a newer CLI wrote is preserved. Used by `install`'s
+ * setup prompt; the mode is a validated PublishMode.
+ */
+export async function persistPublishMode(dir: string, mode: PublishMode): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    publish: { ...existing.publish, mode },
+  }));
 }
 
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
@@ -298,6 +331,31 @@ async function persist(
 function formatLine(key: string, entry: RenderedSetting): string {
   const label = key.padEnd(KEY_WIDTH);
   return `  ${label}  ${displayValue(entry)}  ${styleText('dim', `(${entry.source})`)}`;
+}
+
+/** The list variant: the value line, a dim description, and an optional dim note. */
+function describedLine(key: string, entry: RenderedSetting, note?: string): string {
+  const description = KEY_DESCRIPTIONS[key];
+  let line = formatLine(key, entry);
+  if (description !== undefined) line += `  ${styleText('dim', `- ${description}`)}`;
+  return withNote(line, note);
+}
+
+/** Append a dim parenthetical note (e.g. the full-auto downgrade) when present. */
+function withNote(line: string, note?: string): string {
+  return note !== undefined ? `${line}  ${styleText('dim', `(${note})`)}` : line;
+}
+
+/**
+ * The `publish.mode` line gains a downgrade note when the effective mode came from
+ * a committed `.tenjin.json` asking for `full-auto` (the loosening gate demoted it
+ * to `auto`). Human-only; the machine `data` shape is unchanged.
+ */
+function downgradeNote(key: PublishConfigKey, settings: EffectiveSettings): string | undefined {
+  if (key !== 'publish.mode' || settings.publishMode.downgradedWarning === undefined) {
+    return undefined;
+  }
+  return 'downgraded from full-auto: committed .tenjin.json (gitignore it to opt in)';
 }
 
 function displayValue(entry: RenderedSetting): string {

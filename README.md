@@ -21,8 +21,9 @@ npm package and, soon, the Claude Code plugin and agent skills that wrap it.
 > `wallet` today. `lookup`, `inspect`, `buy`, and `outcome` are implemented but require the
 > marketplace lookup API (Track A2) to be deployed to the base URL you point at;
 > against a deploy without it, `doctor` shows a `lookup-contract` warning and those
-> commands will not work yet. `publish --draft` is still landing. Everything under
-> "zero install" below is complete and live now; start there.
+> commands will not work yet. `publish` writes a piece with an optional answer
+> card, gated by a local secrets scan and your `publish.mode` consent. Everything
+> under "zero install" below is complete and live now; start there.
 
 ## Use Tenjin today, zero install
 
@@ -142,12 +143,13 @@ Shipping today (no backend dependency):
 
 Marketplace commands (need the Track A2 lookup API deployed to your `--base-url`):
 
-| Command                                              | Purpose                                                                             |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `tenjin lookup "<question>"`                         | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim      |
-| `tenjin inspect <url-or-id>`                         | Show a candidate's pre-purchase card from the 402 body; never pays                  |
-| `tenjin buy <url-or-id> [--max-price <usd>] [--yes]` | Entitlement re-check (free re-read if owned), then x402 exact payment               |
-| `tenjin outcome --lookup-id <id> --status <s>`       | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined` |
+| Command                                              | Purpose                                                                                            |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `tenjin lookup "<question>"`                         | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                     |
+| `tenjin inspect <url-or-id>`                         | Show a candidate's pre-purchase card from the 402 body; never pays                                 |
+| `tenjin buy <url-or-id> [--max-price <usd>] [--yes]` | Entitlement re-check (free re-read if owned), then x402 exact payment                              |
+| `tenjin outcome --lookup-id <id> --status <s>`       | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                |
+| `tenjin publish <file.md> [--price <usd>] [--yes]`   | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode |
 
 `buy` re-reads an entitled resource for free before ever paying, re-delivers
 already-bought content from the local library without paying again, and refuses to
@@ -168,8 +170,31 @@ true` opts into 90-day retention of the question for retrieval evaluation.
 > atomic-unit flags in CLI spec 10, per plan 12 decision O1 (humans think in
 > dollars; agents read the atomic value in the JSON).
 
-Next: `publish --draft`, a Claude Code plugin marketplace in this repo, and
-`tenjin mcp` (local stdio server over the same core).
+### Consent modes and pricing
+
+`publish` runs a deterministic local scan (secrets, keys, PII, wallet addresses)
+on every publish, then applies your `publish.mode`:
+
+- **`review`** always asks first, even on a clean scan.
+- **`auto`** (the default) publishes a clean scan immediately; any warning
+  finding stops and asks; a hard block (a live secret or private key) always
+  refuses.
+- **`full-auto`** does not stop for warnings, only for hard blocks. It is honored
+  from your global config, an env var, a flag, or a gitignored `.tenjin.json`. Only
+  a committed `.tenjin.json` asking for `full-auto` is downgraded to `auto`, so
+  cloning a repo can never enable silent auto-publishing.
+
+`--yes` clears the warning findings and the review confirm; it never clears a hard
+block. Set the mode with `tenjin config set publish.mode <mode>`, or per run with
+`--mode`. `tenjin install` asks once on an interactive setup and otherwise leaves
+the default (auto); change it any time with `tenjin config set publish.mode`.
+
+Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultPrice`
+(default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
+what actually chooses a price before it calls the command.
+
+Next: a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
+stdio server over the same core).
 
 ### Output contract
 

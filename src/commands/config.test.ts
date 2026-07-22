@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runConfigList, runConfigGet, runConfigSet } from './config';
+import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -55,6 +56,17 @@ describe('runConfigList', () => {
     expect(humanLines).toHaveLength(9);
   });
 
+  it('appends a one-line description per key to the human listing (data unchanged)', async () => {
+    const { data, humanLines } = await runConfigList(makeCtx());
+    const text = (humanLines ?? []).join('\n');
+    expect(text).toContain('when to ask before paying'); // confirm
+    expect(text).toContain('review=always ask, auto=ask on findings, full-auto=only hard blocks');
+    expect(text).toContain('price used when none is given'); // publish.defaultPrice
+    // The machine shape carries no description field.
+    const d = data as Record<string, Record<string, unknown>>;
+    expect(Object.keys(d.confirm ?? {}).sort()).toEqual(['source', 'value']);
+  });
+
   it('exposes the confirm threshold in dual form when above:', async () => {
     await runConfigSet({ key: 'confirm', value: 'above:0.25' }, makeCtx());
     const { data } = await runConfigList(makeCtx());
@@ -63,6 +75,25 @@ describe('runConfigList', () => {
       value: 'above:250000',
       source: 'file',
       threshold: { atomic: '250000', usd: '0.25' },
+    });
+  });
+
+  it('persistPublishMode preserves pre-existing sibling keys', async () => {
+    // Seed a config with unrelated scalars and a sibling publish subkey, then set
+    // only publish.mode: the locked merge-write must not clobber any of them.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        baseUrl: 'https://seeded.example',
+        maxAutoSpend: '500000',
+        publish: { defaultPrice: '250000' },
+      }),
+    );
+    await persistPublishMode(dir, 'review');
+    expect(await readRawFile()).toEqual({
+      baseUrl: 'https://seeded.example',
+      maxAutoSpend: '500000',
+      publish: { defaultPrice: '250000', mode: 'review' },
     });
   });
 
@@ -383,6 +414,50 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
       process.chdir(projectCwd);
       const { data } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
       expect(data).toMatchObject({ key: 'publish.mode', value: 'review', source: 'project' });
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('notes the downgrade when a committed .tenjin.json asks for full-auto', async () => {
+    // A non-gitignored (committed) full-auto project file is demoted to auto by
+    // the loosening gate; the human line must say so, while data stays unchanged.
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'full-auto' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data, humanLines } = await runConfigList(makeCtx());
+      const d = data as Record<string, { value: unknown; source: string }>;
+      expect(d['publish.mode']).toMatchObject({ value: 'auto', source: 'project' });
+      const line = (humanLines ?? []).find((l) => l.includes('publish.mode'));
+      expect(line).toContain('downgraded from full-auto');
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('honors a gitignored .tenjin.json full-auto with no downgrade note', async () => {
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    execFileSync('git', ['init', '-q'], { cwd: projectCwd });
+    await writeFile(join(projectCwd, '.gitignore'), '.tenjin.json\n');
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'full-auto' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data, humanLines } = await runConfigList(makeCtx());
+      const d = data as Record<string, { value: unknown; source: string }>;
+      expect(d['publish.mode']).toMatchObject({ value: 'full-auto', source: 'project' });
+      const line = (humanLines ?? []).find((l) => l.includes('publish.mode'));
+      expect(line).not.toContain('downgraded');
     } finally {
       process.chdir(prev);
       await rm(projectCwd, { recursive: true, force: true });

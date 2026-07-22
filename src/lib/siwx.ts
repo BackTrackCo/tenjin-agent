@@ -16,6 +16,14 @@ export interface BuildSiwxOptions {
   chainId: string;
   /** Validity window in ms (default 24h, the server's cap). */
   ttlMs?: number;
+  /**
+   * CAIP-122 `resources` URNs to bind into the signed message. Empty/omitted for
+   * a plain sign-in; the session-key layer (B3, D35) passes the three
+   * `urn:tenjin:session:*` URNs so one wallet signature delegates a P-256 key.
+   */
+  resources?: string[];
+  /** Override the human-readable statement (session delegation says so plainly). */
+  statement?: string;
 }
 
 export async function buildSiwxHeader(
@@ -33,7 +41,10 @@ export async function buildSiwxHeader(
     nonce: randomUUID().replace(/-/g, ''),
     issuedAt: new Date(now).toISOString(),
     expirationTime: new Date(now + (opts.ttlMs ?? 86_400_000)).toISOString(),
-    statement: 'Sign in to Tenjin.',
+    statement: opts.statement ?? 'Sign in to Tenjin.',
+    ...(opts.resources !== undefined && opts.resources.length > 0
+      ? { resources: opts.resources }
+      : {}),
   };
   const message = createSIWxMessage(info, signer.address);
   const signature = await signer.signMessage({ message });

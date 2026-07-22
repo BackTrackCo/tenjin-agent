@@ -3,6 +3,7 @@ import { CliError } from './errors';
 import { httpRequest, type HttpResult } from './http';
 import { CLIENT_HEADER } from './client-meta';
 import { ATOMIC_RE, UUID_RE } from './ids';
+import { trimSlash } from './url';
 
 /**
  * The lookup + outcome HTTP contract (A2, tenjin#370). Request building and
@@ -147,10 +148,6 @@ export interface AgentApiOptions {
   fetchImpl?: typeof fetch;
   /** Spec 09 §3 evaluation-cohort opt-in: sends X-Tenjin-Eval-Cohort: 1. */
   evalCohort?: boolean;
-}
-
-function trimSlash(url: string): string {
-  return url.replace(/\/+$/, '');
 }
 
 /** Turn a non-2xx / transport HttpResult into the CLI error contract. */

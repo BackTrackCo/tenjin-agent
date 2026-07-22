@@ -21,6 +21,15 @@ export function walletPath(dir: string = dataDir()): string {
 }
 
 /**
+ * Where the delegated P-256 session key + its wallet-signed SIWX delegation are
+ * cached (B3, D35). A short-lived (≤24h) hot key: lower stakes than wallet.json,
+ * but still written 0600 and address-bound so a wallet change invalidates it.
+ */
+export function sessionPath(dir: string = dataDir()): string {
+  return join(dir, 'session.json');
+}
+
+/**
  * Where the Windows DPAPI-protected wallet passphrase blob lives. The file holds
  * a DPAPI CurrentUser ciphertext, not the passphrase in plaintext, and is only
  * ever written on win32; other platforms use their own OS store.

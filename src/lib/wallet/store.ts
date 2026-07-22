@@ -3,6 +3,7 @@ import { z } from 'zod';
 import * as Keystore from 'ox/Keystore';
 import { CliError } from '../errors';
 import { writeFileAtomicExclusive } from '../atomic-json';
+import { hasCode } from '../errno';
 import { walletPath } from '../paths';
 
 /** A 0x-prefixed 32-byte hex private key (case-insensitive). */
@@ -147,13 +148,4 @@ function isPreEncryptionRecord(json: unknown): boolean {
 
 function isNotFound(err: unknown): boolean {
   return hasCode(err, 'ENOENT');
-}
-
-function hasCode(err: unknown, code: string): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === code
-  );
 }
