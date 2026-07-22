@@ -131,10 +131,11 @@ const LINE_DETECTORS: LineDetector[] = [
     check: 'openai-key',
     severity: 'block',
     // gitleaks openai-api-key: classic sk- plus the modern sk-proj-/sk-svcacct-/
-    // sk-admin- keys, whose bodies carry _ and - separators. `(?!ant-)` keeps an
-    // Anthropic key from matching here; the token boundary is a lookahead (not \b)
-    // so a trailing separator in the body doesn't truncate the match.
-    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_-])/g,
+    // sk-admin- keys. The body is base62 and MUST contain a digit (real keys are
+    // high-entropy), which keeps sk- kebab identifiers (sk-user-profile-updated…)
+    // from hard-blocking. `(?!ant-)` keeps an Anthropic key out. Only the base62
+    // leading run of a modern key is matched — enough to flag it.
+    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}\b/g,
     excerpt: (m) => maskKeeping(m[0], 3),
   },
   {

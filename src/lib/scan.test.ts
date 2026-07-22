@@ -48,19 +48,25 @@ describe('scan — block detectors', () => {
   });
 
   it('flags OpenAI (classic + modern), Anthropic, Google, and npm keys', () => {
-    expect(checks(`key=sk-${'a'.repeat(48)}`)).toContain('openai-key');
-    expect(checks(`key=sk-proj-${'B'.repeat(40)}`)).toContain('openai-key');
-    // Modern keys carry _ and - separators in the body.
-    expect(checks(`key=sk-proj-${'a'.repeat(10)}_${'b'.repeat(10)}-${'c'.repeat(10)}`)).toContain(
-      'openai-key',
-    );
-    expect(checks(`key=sk-svcacct-${'d'.repeat(30)}`)).toContain('openai-key');
-    expect(checks(`key=sk-admin-${'e'.repeat(30)}`)).toContain('openai-key');
+    // Bodies are base62 and carry a digit (real keys are high-entropy).
+    const body = `${'a'.repeat(24)}7${'b'.repeat(12)}`;
+    expect(checks(`key=sk-${body}`)).toContain('openai-key');
+    expect(checks(`key=sk-proj-${body}`)).toContain('openai-key');
+    expect(checks(`key=sk-svcacct-${body}`)).toContain('openai-key');
+    expect(checks(`key=sk-admin-${body}`)).toContain('openai-key');
     expect(checks(`key=sk-ant-api03-${'C'.repeat(30)}`)).toContain('anthropic-key');
     expect(checks(`key=sk-ant-api03-${'C'.repeat(30)}`)).not.toContain('openai-key');
     expect(checks(`key=AIza${'d'.repeat(35)}`)).toContain('google-key');
     expect(checks(`secret=GOCSPX-${'e'.repeat(28)}`)).toContain('google-key');
     expect(checks(`token=npm_${'f'.repeat(36)}`)).toContain('npm-token');
+  });
+
+  it('does not hard-block sk- kebab identifiers (review round 3)', () => {
+    // No digit + hyphen separators → not an OpenAI key.
+    expect(checks('sk-provider-config-loader-instance-factory-x')).not.toContain('openai-key');
+    expect(checks('the sk-user-profile-updated-successfully-now handler')).not.toContain(
+      'openai-key',
+    );
   });
 
   it('flags a DB connection URI with a real password, masking it, but not examples', () => {
@@ -287,7 +293,7 @@ describe('scan — secrets are never echoed verbatim', () => {
       [`ghp_${'Z'.repeat(36)}`, `ghp_${'Z'.repeat(36)}`],
       ['xoxb-123456789012-secrettail99', 'xoxb-123456789012-secrettail99'],
       [`sk_live_${'Q'.repeat(24)}`, `sk_live_${'Q'.repeat(24)}`],
-      [`sk-${'a'.repeat(48)}`, `sk-${'a'.repeat(48)}`],
+      [`sk-${'a'.repeat(24)}7${'b'.repeat(20)}`, `sk-${'a'.repeat(24)}7${'b'.repeat(20)}`],
       [`sk-ant-api03-${'C'.repeat(30)}`, `sk-ant-api03-${'C'.repeat(30)}`],
       [`AIza${'d'.repeat(35)}`, `AIza${'d'.repeat(35)}`],
       [`npm_${'f'.repeat(36)}`, `npm_${'f'.repeat(36)}`],
