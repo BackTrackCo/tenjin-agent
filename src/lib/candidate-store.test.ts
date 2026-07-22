@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,7 +44,6 @@ describe('candidate-store', () => {
       created: '2026-07-18T00:00:00.000Z',
       sourceProject: '/repo/x',
     });
-    const { readFile } = await import('node:fs/promises');
     expect(await readFile(created.draftPath, 'utf8')).toBe('# draft\n\nbody\n');
   });
 
@@ -65,6 +64,17 @@ describe('candidate-store', () => {
       '2026-07-19T00:00:00.000Z',
       '2026-07-18T00:00:00.000Z',
     ]);
+  });
+
+  it('gives a total order when created values tie, via the id tie-break', async () => {
+    const created = '2026-07-20T00:00:00.000Z';
+    const a = await createCandidate(dir, input({ created }));
+    const b = await createCandidate(dir, input({ created }));
+    const c = await createCandidate(dir, input({ created }));
+    const listed = (await listCandidates(dir)).map((r) => r.id);
+    // Equal timestamps fall back to id, descending, so the order is total and
+    // deterministic rather than dependent on readdir/insertion order.
+    expect(listed).toEqual([a.id, b.id, c.id].sort((x, y) => (x < y ? 1 : -1)));
   });
 
   it.skipIf(isWindows)('writes 0600 files inside a 0700 candidate dir', async () => {

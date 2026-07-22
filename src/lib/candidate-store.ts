@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { writeFileAtomic } from './atomic-json';
+import { writeFileAtomicExclusive } from './atomic-json';
 import { newId, UUID_RE } from './ids';
 
 /**
@@ -12,8 +12,9 @@ import { newId, UUID_RE } from './ids';
  * `~/.tenjin/candidates/<id>/` holding the draft markdown plus a meta.json.
  *
  * Custody mirrors the wallet key discipline: the candidates tree is 0700 and
- * every file 0600, written through writeFileAtomic so a reader sees a complete
- * file or none. Unlike lookup-store's single shared ledger, there is no shared
+ * every file 0600, written create-once through writeFileAtomicExclusive so a
+ * reader sees a complete file or none and a uuid collision is loud, never a
+ * silent overwrite. Unlike lookup-store's single shared ledger, there is no shared
  * mutable file here — a fresh uuid per add means two concurrent adds land in two
  * distinct dirs and cannot contend — so no cross-process lock is needed. The
  * meta.json is written LAST and atomically, making it the commit point: `list`
@@ -31,8 +32,11 @@ const CandidateMetaSchema = z.object({
   schemaVersion: z.literal(1),
   lookupId: z.string(),
   question: z.string().optional(),
-  /** ISO-8601 creation time. */
-  created: z.string(),
+  // Fixed-width UTC ISO-8601 (a trailing Z, never an offset): listCandidates
+  // sorts newest-first lexicographically on this string, which is only a valid
+  // proxy for chronological order when every value is same-zone UTC. z.iso
+  // .datetime() rejects offsets and non-datetime strings, pinning that invariant.
+  created: z.iso.datetime(),
   /** The repo root the add ran in, or the cwd when not in a repo. */
   sourceProject: z.string(),
 });
@@ -65,9 +69,10 @@ function candidateDir(dataDir: string, id: string): string {
   return join(candidatesDir(dataDir), id);
 }
 
-/** Park a draft as a new candidate and return the created record. The meta.json
- *  is committed last (atomically), so the candidate is either fully present to
- *  `list`/`read` or absent, never half-there. */
+/** Park a draft as a new candidate and return the created record. Both files are
+ *  written create-once (no-clobber, fsynced) at a fresh uuid path, meta.json
+ *  last, so the candidate is either fully present to `list`/`read` or absent,
+ *  never half-there. */
 export async function createCandidate(
   dataDir: string,
   input: CreateCandidateInput,
@@ -85,16 +90,23 @@ export async function createCandidate(
     sourceProject: input.sourceProject,
   };
   try {
-    await writeFileAtomic(draftPath, input.draft, { mode: 0o600, dirMode: 0o700 });
-    await writeFileAtomic(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`, {
+    // Exclusive (create-or-EEXIST, fsynced) so a uuid collision is loud, not a
+    // silent overwrite of an existing candidate, and the crash-durable commit of
+    // meta.json is the last, atomic step.
+    await writeFileAtomicExclusive(draftPath, input.draft, { mode: 0o600, dirMode: 0o700 });
+    await writeFileAtomicExclusive(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`, {
       mode: 0o600,
       dirMode: 0o700,
     });
   } catch (err) {
-    // A failure between the two writes would otherwise strand a hidden uuid dir
-    // holding the (secrets-adjacent) draft that `list` skips and no one can name
-    // to `drop`. Remove it eagerly and rethrow so the caller sees the real error.
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    // An EEXIST means something already lived at this fresh-uuid path (a real
+    // collision, astronomically unlikely): surface it loudly and NEVER delete
+    // what was already there. Any other failure is a partial write of our own
+    // fresh dir — remove it so a crash mid-add can't strand a hidden dir holding
+    // the (secrets-adjacent) draft that `list` skips and no one can name to `drop`.
+    if (!isEexist(err)) {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
     throw err;
   }
 
@@ -167,4 +179,8 @@ async function readMeta(dir: string): Promise<CandidateMeta | null> {
   }
   const parsed = CandidateMetaSchema.safeParse(json);
   return parsed.success ? parsed.data : null;
+}
+
+function isEexist(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EEXIST';
 }

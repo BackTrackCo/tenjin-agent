@@ -111,7 +111,9 @@ describe('runCandidateList', () => {
     expect(res.humanLines).toEqual(['No pending candidates.']);
   });
 
-  it('humanizes age across boundaries and degrades on bad/future timestamps', async () => {
+  it('humanizes age across boundaries and degrades a future timestamp to "just now"', async () => {
+    // created is schema-pinned to UTC ISO, so a malformed value can never be
+    // listed; the reachable degradation case is a future timestamp (clock skew).
     const base = Date.parse('2026-07-20T12:00:00.000Z');
     const seed = (msAgo: number, question: string) =>
       createCandidate(dir, {
@@ -126,13 +128,6 @@ describe('runCandidateList', () => {
     await seed(3 * 3_600_000, 'hours'); // 3h
     await seed(2 * 86_400_000, 'days'); // 2d
     await seed(-3_600_000, 'future'); // 1h in the future -> just now
-    await createCandidate(dir, {
-      draft: 'x',
-      lookupId: LOOKUP,
-      question: 'bad',
-      created: 'not-a-date',
-      sourceProject: '/p',
-    });
 
     const res = await runCandidateList(makeCtx(), { now: () => new Date(base) });
     const line = (q: string) => res.humanLines?.find((l) => l.includes(q)) ?? '';
@@ -141,7 +136,6 @@ describe('runCandidateList', () => {
     expect(line('hours')).toContain('3h ago');
     expect(line('days')).toContain('2d ago');
     expect(line('future')).toContain('just now');
-    expect(line('bad')).toContain('just now');
   });
 
   it('sanitizes a question with control/escape sequences in the human list', async () => {
