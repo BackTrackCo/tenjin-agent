@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCandidateAdd, runCandidateDrop, runCandidateList } from './candidate';
-import { listCandidates } from '../lib/candidate-store';
+import { createCandidate, listCandidates } from '../lib/candidate-store';
 import { main } from '../cli';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
@@ -73,6 +73,15 @@ describe('runCandidateAdd', () => {
       runCandidateAdd({ file: join(dir, 'nope.md'), lookupId: LOOKUP }, makeCtx()),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
   });
+
+  it('a non-uuid --lookup-id is a USAGE error before any file read (exit 2)', async () => {
+    // No draft file on disk: validation must reject the id first, not ENOENT.
+    await expect(
+      runCandidateAdd({ file: join(dir, 'draft.md'), lookupId: 'not-a-uuid' }, makeCtx(), {
+        cwd: dir,
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+  });
 });
 
 describe('runCandidateList', () => {
@@ -100,6 +109,55 @@ describe('runCandidateList', () => {
     const res = await runCandidateList(makeCtx());
     expect((res.data as { candidates: unknown[] }).candidates).toEqual([]);
     expect(res.humanLines).toEqual(['No pending candidates.']);
+  });
+
+  it('humanizes age across boundaries and degrades on bad/future timestamps', async () => {
+    const base = Date.parse('2026-07-20T12:00:00.000Z');
+    const seed = (msAgo: number, question: string) =>
+      createCandidate(dir, {
+        draft: 'x',
+        lookupId: LOOKUP,
+        question,
+        created: new Date(base - msAgo).toISOString(),
+        sourceProject: '/p',
+      });
+    await seed(30_000, 'fresh'); // 30s -> just now
+    await seed(5 * 60_000, 'mins'); // 5m
+    await seed(3 * 3_600_000, 'hours'); // 3h
+    await seed(2 * 86_400_000, 'days'); // 2d
+    await seed(-3_600_000, 'future'); // 1h in the future -> just now
+    await createCandidate(dir, {
+      draft: 'x',
+      lookupId: LOOKUP,
+      question: 'bad',
+      created: 'not-a-date',
+      sourceProject: '/p',
+    });
+
+    const res = await runCandidateList(makeCtx(), { now: () => new Date(base) });
+    const line = (q: string) => res.humanLines?.find((l) => l.includes(q)) ?? '';
+    expect(line('fresh')).toContain('just now');
+    expect(line('mins')).toContain('5m ago');
+    expect(line('hours')).toContain('3h ago');
+    expect(line('days')).toContain('2d ago');
+    expect(line('future')).toContain('just now');
+    expect(line('bad')).toContain('just now');
+  });
+
+  it('sanitizes a question with control/escape sequences in the human list', async () => {
+    await createCandidate(dir, {
+      draft: 'x',
+      lookupId: LOOKUP,
+      question: 'evil\x1b[31mred\nnewline',
+      created: '2026-07-20T00:00:00.000Z',
+      sourceProject: '/p',
+    });
+    const res = await runCandidateList(makeCtx(), { now: at('2026-07-20T01:00:00.000Z') });
+    const joined = (res.humanLines ?? []).join('\n');
+    // The ANSI escape and the embedded newline are stripped; each list entry
+    // stays one line so a malicious question can't forge a second row.
+    expect(joined).not.toContain('\x1b');
+    expect(joined).toContain('evilrednewline');
   });
 });
 
@@ -139,6 +197,17 @@ describe('candidate via main (one JSON object per invocation)', () => {
   afterEach(() => {
     if (prevDataDir === undefined) delete process.env.TENJIN_DATA_DIR;
     else process.env.TENJIN_DATA_DIR = prevDataDir;
+  });
+
+  it('add emits exactly one success envelope, exits 0, and parks the draft', async () => {
+    const file = join(dir, 'draft.md');
+    await writeFile(file, '# hi\n', 'utf8');
+    const cap = captureIo();
+    const code = await main(['candidate', 'add', file, '--lookup-id', LOOKUP, '--json'], cap.io);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed).toMatchObject({ ok: true, command: 'candidate.add' });
+    expect(await listCandidates(dir)).toHaveLength(1);
   });
 
   it('list emits exactly one success envelope and exits 0', async () => {

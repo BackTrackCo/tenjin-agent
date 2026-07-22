@@ -89,6 +89,32 @@ describe('candidate-store', () => {
     expect(await listCandidates(dir)).toEqual([]);
   });
 
+  it('drop removes a crash-orphaned dir that has no meta', async () => {
+    const orphan = '0197aaaa-bbbb-cccc-dddd-0000000000ff';
+    const odir = join(dir, 'candidates', orphan);
+    await mkdir(odir, { recursive: true });
+    await writeFile(join(odir, 'draft.md'), 'leaked secret', 'utf8');
+    // list hides the orphan, but drop can still clean it up by id.
+    expect(await listCandidates(dir)).toEqual([]);
+    expect(await dropCandidate(dir, orphan)).toBe(true);
+    expect(await dropCandidate(dir, orphan)).toBe(false);
+  });
+
+  it('list skips a meta with an unknown schemaVersion or wrong shape', async () => {
+    const good = await createCandidate(dir, input());
+    const v2 = join(dir, 'candidates', '0197aaaa-bbbb-cccc-dddd-000000000002');
+    await mkdir(v2, { recursive: true });
+    await writeFile(
+      join(v2, 'meta.json'),
+      JSON.stringify({ schemaVersion: 2, lookupId: 'x', created: 'c', sourceProject: 'p' }),
+      'utf8',
+    );
+    const wrong = join(dir, 'candidates', '0197aaaa-bbbb-cccc-dddd-000000000003');
+    await mkdir(wrong, { recursive: true });
+    await writeFile(join(wrong, 'meta.json'), JSON.stringify({ nope: true }), 'utf8');
+    expect((await listCandidates(dir)).map((c) => c.id)).toEqual([good.id]);
+  });
+
   it('skips a dir with an absent or corrupt meta (half-written add)', async () => {
     const good = await createCandidate(dir, input());
     // A dir whose draft exists but meta does not yet (mid-commit) is invisible.

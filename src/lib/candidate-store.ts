@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -11,7 +11,7 @@ import { newId, UUID_RE } from './ids';
  * sends one, under the D38 consent scan. Each candidate is its OWN directory
  * `~/.tenjin/candidates/<id>/` holding the draft markdown plus a meta.json.
  *
- * Custody mirrors the wallet/lookup discipline: the candidates tree is 0700 and
+ * Custody mirrors the wallet key discipline: the candidates tree is 0700 and
  * every file 0600, written through writeFileAtomic so a reader sees a complete
  * file or none. Unlike lookup-store's single shared ledger, there is no shared
  * mutable file here — a fresh uuid per add means two concurrent adds land in two
@@ -19,7 +19,9 @@ import { newId, UUID_RE } from './ids';
  * meta.json is written LAST and atomically, making it the commit point: `list`
  * skips any dir whose meta is absent or unreadable, so a torn or half-written
  * add reads as not-yet-there rather than a broken candidate, the same
- * best-effort posture loadLookups takes on a corrupt store.
+ * best-effort posture loadLookups takes on a corrupt store. A crash mid-add is
+ * cleaned up eagerly (the dir is removed on any write failure), and `drop` can
+ * still remove a metaless orphan by id so a leaked draft is never stranded.
  */
 
 const DRAFT_FILE = 'draft.md';
@@ -75,8 +77,6 @@ export async function createCandidate(
   await mkdir(dir, { recursive: true, mode: 0o700 });
 
   const draftPath = join(dir, DRAFT_FILE);
-  await writeFileAtomic(draftPath, input.draft, { mode: 0o600, dirMode: 0o700 });
-
   const meta: CandidateMeta = {
     schemaVersion: 1,
     lookupId: input.lookupId,
@@ -84,10 +84,19 @@ export async function createCandidate(
     created: input.created,
     sourceProject: input.sourceProject,
   };
-  await writeFileAtomic(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`, {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
+  try {
+    await writeFileAtomic(draftPath, input.draft, { mode: 0o600, dirMode: 0o700 });
+    await writeFileAtomic(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`, {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+  } catch (err) {
+    // A failure between the two writes would otherwise strand a hidden uuid dir
+    // holding the (secrets-adjacent) draft that `list` skips and no one can name
+    // to `drop`. Remove it eagerly and rethrow so the caller sees the real error.
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
 
   return { id, meta, dir, draftPath };
 }
@@ -124,12 +133,20 @@ export async function listCandidates(dataDir: string): Promise<CandidateRecord[]
   return records;
 }
 
-/** Discard one candidate. Returns false when the id is unknown or malformed, so
- *  the command can surface a clean not-found; nothing is ever auto-deleted. */
+/** Discard one candidate by id. Returns false when the id is malformed or no
+ *  such dir exists, so the command can surface a clean not-found; nothing is
+ *  ever auto-deleted. Removes the dir even when its meta is absent or corrupt,
+ *  so a crash-orphaned candidate can still be cleaned up by id (the id is
+ *  UUID-gated first, so a stray argument can never target a path outside the
+ *  store). */
 export async function dropCandidate(dataDir: string, id: string): Promise<boolean> {
   if (!UUID_RE.test(id)) return false;
   const dir = candidateDir(dataDir, id);
-  if ((await readMeta(dir)) === null) return false;
+  try {
+    if (!(await stat(dir)).isDirectory()) return false;
+  } catch {
+    return false; // no such candidate
+  }
   await rm(dir, { recursive: true, force: true });
   return true;
 }

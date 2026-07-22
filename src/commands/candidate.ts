@@ -1,8 +1,10 @@
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { createCandidate, dropCandidate, listCandidates } from '../lib/candidate-store';
+import { UUID_RE } from '../lib/ids';
 import { sanitizeForTerminal } from '../lib/output';
+import { pathExists } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -31,6 +33,12 @@ export async function runCandidateAdd(
   ctx: CommandContext,
   deps: CandidateDeps = {},
 ): Promise<CommandResult> {
+  if (!UUID_RE.test(args.lookupId)) {
+    throw new CliError('USAGE', `Invalid --lookup-id: ${JSON.stringify(args.lookupId)}.`, {
+      fix: 'Pass the lookupId from a prior `tenjin lookup` (a uuid).',
+    });
+  }
+
   let draft: string;
   try {
     draft = await readFile(args.file, 'utf8');
@@ -124,15 +132,6 @@ async function repoRootOrCwd(cwd: string): Promise<string> {
     const parent = dirname(dir);
     if (parent === dir) return resolve(cwd);
     dir = parent;
-  }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
   }
 }
 
