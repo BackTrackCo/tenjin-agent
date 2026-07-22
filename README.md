@@ -150,6 +150,7 @@ Marketplace commands (need the Track A2 lookup API deployed to your `--base-url`
 | `tenjin buy <url-or-id> [--max-price <usd>] [--yes]` | Entitlement re-check (free re-read if owned), then x402 exact payment                              |
 | `tenjin outcome --lookup-id <id> --status <s>`       | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                |
 | `tenjin publish <file.md> [--price <usd>] [--yes]`   | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode |
+| `tenjin publish --candidate <id>`                    | Publish a parked candidate (its draft.md); clears it on success                                    |
 
 `buy` re-reads an entitled resource for free before ever paying, re-delivers
 already-bought content from the local library without paying again, and refuses to
@@ -192,6 +193,11 @@ the default (auto); change it any time with `tenjin config set publish.mode`.
 Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultPrice`
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
 what actually chooses a price before it calls the command.
+
+Instead of a file, `publish --candidate <id>` publishes a parked candidate (see
+`tenjin candidate`) from its stored `draft.md`, prefilling the card's question from
+the candidate. It runs the same scan and consent flow and clears the candidate only
+on a successful publish; a file and `--candidate` are mutually exclusive.
 
 Next: a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
 stdio server over the same core).

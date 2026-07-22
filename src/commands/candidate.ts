@@ -38,6 +38,14 @@ export async function runCandidateAdd(
       fix: 'Pass the lookupId from a prior `tenjin lookup` (a uuid).',
     });
   }
+  // Cap the question at the server's questionsAnswered item bound (200) at PARK
+  // time, so a candidate can never be born unpublishable — it prefills the card's
+  // questionsAnswered, which publish would otherwise reject only at write time.
+  if (args.question !== undefined && args.question.length > 200) {
+    throw new CliError('USAGE', 'A candidate --question is at most 200 characters.', {
+      fix: 'Shorten the question to 200 characters or fewer.',
+    });
+  }
 
   let draft: string;
   try {

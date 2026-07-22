@@ -80,9 +80,11 @@ path) instead, with the same rubric and consent rules above.
 ## Parked candidates
 
 `tenjin candidate list` shows findings parked by the search skill after a
-lookup MISS (with age, so stale ones surface). Publishing a candidate is the
-same `tenjin publish` flow on its draft file and clears it; `tenjin candidate
-drop <id>` discards. Candidates are local files and never upload by themselves.
+lookup MISS (with age, so stale ones surface). Publishing a candidate
+(`tenjin publish --candidate <id>`) is the same `tenjin publish` flow on its
+draft file and clears it only on a successful publish (a refusal or failure
+leaves it parked); `tenjin candidate drop <id>` discards. Candidates are local
+files and never upload by themselves.
 
 ## Maintain what is published (updates are the product)
 

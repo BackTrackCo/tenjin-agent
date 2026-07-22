@@ -3,6 +3,8 @@ import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { PublishModeSchema, parsePublishModeFlag } from '../lib/config';
+import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
+import { UUID_RE } from '../lib/ids';
 import { scan, type ScanFinding } from '../lib/scan';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal } from '../lib/output';
@@ -33,8 +35,9 @@ import {
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin publish <file.md>`: read the Markdown, parse frontmatter for post +
- * answer-card fields, run the deterministic scan (every mode), gate on the D38
+ * `tenjin publish <file.md>` (or `--candidate <id>`): read the Markdown, parse
+ * frontmatter for post + answer-card fields, run the deterministic scan (every
+ * mode), gate on the D38
  * consent cascade, then write via the session key (minted on first use) or the
  * plain-SIWX fallback and return a compact receipt. The ordering is the point and
  * is enforced here: scan and consent BEFORE any wallet touch or network write.
@@ -48,7 +51,10 @@ import type { CommandContext, CommandResult } from '../context';
 const WRITE_CHAIN_ID = 'eip155:8453';
 
 export interface PublishArgs {
-  file: string;
+  /** The Markdown file to publish; mutually exclusive with --candidate. */
+  file?: string;
+  /** A parked candidate id to publish (its draft.md); mutually exclusive with <file>. */
+  candidate?: string;
   draft?: boolean;
   yes?: boolean;
   /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
@@ -91,7 +97,9 @@ export async function runPublish(
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
 
-  const raw = await readMarkdown(args.file);
+  // The content comes from EITHER a <file> or a parked --candidate, never both,
+  // never neither. A candidate resolves to its draft.md (and prefills its question).
+  const { raw, candidate } = await resolveSource(args, ctx.dataDir);
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
@@ -99,7 +107,17 @@ export async function runPublish(
   const tags = resolveTags(frontmatter);
   const excerpt = expectString(frontmatter, 'excerpt');
   const handle = expectString(frontmatter, 'handle');
-  const card = deriveCard(frontmatter, cardFlagsFrom(args));
+  // A candidate's stored question prefills questionsAnswered, but only as a
+  // fallback: an explicit --question OR a frontmatter questionsAnswered still wins.
+  const cardFlags = cardFlagsFrom(args);
+  if (
+    candidate?.meta.question !== undefined &&
+    cardFlags.question === undefined &&
+    frontmatter.questionsAnswered === undefined
+  ) {
+    cardFlags.question = [candidate.meta.question];
+  }
+  const card = deriveCard(frontmatter, cardFlags);
 
   // The consent cascade + resolved price (global < project < env < flag), with the
   // full-auto loosening gate. Its downgrade warnings go to stderr, not the receipt.
@@ -206,10 +224,98 @@ export async function runPublish(
     timeoutMs: ctx.flags.timeout,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  return receipt(result, runtime.baseUrl);
+
+  // ONLY on a successful publish is the candidate cleared from the pending store
+  // (a refusal or a write failure left it parked, above). The clear is BEST-EFFORT:
+  // the piece is already published, so a failing drop must NOT report the publish as
+  // failed — that would invite a retry and double-publish. Keep ok:true, report
+  // cleared:false with a warning, and let the human drop it manually.
+  const candidateInfo =
+    candidate !== undefined ? await clearPublishedCandidate(ctx, candidate.id) : undefined;
+  return receipt(result, runtime.baseUrl, candidateInfo);
 }
 
-function receipt(result: Awaited<ReturnType<typeof publishPost>>, baseUrl: string): CommandResult {
+interface CandidateReceipt {
+  id: string;
+  cleared: boolean;
+  warning?: string;
+}
+
+async function clearPublishedCandidate(ctx: CommandContext, id: string): Promise<CandidateReceipt> {
+  try {
+    if (await dropCandidate(ctx.dataDir, id)) return { id, cleared: true };
+    // The dir was already gone (a concurrent drop): nothing to clear, not an error.
+    const warning = `Published, but candidate ${id} was already gone; nothing to clear.`;
+    ctx.io.stderr.write(`${warning}\n`);
+    return { id, cleared: false, warning };
+  } catch (err) {
+    const warning = `Published successfully, but could not clear candidate ${id}: ${errorMessage(err)}. Remove it with \`tenjin candidate drop ${id}\`.`;
+    ctx.io.stderr.write(`${warning}\n`);
+    return { id, cleared: false, warning };
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Resolve the publish source: a <file>, or a --candidate's draft.md, exclusively.
+ * Both or neither is USAGE, and a malformed/unknown candidate id is USAGE before
+ * any wallet touch — the whole point of parking it locally is to fail cheap here.
+ */
+async function resolveSource(
+  args: PublishArgs,
+  dataDir: string,
+): Promise<{ raw: string; candidate?: CandidateRecord }> {
+  if (args.candidate !== undefined) {
+    if (args.file !== undefined) {
+      throw new CliError('USAGE', 'Pass EITHER a file or --candidate, not both.', {
+        fix: 'Publish a file with `tenjin publish post.md`, or a candidate with `--candidate <id>`.',
+      });
+    }
+    if (!UUID_RE.test(args.candidate)) {
+      throw new CliError('USAGE', `Invalid candidate id: ${JSON.stringify(args.candidate)}`, {
+        fix: 'Pass a candidate id from `tenjin candidate list`.',
+      });
+    }
+    // Read-then-act (read here, drop after a successful publish) is not atomic, but
+    // the candidate store is a single-user local dir; a concurrent drop between the
+    // two is accepted, and the post-success clear is best-effort anyway.
+    const record = await readCandidate(dataDir, args.candidate);
+    if (record === null) {
+      throw new CliError('USAGE', `Unknown candidate: ${JSON.stringify(args.candidate)}`, {
+        fix: 'List parked candidates with `tenjin candidate list`.',
+      });
+    }
+    return { raw: await readDraft(record), candidate: record };
+  }
+  if (args.file === undefined) {
+    throw new CliError('USAGE', 'Nothing to publish.', {
+      fix: 'Pass a Markdown file (`tenjin publish post.md`) or `--candidate <id>`.',
+    });
+  }
+  return { raw: await readMarkdown(args.file) };
+}
+
+/** Read a candidate's draft.md; a readable dir with an unreadable draft is a torn
+ *  candidate (INTERNAL), not the caller's usage error. */
+async function readDraft(record: CandidateRecord): Promise<string> {
+  try {
+    return await readFile(record.draftPath, 'utf8');
+  } catch (err) {
+    throw new CliError('INTERNAL', `Candidate ${record.id} is missing its draft.`, {
+      fix: `Drop it with \`tenjin candidate drop ${record.id}\` and re-add the draft.`,
+      cause: err,
+    });
+  }
+}
+
+function receipt(
+  result: Awaited<ReturnType<typeof publishPost>>,
+  baseUrl: string,
+  candidateInfo?: CandidateReceipt,
+): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing);
   const cacheEligible = result.cacheEligible ?? false;
@@ -222,6 +328,7 @@ function receipt(result: Awaited<ReturnType<typeof publishPost>>, baseUrl: strin
       : missing.length > 0
         ? `Answer card not lookup-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
+    ...(candidateInfo?.cleared === true ? [`Cleared candidate ${candidateInfo.id}.`] : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -233,6 +340,7 @@ function receipt(result: Awaited<ReturnType<typeof publishPost>>, baseUrl: strin
       cacheEligible,
       missing,
       deskUrl,
+      ...(candidateInfo !== undefined ? { candidate: candidateInfo } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,
