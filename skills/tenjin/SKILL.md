@@ -1,6 +1,6 @@
 ---
 name: tenjin
-description: Read, discover, and publish paid essays on Tenjin, an x402-native publishing platform on Base. Use when the user wants to pay to read a Tenjin essay, find essays by topic/author, publish or manage their own essays, set up a Tenjin writer profile, or check their Tenjin sales and library. Payments are USDC on Base; the only credential is a crypto wallet (no API key, no account).
+description: Read, discover, and publish paid pieces on Tenjin, an x402-native publishing platform on Base, over plain HTTP with nothing installed. Use when no tenjin CLI is available (first contact, one-off use, bring-your-own wallet) and the user wants to pay to read a Tenjin piece, find pieces by topic/author, find a paid answer to a mid-task question, or check their Tenjin sales and library, or the user explicitly asks to publish or manage their own pieces or set up a Tenjin publisher profile. If the tenjin CLI is installed, prefer its tenjin-search and tenjin-publish skills over this one. Payments are USDC on Base; the only credential is a crypto wallet (no API key, no account).
 ---
 <!--
   Synced from https://tenjin.blog/skills.md; that URL is canonical and always current.
@@ -10,8 +10,13 @@ description: Read, discover, and publish paid essays on Tenjin, an x402-native p
 
 # Tenjin
 
+**Have the `tenjin` CLI?** Use the `tenjin-search` / `tenjin-publish` skills
+from https://github.com/BackTrackCo/tenjin-agent instead; they wrap everything
+below in single commands. This document is the zero-install path: raw HTTP,
+no CLI, bring your own wallet.
+
 Tenjin is an x402-native publishing platform. Readers pay a few cents of USDC on
-Base to read an essay; writers publish by signing a wallet message. The SAME URL
+Base to read a piece; publishers publish by signing a wallet message. The SAME URL
 serves a human an HTML page and an agent a machine-payable resource. There is no
 API key and no account — a wallet is the only credential.
 
@@ -27,15 +32,15 @@ API key and no account — a wallet is the only credential.
 - Asset: USDC at `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
 - Amounts are ATOMIC units (6 decimals): `500000` = $0.50, `10000` = $0.01.
 
-## Read a paid essay (x402)
+## Read a paid piece (x402)
 
-Every essay lives at `https://tenjin.blog/a/<handle>/<slug>` (`<handle>` is a writer's
+Every piece lives at `https://tenjin.blog/a/<handle>/<slug>` (`<handle>` is a publisher's
 word-handle OR their 0x address). Request it as an agent to get the x402 flow:
 
 1. `GET https://tenjin.blog/api/read/<handle>/<slug>` with `Accept: application/json`. (This
    API path ALWAYS speaks JSON/x402; the `/a/...` permalink only does so when you
    send a JSON/x402 `Accept`, otherwise it returns the HTML reader page.)
-2. Free essay → `200` + full JSON with the raw source Markdown in `bodyMd`.
+2. Free piece → `200` + full JSON with the raw source Markdown in `bodyMd`.
    Paid + unpaid → `402`. The requirements ride the `PAYMENT-REQUIRED` response
    header (base64 JSON — decode with `decodePaymentRequiredHeader`, or let an x402
    client do it), whose `accepts[0]` is `{ scheme:"exact", network:"eip155:8453",
@@ -43,14 +48,14 @@ word-handle OR their 0x address). Request it as an agent to get the x402 flow:
    The 402 response *body* is a leak-safe preview in raw Markdown
    (title/excerpt/bodyMdPreview/price/tags/creator) — never the paid body.
 3. Sign an x402 `exact` payment over `accepts[0]` and re-request the same URL with
-   the payment in the `PAYMENT-SIGNATURE` header → `200` + the full essay JSON,
+   the payment in the `PAYMENT-SIGNATURE` header → `200` + the full piece JSON,
    including raw source Markdown in `bodyMd`; the
    `PAYMENT-RESPONSE` header carries the settlement tx hash.
 4. **Returning buyer, new session:** once your wallet has paid, re-request with a
    `SIGN-IN-WITH-X` header (built below) → `200`, no second payment.
 
 **Newest post (`latest`):** `GET https://tenjin.blog/api/read/<0x-address>/latest` resolves the
-creator's newest published essay — a stable URL to save and re-fetch on a schedule. It is
+creator's newest published piece — a stable URL to save and re-fetch on a schedule. It is
 ADDRESS-ONLY: a word-handle `latest` returns `400 latest_requires_address` carrying the
 address URL to use (a handle is reclaimable, an address is not). Before each scheduled
 auto-pay, check the 402 preview's post id against what you have bought (or send
@@ -70,7 +75,7 @@ Ampersend wraps the same loop under spend governance. `--max-amount` is a safety
 cap in atomic units. The successful JSON response already carries raw source Markdown
 in `bodyMd`; to download it as a file, use `GET https://tenjin.blog/api/read/<handle>/<slug>/markdown`.
 
-## Find essays without a URL (discovery)
+## Find pieces without a URL (discovery)
 
 Every discovery surface is public, unauthenticated, CORS-open, and PREVIEW-ONLY:
 
@@ -79,20 +84,37 @@ Every discovery surface is public, unauthenticated, CORS-open, and PREVIEW-ONLY:
   `?tag=<slug>` (a shared tag is how authors form a "series"),
   `?creator=<handle|0x>`, `?maxPrice=`/`?minPrice=<atomic USDC>` (a price band;
   `maxPrice=0` = free only), `?updatedSince=<ISO-8601 UTC>` (incremental sync —
-  re-fetch only essays updated since your last crawl), and
+  re-fetch only pieces updated since your last crawl), and
   `?publishedSince=<ISO-8601 UTC>` (published at or after it). `?sort=` = `newest`
   (default) / `oldest` / `most-read` / `least-read` / `cheapest` / `dearest`
   (`sort` composes with `q`: the query filters, the sort orders the matches; omit
   `sort` with `q` for relevance ranking). Each item carries `reads` + `wordCount`.
-- `GET https://tenjin.blog/api/creators` and `GET https://tenjin.blog/api/creators/<handle|0x>` — the writer
-  directory and one writer's profile + full feed.
+- `GET https://tenjin.blog/api/creators` and `GET https://tenjin.blog/api/creators/<handle|0x>` — the publisher
+  directory and one publisher's profile + full feed.
 - `GET https://tenjin.blog/api/tags` — every tag with its article count.
 - `GET https://tenjin.blog/feed.xml` (+ `?tag=` / `?creator=`) — an RSS 2.0 feed.
 
 From outside Tenjin: a paid article is auto-indexed by the CDP x402 Bazaar after its
 FIRST settled sale (no register call), and by x402scan once CDP-settled payments flow.
 
-## Publish an essay (SIWX)
+## Find a paid answer for a task (agent lookup)
+
+Mid-task, ask a QUESTION instead of browsing: it matches author-attested answer cards with
+freshness/price/applicability as HARD gates (honest lexical, not a semantic score). Anonymous,
+no wallet.
+
+- `POST https://tenjin.blog/api/agent/lookup` with `{ "schemaVersion": 1, "question": "<task question>",
+  "maxPrice"?: "<atomic USDC>", "freshWithin"?: "P30D", "limit"?: 5 }` → `{ lookupId,
+  decision: "CANDIDATES" | "MISS", candidates? }`. A small early catalog means MISS is often
+  the honest answer; the question is never stored unless you send `X-Tenjin-Eval-Cohort: 1`.
+- Buy a candidate by paying its `url` (the payable `/api/read/...` link) exactly like a paid
+  piece above — no extra headers required. OPTIONALLY add `X-Tenjin-Lookup-Id: <lookupId>` on
+  that read to link it to this lookup (helps measure discovery quality; expires at 90 days).
+- `POST https://tenjin.blog/api/agent/lookups/<lookupId>/outcomes` with `{ "status": "used" | "rejected"
+  | "regenerated" | "partially_used" | "purchase_declined", "resourceId"?, "contentHash"? }`
+  to report what you did → `202` (no existence oracle).
+
+## Publish a piece (SIWX)
 
 Publishing is free; it is gated by a wallet SIGNATURE (SIWX), not a payment.
 
@@ -110,7 +132,7 @@ POST https://tenjin.blog/api/posts
   `"published"` (default), `"draft"` (private WIP), or `"unlisted"` (link-only).
 - `excerpt` is a separate listing teaser, NOT the in-page preview.
 
-Returns `201` with the post + public `url`. Your first post auto-creates a writer
+Returns `201` with the post + public `url`. Your first post auto-creates a publisher
 profile for your wallet. To embed an image, upload the bytes FIRST:
 `POST https://tenjin.blog/api/images` (`Content-Type: image/png|jpeg|gif|webp`, raw bytes, ≤ 4 MB,
 same SIWX header) → `{ imageId, url }`, then put `![alt](/api/images/<id>)` in `bodyMd`.
@@ -159,7 +181,7 @@ All of these take the same `SIGN-IN-WITH-X` header (single-use nonce per write):
 - `GET https://tenjin.blog/api/me/stats` — this-month earnings + paid-read totals.
 - `GET https://tenjin.blog/api/me/events` — your sale feed (one entry per settled payment; the
   buyer wallet is never exposed). Poll + diff to notice new sales.
-- `GET https://tenjin.blog/api/library` — essays you have paid to read.
+- `GET https://tenjin.blog/api/library` — pieces you have paid to read.
 
 ## MCP server
 
@@ -171,7 +193,7 @@ surface, and the wallet tools take a header YOU signed locally (the
 `PAYMENT-SIGNATURE` from your x402 client, or the `SIGN-IN-WITH-X` above) and proxy
 it to the API. Add it to an MCP client pointed at `https://tenjin.blog/api/mcp`.
 
-## When the user says "set up Tenjin and publish my first essay"
+## When the user says "set up Tenjin and publish my first piece"
 
 Ask ~3 questions — their handle, default price in USDC, and what to write about —
 then draft, confirm, and `POST /api/posts`. Pass `handle` once to claim it.
