@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
@@ -580,5 +580,79 @@ describe('runPublish — publish --candidate', () => {
     await expect(runPublish(baseArgs(undefined), makeCtx(), deps)).rejects.toMatchObject({
       code: 'USAGE',
     });
+  });
+
+  it('frontmatter questionsAnswered beats the candidate meta question', async () => {
+    // The untested middle precedence tier: frontmatter wins over the candidate
+    // prefill (an explicit --question would win over both).
+    const id = await park({
+      question: 'meta question',
+      draft: ['---', 'questionsAnswered:', '  - fm question', '---', '# T', '', 'body'].join('\n'),
+    });
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(undefined, { candidate: id }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((body()?.resource as { questionsAnswered?: string[] })?.questionsAnswered).toEqual([
+      'fm question',
+    ]);
+  });
+
+  it('a post-approval publish failure leaves the candidate parked (500 and network)', async () => {
+    // 500 after approval → PUBLISH_FAILED exit 4, candidate NOT cleared.
+    const id500 = await park();
+    const fail500 = (async () =>
+      new Response(JSON.stringify({ error: { code: 'server_error', message: 'boom' } }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: id500, mode: 'full-auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fail500, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_FAILED', exitCode: 4 });
+    expect(await readCandidate(dir, id500)).not.toBeNull();
+
+    // A network failure after approval → still parked (only a 201 clears).
+    const idNet = await park();
+    const failNet = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: idNet, mode: 'full-auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: failNet, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(await readCandidate(dir, idNet)).not.toBeNull();
+  });
+
+  it('a clear failure after a successful publish stays ok:true with cleared:false + warning', async () => {
+    // Only meaningful where unix perms bite and the runner is not root.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const id = await park();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    // Make the candidates dir un-writable so dropCandidate's rm throws AFTER the 201.
+    await chmod(join(dir, 'candidates'), 0o500);
+    try {
+      const res = await runPublish(
+        baseArgs(undefined, { candidate: id }),
+        ctx,
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      );
+      const c = (res.data as { candidate: { id: string; cleared: boolean; warning?: string } })
+        .candidate;
+      expect(c).toMatchObject({ id, cleared: false });
+      expect(c.warning).toContain('could not clear candidate');
+      expect(stderr()).toContain('could not clear candidate');
+    } finally {
+      await chmod(join(dir, 'candidates'), 0o700); // restore so afterEach cleanup works
+    }
   });
 });

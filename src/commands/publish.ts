@@ -226,12 +226,37 @@ export async function runPublish(
   });
 
   // ONLY on a successful publish is the candidate cleared from the pending store
-  // (a refusal or a write failure left it parked, above). Nothing else auto-drops.
-  let clearedCandidate: string | undefined;
-  if (candidate !== undefined && (await dropCandidate(ctx.dataDir, candidate.id))) {
-    clearedCandidate = candidate.id;
+  // (a refusal or a write failure left it parked, above). The clear is BEST-EFFORT:
+  // the piece is already published, so a failing drop must NOT report the publish as
+  // failed — that would invite a retry and double-publish. Keep ok:true, report
+  // cleared:false with a warning, and let the human drop it manually.
+  const candidateInfo =
+    candidate !== undefined ? await clearPublishedCandidate(ctx, candidate.id) : undefined;
+  return receipt(result, runtime.baseUrl, candidateInfo);
+}
+
+interface CandidateReceipt {
+  id: string;
+  cleared: boolean;
+  warning?: string;
+}
+
+async function clearPublishedCandidate(ctx: CommandContext, id: string): Promise<CandidateReceipt> {
+  try {
+    if (await dropCandidate(ctx.dataDir, id)) return { id, cleared: true };
+    // The dir was already gone (a concurrent drop): nothing to clear, not an error.
+    const warning = `Published, but candidate ${id} was already gone; nothing to clear.`;
+    ctx.io.stderr.write(`${warning}\n`);
+    return { id, cleared: false, warning };
+  } catch (err) {
+    const warning = `Published successfully, but could not clear candidate ${id}: ${errorMessage(err)}. Remove it with \`tenjin candidate drop ${id}\`.`;
+    ctx.io.stderr.write(`${warning}\n`);
+    return { id, cleared: false, warning };
   }
-  return receipt(result, runtime.baseUrl, clearedCandidate);
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -286,7 +311,7 @@ async function readDraft(record: CandidateRecord): Promise<string> {
 function receipt(
   result: Awaited<ReturnType<typeof publishPost>>,
   baseUrl: string,
-  clearedCandidate?: string,
+  candidateInfo?: CandidateReceipt,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing);
@@ -300,7 +325,7 @@ function receipt(
       : missing.length > 0
         ? `Answer card not lookup-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
-    ...(clearedCandidate !== undefined ? [`Cleared candidate ${clearedCandidate}.`] : []),
+    ...(candidateInfo?.cleared === true ? [`Cleared candidate ${candidateInfo.id}.`] : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -312,9 +337,7 @@ function receipt(
       cacheEligible,
       missing,
       deskUrl,
-      ...(clearedCandidate !== undefined
-        ? { candidate: { id: clearedCandidate, cleared: true } }
-        : {}),
+      ...(candidateInfo !== undefined ? { candidate: candidateInfo } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,
