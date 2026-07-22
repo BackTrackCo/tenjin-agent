@@ -82,6 +82,23 @@ describe('runCandidateAdd', () => {
       }),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
   });
+
+  it('caps --question at 200 chars (the server bound) so a candidate is publishable', async () => {
+    const file = join(dir, 'draft.md');
+    await writeFile(file, '# hi\n', 'utf8');
+    // 200 is accepted; 201 is USAGE (a longer question would only fail at publish).
+    const ok = await runCandidateAdd(
+      { file, lookupId: LOOKUP, question: 'q'.repeat(200) },
+      makeCtx(),
+      { cwd: dir },
+    );
+    expect((ok.data as { question: string }).question).toHaveLength(200);
+    await expect(
+      runCandidateAdd({ file, lookupId: LOOKUP, question: 'q'.repeat(201) }, makeCtx(), {
+        cwd: dir,
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+  });
 });
 
 describe('runCandidateList', () => {

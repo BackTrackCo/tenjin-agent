@@ -279,6 +279,9 @@ async function resolveSource(
         fix: 'Pass a candidate id from `tenjin candidate list`.',
       });
     }
+    // Read-then-act (read here, drop after a successful publish) is not atomic, but
+    // the candidate store is a single-user local dir; a concurrent drop between the
+    // two is accepted, and the post-success clear is best-effort anyway.
     const record = await readCandidate(dataDir, args.candidate);
     if (record === null) {
       throw new CliError('USAGE', `Unknown candidate: ${JSON.stringify(args.candidate)}`, {

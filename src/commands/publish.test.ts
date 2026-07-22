@@ -632,6 +632,24 @@ describe('runPublish — publish --candidate', () => {
     expect(await readCandidate(dir, idNet)).not.toBeNull();
   });
 
+  it('a block-tier secret in the candidate question hard-blocks and stays parked', async () => {
+    // Pins that the meta-question prefill flows through cardScanText → scan: a
+    // refactor that prefilled AFTER the scan would reopen the card-flag bypass.
+    const id = await park({ question: 'How do I use AKIAIOSFODNN7EXAMPLE?' });
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: id, mode: 'full-auto', yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+    expect(await readCandidate(dir, id)).not.toBeNull(); // still parked
+  });
+
   it('a clear failure after a successful publish stays ok:true with cleared:false + warning', async () => {
     // Only meaningful where unix perms bite and the runner is not root.
     if (process.platform === 'win32' || process.getuid?.() === 0) return;
