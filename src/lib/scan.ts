@@ -134,8 +134,10 @@ const LINE_DETECTORS: LineDetector[] = [
     // sk-admin- keys. The body is base62 and MUST contain a digit (real keys are
     // high-entropy), which keeps sk- kebab identifiers (sk-user-profile-updated…)
     // from hard-blocking. `(?!ant-)` keeps an Anthropic key out. Only the base62
-    // leading run of a modern key is matched — enough to flag it.
-    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}\b/g,
+    // leading run of a modern key is matched — enough to flag it. The run is
+    // terminated by a non-base62 lookahead (not \b, which a trailing `_` — a word
+    // char — would not fire), so an underscore-adjacent key still matches.
+    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])/g,
     excerpt: (m) => maskKeeping(m[0], 3),
   },
   {

@@ -69,6 +69,11 @@ describe('scan — block detectors', () => {
     );
   });
 
+  it('detects an underscore-adjacent openai key (review round 4)', () => {
+    // The base62 run terminates at `_` (a word char \b would not catch).
+    expect(checks('sk-proj-abc123DEF456ghi789JKL012_mno')).toContain('openai-key');
+  });
+
   it('flags a DB connection URI with a real password, masking it, but not examples', () => {
     const f = find('postgres://admin:s3cr3tpass@db.example.com:5432/app', 'db-connection-uri');
     expect(f?.severity).toBe('block');
