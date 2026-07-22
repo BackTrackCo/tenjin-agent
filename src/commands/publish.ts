@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
-import { parseUsdToAtomic, toMoney } from '../lib/money';
+import { formatUsdDisplay, parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { scan, type ScanFinding } from '../lib/scan';
 import { headingOutline } from '../lib/markdown';
@@ -100,7 +100,7 @@ export async function runPublish(
   // consumers) what the default does and how to change it, so an unconfigured
   // publish is never a silent auto-publish surprise.
   if (settings.modeSource === 'default') {
-    const usd = toMoney(settings.defaultPriceAtomic).usd;
+    const usd = formatUsdDisplay(settings.defaultPriceAtomic);
     ctx.io.stderr.write(
       `publish.mode: ${settings.mode} (default) - a clean scan publishes at $${usd} without asking. Change: tenjin config set publish.mode review.\n`,
     );

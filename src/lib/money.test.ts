@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseUsdToAtomic, atomicToUsd, toMoney } from './money';
+import { parseUsdToAtomic, atomicToUsd, toMoney, formatUsdDisplay } from './money';
 import { CliError } from './errors';
 
 describe('parseUsdToAtomic', () => {
@@ -61,5 +61,18 @@ describe('atomicToUsd', () => {
 describe('toMoney', () => {
   it('emits both atomic and USD forms', () => {
     expect(toMoney('250000')).toEqual({ atomic: '250000', usd: '0.25' });
+  });
+});
+
+describe('formatUsdDisplay', () => {
+  it.each([
+    ['100000', '0.10'],
+    ['5000000', '5.00'],
+    ['0', '0.00'],
+    ['250000', '0.25'],
+    ['1', '0.000001'], // sub-cent precision is kept, never rounded to 0.00
+    ['12500000', '12.50'],
+  ])('%s atomic -> $%s canonical', (atomic, usd) => {
+    expect(formatUsdDisplay(atomic)).toBe(usd);
   });
 });

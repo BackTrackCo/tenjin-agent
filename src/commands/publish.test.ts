@@ -241,7 +241,7 @@ describe('runPublish — default-mode notice', () => {
     const { ctx, stderr } = makeCtxCapturingStderr();
     await runPublish(baseArgs(await writeDoc(CLEAN)), ctx, { fetchImpl: fetch, provider });
     expect(stderr()).toContain(
-      'publish.mode: auto (default) - a clean scan publishes at $0.1 without asking.',
+      'publish.mode: auto (default) - a clean scan publishes at $0.10 without asking.',
     );
     expect(stderr()).toContain('tenjin config set publish.mode review');
   });
