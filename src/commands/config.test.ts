@@ -55,6 +55,17 @@ describe('runConfigList', () => {
     expect(humanLines).toHaveLength(9);
   });
 
+  it('appends a one-line description per key to the human listing (data unchanged)', async () => {
+    const { data, humanLines } = await runConfigList(makeCtx());
+    const text = (humanLines ?? []).join('\n');
+    expect(text).toContain('when to ask before paying'); // confirm
+    expect(text).toContain('review=always ask, auto=ask on findings, full-auto=only hard blocks');
+    expect(text).toContain('price used when none is given'); // publish.defaultPrice
+    // The machine shape carries no description field.
+    const d = data as Record<string, Record<string, unknown>>;
+    expect(Object.keys(d.confirm ?? {}).sort()).toEqual(['source', 'value']);
+  });
+
   it('exposes the confirm threshold in dual form when above:', async () => {
     await runConfigSet({ key: 'confirm', value: 'above:0.25' }, makeCtx());
     const { data } = await runConfigList(makeCtx());

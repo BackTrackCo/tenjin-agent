@@ -24,6 +24,26 @@ function makeCtx(): CommandContext {
   };
 }
 
+/** A ctx whose stderr writes are captured, for asserting the default-mode notice. */
+function makeCtxCapturingStderr(): { ctx: CommandContext; stderr: () => string } {
+  const chunks: string[] = [];
+  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+  const errStream = {
+    write: (s: string) => {
+      chunks.push(s);
+      return true;
+    },
+  } as unknown as NodeJS.WritableStream;
+  return {
+    stderr: () => chunks.join(''),
+    ctx: {
+      flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: errStream, isTTY: false },
+    },
+  };
+}
+
 /** A spy wallet provider counting wallet signatures (the establish popup). */
 function spyProvider(): { provider: WalletProvider; signCount: () => number } {
   const inner = testSigner();
@@ -211,6 +231,30 @@ describe('runPublish — session key mint-once', () => {
     await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
     await runPublish(baseArgs(await writeDoc(CLEAN)), makeCtx(), deps);
     expect(signCount()).toBe(2); // one SIWX signature per write
+  });
+});
+
+describe('runPublish — default-mode notice', () => {
+  it('prints one stderr notice when publish.mode is unconfigured (source default)', async () => {
+    const { provider } = spyProvider();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runPublish(baseArgs(await writeDoc(CLEAN)), ctx, { fetchImpl: fetch, provider });
+    expect(stderr()).toContain(
+      'publish.mode: auto (default) - a clean scan publishes at $0.1 without asking.',
+    );
+    expect(stderr()).toContain('tenjin config set publish.mode review');
+  });
+
+  it('omits the notice when the mode is set (source is a flag, not default)', async () => {
+    const { provider } = spyProvider();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), ctx, {
+      fetchImpl: fetch,
+      provider,
+    });
+    expect(stderr()).not.toContain('(default)');
   });
 });
 

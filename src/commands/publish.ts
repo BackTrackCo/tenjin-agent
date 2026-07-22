@@ -96,6 +96,15 @@ export async function runPublish(
   for (const warning of settings.warnings) {
     ctx.io.stderr.write(`${warning}\n`);
   }
+  // When the mode was never configured, say once (on stderr, invisible to JSON
+  // consumers) what the default does and how to change it, so an unconfigured
+  // publish is never a silent auto-publish surprise.
+  if (settings.modeSource === 'default') {
+    const usd = toMoney(settings.defaultPriceAtomic).usd;
+    ctx.io.stderr.write(
+      `publish.mode: ${settings.mode} (default) - a clean scan publishes at $${usd} without asking. Change: tenjin config set publish.mode review.\n`,
+    );
+  }
   const priceAtomic = resolvePrice(args, frontmatter, settings.defaultPriceAtomic);
 
   // The scan runs in EVERY mode (D38): it gates the gate, it does not replace it.
