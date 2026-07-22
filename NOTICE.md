@@ -41,6 +41,39 @@ BlockRun MCP is licensed under the MIT License:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
+## gitleaks
+
+The provider secret-token shape patterns in the publish redaction scan
+(`src/lib/scan.ts`: AWS access keys, GitHub/Slack/Stripe tokens, JWTs, and the
+PEM private-key marker) are adapted from the
+[gitleaks](https://github.com/gitleaks/gitleaks) ruleset (MIT), by Zachary Rice.
+The regexes are vendored and adapted inline; gitleaks is not a runtime
+dependency (the scan is pure and offline by design).
+
+gitleaks is licensed under the MIT License:
+
+> MIT License
+>
+> Copyright (c) 2019 Zachary Rice
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
 ## tenjin-mcp
 
 This repository absorbs, with credit, patterns from the archived

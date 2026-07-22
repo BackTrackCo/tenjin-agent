@@ -1,8 +1,22 @@
 import { mkdir } from 'node:fs/promises';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
-import { CONFIG_KEYS, RawConfigSchema, loadRawConfig, resolveSettings } from '../lib/config';
-import type { Config, EffectiveSettings, Provenance } from '../lib/config';
+import {
+  CONFIG_KEYS,
+  PUBLISH_CONFIG_KEYS,
+  PublishModeSchema,
+  RawConfigSchema,
+  loadRawConfig,
+  resolveSettings,
+} from '../lib/config';
+import type {
+  EffectiveSettings,
+  PartialConfig,
+  Provenance,
+  PublishConfigKey,
+  ScalarConfigKey,
+} from '../lib/config';
+import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -25,7 +39,11 @@ interface RenderedSetting extends RenderedValue {
 }
 
 const CONFIRM_ABOVE = 'above:';
-const KEY_WIDTH = Math.max(...CONFIG_KEYS.map((key) => key.length));
+const KEY_WIDTH = Math.max(...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].map((key) => key.length));
+
+function isPublishKey(key: string): key is PublishConfigKey {
+  return (PUBLISH_CONFIG_KEYS as readonly string[]).includes(key);
+}
 
 /**
  * Show every effective key with its value and provenance. `data` is keyed by
@@ -42,6 +60,11 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(formatLine(key, entry));
   }
+  for (const key of PUBLISH_CONFIG_KEYS) {
+    const entry = renderPublishSetting(key, settings);
+    data[key] = entry;
+    humanLines.push(formatLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -50,6 +73,11 @@ export async function runConfigGet(
   { key }: { key: string },
   ctx: CommandContext,
 ): Promise<CommandResult> {
+  if (isPublishKey(key)) {
+    const settings = await resolveFromContext(ctx);
+    const entry = renderPublishSetting(key, settings);
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
@@ -65,34 +93,90 @@ export async function runConfigSet(
   { key, value }: { key: string; value: string },
   ctx: CommandContext,
 ): Promise<CommandResult> {
+  if (isPublishKey(key)) return setPublishKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
-  await persist(ctx.dataDir, configKey, stored);
+  await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
   const entry = renderSetting(configKey, stored, 'file');
   return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
 
-async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
-  const config = await loadRawConfig(ctx.dataDir);
-  return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
+/**
+ * `config set publish.mode|publish.defaultPrice`. mode validates to the enum;
+ * defaultPrice parses decimal USD at the edge into atomic (matching the spend
+ * keys). The subkey is merged into the nested publish block, so a sibling subkey
+ * (or an unknown one a newer CLI wrote) is preserved.
+ */
+async function setPublishKey(
+  key: PublishConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const entry: RenderedSetting =
+    key === 'publish.mode'
+      ? { value: parsePublishMode(value), source: 'file' }
+      : { value: toMoney(parseUsdToAtomic(value)), source: 'file' };
+  const subkey = key === 'publish.mode' ? 'mode' : 'defaultPrice';
+  const stored = key === 'publish.mode' ? (entry.value as string) : (entry.value as Money).atomic;
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    publish: { ...existing.publish, [subkey]: stored },
+  }));
+  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
-function assertKey(key: string): keyof Config {
-  if ((CONFIG_KEYS as string[]).includes(key)) return key as keyof Config;
+function parsePublishMode(value: string): string {
+  const parsed = PublishModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid publish mode: ${JSON.stringify(value)}`, {
+    fix: 'Use "review", "auto", or "full-auto".',
+  });
+}
+
+async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
+  const config = await loadRawConfig(ctx.dataDir);
+  // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
+  // real `publish` would resolve (project/env included), not a global-only guess.
+  const project = await loadProjectConfig(process.cwd());
+  return resolveSettings({
+    config,
+    flags: { baseUrl: ctx.flags.baseUrl },
+    env: process.env,
+    project: project?.layer,
+  });
+}
+
+function assertKey(key: string): ScalarConfigKey {
+  if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${CONFIG_KEYS.join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].join(', ')}.`,
   });
 }
 
 function renderSetting(
-  key: keyof Config,
+  key: ScalarConfigKey,
   stored: string | string[] | boolean,
   source: Provenance,
 ): RenderedSetting {
   return { ...renderValue(key, stored), source };
 }
 
-function renderValue(key: keyof Config, stored: string | string[] | boolean): RenderedValue {
+/**
+ * The list/get shape for a publish key, read from the resolved effective
+ * settings, which now include the per-project `.tenjin.json` layer (see
+ * resolveFromContext) so the source reflects what a publish would actually use.
+ */
+function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings): RenderedSetting {
+  if (key === 'publish.mode') {
+    return { value: settings.publishMode.value, source: settings.publishMode.source };
+  }
+  return {
+    value: toMoney(settings.publishDefaultPrice.value),
+    source: settings.publishDefaultPrice.source,
+  };
+}
+
+function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'confirm' && stored.startsWith(CONFIRM_ABOVE)) {
@@ -102,7 +186,7 @@ function renderValue(key: keyof Config, stored: string | string[] | boolean): Re
 }
 
 /** Per-key edge parsing. Returns the persisted form; throws USAGE on bad input. */
-function parseValue(key: keyof Config, value: string): string | string[] | boolean {
+function parseValue(key: ScalarConfigKey, value: string): string | string[] | boolean {
   switch (key) {
     case 'maxAutoSpend':
     case 'sessionBudget':
@@ -172,7 +256,7 @@ function parseHttpUrl(value: string): string {
 }
 
 /**
- * Merge one key into the raw file and write it back atomically. Uses the partial
+ * Apply `merge` to the raw file and write it back atomically. Uses the partial
  * schema and writeFileAtomic (not writeConfig, which would materialize every
  * default into the file and corrupt provenance). loadRawConfig surfaces a
  * corrupt existing file as CONFIG_INVALID, which propagates.
@@ -184,15 +268,14 @@ function parseHttpUrl(value: string): string {
  */
 async function persist(
   dir: string,
-  key: keyof Config,
-  stored: string | string[] | boolean,
+  merge: (existing: PartialConfig) => PartialConfig,
 ): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const lockPath = `${configPath(dir)}.lock`;
   try {
     await withFileLock(lockPath, async () => {
       const existing = await loadRawConfig(dir);
-      const merged = { ...existing, [key]: stored };
+      const merged = merge(existing);
       const validated = RawConfigSchema.parse(merged);
       await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
         mode: 0o644,

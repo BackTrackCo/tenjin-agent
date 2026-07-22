@@ -90,3 +90,26 @@ describe('writeConfig', () => {
     expect(await loadConfig(dir)).toEqual(next);
   });
 });
+
+describe('publish block', () => {
+  it('defaults publish to auto / $0.10 atomic', async () => {
+    expect(CONFIG_DEFAULTS.publish).toEqual({ mode: 'auto', defaultPrice: '100000' });
+    expect((await loadConfig(dir)).publish).toEqual({ mode: 'auto', defaultPrice: '100000' });
+  });
+
+  it('merges a partial publish block per-subkey (keeps the default it omits)', async () => {
+    await writeFile(configFile(), JSON.stringify({ publish: { mode: 'review' } }));
+    expect((await loadConfig(dir)).publish).toEqual({ mode: 'review', defaultPrice: '100000' });
+  });
+
+  it('resolveSettings exposes publishMode and publishDefaultPrice', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ publish: { mode: 'review', defaultPrice: '250000' } }),
+    );
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.publishMode).toEqual({ value: 'review', source: 'file' });
+    expect(s.publishDefaultPrice).toEqual({ value: '250000', source: 'file' });
+  });
+});

@@ -47,7 +47,12 @@ describe('runConfigList', () => {
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
-    expect(humanLines).toHaveLength(7);
+    expect(d['publish.mode']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['publish.defaultPrice']).toEqual({
+      value: { atomic: '100000', usd: '0.1' },
+      source: 'default',
+    });
+    expect(humanLines).toHaveLength(9);
   });
 
   it('exposes the confirm threshold in dual form when above:', async () => {
@@ -293,5 +298,94 @@ describe('evalCohort key', () => {
     const err = await caught(() => runConfigSet({ key: 'evalCohort', value: bad }, makeCtx()));
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
+  });
+});
+
+describe('publish.mode key', () => {
+  it.each(['review', 'auto', 'full-auto'] as const)(
+    'round-trips %s through set/get',
+    async (mode) => {
+      const set = await runConfigSet({ key: 'publish.mode', value: mode }, makeCtx());
+      expect(set.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
+      const get = await runConfigGet({ key: 'publish.mode' }, makeCtx());
+      expect(get.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
+      expect(await readRawFile()).toEqual({ publish: { mode } });
+    },
+  );
+
+  it.each(['on', 'AUTO', 'fullauto', ''])('rejects %j as USAGE', async (bad) => {
+    const err = await caught(() => runConfigSet({ key: 'publish.mode', value: bad }, makeCtx()));
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+  });
+});
+
+describe('publish.defaultPrice key', () => {
+  it('parses decimal USD to atomic on set and echoes dual money on get', async () => {
+    const set = await runConfigSet({ key: 'publish.defaultPrice', value: '0.25' }, makeCtx());
+    expect(set.data).toEqual({
+      key: 'publish.defaultPrice',
+      value: { atomic: '250000', usd: '0.25' },
+      source: 'file',
+    });
+    const get = await runConfigGet({ key: 'publish.defaultPrice' }, makeCtx());
+    expect(get.data).toEqual({
+      key: 'publish.defaultPrice',
+      value: { atomic: '250000', usd: '0.25' },
+      source: 'file',
+    });
+    expect(await readRawFile()).toEqual({ publish: { defaultPrice: '250000' } });
+  });
+
+  it.each(['abc', '-1', '1.2345678', ''])('rejects %j as USAGE', async (bad) => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.defaultPrice', value: bad }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+  });
+
+  it('merges the two publish subkeys without dropping each other', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
+    await runConfigSet({ key: 'publish.defaultPrice', value: '0.5' }, makeCtx());
+    expect(await readRawFile()).toEqual({ publish: { mode: 'review', defaultPrice: '500000' } });
+  });
+});
+
+describe('forward compatibility', () => {
+  it('preserves an unknown top-level block through a set', async () => {
+    await writeFile(configFile(), JSON.stringify({ future: { some: 'block' } }));
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx());
+    const raw = (await readRawFile()) as Record<string, unknown>;
+    expect(raw.future).toEqual({ some: 'block' });
+    expect(raw.publish).toEqual({ mode: 'auto' });
+  });
+
+  it('preserves an unknown publish subkey a newer CLI wrote', async () => {
+    await writeFile(configFile(), JSON.stringify({ publish: { visibility: 'unlisted' } }));
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
+    const raw = (await readRawFile()) as { publish: Record<string, unknown> };
+    expect(raw.publish).toEqual({ visibility: 'unlisted', mode: 'review' });
+  });
+});
+
+describe('publish readout reflects the per-project .tenjin.json layer', () => {
+  it('config get publish.mode shows the project source when a .tenjin.json sets it', async () => {
+    // dataDir has no publish config (→ default), but the cwd's .tenjin.json does:
+    // the readout must show what a real publish resolves, sourced 'project'.
+    const projectCwd = await mkdtemp(join(tmpdir(), 'tenjin-cfg-proj-'));
+    await writeFile(
+      join(projectCwd, '.tenjin.json'),
+      JSON.stringify({ publish: { mode: 'review' } }),
+    );
+    const prev = process.cwd();
+    try {
+      process.chdir(projectCwd);
+      const { data } = await runConfigGet({ key: 'publish.mode' }, makeCtx());
+      expect(data).toMatchObject({ key: 'publish.mode', value: 'review', source: 'project' });
+    } finally {
+      process.chdir(prev);
+      await rm(projectCwd, { recursive: true, force: true });
+    }
   });
 });
