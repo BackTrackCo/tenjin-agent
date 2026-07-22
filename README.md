@@ -21,8 +21,9 @@ npm package and, soon, the Claude Code plugin and agent skills that wrap it.
 > `wallet` today. `lookup`, `inspect`, `buy`, and `outcome` are implemented but require the
 > marketplace lookup API (Track A2) to be deployed to the base URL you point at;
 > against a deploy without it, `doctor` shows a `lookup-contract` warning and those
-> commands will not work yet. `publish --draft` is still landing. Everything under
-> "zero install" below is complete and live now; start there.
+> commands will not work yet. `publish` writes a piece with an optional answer
+> card, gated by a local secrets scan and your `publish.mode` consent. Everything
+> under "zero install" below is complete and live now; start there.
 
 ## Use Tenjin today, zero install
 
@@ -168,8 +169,8 @@ true` opts into 90-day retention of the question for retrieval evaluation.
 > atomic-unit flags in CLI spec 10, per plan 12 decision O1 (humans think in
 > dollars; agents read the atomic value in the JSON).
 
-Next: `publish --draft`, a Claude Code plugin marketplace in this repo, and
-`tenjin mcp` (local stdio server over the same core).
+Next: a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
+stdio server over the same core).
 
 ### Output contract
 

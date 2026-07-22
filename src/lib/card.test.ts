@@ -179,6 +179,26 @@ describe('parseAppliesToFlags', () => {
   it('rejects a pair without =', () => {
     expect(() => parseAppliesToFlags(['bad'])).toThrow();
   });
+
+  it('rejects a prototype-polluting key as USAGE, not a raw TypeError', () => {
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expectUsage(() => parseAppliesToFlags([`${key}=x`]));
+    }
+  });
+});
+
+describe('prototype-pollution safety', () => {
+  it('a __proto__ frontmatter key fails loudly (USAGE), never a silent prototype mutation', () => {
+    const text = ['---', '__proto__:', '  - polluted', '---', 'body'].join('\n');
+    expectUsage(() => parseFrontmatter(text));
+    // The parser never corrupted Object.prototype on the way to throwing.
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('a __proto__ nested appliesTo key also fails as USAGE', () => {
+    const text = ['---', 'appliesTo:', '  __proto__: [x]', '---', 'body'].join('\n');
+    expectUsage(() => parseFrontmatter(text));
+  });
 });
 
 describe('cacheEligible echo', () => {

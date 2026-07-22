@@ -151,7 +151,23 @@ function parseNestedMap(lines: string[]): Record<string, string[]> {
 function splitKey(line: string): { key: string; value: string } | null {
   const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s?(.*)$/.exec(line);
   if (m === null || m[1] === undefined) return null;
+  guardKey(m[1]);
   return { key: m[1], value: (m[2] ?? '').trim() };
+}
+
+/**
+ * Reject a prototype-polluting key BEFORE it is used to index a plain object:
+ * a `__proto__`/`constructor`/`prototype` key would otherwise mutate the local
+ * object's prototype (silently dropping the field) or throw a raw TypeError, both
+ * of which contradict the fail-loudly contract. Fails as USAGE instead.
+ */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+function guardKey(key: string): void {
+  if (UNSAFE_KEYS.has(key)) {
+    throw new CliError('USAGE', `Unsupported key: ${JSON.stringify(key)}`, {
+      fix: 'Rename it; __proto__, constructor, and prototype are not allowed as keys.',
+    });
+  }
 }
 
 function parseInlineValue(value: string): string | string[] {
@@ -413,6 +429,7 @@ export function parseAppliesToFlags(pairs: string[]): Record<string, string[]> {
     }
     const key = pair.slice(0, eq).trim();
     const value = pair.slice(eq + 1).trim();
+    guardKey(key);
     (out[key] ??= []).push(value);
   }
   return out;

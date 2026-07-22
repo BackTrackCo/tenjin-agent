@@ -2,9 +2,9 @@ import type { ErrorCode } from '../schemas';
 
 /**
  * The process exit code is API (spec 10): 0 success, 1 runtime/network, 2 usage,
- * 3 policy refusal, 4 payment failure. 4 is reserved for B2 (spend/settlement)
- * and never produced in B1, but it stays in the type so the mapping table is
- * total and B2 adds codes without widening the union.
+ * 3 understood-but-refused (policy refusal, publish confirmation/hard-block), 4 a
+ * failure AFTER an approved spend or write (a settlement that failed, a publish
+ * that failed post-consent).
  */
 export type ExitCode = 1 | 2 | 3 | 4;
 

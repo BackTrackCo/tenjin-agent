@@ -18,9 +18,22 @@ import {
   targetUri,
   type SessionFile,
 } from './session-key';
+import { privateKeyToAccount } from 'viem/accounts';
 import { sessionPath } from './paths';
 import { testSigner } from './read-test-utils';
 import type { TenjinSigner } from './wallet/provider';
+
+/** A second, distinct signer (a different wallet address) for swap-invalidation. */
+function otherSigner(): TenjinSigner {
+  const account = privateKeyToAccount(
+    '0x0123456789012345678901234567890123456789012345678901234567890123',
+  );
+  return {
+    address: account.address,
+    signMessage: (a) => account.signMessage({ message: a.message }),
+    signTypedData: (a) => account.signTypedData(a),
+  };
+}
 
 const subtle = webcrypto.subtle;
 
@@ -297,6 +310,58 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
     expect(count()).toBe(2);
 
     expect(await auth.recover('session_key_unbound')).toBe(false); // fatal
+  });
+
+  it('a wallet swap invalidates the cached session (re-establishes under the new key)', async () => {
+    const first = spySigner();
+    const config1 = {
+      signer: first.signer,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: dir,
+    };
+    const h1 = await createSessionKeyAuth(config1).headersFor({
+      method: 'POST',
+      url: 'https://tenjin.blog/api/posts',
+      body: '{}',
+    });
+    expect(first.count()).toBe(1);
+
+    // A different wallet over the SAME dataDir: the cached session is address-bound
+    // to the first wallet, so it is not reused — the new wallet signs a fresh one.
+    const swapped = otherSigner();
+    let swapSigns = 0;
+    const swapSpy: TenjinSigner = {
+      address: swapped.address,
+      signMessage: (a) => {
+        swapSigns++;
+        return swapped.signMessage(a);
+      },
+      signTypedData: (a) => swapped.signTypedData(a),
+    };
+    const h2 = await createSessionKeyAuth({
+      signer: swapSpy,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: dir,
+    }).headersFor({ method: 'POST', url: 'https://tenjin.blog/api/posts', body: '{}' });
+    expect(swapSigns).toBe(1);
+    expect(h2['Tenjin-Session-Delegation']).not.toBe(h1['Tenjin-Session-Delegation']);
+    expect(first.count()).toBe(1); // the first wallet was never asked to sign again
+  });
+});
+
+describe('signWithSession freshness', () => {
+  it('two signings of the same request differ in created, nonce, and signature', async () => {
+    const { file } = await realKeyFile();
+    const req = { method: 'POST' as const, url: 'https://tenjin.blog/api/posts', body: '{"a":1}' };
+    let clock = 1_700_000_000_000;
+    const sign = () => signWithSession(file, req, { now: () => (clock += 2000) });
+    const a = await sign();
+    const b = await sign();
+    expect(a['Signature-Input']).not.toBe(b['Signature-Input']); // created + nonce move
+    expect(a.Signature).not.toBe(b.Signature); // a fresh ECDSA signature each time
+    expect(a['Content-Digest']).toBe(b['Content-Digest']); // same body ⇒ same digest
   });
 });
 

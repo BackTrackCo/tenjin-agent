@@ -7,11 +7,12 @@ import { buildPostCreateBody } from './lib/posts-api';
 import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
-// (generated from tenjin main af607b3, the A2 merge). Every assertion here is a
-// pure walk of the OpenAPI document, so a server-side rename or removal that
-// would break the CLI fails THIS suite before it fails in production. The
-// env-gated section at the bottom re-runs the same walks against a live
-// deployment and is the only test allowed to touch the network.
+// (the live tenjin.blog/openapi.json, the A3 publish deploy: it carries the
+// resource card + the cacheEligible echo alongside the A2 agent-lookup surface).
+// Every assertion here is a pure walk of the OpenAPI document, so a server-side
+// rename or removal that would break the CLI fails THIS suite before it fails in
+// production. The env-gated section at the bottom re-runs the same walks against a
+// live deployment and is the only test allowed to touch the network.
 
 const fixtureDoc: unknown = fixtureJson;
 

@@ -198,6 +198,28 @@ describe('publishPost — 401 recovery matrix', () => {
     expect(result.resourceId).toBe(CREATED_POST.id);
   });
 
+  it('falls back to the body error.code when a 401 carries no WWW-Authenticate header', async () => {
+    let attempt = 0;
+    const { fetch } = capturingFetch(() => {
+      attempt++;
+      if (attempt === 1) {
+        // No www-authenticate header at all; the code lives only in the body.
+        return new Response(JSON.stringify({ error: { code: 'proof_expired' } }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return ok201(CREATED_POST);
+    });
+    const { auth, recovered } = fakeAuth(() => true);
+    const result = await publishPost({ status: 'published', title: 'T', bodyMd: 'B' }, auth, {
+      ...OPTS,
+      fetchImpl: fetch,
+    });
+    expect(recovered).toEqual(['proof_expired']);
+    expect(result.resourceId).toBe(CREATED_POST.id);
+  });
+
   it('does not retry a fatal 401 (session_key_unbound)', async () => {
     const { fetch, calls } = capturingFetch(
       () =>

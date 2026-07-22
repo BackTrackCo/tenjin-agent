@@ -49,7 +49,7 @@ describe('CliError', () => {
     expect(new CliError('RPC_ERROR', 'x').exitCode).toBe(1);
   });
 
-  it('allows overriding the exit code (4 reserved for B2 payment failures)', () => {
+  it('allows overriding the exit code (4 = a failure after an approved spend/write)', () => {
     expect(new CliError('PROVIDER_ERROR', 'x', { exitCode: 4 }).exitCode).toBe(4);
   });
 
