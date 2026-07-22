@@ -25,6 +25,9 @@ const EXPECTED: Record<ErrorCode, ExitCode> = {
   RESOURCE_NOT_FOUND: 1,
   LOOKUP_NOT_FOUND: 1,
   RATE_LIMITED: 1,
+  NEEDS_CONFIRMATION: 3,
+  PUBLISH_BLOCKED: 3,
+  PUBLISH_FAILED: 4,
 };
 
 describe('exitCodeFor', () => {

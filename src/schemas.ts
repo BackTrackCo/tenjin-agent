@@ -39,6 +39,14 @@ export const ErrorCodeSchema = z.enum([
   // A 429 from the anonymous lookup/outcome/read limits; error.details carries
   // retryAfterSeconds so a looping agent can back off instead of hammering.
   'RATE_LIMITED',
+  // B3 (publish): a publish that needs the human's yes (exit 3) — soft scan
+  // findings, or `review` mode always. NEEDS_CONFIRMATION clears with --yes;
+  // PUBLISH_BLOCKED is a hard-block finding (a live secret) that no mode or --yes
+  // ever clears. PUBLISH_FAILED (exit 4) is a write that failed AFTER approval,
+  // mirroring PAYMENT_FAILED's post-decision failure class.
+  'NEEDS_CONFIRMATION',
+  'PUBLISH_BLOCKED',
+  'PUBLISH_FAILED',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 

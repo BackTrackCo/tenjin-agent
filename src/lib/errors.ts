@@ -45,6 +45,12 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   RESOURCE_NOT_FOUND: 1,
   LOOKUP_NOT_FOUND: 1,
   RATE_LIMITED: 1,
+  // A publish awaiting confirmation or hard-blocked is understood-but-refused (3),
+  // the same posture as POLICY_REFUSED; a write that failed after approval is a
+  // settlement-class failure (4), like PAYMENT_FAILED.
+  NEEDS_CONFIRMATION: 3,
+  PUBLISH_BLOCKED: 3,
+  PUBLISH_FAILED: 4,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {
