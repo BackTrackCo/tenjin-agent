@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomicExclusive } from './atomic-json';
+import { hasCode } from './errno';
 import { newId, UUID_RE } from './ids';
 
 /**
@@ -104,7 +105,7 @@ export async function createCandidate(
     // what was already there. Any other failure is a partial write of our own
     // fresh dir — remove it so a crash mid-add can't strand a hidden dir holding
     // the (secrets-adjacent) draft that `list` skips and no one can name to `drop`.
-    if (!isEexist(err)) {
+    if (!hasCode(err, 'EEXIST')) {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
     throw err;
@@ -179,8 +180,4 @@ async function readMeta(dir: string): Promise<CandidateMeta | null> {
   }
   const parsed = CandidateMetaSchema.safeParse(json);
   return parsed.success ? parsed.data : null;
-}
-
-function isEexist(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EEXIST';
 }
