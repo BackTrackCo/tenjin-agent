@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
+import { createCandidate, readCandidate } from '../lib/candidate-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -109,8 +110,8 @@ const WARN = '# The Answer\n\nSend to 0x' + 'b'.repeat(40) + ' today.\n';
 // and it stays a block through B3.1's secret-assignment→warn demotion.
 const BLOCK = '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
 
-function baseArgs(file: string, over: Partial<PublishArgs> = {}): PublishArgs {
-  return { file, ...over };
+function baseArgs(file: string | undefined, over: Partial<PublishArgs> = {}): PublishArgs {
+  return { ...(file !== undefined ? { file } : {}), ...over };
 }
 
 /** Hermetic deps: an empty env and a temp cwd so tests never read the ambient
@@ -429,5 +430,155 @@ describe('runPublish — draft end to end', () => {
       expect(e.code).toBe('NEEDS_CONFIRMATION');
       expect(e.details?.target?.status).toBe('draft');
     }
+  });
+});
+
+describe('runPublish — publish --candidate', () => {
+  const LOOKUP = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  async function park(over: { draft?: string; question?: string } = {}): Promise<string> {
+    const rec = await createCandidate(dir, {
+      draft: over.draft ?? CLEAN,
+      lookupId: LOOKUP,
+      ...(over.question !== undefined ? { question: over.question } : {}),
+      created: new Date().toISOString(),
+      sourceProject: dir,
+    });
+    return rec.id;
+  }
+
+  /** A stub server that also captures the parsed request body. */
+  function bodyServer(post: Record<string, unknown> = CREATED): {
+    fetch: typeof fetch;
+    body: () => Record<string, unknown> | undefined;
+  } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(post), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  it('publishes a parked candidate and clears it on success', async () => {
+    const id = await park();
+    const { fetch, calls } = stubServer();
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(undefined, { candidate: id }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(calls).toHaveLength(1);
+    expect((res.data as { candidate?: { id: string; cleared: boolean } }).candidate).toEqual({
+      id,
+      cleared: true,
+    });
+    expect(await readCandidate(dir, id)).toBeNull(); // dropped
+  });
+
+  it('prefills questionsAnswered from the candidate meta, explicit --question wins', async () => {
+    const id = await park({ question: 'What does the meta ask?' });
+    const { fetch, body } = bodyServer();
+    const { provider } = spyProvider();
+    await runPublish(
+      baseArgs(undefined, { candidate: id }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((body()?.resource as { questionsAnswered?: string[] })?.questionsAnswered).toEqual([
+      'What does the meta ask?',
+    ]);
+
+    // An explicit --question overrides the candidate prefill.
+    const id2 = await park({ question: 'meta question' });
+    const server2 = bodyServer();
+    await runPublish(
+      baseArgs(undefined, { candidate: id2, question: ['flag question'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: server2.fetch, provider: spyProvider().provider }),
+    );
+    expect(
+      (server2.body()?.resource as { questionsAnswered?: string[] })?.questionsAnswered,
+    ).toEqual(['flag question']);
+  });
+
+  it('a refused candidate publish stays parked (needs_confirmation)', async () => {
+    const id = await park();
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: id, mode: 'review' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+    expect(await readCandidate(dir, id)).not.toBeNull(); // still parked
+  });
+
+  it('a hard-blocked candidate publish stays parked (publish_blocked)', async () => {
+    const id = await park({ draft: `# T\n\nThe leaked key is 0x${'a'.repeat(64)}\n` });
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: id, mode: 'full-auto', yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+    expect(await readCandidate(dir, id)).not.toBeNull();
+  });
+
+  it('--draft combines with --candidate', async () => {
+    const id = await park();
+    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(undefined, { candidate: id, draft: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { status: string }).status).toBe('draft');
+    expect(await readCandidate(dir, id)).toBeNull();
+  });
+
+  it('a malformed or unknown candidate id is USAGE before any wallet touch', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    const deps = hermetic({ fetchImpl: fetch, provider });
+    await expect(
+      runPublish(baseArgs(undefined, { candidate: 'not-a-uuid' }), makeCtx(), deps),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: '0197ffff-bbbb-cccc-dddd-eeeeeeeeeeee' }),
+        makeCtx(),
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+  });
+
+  it('a file AND --candidate together is USAGE; neither is USAGE', async () => {
+    const id = await park();
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    const deps = hermetic({ fetchImpl: fetch, provider });
+    await expect(
+      runPublish(baseArgs(await writeDoc(CLEAN), { candidate: id }), makeCtx(), deps),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    await expect(runPublish(baseArgs(undefined), makeCtx(), deps)).rejects.toMatchObject({
+      code: 'USAGE',
+    });
   });
 });

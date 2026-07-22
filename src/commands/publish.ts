@@ -3,6 +3,8 @@ import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { PublishModeSchema, parsePublishModeFlag } from '../lib/config';
+import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
+import { UUID_RE } from '../lib/ids';
 import { scan, type ScanFinding } from '../lib/scan';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal } from '../lib/output';
@@ -33,8 +35,9 @@ import {
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin publish <file.md>`: read the Markdown, parse frontmatter for post +
- * answer-card fields, run the deterministic scan (every mode), gate on the D38
+ * `tenjin publish <file.md>` (or `--candidate <id>`): read the Markdown, parse
+ * frontmatter for post + answer-card fields, run the deterministic scan (every
+ * mode), gate on the D38
  * consent cascade, then write via the session key (minted on first use) or the
  * plain-SIWX fallback and return a compact receipt. The ordering is the point and
  * is enforced here: scan and consent BEFORE any wallet touch or network write.
@@ -48,7 +51,10 @@ import type { CommandContext, CommandResult } from '../context';
 const WRITE_CHAIN_ID = 'eip155:8453';
 
 export interface PublishArgs {
-  file: string;
+  /** The Markdown file to publish; mutually exclusive with --candidate. */
+  file?: string;
+  /** A parked candidate id to publish (its draft.md); mutually exclusive with <file>. */
+  candidate?: string;
   draft?: boolean;
   yes?: boolean;
   /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
@@ -91,7 +97,9 @@ export async function runPublish(
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
 
-  const raw = await readMarkdown(args.file);
+  // The content comes from EITHER a <file> or a parked --candidate, never both,
+  // never neither. A candidate resolves to its draft.md (and prefills its question).
+  const { raw, candidate } = await resolveSource(args, ctx.dataDir);
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
@@ -99,7 +107,17 @@ export async function runPublish(
   const tags = resolveTags(frontmatter);
   const excerpt = expectString(frontmatter, 'excerpt');
   const handle = expectString(frontmatter, 'handle');
-  const card = deriveCard(frontmatter, cardFlagsFrom(args));
+  // A candidate's stored question prefills questionsAnswered, but only as a
+  // fallback: an explicit --question OR a frontmatter questionsAnswered still wins.
+  const cardFlags = cardFlagsFrom(args);
+  if (
+    candidate?.meta.question !== undefined &&
+    cardFlags.question === undefined &&
+    frontmatter.questionsAnswered === undefined
+  ) {
+    cardFlags.question = [candidate.meta.question];
+  }
+  const card = deriveCard(frontmatter, cardFlags);
 
   // The consent cascade + resolved price (global < project < env < flag), with the
   // full-auto loosening gate. Its downgrade warnings go to stderr, not the receipt.
@@ -206,10 +224,70 @@ export async function runPublish(
     timeoutMs: ctx.flags.timeout,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  return receipt(result, runtime.baseUrl);
+
+  // ONLY on a successful publish is the candidate cleared from the pending store
+  // (a refusal or a write failure left it parked, above). Nothing else auto-drops.
+  let clearedCandidate: string | undefined;
+  if (candidate !== undefined && (await dropCandidate(ctx.dataDir, candidate.id))) {
+    clearedCandidate = candidate.id;
+  }
+  return receipt(result, runtime.baseUrl, clearedCandidate);
 }
 
-function receipt(result: Awaited<ReturnType<typeof publishPost>>, baseUrl: string): CommandResult {
+/**
+ * Resolve the publish source: a <file>, or a --candidate's draft.md, exclusively.
+ * Both or neither is USAGE, and a malformed/unknown candidate id is USAGE before
+ * any wallet touch — the whole point of parking it locally is to fail cheap here.
+ */
+async function resolveSource(
+  args: PublishArgs,
+  dataDir: string,
+): Promise<{ raw: string; candidate?: CandidateRecord }> {
+  if (args.candidate !== undefined) {
+    if (args.file !== undefined) {
+      throw new CliError('USAGE', 'Pass EITHER a file or --candidate, not both.', {
+        fix: 'Publish a file with `tenjin publish post.md`, or a candidate with `--candidate <id>`.',
+      });
+    }
+    if (!UUID_RE.test(args.candidate)) {
+      throw new CliError('USAGE', `Invalid candidate id: ${JSON.stringify(args.candidate)}`, {
+        fix: 'Pass a candidate id from `tenjin candidate list`.',
+      });
+    }
+    const record = await readCandidate(dataDir, args.candidate);
+    if (record === null) {
+      throw new CliError('USAGE', `Unknown candidate: ${JSON.stringify(args.candidate)}`, {
+        fix: 'List parked candidates with `tenjin candidate list`.',
+      });
+    }
+    return { raw: await readDraft(record), candidate: record };
+  }
+  if (args.file === undefined) {
+    throw new CliError('USAGE', 'Nothing to publish.', {
+      fix: 'Pass a Markdown file (`tenjin publish post.md`) or `--candidate <id>`.',
+    });
+  }
+  return { raw: await readMarkdown(args.file) };
+}
+
+/** Read a candidate's draft.md; a readable dir with an unreadable draft is a torn
+ *  candidate (INTERNAL), not the caller's usage error. */
+async function readDraft(record: CandidateRecord): Promise<string> {
+  try {
+    return await readFile(record.draftPath, 'utf8');
+  } catch (err) {
+    throw new CliError('INTERNAL', `Candidate ${record.id} is missing its draft.`, {
+      fix: `Drop it with \`tenjin candidate drop ${record.id}\` and re-add the draft.`,
+      cause: err,
+    });
+  }
+}
+
+function receipt(
+  result: Awaited<ReturnType<typeof publishPost>>,
+  baseUrl: string,
+  clearedCandidate?: string,
+): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing);
   const cacheEligible = result.cacheEligible ?? false;
@@ -222,6 +300,7 @@ function receipt(result: Awaited<ReturnType<typeof publishPost>>, baseUrl: strin
       : missing.length > 0
         ? `Answer card not lookup-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
+    ...(clearedCandidate !== undefined ? [`Cleared candidate ${clearedCandidate}.`] : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -233,6 +312,9 @@ function receipt(result: Awaited<ReturnType<typeof publishPost>>, baseUrl: strin
       cacheEligible,
       missing,
       deskUrl,
+      ...(clearedCandidate !== undefined
+        ? { candidate: { id: clearedCandidate, cleared: true } }
+        : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,

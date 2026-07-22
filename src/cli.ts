@@ -272,9 +272,13 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  addGlobalFlags(program.command('publish <file>'))
+  addGlobalFlags(program.command('publish [file]'))
     .description(
-      'Publish a Markdown file as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
+      'Publish a Markdown file (or a parked --candidate) as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
+    )
+    .option(
+      '--candidate <id>',
+      'publish a parked candidate by id instead of a file (clears it on success)',
     )
     .option('--draft', 'save as a private draft instead of publishing')
     .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
@@ -291,13 +295,14 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--temporal-mode <mode>', 'snapshot | maintained | evergreen')
     .option('--provenance <text>', 'provenance summary (card)')
     .option('--methodology <text>', 'methodology summary (card)')
-    .action(async function (this: Command, file: string) {
+    .action(async function (this: Command, file: string | undefined) {
       await runCommand('publish', this, async (ctx) => {
         const o = this.opts();
         const { runPublish } = await import('./commands/publish');
         return runPublish(
           {
-            file,
+            ...(typeof file === 'string' ? { file } : {}),
+            ...(typeof o.candidate === 'string' ? { candidate: o.candidate } : {}),
             ...(o.draft === true ? { draft: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
