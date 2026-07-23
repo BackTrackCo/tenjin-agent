@@ -38,18 +38,20 @@ describe('emitSuccess', () => {
     expect(cap.stderr()).toBe('');
   });
 
-  it('renders human lines to stderr on a TTY, stdout stays machine-only', () => {
+  it('at a TTY without --json, prints human lines to STDOUT and no envelope', () => {
     const cap = captureIo(true);
     emitSuccess(cap.io, 'doctor', { ok: true }, ['all good']);
-    expect(cap.stderr()).toContain('all good');
-    expect(() => JSON.parse(cap.stdout())).not.toThrow();
+    expect(cap.stdout()).toContain('all good');
+    expect(cap.stdout()).not.toContain('schemaVersion'); // no JSON envelope
+    expect(cap.stderr()).toBe('');
   });
 
-  it('suppresses stderr under --json even on a TTY', () => {
+  it('under --json even on a TTY, emits the envelope and no human lines', () => {
     const cap = captureIo(true);
     emitSuccess(cap.io, 'doctor', { ok: true }, ['all good'], { json: true });
-    expect(cap.stderr()).toBe('');
     expect(JSON.parse(cap.stdout()).ok).toBe(true);
+    expect(cap.stdout()).not.toContain('all good');
+    expect(cap.stderr()).toBe('');
   });
 });
 
@@ -74,11 +76,62 @@ describe('emitFailure', () => {
     expect(ret.exitCode).toBe(1);
   });
 
-  it('renders error + fix to stderr on a TTY', () => {
+  it('at a TTY without --json, prints error + fix to STDOUT and no envelope', () => {
     const cap = captureIo(true);
-    emitFailure(cap.io, 'x', new CliError('USAGE', 'nope', { fix: 'do this' }));
-    expect(cap.stderr()).toContain('nope');
-    expect(cap.stderr()).toContain('do this');
+    const ret = emitFailure(cap.io, 'x', new CliError('USAGE', 'nope', { fix: 'do this' }));
+    expect(cap.stdout()).toContain('nope');
+    expect(cap.stdout()).toContain('do this');
+    expect(cap.stdout()).not.toContain('schemaVersion'); // no JSON envelope
+    expect(cap.stderr()).toBe('');
+    expect(ret.exitCode).toBe(2); // exit code unchanged on the human path
+  });
+
+  it('under --json even on a TTY, emits the failure envelope', () => {
+    const cap = captureIo(true);
+    emitFailure(cap.io, 'x', new CliError('USAGE', 'nope', { fix: 'do this' }), { json: true });
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+
+  it('at a TTY, renders details.findings compactly under the fix line', () => {
+    const cap = captureIo(true);
+    const err = new CliError('NEEDS_CONFIRMATION', 'needs confirm', {
+      fix: 'review then --yes',
+      details: {
+        mode: 'review',
+        findings: [
+          { check: 'aws-access-key', severity: 'warn', line: 12, excerpt: 'AKIA…MPLE' },
+          { check: 'email', severity: 'warn', line: 4, excerpt: 'a@b.com' },
+        ],
+      },
+    });
+    emitFailure(cap.io, 'publish', err);
+    const out = cap.stdout();
+    expect(out).toContain('aws-access-key (line 12): AKIA…MPLE');
+    expect(out).toContain('email (line 4): a@b.com');
+    expect(out).not.toContain('schemaVersion'); // still no envelope
+    // the finding lines come after the fix line
+    expect(out.indexOf('review then --yes')).toBeLessThan(out.indexOf('aws-access-key'));
+  });
+
+  it('leaves the machine envelope unchanged when details.findings is present', () => {
+    const cap = captureIo(false);
+    const details = {
+      mode: 'review',
+      findings: [{ check: 'jwt', severity: 'warn', line: 1, excerpt: 'eyJ…' }],
+    };
+    emitFailure(cap.io, 'publish', new CliError('NEEDS_CONFIRMATION', 'c', { details }));
+    expect(JSON.parse(cap.stdout()).error.details).toEqual(details);
+  });
+
+  it('at a TTY, does not render non-finding detail shapes', () => {
+    const cap = captureIo(true);
+    const err = new CliError('USAGE', 'nope', {
+      fix: 'do this',
+      details: { price: { usd: '0.05' } },
+    });
+    emitFailure(cap.io, 'x', err);
+    expect(cap.stdout()).not.toContain('0.05');
+    expect(cap.stdout()).not.toContain('price');
   });
 });
 
