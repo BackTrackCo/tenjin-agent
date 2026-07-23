@@ -284,8 +284,9 @@ per-run token, so there is **no `NPM_TOKEN`** to store or rotate.
 `tenjin-cli` already exists on npm (published `0.1.0-alpha.1`), so no manual
 first publish is needed. The owner must, one time:
 
-1. **Install a dedicated release-bot GitHub App on `BackTrackCo/tenjin-agent`**
-   (permissions: Contents write, Pull requests write; no webhook needed), then
+1. **Install the shared `backtrack-release-bot` GitHub App on
+   `BackTrackCo/tenjin-agent`** (permissions: Contents write, Pull requests
+   write; no webhook needed; also installed on `BackTrackCo/x402r-sdk`), then
    set repo **variable** `RELEASE_APP_CLIENT_ID` and repo **secret**
    `RELEASE_APP_PRIVATE_KEY`. Required because Changesets' version PR must be
    opened by an App identity to trigger CI (the default `GITHUB_TOKEN` cannot,
