@@ -169,6 +169,14 @@ describe('runLookup — parked-candidate nudge', () => {
     await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).not.toContain('parked');
   });
+
+  it('does NOT nudge on a HIT, even with candidates parked (MISS-only)', async () => {
+    await park(daysAgo(1));
+    const { fetch } = stub(CANDIDATES);
+    const { ctx, stderr } = ctxCapturingStderr();
+    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    expect(stderr()).not.toContain('parked');
+  });
 });
 
 describe('evalCohort threading', () => {

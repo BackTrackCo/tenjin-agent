@@ -12,3 +12,7 @@ to stop only on detected secrets.
 `tenjin lookup` now nudges once on stderr when you have parked candidate drafts
 (and how many are stale over 7 days), so reusable answers you set aside resurface
 instead of rotting.
+
+Migration: an unconfigured setup that relied on promptless clean-scan publishing
+must now run `tenjin config set publish.mode auto` (or pass `--mode auto` /
+`--yes` per publish) to keep publishing without the per-publish confirm.

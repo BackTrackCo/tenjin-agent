@@ -79,10 +79,11 @@ export async function runLookup(
     })),
   });
 
-  // A parked-candidate nudge on stderr (not in the machine JSON): a MISS is the
-  // moment to publish the answer you are about to derive, and stale drafts should
-  // not rot unseen. One line, any lookup outcome, only when something is parked.
-  await emitCandidateNudge(ctx);
+  // A parked-candidate nudge on stderr (not in the machine JSON), MISS only: a
+  // MISS is the moment to publish the answer you are about to derive, and stale
+  // drafts should not rot unseen. A HIT is not a publish moment, and hot lookup
+  // paths should not get advisory noise every call. One line, only when parked.
+  if (response.decision === 'MISS') await emitCandidateNudge(ctx);
 
   const humanLines =
     response.decision === 'MISS'

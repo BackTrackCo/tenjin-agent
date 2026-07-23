@@ -102,9 +102,14 @@ the resolved `publish.mode`. The tenjin-publish skill owns the mechanics and is
 `SKILL.md` (installed alongside this one, at `tenjin-publish/SKILL.md`) first and
 follow its draft, sanitize, and pricing rules; never publish bare.
 
-- **review** (the default): draft the piece and ask the user the one-click
-  yes/no right then. Only on "not now", park it:
-  `tenjin candidate add <finding.md> --lookup-id <id>`.
+- **review** (the default): draft the piece, then run `tenjin publish` (no
+  `--yes`). It exits 3 with the `needs_confirmation` payload; render THAT
+  payload's findings and price as the one-click yes/no, and re-run with `--yes`
+  only on an explicit yes. Park it as a candidate (`tenjin candidate add
+  <finding.md> --lookup-id <id>`) only on "not now". This is the same
+  run-then-render sequence the tenjin-publish skill uses: never ask a generic
+  "publish?" before running, or the `--yes` re-run would clear WARN findings
+  (PII, wallet addresses) the user never saw.
 - **auto / full-auto**: build the answer card and run `tenjin publish` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
