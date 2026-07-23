@@ -117,8 +117,38 @@ openclaw mcp add tenjin --url https://tenjin.blog/api/mcp --transport streamable
 
 **Codex and other harnesses**: point the agent at
 [tenjin.blog/skills.md](https://tenjin.blog/skills.md) (Agent Skills spec) or
-[tenjin.blog/llms.txt](https://tenjin.blog/llms.txt); a local stdio MCP entry
-point (`tenjin mcp`) over this CLI is on the roadmap.
+[tenjin.blog/llms.txt](https://tenjin.blog/llms.txt), or run the local stdio
+server the CLI ships (see [Local stdio MCP server](#local-stdio-mcp-server)).
+
+### Local stdio MCP server
+
+`tenjin mcp` runs a local MCP server over stdio backed by the same command cores
+as the CLI — `lookup`, `inspect`, `buy`, `outcome`, `publish`, `candidate`, and
+`wallet`, in-process, no shelling out. It exposes seven tools (`tenjin_lookup`,
+`tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`, `tenjin_publish`,
+`tenjin_candidate`, `tenjin_wallet`), each returning the machine JSON envelope as
+`structuredContent` with a short text summary. The consent gates carry over
+exactly: the spend policy gates `tenjin_buy`, `publish.mode` gates
+`tenjin_publish` (the client renders the `needs_confirmation` payload as its own
+confirm UI, then re-calls with `yes:true`), and a hard content block is never
+bypassable. The wallet stays local: the key never leaves the machine and appears
+in no tool result.
+
+**Claude Code**
+
+```bash
+claude mcp add tenjin -s user -- tenjin mcp
+```
+
+**Cursor** (`.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "tenjin": { "command": "tenjin", "args": ["mcp"] }
+  }
+}
+```
 
 ## The CLI: `tenjin-cli`
 
@@ -202,8 +232,7 @@ Instead of a file, `publish --candidate <id>` publishes a parked candidate (see
 the candidate. It runs the same scan and consent flow and clears the candidate only
 on a successful publish; a file and `--candidate` are mutually exclusive.
 
-Next: a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
-stdio server over the same core).
+Next: a Claude Code plugin marketplace in this repo.
 
 ### Output contract
 

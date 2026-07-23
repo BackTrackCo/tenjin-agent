@@ -2,7 +2,7 @@ import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
-import type { OutputError } from '../schemas';
+import type { FailureEnvelope, OutputError, SuccessEnvelope } from '../schemas';
 
 /**
  * Injected streams + TTY fact. Every command receives one via CommandContext,
@@ -31,6 +31,26 @@ export interface EmitOptions {
 }
 
 /**
+ * The two pure envelope builders, shared by the CLI's emit functions and the MCP
+ * adapter so both surfaces produce the identical wire object by construction. They
+ * hold no I/O and no --json branching: they turn a (command, data) or a normalized
+ * CliError into the exact object that goes to stdout / structuredContent.
+ */
+export function buildSuccessEnvelope(command: string, data: unknown): SuccessEnvelope {
+  return { schemaVersion: SCHEMA_VERSION, command, ok: true, data };
+}
+
+export function buildFailureEnvelope(command: string, err: CliError): FailureEnvelope {
+  const error: OutputError = {
+    code: err.code,
+    message: err.message,
+    ...(err.fix !== undefined ? { fix: err.fix } : {}),
+    ...(err.details !== undefined ? { details: err.details } : {}),
+  };
+  return { schemaVersion: SCHEMA_VERSION, command, ok: false, error };
+}
+
+/**
  * Output contract (human-first): at a TTY without `--json`, print ONLY the human
  * rendering to stdout, no JSON envelope. With `--json`, or when stdout is not a
  * TTY (a pipe, an agent), print exactly one JSON envelope to stdout and nothing
@@ -47,7 +67,7 @@ export function emitSuccess(
     writeLines(io.stdout, humanLines);
     return;
   }
-  writeJson(io.stdout, { schemaVersion: SCHEMA_VERSION, command, ok: true, data });
+  writeJson(io.stdout, buildSuccessEnvelope(command, data));
 }
 
 /**
@@ -78,13 +98,7 @@ export function emitFailure(
     writeLines(io.stdout, lines);
     return cliErr;
   }
-  const error: OutputError = {
-    code: cliErr.code,
-    message: cliErr.message,
-    ...(cliErr.fix !== undefined ? { fix: cliErr.fix } : {}),
-    ...(cliErr.details !== undefined ? { details: cliErr.details } : {}),
-  };
-  writeJson(io.stdout, { schemaVersion: SCHEMA_VERSION, command, ok: false, error });
+  writeJson(io.stdout, buildFailureEnvelope(command, cliErr));
   return cliErr;
 }
 
