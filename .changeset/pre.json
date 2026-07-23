@@ -5,6 +5,7 @@
     "tenjin-cli": "0.1.0-alpha.1"
   },
   "changesets": [
-    "b3-publish"
+    "b3-publish",
+    "unified-publish-modes"
   ]
 }
