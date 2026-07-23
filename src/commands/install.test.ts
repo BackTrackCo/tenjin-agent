@@ -571,63 +571,44 @@ describe('runInstall: publish-mode selection', () => {
 });
 
 describe('runInstall: interactive walkthrough', () => {
-  function makeCtxCap(flags: Partial<GlobalFlags> = {}): {
-    ctx: CommandContext;
-    stdout: () => string;
-  } {
-    const chunks: string[] = [];
-    const out = {
-      write: (s: string) => (chunks.push(s), true),
-    } as unknown as NodeJS.WritableStream;
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      stdout: () => chunks.join('').replace(/\x1b\[[0-9;]*m/g, ''), // eslint-disable-line no-control-regex
-      ctx: {
-        flags: { json: false, timeout: 10000, ...flags },
-        dataDir: data,
-        io: { stdout: out, stderr: sink(), isTTY: true },
-      },
-    };
-  }
-
   const ADDR = '0x1234567890abcdef1234567890abcdef12345678';
 
-  it('prints the walkthrough to stdout and suppresses the JSON envelope', async () => {
-    const { ctx, stdout } = makeCtxCap();
+  // install is human-first: it returns the walkthrough as humanLines (the
+  // dispatcher prints them at a TTY). Read them here, ANSI-stripped.
+  const human = (res: { humanLines?: string[] }): string =>
+    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+  it('returns the walkthrough as humanLines (no envelope path at a TTY)', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
-      ctx,
+      makeCtx(),
       deps({ isInteractive: true, promptMode: async () => '' }),
     );
-    expect(res.suppressEnvelope).toBe(true);
-    const text = stdout();
+    const text = human(res);
     expect(text).toContain('Claude Code: 3 skills installed');
     expect(text).toContain('publish mode: review');
     expect(text).toContain('Done. Try: tenjin lookup');
-    // No JSON envelope shape leaked onto stdout.
-    expect(text).not.toContain('"schemaVersion"');
   });
 
-  it('--json keeps the envelope and never prompts the wallet', async () => {
+  it('--json returns the envelope data and never prompts the wallet', async () => {
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
       { harness: ['claude'] },
       makeCtx({ json: true }),
       deps({ isInteractive: true, confirmWallet: confirm, walletExists: async () => false }),
     );
-    expect(res.suppressEnvelope).toBeFalsy();
-    const d = asData(res.data) as Data & { publishMode: unknown; doctor: unknown };
+    expect(res.humanLines ?? []).toHaveLength(0); // machine path: no walkthrough
+    const d = asData(res.data) as Data & { publishMode: unknown };
     expect(d.harnesses[0]!.harness).toBe('claude');
     expect(d.publishMode).toBeDefined();
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it('creates a wallet on yes and prints the address + funding lines', async () => {
-    const { ctx, stdout } = makeCtxCap();
+  it('creates a wallet on yes and shows the address + funding lines', async () => {
     const create = vi.fn(async () => ADDR);
-    await runInstall(
+    const res = await runInstall(
       { harness: ['claude'] },
-      ctx,
+      makeCtx(),
       deps({
         isInteractive: true,
         promptMode: async () => '',
@@ -637,18 +618,17 @@ describe('runInstall: interactive walkthrough', () => {
       }),
     );
     expect(create).toHaveBeenCalledOnce();
-    const text = stdout();
+    const text = human(res);
     expect(text).toContain(ADDR);
     expect(text).toContain('Fund it: send a few dollars of USDC on Base');
     expect(text).toContain('Check with: tenjin wallet balance');
   });
 
-  it('declining the wallet prompt prints the create-later line, no create', async () => {
-    const { ctx, stdout } = makeCtxCap();
+  it('declining the wallet prompt shows the create-later line, no create', async () => {
     const create = vi.fn(async () => ADDR);
-    await runInstall(
+    const res = await runInstall(
       { harness: ['claude'] },
-      ctx,
+      makeCtx(),
       deps({
         isInteractive: true,
         promptMode: async () => '',
@@ -658,27 +638,25 @@ describe('runInstall: interactive walkthrough', () => {
       }),
     );
     expect(create).not.toHaveBeenCalled();
-    expect(stdout()).toContain('Create one later with: tenjin wallet create');
+    expect(human(res)).toContain('Create one later with: tenjin wallet create');
   });
 
   it('--no-wallet skips the wallet prompt entirely', async () => {
-    const { ctx, stdout } = makeCtxCap();
     const confirm = vi.fn(async () => true);
-    await runInstall(
+    const res = await runInstall(
       { harness: ['claude'], noWallet: true },
-      ctx,
+      makeCtx(),
       deps({ isInteractive: true, promptMode: async () => '', confirmWallet: confirm }),
     );
     expect(confirm).not.toHaveBeenCalled();
-    expect(stdout()).toContain('Create one later with: tenjin wallet create');
+    expect(human(res)).toContain('Create one later with: tenjin wallet create');
   });
 
   it('shows an existing wallet address without prompting', async () => {
-    const { ctx, stdout } = makeCtxCap();
     const confirm = vi.fn(async () => true);
-    await runInstall(
+    const res = await runInstall(
       { harness: ['claude'] },
-      ctx,
+      makeCtx(),
       deps({
         isInteractive: true,
         promptMode: async () => '',
@@ -688,17 +666,39 @@ describe('runInstall: interactive walkthrough', () => {
       }),
     );
     expect(confirm).not.toHaveBeenCalled();
-    expect(stdout()).toContain(`Wallet: ${ADDR} (existing)`);
+    expect(human(res)).toContain(`Wallet: ${ADDR} (existing)`);
+  });
+
+  it('a TTY with no stdin renders the walkthrough with defaults, no prompt', async () => {
+    // humanOutput true (io.isTTY, no --json), but canPrompt false (stdin is not a
+    // TTY in the test runner and no isInteractive override): default mode, no
+    // wallet prompt, still a full walkthrough.
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    const ttyCtx: CommandContext = {
+      flags: { json: false, timeout: 10000 },
+      dataDir: data,
+      io: { stdout: sink(), stderr: sink(), isTTY: true },
+    };
+    const prompt = vi.fn(async () => 'review');
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      ttyCtx,
+      deps({ promptMode: prompt, confirmWallet: confirm, walletExists: async () => false }),
+    );
+    expect(prompt).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(human(res)).toContain('publish mode: review');
+    expect(human(res)).toContain('Create one later with: tenjin wallet create');
   });
 
   it('a fully-green doctor is one line; a failure surfaces with its fix', async () => {
-    const { ctx: okCtx, stdout: okOut } = makeCtxCap();
-    await runInstall(
+    const okRes = await runInstall(
       { harness: ['claude'] },
-      okCtx,
+      makeCtx(),
       deps({ isInteractive: true, promptMode: async () => '' }),
     );
-    expect(okOut()).toContain('Everything checks out');
+    expect(human(okRes)).toContain('Everything checks out');
 
     const failing: DoctorChecks = {
       checks: [
@@ -715,20 +715,18 @@ describe('runInstall: interactive walkthrough', () => {
         result: { name: 'api', status: 'fail', required: true, detail: 'unreachable' },
       },
     };
-    const { ctx: failCtx, stdout: failOut } = makeCtxCap();
-    await runInstall(
+    const failRes = await runInstall(
       { harness: ['claude'] },
-      failCtx,
+      makeCtx(),
       deps({ isInteractive: true, promptMode: async () => '', collectChecks: async () => failing }),
     );
-    const text = failOut();
+    const text = human(failRes);
     expect(text).toContain('need attention');
     expect(text).toContain('api: unreachable');
     expect(text).toContain('fix: check the base URL');
   });
 
   it('emits no internal jargon (no "roadmap") in the data or walkthrough', async () => {
-    // Machine envelope: the harness notes ship in the JSON.
     await mkdir(join(home, '.claude'), { recursive: true });
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
     expect(JSON.stringify(res.data).toLowerCase()).not.toContain('roadmap');

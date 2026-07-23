@@ -76,11 +76,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      // A human-first command (interactive `install`) renders its own walkthrough
-      // to stdout and asks for no envelope; every other path emits exactly one.
-      if (result.suppressEnvelope !== true) {
-        emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
-      }
+      emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
     } catch (err) {
       setExit(emitFailure(io, command, err, { json }).exitCode);
     }

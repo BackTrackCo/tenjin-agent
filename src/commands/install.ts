@@ -116,13 +116,12 @@ export interface InstallDeps {
  * each one's skills directory, wire the AGENTS.md pointer, then settle the publish
  * consent mode and (interactively) the wallet, and finish with the doctor checks.
  *
- * OUTPUT is mode-dependent, the one documented exception to the "exactly one JSON
- * envelope" contract: on an interactive TTY without `--json` this is HUMAN-FIRST.
- * It prompts and prints a plain onboarding walkthrough to stdout, and emits NO
- * envelope (returns `suppressEnvelope`). With `--json` or off a TTY it is the
- * machine path: exactly today's envelope, no prompts, no wallet step. Idempotent:
- * a re-run reports up-to-date and never duplicates the AGENTS.md line. `--dry-run`
- * writes nothing.
+ * Like every command it is human-first (the global output contract): at a TTY
+ * without `--json` it prompts and returns a plain onboarding walkthrough as
+ * humanLines, which the dispatcher prints to stdout with no envelope. With
+ * `--json` or piped stdout it returns today's envelope, no prompts, no wallet
+ * step. Idempotent: a re-run reports up-to-date and never duplicates the AGENTS.md
+ * line. `--dry-run` writes nothing.
  */
 export async function runInstall(
   input: InstallInput,
@@ -145,14 +144,12 @@ export async function runInstall(
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
 
-  // The human walkthrough runs only on a real interactive terminal without --json;
-  // every machine path (piped, --json) takes the envelope branch below. --json
-  // forces non-interactive even when a test injects isInteractive, so a machine
-  // consumer never sits behind a prompt.
-  const interactive =
-    ctx.flags.json === true
-      ? false
-      : (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
+  // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
+  // without --json and no envelope). `humanOutput` matches that gate so install
+  // returns its walkthrough as humanLines; `canPrompt` additionally needs stdin, so
+  // a piped-stdin run still renders a walkthrough (with defaults, no wallet prompt).
+  const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
+  const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
 
   const skillsSource =
     deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
@@ -164,72 +161,68 @@ export async function runInstall(
     harnesses.push(await applyPlan(plan, skillsSource, dryRun));
   }
   const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, deps.doctorDeps ?? {}));
-
-  if (interactive) {
-    return runWalkthrough({ ctx, deps, dryRun, noWallet, harnesses, publishModeFlag, collect });
-  }
-
-  // Machine path (--json or non-TTY): today's envelope, no prompts, no wallet step.
   const doctor = await collect(ctx);
-  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, false);
-  return {
-    data: {
-      dryRun,
-      skillsSource,
-      harnesses,
-      doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
-      publishMode,
-    },
+  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
+
+  const data = {
+    dryRun,
+    skillsSource,
+    harnesses,
+    doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
+    publishMode,
   };
+
+  // Machine path (--json or piped stdout): today's envelope, no wallet step.
+  if (!humanOutput) return { data };
+
+  // Human path: the onboarding walkthrough as humanLines (the global emitSuccess
+  // prints them to stdout at a TTY and never an envelope). A wallet prompt happens
+  // only when we can actually read stdin.
+  const humanLines = await buildWalkthrough(ctx, deps, {
+    dryRun,
+    noWallet,
+    canPrompt,
+    harnesses,
+    publishMode,
+    doctor,
+  });
+  return { data, humanLines };
 }
 
 const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 
-interface WalkthroughArgs {
-  ctx: CommandContext;
-  deps: InstallDeps;
+interface WalkthroughState {
   dryRun: boolean;
   noWallet: boolean;
+  canPrompt: boolean;
   harnesses: HarnessResult[];
-  publishModeFlag: PublishMode | undefined;
-  collect: (ctx: CommandContext) => Promise<DoctorChecks>;
+  publishMode: PublishModeSelection;
+  doctor: DoctorChecks;
 }
 
 /**
- * The interactive onboarding: skills, the consent-mode question, wallet setup, a
- * one-line doctor verdict, and a next step. Rendered to stdout as a compact
- * walkthrough (no JSON envelope); prompts read stdin and write their labels to
- * stderr. Returns `suppressEnvelope` so the dispatcher emits nothing.
+ * Build the onboarding walkthrough lines: skills, the resolved consent mode,
+ * wallet setup (creating one in-flow only when we can prompt), a one-line doctor
+ * verdict, and a next step. Any prompt reads stdin and writes its label to stderr;
+ * the returned lines are the human stdout surface.
  */
-async function runWalkthrough(a: WalkthroughArgs): Promise<CommandResult> {
-  const { ctx, deps, dryRun, noWallet, harnesses, publishModeFlag, collect } = a;
+async function buildWalkthrough(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  s: WalkthroughState,
+): Promise<string[]> {
   const io = ctx.io;
-  const out = (line = ''): void => void io.stdout.write(`${line}\n`);
-
-  // a. Skills.
-  if (dryRun) out(paint(io, 'yellow', 'Dry run: nothing was written.'));
-  for (const line of skillsWalkthrough(io, harnesses, dryRun)) out(line);
-  out();
-
-  // b. Publish consent mode.
-  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, true);
-  out(
-    `${paint(io, 'bold', `publish mode: ${publishMode.value}`)}  ${paint(io, 'dim', modeBlurb(publishMode.value))}`,
+  const lines: string[] = [];
+  if (s.dryRun) lines.push(paint(io, 'yellow', 'Dry run: nothing was written.'));
+  lines.push(...skillsWalkthrough(io, s.harnesses, s.dryRun), '');
+  lines.push(
+    `${paint(io, 'bold', `publish mode: ${s.publishMode.value}`)}  ${paint(io, 'dim', modeBlurb(s.publishMode.value))}`,
+    '',
   );
-  out();
-
-  // c. Wallet.
-  for (const line of await walletWalkthrough(ctx, deps, dryRun, noWallet, io)) out(line);
-  out();
-
-  // d. Doctor: only what needs action, else one green line.
-  for (const line of doctorSummary(io, await collect(ctx))) out(line);
-  out();
-
-  // e. Next step.
-  out(`Done. Try: tenjin lookup "${EXAMPLE_QUESTION}"`);
-
-  return { data: { dryRun, harnesses, publishMode }, suppressEnvelope: true };
+  lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
+  lines.push(...doctorSummary(io, s.doctor), '');
+  lines.push(`Done. Try: tenjin lookup "${EXAMPLE_QUESTION}"`);
+  return lines;
 }
 
 function harnessLabel(h: Harness): string {

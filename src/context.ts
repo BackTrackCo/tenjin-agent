@@ -19,19 +19,14 @@ export interface CommandContext {
 }
 
 /**
- * What a command returns on success. The CLI dispatcher turns this into the one
- * stdout envelope (emitSuccess) so no command hand-rolls output; on failure a
- * command throws a CliError instead of returning.
- *
- * `suppressEnvelope` is the one documented exception to "exactly one JSON object":
- * a human-first command (interactive `install`) renders its own walkthrough to
- * stdout and sets this so the dispatcher emits no envelope. It is only ever set on
- * an interactive TTY without `--json`; the machine paths always emit the envelope.
+ * What a command returns on success. The CLI dispatcher (emitSuccess) turns this
+ * into either the human rendering (`humanLines` to stdout at a TTY without
+ * `--json`) or exactly one JSON envelope (`data`, with `--json` or when piped), so
+ * no command hand-rolls output; on failure a command throws a CliError instead.
  */
 export interface CommandResult {
   data: unknown;
   humanLines?: string[];
-  suppressEnvelope?: boolean;
 }
 
 export type CommandRun = (ctx: CommandContext) => Promise<CommandResult>;
