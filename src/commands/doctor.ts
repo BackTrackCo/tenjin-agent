@@ -465,7 +465,7 @@ export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
  * else, so a test/redirected sink falls back to the default plain check).
  */
 function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stderr instanceof Stream) return styleText(format, text, { stream: io.stderr });
+  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
   return styleText(format, text);
 }
 

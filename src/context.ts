@@ -19,9 +19,10 @@ export interface CommandContext {
 }
 
 /**
- * What a command returns on success. The CLI dispatcher turns this into the one
- * stdout envelope (emitSuccess) so no command hand-rolls output; on failure a
- * command throws a CliError instead of returning.
+ * What a command returns on success. The CLI dispatcher (emitSuccess) turns this
+ * into either the human rendering (`humanLines` to stdout at a TTY without
+ * `--json`) or exactly one JSON envelope (`data`, with `--json` or when piped), so
+ * no command hand-rolls output; on failure a command throws a CliError instead.
  */
 export interface CommandResult {
   data: unknown;

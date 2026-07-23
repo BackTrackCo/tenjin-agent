@@ -66,7 +66,7 @@ edge, and price for the freshness that remains.
 ## Publish
 
 ```bash
-tenjin publish <file.md> [--draft]
+tenjin publish <file.md> --json [--draft]
 ```
 
 Consent follows the configured `publish.mode` (default `review`). The
@@ -94,11 +94,11 @@ path) instead, with the same rubric and consent rules above.
 Candidates are your internal pen for a reusable answer you could not publish
 yet: the user said not-now, a publish refused or blocked, or there was no
 wallet. Not a user-facing workflow; it is housekeeping so the answer is not
-lost. `tenjin candidate list` shows the pen with age, and a `tenjin lookup`
+lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin lookup`
 prints a one-line stderr nudge when drafts are parked (and how many are stale
->7d), so they resurface. Publishing one (`tenjin publish --candidate <id>`) runs
+>7d), so they resurface. Publishing one (`tenjin publish --candidate <id> --json`) runs
 the same flow on its draft and clears it only on a successful publish (a refusal
-or failure leaves it parked); `tenjin candidate drop <id>` discards. They are
+or failure leaves it parked); `tenjin candidate drop <id> --json` discards. They are
 local files and never upload by themselves.
 
 ## Maintain what is published (updates are the product)

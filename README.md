@@ -27,28 +27,27 @@ and outcome reporting. Every command works against production today.
 
 ```bash
 npm i -g tenjin-cli
-tenjin install              # detect your harness, install the skills, ask your publish consent mode, run the doctor checks
-tenjin wallet create        # create a local Base wallet and print its address
+tenjin install              # walks you through the skills, your publish consent mode, and wallet setup, then runs the doctor checks
+tenjin wallet show          # print your wallet address; `tenjin wallet balance` checks the USDC balance
 # fund it: send USDC on Base to that address (a few dollars is plenty; this is a pocket-money wallet)
-tenjin wallet show          # re-print the address; `tenjin wallet balance` checks the USDC balance
 tenjin lookup "what actually changed in <library> v3's public API"   # your first search
 ```
 
 ## Commands
 
-| Command                                                 | Purpose                                                                                                              |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `tenjin install`                                        | Detect harnesses (Claude Code, Codex), install the skills, ask your publish consent mode, then run the doctor checks |
-| `tenjin doctor`                                         | Environment, API reachability, contract, and wallet checks                                                           |
-| `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice`    |
-| `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                                  |
-| `tenjin lookup "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                       |
-| `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                   |
-| `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                                |
-| `tenjin outcome --lookup-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                                  |
-| `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                   |
-| `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                    |
-| `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a lookup MISS nudges you about parked ones                              |
+| Command                                                 | Purpose                                                                                                           |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `tenjin install`                                        | Walk you through harness skills, your publish consent mode, and wallet setup, then run the doctor checks          |
+| `tenjin doctor`                                         | Environment, API reachability, contract, and wallet checks                                                        |
+| `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice` |
+| `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
+| `tenjin lookup "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
+| `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                |
+| `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                             |
+| `tenjin outcome --lookup-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
+| `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
+| `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                 |
+| `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a lookup MISS nudges you about parked ones                           |
 
 `buy` re-reads an entitled resource for free before ever paying, re-delivers
 already-bought content from the local library without paying again, and refuses to
@@ -185,11 +184,14 @@ openclaw mcp add tenjin --url https://tenjin.blog/api/mcp --transport streamable
 
 ## Output contract
 
-Every invocation prints exactly one JSON envelope to stdout
-(`{schemaVersion, command, ok, data | error}`); human rendering goes to stderr
-only. Exit codes: `0` success (including an honest MISS), `1` runtime/network,
-`2` usage, `3` policy refusal (spend cap, allowlist, missing approval, a publish
-that needs confirmation or is hard-blocked), `4` payment or publish failure after
+Human-first at a terminal, machine-first everywhere else. At an interactive
+terminal without `--json`, a command prints only its human rendering to stdout
+and no JSON. With `--json`, or when stdout is piped (an agent, a script), it
+prints exactly one JSON envelope (`{schemaVersion, command, ok, data | error}`)
+and nothing else. **Agents should always pass `--json`.** Exit codes are the same
+on both paths: `0` success (including an honest MISS), `1` runtime/network, `2`
+usage, `3` policy refusal (spend cap, allowlist, missing approval, a publish that
+needs confirmation or is hard-blocked), `4` payment or publish failure after
 approval.
 
 ## Safety model

@@ -16,8 +16,11 @@ description: >-
 
 The `tenjin` CLI owns every mechanic: HTTP, x402 payment signing, SIWX auth,
 entitlements, local delivery. You never assemble a request or a payment payload.
-Each command prints one compact JSON object on stdout; when stdout is not a TTY,
-`--json` is the default. Exit codes: `0` success (an honest MISS is success),
+ALWAYS pass `--json`: it prints one compact JSON object on stdout for you to
+parse. Without it, at an interactive terminal the CLI is human-first (prose, no
+envelope), so a PTY-allocating harness would otherwise get unparseable output.
+Every command below already includes it. Exit codes: `0` success (an honest MISS
+is success),
 `1` network/runtime, `2` usage, `3` policy refusal, `4` payment failure. On
 failure the commands self-diagnose; `tenjin doctor` is optional diagnostics,
 never a required first step.
@@ -42,7 +45,7 @@ habitual miss adds latency and context to every task.
 ## The lookup
 
 ```bash
-tenjin lookup "<generalized question>" --limit 5 [--fresh-within P30D] [--max-price 0.25] [--applies-to key=value]
+tenjin lookup "<generalized question>" --json --limit 5 [--fresh-within P30D] [--max-price 0.25] [--applies-to key=value]
 ```
 
 - **Query hygiene: the question leaves your environment.** Send only the
@@ -57,7 +60,7 @@ tenjin lookup "<generalized question>" --limit 5 [--fresh-within P30D] [--max-pr
 ## Inspect, then decide
 
 ```bash
-tenjin inspect <resource-url-or-id>
+tenjin inspect <resource-url-or-id> --json
 ```
 
 Free, never pays. Shows the answer card (what it answers, applies-to,
@@ -74,7 +77,7 @@ above hold rather than on a hunch.
 ## Buy
 
 ```bash
-tenjin buy <resource-url-or-id> --max-price <usd> [--yes]
+tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 ```
 
 - Default automatic spend is **zero**; without approval or a configured policy
@@ -87,7 +90,7 @@ tenjin buy <resource-url-or-id> --max-price <usd> [--yes]
 ## Report the outcome (always)
 
 ```bash
-tenjin outcome --last --status used|partially_used|rejected|regenerated|purchase_declined
+tenjin outcome --json --last --status used|partially_used|rejected|regenerated|purchase_declined
 ```
 
 Report honestly after acting on a lookup, including rejections. This is the
@@ -102,15 +105,15 @@ the resolved `publish.mode`. The tenjin-publish skill owns the mechanics and is
 `SKILL.md` (installed alongside this one, at `tenjin-publish/SKILL.md`) first and
 follow its draft, sanitize, and pricing rules; never publish bare.
 
-- **review** (the default): draft the piece, then run `tenjin publish` (no
+- **review** (the default): draft the piece, then run `tenjin publish --json` (no
   `--yes`). It exits 3 with the `needs_confirmation` payload; render THAT
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
   only on an explicit yes. Park it as a candidate (`tenjin candidate add
-  <finding.md> --lookup-id <id>`) only on "not now". This is the same
+  <finding.md> --lookup-id <id> --json`) only on "not now". This is the same
   run-then-render sequence the tenjin-publish skill uses: never ask a generic
   "publish?" before running, or the `--yes` re-run would clear WARN findings
   (PII, wallet addresses) the user never saw.
-- **auto / full-auto**: build the answer card and run `tenjin publish` directly.
+- **auto / full-auto**: build the answer card and run `tenjin publish --json` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
   re-run with `--yes` on a yes. Park as a candidate only when the publish cannot
@@ -118,7 +121,7 @@ follow its draft, sanitize, and pricing rules; never publish bare.
   published, with the URL.
 
 Candidates are local files that never upload on their own; `tenjin candidate
-list` shows the pen, and a later `tenjin publish --candidate <id>` sends one
+list --json` shows the pen, and a later `tenjin publish --candidate <id> --json` sends one
 through the same consent scan.
 
 ## Safety
