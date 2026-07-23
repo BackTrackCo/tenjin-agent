@@ -71,6 +71,10 @@ export function emitFailure(
     if (cliErr.fix !== undefined) {
       lines.push(paint(io, 'dim', `fix: ${sanitizeForTerminal(cliErr.fix)}`));
     }
+    // Scan findings are the one detail shape a human needs inline: without them an
+    // interactive publish hitting NEEDS_CONFIRMATION / PUBLISH_BLOCKED sees the
+    // count but not WHICH lines tripped. Every other details shape stays machine-only.
+    lines.push(...findingLines(io, cliErr.details));
     writeLines(io.stdout, lines);
     return cliErr;
   }
@@ -115,6 +119,29 @@ export function normalizeError(err: unknown): CliError {
 /** True in human-first mode: a TTY without --json. Otherwise the JSON envelope wins. */
 function humanMode(io: Io, opts: EmitOptions): boolean {
   return io.isTTY && opts.json !== true;
+}
+
+/**
+ * Render `details.findings` (the scan-finding projection publish attaches to
+ * NEEDS_CONFIRMATION / PUBLISH_BLOCKED) as one dim line per finding:
+ * `  <check> (line N): <excerpt>`. The excerpt is already masked for secret
+ * findings at the source; sanitize it anyway since it can echo file content.
+ * Returns [] for any other details shape, so no other error leaks a detail dump.
+ */
+function findingLines(io: Io, details: unknown): string[] {
+  if (typeof details !== 'object' || details === null || !('findings' in details)) return [];
+  const { findings } = details as { findings: unknown };
+  if (!Array.isArray(findings) || findings.length === 0) return [];
+  const rendered: string[] = [];
+  for (const f of findings) {
+    if (typeof f !== 'object' || f === null) continue;
+    const { check, line, excerpt } = f as { check?: unknown; line?: unknown; excerpt?: unknown };
+    if (typeof check !== 'string' || typeof line !== 'number' || typeof excerpt !== 'string') {
+      continue;
+    }
+    rendered.push(paint(io, 'dim', `  ${check} (line ${line}): ${sanitizeForTerminal(excerpt)}`));
+  }
+  return rendered;
 }
 
 function writeJson(stream: NodeJS.WritableStream, value: unknown): void {

@@ -40,6 +40,14 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
+    const cap = captureIo(true);
+    const code = await main([], cap.io);
+    expect(code).toBe(2);
+    expect(cap.stdout()).toBe(''); // no JSON envelope, no duplicate human line
+    expect(cap.stderr()).toContain('Usage:'); // commander's help text stands alone
+  });
+
   // The output contract at the dispatcher level, driven by a command's offline
   // validation throw (`config set <unknown-key>` fails before any I/O).
   describe('output contract (human-first at a TTY)', () => {

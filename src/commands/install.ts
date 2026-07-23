@@ -261,7 +261,7 @@ function modeBlurb(v: PublishMode): string {
 async function walletWalkthrough(
   ctx: CommandContext,
   deps: InstallDeps,
-  dryRun: boolean,
+  skipCreate: boolean,
   noWallet: boolean,
   io: Io,
 ): Promise<string[]> {
@@ -271,7 +271,7 @@ async function walletWalkthrough(
     return [`${paint(io, 'bold', 'Wallet:')} ${address} (existing)`];
   }
   const later = `${paint(io, 'bold', 'Wallet:')} none. Create one later with: tenjin wallet create`;
-  if (dryRun || noWallet) return [later];
+  if (skipCreate || noWallet) return [later];
 
   const confirm = deps.confirmWallet ?? defaultConfirmWallet;
   if (!(await confirm('Create a wallet now? [Y/n] '))) return [later];
