@@ -76,7 +76,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
+      // A human-first command (interactive `install`) renders its own walkthrough
+      // to stdout and asks for no envelope; every other path emits exactly one.
+      if (result.suppressEnvelope !== true) {
+        emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
+      }
     } catch (err) {
       setExit(emitFailure(io, command, err, { json }).exitCode);
     }
@@ -125,6 +129,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       '--publish-mode <mode>',
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
+    .option('--no-wallet', 'skip the wallet-setup step of the interactive walkthrough')
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
@@ -136,6 +141,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
               : {}),
             ...(o.dryRun === true ? { dryRun: true } : {}),
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
+            ...(o.wallet === false ? { noWallet: true } : {}),
           },
           ctx,
         );

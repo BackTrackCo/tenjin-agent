@@ -136,7 +136,7 @@ Shipping today (no backend dependency):
 
 | Command                                 | Purpose                                                              |
 | --------------------------------------- | -------------------------------------------------------------------- |
-| `tenjin install`                        | Auto-detect harnesses, wire the skills, then run the doctor checks   |
+| `tenjin install`                        | Walk you through skills, publish mode, and wallet setup              |
 | `tenjin doctor`                         | Environment, API reachability, contract, and wallet checks           |
 | `tenjin config [get\|set]`              | Spend policy: `maxAutoSpend`, `sessionBudget`, `confirm`, allowlists |
 | `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                  |
@@ -209,9 +209,11 @@ stdio server over the same core).
 
 Every invocation prints exactly one JSON envelope to stdout
 (`{schemaVersion, command, ok, data | error}`); human rendering goes to stderr
-only. Exit codes: `0` success (including an honest MISS), `1` runtime/network,
-`2` usage, `3` policy refusal (spend cap, allowlist, missing approval), `4`
-payment failure after approval.
+only. The one exception is `install`: at an interactive terminal it is
+human-first and prints a plain onboarding walkthrough to stdout with no envelope;
+pass `--json` for the envelope. Exit codes: `0` success (including an honest
+MISS), `1` runtime/network, `2` usage, `3` policy refusal (spend cap, allowlist,
+missing approval), `4` payment failure after approval.
 
 ### Safety model
 

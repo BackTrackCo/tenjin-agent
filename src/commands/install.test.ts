@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -47,6 +47,10 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     skillsSourceDir: SKILLS_SRC,
     which: () => false,
     collectChecks: async () => okChecks,
+    // Default wallet seams so an interactive test never blocks on a real prompt or
+    // writes a real key; wallet-specific tests override these.
+    walletExists: async () => false,
+    confirmWallet: async () => false,
     ...over,
   };
 }
@@ -563,5 +567,170 @@ describe('runInstall: publish-mode selection', () => {
     );
     expect(modeOf(d)).toEqual({ value: 'review', source: 'flag' });
     expect(await persistedMode()).toBe('review');
+  });
+});
+
+describe('runInstall: interactive walkthrough', () => {
+  function makeCtxCap(flags: Partial<GlobalFlags> = {}): {
+    ctx: CommandContext;
+    stdout: () => string;
+  } {
+    const chunks: string[] = [];
+    const out = {
+      write: (s: string) => (chunks.push(s), true),
+    } as unknown as NodeJS.WritableStream;
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      stdout: () => chunks.join('').replace(/\x1b\[[0-9;]*m/g, ''), // eslint-disable-line no-control-regex
+      ctx: {
+        flags: { json: false, timeout: 10000, ...flags },
+        dataDir: data,
+        io: { stdout: out, stderr: sink(), isTTY: true },
+      },
+    };
+  }
+
+  const ADDR = '0x1234567890abcdef1234567890abcdef12345678';
+
+  it('prints the walkthrough to stdout and suppresses the JSON envelope', async () => {
+    const { ctx, stdout } = makeCtxCap();
+    const res = await runInstall(
+      { harness: ['claude'] },
+      ctx,
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    expect(res.suppressEnvelope).toBe(true);
+    const text = stdout();
+    expect(text).toContain('Claude Code: 3 skills installed');
+    expect(text).toContain('publish mode: review');
+    expect(text).toContain('Done. Try: tenjin lookup');
+    // No JSON envelope shape leaked onto stdout.
+    expect(text).not.toContain('"schemaVersion"');
+  });
+
+  it('--json keeps the envelope and never prompts the wallet', async () => {
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({ isInteractive: true, confirmWallet: confirm, walletExists: async () => false }),
+    );
+    expect(res.suppressEnvelope).toBeFalsy();
+    const d = asData(res.data) as Data & { publishMode: unknown; doctor: unknown };
+    expect(d.harnesses[0]!.harness).toBe('claude');
+    expect(d.publishMode).toBeDefined();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('creates a wallet on yes and prints the address + funding lines', async () => {
+    const { ctx, stdout } = makeCtxCap();
+    const create = vi.fn(async () => ADDR);
+    await runInstall(
+      { harness: ['claude'] },
+      ctx,
+      deps({
+        isInteractive: true,
+        promptMode: async () => '',
+        walletExists: async () => false,
+        confirmWallet: async () => true,
+        createWallet: create,
+      }),
+    );
+    expect(create).toHaveBeenCalledOnce();
+    const text = stdout();
+    expect(text).toContain(ADDR);
+    expect(text).toContain('Fund it: send a few dollars of USDC on Base');
+    expect(text).toContain('Check with: tenjin wallet balance');
+  });
+
+  it('declining the wallet prompt prints the create-later line, no create', async () => {
+    const { ctx, stdout } = makeCtxCap();
+    const create = vi.fn(async () => ADDR);
+    await runInstall(
+      { harness: ['claude'] },
+      ctx,
+      deps({
+        isInteractive: true,
+        promptMode: async () => '',
+        walletExists: async () => false,
+        confirmWallet: async () => false,
+        createWallet: create,
+      }),
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(stdout()).toContain('Create one later with: tenjin wallet create');
+  });
+
+  it('--no-wallet skips the wallet prompt entirely', async () => {
+    const { ctx, stdout } = makeCtxCap();
+    const confirm = vi.fn(async () => true);
+    await runInstall(
+      { harness: ['claude'], noWallet: true },
+      ctx,
+      deps({ isInteractive: true, promptMode: async () => '', confirmWallet: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(stdout()).toContain('Create one later with: tenjin wallet create');
+  });
+
+  it('shows an existing wallet address without prompting', async () => {
+    const { ctx, stdout } = makeCtxCap();
+    const confirm = vi.fn(async () => true);
+    await runInstall(
+      { harness: ['claude'] },
+      ctx,
+      deps({
+        isInteractive: true,
+        promptMode: async () => '',
+        walletExists: async () => true,
+        walletAddress: async () => ADDR,
+        confirmWallet: confirm,
+      }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(stdout()).toContain(`Wallet: ${ADDR} (existing)`);
+  });
+
+  it('a fully-green doctor is one line; a failure surfaces with its fix', async () => {
+    const { ctx: okCtx, stdout: okOut } = makeCtxCap();
+    await runInstall(
+      { harness: ['claude'] },
+      okCtx,
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    expect(okOut()).toContain('Everything checks out');
+
+    const failing: DoctorChecks = {
+      checks: [
+        {
+          name: 'api',
+          status: 'fail',
+          required: true,
+          detail: 'unreachable',
+          fix: 'check the base URL',
+        },
+      ],
+      failure: {
+        code: 'API_UNREACHABLE',
+        result: { name: 'api', status: 'fail', required: true, detail: 'unreachable' },
+      },
+    };
+    const { ctx: failCtx, stdout: failOut } = makeCtxCap();
+    await runInstall(
+      { harness: ['claude'] },
+      failCtx,
+      deps({ isInteractive: true, promptMode: async () => '', collectChecks: async () => failing }),
+    );
+    const text = failOut();
+    expect(text).toContain('need attention');
+    expect(text).toContain('api: unreachable');
+    expect(text).toContain('fix: check the base URL');
+  });
+
+  it('emits no internal jargon (no "roadmap") in the data or walkthrough', async () => {
+    // Machine envelope: the harness notes ship in the JSON.
+    await mkdir(join(home, '.claude'), { recursive: true });
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    expect(JSON.stringify(res.data).toLowerCase()).not.toContain('roadmap');
   });
 });
