@@ -51,6 +51,9 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // writes a real key; wallet-specific tests override these.
     walletExists: async () => false,
     confirmWallet: async () => false,
+    // Default the CLAUDE.md prompt to no so interactive tests don't block on stdin;
+    // CLAUDE.md-specific tests override this or pass the --claude-md flag.
+    confirmClaudeMd: async () => false,
     ...over,
   };
 }
@@ -71,6 +74,7 @@ type Harnesses = Array<{
   skillsDir: string;
   skills: Array<{ name: string; status: string }>;
   agentsMd?: { path: string; status: string };
+  claudeMd?: { path: string; status: string };
   codexNetworkRule?: string;
   warnings: string[];
   notes: string[];
@@ -218,6 +222,168 @@ describe('runInstall: idempotency', () => {
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
     expect(agents.startsWith('# My notes\n')).toBe(true);
     expect(agents.split(MARKER).length - 1).toBe(1);
+  });
+});
+
+describe('runInstall: AGENTS.md instinct nudge', () => {
+  const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /somewhere (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
+
+  it('appends a lookup-first nudge that points at the skills dir', async () => {
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    expect(agents).toContain("run a free anonymous 'tenjin lookup");
+    expect(agents).toContain('before regenerating public research');
+    expect(agents).toContain(join(home, '.agents', 'skills'));
+    expect(agents).not.toContain('—'); // no em dashes
+  });
+
+  it('replaces an older marker line in place instead of appending a duplicate', async () => {
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), `# notes\n${OLD_LINE}\nmore\n`);
+
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.agentsMd?.status).toBe('updated');
+
+    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    expect(agents.split(MARKER).length - 1).toBe(1); // still exactly one marker
+    expect(agents).not.toContain('installed at /somewhere'); // old text gone
+    expect(agents).toContain("run a free anonymous 'tenjin lookup"); // new text in
+    expect(agents.startsWith('# notes\n')).toBe(true); // surrounding lines preserved
+    expect(agents.trimEnd().endsWith('more')).toBe(true);
+  });
+
+  it('leaves a matching nudge line untouched (already-present)', async () => {
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const before = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
+    expect(await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8')).toBe(before);
+  });
+
+  it('dry-run over a drifted line reports would-update and writes nothing', async () => {
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), `${OLD_LINE}\n`);
+    const { data: d } = await runInstall({ harness: ['codex'], dryRun: true }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('would-update');
+    expect(await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8')).toBe(`${OLD_LINE}\n`);
+  });
+});
+
+describe('runInstall: CLAUDE.md nudge', () => {
+  const claudeMdPath = () => join(home, '.claude', 'CLAUDE.md');
+  const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
+
+  it('skips CLAUDE.md by default on a non-interactive run (no flag, no file)', async () => {
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
+    expect(existsSync(claudeMdPath())).toBe(false);
+  });
+
+  it('--claude-md writes the nudge pointing at ~/.claude/skills', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'], claudeMd: true },
+      makeCtx(),
+      deps(),
+    );
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
+    const md = await readFile(claudeMdPath(), 'utf8');
+    expect(md).toContain("run a free anonymous 'tenjin lookup");
+    expect(md).toContain(join(home, '.claude', 'skills'));
+    expect(md.split(MARKER).length - 1).toBe(1);
+  });
+
+  it('re-running --claude-md is idempotent (up-to-date, file unchanged)', async () => {
+    await runInstall({ harness: ['claude'], claudeMd: true }, makeCtx(), deps());
+    const before = await readFile(claudeMdPath(), 'utf8');
+    const { data: d } = await runInstall(
+      { harness: ['claude'], claudeMd: true },
+      makeCtx(),
+      deps(),
+    );
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('up-to-date');
+    expect(await readFile(claudeMdPath(), 'utf8')).toBe(before);
+  });
+
+  it('replaces an older marker line in CLAUDE.md in place', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeMdPath(), `# my rules\n${OLD_LINE}\n`);
+    const { data: d } = await runInstall(
+      { harness: ['claude'], claudeMd: true },
+      makeCtx(),
+      deps(),
+    );
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('updated');
+    const md = await readFile(claudeMdPath(), 'utf8');
+    expect(md.split(MARKER).length - 1).toBe(1);
+    expect(md).not.toContain('installed at /old');
+    expect(md.startsWith('# my rules\n')).toBe(true);
+  });
+
+  it('--dry-run with --claude-md is would-write and writes nothing', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'], claudeMd: true, dryRun: true },
+      makeCtx(),
+      deps(),
+    );
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('would-write');
+    expect(existsSync(claudeMdPath())).toBe(false);
+  });
+
+  it('--no-claude-md skips without prompting even when interactive', async () => {
+    const confirm = vi.fn(async () => true);
+    const { data: d } = await runInstall(
+      { harness: ['claude'], claudeMd: false },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
+    expect(existsSync(claudeMdPath())).toBe(false);
+  });
+
+  it('interactive yes writes CLAUDE.md; no skips it', async () => {
+    const yes = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: async () => true }),
+    );
+    expect(asData(yes.data).harnesses[0]!.claudeMd?.status).toBe('written');
+    expect(existsSync(claudeMdPath())).toBe(true);
+
+    // Fresh home for the "no" case.
+    await rm(claudeMdPath(), { force: true });
+    const no = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: async () => false }),
+    );
+    expect(asData(no.data).harnesses[0]!.claudeMd?.status).toBe('skipped');
+  });
+
+  it('--dry-run does not prompt for CLAUDE.md', async () => {
+    const confirm = vi.fn(async () => true);
+    const { data: d } = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
+  });
+
+  it('non-interactive skip mentions how to add the nudge later', async () => {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    const ttyCtx: CommandContext = {
+      flags: { json: false, timeout: 10000 },
+      dataDir: data,
+      io: { stdout: sink(), stderr: sink(), isTTY: true },
+    };
+    // TTY output but no stdin (canPrompt false), no flag: skipped, with a hint.
+    const res = await runInstall({ harness: ['claude'] }, ttyCtx, deps());
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('--claude-md');
+    expect(text).toContain('CLAUDE.md');
   });
 });
 

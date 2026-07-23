@@ -34,6 +34,9 @@ const InstallInputSchema = z.object({
   dryRun: z.boolean().optional(),
   publishMode: z.string().optional(),
   noWallet: z.boolean().optional(),
+  /** Tri-state opt-in for the ~/.claude/CLAUDE.md nudge: true (--claude-md), false
+   * (--no-claude-md), or undefined (ask interactively, else skip). */
+  claudeMd: z.boolean().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
 
@@ -47,12 +50,44 @@ interface PublishModeSelection {
 }
 
 /**
- * The one line `install` keeps in an AGENTS.md so Codex (which reads AGENTS.md as
- * global guidance, not the raw ~/.agents/skills scan) knows the skills are there.
- * The HTML-comment marker is how re-runs stay idempotent: its presence means the
- * line is already written, so we never append a second copy.
+ * The one line `install` keeps in an AGENTS.md (and, opt-in, in a CLAUDE.md) so the
+ * harness reads it as global guidance, not the raw ~/.agents/skills scan. It is an
+ * instinct nudge: run a free `tenjin lookup` before regenerating public research,
+ * then a pointer to where the skills live. The HTML-comment marker keeps re-runs
+ * idempotent: a matching line is left untouched, a drifted line (an older install's
+ * copy) is rewritten in place, and an absent line is appended, so we never duplicate.
  */
-const AGENTS_MARKER = '<!-- tenjin-cli:skills -->';
+const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
+
+/**
+ * The instinct nudge line, pointed at `skillsDir`. One line, no em dashes: the
+ * marker, the lookup-before-regenerating nudge, then where the skills live.
+ */
+function nudgeLine(skillsDir: string): string {
+  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run a free anonymous 'tenjin lookup "<question>"' first. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
+}
+
+/**
+ * Upsert the marker line into a file's text. Finds the existing marker line by its
+ * marker prefix (not exact text) so an older install's drifted copy is recognized:
+ * a matching line is `none`, a drifted line is `replace`d in place, an absent marker
+ * is `append`ed. `content` is the text to write (null when nothing changes).
+ */
+function upsertMarkerLine(
+  existing: string | null,
+  line: string,
+): { content: string | null; change: 'append' | 'replace' | 'none' } {
+  const text = existing ?? '';
+  if (!text.includes(SKILLS_MARKER)) {
+    const prefix = text.length === 0 || text.endsWith('\n') ? '' : '\n';
+    return { content: `${text}${prefix}${line}\n`, change: 'append' };
+  }
+  const lines = text.split('\n');
+  const idx = lines.findIndex((l) => l.includes(SKILLS_MARKER));
+  if (lines[idx] === line) return { content: null, change: 'none' };
+  lines[idx] = line;
+  return { content: lines.join('\n'), change: 'replace' };
+}
 
 /**
  * The Codex config.toml rule the user must add by hand. We PRINT it, never edit
@@ -69,7 +104,12 @@ interface SkillResult {
 
 interface AgentsMdResult {
   path: string;
-  status: 'appended' | 'already-present' | 'would-append';
+  status: 'appended' | 'already-present' | 'updated' | 'would-append' | 'would-update';
+}
+
+interface ClaudeMdResult {
+  path: string;
+  status: 'written' | 'up-to-date' | 'updated' | 'skipped' | 'would-write' | 'would-update';
 }
 
 interface HarnessResult {
@@ -79,6 +119,7 @@ interface HarnessResult {
   skillsDir: string;
   skills: SkillResult[];
   agentsMd?: AgentsMdResult;
+  claudeMd?: ClaudeMdResult;
   codexNetworkRule?: string;
   notes: string[];
   warnings: string[];
@@ -109,6 +150,8 @@ export interface InstallDeps {
   createWallet?: (ctx: CommandContext) => Promise<string>;
   /** Yes/no confirm for "Create a wallet now?"; defaults to a TTY y/n reader (default yes). */
   confirmWallet?: (label: string) => Promise<boolean>;
+  /** Yes/no confirm for the CLAUDE.md nudge; defaults to a TTY y/n reader (default yes). */
+  confirmClaudeMd?: (label: string) => Promise<boolean>;
 }
 
 /**
@@ -137,6 +180,7 @@ export async function runInstall(
   }
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
+  const claudeMdFlag = parsed.data.claudeMd;
   // Validate --publish-mode UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
@@ -156,9 +200,14 @@ export async function runInstall(
   await assertSkillsSource(skillsSource);
 
   const plans = resolvePlans(parsed.data.harness, home, which);
+  // The CLAUDE.md nudge is opt-in and only relevant when a Claude target exists.
+  // Resolve it once (may prompt) so the loop just writes the settled decision.
+  const claudeMdWrite = plans.some((p) => p.harness === 'claude')
+    ? await decideClaudeMd(claudeMdFlag, canPrompt, dryRun, deps)
+    : false;
   const harnesses: HarnessResult[] = [];
   for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun));
+    harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
   const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, deps.doctorDeps ?? {}));
   const doctor = await collect(ctx);
@@ -235,10 +284,22 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     const n = h.skills.length;
     const changed = h.skills.some((s) => s.status !== 'up-to-date');
     const verb = dryRun ? 'would install' : changed ? 'installed' : 'up to date';
-    const pointer = h.agentsMd !== undefined ? ' + AGENTS.md pointer' : '';
+    const wired: string[] = [];
+    if (h.agentsMd !== undefined) wired.push('AGENTS.md nudge');
+    if (h.claudeMd !== undefined && h.claudeMd.status !== 'skipped') wired.push('CLAUDE.md nudge');
+    const suffix = wired.length > 0 ? ` + ${wired.join(' + ')}` : '';
     lines.push(
-      `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${pointer}`,
+      `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${suffix}`,
     );
+    if (h.claudeMd?.status === 'skipped') {
+      lines.push(
+        paint(
+          io,
+          'dim',
+          '  Add a Tenjin lookup nudge to ~/.claude/CLAUDE.md later: tenjin install --harness claude --claude-md',
+        ),
+      );
+    }
     if (h.codexNetworkRule !== undefined) {
       lines.push(
         paint(io, 'dim', '  Codex blocks network by default; add to ~/.codex/config.toml:'),
@@ -273,7 +334,7 @@ async function walletWalkthrough(
   const later = `${paint(io, 'bold', 'Wallet:')} none. Create one later with: tenjin wallet create`;
   if (skipCreate || noWallet) return [later];
 
-  const confirm = deps.confirmWallet ?? defaultConfirmWallet;
+  const confirm = deps.confirmWallet ?? defaultConfirmYesNo;
   if (!(await confirm('Create a wallet now? [Y/n] '))) return [later];
 
   const address = await (deps.createWallet ?? defaultCreateWallet)(ctx);
@@ -295,7 +356,7 @@ async function defaultCreateWallet(ctx: CommandContext): Promise<string> {
 }
 
 /** A visible y/n reader defaulting to yes (empty input); label + echo on stderr. */
-function defaultConfirmWallet(label: string): Promise<boolean> {
+function defaultConfirmYesNo(label: string): Promise<boolean> {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     let settled = false;
@@ -494,6 +555,7 @@ async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
   dryRun: boolean,
+  claudeMdWrite: boolean,
 ): Promise<HarnessResult> {
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
@@ -520,8 +582,48 @@ async function applyPlan(
   if (plan.wiresAgentsMd) {
     result.agentsMd = await wireAgentsMd(plan, dryRun);
     result.codexNetworkRule = CODEX_NETWORK_RULE;
+  } else if (plan.harness === 'claude') {
+    result.claudeMd = await wireClaudeMd(plan, dryRun, claudeMdWrite);
   }
   return result;
+}
+
+/**
+ * Decide whether to write the ~/.claude/CLAUDE.md nudge. `--claude-md` forces it on
+ * and `--no-claude-md` off; otherwise ask at an interactive TTY (default yes), and
+ * on a non-interactive run (or --dry-run without the flag) skip it.
+ */
+async function decideClaudeMd(
+  flag: boolean | undefined,
+  canPrompt: boolean,
+  dryRun: boolean,
+  deps: InstallDeps,
+): Promise<boolean> {
+  if (flag !== undefined) return flag;
+  if (dryRun || !canPrompt) return false;
+  const confirm = deps.confirmClaudeMd ?? defaultConfirmYesNo;
+  return confirm('Add a one-line Tenjin lookup nudge to ~/.claude/CLAUDE.md? [Y/n] ');
+}
+
+/**
+ * Write the nudge line into ~/.claude/CLAUDE.md when opted in. Creates the file if
+ * absent, rewrites a drifted marker line in place, and leaves a matching line alone.
+ * `skipped` means the user opted out (or was never asked).
+ */
+async function wireClaudeMd(
+  plan: HarnessPlan,
+  dryRun: boolean,
+  write: boolean,
+): Promise<ClaudeMdResult> {
+  const path = join(plan.home, '.claude', 'CLAUDE.md');
+  if (!write) return { path, status: 'skipped' };
+
+  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
+  const { content, change } = upsertMarkerLine(existing, nudgeLine(plan.skillsDir));
+  if (change === 'none') return { path, status: 'up-to-date' };
+  if (!dryRun && content !== null) await writeFileAtomic(path, content);
+  if (change === 'append') return { path, status: dryRun ? 'would-write' : 'written' };
+  return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
 function notesFor(plan: HarnessPlan): string[] {
@@ -614,21 +716,31 @@ function treesEqual(a: Map<string, Buffer>, b: Map<string, Buffer> | null): bool
 async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsMdResult> {
   const shared = join(plan.home, '.agents', 'AGENTS.md');
   const codex = join(plan.home, '.codex', 'AGENTS.md');
-  const line = `${AGENTS_MARKER} Tenjin agent skills are installed at ${plan.skillsDir} (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
+  const line = nudgeLine(plan.skillsDir);
 
+  // If either file Codex reads already carries the marker, that file owns the line:
+  // refresh it in place when an older install's text drifted, else leave it. This
+  // keeps append-once global while still upgrading a stale line.
   for (const path of [shared, codex]) {
-    if (existsSync(path) && (await readFile(path, 'utf8')).includes(AGENTS_MARKER)) {
-      return { path, status: 'already-present' };
+    if (existsSync(path) && (await readFile(path, 'utf8')).includes(SKILLS_MARKER)) {
+      return upsertAgentsMd(path, line, dryRun);
     }
   }
 
-  const path = chooseAgentsMdPath(plan.home);
-  if (dryRun) return { path, status: 'would-append' };
+  return upsertAgentsMd(chooseAgentsMdPath(plan.home), line, dryRun);
+}
 
+async function upsertAgentsMd(
+  path: string,
+  line: string,
+  dryRun: boolean,
+): Promise<AgentsMdResult> {
   const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
-  const prefix = existing === null || existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-  await writeFileAtomic(path, `${existing ?? ''}${prefix}${line}\n`);
-  return { path, status: 'appended' };
+  const { content, change } = upsertMarkerLine(existing, line);
+  if (change === 'none') return { path, status: 'already-present' };
+  if (!dryRun && content !== null) await writeFileAtomic(path, content);
+  if (change === 'append') return { path, status: dryRun ? 'would-append' : 'appended' };
+  return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
 function chooseAgentsMdPath(home: string): string {
