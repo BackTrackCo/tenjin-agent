@@ -182,9 +182,9 @@ const LINE_DETECTORS: LineDetector[] = [
     skip: (m) => isPlaceholder(m[1] ?? ''),
   },
   // Generic secret-named assignment — WARN, not block (review): a keyword match is
-  // lower-confidence than a structured shape, and warn still forces confirmation
-  // in default auto mode, so nothing publishes unseen while benign config
-  // (SECRET_NAME=…, MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. The
+  // lower-confidence than a structured shape, and a warn still forces confirmation
+  // in auto mode (and review always asks), so nothing publishes unseen while benign
+  // config (SECRET_NAME=…, MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. The
   // excerpt stays masked. Placeholder and structural (path/URL/regex) values are
   // skipped entirely.
   {

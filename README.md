@@ -173,13 +173,16 @@ true` opts into 90-day retention of the question for retrieval evaluation.
 
 ### Consent modes and pricing
 
-`publish` runs a deterministic local scan (secrets, keys, PII, wallet addresses)
-on every publish, then applies your `publish.mode`:
+`publish.mode` governs ALL publishing uniformly. A piece you asked for and a
+reusable answer your agent derived after a lookup both go through it, after a
+deterministic local scan (secrets, keys, PII, wallet addresses) that runs in
+every mode:
 
-- **`review`** always asks first, even on a clean scan.
-- **`auto`** (the default) publishes a clean scan immediately; any warning
-  finding stops and asks; a hard block (a live secret or private key) always
-  refuses.
+- **`review`** (the default) asks a one-click yes/no for every publish, even a
+  clean scan. This is the safe default: nothing leaves your machine unseen.
+- **`auto`** publishes a clean scan immediately, including answers your agent
+  derives; any warning finding stops and asks; a hard block (a live secret or
+  private key) always refuses.
 - **`full-auto`** does not stop for warnings, only for hard blocks. It is honored
   from your global config, an env var, a flag, or a gitignored `.tenjin.json`. Only
   a committed `.tenjin.json` asking for `full-auto` is downgraded to `auto`, so
@@ -188,7 +191,7 @@ on every publish, then applies your `publish.mode`:
 `--yes` clears the warning findings and the review confirm; it never clears a hard
 block. Set the mode with `tenjin config set publish.mode <mode>`, or per run with
 `--mode`. `tenjin install` asks once on an interactive setup and otherwise leaves
-the default (auto); change it any time with `tenjin config set publish.mode`.
+the default (review); change it any time with `tenjin config set publish.mode`.
 
 Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultPrice`
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
