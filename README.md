@@ -26,7 +26,7 @@ and outcome reporting. Every command works against production today.
 ## Quickstart
 
 ```bash
-npm i -g tenjin-cli@alpha   # the alpha channel; a plain `npm i` gets a stale "latest" until a stable release
+npm i -g tenjin-cli
 tenjin install              # detect your harness, install the skills, ask your publish consent mode, run the doctor checks
 tenjin wallet create        # create a local Base wallet and print its address
 # fund it: send USDC on Base to that address (a few dollars is plenty; this is a pocket-money wallet)
