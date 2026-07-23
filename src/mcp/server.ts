@@ -95,12 +95,14 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
   const deps = opts.deps ?? {};
   const resolvedDataDir = opts.dataDir ?? defaultDataDir(process.env);
 
-  // A fresh context per tool call: stdout is a discard sink (nothing but the MCP
-  // transport may write to real stdout), stderr is a discard buffer (a core's
-  // incidental warnings never surface on the wire), isTTY:false guarantees buy's
-  // confirm path safe-declines with no readline. json:true keeps the cores on
-  // their machine contract even though the MCP adapter reads the CommandResult
-  // directly rather than emitting an envelope.
+  // A fresh context per tool call: stdout is a discard sink so nothing but the MCP
+  // transport ever writes to real stdout (the wire). ctx.io.stderr is a discard
+  // sink too, dropping a core's incidental warnings routed through it; a few cores
+  // (e.g. settings.ts's default-warn) write to real process.stderr directly rather
+  // than ctx.io.stderr, but stderr is never the MCP wire, so that is harmless
+  // either way. isTTY:false guarantees buy's confirm path safe-declines with no
+  // readline. json:true keeps the cores on their machine contract even though the
+  // MCP adapter reads the CommandResult directly rather than emitting an envelope.
   function buildCtx(): CommandContext {
     const flags: GlobalFlags = {
       json: true,

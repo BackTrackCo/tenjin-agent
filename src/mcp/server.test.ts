@@ -222,29 +222,50 @@ describe('tenjin_publish consent', () => {
 });
 
 describe('MCP adapter never writes to real stdout', () => {
-  it('a tool call produces no process.stdout output (the transport owns the wire)', async () => {
+  it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
       schemaVersion: 1,
       lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
     };
-    const fetchImpl = (async () =>
+    const lookupFetch = (async () =>
       new Response(JSON.stringify(miss), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })) as unknown as typeof fetch;
+    const pr = buildPaymentRequired();
+    const { fetch: buyFetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+    const file = join(dir, 'clean.md');
+    await writeFile(file, '# Notes\n\nSome clean public prose.\n');
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
-      deps: { lookup: { fetchImpl } },
+      deps: {
+        lookup: { fetchImpl: lookupFetch },
+        buy: {
+          fetchImpl: buyFetch,
+          provider: testWalletProvider(),
+          authorizer: fakeAuthorizer('confirm', 'confirm_always'),
+        },
+        publish: { cwd: dir, env: {} },
+      },
     });
+    // Cover the free read path plus both write-path tools (buy, publish). Their
+    // outcome (settle / refuse / needs_confirmation) is irrelevant here — no path
+    // may write to real stdout, which the MCP transport owns.
     const spy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     try {
       await client.callTool({
         name: 'tenjin_lookup',
         arguments: { question: 'anything public' },
       });
+      await client.callTool({ name: 'tenjin_buy', arguments: { ref: URL_ } });
+      await client.callTool({ name: 'tenjin_publish', arguments: { file, mode: 'review' } });
     } finally {
       spy.mockRestore();
     }
