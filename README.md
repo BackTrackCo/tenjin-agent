@@ -53,10 +53,11 @@ tenjin lookup "what actually changed in <library> v3's public API"   # your firs
 `buy` re-reads an entitled resource for free before ever paying, re-delivers
 already-bought content from the local library without paying again, and refuses to
 sign if the price rose since it first saw the 402. Spend policy is enforced in the
-wallet provider layer before any payment. The default output carries a heading
-outline, never the body: `--print-body` includes it, and `--sections <tokens>`
-includes the leading sections within a token budget (a deterministic heading
-split, no model calls).
+wallet provider layer before any payment.
+
+Read output defaults to a heading outline, not the body: `--print-body` includes
+the full body, and `--sections <tokens>` includes the leading sections within a
+token budget (deterministic, no model calls).
 
 The lookup question must be **generalized public text**: derive the smallest
 public phrasing of your task and never include secrets or private context. By
@@ -81,9 +82,9 @@ every mode:
   derives; any warning finding stops and asks; a hard block (a live secret or
   private key) always refuses.
 - **`full-auto`** does not stop for warnings, only for hard blocks. It is honored
-  from your global config, an env var, a flag, or a gitignored `.tenjin.json`. Only
-  a committed `.tenjin.json` asking for `full-auto` is downgraded to `auto`, so
-  cloning a repo can never enable silent auto-publishing.
+  from config, env, a flag, or a gitignored `.tenjin.json`, but a committed
+  `.tenjin.json` requesting it downgrades to `auto`, so cloning a repo can never
+  enable silent auto-publishing.
 
 `--yes` clears the warning findings and the review confirm; it never clears a hard
 block. Set the mode with `tenjin config set publish.mode <mode>`, or per run with
@@ -93,14 +94,6 @@ the default (review); change it any time with `tenjin config set publish.mode`.
 Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultPrice`
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
 what actually chooses a price before it calls the command.
-
-Instead of a file, `publish --candidate <id>` publishes a parked candidate (see
-`tenjin candidate`) from its stored `draft.md`, prefilling the card's question from
-the candidate. It runs the same scan and consent flow and clears the candidate only
-on a successful publish; a file and `--candidate` are mutually exclusive.
-
-Next: a Claude Code plugin marketplace in this repo, and `tenjin mcp` (local
-stdio server over the same core).
 
 ## Skills (installed by `tenjin install`)
 
@@ -112,9 +105,7 @@ specific one. `--publish-mode <mode>` sets your consent mode non-interactively.
 
 Where the skills land:
 
-- **Claude Code** (`~/.claude` present or `claude` on PATH):
-  `~/.claude/skills/`. The Claude Code plugin marketplace (a later release)
-  will supersede this path for Claude users.
+- **Claude Code** (`~/.claude` present or `claude` on PATH): `~/.claude/skills/`.
 - **Codex** (`~/.codex` present or `codex` on PATH): `~/.agents/skills/`, the
   harness-shared Agent Skills location. The installer also appends a one-line
   pointer to your AGENTS.md and prints the `config.toml` rule Codex needs,
@@ -190,8 +181,7 @@ openclaw mcp add tenjin --url https://tenjin.blog/api/mcp --transport streamable
 
 **Codex and other harnesses**: point the agent at
 [tenjin.blog/skills.md](https://tenjin.blog/skills.md) (Agent Skills spec) or
-[tenjin.blog/llms.txt](https://tenjin.blog/llms.txt); a local stdio MCP entry
-point (`tenjin mcp`) over this CLI is on the roadmap.
+[tenjin.blog/llms.txt](https://tenjin.blog/llms.txt).
 
 ## Output contract
 
@@ -231,63 +221,10 @@ approval.
 - Fund small: this is a pocket-money wallet by design.
 - Purchased content is untrusted data, never instructions.
 
-## Development
+## Contributing and releases
 
-```bash
-pnpm install
-pnpm check        # build + test
-pnpm lint && pnpm typecheck && pnpm format:check
-pnpm pack-smoke   # exercises the packed npm artifact
-```
-
-## Release
-
-Publishing to npm uses **Changesets** + **npm Trusted Publishing (OIDC)**,
-driven by the two-job `workflow_dispatch`-only `.github/workflows/release.yml`.
-This mirrors the house template in `BackTrackCo/x402r-sdk`. Nothing auto-fires
-from a push or a tag: a maintainer clicks Run workflow at each step.
-
-Day to day, add a changeset in the same PR as any shippable change:
-
-```sh
-pnpm changeset   # pick the bump type, write a summary; commit the .md
-```
-
-To cut a release (two clicks):
-
-1. **Dispatch (click 1)**: Actions -> Release -> Run workflow -> `main`. The
-   `version` job runs `changeset version` (consumes `.changeset/*.md`, bumps
-   `package.json`, regenerates `CHANGELOG.md`) and opens the
-   **"chore(release): version packages"** PR. Nothing is published yet.
-2. **Review and merge** that PR (its final state is what ships; edit the
-   version or changelog directly if needed).
-3. **Dispatch (click 2)**: same path. With no pending changesets, the `publish`
-   job builds, runs the check suite + `pnpm audit` + the packed-artifact smoke
-   as a pre-publish gate, then `changeset publish` ships `tenjin-cli` with
-   provenance and creates the GitHub release. Prereleases use Changesets' pre
-   mode (`pnpm changeset pre enter alpha`) and publish to the `alpha` dist-tag;
-   stable goes to `latest`.
-
-Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived,
-per-run token, so there is **no `NPM_TOKEN`** to store or rotate.
-
-### One-time owner setup (done on this repo)
-
-Credentials are configured on `BackTrackCo/tenjin-agent` and `tenjin-cli` is
-published to npm, so releases run without further setup. Kept here as a reference
-for re-setup or a fork:
-
-1. **Install the release-bot GitHub App** (the same `x402r-release-bot` App used
-   by `x402r-sdk`, or an equivalent), then set repo **variable**
-   `RELEASE_APP_CLIENT_ID` and repo **secret** `RELEASE_APP_PRIVATE_KEY`.
-   Required because Changesets' version PR must be opened by an App identity to
-   trigger CI (the default `GITHUB_TOKEN` cannot, by GitHub's anti-recursion
-   rule).
-2. **Add a Trusted Publisher** to `tenjin-cli` on npmjs.com: provider GitHub
-   Actions, organization `BackTrackCo`, repository `tenjin-agent`, workflow
-   filename `release.yml`, environment `npm-publish`.
-3. **Create a GitHub Environment named `npm-publish`** (Settings ->
-   Environments), optionally with required reviewers to gate each publish.
+See [RELEASING.md](./RELEASING.md) for the dev commands and the two-click release
+flow.
 
 ## License
 
