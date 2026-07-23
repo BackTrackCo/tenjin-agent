@@ -26,14 +26,15 @@ export function defaultIo(): Io {
 }
 
 export interface EmitOptions {
-  /** The global --json flag. When true, all stderr human rendering is suppressed. */
+  /** The global --json flag. When true, the JSON envelope is emitted even at a TTY. */
   json?: boolean;
 }
 
 /**
- * Emit exactly one pretty-printed success envelope to stdout. When on a TTY and
- * --json is off, the optional human lines are rendered to stderr (never stdout —
- * stdout stays a clean single JSON object for the agent that piped us).
+ * Output contract (human-first): at a TTY without `--json`, print ONLY the human
+ * rendering to stdout, no JSON envelope. With `--json`, or when stdout is not a
+ * TTY (a pipe, an agent), print exactly one JSON envelope to stdout and nothing
+ * else. Exit codes are identical on both paths; only the stdout shape differs.
  */
 export function emitSuccess(
   io: Io,
@@ -42,17 +43,19 @@ export function emitSuccess(
   humanLines: string[] = [],
   opts: EmitOptions = {},
 ): void {
-  writeJson(io.stdout, { schemaVersion: SCHEMA_VERSION, command, ok: true, data });
-  if (shouldRenderHuman(io, opts) && humanLines.length > 0) {
-    writeLines(io.stderr, humanLines);
+  if (humanMode(io, opts)) {
+    writeLines(io.stdout, humanLines);
+    return;
   }
+  writeJson(io.stdout, { schemaVersion: SCHEMA_VERSION, command, ok: true, data });
 }
 
 /**
- * Emit exactly one pretty-printed failure envelope to stdout and (on a TTY, with
- * --json off) a red error line plus a `fix` line to stderr. Accepts a CliError or
- * any thrown value; anything that is not a CliError normalizes to INTERNAL.
- * Returns the normalized CliError so the caller can read its `exitCode`.
+ * The failure half of the same contract: at a TTY without `--json`, a red error
+ * line plus a `fix` line to stdout and no envelope; otherwise exactly one failure
+ * envelope to stdout. Accepts a CliError or any thrown value (non-CliError
+ * normalizes to INTERNAL). Returns the normalized CliError so the caller reads its
+ * `exitCode`.
  */
 export function emitFailure(
   io: Io,
@@ -61,6 +64,16 @@ export function emitFailure(
   opts: EmitOptions = {},
 ): CliError {
   const cliErr = normalizeError(err);
+  if (humanMode(io, opts)) {
+    // Error messages can embed server-sourced text (api error passthrough) and
+    // never carry intentional ANSI, so sanitize before painting.
+    const lines = [paint(io, 'red', `error: ${sanitizeForTerminal(cliErr.message)}`)];
+    if (cliErr.fix !== undefined) {
+      lines.push(paint(io, 'dim', `fix: ${sanitizeForTerminal(cliErr.fix)}`));
+    }
+    writeLines(io.stdout, lines);
+    return cliErr;
+  }
   const error: OutputError = {
     code: cliErr.code,
     message: cliErr.message,
@@ -68,15 +81,6 @@ export function emitFailure(
     ...(cliErr.details !== undefined ? { details: cliErr.details } : {}),
   };
   writeJson(io.stdout, { schemaVersion: SCHEMA_VERSION, command, ok: false, error });
-  if (shouldRenderHuman(io, opts)) {
-    // Error messages can embed server-sourced text (api error passthrough) and
-    // never carry intentional ANSI, so sanitize before painting.
-    const lines = [paint(io, 'red', `error: ${sanitizeForTerminal(cliErr.message)}`)];
-    if (cliErr.fix !== undefined) {
-      lines.push(paint(io, 'dim', `fix: ${sanitizeForTerminal(cliErr.fix)}`));
-    }
-    writeLines(io.stderr, lines);
-  }
   return cliErr;
 }
 
@@ -108,7 +112,8 @@ export function normalizeError(err: unknown): CliError {
   return new CliError('INTERNAL', 'Unexpected error', { details: err });
 }
 
-function shouldRenderHuman(io: Io, opts: EmitOptions): boolean {
+/** True in human-first mode: a TTY without --json. Otherwise the JSON envelope wins. */
+function humanMode(io: Io, opts: EmitOptions): boolean {
   return io.isTTY && opts.json !== true;
 }
 
@@ -121,14 +126,13 @@ function writeLines(stream: NodeJS.WritableStream, lines: string[]): void {
 }
 
 /**
- * Color the human line for stderr. styleText emits ANSI only when the target
- * stream is color-capable (a real TTY with color depth) and honors
- * NO_COLOR/FORCE_COLOR natively (verified on Node 22/23). The `stream` option is
- * passed only when stderr is a genuine Stream — styleText throws on anything
- * else, and a test/redirected sink is not one, so it falls back to the default
- * (process.stdout) capability check and simply comes out plain.
+ * Color a human line for stdout (the human surface now). styleText emits ANSI only
+ * when the target stream is color-capable (a real TTY with color depth) and honors
+ * NO_COLOR/FORCE_COLOR natively. The `stream` option is passed only when stdout is
+ * a genuine Stream; a test/redirected sink is not one, so it falls back to the
+ * default capability check and comes out plain.
  */
 function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stderr instanceof Stream) return styleText(format, text, { stream: io.stderr });
+  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
   return styleText(format, text);
 }

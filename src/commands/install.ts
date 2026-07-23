@@ -681,7 +681,7 @@ function isFile(p: string): boolean {
 // --- Human rendering -------------------------------------------------------------
 
 function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stderr instanceof Stream) return styleText(format, text, { stream: io.stderr });
+  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
   return styleText(format, text);
 }
 

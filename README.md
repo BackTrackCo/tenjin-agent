@@ -207,13 +207,15 @@ stdio server over the same core).
 
 ### Output contract
 
-Every invocation prints exactly one JSON envelope to stdout
-(`{schemaVersion, command, ok, data | error}`); human rendering goes to stderr
-only. The one exception is `install`: at an interactive terminal it is
-human-first and prints a plain onboarding walkthrough to stdout with no envelope;
-pass `--json` for the envelope. Exit codes: `0` success (including an honest
-MISS), `1` runtime/network, `2` usage, `3` policy refusal (spend cap, allowlist,
-missing approval), `4` payment failure after approval.
+Human-first at a terminal, machine-first everywhere else. At an interactive
+terminal without `--json`, a command prints only its human rendering to stdout
+and no JSON. With `--json`, or when stdout is piped (an agent, a script), it
+prints exactly one JSON envelope (`{schemaVersion, command, ok, data | error}`)
+and nothing else. **Agents should always pass `--json`.** Exit codes are the same
+on both paths: `0` success (including an honest MISS), `1` runtime/network, `2`
+usage, `3` policy refusal (spend cap, allowlist, missing approval, a publish that
+needs confirmation or is hard-blocked), `4` payment or publish failure after
+approval.
 
 ### Safety model
 

@@ -40,6 +40,33 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  // The output contract at the dispatcher level, driven by a command's offline
+  // validation throw (`config set <unknown-key>` fails before any I/O).
+  describe('output contract (human-first at a TTY)', () => {
+    const bad = ['config', 'set', 'no-such-key', 'x'];
+
+    it('at a TTY without --json, prints the human error to stdout and no envelope', async () => {
+      const cap = captureIo(true);
+      const code = await main(bad, cap.io);
+      expect(code).toBe(2);
+      expect(cap.stdout()).toContain('error:');
+      expect(cap.stdout()).not.toContain('schemaVersion'); // no JSON envelope
+      expect(cap.stderr()).toBe('');
+    });
+
+    it('when stdout is piped (not a TTY), prints the JSON envelope', async () => {
+      const cap = captureIo(false);
+      await main(bad, cap.io);
+      expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    });
+
+    it('--json forces the envelope even at a TTY', async () => {
+      const cap = captureIo(true);
+      await main(['--json', ...bad], cap.io);
+      expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    });
+  });
+
   it('--version prints the version and exits 0', async () => {
     const cap = captureIo();
     const code = await main(['--version'], cap.io);

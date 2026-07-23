@@ -38,18 +38,20 @@ describe('emitSuccess', () => {
     expect(cap.stderr()).toBe('');
   });
 
-  it('renders human lines to stderr on a TTY, stdout stays machine-only', () => {
+  it('at a TTY without --json, prints human lines to STDOUT and no envelope', () => {
     const cap = captureIo(true);
     emitSuccess(cap.io, 'doctor', { ok: true }, ['all good']);
-    expect(cap.stderr()).toContain('all good');
-    expect(() => JSON.parse(cap.stdout())).not.toThrow();
+    expect(cap.stdout()).toContain('all good');
+    expect(cap.stdout()).not.toContain('schemaVersion'); // no JSON envelope
+    expect(cap.stderr()).toBe('');
   });
 
-  it('suppresses stderr under --json even on a TTY', () => {
+  it('under --json even on a TTY, emits the envelope and no human lines', () => {
     const cap = captureIo(true);
     emitSuccess(cap.io, 'doctor', { ok: true }, ['all good'], { json: true });
-    expect(cap.stderr()).toBe('');
     expect(JSON.parse(cap.stdout()).ok).toBe(true);
+    expect(cap.stdout()).not.toContain('all good');
+    expect(cap.stderr()).toBe('');
   });
 });
 
@@ -74,11 +76,20 @@ describe('emitFailure', () => {
     expect(ret.exitCode).toBe(1);
   });
 
-  it('renders error + fix to stderr on a TTY', () => {
+  it('at a TTY without --json, prints error + fix to STDOUT and no envelope', () => {
     const cap = captureIo(true);
-    emitFailure(cap.io, 'x', new CliError('USAGE', 'nope', { fix: 'do this' }));
-    expect(cap.stderr()).toContain('nope');
-    expect(cap.stderr()).toContain('do this');
+    const ret = emitFailure(cap.io, 'x', new CliError('USAGE', 'nope', { fix: 'do this' }));
+    expect(cap.stdout()).toContain('nope');
+    expect(cap.stdout()).toContain('do this');
+    expect(cap.stdout()).not.toContain('schemaVersion'); // no JSON envelope
+    expect(cap.stderr()).toBe('');
+    expect(ret.exitCode).toBe(2); // exit code unchanged on the human path
+  });
+
+  it('under --json even on a TTY, emits the failure envelope', () => {
+    const cap = captureIo(true);
+    emitFailure(cap.io, 'x', new CliError('USAGE', 'nope', { fix: 'do this' }), { json: true });
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 });
 
