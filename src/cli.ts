@@ -432,24 +432,32 @@ export async function main(argv: string[], io: Io = defaultIo()): Promise<number
 
 function handleParseError(err: unknown, io: Io, program: Command): number {
   const json = program.opts().json === true;
+  // Human-first: at a real TTY without --json, commander already wrote its usage
+  // text to stderr (see the writeErr gate). In that mode the stderr line stands
+  // alone — stdout stays empty. Only machine mode (piped or --json) gets an
+  // envelope on stdout, so the two surfaces never both render the same failure.
+  const humanFirst = io.isTTY && !json;
   if (err instanceof CommanderError) {
     // Explicit --version / --help already wrote to stdout via writeOut; success.
     if (err.code === 'commander.version' || err.code === 'commander.helpDisplayed') {
       return 0;
     }
     // commander.help (bare or incomplete command) and every usage error (unknown
-    // command/option, missing/excess argument, invalid value): commander already
-    // wrote its human text to writeErr (gated to TTY, non-json). Emit the machine
-    // contract to STDOUT only — pass json:true so emitFailure does not re-render a
-    // human line and duplicate commander's stderr text — and use usage exit 2.
-    const message =
-      err.code === 'commander.help'
-        ? 'No command specified'
-        : err.message.replace(/^error:\s*/i, '');
-    const usageErr = new CliError('USAGE', message, {
-      fix: 'Run `tenjin --help` for available commands.',
-    });
-    emitFailure(io, 'tenjin', usageErr, { json: true });
+    // command/option, missing/excess argument, invalid value) are usage exit 2.
+    // In machine mode emit the machine contract to STDOUT — json:true so
+    // emitFailure renders the envelope, not a human line — matching commander's
+    // silence there. In human mode emit nothing; commander's stderr line already
+    // covered it, and a stdout envelope or second human line would double-render.
+    if (!humanFirst) {
+      const message =
+        err.code === 'commander.help'
+          ? 'No command specified'
+          : err.message.replace(/^error:\s*/i, '');
+      const usageErr = new CliError('USAGE', message, {
+        fix: 'Run `tenjin --help` for available commands.',
+      });
+      emitFailure(io, 'tenjin', usageErr, { json: true });
+    }
     return 2;
   }
   // Defensive: runCommand catches command errors, so a throw reaching here is

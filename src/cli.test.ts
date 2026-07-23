@@ -67,6 +67,28 @@ describe('main', () => {
     });
   });
 
+  // Same contract, but for a commander PARSE error (unknown command) rather than a
+  // command's own validation throw. Here commander writes the usage text to stderr,
+  // so human mode leaves stdout empty (no envelope, no duplicate) instead of
+  // painting an error line to stdout — the inverse surface from the block above.
+  describe('output contract (human-first for a parse error)', () => {
+    it('unknown command at a TTY: usage on stderr, stdout empty (no envelope)', async () => {
+      const cap = captureIo(true);
+      const code = await main(['bogus'], cap.io);
+      expect(code).toBe(2);
+      expect(cap.stdout()).toBe(''); // no JSON envelope, no second human line
+      expect(cap.stderr()).not.toBe(''); // commander's usage text stands alone
+    });
+
+    it('unknown command when piped: JSON envelope on stdout, stderr empty', async () => {
+      const cap = captureIo(false);
+      const code = await main(['bogus'], cap.io);
+      expect(code).toBe(2);
+      expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+      expect(cap.stderr()).toBe('');
+    });
+  });
+
   it('--version prints the version and exits 0', async () => {
     const cap = captureIo();
     const code = await main(['--version'], cap.io);
