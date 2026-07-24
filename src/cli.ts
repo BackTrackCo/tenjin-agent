@@ -126,9 +126,14 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
     .option('--no-wallet', 'skip the wallet-setup step of the interactive walkthrough')
+    .option('--claude-md', 'append the Tenjin lookup nudge to ~/.claude/CLAUDE.md')
+    .option('--no-claude-md', 'skip the CLAUDE.md nudge (and its interactive question)')
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
+        // `claudeMd` is tri-state: only forward it when the flag was actually given,
+        // so an omitted flag stays undefined (ask interactively, else skip).
+        const claudeMdGiven = this.getOptionValueSource('claudeMd') !== 'default';
         const { runInstall } = await import('./commands/install');
         return runInstall(
           {
@@ -138,6 +143,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(o.dryRun === true ? { dryRun: true } : {}),
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
+            ...(claudeMdGiven && typeof o.claudeMd === 'boolean' ? { claudeMd: o.claudeMd } : {}),
           },
           ctx,
         );
