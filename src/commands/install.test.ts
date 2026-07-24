@@ -231,8 +231,9 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
   it('appends a lookup-first nudge that points at the skills dir', async () => {
     await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(agents).toContain("run a free anonymous 'tenjin lookup");
+    expect(agents).toContain(`'tenjin lookup "<question>" --json'`);
     expect(agents).toContain('before regenerating public research');
+    expect(agents).toContain('sends the generalized question text to tenjin.blog');
     expect(agents).toContain(join(home, '.agents', 'skills'));
     expect(agents).not.toContain('—'); // no em dashes
   });
@@ -248,7 +249,7 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
     expect(agents.split(MARKER).length - 1).toBe(1); // still exactly one marker
     expect(agents).not.toContain('installed at /somewhere'); // old text gone
-    expect(agents).toContain("run a free anonymous 'tenjin lookup"); // new text in
+    expect(agents).toContain(`'tenjin lookup "<question>" --json'`); // new text in
     expect(agents.startsWith('# notes\n')).toBe(true); // surrounding lines preserved
     expect(agents.trimEnd().endsWith('more')).toBe(true);
   });
@@ -288,7 +289,8 @@ describe('runInstall: CLAUDE.md nudge', () => {
     );
     expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
     const md = await readFile(claudeMdPath(), 'utf8');
-    expect(md).toContain("run a free anonymous 'tenjin lookup");
+    expect(md).toContain(`'tenjin lookup "<question>" --json'`);
+    expect(md).toContain('sends the generalized question text to tenjin.blog');
     expect(md).toContain(join(home, '.claude', 'skills'));
     expect(md.split(MARKER).length - 1).toBe(1);
   });
@@ -384,6 +386,61 @@ describe('runInstall: CLAUDE.md nudge', () => {
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
     expect(text).toContain('--claude-md');
     expect(text).toContain('CLAUDE.md');
+  });
+});
+
+describe('runInstall: nudge disclosure + undo hint in the walkthrough', () => {
+  const human = (res: { humanLines?: string[] }): string =>
+    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+  it('discloses what a freshly written AGENTS.md nudge does + how to undo it', async () => {
+    const res = await runInstall(
+      { harness: ['codex'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    const text = human(res);
+    expect(text).toContain('the generalized question text is sent to tenjin.blog');
+    expect(text).toContain('Undo anytime: delete the');
+    expect(text).toContain(join(home, '.agents', 'AGENTS.md'));
+  });
+
+  it('discloses + undo for a CLAUDE.md nudge written on interactive yes', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: async () => true }),
+    );
+    const text = human(res);
+    expect(text).toContain('CLAUDE.md nudge');
+    expect(text).toContain('the generalized question text is sent to tenjin.blog');
+    expect(text).toContain(join(home, '.claude', 'CLAUDE.md'));
+  });
+
+  it('does NOT disclose on an untouched re-run (already-present)', async () => {
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const res = await runInstall(
+      { harness: ['codex'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    const text = human(res);
+    expect(text).not.toContain('Undo anytime');
+    expect(text).not.toContain('the generalized question text is sent to tenjin.blog');
+  });
+
+  it('discloses a silent in-place upgrade of an older AGENTS.md pointer line', async () => {
+    const OLD = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), `${OLD}\n`);
+    const res = await runInstall(
+      { harness: ['codex'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    const text = human(res);
+    expect(text).toContain('Undo anytime');
+    expect(text).toContain('the generalized question text is sent to tenjin.blog');
   });
 });
 

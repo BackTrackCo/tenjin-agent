@@ -64,7 +64,7 @@ const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
  * marker, the lookup-before-regenerating nudge, then where the skills live.
  */
 function nudgeLine(skillsDir: string): string {
-  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run a free anonymous 'tenjin lookup "<question>"' first. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
+  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin lookup "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
 }
 
 /**
@@ -291,6 +291,26 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     lines.push(
       `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${suffix}`,
     );
+    // When a nudge line was actually written or refreshed, disclose what it does
+    // (question text leaves the machine) and how to undo it. This makes a re-run
+    // that silently upgrades an older pointer line visible, not just the first write.
+    const nudgePaths = nudgeFilesTouched(h);
+    if (nudgePaths.length > 0) {
+      lines.push(
+        paint(
+          io,
+          'dim',
+          '  The nudge tells agents to run a free anonymous `tenjin lookup` before regenerating research; the generalized question text is sent to tenjin.blog.',
+        ),
+      );
+      lines.push(
+        paint(
+          io,
+          'dim',
+          `  Undo anytime: delete the ${SKILLS_MARKER} line from ${nudgePaths.join(' and ')}.`,
+        ),
+      );
+    }
     if (h.claudeMd?.status === 'skipped') {
       lines.push(
         paint(
@@ -309,6 +329,28 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `  ! ${w}`));
   }
   return lines;
+}
+
+/**
+ * The nudge files whose marker line this run wrote or refreshed (append/update, and
+ * their dry-run would-* previews). An untouched line (already-present / up-to-date)
+ * or a skipped CLAUDE.md is not included, so the disclosure only fires on a change.
+ */
+function nudgeFilesTouched(h: HarnessResult): string[] {
+  const paths: string[] = [];
+  if (
+    h.agentsMd !== undefined &&
+    ['appended', 'updated', 'would-append', 'would-update'].includes(h.agentsMd.status)
+  ) {
+    paths.push(h.agentsMd.path);
+  }
+  if (
+    h.claudeMd !== undefined &&
+    ['written', 'updated', 'would-write', 'would-update'].includes(h.claudeMd.status)
+  ) {
+    paths.push(h.claudeMd.path);
+  }
+  return paths;
 }
 
 function modeBlurb(v: PublishMode): string {
@@ -602,7 +644,9 @@ async function decideClaudeMd(
   if (flag !== undefined) return flag;
   if (dryRun || !canPrompt) return false;
   const confirm = deps.confirmClaudeMd ?? defaultConfirmYesNo;
-  return confirm('Add a one-line Tenjin lookup nudge to ~/.claude/CLAUDE.md? [Y/n] ');
+  return confirm(
+    'Add a one-line nudge to ~/.claude/CLAUDE.md telling agents to try a free Tenjin lookup before regenerating research? It sends only generalized question text to tenjin.blog. [Y/n] ',
+  );
 }
 
 /**
