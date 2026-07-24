@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -190,5 +190,31 @@ describe('createLocalWallet', () => {
     const err = (await createLocalWallet(dataDir, KNOWN_PASSPHRASE).catch((e) => e)) as CliError;
     expect(err.code).toBe('WALLET_EXISTS');
     expect(err.exitCode).toBe(3);
+  });
+});
+
+describe('createLocalProvider.getSigner, non-interactive passphrase gate', () => {
+  it('never prompts when isTTY:false; surfaces the coded no-passphrase error instead', async () => {
+    // The exact passphrase override resolveWalletProvider now sets for a
+    // non-interactive context (io.isTTY:false — every `tenjin mcp` context). With
+    // no env/keychain passphrase, the resolver must fail with the coded error
+    // rather than start a hidden-stdin prompt that would fight the MCP transport.
+    await writeWalletRecord(dataDir, fakeRecord());
+    const prompt = vi.fn(async () => 'never-called');
+    const provider = createLocalProvider({
+      dir: dataDir,
+      env: {},
+      passphrase: {
+        isTTY: false,
+        platform: 'linux',
+        exec: (async () => ({ stdout: '', stderr: '' })) as ExecFn, // secret-service miss
+        prompt,
+      },
+    });
+    const err = (await provider.getSigner().catch((e) => e)) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('USAGE');
+    expect(err.message).toContain('No wallet passphrase');
+    expect(prompt).not.toHaveBeenCalled();
   });
 });

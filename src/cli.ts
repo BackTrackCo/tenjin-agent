@@ -410,6 +410,18 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // `mcp` is NOT routed through runCommand: it hands stdout to the MCP transport
+  // and blocks until the client disconnects, so it prints no envelope and sets no
+  // exit code on success. buildContext reuses the same flag/dataDir plumbing every
+  // other leaf gets; a bad global option still throws USAGE up to handleParseError.
+  addGlobalFlags(program.command('mcp'))
+    .description('Run a local stdio MCP server exposing the Tenjin command cores to an MCP client')
+    .action(async function (this: Command) {
+      const ctx = buildContext(this, io);
+      const { runMcpServer } = await import('./mcp/run');
+      await runMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
+    });
+
   return program;
 }
 
