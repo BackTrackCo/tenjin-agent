@@ -24,13 +24,25 @@ export interface ResolveWalletProviderOptions {
  * provider bound to the context's data dir and process env; tests pass
  * `opts.provider` to prove `show`/`balance` work against any provider without a
  * real key on disk.
+ *
+ * The context's interactivity is threaded into the passphrase resolver: a
+ * non-interactive context (io.isTTY:false — every `tenjin mcp` context, and any
+ * piped-stdout run) can NEVER trigger a hidden-input passphrase prompt, which
+ * under the MCP stdio transport would fight the transport for stdin. It fails with
+ * the coded no-passphrase error instead. This mirrors buy's confirm gate, which
+ * already declines when !ctx.io.isTTY. A real TTY passes isTTY:undefined, keeping
+ * the resolver's existing process.stdin.isTTY default untouched.
  */
 export function resolveWalletProvider(
   ctx: CommandContext,
   opts: ResolveWalletProviderOptions = {},
 ): WalletProvider {
   if (opts.provider !== undefined) return opts.provider;
-  return createLocalProvider({ dir: ctx.dataDir, env: process.env });
+  return createLocalProvider({
+    dir: ctx.dataDir,
+    env: process.env,
+    passphrase: { isTTY: ctx.io.isTTY ? undefined : false },
+  });
 }
 
 export interface ResolveSpendAuthorizerOptions {
