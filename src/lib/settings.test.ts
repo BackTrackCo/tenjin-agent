@@ -41,7 +41,7 @@ describe('resolvePublishSettings — precedence', () => {
   it('falls back to the built-in defaults when nothing is set', async () => {
     const r = await resolvePublishSettings(input(), committed);
     expect(r).toMatchObject({
-      mode: 'auto',
+      mode: 'review',
       modeSource: 'default',
       defaultPriceAtomic: '100000',
       defaultPriceSource: 'default',

@@ -10,11 +10,19 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
-import { loadRawConfig, PublishModeSchema, parsePublishModeFlag } from '../lib/config';
+import {
+  CONFIG_DEFAULTS,
+  loadRawConfig,
+  PublishModeSchema,
+  parsePublishModeFlag,
+} from '../lib/config';
 import type { PublishMode } from '../lib/config';
 import { persistPublishMode } from './config';
-import { collectDoctorChecks, renderDoctorHuman } from './doctor';
+import { runWalletCreate } from './wallet';
+import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
+import { describeWallet, resolveWalletProvider } from '../lib/wallet';
+import { walletFileExists } from '../lib/wallet/store';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -25,6 +33,7 @@ const InstallInputSchema = z.object({
   harness: z.array(z.string()).optional(),
   dryRun: z.boolean().optional(),
   publishMode: z.string().optional(),
+  noWallet: z.boolean().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
 
@@ -90,17 +99,29 @@ export interface InstallDeps {
   doctorDeps?: DoctorDeps;
   /** Interactive text-prompt seam for the publish-mode question; defaults to a stdin reader. */
   promptMode?: PromptFn;
-  /** Whether an interactive prompt is possible; defaults to the TTY facts. */
+  /** Whether the human walkthrough runs (TTY, no --json, stdin is a TTY). Injected in tests. */
   isInteractive?: boolean;
+  /** Does a wallet already exist? Defaults to walletFileExists(dataDir). */
+  walletExists?: (dataDir: string) => Promise<boolean>;
+  /** An existing wallet's address, for the "(existing)" line. Defaults to the local provider. */
+  walletAddress?: (ctx: CommandContext) => Promise<string>;
+  /** Create a wallet and return its address. Defaults to runWalletCreate. */
+  createWallet?: (ctx: CommandContext) => Promise<string>;
+  /** Yes/no confirm for "Create a wallet now?"; defaults to a TTY y/n reader (default yes). */
+  confirmWallet?: (label: string) => Promise<boolean>;
 }
 
 /**
  * `tenjin install`: detect the installed harness(es), copy the packaged skills into
- * each one's skills directory, wire the AGENTS.md pointer + print the Codex sandbox
- * rule where relevant, THEN run the doctor checks as the final step (D39: doctor is
- * diagnostics run last, never a required first hop; a doctor problem is surfaced but
- * never fails the wiring that already succeeded). Idempotent: a re-run reports
- * up-to-date and never duplicates the AGENTS.md line. `--dry-run` writes nothing.
+ * each one's skills directory, wire the AGENTS.md pointer, then settle the publish
+ * consent mode and (interactively) the wallet, and finish with the doctor checks.
+ *
+ * Like every command it is human-first (the global output contract): at a TTY
+ * without `--json` it prompts and returns a plain onboarding walkthrough as
+ * humanLines, which the dispatcher prints to stdout with no envelope. With
+ * `--json` or piped stdout it returns today's envelope, no prompts, no wallet
+ * step. Idempotent: a re-run reports up-to-date and never duplicates the AGENTS.md
+ * line. `--dry-run` writes nothing.
  */
 export async function runInstall(
   input: InstallInput,
@@ -115,50 +136,207 @@ export async function runInstall(
     });
   }
   const dryRun = parsed.data.dryRun === true;
-  // Validate --publish-mode UP FRONT so a bad value fails before any wiring, even
-  // though the mode is only settled (and persisted) after the doctor phase below.
+  const noWallet = parsed.data.noWallet === true;
+  // Validate --publish-mode UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
 
+  // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
+  // without --json and no envelope). `humanOutput` matches that gate so install
+  // returns its walkthrough as humanLines; `canPrompt` additionally needs stdin, so
+  // a piped-stdin run still renders a walkthrough (with defaults, no wallet prompt).
+  const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
+  const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+
   const skillsSource =
     deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
   await assertSkillsSource(skillsSource);
 
   const plans = resolvePlans(parsed.data.harness, home, which);
-
   const harnesses: HarnessResult[] = [];
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun));
   }
-
   const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, deps.doctorDeps ?? {}));
   const doctor = await collect(ctx);
-  const doctorStatus = doctor.failure !== undefined ? 'fail' : 'pass';
-
-  // After wiring + doctor, settle the publish consent mode: a flag sets it, an
-  // already-configured mode is left alone, and an interactive setup asks once
-  // (plain enter keeps the default WITHOUT writing, so `config get` stays truthful).
-  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun);
+  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
 
   const data = {
     dryRun,
     skillsSource,
     harnesses,
-    doctor: { status: doctorStatus, checks: doctor.checks },
+    doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
   };
-  const humanLines = renderHuman(ctx.io, harnesses, doctor, dryRun);
-  humanLines.push(publishModeLine(ctx.io, publishMode, dryRun));
+
+  // Machine path (--json or piped stdout): today's envelope, no wallet step.
+  if (!humanOutput) return { data };
+
+  // Human path: the onboarding walkthrough as humanLines (the global emitSuccess
+  // prints them to stdout at a TTY and never an envelope). A wallet prompt happens
+  // only when we can actually read stdin.
+  const humanLines = await buildWalkthrough(ctx, deps, {
+    dryRun,
+    noWallet,
+    canPrompt,
+    harnesses,
+    publishMode,
+    doctor,
+  });
   return { data, humanLines };
+}
+
+const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
+
+interface WalkthroughState {
+  dryRun: boolean;
+  noWallet: boolean;
+  canPrompt: boolean;
+  harnesses: HarnessResult[];
+  publishMode: PublishModeSelection;
+  doctor: DoctorChecks;
+}
+
+/**
+ * Build the onboarding walkthrough lines: skills, the resolved consent mode,
+ * wallet setup (creating one in-flow only when we can prompt), a one-line doctor
+ * verdict, and a next step. Any prompt reads stdin and writes its label to stderr;
+ * the returned lines are the human stdout surface.
+ */
+async function buildWalkthrough(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  s: WalkthroughState,
+): Promise<string[]> {
+  const io = ctx.io;
+  const lines: string[] = [];
+  if (s.dryRun) lines.push(paint(io, 'yellow', 'Dry run: nothing was written.'));
+  lines.push(...skillsWalkthrough(io, s.harnesses, s.dryRun), '');
+  lines.push(
+    `${paint(io, 'bold', `publish mode: ${s.publishMode.value}`)}  ${paint(io, 'dim', modeBlurb(s.publishMode.value))}`,
+    '',
+  );
+  lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
+  lines.push(...doctorSummary(io, s.doctor), '');
+  lines.push(`Done. Try: tenjin lookup "${EXAMPLE_QUESTION}"`);
+  return lines;
+}
+
+function harnessLabel(h: Harness): string {
+  return h === 'claude' ? 'Claude Code' : h === 'codex' ? 'Codex' : 'Agent Skills';
+}
+
+function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean): string[] {
+  const lines: string[] = [];
+  for (const h of harnesses) {
+    const n = h.skills.length;
+    const changed = h.skills.some((s) => s.status !== 'up-to-date');
+    const verb = dryRun ? 'would install' : changed ? 'installed' : 'up to date';
+    const pointer = h.agentsMd !== undefined ? ' + AGENTS.md pointer' : '';
+    lines.push(
+      `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${pointer}`,
+    );
+    if (h.codexNetworkRule !== undefined) {
+      lines.push(
+        paint(io, 'dim', '  Codex blocks network by default; add to ~/.codex/config.toml:'),
+      );
+      for (const rl of h.codexNetworkRule.split('\n')) lines.push(paint(io, 'dim', `    ${rl}`));
+    }
+    for (const w of h.warnings) lines.push(paint(io, 'yellow', `  ! ${w}`));
+  }
+  return lines;
+}
+
+function modeBlurb(v: PublishMode): string {
+  return v === 'review'
+    ? 'asks before every publish'
+    : v === 'auto'
+      ? 'publishes clean scans automatically'
+      : 'only detected secrets stop a publish';
+}
+
+async function walletWalkthrough(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  skipCreate: boolean,
+  noWallet: boolean,
+  io: Io,
+): Promise<string[]> {
+  const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
+  if (exists) {
+    const address = await (deps.walletAddress ?? existingWalletAddress)(ctx);
+    return [`${paint(io, 'bold', 'Wallet:')} ${address} (existing)`];
+  }
+  const later = `${paint(io, 'bold', 'Wallet:')} none. Create one later with: tenjin wallet create`;
+  if (skipCreate || noWallet) return [later];
+
+  const confirm = deps.confirmWallet ?? defaultConfirmWallet;
+  if (!(await confirm('Create a wallet now? [Y/n] '))) return [later];
+
+  const address = await (deps.createWallet ?? defaultCreateWallet)(ctx);
+  return [
+    paint(io, 'bold', 'Wallet created:'),
+    `  ${address}`,
+    '  Fund it: send a few dollars of USDC on Base to that address (this is a pocket-money wallet; keep it small).',
+    '  Check with: tenjin wallet balance',
+  ];
+}
+
+async function existingWalletAddress(ctx: CommandContext): Promise<string> {
+  return (await describeWallet(resolveWalletProvider(ctx))).address;
+}
+
+async function defaultCreateWallet(ctx: CommandContext): Promise<string> {
+  const result = await runWalletCreate(ctx);
+  return (result.data as { address: string }).address;
+}
+
+/** A visible y/n reader defaulting to yes (empty input); label + echo on stderr. */
+function defaultConfirmWallet(label: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    let settled = false;
+    const settle = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve(value);
+    };
+    rl.once('close', () => settle(false));
+    rl.question(label, (answer) => {
+      const a = answer.trim().toLowerCase();
+      settle(a === '' || a === 'y' || a === 'yes');
+    });
+  });
+}
+
+function doctorSummary(io: Io, doctor: DoctorChecks): string[] {
+  const problems = doctor.checks.filter((c) => c.status !== 'ok');
+  if (problems.length === 0) return [`${paint(io, 'green', '✓')} Everything checks out`];
+  const lines = [paint(io, 'yellow', 'Some checks need attention:')];
+  for (const c of problems) {
+    const icon = c.status === 'fail' ? paint(io, 'red', '✗') : paint(io, 'yellow', '!');
+    lines.push(`  ${icon} ${c.name}: ${c.detail}`);
+    if (c.fix !== undefined) lines.push(paint(io, 'dim', `    fix: ${c.fix}`));
+  }
+  return lines;
 }
 
 // --- Publish-mode selection (D38 setup) ------------------------------------------
 
-const PUBLISH_MODE_PROMPT =
-  'Publish consent mode? review = always ask / auto = ask only on findings / full-auto = only hard blocks stop it [auto]: ';
+/** The default consent mode (also what a plain enter keeps, without writing). */
+const DEFAULT_MODE: PublishMode = CONFIG_DEFAULTS.publish.mode;
+
+const PUBLISH_MODE_PROMPT = [
+  'Publish consent mode?',
+  '  review     - asks a yes/no for every publish',
+  '  auto       - publishes automatically when the secret-scan is clean (including answers your agent derives)',
+  '  full-auto  - publishes even past warnings; only detected secrets stop it',
+  `[${DEFAULT_MODE}]: `,
+].join('\n');
 
 /**
  * Resolve (and, for an explicit choice, persist) the publish consent mode at
@@ -172,6 +350,7 @@ async function selectPublishMode(
   ctx: CommandContext,
   deps: InstallDeps,
   dryRun: boolean,
+  interactive: boolean,
 ): Promise<PublishModeSelection> {
   if (flag !== undefined) {
     if (!dryRun) await persistPublishMode(ctx.dataDir, flag); // --dry-run: would-set only
@@ -185,19 +364,15 @@ async function selectPublishMode(
     return { value: config.publish.mode, source: 'existing' };
   }
 
-  // --json implies non-interactive: a machine consumer must never sit behind a
-  // prompt, even one on stderr. It overrides an injected isInteractive too, so the
-  // only ways to set the mode under --json are --publish-mode or a prior config.
-  const interactive =
-    ctx.flags.json !== true &&
-    (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
-  if (dryRun || !interactive) return { value: 'auto', source: 'default-skipped' };
+  // `interactive` is the walkthrough gate (already false under --json or off a TTY),
+  // so a machine consumer never sits behind a prompt.
+  if (dryRun || !interactive) return { value: DEFAULT_MODE, source: 'default-skipped' };
 
   const prompt = deps.promptMode ?? defaultPromptMode;
-  // Ask, allow ONE reprompt on an unrecognized answer, then fall back to auto.
+  // Ask, allow ONE reprompt on an unrecognized answer, then fall back to the default.
   for (let attempt = 0; attempt < 2; attempt++) {
     const answer = (await prompt(PUBLISH_MODE_PROMPT)).trim();
-    if (answer.length === 0) return { value: 'auto', source: 'default-skipped' }; // enter: no write
+    if (answer.length === 0) return { value: DEFAULT_MODE, source: 'default-skipped' }; // enter: no write
     const parsed = PublishModeSchema.safeParse(answer);
     if (parsed.success) {
       await persistPublishMode(ctx.dataDir, parsed.data);
@@ -205,9 +380,9 @@ async function selectPublishMode(
     }
   }
   ctx.io.stderr.write(
-    'Unrecognized mode; keeping the default (auto). Change it with `tenjin config set publish.mode`.\n',
+    `Unrecognized mode; keeping the default (${DEFAULT_MODE}). Change it with \`tenjin config set publish.mode\`.\n`,
   );
-  return { value: 'auto', source: 'default-skipped' };
+  return { value: DEFAULT_MODE, source: 'default-skipped' };
 }
 
 function parseModeFlag(value: string): PublishMode {
@@ -228,16 +403,6 @@ function defaultPromptMode(label: string): Promise<string> {
     rl.once('close', () => settle('')); // ctrl-D mid-prompt reads as the default
     rl.question(label, (answer) => settle(answer));
   });
-}
-
-function publishModeLine(io: Io, selection: PublishModeSelection, dryRun: boolean): string {
-  const detail: Record<PublishModeSource, string> = {
-    flag: dryRun ? 'would set from --publish-mode' : 'set from --publish-mode',
-    existing: 'already configured',
-    prompt: 'saved',
-    'default-skipped': 'default; run interactively or pass --publish-mode to change',
-  };
-  return paint(io, 'bold', `publish mode: ${selection.value} (${detail[selection.source]})`);
 }
 
 // --- Detection + planning --------------------------------------------------------
@@ -362,7 +527,7 @@ async function applyPlan(
 function notesFor(plan: HarnessPlan): string[] {
   if (plan.harness === 'claude') {
     return [
-      'Installed at the user level (~/.claude/skills). The Claude Code plugin marketplace (roadmap C3) will supersede this path for Claude users.',
+      'Installed at the user level (~/.claude/skills). A Claude Code plugin will later make this automatic.',
     ];
   }
   return [
@@ -508,54 +673,8 @@ function isFile(p: string): boolean {
 
 // --- Human rendering -------------------------------------------------------------
 
-function renderHuman(
-  io: Io,
-  harnesses: HarnessResult[],
-  doctor: DoctorChecks,
-  dryRun: boolean,
-): string[] {
-  const lines: string[] = [];
-  if (dryRun) lines.push(paint(io, 'yellow', 'dry run: no files written'));
-  for (const h of harnesses) {
-    const how = h.detectedBy.length > 0 ? ` (${h.detectedBy.join(', ')})` : '';
-    lines.push(paint(io, 'bold', `${h.harness}${how} -> ${h.skillsDir}`));
-    for (const s of h.skills) {
-      lines.push(`  ${skillIcon(io, s.status)} ${s.name.padEnd(14)} ${paint(io, 'dim', s.status)}`);
-    }
-    if (h.agentsMd !== undefined) {
-      lines.push(`  ${paint(io, 'dim', `AGENTS.md ${h.agentsMd.status}: ${h.agentsMd.path}`)}`);
-    }
-    for (const w of h.warnings) lines.push(`  ${paint(io, 'yellow', `! ${w}`)}`);
-    for (const n of h.notes) lines.push(`  ${paint(io, 'dim', n)}`);
-    if (h.codexNetworkRule !== undefined) {
-      lines.push(
-        paint(
-          io,
-          'dim',
-          "  Codex's default workspace-write sandbox blocks network, which breaks paid x402 calls.",
-        ),
-      );
-      lines.push(paint(io, 'dim', '  Add this to ~/.codex/config.toml:'));
-      for (const rl of h.codexNetworkRule.split('\n')) lines.push(`    ${rl}`);
-    }
-  }
-  lines.push('');
-  lines.push(paint(io, 'bold', 'doctor (final checks):'));
-  lines.push(...renderDoctorHuman(io, doctor.checks));
-  if (doctor.failure !== undefined) {
-    lines.push(paint(io, 'yellow', 'doctor reported a problem above; the skills are still wired.'));
-  }
-  return lines;
-}
-
-function skillIcon(io: Io, status: SkillResult['status']): string {
-  if (status === 'up-to-date') return paint(io, 'green', '=');
-  if (status === 'updated' || status === 'would-update') return paint(io, 'yellow', '~');
-  return paint(io, 'green', '+');
-}
-
 function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
-  if (io.stderr instanceof Stream) return styleText(format, text, { stream: io.stderr });
+  if (io.stdout instanceof Stream) return styleText(format, text, { stream: io.stdout });
   return styleText(format, text);
 }
 

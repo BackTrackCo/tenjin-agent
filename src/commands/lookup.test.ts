@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runLookup } from './lookup';
 import { latestLookup } from '../lib/lookup-store';
+import { createCandidate } from '../lib/candidate-store';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -105,6 +106,76 @@ describe('runLookup', () => {
     await expect(
       runLookup({ question: 'q', appliesTo: ['noequals'] }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+});
+
+describe('runLookup — parked-candidate nudge', () => {
+  const miss = {
+    schemaVersion: 1,
+    lookupId: '0197aaaa-bbbb-cccc-dddd-000000000009',
+    decision: 'MISS',
+    calibration: 'lexical-v1',
+  };
+
+  function ctxCapturingStderr(): { ctx: CommandContext; stderr: () => string } {
+    const chunks: string[] = [];
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    const err = {
+      write: (s: string) => (chunks.push(s), true),
+    } as unknown as NodeJS.WritableStream;
+    return {
+      stderr: () => chunks.join(''),
+      ctx: {
+        flags: { json: false, timeout: 5000, baseUrl: 'https://preview.example' },
+        dataDir: dir,
+        io: { stdout: sink(), stderr: err, isTTY: false },
+      },
+    };
+  }
+
+  async function park(created: string): Promise<void> {
+    await createCandidate(dir, {
+      draft: '# d\n',
+      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      created,
+      sourceProject: dir,
+    });
+  }
+
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+
+  it('emits one stderr line when candidates are parked (none stale)', async () => {
+    await park(daysAgo(1));
+    await park(daysAgo(2));
+    const { fetch } = stub(miss);
+    const { ctx, stderr } = ctxCapturingStderr();
+    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    expect(stderr()).toContain('2 candidate(s) parked (0 stale >7d) - tenjin candidate list');
+  });
+
+  it('counts the stale (>7d) candidates', async () => {
+    await park(daysAgo(1));
+    await park(daysAgo(8));
+    await park(daysAgo(30));
+    const { fetch } = stub(miss);
+    const { ctx, stderr } = ctxCapturingStderr();
+    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    expect(stderr()).toContain('3 candidate(s) parked (2 stale >7d)');
+  });
+
+  it('is silent when nothing is parked', async () => {
+    const { fetch } = stub(miss);
+    const { ctx, stderr } = ctxCapturingStderr();
+    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    expect(stderr()).not.toContain('parked');
+  });
+
+  it('does NOT nudge on a HIT, even with candidates parked (MISS-only)', async () => {
+    await park(daysAgo(1));
+    const { fetch } = stub(CANDIDATES);
+    const { ctx, stderr } = ctxCapturingStderr();
+    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    expect(stderr()).not.toContain('parked');
   });
 });
 

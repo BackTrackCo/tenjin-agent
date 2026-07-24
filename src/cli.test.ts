@@ -40,6 +40,63 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
+    const cap = captureIo(true);
+    const code = await main([], cap.io);
+    expect(code).toBe(2);
+    expect(cap.stdout()).toBe(''); // no JSON envelope, no duplicate human line
+    expect(cap.stderr()).toContain('Usage:'); // commander's help text stands alone
+  });
+
+  // The output contract at the dispatcher level, driven by a command's offline
+  // validation throw (`config set <unknown-key>` fails before any I/O).
+  describe('output contract (human-first at a TTY)', () => {
+    const bad = ['config', 'set', 'no-such-key', 'x'];
+
+    it('at a TTY without --json, prints the human error to stdout and no envelope', async () => {
+      const cap = captureIo(true);
+      const code = await main(bad, cap.io);
+      expect(code).toBe(2);
+      expect(cap.stdout()).toContain('error:');
+      expect(cap.stdout()).not.toContain('schemaVersion'); // no JSON envelope
+      expect(cap.stderr()).toBe('');
+    });
+
+    it('when stdout is piped (not a TTY), prints the JSON envelope', async () => {
+      const cap = captureIo(false);
+      await main(bad, cap.io);
+      expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    });
+
+    it('--json forces the envelope even at a TTY', async () => {
+      const cap = captureIo(true);
+      await main(['--json', ...bad], cap.io);
+      expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    });
+  });
+
+  // Same contract, but for a commander PARSE error (unknown command) rather than a
+  // command's own validation throw. Here commander writes the usage text to stderr,
+  // so human mode leaves stdout empty (no envelope, no duplicate) instead of
+  // painting an error line to stdout — the inverse surface from the block above.
+  describe('output contract (human-first for a parse error)', () => {
+    it('unknown command at a TTY: usage on stderr, stdout empty (no envelope)', async () => {
+      const cap = captureIo(true);
+      const code = await main(['bogus'], cap.io);
+      expect(code).toBe(2);
+      expect(cap.stdout()).toBe(''); // no JSON envelope, no second human line
+      expect(cap.stderr()).not.toBe(''); // commander's usage text stands alone
+    });
+
+    it('unknown command when piped: JSON envelope on stdout, stderr empty', async () => {
+      const cap = captureIo(false);
+      const code = await main(['bogus'], cap.io);
+      expect(code).toBe(2);
+      expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+      expect(cap.stderr()).toBe('');
+    });
+  });
+
   it('--version prints the version and exits 0', async () => {
     const cap = captureIo();
     const code = await main(['--version'], cap.io);

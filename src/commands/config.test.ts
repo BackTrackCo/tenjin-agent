@@ -48,7 +48,7 @@ describe('runConfigList', () => {
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
-    expect(d['publish.mode']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['publish.mode']).toEqual({ value: 'review', source: 'default' });
     expect(d['publish.defaultPrice']).toEqual({
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',

@@ -2,9 +2,9 @@ name: Release
 
 # Changesets + npm Trusted Publishing (OIDC), workflow_dispatch only. Adapted
 # from BackTrackCo/x402r-sdk's release.yml (the house template); the operator
-# runbook is the Release section of this repo's own README.md. Nothing
-# auto-fires: a maintainer clicks Run workflow once to open the version PR,
-# merges it, then clicks again to publish.
+# runbook is this repo's own RELEASING.md. Nothing auto-fires: a maintainer
+# clicks Run workflow once to open the version PR, merges it, then clicks
+# again to publish.
 on:
   workflow_dispatch:
 

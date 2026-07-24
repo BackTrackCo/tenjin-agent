@@ -92,9 +92,9 @@ describe('writeConfig', () => {
 });
 
 describe('publish block', () => {
-  it('defaults publish to auto / $0.10 atomic', async () => {
-    expect(CONFIG_DEFAULTS.publish).toEqual({ mode: 'auto', defaultPrice: '100000' });
-    expect((await loadConfig(dir)).publish).toEqual({ mode: 'auto', defaultPrice: '100000' });
+  it('defaults publish to review / $0.10 atomic', async () => {
+    expect(CONFIG_DEFAULTS.publish).toEqual({ mode: 'review', defaultPrice: '100000' });
+    expect((await loadConfig(dir)).publish).toEqual({ mode: 'review', defaultPrice: '100000' });
   });
 
   it('merges a partial publish block per-subkey (keeps the default it omits)', async () => {

@@ -81,7 +81,7 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
-  publish: { mode: 'auto', defaultPrice: '100000' },
+  publish: { mode: 'review', defaultPrice: '100000' },
 };
 
 /**
