@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOutcome } from './outcome';
-import { recordLookup } from '../lib/lookup-store';
+import { recordSearch } from '../lib/search-store';
 import type { CommandContext } from '../context';
 
 let dir: string;
@@ -38,18 +38,18 @@ function stub(): { fetch: typeof fetch; urls: string[] } {
 const LOOKUP = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
 describe('runOutcome', () => {
-  it('reports against an explicit --lookup-id', async () => {
+  it('reports against an explicit --search-id', async () => {
     const { fetch, urls } = stub();
-    const res = await runOutcome({ lookupId: LOOKUP, status: 'used' }, makeCtx(), {
+    const res = await runOutcome({ searchId: LOOKUP, status: 'used' }, makeCtx(), {
       fetchImpl: fetch,
     });
     expect((res.data as { accepted: number }).accepted).toBe(1);
-    expect(urls[0]).toBe(`https://preview.example/api/agent/lookups/${LOOKUP}/outcomes`);
+    expect(urls[0]).toBe(`https://preview.example/api/agent/searches/${LOOKUP}/outcomes`);
   });
 
-  it('--last targets the most recent local lookup', async () => {
-    await recordLookup(dir, {
-      lookupId: LOOKUP,
+  it('--last targets the most recent local search', async () => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
       at: new Date().toISOString(),
       question: 'q',
       decision: 'CANDIDATES',
@@ -60,14 +60,14 @@ describe('runOutcome', () => {
     expect(urls[0]).toContain(LOOKUP);
   });
 
-  it('--last with no local lookup is a LOOKUP_NOT_FOUND error', async () => {
+  it('--last with no local lookup is a SEARCH_NOT_FOUND error', async () => {
     const { fetch } = stub();
     await expect(
       runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'LOOKUP_NOT_FOUND', exitCode: 1 });
+    ).rejects.toMatchObject({ code: 'SEARCH_NOT_FOUND', exitCode: 1 });
   });
 
-  it('rejects passing neither --lookup-id nor --last', async () => {
+  it('rejects passing neither --search-id nor --last', async () => {
     const { fetch, urls } = stub();
     await expect(
       runOutcome({ status: 'used' }, makeCtx(), { fetchImpl: fetch }),
@@ -75,17 +75,17 @@ describe('runOutcome', () => {
     expect(urls).toHaveLength(0);
   });
 
-  it('rejects passing both --lookup-id and --last', async () => {
+  it('rejects passing both --search-id and --last', async () => {
     const { fetch } = stub();
     await expect(
-      runOutcome({ lookupId: LOOKUP, last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
   it('rejects an unknown status before any request', async () => {
     const { fetch, urls } = stub();
     await expect(
-      runOutcome({ lookupId: LOOKUP, status: 'loved-it' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, status: 'loved-it' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(urls).toHaveLength(0);
   });

@@ -128,7 +128,7 @@ const buyInput = {
 
 const outcomeInput = {
   status: z.string().describe('used | partially_used | rejected | regenerated | purchase_declined'),
-  lookupId: z.string().optional().describe('The search to report against'),
+  searchId: z.string().optional().describe('The search to report against'),
   last: z.boolean().optional().describe('Target the most recent local search instead of an id'),
   resource: z.string().optional().describe('The resourceId the outcome concerns'),
   contentHash: z.string().optional().describe('sha256:<64hex> of the exact body read'),
@@ -163,10 +163,10 @@ const publishInput = {
 // its core. add -> CandidateAddArgs, drop -> runCandidateDrop's params, list none.
 const candidateAddInput = {
   file: z.string().optional().describe('add: path to the Markdown draft to park'),
-  lookupId: z
+  searchId: z
     .string()
     .optional()
-    .describe('add: the lookupId whose unmet demand this draft answers'),
+    .describe('add: the searchId whose unmet demand this draft answers'),
   question: z.string().optional().describe('add: the question this draft answers'),
 } satisfies Record<keyof CandidateAddArgs, z.ZodTypeAny>;
 
@@ -240,7 +240,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'MISS. Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: derive the smallest ' +
         'public phrasing of your task and never include secrets, private identifiers, or ' +
         'company-internal context. Returns the compact candidates/MISS envelope; records the ' +
-        'lookupId locally so tenjin_buy and tenjin_outcome can refer to it.',
+        'searchId locally so tenjin_buy and tenjin_outcome can refer to it.',
       inputSchema: searchInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -310,7 +310,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
       title: 'Report a search outcome',
       description:
         'Report honestly how a search ended (used, partially_used, rejected, regenerated, ' +
-        'purchase_declined), closing the loop the marketplace learns from. No wallet: the lookupId ' +
+        'purchase_declined), closing the loop the marketplace learns from. No wallet: the searchId ' +
         'is the capability. Use --last (last:true) to target the most recent local search.',
       inputSchema: outcomeInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
@@ -320,7 +320,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         runOutcome(
           {
             status: args.status,
-            ...(args.lookupId !== undefined ? { lookupId: args.lookupId } : {}),
+            ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.last !== undefined ? { last: args.last } : {}),
             ...(args.resource !== undefined ? { resource: args.resource } : {}),
             ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
@@ -379,7 +379,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
       title: 'Manage publish candidates',
       description:
         'Manage local publish candidates: parked Markdown drafts that never upload on their own. ' +
-        'action:add parks a file tied to a lookupId; action:list shows pending candidates; ' +
+        'action:add parks a file tied to a searchId; action:list shows pending candidates; ' +
         'action:drop discards one. Nothing reaches the network until a later tenjin_publish, under ' +
         'the same scan and consent gates.',
       inputSchema: candidateInput,
@@ -388,15 +388,15 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     async (args) =>
       runCore(`candidate.${args.action}`, (ctx) => {
         if (args.action === 'add') {
-          if (args.file === undefined || args.lookupId === undefined) {
-            throw new CliError('USAGE', 'candidate add needs both file and lookupId.', {
-              fix: 'Pass file (a Markdown path) and lookupId (from a prior search).',
+          if (args.file === undefined || args.searchId === undefined) {
+            throw new CliError('USAGE', 'candidate add needs both file and searchId.', {
+              fix: 'Pass file (a Markdown path) and searchId (from a prior search).',
             });
           }
           return runCandidateAdd(
             {
               file: args.file,
-              lookupId: args.lookupId,
+              searchId: args.searchId,
               ...(args.question !== undefined ? { question: args.question } : {}),
             },
             ctx,

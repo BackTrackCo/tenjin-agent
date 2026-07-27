@@ -8,7 +8,7 @@ import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
 // (the live tenjin.blog/openapi.json, the A3 publish deploy: it carries the
-// resource card + the cacheEligible echo alongside the A2 agent-lookup surface).
+// resource card + the cacheEligible echo alongside the A2 agent-search surface).
 // Every assertion here is a pure walk of the OpenAPI document, so a server-side
 // rename or removal that would break the CLI fails THIS suite before it fails in
 // production. The env-gated section at the bottom re-runs the same walks against a
@@ -44,7 +44,7 @@ function requiredKeys(schema: { shape: Record<string, z.ZodType> }): string[] {
 
 // The contract the CLI relies on, written out long-hand: if either the CLI
 // schema or the fixture drifts from these lists, the drift is the failure.
-const RESPONSE_REQUIRED = ['calibration', 'decision', 'lookupId', 'schemaVersion'];
+const RESPONSE_REQUIRED = ['calibration', 'decision', 'schemaVersion', 'searchId'];
 const CANDIDATE_REQUIRED = [
   'appliesTo',
   'artifactType',
@@ -70,8 +70,8 @@ const BROWSE_REQUIRED = ['creator', 'price', 'resourceId', 'title', 'url'];
 
 function assertAgentPaths(doc: unknown): void {
   expect(get(doc, 'paths', '/api/agent/search', 'post', 'operationId')).toBe('agentSearch');
-  expect(get(doc, 'paths', '/api/agent/lookups/{id}/outcomes', 'post', 'operationId')).toBe(
-    'agentLookupOutcomes',
+  expect(get(doc, 'paths', '/api/agent/searches/{id}/outcomes', 'post', 'operationId')).toBe(
+    'agentSearchOutcomes',
   );
 }
 
@@ -102,10 +102,10 @@ function assertSearchRequest(doc: unknown): void {
 }
 
 function assertOutcomeStatusEnum(doc: unknown): void {
-  // LookupOutcomeSubmit is an anyOf of a single report object and a batch array
+  // SearchOutcomeSubmit is an anyOf of a single report object and a batch array
   // of the same object; the status enum must be identical wherever it appears.
-  const schema = get(doc, 'components', 'schemas', 'LookupOutcomeSubmit');
-  expect(schema, 'components.schemas.LookupOutcomeSubmit missing').toBeDefined();
+  const schema = get(doc, 'components', 'schemas', 'SearchOutcomeSubmit');
+  expect(schema, 'components.schemas.SearchOutcomeSubmit missing').toBeDefined();
   const branches = get(schema, 'anyOf');
   const variants = Array.isArray(branches) ? branches : [schema];
   const enums = variants
@@ -121,7 +121,7 @@ function assertOutcomeStatusEnum(doc: unknown): void {
 }
 
 describe('contract fixture pins the agent endpoints', () => {
-  it('declares POST /api/agent/search and /api/agent/lookups/{id}/outcomes', () => {
+  it('declares POST /api/agent/search and /api/agent/searches/{id}/outcomes', () => {
     assertAgentPaths(fixtureDoc);
   });
 });
@@ -167,7 +167,7 @@ describe('contract fixture request shapes', () => {
     assertSearchRequest(fixtureDoc);
   });
 
-  it('LookupOutcomeSubmit status enum is exactly the five CLI statuses', () => {
+  it('SearchOutcomeSubmit status enum is exactly the five CLI statuses', () => {
     assertOutcomeStatusEnum(fixtureDoc);
   });
 });
@@ -196,7 +196,7 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   };
   const response = {
     schemaVersion: 1,
-    lookupId: '0f8b2d4c-6a1e-4b3f-8c5d-7e9f1a2b3c4d',
+    searchId: '0f8b2d4c-6a1e-4b3f-8c5d-7e9f1a2b3c4d',
     decision: 'CANDIDATES',
     calibration: 'lexical-v1',
     candidates: [candidate],
@@ -218,7 +218,7 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   it('searchResponseSchema.parse accepts a MISS with candidates omitted', () => {
     const miss = {
       schemaVersion: 1,
-      lookupId: response.lookupId,
+      searchId: response.searchId,
       decision: 'MISS',
       calibration: 'lexical-v1',
     };
@@ -411,7 +411,7 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
       assertSearchRequest(liveDoc);
     });
 
-    it('LookupOutcomeSubmit status enum matches the CLI', () => {
+    it('SearchOutcomeSubmit status enum matches the CLI', () => {
       assertOutcomeStatusEnum(liveDoc);
     });
 

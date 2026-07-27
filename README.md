@@ -44,7 +44,7 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 | `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
 | `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                |
 | `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                             |
-| `tenjin outcome --lookup-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
+| `tenjin outcome --search-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
 | `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
 | `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                 |
 | `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a search MISS nudges you about parked ones                           |

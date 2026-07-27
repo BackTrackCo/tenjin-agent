@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
-import { latestLookup } from '../lib/lookup-store';
+import { latestSearch } from '../lib/search-store';
 import { createCandidate } from '../lib/candidate-store';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -38,7 +38,7 @@ function stub(body: unknown, status = 200): { fetch: typeof fetch; bodies: unkno
 
 const CANDIDATES = {
   schemaVersion: 1,
-  lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   decision: 'CANDIDATES',
   calibration: 'lexical-v1',
   candidates: [
@@ -84,15 +84,15 @@ describe('runSearch', () => {
   it('records the lookup so outcome --last and buy <id> can use it', async () => {
     const { fetch } = stub(CANDIDATES);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    const latest = await latestLookup(dir);
-    expect(latest?.lookupId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    const latest = await latestSearch(dir);
+    expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     expect(latest?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
   });
 
   it('returns the MISS verbatim and records it', async () => {
     const miss = {
       schemaVersion: 1,
-      lookupId: '0197aaaa-bbbb-cccc-dddd-000000000009',
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
       decision: 'MISS',
       calibration: 'lexical-v1',
     };
@@ -105,7 +105,7 @@ describe('runSearch', () => {
   // line, never merged into candidates, never recorded as a buyable candidate.
   const BROWSE_MISS = {
     schemaVersion: 1,
-    lookupId: '0197aaaa-bbbb-cccc-dddd-00000000000b',
+    searchId: '0197aaaa-bbbb-cccc-dddd-00000000000b',
     decision: 'MISS',
     calibration: 'lexical-v1',
     browse: [
@@ -140,7 +140,7 @@ describe('runSearch', () => {
     const { fetch } = stub(BROWSE_MISS);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect((res.data as { candidates?: unknown[] }).candidates).toBeUndefined();
-    const latest = await latestLookup(dir);
+    const latest = await latestSearch(dir);
     expect(latest?.candidates).toEqual([]);
   });
 
@@ -166,7 +166,7 @@ describe('runSearch', () => {
 describe('runSearch — parked-candidate nudge', () => {
   const miss = {
     schemaVersion: 1,
-    lookupId: '0197aaaa-bbbb-cccc-dddd-000000000009',
+    searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
     decision: 'MISS',
     calibration: 'lexical-v1',
   };
@@ -190,7 +190,7 @@ describe('runSearch — parked-candidate nudge', () => {
   async function park(created: string): Promise<void> {
     await createCandidate(dir, {
       draft: '# d\n',
-      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       created,
       sourceProject: dir,
     });
@@ -241,7 +241,7 @@ describe('evalCohort threading', () => {
       return new Response(
         JSON.stringify({
           schemaVersion: 1,
-          lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
           decision: 'MISS',
           calibration: 'lexical-v1',
         }),

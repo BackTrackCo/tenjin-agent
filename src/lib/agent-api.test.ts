@@ -32,7 +32,7 @@ function json(status: number, body: unknown): Response {
 
 const CANDIDATES: SearchResponse = {
   schemaVersion: 1,
-  lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   decision: 'CANDIDATES',
   calibration: 'lexical-v1',
   candidates: [
@@ -228,7 +228,7 @@ describe('postSearch', () => {
     const { fetch } = stubFetch(
       json(200, {
         schemaVersion: 1,
-        lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         decision: 'MISS',
         calibration: 'lexical-v1',
       }),
@@ -302,28 +302,28 @@ describe('buildOutcomeItem', () => {
 });
 
 describe('postOutcomes', () => {
-  const LOOKUP_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const SEARCH_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   it('POSTs a single outcome as an object (not an array) and returns accepted', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 1 }));
-    const res = await postOutcomes(LOOKUP_ID, [buildOutcomeItem({ status: 'used' })], {
+    const res = await postOutcomes(SEARCH_ID, [buildOutcomeItem({ status: 'used' })], {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
     expect(res.accepted).toBe(1);
-    expect(calls[0]?.url).toBe(`https://preview.example/api/agent/lookups/${LOOKUP_ID}/outcomes`);
+    expect(calls[0]?.url).toBe(`https://preview.example/api/agent/searches/${SEARCH_ID}/outcomes`);
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ status: 'used' });
   });
   it('POSTs a batch as an array', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 2 }));
     await postOutcomes(
-      LOOKUP_ID,
+      SEARCH_ID,
       [buildOutcomeItem({ status: 'used' }), buildOutcomeItem({ status: 'rejected' })],
       { baseUrl: 'https://preview.example', timeoutMs: 5000, fetchImpl: fetch },
     );
     expect(Array.isArray(JSON.parse(String(calls[0]?.init.body)))).toBe(true);
   });
-  it('rejects an invalid lookup id before any request', async () => {
+  it('rejects an invalid search id before any request', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 1 }));
     await expect(
       postOutcomes('not-a-uuid', [buildOutcomeItem({ status: 'used' })], {
@@ -338,7 +338,7 @@ describe('postOutcomes', () => {
     const { fetch } = stubFetch(json(202, { accepted: 11 }));
     const items = Array.from({ length: 11 }, () => buildOutcomeItem({ status: 'used' }));
     await expect(
-      postOutcomes(LOOKUP_ID, items, {
+      postOutcomes(SEARCH_ID, items, {
         baseUrl: 'https://preview.example',
         timeoutMs: 5000,
         fetchImpl: fetch,

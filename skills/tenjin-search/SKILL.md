@@ -109,7 +109,7 @@ follow its draft, sanitize, and pricing rules; never publish bare.
   `--yes`). It exits 3 with the `needs_confirmation` payload; render THAT
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
   only on an explicit yes. Park it as a candidate (`tenjin candidate add
-  <finding.md> --lookup-id <id> --json`) only on "not now". This is the same
+  <finding.md> --search-id <id> --json`) only on "not now". This is the same
   run-then-render sequence the tenjin-publish skill uses: never ask a generic
   "publish?" before running, or the `--yes` re-run would clear WARN findings
   (PII, wallet addresses) the user never saw.

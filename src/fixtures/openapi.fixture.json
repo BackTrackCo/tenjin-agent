@@ -1352,7 +1352,7 @@
       "post": {
         "operationId": "agentSearch",
         "summary": "Search paid resources for a task question (honest lexical)",
-        "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return budget-bounded candidates to buy, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours) — pointers to browse, never scored candidates. The response is budget-bounded (~4k chars serialized), so trailing candidates may drop and long card fields truncate. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `lookupId` as `X-Tenjin-Lookup-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
+        "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return budget-bounded candidates to buy, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours) — pointers to browse, never scored candidates. The response is budget-bounded (~4k chars serialized), so trailing candidates may drop and long card fields truncate. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `searchId` as `X-Tenjin-Search-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
         "security": [],
         "requestBody": {
           "required": true,
@@ -1398,7 +1398,7 @@
         }
       }
     },
-    "/api/agent/lookups/{id}/outcomes": {
+    "/api/agent/searches/{id}/outcomes": {
       "parameters": [
         {
           "name": "id",
@@ -1408,31 +1408,31 @@
             "type": "string",
             "format": "uuid"
           },
-          "description": "The `lookupId` from a prior /api/agent/search response — the unguessable capability."
+          "description": "The `searchId` from a prior /api/agent/search response — the unguessable capability."
         }
       ],
       "post": {
-        "operationId": "agentLookupOutcomes",
+        "operationId": "agentSearchOutcomes",
         "summary": "Report what you did with a search's candidates",
-        "description": "Append-only outcome reporting. Body is one outcome or a batch (≤10). Each outcome carries a `status`, an optional `resourceId` (a candidate id — resolved against THIS search only, so an id that was not a candidate is stored as null and the rest of the batch still lands), and an optional `contentHash` (sha256 over the UTF-8 bytes of the exact `bodyMd` string the read API returned, lowercase hex, `sha256:` prefix). There is deliberately NO `note` field — a body carrying it (or any unknown key) is a 400. ALWAYS answers 202 with an identical body and timing whether the lookup id exists, was swept, or never existed (no existence oracle — the write is deferred). A malformed (non-uuid) `id` is a 400. Anonymous; the uuid `lookupId` is the only capability.",
+        "description": "Append-only outcome reporting. Body is one outcome or a batch (≤10). Each outcome carries a `status`, an optional `resourceId` (a candidate id — resolved against THIS search only, so an id that was not a candidate is stored as null and the rest of the batch still lands), and an optional `contentHash` (sha256 over the UTF-8 bytes of the exact `bodyMd` string the read API returned, lowercase hex, `sha256:` prefix). There is deliberately NO `note` field — a body carrying it (or any unknown key) is a 400. ALWAYS answers 202 with an identical body and timing whether the searchId exists, was swept, or never existed (no existence oracle — the write is deferred). A malformed (non-uuid) `id` is a 400. Anonymous; the uuid `searchId` is the only capability.",
         "security": [],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/LookupOutcomeSubmit"
+                "$ref": "#/components/schemas/SearchOutcomeSubmit"
               }
             }
           }
         },
         "responses": {
           "202": {
-            "description": "Accepted (queued). Returned uniformly, even for an unknown lookup id.",
+            "description": "Accepted (queued). Returned uniformly, even for an unknown searchId.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LookupOutcomeAccepted"
+                  "$ref": "#/components/schemas/SearchOutcomeAccepted"
                 }
               }
             }
@@ -2144,7 +2144,7 @@
             },
             "additionalProperties": false
           },
-          "lookupId": {
+          "searchId": {
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
@@ -2350,7 +2350,7 @@
             },
             "additionalProperties": false
           },
-          "lookupId": {
+          "searchId": {
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
@@ -2605,7 +2605,7 @@
         "required": ["schemaVersion", "question"],
         "additionalProperties": false
       },
-      "LookupOutcomeSubmit": {
+      "SearchOutcomeSubmit": {
         "anyOf": [
           {
             "type": "object",
@@ -3897,10 +3897,10 @@
             "type": "integer",
             "const": 1
           },
-          "lookupId": {
+          "searchId": {
             "type": "string",
             "format": "uuid",
-            "description": "The correlation capability — post it to /api/agent/lookups/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Lookup-Id on a later buy to link that purchase to this search (nulled with the telemetry at 90 days)."
+            "description": "The correlation capability — post it to /api/agent/searches/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Search-Id on a later buy to link that purchase to this search (nulled with the telemetry at 90 days)."
           },
           "decision": {
             "type": "string",
@@ -3925,11 +3925,11 @@
             "description": "Present only on a MISS that found broad-corpus neighbors (≤3), omitted entirely when empty. A MISS stays a MISS: `browse` is a browse hint, never merged into `candidates`, and rides the same ~4k-char budget."
           }
         },
-        "required": ["schemaVersion", "lookupId", "decision", "calibration"]
+        "required": ["schemaVersion", "searchId", "decision", "calibration"]
       },
-      "LookupOutcomeAccepted": {
+      "SearchOutcomeAccepted": {
         "type": "object",
-        "description": "Always 202 — the write is deferred and there is no existence oracle, so this is returned with identical body + timing whether the lookup id exists, was swept, or never existed. `accepted` echoes how many outcomes were queued.",
+        "description": "Always 202 — the write is deferred and there is no existence oracle, so this is returned with identical body + timing whether the searchId exists, was swept, or never existed. `accepted` echoes how many outcomes were queued.",
         "properties": {
           "accepted": {
             "type": "integer"

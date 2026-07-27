@@ -52,7 +52,7 @@ interface PublishModeSelection {
 /**
  * The one line `install` keeps in an AGENTS.md (and, opt-in, in a CLAUDE.md) so the
  * harness reads it as global guidance, not the raw ~/.agents/skills scan. It is an
- * instinct nudge: run a free `tenjin lookup` before regenerating public research,
+ * instinct nudge: run a free `tenjin search` before regenerating public research,
  * then a pointer to where the skills live. The HTML-comment marker keeps re-runs
  * idempotent: a matching line is left untouched, a drifted line (an older install's
  * copy) is rewritten in place, and an absent line is appended, so we never duplicate.
@@ -61,7 +61,7 @@ const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
 
 /**
  * The instinct nudge line, pointed at `skillsDir`. One line, no em dashes: the
- * marker, the lookup-before-regenerating nudge, then where the skills live.
+ * marker, the search-before-regenerating nudge, then where the skills live.
  */
 function nudgeLine(skillsDir: string): string {
   return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin lookup "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
@@ -300,7 +300,7 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
         paint(
           io,
           'dim',
-          '  The nudge tells agents to run a free anonymous `tenjin lookup` before regenerating research; the generalized question text is sent to tenjin.blog.',
+          '  The nudge tells agents to run a free anonymous `tenjin search` before regenerating research; the generalized question text is sent to tenjin.blog.',
         ),
       );
       lines.push(

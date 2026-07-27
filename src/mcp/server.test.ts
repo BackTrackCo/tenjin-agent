@@ -83,7 +83,7 @@ describe('tenjin_search', () => {
   it('returns the exact success envelope as structuredContent with a non-empty text summary', async () => {
     const miss = {
       schemaVersion: 1,
-      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
     };
@@ -225,11 +225,11 @@ describe('MCP adapter never writes to real stdout', () => {
   it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
       schemaVersion: 1,
-      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
     };
-    const lookupFetch = (async () =>
+    const searchFetch = (async () =>
       new Response(JSON.stringify(miss), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -246,7 +246,7 @@ describe('MCP adapter never writes to real stdout', () => {
       dataDir: dir,
       flags: { baseUrl: BASE },
       deps: {
-        search: { fetchImpl: lookupFetch },
+        search: { fetchImpl: searchFetch },
         buy: {
           fetchImpl: buyFetch,
           provider: testWalletProvider(),

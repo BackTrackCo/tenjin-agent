@@ -47,7 +47,7 @@ describe.skipIf(BASE === undefined)('live e2e (TENJIN_E2E_BASE_URL)', () => {
 
   it('search answers CANDIDATES or an honest MISS and outcome gets a 202', async () => {
     const search = await runSearch({ question: 'How do x402 payments settle on Base?' }, ctx);
-    const data = search.data as { decision: string; lookupId: string };
+    const data = search.data as { decision: string; searchId: string };
     expect(['CANDIDATES', 'MISS']).toContain(data.decision);
     const outcome = await runOutcome({ last: true, status: 'regenerated' }, ctx);
     expect((outcome.data as { accepted: number }).accepted).toBeGreaterThanOrEqual(1);

@@ -23,7 +23,7 @@ afterEach(async () => {
 function input(over: Partial<CreateCandidateInput> = {}): CreateCandidateInput {
   return {
     draft: '# draft\n\nbody\n',
-    lookupId: '0197aaaa-bbbb-cccc-dddd-000000000001',
+    searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
     question: 'how do I X?',
     created: '2026-07-18T00:00:00.000Z',
     sourceProject: '/repo/x',
@@ -39,7 +39,7 @@ describe('candidate-store', () => {
     expect(read?.id).toBe(created.id);
     expect(read?.meta).toEqual({
       schemaVersion: 1,
-      lookupId: '0197aaaa-bbbb-cccc-dddd-000000000001',
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
       question: 'how do I X?',
       created: '2026-07-18T00:00:00.000Z',
       sourceProject: '/repo/x',
@@ -116,7 +116,7 @@ describe('candidate-store', () => {
     await mkdir(v2, { recursive: true });
     await writeFile(
       join(v2, 'meta.json'),
-      JSON.stringify({ schemaVersion: 2, lookupId: 'x', created: 'c', sourceProject: 'p' }),
+      JSON.stringify({ schemaVersion: 2, searchId: 'x', created: 'c', sourceProject: 'p' }),
       'utf8',
     );
     const wrong = join(dir, 'candidates', '0197aaaa-bbbb-cccc-dddd-000000000003');

@@ -340,7 +340,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
-    .option('--lookup-id <id>', 'the search to report against')
+    .option('--search-id <id>', 'the search to report against')
     .option('--last', 'target the most recent local search')
     .requiredOption(
       '--status <status>',
@@ -355,7 +355,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runOutcome(
           {
             status: String(o.status),
-            ...(typeof o.lookupId === 'string' ? { lookupId: o.lookupId } : {}),
+            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.last === true ? { last: true } : {}),
             ...(typeof o.resource === 'string' ? { resource: o.resource } : {}),
             ...(typeof o.contentHash === 'string' ? { contentHash: o.contentHash } : {}),
@@ -377,7 +377,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   );
   addGlobalFlags(candidate.command('add <file>'))
     .description('Park a Markdown draft as a publish candidate, tied to a search')
-    .requiredOption('--lookup-id <id>', 'the search whose unmet demand this draft answers')
+    .requiredOption('--search-id <id>', 'the search whose unmet demand this draft answers')
     .option('--question <q>', 'the question this draft answers')
     .action(async function (this: Command, file: string) {
       await runCommand('candidate.add', this, async (ctx) => {
@@ -386,7 +386,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runCandidateAdd(
           {
             file,
-            lookupId: String(o.lookupId),
+            searchId: String(o.searchId),
             ...(typeof o.question === 'string' ? { question: o.question } : {}),
           },
           ctx,

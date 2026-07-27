@@ -136,7 +136,7 @@ export type SearchCandidate = z.infer<typeof searchCandidateSchema>;
 // discoverable corpus with deliberately NO matchReasons, NO estimatedTokens and
 // no confidence field. It is a "you might browse this" hint, never a scored
 // answer candidate — so it is kept strictly out of `candidates`, never recorded
-// in the local lookup store, and never reachable by `inspect`/`buy`/`outcome`.
+// in the local search store, and never reachable by `inspect`/`buy`/`outcome`.
 export const searchBrowseSchema = z
   .object({
     resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
@@ -151,7 +151,7 @@ export type SearchBrowse = z.infer<typeof searchBrowseSchema>;
 
 export const searchResponseSchema = z.object({
   schemaVersion: z.literal(1),
-  lookupId: z.string().regex(UUID_RE, 'lookupId must be a uuid'),
+  searchId: z.string().regex(UUID_RE, 'searchId must be a uuid'),
   decision: z.enum(['CANDIDATES', 'MISS']),
   calibration: z.string(),
   candidates: z.array(searchCandidateSchema).optional(),
@@ -358,16 +358,16 @@ export function buildOutcomeItem(input: OutcomeInput): OutcomeBodyItem {
   };
 }
 
-const LOOKUP_ID_RE = UUID_RE;
+const SEARCH_ID_RE = UUID_RE;
 
 export async function postOutcomes(
-  lookupId: string,
+  searchId: string,
   items: OutcomeBodyItem[],
   opts: AgentApiOptions,
 ): Promise<{ accepted: number }> {
-  if (!LOOKUP_ID_RE.test(lookupId)) {
-    throw new CliError('USAGE', `Invalid lookup id: ${JSON.stringify(lookupId)}`, {
-      fix: 'Pass the lookupId from a prior search (or use --last).',
+  if (!SEARCH_ID_RE.test(searchId)) {
+    throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
+      fix: 'Pass the searchId from a prior search (or use --last).',
     });
   }
   if (items.length === 0 || items.length > 10) {
@@ -375,7 +375,7 @@ export async function postOutcomes(
       fix: 'Report between 1 and 10 outcomes per call.',
     });
   }
-  const url = `${trimSlash(opts.baseUrl)}/api/agent/lookups/${lookupId}/outcomes`;
+  const url = `${trimSlash(opts.baseUrl)}/api/agent/searches/${searchId}/outcomes`;
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
@@ -386,13 +386,13 @@ export async function postOutcomes(
   if (!res.ok) throw apiFailure(url, res);
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   // 202 is the only success; the body is a uniform { accepted } regardless of
-  // whether the lookupId existed (no existence oracle, by design).
+  // whether the searchId existed (no existence oracle, by design).
   if (res.status !== 202) {
     throw new CliError(
       'API_UNREACHABLE',
       serverErrorMessage(res.json) ?? `Outcome report failed (${res.status})`,
       {
-        fix: 'Check the status vocabulary and lookup id, then retry.',
+        fix: 'Check the status vocabulary and search id, then retry.',
         details: res.json,
       },
     );

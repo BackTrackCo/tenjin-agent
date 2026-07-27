@@ -14,7 +14,7 @@ import { SIWX_HEADER } from './siwx';
  * re-read, or freshly paid), `payment_required` (402 with the decoded
  * PAYMENT-REQUIRED header + the leak-safe preview body), and `already_purchased`
  * (409 owned-re-pay gate, nothing charged). Purchase attribution rides
- * `X-Tenjin-Client` always and `X-Tenjin-Lookup-Id` when a search preceded the buy.
+ * `X-Tenjin-Client` always and `X-Tenjin-Search-Id` when a search preceded the buy.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
@@ -91,7 +91,7 @@ export interface ReadRequestOptions {
   /** The `PAYMENT-SIGNATURE` header(s) for a paid request. */
   paymentHeaders?: Record<string, string>;
   /** Attribute a following purchase to the search that surfaced it. */
-  lookupId?: string;
+  searchId?: string;
 }
 
 export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<ReadResult> {
@@ -99,7 +99,7 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     accept: 'application/json',
     'x-tenjin-client': CLIENT_HEADER,
   };
-  if (opts.lookupId !== undefined) headers['x-tenjin-lookup-id'] = opts.lookupId;
+  if (opts.searchId !== undefined) headers['x-tenjin-search-id'] = opts.searchId;
   if (opts.siwxHeader !== undefined) headers[SIWX_HEADER] = opts.siwxHeader;
   if (opts.paymentHeaders !== undefined) Object.assign(headers, opts.paymentHeaders);
 

@@ -35,7 +35,7 @@ export const ErrorCodeSchema = z.enum([
   'POLICY_REFUSED',
   'PAYMENT_FAILED',
   'RESOURCE_NOT_FOUND',
-  'LOOKUP_NOT_FOUND',
+  'SEARCH_NOT_FOUND',
   // A 429 from the anonymous search/outcome/read limits; error.details carries
   // retryAfterSeconds so a looping agent can back off instead of hammering.
   'RATE_LIMITED',

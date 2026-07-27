@@ -2,7 +2,7 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, type SearchInput } from '../lib/agent-api';
-import { recordLookup } from '../lib/lookup-store';
+import { recordSearch } from '../lib/search-store';
 import { listCandidates } from '../lib/candidate-store';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
@@ -10,12 +10,12 @@ import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin search "<question>"`, one POST to /api/agent/search. Prints the compact
- * CANDIDATES/MISS response verbatim (spec 10), and records the lookupId +
+ * CANDIDATES/MISS response verbatim (spec 10), and records the searchId +
  * candidates locally so `outcome --last` and `buy <resourceId>` can use them. No
  * wallet, no signing: search is anonymous.
  *
- * The response's `lookupId` keeps its name: it is the outcome-reporting capability
- * for POST /api/agent/lookups/<lookupId>/outcomes, which tenjin#463 left unchanged.
+ * The response's `searchId` keeps its name: it is the outcome-reporting capability
+ * for POST /api/agent/searches/<searchId>/outcomes, which tenjin#463 left unchanged.
  */
 
 export interface SearchArgs {
@@ -83,8 +83,8 @@ export async function runSearch(
       );
     }
   }
-  await recordLookup(ctx.dataDir, {
-    lookupId: response.lookupId,
+  await recordSearch(ctx.dataDir, {
+    searchId: response.searchId,
     at: new Date().toISOString(),
     question: request.question,
     decision: response.decision,
@@ -119,9 +119,9 @@ export async function runSearch(
 
   const humanLines =
     response.decision === 'MISS'
-      ? [`MISS, no candidates (lookupId ${response.lookupId})`, ...browseHint]
+      ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint]
       : [
-          `${candidates.length} candidate(s) (lookupId ${response.lookupId}):`,
+          `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
           ...candidates.map(
             (c, i) =>
               `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${c.price} atomic, ${sanitizeForTerminal(c.url)}`,
