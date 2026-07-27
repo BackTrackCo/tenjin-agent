@@ -114,9 +114,9 @@ follow its draft, sanitize, and pricing rules; never publish bare.
   only on an explicit yes. Park it as a candidate (`tenjin candidate add
   <finding.md> --lookup-id <id> --question "<the question you looked up>"
   --json`) only on "not now". This is the same run-then-render sequence the
-  tenjin-publish skill uses: never ask a generic
-  "publish?" before running, or the `--yes` re-run would clear WARN findings
-  (PII, wallet addresses) the user never saw.
+  tenjin-publish skill uses: never ask a generic "publish?" before running, or
+  the `--yes` re-run would clear WARN findings (PII, wallet addresses) the user
+  never saw.
 - **auto / full-auto**: build the answer card and run `tenjin publish --json` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
@@ -126,9 +126,10 @@ follow its draft, sanitize, and pricing rules; never publish bare.
 
 Candidates are local files that never upload on their own; `tenjin candidate
 list --json` shows the pen, and a later `tenjin publish --candidate <id> --json` sends one
-through the same consent scan. Publish auto-fills the answer card's
-`questionsAnswered` from `--question`, so the exact phrasing a searcher used
-becomes a search target on the published card.
+through the same consent scan. Publish falls back to the stored `--question` for
+the card's `questionsAnswered`, but only when the draft names none, so whenever
+you write the card yourself include the question you looked up as one of its
+entries: that exact phrasing is what the next searcher sends.
 
 ## Safety
 
