@@ -12,7 +12,7 @@ description: >-
   https://tenjin.blog/skills.md instead.
 ---
 
-# Tenjin search: one lookup before you regenerate
+# Tenjin search: one search before you regenerate
 
 The `tenjin` CLI owns every mechanic: HTTP, x402 payment signing, SIWX auth,
 entitlements, local delivery. You never assemble a request or a payment payload.
@@ -42,10 +42,10 @@ never a required first step.
 If any of the four fails, generate instead. When they hold, look up first: a
 habitual miss adds latency and context to every task.
 
-## The lookup
+## The search
 
 ```bash
-tenjin lookup "<generalized question>" --json --limit 5 [--fresh-within P30D] [--max-price 0.25] [--applies-to key=value]
+tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [--max-price 0.25] [--applies-to key=value]
 ```
 
 - **Query hygiene: the question leaves your environment.** Send only the
@@ -93,12 +93,12 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 tenjin outcome --json --last --status used|partially_used|rejected|regenerated|purchase_declined
 ```
 
-Report honestly after acting on a lookup, including rejections. This is the
+Report honestly after acting on a search, including rejections. This is the
 signal the marketplace learns from and it costs one command.
 
 ## After a MISS: publish what you build (by your consent mode)
 
-If the lookup MISSed and you then completed the task with a reusable, public,
+If the search MISSed and you then completed the task with a reusable, public,
 rights-clean finding, publishing it back is the point of the marketplace. Act by
 the resolved `publish.mode`. The tenjin-publish skill owns the mechanics and is
 `disable-model-invocation: true`, so on any path that publishes, READ its

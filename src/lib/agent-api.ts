@@ -6,21 +6,21 @@ import { ATOMIC_RE, UUID_RE } from './ids';
 import { trimSlash } from './url';
 
 /**
- * The lookup + outcome HTTP contract (A2, tenjin#370). Request building and
+ * The search + outcome HTTP contract (A2, tenjin#370). Request building and
  * response validation live here; the wire shape is validated defensively, an
  * unknown `schemaVersion` degrades to a parse refusal rather than a guess, and
  * unrecognized candidate fields are ignored (forward-compatible), per spec 10.
  *
  * These endpoints are anonymous: no wallet, no SIWX. The only header of note is
- * `X-Tenjin-Client`, which attributes a later purchase back to the lookup flow.
+ * `X-Tenjin-Client`, which attributes a later purchase back to the search flow.
  */
 
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
-/** Client-side lookup request (mirrors lib/lookup.ts lookupRequestSchema bounds
+/** Client-side search request (mirrors the server lookupRequestSchema bounds
  *  so a malformed flag fails locally as USAGE, before a round trip). */
-export interface LookupInput {
+export interface SearchInput {
   question: string;
   freshWithin?: string;
   maxPrice?: string;
@@ -28,7 +28,7 @@ export interface LookupInput {
   limit?: number;
 }
 
-export interface LookupRequestBody {
+export interface SearchRequestBody {
   schemaVersion: 1;
   question: string;
   freshWithin?: string;
@@ -37,7 +37,7 @@ export interface LookupRequestBody {
   limit: number;
 }
 
-export function buildLookupRequest(input: LookupInput): LookupRequestBody {
+export function buildSearchRequest(input: SearchInput): SearchRequestBody {
   const question = input.question.trim();
   if (question.length === 0 || question.length > 512) {
     throw new CliError('USAGE', 'question must be 1 to 512 characters', {
@@ -109,7 +109,7 @@ export function buildLookupRequest(input: LookupInput): LookupRequestBody {
 // Response schemas. `.passthrough()` on the candidate keeps unknown future fields
 // instead of stripping them (forward-compatible), while still requiring the
 // contract fields this CLI reads. `decision` is uppercase on the wire.
-export const lookupCandidateSchema = z
+export const searchCandidateSchema = z
   .object({
     resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
     url: z.string(),
@@ -130,17 +130,36 @@ export const lookupCandidateSchema = z
   })
   .passthrough();
 
-export type LookupCandidate = z.infer<typeof lookupCandidateSchema>;
+export type SearchCandidate = z.infer<typeof searchCandidateSchema>;
 
-export const lookupResponseSchema = z.object({
+// A browse pointer, carried ONLY on a MISS (tenjin#460): a piece from the broad
+// discoverable corpus with deliberately NO matchReasons, NO estimatedTokens and
+// no confidence field. It is a "you might browse this" hint, never a scored
+// answer candidate — so it is kept strictly out of `candidates`, never recorded
+// in the local lookup store, and never reachable by `inspect`/`buy`/`outcome`.
+export const searchBrowseSchema = z
+  .object({
+    resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
+    url: z.string(),
+    title: z.string(),
+    price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
+    creator: z.object({ handle: z.string() }).passthrough(),
+  })
+  .passthrough();
+
+export type SearchBrowse = z.infer<typeof searchBrowseSchema>;
+
+export const searchResponseSchema = z.object({
   schemaVersion: z.literal(1),
   lookupId: z.string().regex(UUID_RE, 'lookupId must be a uuid'),
   decision: z.enum(['CANDIDATES', 'MISS']),
   calibration: z.string(),
-  candidates: z.array(lookupCandidateSchema).optional(),
+  candidates: z.array(searchCandidateSchema).optional(),
+  // Omitted entirely by the server when empty, and only ever present on a MISS.
+  browse: z.array(searchBrowseSchema).optional(),
 });
 
-export type LookupResponse = z.infer<typeof lookupResponseSchema>;
+export type SearchResponse = z.infer<typeof searchResponseSchema>;
 
 export interface AgentApiOptions {
   baseUrl: string;
@@ -191,11 +210,11 @@ function serverErrorMessage(json: unknown): string | undefined {
   return undefined;
 }
 
-export async function postLookup(
-  body: LookupRequestBody,
+export async function postSearch(
+  body: SearchRequestBody,
   opts: AgentApiOptions,
-): Promise<LookupResponse> {
-  const url = `${trimSlash(opts.baseUrl)}/api/agent/lookup`;
+): Promise<SearchResponse> {
+  const url = `${trimSlash(opts.baseUrl)}/api/agent/search`;
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
@@ -211,16 +230,16 @@ export async function postLookup(
   if (res.status !== 200) {
     throw new CliError(
       'API_UNREACHABLE',
-      serverErrorMessage(res.json) ?? `Lookup failed (${res.status})`,
+      serverErrorMessage(res.json) ?? `Search failed (${res.status})`,
       {
-        fix: 'Retry; if it persists the lookup endpoint may be unavailable.',
+        fix: 'Retry; if it persists the search endpoint may be unavailable.',
         details: res.json,
       },
     );
   }
-  const parsed = lookupResponseSchema.safeParse(res.json);
+  const parsed = searchResponseSchema.safeParse(res.json);
   if (!parsed.success) {
-    throw new CliError('CONTRACT_MISMATCH', 'Lookup response did not match the expected contract', {
+    throw new CliError('CONTRACT_MISMATCH', 'Search response did not match the expected contract', {
       fix: 'Update tenjin-cli; the server contract may have changed.',
       details: parsed.error.issues,
     });
@@ -246,12 +265,25 @@ const CAND_BOUNDS = {
   appliesToValueChars: 80,
 } as const;
 
-function truncateResponse(res: LookupResponse): LookupResponse {
-  if (res.candidates === undefined) return res;
-  return { ...res, candidates: res.candidates.map(truncateCandidate) };
+function truncateResponse(res: SearchResponse): SearchResponse {
+  const out: SearchResponse = { ...res };
+  if (res.candidates !== undefined) out.candidates = res.candidates.map(truncateCandidate);
+  // Browse pointers ride the same defensive discipline: cap the count at the
+  // server's BROWSE_MAX and the only free-form string at the candidate title cap.
+  if (res.browse !== undefined) {
+    out.browse = res.browse.slice(0, BROWSE_MAX).map((b) => ({
+      ...b,
+      title: b.title.length > CAND_BOUNDS.title ? b.title.slice(0, CAND_BOUNDS.title) : b.title,
+    }));
+  }
+  return out;
 }
 
-function truncateCandidate(c: LookupCandidate): LookupCandidate {
+/** Mirrors the server's BROWSE_MAX (lib/search-browse.ts): a MISS carries at
+ *  most three browse pointers. */
+const BROWSE_MAX = 3;
+
+function truncateCandidate(c: SearchCandidate): SearchCandidate {
   const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
   const capList = (list: string[], items: number, chars: number): string[] =>
     list.slice(0, items).map((s) => cap(s, chars));
@@ -311,7 +343,7 @@ export function buildOutcomeItem(input: OutcomeInput): OutcomeBodyItem {
   }
   if (input.resourceId !== undefined && !UUID_RE.test(input.resourceId)) {
     throw new CliError('USAGE', `Invalid --resource id: ${JSON.stringify(input.resourceId)}`, {
-      fix: 'Pass the resourceId (a uuid) from a lookup candidate.',
+      fix: 'Pass the resourceId (a uuid) from a search candidate.',
     });
   }
   if (input.contentHash !== undefined && !CONTENT_HASH_RE.test(input.contentHash)) {
@@ -335,7 +367,7 @@ export async function postOutcomes(
 ): Promise<{ accepted: number }> {
   if (!LOOKUP_ID_RE.test(lookupId)) {
     throw new CliError('USAGE', `Invalid lookup id: ${JSON.stringify(lookupId)}`, {
-      fix: 'Pass the lookupId from a prior lookup (or use --last).',
+      fix: 'Pass the lookupId from a prior search (or use --last).',
     });
   }
   if (items.length === 0 || items.length > 10) {

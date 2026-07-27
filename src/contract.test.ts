@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
-import { lookupCandidateSchema, lookupResponseSchema } from './lib/agent-api';
+import { searchBrowseSchema, searchCandidateSchema, searchResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
 import { buildPostCreateBody } from './lib/posts-api';
 import { deriveCard } from './lib/card';
@@ -63,9 +63,13 @@ const CANDIDATE_REQUIRED = [
   'url',
   'validUntil',
 ];
+// The MISS-only browse tail (tenjin#460). Deliberately minimal: if the server
+// ever grows it a matchReasons/confidence field, that is a contract change the
+// CLI must see, because a browse pointer must never read as a scored candidate.
+const BROWSE_REQUIRED = ['creator', 'price', 'resourceId', 'title', 'url'];
 
 function assertAgentPaths(doc: unknown): void {
-  expect(get(doc, 'paths', '/api/agent/lookup', 'post', 'operationId')).toBe('agentLookup');
+  expect(get(doc, 'paths', '/api/agent/search', 'post', 'operationId')).toBe('agentSearch');
   expect(get(doc, 'paths', '/api/agent/lookups/{id}/outcomes', 'post', 'operationId')).toBe(
     'agentLookupOutcomes',
   );
@@ -82,8 +86,8 @@ function assertSchemaDeclares(doc: unknown, schemaName: string, fields: string[]
   }
 }
 
-function assertLookupRequest(doc: unknown): void {
-  const properties = get(doc, 'components', 'schemas', 'LookupRequest', 'properties');
+function assertSearchRequest(doc: unknown): void {
+  const properties = get(doc, 'components', 'schemas', 'SearchRequest', 'properties');
   for (const field of [
     'schemaVersion',
     'question',
@@ -92,7 +96,7 @@ function assertLookupRequest(doc: unknown): void {
     'appliesTo',
     'limit',
   ]) {
-    expect(get(properties, field), `LookupRequest.properties.${field} missing`).toBeDefined();
+    expect(get(properties, field), `SearchRequest.properties.${field} missing`).toBeDefined();
   }
   expect(get(properties, 'question', 'maxLength')).toBe(512);
 }
@@ -117,32 +121,50 @@ function assertOutcomeStatusEnum(doc: unknown): void {
 }
 
 describe('contract fixture pins the agent endpoints', () => {
-  it('declares POST /api/agent/lookup and /api/agent/lookups/{id}/outcomes', () => {
+  it('declares POST /api/agent/search and /api/agent/lookups/{id}/outcomes', () => {
     assertAgentPaths(fixtureDoc);
   });
 });
 
 describe('contract fixture covers every field the CLI requires', () => {
-  it('the CLI requires exactly the pinned LookupResponse fields', () => {
-    expect(requiredKeys(lookupResponseSchema)).toEqual(RESPONSE_REQUIRED);
+  it('the CLI requires exactly the pinned SearchResponse fields', () => {
+    expect(requiredKeys(searchResponseSchema)).toEqual(RESPONSE_REQUIRED);
   });
 
-  it('the CLI requires exactly the pinned LookupCandidate fields', () => {
-    expect(requiredKeys(lookupCandidateSchema)).toEqual(CANDIDATE_REQUIRED);
+  it('the CLI requires exactly the pinned SearchCandidate fields', () => {
+    expect(requiredKeys(searchCandidateSchema)).toEqual(CANDIDATE_REQUIRED);
   });
 
-  it.each(RESPONSE_REQUIRED)('LookupResponse declares required field %s', (field) => {
-    assertSchemaDeclares(fixtureDoc, 'LookupResponse', [field]);
+  it.each(RESPONSE_REQUIRED)('SearchResponse declares required field %s', (field) => {
+    assertSchemaDeclares(fixtureDoc, 'SearchResponse', [field]);
   });
 
-  it.each(CANDIDATE_REQUIRED)('LookupCandidate declares required field %s', (field) => {
-    assertSchemaDeclares(fixtureDoc, 'LookupCandidate', [field]);
+  it.each(CANDIDATE_REQUIRED)('SearchCandidate declares required field %s', (field) => {
+    assertSchemaDeclares(fixtureDoc, 'SearchCandidate', [field]);
+  });
+
+  it('the CLI requires exactly the pinned SearchBrowse fields', () => {
+    expect(requiredKeys(searchBrowseSchema)).toEqual(BROWSE_REQUIRED);
+  });
+
+  it.each(BROWSE_REQUIRED)('SearchBrowse declares required field %s', (field) => {
+    assertSchemaDeclares(fixtureDoc, 'SearchBrowse', [field]);
+  });
+
+  it('SearchBrowse carries no score-like field a candidate would have', () => {
+    const properties = get(fixtureDoc, 'components', 'schemas', 'SearchBrowse', 'properties');
+    for (const scoreish of ['matchReasons', 'estimatedTokens', 'confidence']) {
+      expect(
+        get(properties, scoreish),
+        `SearchBrowse must not declare ${scoreish}`,
+      ).toBeUndefined();
+    }
   });
 });
 
 describe('contract fixture request shapes', () => {
-  it('LookupRequest carries the fields the CLI sends, question capped at 512', () => {
-    assertLookupRequest(fixtureDoc);
+  it('SearchRequest carries the fields the CLI sends, question capped at 512', () => {
+    assertSearchRequest(fixtureDoc);
   });
 
   it('LookupOutcomeSubmit status enum is exactly the five CLI statuses', () => {
@@ -181,26 +203,26 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   };
 
   it('the hand-built candidate only uses fields the fixture declares', () => {
-    const declared = get(fixtureDoc, 'components', 'schemas', 'LookupCandidate', 'properties');
+    const declared = get(fixtureDoc, 'components', 'schemas', 'SearchCandidate', 'properties');
     for (const key of Object.keys(candidate)) {
       expect(get(declared, key), `fixture does not declare candidate field ${key}`).toBeDefined();
     }
   });
 
-  it('lookupResponseSchema.parse accepts a CANDIDATES response', () => {
-    const parsed = lookupResponseSchema.parse(response);
+  it('searchResponseSchema.parse accepts a CANDIDATES response', () => {
+    const parsed = searchResponseSchema.parse(response);
     expect(parsed.decision).toBe('CANDIDATES');
     expect(parsed.candidates).toHaveLength(1);
   });
 
-  it('lookupResponseSchema.parse accepts a MISS with candidates omitted', () => {
+  it('searchResponseSchema.parse accepts a MISS with candidates omitted', () => {
     const miss = {
       schemaVersion: 1,
       lookupId: response.lookupId,
       decision: 'MISS',
       calibration: 'lexical-v1',
     };
-    expect(lookupResponseSchema.parse(miss).candidates).toBeUndefined();
+    expect(searchResponseSchema.parse(miss).candidates).toBeUndefined();
   });
 });
 
@@ -375,17 +397,18 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
       liveDoc = await res.json();
     });
 
-    it('declares the agent lookup and outcomes operations', () => {
+    it('declares the agent search and outcomes operations', () => {
       assertAgentPaths(liveDoc);
     });
 
-    it('LookupResponse and LookupCandidate declare every CLI-required field', () => {
-      assertSchemaDeclares(liveDoc, 'LookupResponse', RESPONSE_REQUIRED);
-      assertSchemaDeclares(liveDoc, 'LookupCandidate', CANDIDATE_REQUIRED);
+    it('SearchResponse, SearchCandidate and SearchBrowse declare every CLI-required field', () => {
+      assertSchemaDeclares(liveDoc, 'SearchResponse', RESPONSE_REQUIRED);
+      assertSchemaDeclares(liveDoc, 'SearchCandidate', CANDIDATE_REQUIRED);
+      assertSchemaDeclares(liveDoc, 'SearchBrowse', BROWSE_REQUIRED);
     });
 
-    it('LookupRequest matches what the CLI sends', () => {
-      assertLookupRequest(liveDoc);
+    it('SearchRequest matches what the CLI sends', () => {
+      assertSearchRequest(liveDoc);
     });
 
     it('LookupOutcomeSubmit status enum matches the CLI', () => {

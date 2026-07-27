@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runLookup } from './lookup';
+import { runSearch } from './search';
 import { latestLookup } from '../lib/lookup-store';
 import { createCandidate } from '../lib/candidate-store';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -63,10 +63,10 @@ const CANDIDATES = {
   ],
 };
 
-describe('runLookup', () => {
+describe('runSearch', () => {
   it('converts a decimal-USD --max-price to atomic and passes the appliesTo map', async () => {
     const { fetch, bodies } = stub(CANDIDATES);
-    await runLookup(
+    await runSearch(
       { question: 'q', maxPrice: '0.10', freshWithin: 'P30D', appliesTo: ['products=Vercel,Next'] },
       makeCtx(),
       { fetchImpl: fetch },
@@ -83,7 +83,7 @@ describe('runLookup', () => {
 
   it('records the lookup so outcome --last and buy <id> can use it', async () => {
     const { fetch } = stub(CANDIDATES);
-    await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     const latest = await latestLookup(dir);
     expect(latest?.lookupId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     expect(latest?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
@@ -97,19 +97,73 @@ describe('runLookup', () => {
       calibration: 'lexical-v1',
     };
     const { fetch } = stub(miss);
-    const res = await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect((res.data as { decision: string }).decision).toBe('MISS');
+  });
+
+  // The browse tail (tenjin#460) is MISS-only and must stay a hint: one human
+  // line, never merged into candidates, never recorded as a buyable candidate.
+  const BROWSE_MISS = {
+    schemaVersion: 1,
+    lookupId: '0197aaaa-bbbb-cccc-dddd-00000000000b',
+    decision: 'MISS',
+    calibration: 'lexical-v1',
+    browse: [
+      {
+        resourceId: '0197aaaa-bbbb-cccc-dddd-00000000000c',
+        url: 'https://preview.example/api/read/iris/one',
+        title: 'Browse one',
+        price: '100000',
+        creator: { handle: 'iris' },
+      },
+      {
+        resourceId: '0197aaaa-bbbb-cccc-dddd-00000000000d',
+        url: 'https://preview.example/api/read/iris/two',
+        title: 'Browse two',
+        price: '200000',
+        creator: { handle: 'iris' },
+      },
+    ],
+  };
+
+  it('renders a MISS browse tail as exactly one extra hint line', async () => {
+    const { fetch } = stub(BROWSE_MISS);
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect(res.humanLines).toHaveLength(2);
+    expect(res.humanLines?.[0]).toContain('MISS, no candidates');
+    expect(res.humanLines?.[1]).toBe(
+      'no match — 2 piece(s) you could browse: Browse one; Browse two',
+    );
+  });
+
+  it('keeps browse pointers out of candidates and out of the local store', async () => {
+    const { fetch } = stub(BROWSE_MISS);
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect((res.data as { candidates?: unknown[] }).candidates).toBeUndefined();
+    const latest = await latestLookup(dir);
+    expect(latest?.candidates).toEqual([]);
+  });
+
+  it('refuses a browse pointer whose url points off the configured base URL', async () => {
+    const evil = {
+      ...BROWSE_MISS,
+      browse: [{ ...BROWSE_MISS.browse[0], url: 'https://evil.example/api/read/iris/one' }],
+    };
+    const { fetch } = stub(evil);
+    await expect(
+      runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 
   it('rejects a malformed --applies-to', async () => {
     const { fetch } = stub(CANDIDATES);
     await expect(
-      runLookup({ question: 'q', appliesTo: ['noequals'] }, makeCtx(), { fetchImpl: fetch }),
+      runSearch({ question: 'q', appliesTo: ['noequals'] }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 });
 
-describe('runLookup — parked-candidate nudge', () => {
+describe('runSearch — parked-candidate nudge', () => {
   const miss = {
     schemaVersion: 1,
     lookupId: '0197aaaa-bbbb-cccc-dddd-000000000009',
@@ -149,7 +203,7 @@ describe('runLookup — parked-candidate nudge', () => {
     await park(daysAgo(2));
     const { fetch } = stub(miss);
     const { ctx, stderr } = ctxCapturingStderr();
-    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).toContain('2 candidate(s) parked (0 stale >7d) - tenjin candidate list');
   });
 
@@ -159,14 +213,14 @@ describe('runLookup — parked-candidate nudge', () => {
     await park(daysAgo(30));
     const { fetch } = stub(miss);
     const { ctx, stderr } = ctxCapturingStderr();
-    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).toContain('3 candidate(s) parked (2 stale >7d)');
   });
 
   it('is silent when nothing is parked', async () => {
     const { fetch } = stub(miss);
     const { ctx, stderr } = ctxCapturingStderr();
-    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).not.toContain('parked');
   });
 
@@ -174,7 +228,7 @@ describe('runLookup — parked-candidate nudge', () => {
     await park(daysAgo(1));
     const { fetch } = stub(CANDIDATES);
     const { ctx, stderr } = ctxCapturingStderr();
-    await runLookup({ question: 'q' }, ctx, { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).not.toContain('parked');
   });
 });
@@ -199,14 +253,14 @@ describe('evalCohort threading', () => {
 
   it('sends no eval-cohort header by default', async () => {
     const { fetch, headers } = headerStub();
-    await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(headers[0]?.['x-tenjin-eval-cohort']).toBeUndefined();
   });
 
   it('sends X-Tenjin-Eval-Cohort: 1 when config.json opts in', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ evalCohort: true }));
     const { fetch, headers } = headerStub();
-    await runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(headers[0]?.['x-tenjin-eval-cohort']).toBe('1');
   });
 });
@@ -224,7 +278,7 @@ describe('candidate URL origin ingest boundary', () => {
     };
     const { fetch } = stub(offOrigin);
     await expect(
-      runLookup({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
+      runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
   });
 });

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runLookup } from './commands/lookup';
+import { runSearch } from './commands/search';
 import { runInspect } from './commands/inspect';
 import { runBuy } from './commands/buy';
 import { runOutcome } from './commands/outcome';
@@ -17,7 +17,7 @@ import type { Io } from './lib/output';
  * (http://localhost:3000) or a preview deploy. The paid leg additionally needs
  * TENJIN_E2E_WALLET_KEY (a funded throwaway key) AND TENJIN_E2E_PAID_REF (the
  * resource to buy) because it settles real USDC; without them it verifies the
- * free hit, the 402 decode, and the lookup/outcome loop, which is the
+ * free hit, the 402 decode, and the search/outcome loop, which is the
  * wallet-free half of the first-run proof.
  */
 const BASE = process.env.TENJIN_E2E_BASE_URL;
@@ -45,9 +45,9 @@ describe.skipIf(BASE === undefined)('live e2e (TENJIN_E2E_BASE_URL)', () => {
     await rm(join(dataDir, '..'), { recursive: true, force: true });
   });
 
-  it('lookup answers CANDIDATES or an honest MISS and outcome gets a 202', async () => {
-    const lookup = await runLookup({ question: 'How do x402 payments settle on Base?' }, ctx);
-    const data = lookup.data as { decision: string; lookupId: string };
+  it('search answers CANDIDATES or an honest MISS and outcome gets a 202', async () => {
+    const search = await runSearch({ question: 'How do x402 payments settle on Base?' }, ctx);
+    const data = search.data as { decision: string; lookupId: string };
     expect(['CANDIDATES', 'MISS']).toContain(data.decision);
     const outcome = await runOutcome({ last: true, status: 'regenerated' }, ctx);
     expect((outcome.data as { accepted: number }).accepted).toBeGreaterThanOrEqual(1);
