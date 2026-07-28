@@ -55,7 +55,7 @@ export const ConfigSchema = z.object({
   baseUrl: z.url(),
   rpcUrl: z.url(),
   /**
-   * Evaluation-cohort opt-in (spec 09 §3): when true, lookup sends
+   * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
    * X-Tenjin-Eval-Cohort: 1 and the server stores the generalized question for
    * 90 days. Off by default; no query text is retained server-side without it.
    */

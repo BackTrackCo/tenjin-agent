@@ -55,7 +55,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   baseUrl: 'Tenjin API base URL',
   rpcUrl: 'Base RPC endpoint for balance reads',
-  evalCohort: 'opt in to the lookup evaluation cohort',
+  evalCohort: 'opt in to the search evaluation cohort',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
 };

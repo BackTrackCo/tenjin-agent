@@ -25,7 +25,7 @@ export interface ResolvedSettings {
   baseUrl: string;
   rpcUrl: string;
   policy: SpendPolicy;
-  /** Lookup-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
+  /** Search-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
   evalCohort: boolean;
   /** Hard per-send cap for `tenjin send`; null = uncapped ("none"), 0n = disabled. */
   sendMaxAmountAtomic: bigint | null;
