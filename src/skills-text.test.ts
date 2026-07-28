@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveSkillsSource } from './lib/skills-source';
@@ -245,5 +245,75 @@ describe('README allowlist block does not drift from the constants', () => {
     expect(README).toMatch(/that line authorizes\s*unattended spending up to your wallet balance/i);
     expect(README).toMatch(/`sessionBudget` is `0`, which the policy reads as \*\*no\s*ceiling/i);
     expect(README).not.toMatch(/a human is still on every purchase/i);
+  });
+});
+
+/**
+ * The skill tells the agent never to pass `--base-url` on an allowlisted verb.
+ * The CLI's own error copy is the loudest contrary voice available: `doctor` is
+ * allowlisted and unattended, its `fix:` lines print to the agent and ride the
+ * failure envelope, and `resource-ref` emits one on the paying path at exactly
+ * the moment a resource URL is off-origin. A fix line naming the flag would
+ * coach the move the skill forbids, so no user-facing string may name it.
+ *
+ * The pin is a source scan rather than a per-message assertion so a NEW string
+ * fails it too. Comment lines are stripped: the flag is a real part of the CLI
+ * surface, and prose explaining why it is dangerous must stay writable.
+ */
+describe('no user-facing CLI string coaches --base-url', () => {
+  const SRC = fileURLToPath(new URL('.', import.meta.url));
+
+  // `cli.ts` DEFINES the flag (commander needs the literal); `lib/permissions.ts`
+  // is the caveat that discloses it. Both name it deliberately.
+  const ALLOWED = new Set(['cli.ts', 'lib/permissions.ts']);
+
+  /** Source lines with block/line comments removed, in this repo's comment style. */
+  function codeLines(file: string): string[] {
+    const out: string[] = [];
+    let inBlock = false;
+    for (const raw of readFileSync(join(SRC, file), 'utf8').split('\n')) {
+      const t = raw.trim();
+      if (inBlock) {
+        if (t.includes('*/')) inBlock = false;
+        continue;
+      }
+      if (t.startsWith('/*')) {
+        if (!t.includes('*/')) inBlock = true;
+        continue;
+      }
+      if (t.startsWith('//')) continue;
+      out.push(raw);
+    }
+    return out;
+  }
+
+  function sourceFiles(): string[] {
+    return readdirSync(SRC, { recursive: true, encoding: 'utf8' })
+      .map((p) => p.split(sep).join('/'))
+      .filter((p) => p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.endsWith('.d.ts'))
+      .filter((p) => !ALLOWED.has(p));
+  }
+
+  it('scans a real set of source files (guard against an empty sweep)', () => {
+    const files = sourceFiles();
+    expect(files.length).toBeGreaterThan(20);
+    expect(files).toContain('lib/resource-ref.ts');
+    expect(files).toContain('commands/doctor.ts');
+  });
+
+  it('names the flag in no executable line outside the flag definition and the caveat', () => {
+    const offenders = sourceFiles().flatMap((file) =>
+      codeLines(file)
+        .map((line, i) => ({ file, line: line.trim(), n: i + 1 }))
+        .filter((l) => l.line.includes('--base-url')),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it('the comment-stripper still sees code (it is not silently blanking files)', () => {
+    // Without this, a broken stripper would make the scan above vacuously green.
+    const doctor = codeLines('commands/doctor.ts').join('\n');
+    expect(doctor).toContain('config set baseUrl');
+    expect(doctor).not.toContain('allowlisted verb (see FLAG_CAVEAT');
   });
 });

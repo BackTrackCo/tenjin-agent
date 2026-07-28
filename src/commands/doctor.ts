@@ -35,6 +35,20 @@ export interface CheckResult {
 const POCKET_MONEY_CEILING_ATOMIC = 20_000_000n;
 
 /**
+ * `doctor` is an allowlisted verb an unattended agent runs on its own, and its
+ * `fix:` lines reach that agent both on the TTY and in `error.details.checks`.
+ * So they name the CONFIGURED base URL and the operator command that changes it,
+ * never `--base-url`: the flag rides every allowlisted verb (see FLAG_CAVEAT in
+ * lib/permissions), and a fix line telling the agent to pass it would be the CLI
+ * coaching the exact move the skills forbid. `config set` is not allowlisted, so
+ * pointing there routes the change through the operator by construction.
+ */
+const FIX_POINT_AT_TENJIN_API =
+  'Point the configured base URL at a Tenjin API (expected an OpenAPI document): `tenjin config set baseUrl <url>`.';
+const FIX_CHECK_NETWORK_AND_BASE_URL =
+  'Check your network connection and the configured base URL (`tenjin config get baseUrl`).';
+
+/**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
  * required checks carry a `failCode`; the outcome step raises the first one, so
  * the failure envelope's `error.code` names what actually broke (api-contract
@@ -200,9 +214,7 @@ async function checkApiContract(
         detail: malformed
           ? `OpenAPI document at ${url} was not valid JSON`
           : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix: malformed
-          ? 'Point --base-url at a Tenjin API (expected an OpenAPI document).'
-          : 'Check your network connection and --base-url.',
+        fix: malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
     };
@@ -215,7 +227,7 @@ async function checkApiContract(
         status: 'fail',
         required: true,
         detail: `OpenAPI document at ${url} is missing a string info.version`,
-        fix: 'Point --base-url at a Tenjin API (expected an OpenAPI document).',
+        fix: FIX_POINT_AT_TENJIN_API,
       },
       failCode: 'CONTRACT_MISMATCH',
     };
@@ -254,7 +266,7 @@ async function checkLookupContract(
         status: 'warn',
         required: false,
         detail: `Could not confirm the lookup endpoint at ${url}`,
-        fix: 'Check --base-url; lookup/buy need the A2 endpoints deployed.',
+        fix: 'Check the configured base URL (`tenjin config get baseUrl`); lookup/buy need the A2 endpoints deployed.',
       },
     };
   }
@@ -272,7 +284,7 @@ async function checkLookupContract(
           status: 'warn',
           required: false,
           detail: 'This deployment does not advertise POST /api/agent/lookup (A2 not deployed)',
-          fix: 'lookup/buy need A2 deployed; point --base-url at a deploy that has it.',
+          fix: 'lookup/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
         },
   };
 }
@@ -305,7 +317,7 @@ async function checkReadPath(
         status: 'fail',
         required: true,
         detail: `Read path ${url} failed: ${res.message}`,
-        fix: 'Check your network connection and --base-url.',
+        fix: FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: 'API_UNREACHABLE',
     };
@@ -318,7 +330,7 @@ async function checkReadPath(
         status: 'fail',
         required: true,
         detail: `Read path ${url} did not return an items array`,
-        fix: 'Point --base-url at a Tenjin API.',
+        fix: 'Point the configured base URL at a Tenjin API: `tenjin config set baseUrl <url>`.',
       },
       failCode: 'API_UNREACHABLE',
     };

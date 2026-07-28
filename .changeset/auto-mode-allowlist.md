@@ -25,6 +25,16 @@ the wallet balance (`sessionBudget: 0` means no ceiling, not a zero one). Set
 also sanitize server-sourced check text, which renders directly above the block
 an operator is told to paste.
 
+Because the flag caveat is a disclosed convention rather than an enforced
+boundary, the CLI's own error copy no longer argues against it. Every
+user-facing `fix:` line that used to say "pass `--base-url`" now names the
+configured value (`tenjin config get baseUrl`) and, where a change is really
+warranted, the operator command that makes it (`tenjin config set baseUrl <url>`,
+a verb the allowlist never recommends). This covers `doctor`'s reachability and
+contract checks, the read/agent/posts transport errors, and above all the
+off-origin resource-ref refusal on the paying path, which fires precisely when a
+URL came from somewhere untrusted.
+
 The `tenjin-search` and `tenjin-publish` skills gain the matching rules: on a
 harness permission denial, surface the exact allowlist line to add and stop:
 never retry, never reword the command, never route around it; and never recommend
