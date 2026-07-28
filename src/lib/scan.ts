@@ -63,33 +63,47 @@ export function scan(text: string, context: ScanContext = {}): ScanFinding[] {
 
 /**
  * Occurrences of the caller's private project markers (git remote slugs, paths)
- * in the text — warn 'private-repo-reference'. Literal case-insensitive
- * substring match; markers shorter than 3 chars are dropped as degenerate.
- * The excerpt names the matched marker: it is the publisher's own project name,
- * shown locally so they can find and generalize the reference, not key material.
+ * in the text — warn 'private-repo-reference'. Literal case-insensitive match,
+ * compiled once per marker (not per line) and executed against the ORIGINAL
+ * line, so spans stay exact (a locale-sensitive toLowerCase can change string
+ * length — U+0130 — and misalign them; review r5). Token-bounded: `Org/repo`
+ * must not fire inside a sibling slug (`Org/repo-docs`, `xOrg/repo`), but a
+ * trailing `.` stays allowed so a remote-URL mention (`…/Org/repo.git`) fires.
+ * Markers shorter than 3 chars are dropped as degenerate. The excerpt names the
+ * matched marker: it is the publisher's own project name, shown locally so they
+ * can find and generalize the reference, not key material.
  */
 function scanProjectMarkers(lines: string[], markers: string[]): ScanFinding[] {
   const cleaned = [...new Set(markers.filter((m) => m.trim().length >= 3))];
   if (cleaned.length === 0) return [];
+  const needles = cleaned.map((marker) => ({
+    marker,
+    re: new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(marker)}(?![A-Za-z0-9_-])`, 'gi'),
+  }));
   const out: ScanFinding[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const lower = (lines[i] ?? '').toLowerCase();
-    for (const marker of cleaned) {
-      const needle = marker.toLowerCase();
-      let idx = lower.indexOf(needle);
-      while (idx !== -1) {
+    const line = lines[i] ?? '';
+    for (const { marker, re } of needles) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      // Markers are >=3 chars, so every match advances lastIndex — no zero-width guard.
+      while ((m = re.exec(line)) !== null) {
         out.push({
           check: 'private-repo-reference',
           severity: 'warn',
           line: i + 1,
-          span: [idx, idx + needle.length],
+          span: [m.index, m.index + m[0].length],
           excerpt: marker,
         });
-        idx = lower.indexOf(needle, idx + needle.length);
       }
     }
   }
   return out;
+}
+
+/** Escape a literal string for embedding in a RegExp source. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // A home-path username that is a docs placeholder, not a real machine username.
@@ -246,14 +260,7 @@ const LINE_DETECTORS: LineDetector[] = [
     // (interior spaces allowed) or an unquoted run, ≥6 chars. Value is masked.
     re: /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\s*[:=]\s*("[^"]{6,}"|'[^']{6,}'|[^\s"']{6,})/gi,
     excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
-    skip: (m) => {
-      const raw = m[2] ?? '';
-      const value = dequote(raw);
-      if (isPlaceholder(value) || isStructural(value)) return true;
-      // A code RHS (config.clientSecret, hashAndSalt(input), a bare identifier)
-      // is not a literal — but only when UNQUOTED; a quoted string is a literal.
-      return raw === value && isCodeExpression(value);
-    },
+    skip: skipNonLiteralValue,
   },
   // Wallet addresses — warn (a contract address may be intentional). Not a secret,
   // shown abbreviated. viem's checksum validation is deliberately NOT used to gate
@@ -266,19 +273,23 @@ const LINE_DETECTORS: LineDetector[] = [
     excerpt: (m) => `${m[0].slice(0, 6)}…${m[0].slice(-4)}`,
   },
   // Employer-internal markers — warn. Marker-SHAPED, not word-in-phrase (#36):
-  // the detector targets the uppercase classification legend a document stamp
-  // carries (CONFIDENTIAL, STRICTLY CONFIDENTIAL, INTERNAL ONLY, INTERNAL USE
-  // ONLY, DO NOT DISTRIBUTE), so it is case-SENSITIVE — prose about
-  // "confidential computing" never fires — and CONFIDENTIAL followed by another
-  // all-caps word (CONFIDENTIAL COMPUTING in a shouting heading) reads as a
-  // phrase, not a legend, and is skipped. Chosen tradeoff: a legend that
-  // continues in caps (CONFIDENTIAL INFORMATION) is a false negative; the
-  // phrase-vs-legend ambiguity is undecidable lexically and the miss is
-  // warn-tier.
+  // the detector targets the classification legend a document stamp carries
+  // (CONFIDENTIAL, CONFIDENTIAL DRAFT/INFORMATION, STRICTLY/COMPANY
+  // CONFIDENTIAL, "Acme Inc. Confidential", INTERNAL (USE) ONLY, DO NOT
+  // DISTRIBUTE), so it is case-SENSITIVE — prose about "confidential computing"
+  // never fires. The phrase-vs-legend split is positional, not a blanket
+  // next-word lookahead (review r5: the old lookahead lost CONFIDENTIAL
+  // INFORMATION and every title-case legend):
+  //  - all-caps CONFIDENTIAL fires unless PRECEDED by another all-caps word —
+  //    mid-phrase in a shouting heading (A SURVEY OF CONFIDENTIAL COMPUTING …)
+  //    reads as a phrase, while a legend leads its line (CONFIDENTIAL DRAFT).
+  //  - Title-case Confidential fires only before punctuation or end-of-line
+  //    ("Acme Inc. Confidential", "## Confidential: …"), never mid-title
+  //    ("Confidential Computing: a TEE survey").
   {
     check: 'confidential-marker',
     severity: 'warn',
-    re: /\b(?:(?:STRICTLY|COMPANY)\s+)?CONFIDENTIAL\b(?!\s+[A-Z]{2,}\b)|\bINTERNAL(?:\s+USE)?\s+ONLY\b|\bDO\s+NOT\s+DISTRIBUTE\b/g,
+    re: /\b(?:STRICTLY|COMPANY)\s+CONFIDENTIAL\b|(?<![A-Z]{2,}[ \t]+)\bCONFIDENTIAL\b|\bConfidential(?=\s*(?:[-:.,;–—]|$))|\b(?:INTERNAL|Internal)(?:\s+(?:USE|Use))?\s+(?:ONLY|Only)\b|\b(?:DO\s+NOT\s+DISTRIBUTE|Do\s+Not\s+Distribute)\b/g,
     excerpt: (m) => m[0],
   },
   {
@@ -292,14 +303,26 @@ const LINE_DETECTORS: LineDetector[] = [
   // path leaks the machine username and private project layout. The username
   // segment is masked in the excerpt; obvious placeholder usernames
   // (/home/user/…, /Users/username/…) are docs examples and skip. `~/…` paths
-  // deliberately do NOT fire: they are already generalized.
+  // deliberately do NOT fire: they are already generalized. The unix branch
+  // requires a non-name left boundary so a web-URL path segment
+  // (docs.example.com/home/…) is not a local path, and the segment class
+  // excludes `?`/`&` so a query string (…?api_key=…) is never swallowed into a
+  // verbatim excerpt a sibling detector would have masked (review r5). Windows
+  // matches [Uu]sers: the filesystem is case-insensitive.
   {
     check: 'local-path',
     severity: 'warn',
-    re: /(?:\/(?:Users|home)\/([A-Za-z0-9._-]+)(?:\/[^\s"'`)\]}>:,;]+)+|\b[A-Za-z]:\\Users\\([^\\\s"']+)(?:\\[^\\\s"']+)+)/g,
+    re: /(?:(?<![\w.-])\/(?:Users|home)\/([A-Za-z0-9._-]+)(?:\/[^\s"'`)\]}>:,;?&]+)+|\b[A-Za-z]:\\[Uu]sers\\([^\\\s"']+)(?:\\[^\\\s"']+)+)/dg,
     excerpt: (m) => {
-      const user = m[1] ?? m[2] ?? '';
-      const masked = user.length > 0 ? m[0].replace(user, '[user]') : m[0];
+      // Splice at the capture's own offsets (d-flag indices): a plain
+      // String.replace masked the FIRST occurrence of the username, which for a
+      // username that is a substring of the /Users|/home prefix mangled the
+      // prefix and echoed the real username (review r5).
+      const bounds = m.indices?.[1] ?? m.indices?.[2];
+      const masked =
+        bounds === undefined
+          ? m[0]
+          : `${m[0].slice(0, bounds[0] - m.index)}[user]${m[0].slice(bounds[1] - m.index)}`;
       return masked.length > 60 ? `${masked.slice(0, 57)}…` : masked;
     },
     skip: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
@@ -315,35 +338,34 @@ const LINE_DETECTORS: LineDetector[] = [
     severity: 'warn',
     re: /\b((?:customer|client|account|tenant|subscriber)[ _-]?(?:id|number|no))\b\s*[:=#]\s*("[^"]{2,}"|'[^']{2,}'|[A-Za-z0-9][A-Za-z0-9._-]{2,})/gi,
     excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
-    skip: (m) => {
-      const raw = m[2] ?? '';
-      const value = dequote(raw);
-      if (isPlaceholder(value) || isStructural(value)) return true;
-      // A schema/code RHS (customer_id: string, account_id = user.account_id)
-      // is a declaration, not a leaked identifier — but only when unquoted.
-      return raw === value && isCodeExpression(value);
-    },
+    skip: skipNonLiteralValue,
   },
   // Third-party paid/licensed-content markers — warn (open-questions
-  // publishing-safety: third-party copyrighted inputs). A rights legend or
-  // paywall marker in the draft suggests copied licensed material; ambiguity-
-  // class (the author may hold the rights), so warn, never block.
+  // publishing-safety: third-party copyrighted inputs). A rights LEGEND in the
+  // draft suggests copied licensed material; ambiguity-class (the author may
+  // hold the rights), so warn, never block. Legend shapes only — bare paywall
+  // vocabulary (paywalled, premium content, subscriber-only, behind a paywall)
+  // deliberately does NOT fire: it is this marketplace's own subject matter and
+  // measured 100% false-positive on the dogfood corpus (review r5), the exact
+  // word-in-phrase failure #36 is about.
   {
     check: 'paid-content-marker',
     severity: 'warn',
-    re: /\ball rights reserved\b|\b(?:reprinted|reproduced|used) with permission\b|\bsubscribers?[- ]only\b|\bpremium (?:content|article)\b|\bbehind (?:a|the) paywall\b|\bpaywalled\b|\bnot for (?:redistribution|republication)\b|\bdo not (?:redistribute|republish)\b|(?:©|\(c\)|copyright)\s*(?:19|20)\d{2}\b/gi,
+    re: /\ball rights reserved\b|\b(?:reprinted|reproduced|used) with permission\b|\bnot for (?:redistribution|republication)\b|\bdo not (?:redistribute|republish)\b|(?:©|\(c\)|copyright)\s*(?:19|20)\d{2}\b/gi,
     excerpt: (m) => m[0],
   },
   // Embedded prompt/tool-output instruction patterns — warn (open-questions
   // publishing-safety: embedded instructions). Source material captured from
   // prompts or tool output can carry injection-shaped imperatives that would
-  // ship to every future buyer. High-precision imperative shapes only; a bare
-  // "system prompt" mention deliberately does NOT fire (legitimate
-  // agent-engineering content says it constantly).
+  // ship to every future buyer. High-precision imperative shapes only: a bare
+  // "system prompt" mention, chat-template delimiters (<system>, [INST]), and
+  // persona phrases ("you are an assistant", "as an AI") deliberately do NOT
+  // fire — legitimate agent-engineering exposition quotes all of them
+  // constantly (review r5), and only the imperative shapes are injection-typed.
   {
     check: 'embedded-instruction',
     severity: 'warn',
-    re: /\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|context|messages?)\b|\byou are an? (?:AI|assistant|language model)\b|\bas an AI(?: language model| assistant| model)?\b|<\/?system>|\[\/?INST\]|\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\b|\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\b/gi,
+    re: /\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|context|messages?)\b|\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\b|\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\b/gi,
     excerpt: (m) => m[0],
   },
   // Personal data — warn. `email` subsumes corp-domain emails (an internal marker).
@@ -395,6 +417,20 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
 // filed next to BIP-39. Headerless base64/DER-encoded private keys (no
 // -----BEGIN----- marker) are likewise NOT detected; only the PEM-armored form
 // and the 0x-64-hex form are.
+
+/**
+ * Shared skip for labeled-value detectors (secret-assignment,
+ * customer-identifier — one helper so the two cannot drift): drop a value that
+ * is a placeholder, a structural path/URL/regex, or — when UNQUOTED only, a
+ * quoted string is a literal — a code expression (config.clientSecret,
+ * user.account_id, hashAndSalt(input), a bare lowercase identifier).
+ */
+function skipNonLiteralValue(m: RegExpExecArray): boolean {
+  const raw = m[2] ?? '';
+  const value = dequote(raw);
+  if (isPlaceholder(value) || isStructural(value)) return true;
+  return raw === value && isCodeExpression(value);
+}
 
 /** Strip a single matching pair of surrounding quotes from a captured value. */
 function dequote(value: string): string {

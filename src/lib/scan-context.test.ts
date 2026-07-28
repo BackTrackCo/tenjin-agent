@@ -44,6 +44,18 @@ describe('extractRemoteSlugs', () => {
     const config = ['[remote "origin"]', '\turl = /srv/git/repo'].join('\n');
     expect(extractRemoteSlugs(config)).toEqual([]);
   });
+
+  it('only reads url keys in [remote] sections and strips inline comments (review r5)', () => {
+    const config = [
+      '[remote "origin"]',
+      '\turl = git@github.com:Org/repo.git # primary',
+      '[lfs]',
+      '\turl = https://github.com/AcmeCo/repo.git/info/lfs',
+      '[url "git@github.com:"]',
+      '\tinsteadOf = https://github.com/',
+    ].join('\n');
+    expect(extractRemoteSlugs(config)).toEqual(['Org/repo']);
+  });
 });
 
 describe('deriveProjectMarkers', () => {
@@ -76,5 +88,17 @@ describe('deriveProjectMarkers', () => {
   it('returns [] outside a git checkout and never throws', async () => {
     expect(await deriveProjectMarkers(dir)).toEqual([]);
     expect(await deriveProjectMarkers(join(dir, 'does', 'not', 'exist'))).toEqual([]);
+  });
+
+  it('returns [] when .git/config is not a regular file (review r5)', async () => {
+    // config as a DIRECTORY: the isFile() gate must skip it, not read/hang.
+    await mkdir(join(dir, '.git', 'config'), { recursive: true });
+    expect(await deriveProjectMarkers(dir)).toEqual([]);
+  });
+
+  it('returns [] for an oversized .git/config instead of reading it (review r5)', async () => {
+    await mkdir(join(dir, '.git'), { recursive: true });
+    await writeFile(join(dir, '.git', 'config'), `${CONFIG}\n${'#'.repeat(1024 * 1024)}`);
+    expect(await deriveProjectMarkers(dir)).toEqual([]);
   });
 });

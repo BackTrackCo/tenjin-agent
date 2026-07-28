@@ -17,11 +17,26 @@ export async function deriveProjectMarkers(cwd: string): Promise<string[]> {
   try {
     const configPath = await findGitConfig(resolve(cwd));
     if (configPath === undefined) return [];
-    const config = await readFile(configPath, 'utf8');
-    return extractRemoteSlugs(config);
+    const config = await readSmallFile(configPath);
+    return config === undefined ? [] : extractRemoteSlugs(config);
   } catch {
     return [];
   }
+}
+
+/**
+ * Real .git plumbing files are tiny; anything bigger is not one. The cap plus
+ * the isFile() gate keep the "never fail a publish" contract honest against a
+ * crafted or broken checkout: an unbounded readFile of a FIFO hangs forever and
+ * of a device/huge file dies on an uncatchable OOM (review r5).
+ */
+const MAX_GIT_FILE_BYTES = 1024 * 1024;
+
+/** Read a regular file of sane size, or undefined — never hang, never throw. */
+async function readSmallFile(path: string): Promise<string | undefined> {
+  const s = await stat(path).catch(() => undefined);
+  if (s?.isFile() !== true || s.size > MAX_GIT_FILE_BYTES) return undefined;
+  return readFile(path, 'utf8').catch(() => undefined);
 }
 
 /** Walk up from `dir` to the filesystem root looking for a `.git` dir or file. */
@@ -47,11 +62,12 @@ async function resolveGitFile(
   dotGitFile: string,
   containingDir: string,
 ): Promise<string | undefined> {
-  const content = await readFile(dotGitFile, 'utf8');
+  const content = await readSmallFile(dotGitFile);
+  if (content === undefined) return undefined;
   const m = /^gitdir:\s*(.+)\s*$/m.exec(content);
   if (m?.[1] === undefined) return undefined;
   const gitdir = isAbsolute(m[1]) ? m[1] : resolve(containingDir, m[1]);
-  const commondirFile = await readFile(join(gitdir, 'commondir'), 'utf8').catch(() => undefined);
+  const commondirFile = await readSmallFile(join(gitdir, 'commondir'));
   if (commondirFile !== undefined) {
     const common = commondirFile.trim();
     return join(isAbsolute(common) ? common : resolve(gitdir, common), 'config');
@@ -59,8 +75,9 @@ async function resolveGitFile(
   return join(gitdir, 'config');
 }
 
-// `url = <value>` lines; git config keys are case-insensitive.
-const URL_LINE = /^\s*url\s*=\s*(.+?)\s*$/gim;
+// Section headers and `url = <value>` lines; git config keys are case-insensitive.
+const SECTION_LINE = /^\s*\[([^\]]*)\]/;
+const URL_LINE = /^\s*url\s*=\s*(.+?)\s*$/i;
 
 /**
  * Reduce each remote URL to its repository path slug (`org/repo`, or the full
@@ -70,11 +87,23 @@ const URL_LINE = /^\s*url\s*=\s*(.+?)\s*$/gim;
  * marker: a bare name is too collision-prone against ordinary prose.
  */
 export function extractRemoteSlugs(gitConfig: string): string[] {
+  // Section-aware, like git itself: only `[remote …]` sections carry remote
+  // URLs — an [lfs]/[url "…"] `url =` key is NOT a remote and produced dead
+  // markers (review r5). Inline `#`/`;` comments are stripped (a remote URL
+  // never carries either).
   const slugs = new Set<string>();
-  URL_LINE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = URL_LINE.exec(gitConfig)) !== null) {
-    const slug = slugFromRemoteUrl(m[1] ?? '');
+  let inRemoteSection = false;
+  for (const line of gitConfig.split('\n')) {
+    const section = SECTION_LINE.exec(line);
+    if (section !== null) {
+      inRemoteSection = /^remote\b/i.test((section[1] ?? '').trim());
+      continue;
+    }
+    if (!inRemoteSection) continue;
+    const m = URL_LINE.exec(line);
+    if (m === null) continue;
+    const value = (m[1] ?? '').split(/[#;]/, 1)[0]?.trim() ?? '';
+    const slug = slugFromRemoteUrl(value);
     if (slug !== undefined) slugs.add(slug);
   }
   return [...slugs];

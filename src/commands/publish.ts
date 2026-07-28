@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
@@ -162,7 +163,17 @@ export async function runPublish(
   // The scan context carries the source project's git remote slugs (offline FS
   // read, best-effort): a draft quoting its own project's repo/org warns as a
   // private-by-default reference (open-questions publishing-safety check-set).
-  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(cwd) };
+  // Markers derive from the DRAFT's project, not the shell's cwd (review r5): a
+  // file publish walks up from the file's own directory, and a parked candidate
+  // uses the source project recorded in its meta at park time — the pen lives
+  // under ~/.tenjin, so the process cwd is unrelated to the draft on both paths.
+  const markerRoot =
+    candidate !== undefined
+      ? candidate.meta.sourceProject
+      : args.file !== undefined
+        ? dirname(resolve(cwd, args.file))
+        : cwd;
+  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
   const findings = dedupeFindings([
     ...scan(raw, scanContext),
     ...scan(cardScanText(card), scanContext),

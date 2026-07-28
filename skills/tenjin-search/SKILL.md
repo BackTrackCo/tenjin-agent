@@ -116,8 +116,8 @@ follow its draft, sanitize, and pricing rules; never publish bare.
 - **auto / full-auto**: run the tenjin-publish skill's semantic publish-safety
   pass FIRST (statement-level classification, competitor-reconstruction check,
   title/answer-card leak check) — the CLI scan is lexical and you are the only
-  semantic reviewer on these paths. A MISS is evidence of demand, never
-  evidence the answer is safe to publish. Any doubt parks the draft as a
+  semantic reviewer on these paths; that skill also states why a MISS is never
+  a safety signal. Any doubt parks the draft as a
   candidate instead of publishing. When the pass is clean, build the answer
   card and run `tenjin publish --json` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
@@ -143,5 +143,4 @@ through the same consent scan.
 - A derived answer that leans on private context (the source project's
   architecture, metrics, roadmap, or implementation order — Tenjin's own
   included) is candidate-pen material, not publish material, whatever the scan
-  says: the deterministic scan cannot see meaning, so the semantic pass in the
-  tenjin-publish skill is the gate on auto/full-auto paths.
+  says (the tenjin-publish semantic pass is the gate on auto/full-auto paths).
