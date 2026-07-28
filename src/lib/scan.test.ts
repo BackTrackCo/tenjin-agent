@@ -266,6 +266,30 @@ describe('scan — warn detectors', () => {
     expect(checks('Internal Only')).toContain('confidential-marker');
   });
 
+  // The caps-prefixed stamp family the r5 left-only suppression lost (review
+  // r6): a legend preceded by all-caps words but ENDING the line must fire —
+  // suppression now requires all-caps on both sides of the marker.
+  it('flags caps-prefixed all-caps legends (review r6)', () => {
+    expect(checks('ACME CONFIDENTIAL')).toContain('confidential-marker');
+    expect(checks('ACME CORP CONFIDENTIAL')).toContain('confidential-marker');
+    expect(checks('HIGHLY CONFIDENTIAL')).toContain('confidential-marker');
+    expect(checks('BUSINESS CONFIDENTIAL')).toContain('confidential-marker');
+    expect(checks('CLIENT CONFIDENTIAL')).toContain('confidential-marker');
+    expect(checks('PROPRIETARY AND CONFIDENTIAL')).toContain('confidential-marker');
+    // Whitelisted legend-only prefixes fire even with caps on both sides.
+    expect(checks('STRICTLY CONFIDENTIAL INFORMATION')).toContain('confidential-marker');
+    expect(checks('HIGHLY CONFIDENTIAL DRAFT')).toContain('confidential-marker');
+  });
+
+  // Documented tradeoffs of the both-sides rule (review r6): a caps heading
+  // leading with the topic word warns (accepted FP, fail-safe direction), and a
+  // caps-flanked legend without a whitelisted prefix misses (accepted FN) —
+  // both pinned so a rule change shows up here, not in the field.
+  it('pins the both-sides suppression tradeoffs (review r6)', () => {
+    expect(checks('# CONFIDENTIAL COMPUTING ON AWS')).toContain('confidential-marker');
+    expect(checks('ACME CONFIDENTIAL INFORMATION')).not.toContain('confidential-marker');
+  });
+
   // The #36 dogfooding fixture (evals tracked in #28): a research draft about
   // confidential computing was flagged twice merely for containing the word.
   // The marker is a stamp, not a word: word-in-phrase must not fire.

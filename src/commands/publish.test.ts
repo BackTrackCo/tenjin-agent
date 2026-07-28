@@ -415,11 +415,11 @@ function stubDeps(): { fetchImpl: typeof fetch } {
 }
 
 describe('runPublish — source-project scan context (#36)', () => {
-  async function gitConfigAt(root: string): Promise<void> {
+  async function gitConfigAt(root: string, slug = 'AcmeCorp/secret-svc'): Promise<void> {
     await mkdir(join(root, '.git'), { recursive: true });
     await writeFile(
       join(root, '.git', 'config'),
-      '[remote "origin"]\n\turl = git@github.com:AcmeCorp/secret-svc.git\n',
+      `[remote "origin"]\n\turl = git@github.com:${slug}.git\n`,
       'utf8',
     );
   }
@@ -450,6 +450,66 @@ describe('runPublish — source-project scan context (#36)', () => {
     );
     expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
     expect(calls).toHaveLength(1);
+  });
+
+  // Markers derive from the DRAFT's project, not the shell's cwd (review r5 fix,
+  // pinned in r6: every earlier fixture had cwd === draft dir === sourceProject,
+  // so a revert of markerRoot to plain cwd passed the suite unchanged). Here the
+  // shell cwd is a DIFFERENT checkout with its own remote: the draft-repo slug
+  // must warn, and the cwd-repo slug must not.
+  it('file publish scans with the draft directory markers, not the cwd markers (review r6)', async () => {
+    const shellDir = join(dir, 'shell');
+    const projectDir = join(dir, 'project');
+    await mkdir(shellDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    await gitConfigAt(shellDir, 'OtherOrg/shell-tools');
+    await gitConfigAt(projectDir, 'AcmeCorp/secret-svc');
+
+    // Draft mentions ITS OWN repo: warns even though cwd is another checkout.
+    const file = join(projectDir, 'post.md');
+    await writeFile(file, '# T\n\nas shipped in AcmeCorp/secret-svc last week\n', 'utf8');
+    const err = (await runPublish(
+      baseArgs(file, { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider, cwd: shellDir }),
+    ).catch((e: unknown) => e)) as { code: string; details: { findings: { check: string }[] } };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.details.findings.map((f) => f.check)).toContain('private-repo-reference');
+
+    // Draft mentions the SHELL's repo: the cwd markers are not consulted.
+    const file2 = join(projectDir, 'post2.md');
+    await writeFile(file2, '# T\n\nas shipped in OtherOrg/shell-tools last week\n', 'utf8');
+    const { fetch, calls } = stubServer();
+    const res = await runPublish(
+      baseArgs(file2, { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider, cwd: shellDir }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('candidate publish scans with the recorded sourceProject markers, not the cwd markers (review r6)', async () => {
+    const shellDir = join(dir, 'shell');
+    const projectDir = join(dir, 'project');
+    await mkdir(shellDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    await gitConfigAt(shellDir, 'OtherOrg/shell-tools');
+    await gitConfigAt(projectDir, 'AcmeCorp/secret-svc');
+
+    const rec = await createCandidate(dir, {
+      draft: '# T\n\nas shipped in AcmeCorp/secret-svc last week\n',
+      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      created: new Date().toISOString(),
+      sourceProject: projectDir,
+    });
+    const err = (await runPublish(
+      baseArgs(undefined, { candidate: rec.id, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider, cwd: shellDir }),
+    ).catch((e: unknown) => e)) as { code: string; details: { findings: { check: string }[] } };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.details.findings.map((f) => f.check)).toContain('private-repo-reference');
   });
 });
 

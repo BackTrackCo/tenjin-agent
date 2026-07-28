@@ -280,16 +280,26 @@ const LINE_DETECTORS: LineDetector[] = [
   // never fires. The phrase-vs-legend split is positional, not a blanket
   // next-word lookahead (review r5: the old lookahead lost CONFIDENTIAL
   // INFORMATION and every title-case legend):
-  //  - all-caps CONFIDENTIAL fires unless PRECEDED by another all-caps word —
-  //    mid-phrase in a shouting heading (A SURVEY OF CONFIDENTIAL COMPUTING …)
-  //    reads as a phrase, while a legend leads its line (CONFIDENTIAL DRAFT).
+  //  - all-caps CONFIDENTIAL is suppressed only when all-caps words flank it on
+  //    BOTH sides — that is what a mid-phrase mention in a shouting heading
+  //    looks like (A SURVEY OF CONFIDENTIAL COMPUTING …). A legend either leads
+  //    its line (CONFIDENTIAL DRAFT) or ends it (ACME CONFIDENTIAL, HIGHLY
+  //    CONFIDENTIAL, PROPRIETARY AND CONFIDENTIAL), so one-sided caps still
+  //    fire (review r6: the caps-prefixed company stamp is the most common real
+  //    legend form, and the old left-only rule missed the whole family).
+  //    Accepted FP: a caps heading that LEADS with the topic word
+  //    (# CONFIDENTIAL COMPUTING ON AWS) warns — fail-safe direction. Accepted
+  //    FN: a caps-flanked legend without a whitelisted prefix (ACME
+  //    CONFIDENTIAL INFORMATION) is indistinguishable from a shouting-heading
+  //    phrase and misses; STRICTLY/COMPANY/HIGHLY prefixes are legend-only
+  //    vocabulary and are whitelisted through.
   //  - Title-case Confidential fires only before punctuation or end-of-line
   //    ("Acme Inc. Confidential", "## Confidential: …"), never mid-title
   //    ("Confidential Computing: a TEE survey").
   {
     check: 'confidential-marker',
     severity: 'warn',
-    re: /\b(?:STRICTLY|COMPANY)\s+CONFIDENTIAL\b|(?<![A-Z]{2,}[ \t]+)\bCONFIDENTIAL\b|\bConfidential(?=\s*(?:[-:.,;–—]|$))|\b(?:INTERNAL|Internal)(?:\s+(?:USE|Use))?\s+(?:ONLY|Only)\b|\b(?:DO\s+NOT\s+DISTRIBUTE|Do\s+Not\s+Distribute)\b/g,
+    re: /\b(?:STRICTLY|COMPANY|HIGHLY)\s+CONFIDENTIAL\b|(?<![A-Z]{2,}[ \t]+)\bCONFIDENTIAL\b|\bCONFIDENTIAL\b(?![ \t]+[A-Z]{2,})|\bConfidential(?=\s*(?:[-:.,;–—]|$))|\b(?:INTERNAL|Internal)(?:\s+(?:USE|Use))?\s+(?:ONLY|Only)\b|\b(?:DO\s+NOT\s+DISTRIBUTE|Do\s+Not\s+Distribute)\b/g,
     excerpt: (m) => m[0],
   },
   {

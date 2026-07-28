@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveProjectMarkers, extractRemoteSlugs } from './scan-context';
@@ -95,6 +96,23 @@ describe('deriveProjectMarkers', () => {
     await mkdir(join(dir, '.git', 'config'), { recursive: true });
     expect(await deriveProjectMarkers(dir)).toEqual([]);
   });
+
+  // The exact hang the isFile() gate exists for (review r6: the directory case
+  // above covers it only by proxy): a FIFO's open() blocks forever with no
+  // writer, so a regression here fails as a test timeout, not a wrong value.
+  it.skipIf(process.platform === 'win32')(
+    'returns [] when .git/config is a FIFO instead of hanging (review r6)',
+    async () => {
+      await mkdir(join(dir, '.git'), { recursive: true });
+      await new Promise<void>((res, rej) => {
+        execFile('mkfifo', [join(dir, '.git', 'config')], (err) => {
+          if (err) rej(err);
+          else res();
+        });
+      });
+      expect(await deriveProjectMarkers(dir)).toEqual([]);
+    },
+  );
 
   it('returns [] for an oversized .git/config instead of reading it (review r5)', async () => {
     await mkdir(join(dir, '.git'), { recursive: true });
