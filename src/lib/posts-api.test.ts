@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { buildPostCreateBody, publishPost, type PublishInput } from './posts-api';
+import {
+  buildPostCreateBody,
+  buildPostUpdateBody,
+  getOwnPost,
+  publishPost,
+  updatePost,
+  type PublishInput,
+} from './posts-api';
 import type { SignableRequest, WriteAuth } from './session-key';
 
 const OPTS = { baseUrl: 'https://tenjin.blog', timeoutMs: 5000 };
@@ -317,6 +324,195 @@ describe('publishPost — write failures after approval', () => {
       publishPost({ status: 'published', title: 'T', bodyMd: 'B' }, fakeAuth().auth, {
         ...OPTS,
         fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The owner-scoped read + merge-update surface.
+// ---------------------------------------------------------------------------
+
+const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const STORED_POST = {
+  ...CREATED_POST,
+  excerpt: 'An excerpt.',
+  bodyMd: '# Base fees\n',
+  resource: {
+    scope: 'L2 fees',
+    questionsAnswered: ['q'],
+    cacheEligible: false,
+    cacheEligibleMissing: ['exclusions'],
+    schemaVersion: 1,
+  },
+};
+
+function ok200(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+describe('buildPostUpdateBody — bounds', () => {
+  it('emits only the defined keys, price converted from the atomic input', () => {
+    expect(
+      buildPostUpdateBody({ title: 'T', priceAtomic: '250000', resource: { scope: null } }),
+    ).toEqual({ title: 'T', price: '250000', resource: { scope: null } });
+  });
+
+  it('needs no title or body (a partial update keeps what it omits)', () => {
+    expect(buildPostUpdateBody({ excerpt: 'e' })).toEqual({ excerpt: 'e' });
+  });
+
+  it('refuses an empty title or body: neither can be cleared, and blanking is not an edit', () => {
+    expect(() => buildPostUpdateBody({ title: '   ' })).toThrow(/title cannot be empty/);
+    expect(() => buildPostUpdateBody({ bodyMd: '\n' })).toThrow(/bodyMd cannot be empty/);
+  });
+
+  it('rejects out-of-bound values, the same bounds the create body pins', () => {
+    expect(() => buildPostUpdateBody({ title: 'x'.repeat(201) })).toThrow();
+    expect(() => buildPostUpdateBody({ bodyMd: 'x'.repeat(200_001) })).toThrow();
+    expect(() => buildPostUpdateBody({ excerpt: 'x'.repeat(501) })).toThrow();
+    expect(() => buildPostUpdateBody({ tags: ['a', 'b', 'c', 'd', 'e', 'f'] })).toThrow();
+    expect(() => buildPostUpdateBody({ tags: [''] })).toThrow();
+    expect(() => buildPostUpdateBody({ priceAtomic: '1a' })).toThrow();
+  });
+
+  it('refuses an empty update rather than burning a nonce on a no-op', () => {
+    expect(() => buildPostUpdateBody({})).toThrow(/Nothing to update/);
+  });
+});
+
+describe('getOwnPost', () => {
+  it('GETs the owner-scoped route with auth headers and no body', async () => {
+    const { fetch, calls } = capturingFetch(() => ok200(STORED_POST));
+    const { auth, signed } = fakeAuth();
+    const post = await getOwnPost(POST_ID, auth, { ...OPTS, fetchImpl: fetch });
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.method).toBe('GET');
+    expect(call.url).toBe(`https://tenjin.blog/api/posts/${POST_ID}`);
+    expect(call.body).toBe('');
+    expect(call.headers['tenjin-session-delegation']).toBe('D');
+    // A bodiless request is signed without a content-digest over phantom bytes.
+    expect(signed[0]).toEqual({ method: 'GET', url: call.url });
+    expect(post.resource?.questionsAnswered).toEqual(['q']);
+  });
+
+  it('maps 404 to RESOURCE_NOT_FOUND and 429 to RATE_LIMITED', async () => {
+    const notFound = capturingFetch(() => ok200({ error: { code: 'post_not_found' } }, 404));
+    await expect(
+      getOwnPost(POST_ID, fakeAuth().auth, { ...OPTS, fetchImpl: notFound.fetch }),
+    ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND', exitCode: 1 });
+
+    const limited = capturingFetch(() => new Response('{}', { status: 429 }));
+    await expect(
+      getOwnPost(POST_ID, fakeAuth().auth, { ...OPTS, fetchImpl: limited.fetch }),
+    ).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('a failed read is runtime-class, never the post-approval write class', async () => {
+    const { fetch } = capturingFetch(
+      () =>
+        new Response(JSON.stringify({ error: { code: 'unauthenticated' } }), {
+          status: 401,
+          headers: { 'www-authenticate': 'Session error="session_key_unbound"' },
+        }),
+    );
+    await expect(
+      getOwnPost(POST_ID, fakeAuth(() => false).auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ exitCode: 1 });
+  });
+
+  it('re-signs a recoverable 401, then succeeds', async () => {
+    let attempt = 0;
+    const { fetch, calls } = capturingFetch(() => {
+      attempt++;
+      return attempt === 1
+        ? new Response(JSON.stringify({ error: { code: 'proof_expired' } }), { status: 401 })
+        : ok200(STORED_POST);
+    });
+    const { auth, recovered } = fakeAuth(() => true);
+    const post = await getOwnPost(POST_ID, auth, { ...OPTS, fetchImpl: fetch });
+    expect(recovered).toEqual(['proof_expired']);
+    expect(calls).toHaveLength(2);
+    expect(post.id).toBe(CREATED_POST.id);
+  });
+});
+
+describe('updatePost', () => {
+  it('PUTs the built body, signs those exact bytes, and returns the full post', async () => {
+    const { fetch, calls } = capturingFetch(() => ok200({ ...STORED_POST, title: 'New' }));
+    const { auth, signed } = fakeAuth();
+    const post = await updatePost(
+      POST_ID,
+      { title: 'New', resource: { scope: null, questionsAnswered: [] } },
+      auth,
+      { ...OPTS, fetchImpl: fetch },
+    );
+
+    const call = calls[0]!;
+    expect(call.method).toBe('PUT');
+    expect(call.url).toBe(`https://tenjin.blog/api/posts/${POST_ID}`);
+    expect(call.body).toBe(
+      JSON.stringify({ title: 'New', resource: { scope: null, questionsAnswered: [] } }),
+    );
+    expect(signed[0]!.body).toBe(call.body);
+    expect(signed[0]!.method).toBe('PUT');
+    expect(post.title).toBe('New');
+  });
+
+  it('signs every attempt afresh, because each PUT burns a single-use nonce', async () => {
+    let attempt = 0;
+    const { fetch } = capturingFetch(() => {
+      attempt++;
+      return attempt === 1
+        ? new Response(JSON.stringify({ error: { code: 'nonce_already_used' } }), { status: 401 })
+        : ok200(STORED_POST);
+    });
+    const { auth, signed } = fakeAuth(() => true);
+    await updatePost(POST_ID, { title: 'New' }, auth, { ...OPTS, fetchImpl: fetch });
+    expect(signed).toHaveLength(2);
+  });
+
+  it('names the rejected fields on a validation_failed (exit 4, after approval)', async () => {
+    const { fetch } = capturingFetch(() =>
+      ok200(
+        {
+          error: {
+            code: 'validation_failed',
+            message: 'validation failed',
+            details: { fieldErrors: { 'resource.asOf': ['bad'], price: ['bad'] } },
+          },
+        },
+        400,
+      ),
+    );
+    await expect(
+      updatePost(POST_ID, { title: 'New' }, fakeAuth().auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+      exitCode: 4,
+      message: 'validation failed (resource.asOf, price)',
+    });
+  });
+
+  it('maps 404 to RESOURCE_NOT_FOUND and a mismatched 200 to CONTRACT_MISMATCH', async () => {
+    const notFound = capturingFetch(() => ok200({ error: { code: 'post_not_found' } }, 404));
+    await expect(
+      updatePost(POST_ID, { title: 'New' }, fakeAuth().auth, {
+        ...OPTS,
+        fetchImpl: notFound.fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
+
+    const mismatch = capturingFetch(() => ok200({ id: 'x' }));
+    await expect(
+      updatePost(POST_ID, { title: 'New' }, fakeAuth().auth, {
+        ...OPTS,
+        fetchImpl: mismatch.fetch,
       }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });

@@ -30,6 +30,7 @@ import { runInspect, type InspectArgs, type InspectDeps } from '../commands/insp
 import { runBuy, type BuyArgs, type BuyDeps } from '../commands/buy';
 import { runOutcome, type OutcomeArgs, type OutcomeDeps } from '../commands/outcome';
 import { runPublish, type PublishArgs, type PublishDeps } from '../commands/publish';
+import { runEdit, type EditArgs, type EditDeps } from '../commands/edit';
 import {
   runCandidateAdd,
   runCandidateDrop,
@@ -55,6 +56,7 @@ export interface McpCommandDeps {
   buy?: BuyDeps;
   outcome?: OutcomeDeps;
   publish?: PublishDeps;
+  edit?: EditDeps;
   candidate?: CandidateDeps;
   wallet?: ResolveWalletProviderOptions & WalletCreateOptions;
 }
@@ -158,6 +160,47 @@ const publishInput = {
   provenance: z.string().optional().describe('Provenance summary (card)'),
   methodology: z.string().optional().describe('Methodology summary (card)'),
 } satisfies Record<keyof PublishArgs, z.ZodTypeAny>;
+
+const editInput = {
+  postId: z.string().describe('The uuid of your own post to show or update'),
+  yes: z
+    .boolean()
+    .optional()
+    .describe('Apply the update after user approval (omit to get the change summary first)'),
+  title: z.string().optional().describe('New post title'),
+  price: z.coerce.string().optional().describe('New post price in decimal USD, e.g. "0.25"'),
+  body: z
+    .string()
+    .optional()
+    .describe('Path to a Markdown file whose body replaces the stored body (frontmatter ignored)'),
+  excerpt: z.string().optional().describe('New excerpt'),
+  question: z.array(z.string()).optional().describe('REPLACE the questions this piece answers'),
+  task: z.array(z.string()).optional().describe('REPLACE the tasks this piece supports'),
+  addQuestion: z
+    .array(z.string())
+    .optional()
+    .describe('Append questions, keeping the stored ones (not with question)'),
+  addTask: z
+    .array(z.string())
+    .optional()
+    .describe('Append tasks, keeping the stored ones (not with task)'),
+  scope: z.string().optional().describe('What the piece covers (card scope)'),
+  exclusions: z.string().optional().describe('What the piece does not cover (card exclusions)'),
+  appliesTo: z.array(z.string()).optional().describe('REPLACE applicability with key=value pairs'),
+  asOf: z.string().optional().describe('As-of timestamp, ISO-8601 with offset'),
+  validUntil: z.string().optional().describe('Valid-until timestamp, ISO-8601 with offset'),
+  artifactType: z.string().optional().describe('document | skill | dataset'),
+  temporalMode: z.string().optional().describe('snapshot | maintained | evergreen'),
+  provenance: z.string().optional().describe('Provenance summary (card)'),
+  methodology: z.string().optional().describe('Methodology summary (card)'),
+  clear: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Card fields to clear: scope, exclusions, asOf, validUntil, provenance, methodology, ' +
+        'supersedesPostId, questionsAnswered, tasksSupported, appliesTo',
+    ),
+} satisfies Record<keyof EditArgs, z.ZodTypeAny>;
 
 // candidate is one tool over three actions; guard each action's arg set against
 // its core. add -> CandidateAddArgs, drop -> runCandidateDrop's params, list none.
@@ -369,6 +412,52 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           },
           ctx,
           deps.publish,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    'tenjin_edit',
+    {
+      title: 'Show or update one of your posts',
+      description:
+        'Show one of your own posts and its answer card (call with only postId), or update it: ' +
+        'every field flag you pass is merged, every field you omit is kept, and array fields ' +
+        'REPLACE the stored list unless you use addQuestion/addTask. Clear a card field with ' +
+        'clear:["scope"]. Under the same publish.mode consent as publishing, an update returns ' +
+        'NEEDS_CONFIRMATION with the before/after summary for you to show the user before ' +
+        're-calling with yes:true, and a live secret in the new content returns PUBLISH_BLOCKED, ' +
+        'which yes never clears.',
+      inputSchema: editInput,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async (args) =>
+      runCore('edit', (ctx) =>
+        runEdit(
+          {
+            postId: args.postId,
+            ...(args.yes !== undefined ? { yes: args.yes } : {}),
+            ...(args.title !== undefined ? { title: args.title } : {}),
+            ...(args.price !== undefined ? { price: args.price } : {}),
+            ...(args.body !== undefined ? { body: args.body } : {}),
+            ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
+            ...(args.question !== undefined ? { question: args.question } : {}),
+            ...(args.task !== undefined ? { task: args.task } : {}),
+            ...(args.addQuestion !== undefined ? { addQuestion: args.addQuestion } : {}),
+            ...(args.addTask !== undefined ? { addTask: args.addTask } : {}),
+            ...(args.scope !== undefined ? { scope: args.scope } : {}),
+            ...(args.exclusions !== undefined ? { exclusions: args.exclusions } : {}),
+            ...(args.appliesTo !== undefined ? { appliesTo: args.appliesTo } : {}),
+            ...(args.asOf !== undefined ? { asOf: args.asOf } : {}),
+            ...(args.validUntil !== undefined ? { validUntil: args.validUntil } : {}),
+            ...(args.artifactType !== undefined ? { artifactType: args.artifactType } : {}),
+            ...(args.temporalMode !== undefined ? { temporalMode: args.temporalMode } : {}),
+            ...(args.provenance !== undefined ? { provenance: args.provenance } : {}),
+            ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
+            ...(args.clear !== undefined ? { clear: args.clear } : {}),
+          },
+          ctx,
+          deps.edit,
         ),
       ),
   );

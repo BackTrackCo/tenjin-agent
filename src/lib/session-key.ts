@@ -46,10 +46,14 @@ const SessionFileSchema = z.object({
 export type SessionFile = z.infer<typeof SessionFileSchema>;
 
 export interface SignableRequest {
-  method: 'POST' | 'PUT';
+  method: 'GET' | 'POST' | 'PUT';
   url: string;
-  /** The exact request body bytes (JSON string); covered by Content-Digest. */
-  body: string;
+  /**
+   * The exact request body bytes (JSON string); covered by Content-Digest.
+   * Omitted for a bodiless request (the owner-scoped GET), where content-digest
+   * drops out of the covered set per the signature contract.
+   */
+  body?: string;
 }
 
 /**
@@ -236,12 +240,15 @@ export async function signWithSession(
 ): Promise<Record<string, string>> {
   const now = deps.now ?? Date.now;
   const nonce = deps.nonce ?? (() => randomBytes(16).toString('hex'));
-  const digest = contentDigest(req.body);
+  // A bodiless request carries no Content-Digest, and content-digest leaves the
+  // covered component set with it — signing a digest of "" would cover bytes the
+  // request never sends.
+  const digest = req.body !== undefined ? contentDigest(req.body) : undefined;
   const created = Math.floor(now() / 1000);
   const params: SignatureParamsInput = {
     method: req.method,
     url: req.url,
-    contentDigest: digest,
+    ...(digest !== undefined ? { contentDigest: digest } : {}),
     created,
     nonce: nonce(),
     keyid: keyidFor(file.publicKeyRaw),
@@ -252,7 +259,7 @@ export async function signWithSession(
     'Tenjin-Session-Delegation': file.delegation,
     'Signature-Input': `tenjin=${signatureParams(params)}`,
     Signature: `tenjin=:${signature}:`,
-    'Content-Digest': digest,
+    ...(digest !== undefined ? { 'Content-Digest': digest } : {}),
   };
 }
 

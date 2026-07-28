@@ -133,7 +133,7 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PUT';
   timeoutMs: number;
   headers?: Record<string, string>;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
@@ -169,7 +169,9 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
       body = JSON.stringify(opts.jsonBody);
       headers['content-type'] = 'application/json';
     }
-    if (opts.method === 'POST' || body !== undefined) headers['accept'] ??= 'application/json';
+    if (opts.method === 'POST' || opts.method === 'PUT' || body !== undefined) {
+      headers['accept'] ??= 'application/json';
+    }
 
     let res: Response;
     try {
