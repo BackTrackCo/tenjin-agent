@@ -9,6 +9,12 @@ import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
 import { fakeRecord } from '../lib/wallet/test-support';
+import {
+  ALWAYS_SAFE_ALLOWLIST,
+  NEVER_ALLOWLISTED,
+  OPT_IN_ALLOWLIST,
+  renderPermissionsBlock,
+} from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import type { WalletProvider } from '../lib/wallet';
@@ -107,7 +113,10 @@ describe('runDoctor — passing outcomes', () => {
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
     expect(find(data.checks, 'lookup-contract').status).toBe('ok');
-    expect(res.humanLines).toHaveLength(data.checks.length + 1); // wallet warn adds a fix line
+    // checks + a wallet-warn fix line, then a blank separator plus the allowlist block.
+    expect(res.humanLines).toHaveLength(
+      data.checks.length + 1 + 1 + renderPermissionsBlock().length,
+    );
   });
 
   it('lookup-contract warns (never fails doctor) when the deploy omits the lookup path', async () => {
@@ -329,5 +338,44 @@ describe('runDoctor — injected remote provider', () => {
     expect(data.checks.filter((c) => c.name === 'wallet-custody')).toEqual([]);
     expect(balanceMock.mock.calls[0]?.[0]).toBe(address);
     expect(JSON.stringify(res.data)).not.toContain(PRIVATE_KEY);
+  });
+});
+
+describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
+  it('emits the three tiers in the machine payload', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as {
+      permissions: {
+        alwaysSafe: { rule: string }[];
+        optIn: { rule: string }[];
+        neverAllowlisted: { command: string }[];
+      };
+    };
+    expect(data.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
+      ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
+    );
+    expect(data.permissions.optIn.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
+    expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
+  });
+
+  it('prints every free-verb line, and buy only as the opt-in', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const text = (res.humanLines ?? []).join('\n');
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).toContain(e.rule);
+    for (const e of OPT_IN_ALLOWLIST) expect(text).toContain(e.rule);
+    expect(text).toContain('Opt in separately');
+    expect(text).toContain('.claude/settings.json');
+  });
+
+  it('never prints an allowlist rule for a money-moving or state-changing verb', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const text = (res.humanLines ?? []).join('\n');
+    for (const e of NEVER_ALLOWLISTED) {
+      const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
+      expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
+    }
+    // but it does name them, with the reason, so the exclusion is visible.
+    expect(text).toContain('Never recommended');
+    expect(text).toContain('tenjin send');
   });
 });

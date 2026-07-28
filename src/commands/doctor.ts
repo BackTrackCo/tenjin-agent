@@ -8,6 +8,7 @@ import { trimSlash } from '../lib/url';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
+import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -107,7 +108,15 @@ export async function runDoctor(
     });
   }
 
-  return { data: { status: 'pass', checks }, humanLines: renderDoctorHuman(ctx.io, checks) };
+  // The recommended harness allowlist rides on every doctor run, pass or human.
+  // It is the discoverability surface for the auto-mode denial problem (#33): an
+  // operator whose agent just got denied runs doctor and gets the exact lines to
+  // paste, without having to already know they exist. It reports nothing about the
+  // local machine, so it is deliberately NOT a check: it can never pass or fail.
+  return {
+    data: { status: 'pass', checks, permissions: recommendedPermissions() },
+    humanLines: [...renderDoctorHuman(ctx.io, checks), '', ...renderPermissionsBlock()],
+  };
 }
 
 function checkNode(): BuiltCheck {

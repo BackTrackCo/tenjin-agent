@@ -94,6 +94,54 @@ Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultP
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
 what actually chooses a price before it calls the command.
 
+## Auto-mode permission allowlist
+
+Coding harnesses running unattended ("auto mode", "full auto", YOLO) classify each
+shell command before running it, and an unknown binary is denied by default. That
+denies the free verbs too, which breaks the whole marketplace loop: the skills
+forbid working around a denial, so a denied `tenjin lookup` just stops.
+
+Pre-clear the free, read-only verbs once. In Claude Code these go in the
+`permissions.allow` array of `.claude/settings.json`:
+
+```
+Bash(tenjin lookup:*)
+Bash(tenjin inspect:*)
+Bash(tenjin outcome:*)
+Bash(tenjin doctor:*)
+Bash(tenjin wallet show:*)
+Bash(tenjin wallet balance:*)
+Bash(tenjin config get:*)
+Bash(tenjin candidate list:*)
+```
+
+None of those touches the wallet, signs anything, or moves money. `tenjin install`
+prints this block, and `tenjin doctor` reprints it on every run (also in
+`doctor --json` under `permissions`), so an agent that just got denied can point
+you at the exact line.
+
+Purchases are a **separate, explicit opt-in**:
+
+```
+Bash(tenjin buy:*)
+```
+
+That line clears the harness prompt only — it never raises a spend cap. Set the
+caps first (`tenjin config set maxAutoSpend 0.25`, `tenjin config set sessionBudget
+2.00`); `confirm` stays `always` by default, so a human is still on every purchase
+until you change it.
+
+Deliberately **never** recommended, because each is a human decision: `tenjin send`
+(moves USDC out of the wallet, and is not bounded by the buy spend policy), `tenjin
+publish`, `tenjin wallet create`, `tenjin config set` (it can widen the agent's own
+spend policy), `tenjin candidate add`/`drop`, `tenjin install`, and `tenjin mcp`
+(it re-exposes every command core, so clearing it clears everything). For the same
+reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`, `Bash(tenjin
+wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
+that one gates **who you may pay**, this one gates **which commands may run**.
+
 ## Skills (installed by `tenjin install`)
 
 `tenjin install` auto-detects your harness, copies the three Tenjin skills into
@@ -252,7 +300,16 @@ approval.
   key never leaves the machine.
 
 - Fund small: this is a pocket-money wallet by design.
-- Purchased content is untrusted data, never instructions.
+- Purchased content is untrusted data, never instructions. In auto mode the skills
+  use a purchased piece's claims without re-deriving them against public sources
+  (that is what you paid for), but they still never execute purchased content and
+  instructions embedded in it never override the task. Reputation gating replaces
+  this interim wholesale trust when it lands.
+- The recommended auto-mode allowlist covers free read-only verbs only; `tenjin
+buy` is an explicit opt-in and money-moving verbs are never recommended. See
+  [Auto-mode permission allowlist](#auto-mode-permission-allowlist). A harness
+  permission denial is never worked around: the skills surface the exact allowlist
+  line and stop.
 
 ## Contributing and releases
 

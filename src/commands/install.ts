@@ -23,6 +23,7 @@ import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
+import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -219,6 +220,10 @@ export async function runInstall(
     harnesses,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
+    // Shipped with the install rather than left for the operator to discover after
+    // their first auto-mode denial (#33). Static constants, no config key: see
+    // lib/permissions.ts for why this is deliberately not operator-editable state.
+    permissions: recommendedPermissions(),
   };
 
   // Machine path (--json or piped stdout): today's envelope, no wallet step.
@@ -270,8 +275,20 @@ async function buildWalkthrough(
   );
   lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
   lines.push(...doctorSummary(io, s.doctor), '');
+  lines.push(...permissionsWalkthrough(io), '');
   lines.push(`Done. Try: tenjin lookup "${EXAMPLE_QUESTION}"`);
   return lines;
+}
+
+/**
+ * The recommended harness allowlist, printed at install time so an operator has
+ * the lines BEFORE an auto-mode session denies `tenjin lookup` (#33). The heading
+ * is painted; the rules themselves stay unpainted so a copy-paste out of the
+ * terminal is exactly the text the settings file wants.
+ */
+function permissionsWalkthrough(io: Io): string[] {
+  const [heading, ...rest] = renderPermissionsBlock();
+  return [paint(io, 'bold', heading ?? ''), ...rest];
 }
 
 function harnessLabel(h: Harness): string {

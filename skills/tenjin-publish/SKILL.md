@@ -85,6 +85,16 @@ full-auto):
 
 `--draft` parks it as a private draft for browser review instead of publishing.
 
+**If the harness denies permission to run `tenjin publish`, stop and surface it;
+never retry.** `tenjin publish` is deliberately NOT in the recommended auto-mode
+allowlist (neither are `tenjin send`, `tenjin wallet create`, or `tenjin config
+set`): publishing puts the user's content on a public marketplace under their
+identity, so a denial is the gate working, not a misconfiguration. Tell the user
+what you wanted to publish and let them run it or clear it themselves. Do not
+propose an allowlist line for it, do not reword the command, and do not route
+around it via `npx`, a shell wrapper, or HTTP. Park the draft instead: `tenjin
+candidate add <finding.md> --lookup-id <id> --json`.
+
 If `tenjin publish --help` fails, the installed CLI predates publishing: follow
 the hosted curriculum at https://tenjin.blog/skills.md (canonical zero-install
 path) instead, with the same rubric and consent rules above.
