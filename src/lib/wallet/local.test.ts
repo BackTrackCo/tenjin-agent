@@ -5,11 +5,20 @@ import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Hex } from 'viem';
 import { CliError } from '../errors';
-import { passphraseBlobPath, passphraseBlobPathFor, walletPath } from '../paths';
+import {
+  archivedWalletPath,
+  passphraseBlobPath,
+  passphraseBlobPathFor,
+  walletPath,
+} from '../paths';
 import { readWalletRecord, writeWalletRecord } from './store';
-import { createLocalProvider, createLocalWallet } from './local';
+import { createLocalProvider, createLocalWallet, parkOutgoingWallet } from './local';
 import type { ExecFn } from './passphrase';
 import { KNOWN_PASSPHRASE, encryptedRecord, fakeRecord } from './test-support';
+
+// This suite runs real ox scrypt (N=262144) via encryptedRecord; the 5s default
+// flakes under parallel vitest load (tenjin-agent#47).
+vi.setConfig({ testTimeout: 120000 });
 
 let tmp: string;
 let dataDir: string;
@@ -321,6 +330,26 @@ describe('createLocalProvider.getSigner', () => {
     });
     const signer = await provider.getSigner();
     expect(signer.address).toBe(privateKeyToAccount(key).address);
+  });
+});
+
+describe('parkOutgoingWallet', () => {
+  it('refuses (REFUSED) when an archive already exists at the address — neither file changes', async () => {
+    const account = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(walletPath(dataDir), 'active-keystore');
+    const dst = archivedWalletPath(account, dataDir);
+    await writeFile(dst, 'existing-archive');
+
+    const err = (await parkOutgoingWallet(dataDir, account).catch((e) => e)) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('REFUSED');
+    expect(err.fix).toContain(dst);
+    // No clobber in either direction: the active wallet stayed active and the
+    // existing archive kept its bytes.
+    expect(await readFile(walletPath(dataDir), 'utf8')).toBe('active-keystore');
+    expect(await readFile(dst, 'utf8')).toBe('existing-archive');
   });
 });
 

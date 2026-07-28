@@ -10,6 +10,10 @@ import type { CommandContext } from '../context';
 import type { WalletProvider } from '../lib/wallet';
 import type { ExecFn } from '../lib/wallet/passphrase';
 
+// This suite runs real ox scrypt (N=262144) several times per test; the 5s
+// default flakes under parallel vitest load (tenjin-agent#47).
+vi.setConfig({ testTimeout: 120000 });
+
 // Balance is the only path that hits the chain; mock the RPC read so the whole
 // suite stays offline and deterministic. viem's key derivation stays real.
 vi.mock('../lib/usdc', () => ({

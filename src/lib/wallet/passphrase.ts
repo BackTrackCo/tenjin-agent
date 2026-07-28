@@ -226,8 +226,10 @@ export async function storePassphraseForWallet(
   const store = storeFor(deps);
   if (store === null) return 'no-store';
   const account = walletStoreAccount(address);
-  if (store.storable !== undefined && !store.storable(passphrase)) return 'rejected-characters';
+  // Identical-entry check FIRST: a passphrase that already has a durable copy is
+  // `stored` even when the backend's writer would refuse to (re)write it.
   if ((await store.read(account)) === passphrase) return 'stored';
+  if (store.storable !== undefined && !store.storable(passphrase)) return 'rejected-characters';
   if (!(await store.store(account, passphrase))) return 'store-failed';
   return (await store.read(account)) === passphrase ? 'stored' : 'store-failed';
 }

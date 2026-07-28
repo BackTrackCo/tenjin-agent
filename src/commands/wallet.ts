@@ -171,16 +171,27 @@ async function createWalletLocked(
         try {
           await restoreParkedWallet(dir, archivedPath);
         } catch (restoreErr) {
+          // The no-clobber restore also refuses when a wallet.json appeared out
+          // of band (commit EEXIST) — never overwrite it; name both files.
           throw new CliError(
             'INTERNAL',
             'Creating the replacement wallet failed after the old wallet was parked, and restoring it also failed.',
             {
-              fix: `Your old wallet ${preserved.address} is intact at ${archivedPath} with its passphrase preserved; restore it with \`mv ${archivedPath} ${walletPath(dir)}\`.`,
+              fix: `Your old wallet ${preserved.address} is intact at ${archivedPath} with its passphrase preserved. If a ${walletPath(dir)} now exists, another process wrote it — move it aside first. Then restore with \`mv ${archivedPath} ${walletPath(dir)}\`.`,
               cause: restoreErr,
             },
           );
         }
-        throw err; // Old wallet restored as the active one; surface the real failure.
+        // Old wallet restored as the active one; say so rather than surfacing a
+        // raw fs error (or a WALLET_EXISTS whose fix suggests re-running --replace).
+        throw new CliError(
+          'INTERNAL',
+          'Creating the replacement wallet failed; the previous wallet was restored and is the active wallet again.',
+          {
+            fix: 'Nothing was lost. Fix the underlying error, then retry `tenjin wallet create --replace`.',
+            cause: err,
+          },
+        );
       }
     });
   } catch (err) {

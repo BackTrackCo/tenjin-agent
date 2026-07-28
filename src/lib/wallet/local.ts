@@ -1,4 +1,5 @@
-import { link, readdir, rename, unlink } from 'node:fs/promises';
+import { link, readdir, unlink } from 'node:fs/promises';
+import { fsyncDir } from '../atomic-json';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
@@ -313,19 +314,53 @@ export async function parkOutgoingWallet(dir: string, account: string): Promise<
   } catch (err) {
     if (hasCode(err, 'EEXIST')) {
       throw new CliError('REFUSED', `An archived wallet already exists at ${dst}.`, {
-        fix: `Move ${dst} aside, then retry \`tenjin wallet create --replace\`.`,
+        fix: `Move ${dst} aside, then retry \`tenjin wallet create --replace\`. Nothing has moved; the current wallet is still active.`,
         cause: err,
       });
     }
-    throw err;
+    throw new CliError('INTERNAL', `Could not park the outgoing keystore at ${dst}.`, {
+      fix: `Nothing has moved; the current wallet is still active at ${src}. Fix the underlying filesystem error and retry.`,
+      cause: err,
+    });
   }
-  await unlink(src);
+  try {
+    await unlink(src);
+  } catch (err) {
+    // link succeeded but the active slot would not clear (e.g. EBUSY on win32
+    // with the file held open): both names point at one inode and the ACTIVE
+    // wallet would be listed as archived. Best-effort undo the new link so the
+    // state stays exactly as before the park.
+    await unlink(dst).catch(() => undefined);
+    throw new CliError(
+      'INTERNAL',
+      `Could not clear the active wallet slot ${src} while parking the outgoing wallet.`,
+      {
+        fix: 'The previous wallet is still active and nothing was lost. Fix the underlying filesystem error (on Windows, close any process holding the wallet file open) and retry.',
+        cause: err,
+      },
+    );
+  }
+  await syncWalletDir(dir);
   return dst;
 }
 
-/** Undo a park (rollback when the replacement failed to commit). */
+/**
+ * Undo a park (rollback when the replacement failed to commit), NO-CLOBBER: if
+ * a wallet.json appeared out of band, `link` throws EEXIST rather than
+ * overwriting it — the caller surfaces both paths instead of guessing.
+ */
 export async function restoreParkedWallet(dir: string, archivedPath: string): Promise<void> {
-  await rename(archivedPath, walletPath(dir));
+  await link(archivedPath, walletPath(dir));
+  // The active wallet is restored from here on; a stale .bak link is a listing
+  // blemish, not a loss, so its removal is best-effort.
+  await unlink(archivedPath).catch(() => undefined);
+  await syncWalletDir(dir);
+}
+
+/** fsync the wallet dir so a park/restore survives a crash (POSIX only). */
+async function syncWalletDir(dir: string): Promise<void> {
+  if (isWindows) return; // a directory cannot be fsynced on win32
+  await fsyncDir(dir);
 }
 
 type Credential =
@@ -393,8 +428,16 @@ async function accountForSigning(
         },
       );
     }
+    // Name only the escape that applies to where the passphrase came from —
+    // resolution never falls through to a prompt after a store or env hit.
+    const escape =
+      resolved.source === 'env'
+        ? 'TENJIN_WALLET_PASSPHRASE is set but does not decrypt it; set it to the correct passphrase'
+        : resolved.source === 'prompt'
+          ? 'Retry and enter the correct passphrase at the prompt, or set TENJIN_WALLET_PASSPHRASE to it'
+          : `The OS credential store entry (service tenjin-cli, account ${cred.address.toLowerCase()}) does not decrypt it; set TENJIN_WALLET_PASSPHRASE to the correct passphrase`;
     throw new CliError('WALLET_INVALID_KEY', 'Could not decrypt the wallet keystore.', {
-      fix: `Check the passphrase: TENJIN_WALLET_PASSPHRASE, the OS credential store (service tenjin-cli, account ${cred.address.toLowerCase()}), or the one you enter when prompted.`,
+      fix: `${escape}.`,
       cause: err,
     });
   }

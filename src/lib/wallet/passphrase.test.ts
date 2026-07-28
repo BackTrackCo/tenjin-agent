@@ -388,7 +388,21 @@ describe('storePassphraseForWallet — the --replace archive writer', () => {
         'has spaces in it',
       ),
     ).resolves.toBe('rejected-characters');
-    expect(calls).toHaveLength(0); // refused before any exec — nothing was attempted
+    // The identical-entry read runs first (an existing copy would count as
+    // stored); the gate then refuses before any write is attempted.
+    expect(calls.every((c) => c.args[0] === 'find-generic-password')).toBe(true);
+  });
+
+  it('an existing identical entry beats the character gate: unstorable but already stored', async () => {
+    const { exec, calls } = fakeKeychain({ [ACCOUNT]: 'has spaces in it' });
+    await expect(
+      storePassphraseForWallet(
+        { env: {}, platform: 'darwin', isTTY: false, exec },
+        ADDRESS,
+        'has spaces in it',
+      ),
+    ).resolves.toBe('stored');
+    expect(calls.every((c) => c.args[0] !== '-i')).toBe(true); // no write attempted
   });
 
   it('reports no-store on a platform without one', async () => {

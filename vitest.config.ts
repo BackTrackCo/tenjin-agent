@@ -5,10 +5,9 @@ export default defineConfig({
     globals: false,
     environment: 'node',
     include: ['src/**/*.test.ts'],
-    // The wallet suites run real ox scrypt (N=262144) several times per test;
-    // the 5s default flakes under load (a saturated dev box stretches one
-    // scrypt past 30s). One generous global timeout instead of per-test
-    // overrides scattered through the suites.
-    testTimeout: 120000,
+    // The default 5s testTimeout stands globally so a genuine hang (MCP/stdio,
+    // e2e) surfaces fast. The scrypt-heavy wallet suites raise it per-file via
+    // vi.setConfig — real ox scrypt at N=262144 flakes the default under
+    // parallel load (tenjin-agent#47).
   },
 });
