@@ -51,6 +51,9 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   NEEDS_CONFIRMATION: 3,
   PUBLISH_BLOCKED: 3,
   PUBLISH_FAILED: 4,
+  // A send that reverted or stalled AFTER the human approved it and it was
+  // broadcast: the post-decision failure class (4), like PAYMENT_FAILED.
+  SEND_FAILED: 4,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {

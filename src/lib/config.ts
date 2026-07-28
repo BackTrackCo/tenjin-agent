@@ -44,6 +44,13 @@ export const ConfigSchema = z.object({
   maxAutoSpend: atomicString,
   sessionBudget: atomicString,
   confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
+  /**
+   * Hard per-send cap for `tenjin send`, NOT satisfiable by --yes or a prompt
+   * (the spend-policy posture): "none" = uncapped (the default; send exists to
+   * drain the wallet), an atomic amount caps each send, and "0" disables the
+   * verb entirely. Client-enforced like every spend key (see the note above).
+   */
+  sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
   rpcUrl: z.url(),
@@ -77,6 +84,7 @@ export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',
   confirm: 'always',
+  sendMaxAmount: 'none',
   allowlistCreators: [],
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
@@ -179,6 +187,7 @@ export interface EffectiveSettings {
   maxAutoSpend: ResolvedSetting<string>;
   sessionBudget: ResolvedSetting<string>;
   confirm: ResolvedSetting<string>;
+  sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
@@ -213,6 +222,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
     confirm: fileOrDefault('confirm', config),
+    sendMaxAmount: fileOrDefault('sendMaxAmount', config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),

@@ -214,9 +214,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  // The funds-out ESCAPE HATCH (issue #34): human-invoked only. It is deliberately
-  // absent from the MCP toolset (src/mcp/server.ts) and from the skill adapters —
-  // no model-facing surface gains a send trigger.
+  // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
+  // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
+  // surface gains a send trigger (both exclusions are pinned by tests).
   addGlobalFlags(program.command('send <amount> <token> <to>'))
     .description(
       'Move funds OUT of the agent wallet (escape hatch): preview the resolved recipient and amount, confirm explicitly, then transfer on Base and print the tx hash. USDC only',

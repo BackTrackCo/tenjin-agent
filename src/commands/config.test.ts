@@ -48,12 +48,29 @@ describe('runConfigList', () => {
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
+    expect(d.sendMaxAmount).toEqual({ value: 'none', source: 'default' });
     expect(d['publish.mode']).toEqual({ value: 'review', source: 'default' });
     expect(d['publish.defaultPrice']).toEqual({
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
     });
-    expect(humanLines).toHaveLength(9);
+    expect(humanLines).toHaveLength(10);
+  });
+
+  it('sendMaxAmount round-trips: none by default, decimal USD in, Money out, 0 valid', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'sendMaxAmount', value: '20' }, ctx);
+    expect(set.data).toMatchObject({
+      key: 'sendMaxAmount',
+      value: { atomic: '20000000', usd: '20' },
+      source: 'file',
+    });
+    const zero = await runConfigSet({ key: 'sendMaxAmount', value: '0' }, ctx);
+    expect(zero.data).toMatchObject({ value: { atomic: '0', usd: '0' } });
+    const cleared = await runConfigSet({ key: 'sendMaxAmount', value: 'none' }, ctx);
+    expect(cleared.data).toMatchObject({ value: 'none' });
+    const bad = await caught(() => runConfigSet({ key: 'sendMaxAmount', value: 'lots' }, ctx));
+    expect(bad.code).toBe('USAGE');
   });
 
   it('appends a one-line description per key to the human listing (data unchanged)', async () => {

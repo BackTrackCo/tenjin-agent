@@ -27,6 +27,8 @@ export interface ResolvedSettings {
   policy: SpendPolicy;
   /** Lookup-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
   evalCohort: boolean;
+  /** Hard per-send cap for `tenjin send`; null = uncapped ("none"), 0n = disabled. */
+  sendMaxAmountAtomic: bigint | null;
 }
 
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
@@ -36,6 +38,7 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
     baseUrl: s.baseUrl.value,
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
+    sendMaxAmountAtomic: s.sendMaxAmount.value === 'none' ? null : BigInt(s.sendMaxAmount.value),
     policy: {
       maxAutoSpendAtomic: BigInt(s.maxAutoSpend.value),
       sessionBudgetAtomic: BigInt(s.sessionBudget.value),

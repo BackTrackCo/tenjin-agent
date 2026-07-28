@@ -47,6 +47,9 @@ export const ErrorCodeSchema = z.enum([
   'NEEDS_CONFIRMATION',
   'PUBLISH_BLOCKED',
   'PUBLISH_FAILED',
+  // A send that reverted or produced no receipt AFTER the human approved it and
+  // it was broadcast (exit 4), same post-decision class as PAYMENT_FAILED.
+  'SEND_FAILED',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 

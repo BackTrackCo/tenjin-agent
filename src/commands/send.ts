@@ -1,33 +1,36 @@
-import { createInterface } from 'node:readline';
-import { getAddress, isAddress, type Address } from 'viem';
+import { formatEther, getAddress, isAddress, type Address } from 'viem';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
+import { promptYesNo } from '../lib/prompt';
 import { resolveContextSettings } from '../lib/settings';
-import { getUsdcBalance, sendUsdc, USDC_ADDRESS } from '../lib/usdc';
+import {
+  broadcastUsdcSend,
+  FeeCapExceededError,
+  getUsdcBalance,
+  prepareUsdcSend,
+  SendPendingError,
+  SendRevertedError,
+  USDC_ADDRESS,
+} from '../lib/usdc';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin send <amount> <token> <to>` — the EXPLICIT ESCAPE HATCH for moving
- * funds OUT of the agent wallet (issue #34). The notes deliberately ship no
- * funds-moving verb by default; this one exists for funds already sitting on the
- * hot key, complementary to tenjin#251 delegation (which routes FUTURE revenue
- * off the hot key and does nothing for a balance already here). Because a
- * transfer is irreversible, the gate is explicit per the repo's confirm
- * conventions (the `wallet export --yes` posture): the resolved recipient and
- * amount are previewed and an interactive y/N (or `--yes`) is required before
- * anything is signed — headless without `--yes` refuses, and a missing wallet
- * passphrase refuses through the provider seam before any signature exists.
- * Everything signs through the same TenjinSigner/WalletProvider seam `buy` uses;
- * there is no second signing path. Deliberately EXCLUDED from the MCP toolset
- * (doc 10's narrow-toolset rule) and from the skill adapters: a human invokes
- * this verb, never a model.
+ * `tenjin send <amount> <token> <to>`: the escape hatch that moves funds OUT of
+ * the agent wallet, complementary to delegation (which redirects future revenue
+ * off the hot key; this is for a balance already on it). Invariants a reader
+ * cannot derive from the code order alone:
+ *   - the confirm (buy's posture: interactive y/N, `--yes` bypasses the prompt
+ *     only, headless without it refuses) runs BEFORE the signer is resolved, so
+ *     no refusal branch ever touches key material;
+ *   - `sendMaxAmount` is a spend-policy gate, NOT satisfiable by --yes;
+ *   - the verb is deliberately absent from the MCP toolset (spec 10's narrow
+ *     toolset) and the skill adapters — human-invoked only, both pinned by tests.
  */
 
 export interface SendArgs {
   /** Decimal USD at the edge (O1 convention); converted to atomic exactly once. */
   amount: string;
-  /** Token symbol; USDC on Base only, for now. */
   token: string;
   /** Recipient address, 0x-prefixed; checksummed or all-lowercase. */
   to: string;
@@ -41,6 +44,9 @@ export interface SendDeps {
   /** Interactive-confirm seam; defaults to a TTY y/n prompt (same shape as buy). */
   confirm?: (prompt: string) => Promise<boolean>;
 }
+
+const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
+const DEAD_ADDRESS: Address = '0x000000000000000000000000000000000000dEaD';
 
 export async function runSend(
   args: SendArgs,
@@ -60,12 +66,17 @@ export async function runSend(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
-  // Surfaces WALLET_MISSING with its own fix if no wallet exists. No key material
-  // is touched here; the signer (and any passphrase) is resolved only after the
-  // explicit confirm below.
+  // Address + posture only; surfaces WALLET_MISSING. No key material yet.
   const desc = await describeWallet(provider);
+  if (to.toLowerCase() === desc.address.toLowerCase()) {
+    throw new CliError('USAGE', 'The recipient is this wallet itself.', {
+      fix: 'Pass the destination wallet address, not the sending one.',
+    });
+  }
 
-  const { rpcUrl } = await resolveContextSettings(ctx);
+  const { rpcUrl, sendMaxAmountAtomic } = await resolveContextSettings(ctx);
+  enforceSendCap(amountAtomic, sendMaxAmountAtomic);
+
   let balance: bigint;
   try {
     balance = await getUsdcBalance(desc.address, rpcUrl);
@@ -85,10 +96,39 @@ export async function runSend(
     });
   }
 
-  // The explicit gate: preview the RESOLVED recipient (checksummed, not the raw
-  // input) and the exact amount, then require a y/N or --yes. No flag and no
-  // approval means NOTHING is signed — the signer has not even been resolved yet.
-  const approved = await confirmSend(ctx, deps, args.yes === true, amountAtomic, to, desc.address);
+  // Read-only chain prep before the confirm, so the prompt can show the fee and
+  // a wallet without gas refuses before asking anyone to approve anything.
+  let prepared;
+  try {
+    prepared = await prepareUsdcSend({ from: desc.address, to, amountAtomic, rpcUrl });
+  } catch (err) {
+    if (err instanceof FeeCapExceededError) {
+      throw new CliError('REFUSED', 'The RPC gas/fee estimate is abnormal for Base; refusing.', {
+        fix: 'Check `tenjin config get rpcUrl` points at a trusted Base RPC, then retry.',
+        cause: err,
+      });
+    }
+    throw new CliError('RPC_ERROR', 'Could not prepare the transfer on Base.', {
+      fix: 'Check your network, or set a working RPC with `tenjin config set rpcUrl <url>`.',
+      cause: err,
+    });
+  }
+  if (prepared.ethBalanceWei < prepared.feeWei) {
+    throw new CliError('REFUSED', 'The wallet has no ETH on Base to pay the network fee.', {
+      fix: `Send a little ETH on Base to ${desc.address} (about ${formatEther(prepared.feeWei)} ETH needed), then retry.`,
+      details: {
+        ethBalanceWei: prepared.ethBalanceWei.toString(),
+        feeWei: prepared.feeWei.toString(),
+      },
+    });
+  }
+
+  const approved = await confirmSend(ctx, deps, args.yes === true, {
+    amountAtomic,
+    to,
+    from: desc.address,
+    feeWei: prepared.feeWei,
+  });
   if (!approved) {
     throw new CliError('REFUSED', 'Send not confirmed.', {
       fix: 'Verify the recipient and amount, then re-run with --yes to approve this transfer.',
@@ -96,37 +136,66 @@ export async function runSend(
     });
   }
 
-  // The ONLY door to the key. A missing passphrase entry for the active wallet
-  // refuses here with the provider's own coded error (headless: USAGE
-  // no-passphrase; wrong entry: WALLET_INVALID_KEY) — never a silent prompt loop,
-  // never a second signing path.
+  // The only door to the key; a missing passphrase entry refuses here with the
+  // provider's coded error. The signer must be the wallet the human just saw:
+  // the local provider guarantees it, a hosted one is only trusted after this.
   const signer = await provider.getSigner();
+  if (signer.address.toLowerCase() !== desc.address.toLowerCase()) {
+    throw new CliError(
+      'PROVIDER_ERROR',
+      `The signer address ${signer.address} does not match the confirmed wallet ${desc.address}.`,
+      { fix: 'The wallet changed between preview and signing; re-run `tenjin send`.' },
+    );
+  }
 
   let txHash: string;
   try {
-    txHash = await sendUsdc({ signer, to, amountAtomic, rpcUrl });
+    txHash = await broadcastUsdcSend({ signer, prepared, rpcUrl });
   } catch (err) {
+    if (err instanceof SendRevertedError) {
+      throw new CliError('SEND_FAILED', 'The transfer was mined but reverted; no USDC moved.', {
+        fix: 'Check the transaction on a Base explorer, then retry if the cause is transient.',
+        details: { txHash: err.txHash },
+        cause: err,
+      });
+    }
+    if (err instanceof SendPendingError) {
+      throw new CliError('SEND_FAILED', 'The transfer was broadcast but not confirmed in time.', {
+        fix: 'Check the transaction on a Base explorer before retrying: it may still mine, and an immediate retry could double-send.',
+        details: { txHash: err.txHash, pending: true },
+        cause: err,
+      });
+    }
     throw new CliError('RPC_ERROR', 'The transfer could not be sent on Base.', {
-      fix: 'Check the network, and that the wallet holds a little ETH on Base for gas; then retry.',
+      fix: 'Check the network and RPC, then retry.',
       cause: err,
     });
   }
 
   const amount = toMoney(amountAtomic.toString());
   return {
-    data: {
-      txHash,
-      from: desc.address,
-      to,
-      token: 'USDC',
-      network: 'base',
-      amount,
-    },
+    data: { txHash, from: signer.address, to, token: 'USDC', network: 'base', amount },
     humanLines: [`Sent ${amount.usd} USDC on Base to ${to}`, `Tx: ${txHash}`],
   };
 }
 
-/** USDC on Base first (issue #34); anything else is a usage error, not a guess. */
+/** The hard per-send cap (`config set sendMaxAmount`): a policy gate, not a confirm. */
+function enforceSendCap(amountAtomic: bigint, capAtomic: bigint | null): void {
+  if (capAtomic === null) return;
+  if (capAtomic === 0n) {
+    throw new CliError('POLICY_REFUSED', 'Sending is disabled by sendMaxAmount = 0.', {
+      fix: 'Run `tenjin config set sendMaxAmount <usd|none>` to allow sends.',
+    });
+  }
+  if (amountAtomic > capAtomic) {
+    throw new CliError('POLICY_REFUSED', 'The amount exceeds the sendMaxAmount cap.', {
+      fix: 'Send a smaller amount, or raise the cap with `tenjin config set sendMaxAmount <usd>`.',
+      details: { requested: toMoney(amountAtomic.toString()), cap: toMoney(capAtomic.toString()) },
+    });
+  }
+}
+
+/** USDC on Base only; anything else is a usage error, not a guess. */
 function requireUsdc(token: string): void {
   if (token.trim().toLowerCase() === 'usdc') return;
   throw new CliError('USAGE', `Unsupported token: ${JSON.stringify(token)}`, {
@@ -135,66 +204,52 @@ function requireUsdc(token: string): void {
 }
 
 /**
- * Validate and RESOLVE the recipient: viem's strict isAddress rejects a
- * malformed address and a bad EIP-55 checksum (a likely typo — getAddress alone
- * would silently re-checksum it), then getAddress returns the checksummed form —
- * what the preview shows and the transfer targets. Sending to the USDC contract
- * itself is refused outright: tokens transferred to the token contract are
- * unrecoverable, and no legitimate send targets it.
+ * Validate and resolve the recipient. Strict `isAddress` refuses malformed input
+ * and a bad EIP-55 checksum on MIXED-CASE input (all-lowercase input carries no
+ * checksum to verify — that limit is inherent to the format); `getAddress` then
+ * yields the checksummed form the preview shows and the transfer targets. Known
+ * fund-destroying destinations (the USDC contract, the zero address, the burn
+ * address) refuse outright.
  */
 function parseRecipient(raw: string): Address {
   const trimmed = raw.trim();
   if (!isAddress(trimmed)) {
     throw new CliError('USAGE', `Invalid recipient address: ${JSON.stringify(raw)}`, {
-      fix: 'Pass a 0x-prefixed 20-byte address, checksummed or all-lowercase.',
+      fix: 'Pass a 0x-prefixed 20-byte address, checksummed or all-lowercase (lowercase skips the checksum typo check).',
     });
   }
   const to = getAddress(trimmed);
-  if (to === USDC_ADDRESS) {
-    throw new CliError('USAGE', 'The recipient is the USDC token contract itself.', {
-      fix: 'Tokens sent to the token contract are unrecoverable. Pass the destination wallet address.',
+  if (to === USDC_ADDRESS || to === ZERO_ADDRESS || to === DEAD_ADDRESS) {
+    throw new CliError('USAGE', 'The recipient is a known fund-destroying address.', {
+      fix: 'Tokens sent to the token contract, the zero address, or the burn address are unrecoverable. Pass the destination wallet address.',
     });
   }
   return to;
 }
 
-/**
- * The same confirm posture as buy: --yes bypasses the interactive confirm only;
- * a TTY gets a y/N prompt naming the resolved recipient and amount; headless
- * without --yes declines (exit 3), so no flag can ever mean a signature.
- */
+interface ConfirmDetails {
+  amountAtomic: bigint;
+  to: Address;
+  from: Address;
+  feeWei: bigint;
+}
+
+/** Buy's confirm posture; the preview names the resolved recipient, amount, and fee. */
 async function confirmSend(
   ctx: CommandContext,
   deps: SendDeps,
   yes: boolean,
-  amountAtomic: bigint,
-  to: Address,
-  from: Address,
+  d: ConfirmDetails,
 ): Promise<boolean> {
   if (yes) return true;
   const prompt =
-    `Send ${toMoney(amountAtomic.toString()).usd} USDC on Base\n` +
-    `  from ${from}\n` +
-    `  to   ${to}\n` +
+    `Send ${toMoney(d.amountAtomic.toString()).usd} USDC on Base\n` +
+    `  from ${d.from}\n` +
+    `  to   ${d.to}\n` +
+    `  network fee up to ~${formatEther(d.feeWei)} ETH\n` +
     `This moves funds out of the agent wallet and cannot be undone. [y/N] `;
   if (deps.confirm !== undefined) return deps.confirm(prompt);
-  if (!ctx.io.isTTY) return false; // non-interactive without --yes: refuse (exit 3)
-  if (!process.stdin.isTTY) return false;
+  // Both streams must be real TTYs; piped stdin/stdout without --yes refuses.
+  if (!ctx.io.isTTY || !process.stdin.isTTY) return false;
   return promptYesNo(prompt);
-}
-
-/** stdin closing mid-prompt (ctrl-D) resolves as decline, never a hang. */
-function promptYesNo(prompt: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    let settled = false;
-    const settle = (value: boolean): void => {
-      if (settled) return;
-      settled = true;
-      rl.close();
-      resolve(value);
-    };
-    rl.once('close', () => settle(false));
-    rl.question(prompt, (answer) => settle(/^y(es)?$/i.test(answer.trim())));
-  });
 }
