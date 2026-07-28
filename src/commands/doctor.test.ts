@@ -467,6 +467,42 @@ describe('runDoctor — skill wiring', () => {
     }
   });
 
+  it('two shadowed skills with DIFFERENT reasons are not given one merged label', async () => {
+    await writeSkill('tenjin-search', 'disable-model-invocation: true\n');
+    await writeSkill('tenjin-publish');
+    await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o000);
+    try {
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      // The flagged one is a fact; only the unreadable one carries the hedge, because
+      // being unable to read it is exactly why its flag cannot be asserted.
+      expect(skills.detail).toContain(
+        'tenjin-search installed but not model-invocable (disable-model-invocation: true)',
+      );
+      expect(skills.detail).toContain(
+        'tenjin-publish installed but not model-invocable (unreadable or disable-model-invocation: true)',
+      );
+    } finally {
+      await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o600);
+    }
+  });
+
+  it('a wired directory with no mirror does not claim precedence over one', async () => {
+    await writeSkill('tenjin-search');
+    await writeSkill('tenjin-publish');
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(skills.status).toBe('ok');
+    expect(skills.detail).toContain(
+      `${claudeSkills()} -> tenjin-search, tenjin-publish (CLI skills wired)`,
+    );
+    expect(skills.detail).not.toContain('take precedence');
+  });
+
   // Two directories in different states: the mixed case a developer with both
   // Claude Code and Codex actually hits, and the one a union across directories
   // renders as a self-contradiction.

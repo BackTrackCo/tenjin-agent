@@ -15,7 +15,7 @@ import {
   readAllWiring,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
-import type { DirState, HarnessWiring } from '../lib/skill-wiring';
+import type { DirState, HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
@@ -373,13 +373,21 @@ function describeProblem(w: HarnessWiring): string {
   const shadowed = shadowedCliSkills(w);
   const missing = missingCliSkills(w);
   const parts: string[] = [];
-  if (shadowed.length > 0) {
-    const why = shadowed
-      .map((n) => w.skills.find((s) => s.name === n)?.reason)
-      .includes('unreadable')
-      ? 'not model-invocable (unreadable or disable-model-invocation: true)'
-      : 'not model-invocable (disable-model-invocation: true)';
-    parts.push(`${shadowed.join(', ')} installed but ${why}`);
+  // Grouped BY REASON, not into one clause: the two claims differ in strength. A
+  // readable file with the flag set is a fact; an unreadable one is a disjunction,
+  // because the whole reason we cannot assert the flag is that we could not read it.
+  // Merging them would spread that hedge onto a skill we know the answer for.
+  const unreadable = shadowed.filter((n) => reasonFor(w, n) === 'unreadable');
+  const disabled = shadowed.filter((n) => reasonFor(w, n) !== 'unreadable');
+  if (disabled.length > 0) {
+    parts.push(
+      `${disabled.join(', ')} installed but not model-invocable (disable-model-invocation: true)`,
+    );
+  }
+  if (unreadable.length > 0) {
+    parts.push(
+      `${unreadable.join(', ')} installed but not model-invocable (unreadable or disable-model-invocation: true)`,
+    );
   }
   // Naming both by name reads as a half-install; when NEITHER is there the state is
   // "this harness has no CLI skills at all", which is a different sentence.
@@ -391,6 +399,15 @@ function describeProblem(w: HarnessWiring): string {
     );
   } else if (missing.length > 0) parts.push(`${missing.join(', ')} missing`);
   return `${w.dir}: ${parts.join(' and ')}`;
+}
+
+function reasonFor(w: HarnessWiring, name: string): NotInvocableReason | undefined {
+  return w.skills.find((s) => s.name === name)?.reason;
+}
+
+/** Is the hosted zero-install mirror in THIS directory? */
+function hostedHere(w: HarnessWiring): boolean {
+  return w.skills.find((s) => s.name === HOSTED_SKILL_NAME)?.present === true;
 }
 
 /**
@@ -412,9 +429,22 @@ function describeWiring(wiring: HarnessWiring[]): string {
         .map((s) =>
           s.modelInvocable === false ? `${s.name} [${s.reason ?? 'shadowed'}]` : s.name,
         );
-      return `${w.dir} -> ${parts.join(', ')} (${POSTURE[w.state]})`;
+      return `${w.dir} -> ${parts.join(', ')} (${posture(w)})`;
     })
     .join('; ');
+}
+
+/**
+ * The precedence half of the `wired` posture is only true when there is a mirror
+ * here to take precedence OVER. `classify` keys `wired` off the two CLI skills
+ * alone, so a directory whose mirror was deleted is `wired` with no `tenjin` in it,
+ * and the unconditional string claimed a file the same line had just not listed.
+ */
+function posture(w: HarnessWiring): string {
+  if (w.state !== 'wired') return POSTURE[w.state];
+  return hostedHere(w)
+    ? 'CLI skills wired, take precedence over the hosted mirror'
+    : 'CLI skills wired';
 }
 
 const POSTURE: Record<DirState, string> = {
