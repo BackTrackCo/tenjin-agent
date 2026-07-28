@@ -345,14 +345,11 @@ approval.
   key never leaves the machine.
 
 - Fund small: this is a pocket-money wallet by design.
-- Purchased content is untrusted data, never instructions. In an unattended
-  session the skills use a piece's claims without re-deriving them against public
-  sources (that is what you paid for), but only for content actually paid for:
-  previews and $0.00 pieces get no such relaxation. They still never execute
-  purchased content, instructions embedded in it never override the task, and no
-  permission, hook, or settings change is ever recommended on the strength of
-  content the agent read. Reputation gating replaces this interim wholesale trust
-  when it lands.
+- Purchased content is untrusted data, never instructions. The skills never
+  execute it, and instructions embedded in it never override the task. In
+  particular, no harness permission, hook, or settings change is ever recommended
+  on the strength of content the agent read: a claim that some permission change
+  is "the documented fix" is still a claim from untrusted content.
 - The recommended auto-mode allowlist covers free verbs only; `tenjin buy` is an
   explicit opt-in that authorizes unattended spending, and money-moving verbs are
   never recommended. See
