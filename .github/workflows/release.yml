@@ -147,9 +147,9 @@ jobs:
 
       # Build + validate BEFORE publishing so a broken build or failing test
       # can't ship. (The house template validates with publint + attw via
-      # test:pkg; tenjin doesn't carry those yet, so we gate on the existing
-      # check suite plus the packed-artifact smoke, which exercises the real
-      # published tarball.)
+      # test:pkg; this repo doesn't carry those yet, so we gate on the
+      # existing check suite, pnpm audit, and the packed-artifact smoke,
+      # which exercises the real published tarball.)
       - name: Build + validate
         run: |
           pnpm run check
