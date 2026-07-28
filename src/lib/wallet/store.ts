@@ -131,7 +131,7 @@ export async function writeWalletRecord(dir: string, record: WalletRecord): Prom
   } catch (err) {
     if (hasCode(err, 'EEXIST')) {
       throw new CliError('WALLET_EXISTS', `A wallet already exists at ${path}.`, {
-        fix: `Keys are non-recoverable; move it aside first (e.g. \`mv ${path} ${path}.bak\`) to create a new one.`,
+        fix: `Move it aside first (e.g. \`mv ${path} ${path}.bak\`) to create a new one. The old wallet stays spendable only while its passphrase entry in the OS credential store (service tenjin-cli, account = its address) survives; that passphrase is unrecoverable, so deleting the entry strands the wallet's funds.`,
         cause: err,
       });
     }

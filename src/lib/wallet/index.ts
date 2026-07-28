@@ -6,7 +6,7 @@ import type { CommandContext } from '../../context';
 import type { WalletDescription, WalletProvider } from './provider';
 
 export * from './provider';
-export { createLocalWallet, type LocalWalletInfo } from './local';
+export { createLocalWallet, type CreatePassphrase, type LocalWalletInfo } from './local';
 export {
   createLocalSpendAuthorizer,
   type SpendAuthorizer,

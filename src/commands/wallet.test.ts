@@ -59,6 +59,45 @@ async function catchCliError(p: Promise<unknown>): Promise<CliError> {
 }
 
 const walletFile = () => join(dataDir, 'wallet.json');
+
+/**
+ * An in-memory macOS keychain behind the real `security` argv/stdin contract:
+ * account -> passphrase entries, duplicate adds FAIL (matching the -U-less
+ * add-generic-password), reads miss with an error. `writes` records every
+ * `security -i` call for argv-hygiene assertions.
+ */
+function fakeKeychain(initial: Record<string, string> = {}): {
+  exec: ExecFn;
+  entries: Map<string, string>;
+  writes: { args: string[]; stdin?: string }[];
+} {
+  const entries = new Map(Object.entries(initial));
+  const writes: { args: string[]; stdin?: string }[] = [];
+  const exec: ExecFn = async (file, args, stdin) => {
+    expect(file).toBe('security');
+    if (args[0] === '-i') {
+      writes.push({ args, stdin });
+      const m = stdin?.match(/^add-generic-password -s tenjin-cli -a (\S+) -w '([^']*)'\n$/);
+      if (!m) throw new Error(`unexpected security -i payload: ${String(stdin)}`);
+      if (entries.has(m[1] as string)) throw new Error('errSecDuplicateItem');
+      entries.set(m[1] as string, m[2] as string);
+      return { stdout: '', stderr: '' };
+    }
+    if (args[0] === 'find-generic-password') {
+      const value = entries.get(args[args.indexOf('-a') + 1] as string);
+      if (value === undefined) throw new Error('could not be found');
+      return { stdout: `${value}\n`, stderr: '' };
+    }
+    if (args[0] === 'delete-generic-password') {
+      if (!entries.delete(args[args.indexOf('-a') + 1] as string)) {
+        throw new Error('could not be found');
+      }
+      return { stdout: '', stderr: '' };
+    }
+    throw new Error(`unexpected security call: ${args.join(' ')}`);
+  };
+  return { exec, entries, writes };
+}
 const readStored = async () =>
   JSON.parse(await readFile(walletFile(), 'utf8')) as {
     schemaVersion: number;
@@ -143,6 +182,11 @@ describe('runWalletCreate', () => {
     expect(err.code).toBe('WALLET_EXISTS');
     expect(err.exitCode).toBe(3);
     expect(err.fix).toContain(walletFile());
+    // The unrecoverable part is the PASSPHRASE in the OS credential store, and the
+    // error must name that risk rather than pointing only at the keystore file.
+    expect(err.fix).toContain('passphrase');
+    expect(err.fix).toContain('credential store');
+    expect(err.fix).toContain('strands');
   });
 
   it('warns about env shadowing in both data and human lines', async () => {
@@ -153,28 +197,57 @@ describe('runWalletCreate', () => {
     expect(res.humanLines?.some((l) => l.includes('TENJIN_WALLET_KEY'))).toBe(true);
   });
 
-  it('auto-generates and stores a keychain passphrase on macOS when env is unset', async () => {
+  it('auto-generates and stores a per-address keychain passphrase on macOS when env is unset', async () => {
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', ''); // clear the env passphrase
-    let seenArgs: string[] | undefined;
-    let seenStdin: string | undefined;
-    const exec: ExecFn = async (file, args, stdin) => {
-      // The write goes through `security -i`: the secret is on stdin, never argv.
-      expect(file).toBe('security');
-      seenArgs = args;
-      seenStdin = stdin;
-      return { stdout: '', stderr: '' };
-    };
+    const { exec, entries, writes } = fakeKeychain();
     const res = await runWalletCreate(makeCtx(), {
       passphrase: { platform: 'darwin', isTTY: false, exec },
     });
-    expect((res.data as { passphraseSource: string }).passphraseSource).toBe('keychain');
-    expect(res.humanLines?.some((l) => l.includes('keychain'))).toBe(true);
-    // argv is exactly ['-i']; the generated base64url passphrase lives only in stdin.
-    expect(seenArgs).toEqual(['-i']);
-    const stored = seenStdin?.match(/-w '([^']+)'/)?.[1];
+    const data = res.data as { address: string; passphraseSource: string };
+    const account = data.address.toLowerCase();
+    expect(data.passphraseSource).toBe('keychain');
+    expect(res.humanLines?.some((l) => l.includes('keychain') && l.includes(account))).toBe(true);
+    // Exactly one write, keyed by the NEW wallet's own address — no shared slot,
+    // no -U update-in-place; the secret transits stdin, never argv.
+    expect(writes).toHaveLength(1);
+    const write = writes[0] as { args: string[]; stdin?: string };
+    expect(write.args).toEqual(['-i']);
+    expect(write.stdin).toContain(`-a ${account} `);
+    expect(write.stdin).not.toContain('-U');
+    const stored = entries.get(account);
     expect(stored).toBeDefined();
     expect((stored as string).length).toBeGreaterThanOrEqual(32);
     expect(stored as string).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(write.args.some((a) => a.includes(stored as string))).toBe(false);
+    expect(entries.size).toBe(1); // nothing else was written
+  });
+
+  it('create with existing wallets present never overwrites their passphrase entries', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    // A machine with a legacy shared slot AND an existing per-address entry.
+    const { exec, entries } = fakeKeychain({
+      wallet: 'legacy-wallet-pass',
+      '0x00000000219ab540356cbb839cbe05303d7705fa': 'old-wallet-pass',
+    });
+    const opts = { passphrase: { platform: 'darwin' as NodeJS.Platform, isTTY: false, exec } };
+
+    const firstRes = await runWalletCreate(makeCtx(), opts);
+    const firstAccount = (firstRes.data as { address: string }).address.toLowerCase();
+    const firstPass = entries.get(firstAccount) as string;
+
+    // The operator's exact loss scenario from issue #32: move the wallet file
+    // aside and create another one. The old wallet's entry MUST survive.
+    const { rename } = await import('node:fs/promises');
+    await rename(walletFile(), `${walletFile()}.bak`);
+    const secondRes = await runWalletCreate(makeCtx(), opts);
+    const secondAccount = (secondRes.data as { address: string }).address.toLowerCase();
+
+    expect(secondAccount).not.toBe(firstAccount);
+    expect(entries.get(firstAccount)).toBe(firstPass); // first wallet still spendable
+    expect(entries.get('wallet')).toBe('legacy-wallet-pass'); // legacy slot untouched
+    expect(entries.get('0x00000000219ab540356cbb839cbe05303d7705fa')).toBe('old-wallet-pass');
+    expect(entries.get(secondAccount)).toBeDefined();
+    expect(entries.size).toBe(4); // two pre-existing + two created, zero destroyed
   });
 
   it('errors USAGE when no passphrase source is available (headless, non-mac)', async () => {

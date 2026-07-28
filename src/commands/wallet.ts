@@ -46,7 +46,7 @@ export async function runWalletCreate(
     humanLines: [
       `Wallet created: ${address}`,
       `Key stored ${KEY_STORAGE}.`,
-      passphraseNote(source),
+      passphraseNote(source, address),
       FUNDING_LINE,
       ...warnings,
     ],
@@ -57,14 +57,18 @@ export async function runWalletCreate(
  * Run the whole create critical section under a cross-process file lock: the
  * existence pre-check, the passphrase generate-and-store, and the no-clobber
  * write. Without the lock these interleave across two concurrent creates — each
- * generates a distinct passphrase and persists it to the OS store (which is
- * last-writer-wins on every platform) BEFORE the exclusive file write, so a
- * different process can win the file, orphaning the winning wallet from the
- * passphrase the store now holds (which then decrypts nothing, unrecoverably).
- * Serializing means the loser blocks until the winner commits, then trips
- * refuseIfWalletExists and exits WALLET_EXISTS having never generated or stored a
- * passphrase. The store-before-write ordering stays (it still guards the
- * single-process crash window), and the exclusive write stays the final authority.
+ * generates a distinct passphrase and persists it to the OS store BEFORE the
+ * exclusive file write, so a different process could win the file while this
+ * one's per-address entry names a wallet that never landed. Serializing means
+ * the loser blocks until the winner commits, then trips refuseIfWalletExists and
+ * exits WALLET_EXISTS having never generated or stored a passphrase. The
+ * store-before-write ordering stays (it still guards the single-process crash
+ * window), and the exclusive write stays the final authority.
+ *
+ * The passphrase is resolved INSIDE createLocalWallet's address callback so the
+ * OS-store entry is keyed to the new wallet's own address — a create can only
+ * ever write its own entry and can never overwrite (or delete) the entry of any
+ * existing wallet (issue #32).
  */
 async function createWalletLocked(
   dir: string,
@@ -77,12 +81,19 @@ async function createWalletLocked(
   try {
     return await withFileLock(lockPath, async () => {
       await refuseIfWalletExists(dir);
-      const { passphrase, source } = await resolvePassphraseForCreate({
-        env: process.env,
-        dir,
-        ...opts.passphrase,
+      let source: PassphraseSource = 'env';
+      const { address, walletPath: path } = await createLocalWallet(dir, async (forAddress) => {
+        const resolved = await resolvePassphraseForCreate(
+          {
+            env: process.env,
+            dir,
+            ...opts.passphrase,
+          },
+          forAddress,
+        );
+        source = resolved.source;
+        return resolved.passphrase;
       });
-      const { address, walletPath: path } = await createLocalWallet(dir, passphrase);
       return { address, walletPath: path, source };
     });
   } catch (err) {
@@ -100,14 +111,15 @@ async function createWalletLocked(
 }
 
 /** Where the encryption passphrase lives, and what the user must remember. */
-function passphraseNote(source: PassphraseSource): string {
+function passphraseNote(source: PassphraseSource, address: string): string {
+  const account = address.toLowerCase();
   switch (source) {
     case 'keychain':
-      return 'Passphrase saved to your macOS keychain (service tenjin-cli); signing will be transparent on this machine.';
+      return `Passphrase saved to your macOS keychain (service tenjin-cli, account ${account}); signing will be transparent on this machine.`;
     case 'dpapi':
-      return 'Passphrase saved to a DPAPI-encrypted file, readable only by you on this Windows machine; signing will be transparent here.';
+      return `Passphrase saved to a DPAPI-encrypted per-wallet file (passphrase.${account}.dpapi), readable only by you on this Windows machine; signing will be transparent here.`;
     case 'secret-service':
-      return 'Passphrase saved to your Linux keyring (Secret Service, service tenjin-cli); signing will be transparent on this machine.';
+      return `Passphrase saved to your Linux keyring (Secret Service, service tenjin-cli, account ${account}); signing will be transparent on this machine.`;
     case 'env':
       return 'Encrypted with TENJIN_WALLET_PASSPHRASE; keep that value to sign.';
     case 'prompt':
@@ -178,12 +190,15 @@ export async function runWalletBalance(
   };
 }
 
-/** create refuses to overwrite: keys are non-recoverable and may hold funds. */
+/**
+ * create refuses to overwrite: the wallet decrypts only with the PASSPHRASE
+ * stored in the OS credential store, and losing either half strands any funds.
+ */
 async function refuseIfWalletExists(dir: string): Promise<void> {
   if (!(await walletFileExists(dir))) return;
   const path = walletPath(dir);
   throw new CliError('WALLET_EXISTS', `A wallet already exists at ${path}.`, {
-    fix: `Keys are non-recoverable; move it aside first (e.g. \`mv ${path} ${path}.bak\`) to create a new one.`,
+    fix: `Move it aside first (e.g. \`mv ${path} ${path}.bak\`) to create a new one. The old wallet stays spendable only while its passphrase entry in the OS credential store (service tenjin-cli, account = its address) survives; that passphrase is unrecoverable, so deleting the entry strands the wallet's funds.`,
   });
 }
 

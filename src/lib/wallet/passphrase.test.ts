@@ -2,10 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { passphraseBlobPath } from '../paths';
+import { passphraseBlobPath, passphraseBlobPathFor } from '../paths';
 import {
   resolvePassphrase,
   resolvePassphraseForCreate,
+  walletStoreAccount,
   type ExecFn,
   type PromptFn,
 } from './passphrase';
@@ -40,10 +41,60 @@ function recordingExec(handler: (call: ExecCall) => { stdout?: string; stderr?: 
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const enoent = (): Error => Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
 
+/** A fixed wallet address for the resolve calls; ACCOUNT is its store account form. */
+const ADDRESS = '0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B';
+const ACCOUNT = ADDRESS.toLowerCase();
+/** A second wallet standing in for a previously created one. */
+const OTHER_ADDRESS = '0x00000000219ab540356cBB839Cbe05303d7705Fa';
+const OTHER_ACCOUNT = OTHER_ADDRESS.toLowerCase();
+const LEGACY_ACCOUNT = 'wallet';
+
 /** The first recorded call, asserted present (satisfies noUncheckedIndexedAccess). */
 function first(calls: ExecCall[]): ExecCall {
   expect(calls.length).toBeGreaterThan(0);
   return calls[0] as ExecCall;
+}
+
+/**
+ * An in-memory macOS keychain: a map of account -> passphrase behind a real
+ * `security` argv/stdin contract. Duplicate adds FAIL (matching a `-U`-less
+ * add-generic-password), reads miss with an error, deletes remove the entry.
+ * Every write must arrive over stdin via `security -i`; any unexpected payload
+ * throws so a behavior drift cannot pass silently.
+ */
+function fakeKeychain(initial: Record<string, string> = {}): {
+  exec: ExecFn;
+  entries: Map<string, string>;
+  calls: ExecCall[];
+} {
+  const entries = new Map(Object.entries(initial));
+  const calls: ExecCall[] = [];
+  const exec: ExecFn = async (file, args, stdin) => {
+    calls.push({ file, args, stdin });
+    expect(file).toBe('security');
+    if (args[0] === '-i') {
+      const m = stdin?.match(/^add-generic-password -s tenjin-cli -a (\S+) -w '([^']*)'\n$/);
+      if (!m) throw new Error(`unexpected security -i payload: ${String(stdin)}`);
+      const account = m[1] as string;
+      const pass = m[2] as string;
+      if (entries.has(account)) throw new Error('errSecDuplicateItem'); // no -U anywhere
+      entries.set(account, pass);
+      return { stdout: '', stderr: '' };
+    }
+    if (args[0] === 'find-generic-password') {
+      const account = args[args.indexOf('-a') + 1] as string;
+      const value = entries.get(account);
+      if (value === undefined) throw new Error('could not be found');
+      return { stdout: `${value}\n`, stderr: '' };
+    }
+    if (args[0] === 'delete-generic-password') {
+      const account = args[args.indexOf('-a') + 1] as string;
+      if (!entries.delete(account)) throw new Error('could not be found');
+      return { stdout: '', stderr: '' };
+    }
+    throw new Error(`unexpected security call: ${args.join(' ')}`);
+  };
+  return { exec, entries, calls };
 }
 
 let tmp: string;
@@ -54,15 +105,29 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
+describe('walletStoreAccount', () => {
+  it('lowercases a checksummed address', () => {
+    expect(walletStoreAccount(ADDRESS)).toBe(ACCOUNT);
+  });
+
+  it('refuses a non-address (defense for the piped keychain command)', () => {
+    expect(() => walletStoreAccount('wallet')).toThrow();
+    expect(() => walletStoreAccount("0x'; rm -rf /")).toThrow();
+  });
+});
+
 describe('resolvePassphrase — env and platform selection', () => {
   it('env beats every OS store and never touches exec', async () => {
     const { exec, calls } = recordingExec(() => new Error('exec must not run'));
-    const res = await resolvePassphrase({
-      env: { TENJIN_WALLET_PASSPHRASE: 'from-env' },
-      platform: 'darwin',
-      isTTY: false,
-      exec,
-    });
+    const res = await resolvePassphrase(
+      {
+        env: { TENJIN_WALLET_PASSPHRASE: 'from-env' },
+        platform: 'darwin',
+        isTTY: false,
+        exec,
+      },
+      ADDRESS,
+    );
     expect(res).toEqual({ passphrase: 'from-env', source: 'env' });
     expect(calls).toHaveLength(0);
   });
@@ -70,62 +135,195 @@ describe('resolvePassphrase — env and platform selection', () => {
   it('an unsupported platform has no store: a store miss falls straight to USAGE', async () => {
     const { exec, calls } = recordingExec(() => new Error('exec must not run'));
     await expect(
-      resolvePassphrase({ env: {}, platform: 'freebsd', isTTY: false, exec }),
+      resolvePassphrase({ env: {}, platform: 'freebsd', isTTY: false, exec }, ADDRESS),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
   });
 
-  it('falls through a store miss to the interactive prompt', async () => {
-    const { exec } = recordingExec(() => new Error('not found')); // keychain miss
+  it('falls through a store miss (own entry AND legacy) to the interactive prompt', async () => {
+    const { exec, calls } = recordingExec(() => new Error('not found')); // keychain misses
     const prompt: PromptFn = async () => 'typed-pass';
-    const res = await resolvePassphrase({ env: {}, platform: 'darwin', isTTY: true, exec, prompt });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: true, exec, prompt },
+      ADDRESS,
+    );
     expect(res).toEqual({ passphrase: 'typed-pass', source: 'prompt' });
+    // Both the per-address entry and the legacy slot were tried before prompting.
+    expect(calls).toHaveLength(2);
   });
 });
 
 describe('macOS keychain backend', () => {
-  it('read hit: find-generic-password -w yields the stored passphrase', async () => {
-    const { exec, calls } = recordingExec(() => ({ stdout: 'stored-pass\n' }));
-    const res = await resolvePassphrase({ env: {}, platform: 'darwin', isTTY: false, exec });
+  it('read hit: find-generic-password -w on the wallet OWN account yields the passphrase', async () => {
+    const { exec, calls } = fakeKeychain({ [ACCOUNT]: 'stored-pass' });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
     expect(res).toEqual({ passphrase: 'stored-pass', source: 'keychain' });
     const call = first(calls);
     expect(call.file).toBe('security');
     expect(call.args).toContain('find-generic-password');
+    expect(call.args).toContain(ACCOUNT); // per-wallet account, never the shared constant
     expect(call.stdin).toBeUndefined();
   });
 
   it('read miss: a nonzero `security` exit degrades to USAGE (no TTY)', async () => {
     const { exec } = recordingExec(() => new Error('SecKeychainSearchCopyNext: not found'));
     await expect(
-      resolvePassphrase({ env: {}, platform: 'darwin', isTTY: false, exec }),
+      resolvePassphrase({ env: {}, platform: 'darwin', isTTY: false, exec }, ADDRESS),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
-  it('store success: writes via `security -i`, secret on stdin and never in argv', async () => {
-    const { exec, calls } = recordingExec(() => ({ stdout: '' }));
-    const res = await resolvePassphraseForCreate({
-      env: {},
-      platform: 'darwin',
-      isTTY: false,
-      exec,
-    });
+  it('store success: writes via `security -i` under the wallet address, no -U, verified by read-back', async () => {
+    const { exec, entries, calls } = fakeKeychain();
+    const res = await resolvePassphraseForCreate(
+      {
+        env: {},
+        platform: 'darwin',
+        isTTY: false,
+        exec,
+      },
+      ADDRESS,
+    );
     expect(res.source).toBe('keychain');
     expect(res.passphrase).toMatch(BASE64URL);
-    expect(calls).toHaveLength(1);
-    const call = first(calls);
-    expect(call.file).toBe('security');
-    expect(call.args).toEqual(['-i']); // secret is NOT in argv
-    expect(call.stdin).toBe(
-      `add-generic-password -U -s tenjin-cli -a wallet -w '${res.passphrase}'\n`,
+    // Exactly one add (via -i, secret on stdin) and one verifying read-back.
+    expect(calls).toHaveLength(2);
+    const add = first(calls);
+    expect(add.args).toEqual(['-i']); // secret is NOT in argv
+    expect(add.stdin).toBe(
+      `add-generic-password -s tenjin-cli -a ${ACCOUNT} -w '${res.passphrase}'\n`,
     );
-    expect(call.args.some((a) => a.includes(res.passphrase))).toBe(false);
+    expect(add.stdin).not.toContain('-U'); // never update-in-place over an existing entry
+    expect(add.args.some((a) => a.includes(res.passphrase))).toBe(false);
+    expect(entries.get(ACCOUNT)).toBe(res.passphrase);
+    expect(entries.has(LEGACY_ACCOUNT)).toBe(false); // create never touches the legacy slot
   });
 
   it('store failure: a `security` error degrades to USAGE', async () => {
     const { exec } = recordingExec(() => new Error('User interaction is not allowed.'));
     await expect(
-      resolvePassphraseForCreate({ env: {}, platform: 'darwin', isTTY: false, exec }),
+      resolvePassphraseForCreate({ env: {}, platform: 'darwin', isTTY: false, exec }, ADDRESS),
     ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  it('store write that does not read back degrades (never encrypt with an unverified passphrase)', async () => {
+    // The add "succeeds" but the read-back finds nothing: create must not trust it.
+    const { exec } = recordingExec((call) =>
+      call.args[0] === '-i' ? { stdout: '' } : new Error('not found'),
+    );
+    await expect(
+      resolvePassphraseForCreate({ env: {}, platform: 'darwin', isTTY: false, exec }, ADDRESS),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+});
+
+describe('per-wallet entries and the legacy shared slot', () => {
+  it('create with existing wallets present writes ONLY its own entry and overwrites nothing', async () => {
+    const { exec, entries, calls } = fakeKeychain({
+      [OTHER_ACCOUNT]: 'other-wallet-pass',
+      [LEGACY_ACCOUNT]: 'legacy-pass',
+    });
+    const res = await resolvePassphraseForCreate(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
+    // The new wallet got its own entry; every pre-existing entry is untouched.
+    expect(entries.get(ACCOUNT)).toBe(res.passphrase);
+    expect(entries.get(OTHER_ACCOUNT)).toBe('other-wallet-pass');
+    expect(entries.get(LEGACY_ACCOUNT)).toBe('legacy-pass');
+    // And no delete was ever attempted.
+    expect(calls.every((c) => c.args[0] !== 'delete-generic-password')).toBe(true);
+  });
+
+  it('a second create cannot overwrite an existing per-address entry (duplicate add fails)', async () => {
+    const { exec, entries } = fakeKeychain({ [ACCOUNT]: 'the-original-pass' });
+    // Same address again (cannot happen with fresh random keys; simulates the
+    // worst case): the -U-less add fails, resolution degrades instead of clobbering.
+    await expect(
+      resolvePassphraseForCreate({ env: {}, platform: 'darwin', isTTY: false, exec }, ADDRESS),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(entries.get(ACCOUNT)).toBe('the-original-pass');
+  });
+
+  it('read prefers the per-address entry over the legacy slot and offers no migration', async () => {
+    const { exec } = fakeKeychain({
+      [ACCOUNT]: 'own-pass',
+      [LEGACY_ACCOUNT]: 'legacy-pass',
+    });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
+    expect(res.passphrase).toBe('own-pass');
+    expect(res.migrateLegacy).toBeUndefined();
+  });
+
+  it('legacy fallback: serves the legacy passphrase and migrateLegacy re-keys it (copy, verify, then remove)', async () => {
+    const legacyPass = 'legacy-migration-pass';
+    const { exec, entries, calls } = fakeKeychain({ [LEGACY_ACCOUNT]: legacyPass });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
+    expect(res.passphrase).toBe(legacyPass);
+    expect(res.source).toBe('keychain');
+    expect(res.migrateLegacy).toBeDefined();
+    // Nothing has been migrated yet — resolution alone never mutates the store.
+    expect(entries.get(LEGACY_ACCOUNT)).toBe(legacyPass);
+    expect(entries.has(ACCOUNT)).toBe(false);
+
+    await expect(res.migrateLegacy?.()).resolves.toBe(true);
+    expect(entries.get(ACCOUNT)).toBe(legacyPass);
+    expect(entries.has(LEGACY_ACCOUNT)).toBe(false);
+
+    // Ordering: the copy (add) and its verifying read-back both happened BEFORE the delete.
+    const kinds = calls.map((c) => (c.args[0] === '-i' ? 'add' : c.args[0]));
+    const addIdx = kinds.indexOf('add');
+    const delIdx = kinds.indexOf('delete-generic-password');
+    expect(addIdx).toBeGreaterThanOrEqual(0);
+    expect(delIdx).toBeGreaterThan(addIdx);
+    expect(kinds.slice(addIdx + 1, delIdx)).toContain('find-generic-password');
+  });
+
+  it('migration keeps the legacy entry when the copy cannot be verified', async () => {
+    // A keychain where adds are accepted but the per-address read-back stays empty:
+    // the copy is unverifiable, so the legacy slot must survive.
+    const { exec, calls } = recordingExec((call) => {
+      if (call.args[0] === '-i') return { stdout: '' }; // add "succeeds"
+      if (call.args[0] === 'find-generic-password') {
+        const account = call.args[call.args.indexOf('-a') + 1];
+        if (account === LEGACY_ACCOUNT) return { stdout: 'legacy-pass\n' };
+        return new Error('could not be found'); // per-address read-back always misses
+      }
+      return new Error(`unexpected: ${call.args.join(' ')}`);
+    });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
+    await expect(res.migrateLegacy?.()).resolves.toBe(false);
+    // No delete was ever attempted.
+    expect(calls.every((c) => c.args[0] !== 'delete-generic-password')).toBe(true);
+  });
+
+  it('migration keeps the legacy entry when the copy write itself fails', async () => {
+    const { exec, calls } = recordingExec((call) => {
+      if (call.args[0] === '-i') return new Error('errSecDuplicateItem');
+      if (call.args[0] === 'find-generic-password') {
+        const account = call.args[call.args.indexOf('-a') + 1];
+        if (account === LEGACY_ACCOUNT) return { stdout: 'legacy-pass\n' };
+        return new Error('could not be found');
+      }
+      return new Error(`unexpected: ${call.args.join(' ')}`);
+    });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
+    await expect(res.migrateLegacy?.()).resolves.toBe(false);
+    expect(calls.every((c) => c.args[0] !== 'delete-generic-password')).toBe(true);
   });
 });
 
@@ -141,35 +339,63 @@ describe('Windows DPAPI backend', () => {
     return { stdout: Buffer.from(stdin ?? '', 'utf8').toString('base64'), stderr: '' };
   };
 
-  it('roundtrip: store writes a DPAPI blob file, read unprotects it back', async () => {
-    const created = await resolvePassphraseForCreate({
-      env: {},
-      dir: tmp,
-      platform: 'win32',
-      isTTY: false,
-      exec: fakeDpapi,
-    });
+  it('roundtrip: store writes a PER-WALLET DPAPI blob file, read unprotects it back', async () => {
+    const created = await resolvePassphraseForCreate(
+      {
+        env: {},
+        dir: tmp,
+        platform: 'win32',
+        isTTY: false,
+        exec: fakeDpapi,
+      },
+      ADDRESS,
+    );
     expect(created.source).toBe('dpapi');
     expect(created.passphrase).toMatch(BASE64URL);
 
-    // The on-disk file is the (fake) ciphertext, not the plaintext passphrase.
-    const blob = await readFile(passphraseBlobPath(tmp), 'utf8');
+    // The on-disk file is the (fake) ciphertext at the PER-WALLET path; the
+    // legacy shared blob path is never written.
+    const blob = await readFile(passphraseBlobPathFor(ACCOUNT, tmp), 'utf8');
     expect(blob).toBe(Buffer.from(created.passphrase, 'utf8').toString('base64'));
+    await expect(stat(passphraseBlobPath(tmp))).rejects.toMatchObject({ code: 'ENOENT' });
 
-    const read = await resolvePassphrase({
-      env: {},
-      dir: tmp,
-      platform: 'win32',
-      isTTY: false,
-      exec: fakeDpapi,
-    });
+    const read = await resolvePassphrase(
+      {
+        env: {},
+        dir: tmp,
+        platform: 'win32',
+        isTTY: false,
+        exec: fakeDpapi,
+      },
+      ADDRESS,
+    );
     expect(read).toEqual({ passphrase: created.passphrase, source: 'dpapi' });
+  });
+
+  it('legacy blob fallback: served with a migration that re-keys the file and removes the old blob', async () => {
+    // Seed only the LEGACY shared blob (a pre-per-wallet install layout); the
+    // fake DPAPI ciphertext is just base64 of the plaintext.
+    const legacyPass = 'legacy-dpapi-pass';
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(passphraseBlobPath(tmp), Buffer.from(legacyPass, 'utf8').toString('base64'));
+
+    const res = await resolvePassphrase(
+      { env: {}, dir: tmp, platform: 'win32', isTTY: false, exec: fakeDpapi },
+      ADDRESS,
+    );
+    expect(res.passphrase).toBe(legacyPass);
+    expect(res.migrateLegacy).toBeDefined();
+    await expect(res.migrateLegacy?.()).resolves.toBe(true);
+    // Re-keyed: per-wallet blob decodes to the passphrase, legacy blob is gone.
+    const migrated = await readFile(passphraseBlobPathFor(ACCOUNT, tmp), 'utf8');
+    expect(Buffer.from(migrated.trim(), 'base64').toString('utf8')).toBe(legacyPass);
+    await expect(stat(passphraseBlobPath(tmp))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('read miss: a missing blob file returns null WITHOUT spawning PowerShell', async () => {
     const { exec, calls } = recordingExec(() => ({ stdout: '' }));
     await expect(
-      resolvePassphrase({ env: {}, dir: tmp, platform: 'win32', isTTY: false, exec }),
+      resolvePassphrase({ env: {}, dir: tmp, platform: 'win32', isTTY: false, exec }, ADDRESS),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
   });
@@ -177,50 +403,72 @@ describe('Windows DPAPI backend', () => {
   it('store failure: a PowerShell error degrades to USAGE and writes no blob', async () => {
     const { exec } = recordingExec(() => new Error('powershell.exe not found'));
     await expect(
-      resolvePassphraseForCreate({ env: {}, dir: tmp, platform: 'win32', isTTY: false, exec }),
+      resolvePassphraseForCreate(
+        { env: {}, dir: tmp, platform: 'win32', isTTY: false, exec },
+        ADDRESS,
+      ),
     ).rejects.toMatchObject({ code: 'USAGE' });
+    await expect(stat(passphraseBlobPathFor(ACCOUNT, tmp))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
     await expect(stat(passphraseBlobPath(tmp))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 
 describe('desktop-Linux secret-service backend', () => {
-  it('read hit: secret-tool lookup yields the stored passphrase', async () => {
+  it('read hit: secret-tool lookup on the wallet own account yields the stored passphrase', async () => {
     const { exec, calls } = recordingExec(() => ({ stdout: 'secret-pass' }));
-    const res = await resolvePassphrase({ env: {}, platform: 'linux', isTTY: false, exec });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'linux', isTTY: false, exec },
+      ADDRESS,
+    );
     expect(res).toEqual({ passphrase: 'secret-pass', source: 'secret-service' });
     const call = first(calls);
     expect(call.file).toBe('secret-tool');
     expect(call.args).toContain('lookup');
+    expect(call.args).toContain(ACCOUNT);
   });
 
   it('read miss: secret-tool not installed (ENOENT) degrades to USAGE', async () => {
     const { exec, calls } = recordingExec(() => enoent());
     await expect(
-      resolvePassphrase({ env: {}, platform: 'linux', isTTY: false, exec }),
+      resolvePassphrase({ env: {}, platform: 'linux', isTTY: false, exec }, ADDRESS),
     ).rejects.toMatchObject({ code: 'USAGE' });
-    expect(calls).toHaveLength(1); // the lookup was attempted, then degraded silently
+    expect(calls).toHaveLength(2); // own entry, then legacy — both degraded silently
   });
 
-  it('store success: secret-tool store, secret on stdin and never in argv', async () => {
-    const { exec, calls } = recordingExec(() => ({ stdout: '' }));
-    const res = await resolvePassphraseForCreate({
-      env: {},
-      platform: 'linux',
-      isTTY: false,
-      exec,
+  it('store success: secret-tool store under the wallet account, secret on stdin, verified by read-back', async () => {
+    let stored = '';
+    const { exec, calls } = recordingExec((call) => {
+      if (call.args[0] === 'store') {
+        stored = call.stdin ?? '';
+        return { stdout: '' };
+      }
+      return { stdout: stored }; // the verifying lookup
     });
+    const res = await resolvePassphraseForCreate(
+      {
+        env: {},
+        platform: 'linux',
+        isTTY: false,
+        exec,
+      },
+      ADDRESS,
+    );
     expect(res.source).toBe('secret-service');
     const call = first(calls);
     expect(call.file).toBe('secret-tool');
     expect(call.args).toContain('store');
+    expect(call.args).toContain(ACCOUNT);
     expect(call.stdin).toBe(res.passphrase);
     expect(call.args.some((a) => a.includes(res.passphrase))).toBe(false);
+    expect(calls).toHaveLength(2); // store + verifying lookup
   });
 
   it('store failure: secret-tool ENOENT degrades to USAGE', async () => {
     const { exec } = recordingExec(() => enoent());
     await expect(
-      resolvePassphraseForCreate({ env: {}, platform: 'linux', isTTY: false, exec }),
+      resolvePassphraseForCreate({ env: {}, platform: 'linux', isTTY: false, exec }, ADDRESS),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 });
@@ -240,14 +488,18 @@ describe('argv hygiene across every backend', () => {
             kept = stdin?.match(/-w '([^']+)'/)?.[1] ?? '';
             return { stdout: '', stderr: '' };
           }
-          return { stdout: `${kept}\n`, stderr: '' }; // find-generic-password -w
+          // find-generic-password -w: only the per-address account is populated.
+          const account = args[args.indexOf('-a') + 1];
+          if (account === ACCOUNT && kept !== '') return { stdout: `${kept}\n`, stderr: '' };
+          throw new Error('not found');
         }
         if (file === 'secret-tool') {
           if (args[0] === 'store') {
             kept = stdin ?? '';
             return { stdout: '', stderr: '' };
           }
-          return { stdout: kept, stderr: '' }; // lookup (no trailing newline)
+          const account = args[args.indexOf('account') + 1];
+          return { stdout: account === ACCOUNT ? kept : '', stderr: '' }; // lookup
         }
         // powershell.exe: fake DPAPI as base64 <-> plaintext.
         const script = args[args.length - 1] ?? '';
@@ -261,14 +513,17 @@ describe('argv hygiene across every backend', () => {
       };
 
       const before = recorded.length;
-      const created = await resolvePassphraseForCreate({
-        env: {},
-        dir,
-        platform,
-        isTTY: false,
-        exec,
-      });
-      const read = await resolvePassphrase({ env: {}, dir, platform, isTTY: false, exec });
+      const created = await resolvePassphraseForCreate(
+        {
+          env: {},
+          dir,
+          platform,
+          isTTY: false,
+          exec,
+        },
+        ADDRESS,
+      );
+      const read = await resolvePassphrase({ env: {}, dir, platform, isTTY: false, exec }, ADDRESS);
       expect(read.passphrase).toBe(created.passphrase);
       for (let i = before; i < recorded.length; i++) {
         const entry = recorded[i];

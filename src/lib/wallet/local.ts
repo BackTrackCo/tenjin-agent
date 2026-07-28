@@ -120,16 +120,30 @@ export interface LocalWalletInfo {
 }
 
 /**
- * Generate a fresh key, encrypt it into a Keystore v3 document with `passphrase`,
+ * The encryption passphrase for a create: a fixed string, or a resolver invoked
+ * with the freshly derived ADDRESS — so passphrase storage can be keyed to the
+ * wallet's own per-address OS-store entry before the key is ever encrypted.
+ */
+export type CreatePassphrase = string | ((address: Address) => Promise<string>);
+
+/**
+ * Generate a fresh key, resolve the passphrase FOR THAT ADDRESS (the resolver
+ * runs after key generation so per-wallet passphrase entries are keyed by the
+ * new address, and before encryption so a stored passphrase always exists by the
+ * time an encrypted wallet does), encrypt the key into a Keystore v3 document,
  * and persist the record NO-CLOBBER. The raw key exists only in memory here and
  * is never written to disk in cleartext. The write, not a caller's pre-check, is
  * the authority: a lost create race throws WALLET_EXISTS rather than overwriting
  * a funded key.
  */
-export async function createLocalWallet(dir: string, passphrase: string): Promise<LocalWalletInfo> {
+export async function createLocalWallet(
+  dir: string,
+  passphrase: CreatePassphrase,
+): Promise<LocalWalletInfo> {
   const key = generatePrivateKey();
   const address = privateKeyToAccount(key).address;
-  const keystore = await encryptToKeystore(key, passphrase);
+  const resolved = typeof passphrase === 'string' ? passphrase : await passphrase(address);
+  const keystore = await encryptToKeystore(key, resolved);
   await writeWalletRecord(dir, walletRecord(address, keystore));
   return { address, walletPath: walletPath(dir) };
 }
@@ -158,10 +172,15 @@ async function loadCredential(deps: LocalProviderDeps): Promise<Credential | nul
 
 /**
  * Build the viem account for SIGNING. An env credential uses its raw key; a file
- * credential decrypts the keystore with the resolved passphrase, then verifies
- * the recovered key derives the stored cleartext address (a tamper signal) before
- * trusting it. A wrong passphrase or corrupt keystore surfaces as
- * WALLET_INVALID_KEY that names where the passphrase comes from.
+ * credential resolves the passphrase FOR ITS ADDRESS (its own per-address OS
+ * store entry, with the legacy shared slot as a migration fallback), decrypts
+ * the keystore, then verifies the recovered key derives the stored cleartext
+ * address (a tamper signal) before trusting it. A legacy-served passphrase is
+ * re-keyed under the wallet's own address only AFTER that proof — a decrypt
+ * failure means the legacy slot belongs to some other wallet, so it is left
+ * untouched and the ambiguity is surfaced instead of guessed away. A wrong
+ * passphrase or corrupt keystore surfaces as WALLET_INVALID_KEY that names where
+ * the passphrase comes from.
  */
 async function accountForSigning(
   cred: Credential,
@@ -172,18 +191,35 @@ async function accountForSigning(
   const cached = signerCache.get(cred.keystore.id);
   if (cached !== undefined) return cached;
 
-  const { passphrase } = await resolvePassphrase({
-    env: deps.env,
-    dir: deps.dir,
-    ...deps.passphrase,
-  });
+  const resolved = await resolvePassphrase(
+    {
+      env: deps.env,
+      dir: deps.dir,
+      ...deps.passphrase,
+    },
+    cred.address,
+  );
   let key: Hex;
   try {
-    const derived = await Keystore.toKeyAsync(cred.keystore, { password: passphrase });
+    const derived = await Keystore.toKeyAsync(cred.keystore, { password: resolved.passphrase });
     key = Keystore.decrypt(cred.keystore, derived);
   } catch (err) {
+    if (resolved.migrateLegacy !== undefined) {
+      // The only durable passphrase came from the legacy shared slot and it does
+      // NOT decrypt this wallet: it almost certainly belongs to whichever wallet
+      // was created last before per-wallet entries existed. Do not migrate, do
+      // not delete — surface the ambiguity and leave the entry for its owner.
+      throw new CliError(
+        'WALLET_INVALID_KEY',
+        'The legacy shared passphrase entry (service tenjin-cli, account "wallet") does not decrypt this wallet.',
+        {
+          fix: "That entry likely belongs to a different wallet created later and was left untouched. If you know this wallet's passphrase, set TENJIN_WALLET_PASSPHRASE or enter it at the prompt in a terminal.",
+          cause: err,
+        },
+      );
+    }
     throw new CliError('WALLET_INVALID_KEY', 'Could not decrypt the wallet keystore.', {
-      fix: 'Check the passphrase: TENJIN_WALLET_PASSPHRASE, the macOS keychain (service tenjin-cli), or the one you enter when prompted.',
+      fix: `Check the passphrase: TENJIN_WALLET_PASSPHRASE, the OS credential store (service tenjin-cli, account ${cred.address.toLowerCase()}), or the one you enter when prompted.`,
       cause: err,
     });
   }
@@ -197,6 +233,11 @@ async function accountForSigning(
       },
     );
   }
+  // Decrypt + address check passed: this wallet provably owns the legacy
+  // passphrase, so re-key it under the wallet's own address (copy, verify, then
+  // remove the legacy slot). Best-effort: on failure the legacy entry remains
+  // the durable copy and the next signing retries the migration.
+  if (resolved.migrateLegacy !== undefined) await resolved.migrateLegacy();
   signerCache.set(cred.keystore.id, account);
   return account;
 }
