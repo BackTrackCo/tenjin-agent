@@ -5,7 +5,8 @@ import { resolveContextSettings, resolvePublishSettings } from '../lib/settings'
 import { PublishModeSchema, parsePublishModeFlag } from '../lib/config';
 import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
 import { UUID_RE } from '../lib/ids';
-import { scan, type ScanFinding } from '../lib/scan';
+import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
+import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal } from '../lib/output';
 import { trimSlash } from '../lib/url';
@@ -158,7 +159,14 @@ export async function runPublish(
   // flag (--provenance, --scope, …) — the card ships to the PUBLIC card, so a flag
   // secret must block exactly like an in-file one. Dedupe by check+excerpt so a
   // frontmatter value (present in both raw and the card) is not double-counted.
-  const findings = dedupeFindings([...scan(raw), ...scan(cardScanText(card))]);
+  // The scan context carries the source project's git remote slugs (offline FS
+  // read, best-effort): a draft quoting its own project's repo/org warns as a
+  // private-by-default reference (open-questions publishing-safety check-set).
+  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(cwd) };
+  const findings = dedupeFindings([
+    ...scan(raw, scanContext),
+    ...scan(cardScanText(card), scanContext),
+  ]);
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 

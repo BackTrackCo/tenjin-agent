@@ -30,19 +30,70 @@ export interface ScanFinding {
   excerpt: string;
 }
 
+/**
+ * Optional caller-supplied context. The scan stays a pure function — of the text
+ * AND the context — with zero model calls; the context only carries deterministic
+ * facts the caller already holds (the source project's git remote slugs/paths at
+ * publish time, per the open-questions publishing-safety check-set).
+ */
+export interface ScanContext {
+  /**
+   * Source-project identifiers treated as private-by-default: git remote
+   * `org/repo` slugs and project paths. Matched case-insensitively as literal
+   * substrings; a mention in the draft warns (the project may be public — the
+   * offline scan cannot know — so this is ambiguity-class, never block).
+   */
+  projectMarkers?: string[];
+}
+
 /** Contiguous quoted/fenced runs at or above this word count read as copied. */
 const LONG_QUOTE_WORDS = 80;
 
-export function scan(text: string): ScanFinding[] {
+export function scan(text: string, context: ScanContext = {}): ScanFinding[] {
   const lines = text.split('\n');
   const findings: ScanFinding[] = [
     ...scanHex64(lines),
     ...scanLineDetectors(lines),
     ...scanPemBlocks(lines),
     ...scanLongVerbatim(lines),
+    ...scanProjectMarkers(lines, context.projectMarkers ?? []),
   ];
   return dedupeAndSort(suppressEmailsInDbUris(findings));
 }
+
+/**
+ * Occurrences of the caller's private project markers (git remote slugs, paths)
+ * in the text — warn 'private-repo-reference'. Literal case-insensitive
+ * substring match; markers shorter than 3 chars are dropped as degenerate.
+ * The excerpt names the matched marker: it is the publisher's own project name,
+ * shown locally so they can find and generalize the reference, not key material.
+ */
+function scanProjectMarkers(lines: string[], markers: string[]): ScanFinding[] {
+  const cleaned = [...new Set(markers.filter((m) => m.trim().length >= 3))];
+  if (cleaned.length === 0) return [];
+  const out: ScanFinding[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const lower = (lines[i] ?? '').toLowerCase();
+    for (const marker of cleaned) {
+      const needle = marker.toLowerCase();
+      let idx = lower.indexOf(needle);
+      while (idx !== -1) {
+        out.push({
+          check: 'private-repo-reference',
+          severity: 'warn',
+          line: i + 1,
+          span: [idx, idx + needle.length],
+          excerpt: marker,
+        });
+        idx = lower.indexOf(needle, idx + needle.length);
+      }
+    }
+  }
+  return out;
+}
+
+// A home-path username that is a docs placeholder, not a real machine username.
+const PLACEHOLDER_USERNAME = /^(?:user(?:name)?|you(?:rname)?|example|foo|me|myuser|somebody)$/i;
 
 /**
  * A db-connection-uri already masks the embedded password; the email detector,
@@ -214,17 +265,85 @@ const LINE_DETECTORS: LineDetector[] = [
     re: /(?<![0-9a-fx])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/gi,
     excerpt: (m) => `${m[0].slice(0, 6)}…${m[0].slice(-4)}`,
   },
-  // Employer-internal markers — warn.
+  // Employer-internal markers — warn. Marker-SHAPED, not word-in-phrase (#36):
+  // the detector targets the uppercase classification legend a document stamp
+  // carries (CONFIDENTIAL, STRICTLY CONFIDENTIAL, INTERNAL ONLY, INTERNAL USE
+  // ONLY, DO NOT DISTRIBUTE), so it is case-SENSITIVE — prose about
+  // "confidential computing" never fires — and CONFIDENTIAL followed by another
+  // all-caps word (CONFIDENTIAL COMPUTING in a shouting heading) reads as a
+  // phrase, not a legend, and is skipped. Chosen tradeoff: a legend that
+  // continues in caps (CONFIDENTIAL INFORMATION) is a false negative; the
+  // phrase-vs-legend ambiguity is undecidable lexically and the miss is
+  // warn-tier.
   {
     check: 'confidential-marker',
     severity: 'warn',
-    re: /\b(?:CONFIDENTIAL|INTERNAL ONLY)\b/gi,
+    re: /\b(?:(?:STRICTLY|COMPANY)\s+)?CONFIDENTIAL\b(?!\s+[A-Z]{2,}\b)|\bINTERNAL(?:\s+USE)?\s+ONLY\b|\bDO\s+NOT\s+DISTRIBUTE\b/g,
     excerpt: (m) => m[0],
   },
   {
     check: 'internal-hostname',
     severity: 'warn',
     re: /\b(?:[a-z0-9-]+\.)+(?:internal|corp|local|lan|intranet)\b/gi,
+    excerpt: (m) => m[0],
+  },
+  // Home-anchored local filesystem paths — warn (open-questions publishing-safety:
+  // private paths). A /Users/<name>/… or /home/<name>/… or C:\Users\<name>\…
+  // path leaks the machine username and private project layout. The username
+  // segment is masked in the excerpt; obvious placeholder usernames
+  // (/home/user/…, /Users/username/…) are docs examples and skip. `~/…` paths
+  // deliberately do NOT fire: they are already generalized.
+  {
+    check: 'local-path',
+    severity: 'warn',
+    re: /(?:\/(?:Users|home)\/([A-Za-z0-9._-]+)(?:\/[^\s"'`)\]}>:,;]+)+|\b[A-Za-z]:\\Users\\([^\\\s"']+)(?:\\[^\\\s"']+)+)/g,
+    excerpt: (m) => {
+      const user = m[1] ?? m[2] ?? '';
+      const masked = user.length > 0 ? m[0].replace(user, '[user]') : m[0];
+      return masked.length > 60 ? `${masked.slice(0, 57)}…` : masked;
+    },
+    skip: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
+  },
+  // Labeled customer/account identifiers — warn (open-questions publishing-safety:
+  // customer identifiers). Fires only on the explicit label + separator + value
+  // shape (customer_id: 84213, Account Number: ACME-0042); the value is masked
+  // like a secret-assignment value since a customer identifier is third-party
+  // data. Chosen tradeoff: an unlabeled identifier (bare CUST-4812) is a false
+  // negative — an unlabeled token is indistinguishable from a SKU or version tag.
+  {
+    check: 'customer-identifier',
+    severity: 'warn',
+    re: /\b((?:customer|client|account|tenant|subscriber)[ _-]?(?:id|number|no))\b\s*[:=#]\s*("[^"]{2,}"|'[^']{2,}'|[A-Za-z0-9][A-Za-z0-9._-]{2,})/gi,
+    excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
+    skip: (m) => {
+      const raw = m[2] ?? '';
+      const value = dequote(raw);
+      if (isPlaceholder(value) || isStructural(value)) return true;
+      // A schema/code RHS (customer_id: string, account_id = user.account_id)
+      // is a declaration, not a leaked identifier — but only when unquoted.
+      return raw === value && isCodeExpression(value);
+    },
+  },
+  // Third-party paid/licensed-content markers — warn (open-questions
+  // publishing-safety: third-party copyrighted inputs). A rights legend or
+  // paywall marker in the draft suggests copied licensed material; ambiguity-
+  // class (the author may hold the rights), so warn, never block.
+  {
+    check: 'paid-content-marker',
+    severity: 'warn',
+    re: /\ball rights reserved\b|\b(?:reprinted|reproduced|used) with permission\b|\bsubscribers?[- ]only\b|\bpremium (?:content|article)\b|\bbehind (?:a|the) paywall\b|\bpaywalled\b|\bnot for (?:redistribution|republication)\b|\bdo not (?:redistribute|republish)\b|(?:©|\(c\)|copyright)\s*(?:19|20)\d{2}\b/gi,
+    excerpt: (m) => m[0],
+  },
+  // Embedded prompt/tool-output instruction patterns — warn (open-questions
+  // publishing-safety: embedded instructions). Source material captured from
+  // prompts or tool output can carry injection-shaped imperatives that would
+  // ship to every future buyer. High-precision imperative shapes only; a bare
+  // "system prompt" mention deliberately does NOT fire (legitimate
+  // agent-engineering content says it constantly).
+  {
+    check: 'embedded-instruction',
+    severity: 'warn',
+    re: /\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|context|messages?)\b|\byou are an? (?:AI|assistant|language model)\b|\bas an AI(?: language model| assistant| model)?\b|<\/?system>|\[\/?INST\]|\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\b|\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\b/gi,
     excerpt: (m) => m[0],
   },
   // Personal data — warn. `email` subsumes corp-domain emails (an internal marker).

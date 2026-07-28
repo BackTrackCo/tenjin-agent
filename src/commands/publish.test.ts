@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
@@ -413,6 +413,45 @@ describe('runPublish — card-flag values pass the scan', () => {
 function stubDeps(): { fetchImpl: typeof fetch } {
   return { fetchImpl: stubServer().fetch };
 }
+
+describe('runPublish — source-project scan context (#36)', () => {
+  async function gitConfigAt(root: string): Promise<void> {
+    await mkdir(join(root, '.git'), { recursive: true });
+    await writeFile(
+      join(root, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:AcmeCorp/secret-svc.git\n',
+      'utf8',
+    );
+  }
+
+  it('a draft mentioning its own repo slug needs confirmation in auto mode', async () => {
+    await gitConfigAt(dir);
+    const file = await writeDoc('# T\n\nas shipped in AcmeCorp/secret-svc last week\n');
+    const { fetch, calls } = stubServer();
+    const { provider } = spyProvider();
+    const err = (await runPublish(
+      baseArgs(file, { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    ).catch((e: unknown) => e)) as { code: string; details: { findings: { check: string }[] } };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.details.findings.map((f) => f.check)).toContain('private-repo-reference');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('a clean draft in the same checkout still auto-publishes', async () => {
+    await gitConfigAt(dir);
+    const { fetch, calls } = stubServer();
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(calls).toHaveLength(1);
+  });
+});
 
 describe('runPublish — draft end to end', () => {
   it('maps --draft to a draft POST and echoes the draft receipt', async () => {

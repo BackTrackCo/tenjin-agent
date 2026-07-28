@@ -113,11 +113,17 @@ follow its draft, sanitize, and pricing rules; never publish bare.
   run-then-render sequence the tenjin-publish skill uses: never ask a generic
   "publish?" before running, or the `--yes` re-run would clear WARN findings
   (PII, wallet addresses) the user never saw.
-- **auto / full-auto**: build the answer card and run `tenjin publish --json` directly.
+- **auto / full-auto**: run the tenjin-publish skill's semantic publish-safety
+  pass FIRST (statement-level classification, competitor-reconstruction check,
+  title/answer-card leak check) — the CLI scan is lexical and you are the only
+  semantic reviewer on these paths. A MISS is evidence of demand, never
+  evidence the answer is safe to publish. Any doubt parks the draft as a
+  candidate instead of publishing. When the pass is clean, build the answer
+  card and run `tenjin publish --json` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
-  re-run with `--yes` on a yes. Park as a candidate only when the publish cannot
-  proceed at all: a hard block, or no wallet. Then tell the user what was
+  re-run with `--yes` on a yes. Otherwise park as a candidate when the publish
+  cannot proceed at all: a hard block, or no wallet. Then tell the user what was
   published, with the URL.
 
 Candidates are local files that never upload on their own; `tenjin candidate
@@ -134,3 +140,8 @@ through the same consent scan.
   a silent side effect: review asks first, auto/full-auto acts on a clean scan
   and tells you with the URL. Never publish content unrelated to the task you
   just completed.
+- A derived answer that leans on private context (the source project's
+  architecture, metrics, roadmap, or implementation order — Tenjin's own
+  included) is candidate-pen material, not publish material, whatever the scan
+  says: the deterministic scan cannot see meaning, so the semantic pass in the
+  tenjin-publish skill is the gate on auto/full-auto paths.
