@@ -58,10 +58,12 @@ Read output defaults to a heading outline, not the body: `--print-body` includes
 the full body, and `--sections <tokens>` includes the leading sections within a
 token budget (deterministic, no model calls).
 
-The search question must be **generalized public text**: derive the smallest
-public phrasing of your task and never include secrets or private context. By
-default the server stores no query text at all; `tenjin config set evalCohort
-true` opts into 90-day retention of the question for retrieval evaluation.
+The search question must be **generalized public text**: strip secrets, private
+identifiers, and internal context, then send what is left as one complete
+natural-language sentence. Retrieval matches wording and meaning, so compressing
+the question to keywords throws away signal. By default the server stores no
+query text at all; `tenjin config set evalCohort true` opts into 90-day retention
+of the question for retrieval evaluation.
 
 > **Money units.** `--max-price`, `--price`, and the spend-policy config values are
 > entered in **decimal USD** at the CLI edge (e.g. `--max-price 0.10`), and emitted
