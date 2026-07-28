@@ -5,7 +5,15 @@ import { join } from 'node:path';
 import { runRead } from './read';
 import { findDelivered, libraryDir, saveDelivery } from '../lib/library';
 import { recordLookup } from '../lib/lookup-store';
-import { buildPaymentRequired, makeReadServer, readBody, reply } from '../lib/read-test-utils';
+import {
+  buildPaymentRequired,
+  makeReadServer,
+  readBody,
+  reply,
+  testSigner,
+  testWalletProvider,
+} from '../lib/read-test-utils';
+import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 import { CliError } from '../lib/errors';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -32,6 +40,36 @@ const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 const neverFetch = (async () => {
   throw new Error('the network must not be touched on this path');
 }) as unknown as typeof fetch;
+
+/**
+ * A wallet provider that fails the test the moment anything asks it for a signer.
+ * `read` resolves a signer ONLY on the paid branch, so every other path passes
+ * this without unlocking a keystore.
+ */
+function neverSignsProvider(): WalletProvider {
+  return {
+    ...testWalletProvider(),
+    getSigner: async (): Promise<TenjinSigner> => {
+      throw new Error('the keystore must not be unlocked on this path');
+    },
+  };
+}
+
+/** Records whether a signer was ever asked for, without failing the test. */
+function countingProvider(): { provider: WalletProvider; signerCalls: () => number } {
+  let n = 0;
+  const base = testWalletProvider();
+  return {
+    provider: {
+      ...base,
+      getSigner: async () => {
+        n += 1;
+        return testSigner();
+      },
+    },
+    signerCalls: () => n,
+  };
+}
 
 describe('runRead, free delivery', () => {
   it('delivers a free 200 and saves it, with no wallet and no payment attempt', async () => {
@@ -87,7 +125,10 @@ describe('runRead, entitled re-read', () => {
     });
 
     // neverFetch: a single request on this path fails the test.
-    const result = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: neverFetch });
+    const result = await runRead({ ref: URL_ }, makeCtx(), {
+      fetchImpl: neverFetch,
+      provider: neverSignsProvider(),
+    });
     const data = result.data as { alreadyDelivered: boolean; entitlement: string };
     expect(data.alreadyDelivered).toBe(true);
     expect(data.entitlement).toBe('purchased');
@@ -114,19 +155,60 @@ describe('runRead, entitled re-read', () => {
       entitlement: 'purchased',
       bodyMd: body.bodyMd,
     });
-    const result = await runRead({ ref: body.id }, makeCtx(), { fetchImpl: neverFetch });
+    const result = await runRead({ ref: body.id }, makeCtx(), {
+      fetchImpl: neverFetch,
+      provider: neverSignsProvider(),
+    });
     expect((result.data as { alreadyDelivered: boolean }).alreadyDelivered).toBe(true);
   });
 });
 
-describe('runRead, paid refusal', () => {
-  it('exits 3 naming the price and pointing at buy, without paying or saving', async () => {
+describe('runRead, entitled remote re-read (SIWX)', () => {
+  it('delivers a piece the wallet already owns via the SIWX auth check, paying nothing', async () => {
+    // Nothing in the local library: this is the cross-machine case — entitled
+    // server-side, absent from disk. The 402 probe is followed by a SIWX-signed
+    // re-read, which the server answers with the full body.
     const pr = buildPaymentRequired();
-    const { fetch, calls } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.entitled(readBody()),
+      payment: () => reply.entitled(readBody()),
+    });
+    const { provider, signerCalls } = countingProvider();
 
-    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
-      (e: unknown) => e,
-    );
+    const result = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch, provider });
+    const data = result.data as { entitlement: string; bodyPath: string };
+
+    expect(data.entitlement).toBe('entitled');
+    await expect(readFile(data.bodyPath, 'utf8')).resolves.toContain('full body');
+    expect(result.humanLines?.[0]).toContain('already owned');
+    // It is stored to the library through the normal delivery path, so the NEXT
+    // read is a local hit that never touches the keystore.
+    await expect(findDelivered(dir, readBody().id)).resolves.not.toBeNull();
+
+    // Exactly probe-then-auth. The mock would have DELIVERED on a payment attempt,
+    // so the absent `payment` phase is a real assertion, not an accident of setup.
+    expect(calls.map((c) => c.phase)).toEqual(['plain', 'siwx']);
+    expect(calls[1]?.headers['payment-signature']).toBeUndefined();
+    expect(signerCalls()).toBe(1);
+  });
+});
+
+describe('runRead, paid refusal', () => {
+  it('exits 3 after the SIWX check comes back unentitled, without ever paying or saving', async () => {
+    const pr = buildPaymentRequired();
+    // The trap: a payment attempt would SUCCEED against this mock. Refusing anyway
+    // is the proof that no payment is constructed, not merely that none succeeded.
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+
+    const err = await runRead({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+    }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CliError);
     const cliErr = err as CliError;
     expect(cliErr.code).toBe('REFUSED');
@@ -137,36 +219,35 @@ describe('runRead, paid refusal', () => {
     expect(cliErr.fix).toContain('tenjin buy');
     expect(cliErr.details).toMatchObject({
       reason: 'payment_required',
+      entitlementCheck: 'siwx_unentitled',
       price: { usd: '0.1', atomic: '100000' },
       buyCommand: `tenjin buy ${URL_}`,
     });
 
-    // One unauthenticated probe, then a refusal: never a SIWX re-check (which would
-    // need the wallet) and never a payment attempt.
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.phase).toBe('plain');
+    // Probe, auth check, refusal. Never a payment phase.
+    expect(calls.map((c) => c.phase)).toEqual(['plain', 'siwx']);
     // Nothing is written to the library on a refusal.
     await expect(readdir(libraryDir(dir))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('refuses rather than taking buy’s SIWX entitlement re-check, even when it would succeed', async () => {
-    // The trap: the mock is configured to answer a SIWX re-check with the full body.
-    // If `read` ever signed one (which means resolving the wallet), it would deliver
-    // and this test would fail. Refusing here is the wallet-untouched proof.
+  it('refuses cleanly when there is no wallet to prove entitlement with', async () => {
+    // No wallet file was ever created in this temp data dir, so the real local
+    // provider raises WALLET_MISSING. That must surface as read's exit-3 refusal,
+    // not as a runtime wallet error: unprovable and absent look the same from here.
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
       plain: () => reply.paymentRequired(pr),
       siwx: () => reply.entitled(readBody()),
-      payment: () => reply.entitled(readBody()),
     });
 
-    await expect(runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch })).rejects.toMatchObject({
-      code: 'REFUSED',
-      exitCode: 3,
-    });
+    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).code).toBe('REFUSED');
+    expect((err as CliError).exitCode).toBe(3);
+    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'skipped_no_wallet' });
+    // It never got as far as signing, so no SIWX request was made.
     expect(calls.map((c) => c.phase)).toEqual(['plain']);
-    // And no delivery receipt was created for it.
-    await expect(findDelivered(dir, readBody().id)).resolves.toBeNull();
   });
 });
 
@@ -212,15 +293,36 @@ describe('runRead, module boundary', () => {
     expect([...seen].some((f) => f.includes('delivery'))).toBe(true);
   });
 
-  // Direct imports are the part read controls. lib/siwx and lib/wallet/provider are
-  // reachable further down the shared read-client graph (as types and a header
-  // constant), so the transitive walk above cannot say anything about them; what
-  // matters is that READ itself never pulls in the wallet, the spend policy, or the
-  // signing helper, because those are what a payment would need.
-  it('directly imports no wallet, spend-policy, or SIWX module', async () => {
+  // read DOES import the wallet and lib/siwx, by operator decision (#43), to sign
+  // the AUTH message that proves an existing entitlement. What it must never touch
+  // is the money half: the payment builder and the spend policy. lib/wallet is a
+  // barrel that re-exports the spend authorizer, so an import check alone would not
+  // catch a read that started authorizing spends — assert on the USAGE too.
+  it('never names the payment builder or the spend policy in its source', async () => {
     const source = await readFile(join(here, 'read.ts'), 'utf8');
     for (const spec of importSpecs(source)) {
-      expect(spec).not.toMatch(/\/(x402-pay|policy|siwx|wallet)(\/|$)/);
+      expect(spec).not.toMatch(/\/(x402-pay|policy)(\/|$)/);
     }
+    for (const banned of [
+      'buildExactPayment',
+      'resolveSpendAuthorizer',
+      'createLocalSpendAuthorizer',
+      'SpendAuthorizer',
+      'paymentHeaders',
+      'x402',
+    ]) {
+      // The docblock explains what read does NOT do, so only the code half counts.
+      const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+      expect(code, `read.ts must not reference ${banned}`).not.toContain(banned);
+    }
+  });
+
+  // The signature read makes must be the same class publish makes: an
+  // authentication message, never a transfer authorization.
+  it('signs only through buildSiwxHeader, the auth-message helper', async () => {
+    const source = await readFile(join(here, 'read.ts'), 'utf8');
+    const signCalls = [...source.matchAll(/\b(sign[A-Za-z]*)\s*\(/g)].map((m) => m[1]);
+    expect(signCalls).toEqual([]);
+    expect(source).toContain("import { buildSiwxHeader } from '../lib/siwx'");
   });
 });
