@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SKILL_NAMES } from './skills-source';
 import {
   CLI_SKILL_NAMES,
   HOSTED_SKILL_NAME,
@@ -13,6 +14,7 @@ import {
   readAllWiring,
   readHarnessWiring,
   shadowedCliSkills,
+  harnessFlagFor,
   skillsDirsFor,
 } from './skill-wiring';
 
@@ -67,6 +69,54 @@ describe('isModelInvocationDisabled', () => {
   it('tolerates trailing whitespace on the flag line', () => {
     expect(isModelInvocationDisabled('---\ndisable-model-invocation:  true  \n---\n')).toBe(true);
   });
+
+  it('accepts the YAML 1.1 truthy spellings a harness parser may take', () => {
+    for (const v of ['true', 'True', 'TRUE', 'yes', 'Yes', 'on', 'ON', '"true"', "'yes'"]) {
+      expect(isModelInvocationDisabled(`---\ndisable-model-invocation: ${v}\n---\n`)).toBe(true);
+    }
+    for (const v of ['false', 'False', 'no', 'off', '0', 'maybe']) {
+      expect(isModelInvocationDisabled(`---\ndisable-model-invocation: ${v}\n---\n`)).toBe(false);
+    }
+  });
+
+  it('strips an inline YAML comment before testing the value', () => {
+    expect(isModelInvocationDisabled('---\ndisable-model-invocation: true # why\n---\n')).toBe(
+      true,
+    );
+    expect(
+      isModelInvocationDisabled('---\ndisable-model-invocation: false # not true\n---\n'),
+    ).toBe(false);
+  });
+
+  it('handles a BOM, CRLF, and leading blank lines before the fence', () => {
+    expect(isModelInvocationDisabled('\uFEFF---\ndisable-model-invocation: true\n---\n')).toBe(
+      true,
+    );
+    expect(isModelInvocationDisabled('---\r\ndisable-model-invocation: true\r\n---\r\n')).toBe(
+      true,
+    );
+    expect(isModelInvocationDisabled('\n\n---\ndisable-model-invocation: true\n---\n')).toBe(true);
+  });
+});
+
+describe('skill name constants', () => {
+  it('CLI_SKILL_NAMES and HOSTED_SKILL_NAME partition SKILL_NAMES', () => {
+    // Two hand-maintained lists that must stay consistent: a rename in one and not
+    // the other makes cliSkillsWired silently always false, so doctor would warn
+    // "missing" forever on a correctly wired machine. The `satisfies` clause and
+    // the Exclude type catch it at compile time; this catches a drifting count.
+    expect([...CLI_SKILL_NAMES, HOSTED_SKILL_NAME].sort()).toEqual([...SKILL_NAMES].sort());
+    expect(CLI_SKILL_NAMES).not.toContain(HOSTED_SKILL_NAME);
+  });
+});
+
+describe('harnessFlagFor', () => {
+  it('maps each skills directory to the --harness value that targets it', () => {
+    // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
+    // machine, so a fix line naming it has to say `--harness shared`.
+    expect(harnessFlagFor(home, join(home, '.claude', 'skills'))).toBe('claude');
+    expect(harnessFlagFor(home, join(home, '.agents', 'skills'))).toBe('shared');
+  });
 });
 
 describe('skillsDirsFor', () => {
@@ -105,6 +155,21 @@ describe('readHarnessWiring', () => {
     expect(missingCliSkills(w)).toEqual([]); // it IS on disk
     expect(shadowedCliSkills(w)).toEqual(['tenjin-publish']); // and still not wired
     expect(cliSkillsWired(w)).toBe(false);
+    expect(w.state).toBe('shadowed');
+    expect(w.skills.find((s) => s.name === 'tenjin-publish')?.reason).toBe('disabled');
+  });
+
+  it('classifies each directory with a single verdict', async () => {
+    const empty = await readHarnessWiring(join(home, 'gone'));
+    expect(empty.state).toBe('empty');
+
+    const hostedOnly = join(home, 'a');
+    await seed(hostedOnly, HOSTED_SKILL_NAME);
+    expect((await readHarnessWiring(hostedOnly)).state).toBe('hosted-only');
+
+    const partial = join(home, 'b');
+    await seed(partial, 'tenjin-search');
+    expect((await readHarnessWiring(partial)).state).toBe('partial');
   });
 
   it('both CLI skills plus the hosted mirror is the fully wired state', async () => {

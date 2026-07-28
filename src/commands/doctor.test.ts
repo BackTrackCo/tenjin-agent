@@ -351,15 +351,21 @@ describe('runDoctor — injected remote provider', () => {
 // and no CLI publish skill looked identical, from the outside, to a fully wired
 // one. Only a screen recording caught it. These assert the check names the state.
 
-/** Write a SKILL.md into <skillHome>/.claude/skills/<name>/, with optional frontmatter extras. */
-async function writeSkill(name: string, extraFrontmatter = ''): Promise<void> {
-  const skillDir = join(skillHome, '.claude', 'skills', name);
+const claudeSkills = (): string => join(skillHome, '.claude', 'skills');
+const sharedSkills = (): string => join(skillHome, '.agents', 'skills');
+
+/** Write a SKILL.md into a skills directory, with optional frontmatter extras. */
+async function writeSkillIn(dir: string, name: string, extraFrontmatter = ''): Promise<void> {
+  const skillDir = join(dir, name);
   await mkdir(skillDir, { recursive: true });
   await writeFile(
     join(skillDir, 'SKILL.md'),
     `---\nname: ${name}\ndescription: test\n${extraFrontmatter}---\n\n# ${name}\n`,
   );
 }
+
+const writeSkill = (name: string, extraFrontmatter = ''): Promise<void> =>
+  writeSkillIn(claudeSkills(), name, extraFrontmatter);
 
 describe('runDoctor — skill wiring', () => {
   it('no skills anywhere: warns and points at tenjin install', async () => {
@@ -378,21 +384,20 @@ describe('runDoctor — skill wiring', () => {
     const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
-    expect(skills.detail).toContain('tenjin-search');
-    expect(skills.detail).toContain('tenjin-publish');
-    expect(skills.detail).toContain('missing');
-    expect(skills.detail).toContain('hosted skill only');
-    expect(skills.fix).toContain('tenjin install');
+    expect(skills.detail).toContain('neither CLI skill is wired anywhere');
+    expect(skills.detail).toContain('hosted skill only, no CLI skills here');
+    expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
-  it('hosted + search but no publish: names publish as the missing one', async () => {
+  it('hosted + search but no publish: names the directory and only the missing skill', async () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
-    expect(skills.detail).toContain('tenjin-publish missing');
+    expect(skills.detail).toContain(`${claudeSkills()}: tenjin-publish missing`);
     expect(skills.detail).not.toContain('tenjin-search missing');
+    expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
   it('publish on disk but disable-model-invocation: reported as shadowed, not wired', async () => {
@@ -402,9 +407,11 @@ describe('runDoctor — skill wiring', () => {
     const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
-    expect(skills.detail).toContain('tenjin-publish installed but not model-invocable');
-    expect(skills.detail).toContain('[shadowed]');
-    expect(skills.fix).toContain('tenjin install');
+    expect(skills.detail).toContain(
+      `${claudeSkills()}: tenjin-publish installed but not model-invocable (disable-model-invocation: true)`,
+    );
+    expect(skills.detail).toContain('[disabled]');
+    expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
   it('both CLI skills wired alongside the hosted mirror: ok, and says which takes precedence', async () => {
@@ -415,18 +422,122 @@ describe('runDoctor — skill wiring', () => {
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
     expect(skills.detail).toContain('tenjin-search + tenjin-publish wired');
-    expect(skills.detail).toContain('CLI skills take precedence, hosted mirror kept');
+    expect(skills.detail).toContain('CLI skills wired, take precedence over the hosted mirror');
   });
 
   it('reports the shared ~/.agents/skills target too, not just Claude Code', async () => {
-    const shared = join(skillHome, '.agents', 'skills');
     for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
-      await mkdir(join(shared, name), { recursive: true });
-      await writeFile(join(shared, name, 'SKILL.md'), `---\nname: ${name}\n---\n`);
+      await writeSkillIn(sharedSkills(), name);
     }
     const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain(shared);
+    expect(skills.detail).toContain(sharedSkills());
+  });
+
+  it('an unreadable skill is not reported as disable-model-invocation', async () => {
+    await writeSkill('tenjin-search');
+    await writeSkill('tenjin-publish');
+    await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o000);
+    try {
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain('unreadable or disable-model-invocation');
+      expect(skills.detail).toContain('[unreadable]');
+    } finally {
+      await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o600);
+    }
+  });
+
+  // Two directories in different states: the mixed case a developer with both
+  // Claude Code and Codex actually hits, and the one a union across directories
+  // renders as a self-contradiction.
+  describe('two directories in different states', () => {
+    it('wired in .claude + hosted-only leftover in .agents is ok, not "missing"', async () => {
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+        await writeSkillIn(claudeSkills(), name);
+      }
+      await writeSkillIn(sharedSkills(), 'tenjin');
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('ok');
+      // The regression: a union across directories announced both CLI skills
+      // missing in the same sentence that listed them wired.
+      expect(skills.detail).not.toContain('missing');
+      expect(skills.detail).toContain(
+        `${claudeSkills()} -> tenjin-search, tenjin-publish, tenjin (CLI skills wired`,
+      );
+      expect(skills.detail).toContain(
+        `${sharedSkills()} -> tenjin (hosted skill only, no CLI skills here)`,
+      );
+    });
+
+    it('shadowed in one directory and missing in the other names BOTH, with both fixes', async () => {
+      await writeSkillIn(claudeSkills(), 'tenjin-search');
+      await writeSkillIn(claudeSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
+      await writeSkillIn(sharedSkills(), 'tenjin-search');
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      // The shadowed branch used to return before missing was ever computed.
+      expect(skills.detail).toContain(`${claudeSkills()}: tenjin-publish installed but not`);
+      expect(skills.detail).toContain(`${sharedSkills()}: tenjin-publish missing`);
+      expect(skills.fix).toBe('tenjin install --harness claude --harness shared');
+    });
+
+    it('a problem only in .agents/skills gets the --harness shared fix that can clear it', async () => {
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+        await writeSkillIn(claudeSkills(), name);
+      }
+      await writeSkillIn(sharedSkills(), 'tenjin-search');
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
+      // machine, so it would reproduce the warning forever.
+      expect(skills.fix).toBe('tenjin install --harness shared');
+    });
+  });
+
+  it('--json carries the per-directory state as data, not only as prose', async () => {
+    for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+      await writeSkillIn(claudeSkills(), name);
+    }
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    const data = skills.data as {
+      directories: Array<{
+        dir: string;
+        state: string;
+        skills: Array<{ name: string; present: boolean; modelInvocable?: boolean }>;
+      }>;
+    };
+    const claude = data.directories.find((d) => d.dir === claudeSkills());
+    expect(claude?.state).toBe('wired');
+    // The question an agent should be able to answer without parsing prose.
+    const publish = claude?.skills.find((s) => s.name === 'tenjin-publish');
+    expect(publish).toEqual({ name: 'tenjin-publish', present: true, modelInvocable: true });
+    const shared = data.directories.find((d) => d.dir === sharedSkills());
+    expect(shared?.state).toBe('empty');
   });
 });

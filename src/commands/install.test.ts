@@ -72,7 +72,13 @@ type Harnesses = Array<{
   detected: boolean;
   detectedBy: string[];
   skillsDir: string;
-  skills: Array<{ name: string; status: string; preexisting: boolean; cli: boolean }>;
+  skills: Array<{
+    name: string;
+    status: string;
+    preexisting: boolean;
+    cli: boolean;
+    modelInvocable: boolean;
+  }>;
   hostedPreexisting: boolean;
   agentsMd?: { path: string; status: string };
   claudeMd?: { path: string; status: string };
@@ -1028,7 +1034,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
       deps({ isInteractive: true, promptMode: async () => '' }),
     );
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
-    expect(text).toContain('tenjin-search + tenjin-publish (CLI)');
+    expect(text).toContain('tenjin-search, tenjin-publish (CLI)');
     expect(text).toContain('zero-install fallback');
     expect(text).toContain('take precedence');
   });
@@ -1087,5 +1093,103 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(h.hostedPreexisting).toBe(true);
     expect(h.skills.find((s) => s.name === 'tenjin-publish')?.status).toBe('installed');
     expect(existsSync(join(shared, 'tenjin-publish', 'SKILL.md'))).toBe(true);
+  });
+});
+
+describe('runInstall: packaged-source wiring guard (#35)', () => {
+  /** A throwaway skills source with all three skills, so a test can corrupt exactly one. */
+  async function fixtureSource(): Promise<string> {
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-install-src-'));
+    for (const name of SKILL_NAMES) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), `---\nname: ${name}\n---\n\n# ${name}\n`);
+    }
+    return src;
+  }
+
+  it('a packaged CLI skill carrying the flag fails INTERNAL before anything is written', async () => {
+    const src = await fixtureSource();
+    await writeFile(
+      join(src, 'tenjin-publish', 'SKILL.md'),
+      '---\nname: tenjin-publish\ndisable-model-invocation: true\n---\n',
+    );
+    try {
+      const err = await caught(() =>
+        runInstall({ harness: ['claude'] }, makeCtx(), deps({ skillsSourceDir: src })),
+      );
+      expect(err.code).toBe('INTERNAL');
+      expect(err.message).toContain('tenjin-publish');
+      expect(err.message).toContain('disable-model-invocation');
+      // Nothing is written: the guard runs before the plan loop, so a bad package
+      // can never leave one target rewritten and the next untouched.
+      expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+
+  it('the hosted mirror carrying the flag is NOT fatal; install still wires the CLI skills', async () => {
+    // The mirror's frontmatter comes verbatim from tenjin.blog/skills.md, so
+    // upstream adding the flag must not hard-fail every install.
+    const src = await fixtureSource();
+    await writeFile(
+      join(src, 'tenjin', 'SKILL.md'),
+      '---\nname: tenjin\ndisable-model-invocation: true\n---\n',
+    );
+    try {
+      const { data: d } = await runInstall(
+        { harness: ['claude'] },
+        makeCtx(),
+        deps({ skillsSourceDir: src }),
+      );
+      const h = asData(d).harnesses[0]!;
+      expect(h.skills.find((s) => s.name === 'tenjin-publish')?.modelInvocable).toBe(true);
+      expect(h.skills.find((s) => s.name === 'tenjin')?.modelInvocable).toBe(false);
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+
+  it('reports modelInvocable per skill, read back from what actually landed', async () => {
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.skills.filter((s) => s.cli).every((s) => s.modelInvocable)).toBe(true);
+  });
+});
+
+describe('runInstall: preexisting means a real prior copy', () => {
+  it('a bare empty skill directory is not "already here"', async () => {
+    // `mkdir ~/.claude/skills/tenjin` with no SKILL.md used to report
+    // preexisting/hostedPreexisting true and claim the mirror was refreshed.
+    await mkdir(join(home, '.claude', 'skills', 'tenjin'), { recursive: true });
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
+    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('installed');
+    expect(h.hostedPreexisting).toBe(false);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('an interrupted write (stray file, no SKILL.md) is not "already here" either', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'asset.bin'), 'partial');
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
+    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('installed');
+    expect(h.hostedPreexisting).toBe(false);
+    // The stray file is cleared by the wholesale overwrite.
+    expect(existsSync(join(home, '.claude', 'skills', 'tenjin', 'asset.bin'))).toBe(false);
+  });
+
+  it('the mirror-replacement warning claims no direction about which copy is newer', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin\n---\n\n# a newer fetch\n');
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const warnings = asData(d).harnesses[0]!.warnings.join('\n');
+    expect(warnings).toContain('may be older');
+    expect(warnings).not.toContain('was would be');
   });
 });

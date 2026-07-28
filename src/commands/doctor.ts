@@ -4,14 +4,15 @@ import { homedir } from 'node:os';
 import { CliError } from '../lib/errors';
 import {
   CLI_SKILL_NAMES,
+  HOSTED_SKILL_NAME,
   anyTenjinSkill,
   cliSkillsWired,
-  hostedPresent,
+  harnessFlagFor,
   missingCliSkills,
   readAllWiring,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
-import type { HarnessWiring } from '../lib/skill-wiring';
+import type { DirState, HarnessWiring } from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
@@ -38,6 +39,12 @@ export interface CheckResult {
   required: boolean;
   detail: string;
   fix?: string;
+  /**
+   * Optional structured payload for machine consumers, so `--json` carries the
+   * check's findings as data instead of only as the prose in `detail`. Additive
+   * and per-check; the human renderer ignores it.
+   */
+  data?: unknown;
 }
 
 /** ~$20 in atomic USDC (6 decimals). Above this, the pocket-money wallet warns. */
@@ -284,21 +291,22 @@ function hasLookupPath(json: unknown): boolean {
 }
 
 /**
- * WARN-level (never fails doctor): is the harness skill wiring actually usable?
- * This exists because #35 was invisible without a screen recording: the publish
- * skill was on disk yet the model never saw it, and only the hosted zero-install
- * skill answered "publish" asks. The check reports the three states that matter,
- * per directory, in one line: which CLI skills are wired, whether the hosted
- * mirror sits alongside them (expected and permanent, roadmap G4), and whether a
- * CLI skill is present-but-shadowed (`disable-model-invocation: true`, an older
- * CLI's copy) which is installed without being wired.
+ * WARN-level (never fails doctor): is the harness skill wiring usable? #35 was
+ * invisible without a screen recording, because the publish skill was on disk yet
+ * the model never saw it and only the hosted skill answered publish asks.
  *
- * Warn, never fail, and never required: skills are a harness convenience and a CI
- * or server machine legitimately has none, so this must not change doctor's exit
- * code.
+ * Verdicts are per DIRECTORY, never unioned across them. A union produces strings
+ * that contradict themselves on a real machine: a Claude-only install leaves a
+ * stray hosted skill in ~/.agents/skills, and flat-mapping made the check announce
+ * both CLI skills "missing" in the same sentence that listed them wired, under a
+ * `tenjin install` fix that can never target that directory.
+ *
+ * Warn and never required: a CI or server machine legitimately has no harness, so
+ * this must not move the exit code.
  */
 async function checkSkills(home: string): Promise<BuiltCheck> {
   const wiring = await readAllWiring(home);
+  const data = { directories: wiring };
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
 
   if (inPlay.length === 0) {
@@ -309,33 +317,37 @@ async function checkSkills(home: string): Promise<BuiltCheck> {
         required: false,
         detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
         fix: 'tenjin install',
+        data,
       },
     };
   }
 
-  const shadowed = new Set(inPlay.flatMap((w) => shadowedCliSkills(w)));
-  const missing = new Set(inPlay.flatMap((w) => missingCliSkills(w)));
-
-  if (shadowed.size > 0) {
+  // Only `shadowed` and `partial` are defects. A `hosted-only` directory is a
+  // working zero-install machine, and once any directory is fully wired it is just
+  // a leftover mirror, so it is described but never warned about.
+  const broken = inPlay.filter((w) => w.state === 'shadowed' || w.state === 'partial');
+  if (broken.length > 0) {
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${[...shadowed].join(', ')} installed but not model-invocable (disable-model-invocation: true), so the harness never surfaces ${shadowed.size === 1 ? 'it' : 'them'}: ${describeWiring(inPlay)}`,
-        fix: 'tenjin install (refreshes the skills to the packaged copies)',
+        detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
+        fix: fixFor(home, broken),
+        data,
       },
     };
   }
 
-  if (missing.size > 0) {
+  if (!inPlay.some(cliSkillsWired)) {
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${[...missing].join(', ')} missing: ${describeWiring(inPlay)}`,
-        fix: 'tenjin install (wires both CLI skills alongside the hosted skill)',
+        detail: `The hosted ${HOSTED_SKILL_NAME} skill is present but neither CLI skill is wired anywhere: ${describeWiring(inPlay)}`,
+        fix: fixFor(home, inPlay),
+        data,
       },
     };
   }
@@ -346,28 +358,59 @@ async function checkSkills(home: string): Promise<BuiltCheck> {
       status: 'ok',
       required: false,
       detail: `${CLI_SKILL_NAMES.join(' + ')} wired: ${describeWiring(inPlay)}`,
+      data,
     },
   };
 }
 
-/** One-line per-directory wiring summary: `<dir> (tenjin-search, tenjin-publish, hosted tenjin)`. */
+/** What is wrong in ONE directory, naming the directory and the skills. */
+function describeProblem(w: HarnessWiring): string {
+  const shadowed = shadowedCliSkills(w);
+  const missing = missingCliSkills(w);
+  const parts: string[] = [];
+  if (shadowed.length > 0) {
+    const why = shadowed
+      .map((n) => w.skills.find((s) => s.name === n)?.reason)
+      .includes('unreadable')
+      ? 'not model-invocable (unreadable or disable-model-invocation: true)'
+      : 'not model-invocable (disable-model-invocation: true)';
+    parts.push(`${shadowed.join(', ')} installed but ${why}`);
+  }
+  if (missing.length > 0) parts.push(`${missing.join(', ')} missing`);
+  return `${w.dir}: ${parts.join(' and ')}`;
+}
+
+/**
+ * A fix that can actually clear the warning. A bare `tenjin install` only targets
+ * the directories detection picks, so a problem in ~/.agents/skills on a
+ * Claude-only machine needs `--harness shared` spelled out.
+ */
+function fixFor(home: string, dirs: HarnessWiring[]): string {
+  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
+  return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
+}
+
+/** One-line per-directory summary: `<dir> -> <skills> (<posture>)`. */
 function describeWiring(wiring: HarnessWiring[]): string {
   return wiring
     .map((w) => {
       const parts = w.skills
         .filter((s) => s.present)
-        .map((s) => (s.modelInvocable === false ? `${s.name} [shadowed]` : s.name));
-      const posture = cliSkillsWired(w)
-        ? hostedPresent(w)
-          ? 'CLI skills take precedence, hosted mirror kept'
-          : 'CLI skills wired'
-        : hostedPresent(w)
-          ? 'hosted skill only'
-          : 'partial';
-      return `${w.dir} -> ${parts.join(', ')} (${posture})`;
+        .map((s) =>
+          s.modelInvocable === false ? `${s.name} [${s.reason ?? 'shadowed'}]` : s.name,
+        );
+      return `${w.dir} -> ${parts.join(', ')} (${POSTURE[w.state]})`;
     })
     .join('; ');
 }
+
+const POSTURE: Record<DirState, string> = {
+  empty: 'no Tenjin skills',
+  'hosted-only': 'hosted skill only, no CLI skills here',
+  partial: 'only one CLI skill',
+  shadowed: 'CLI skills present but not model-invocable',
+  wired: 'CLI skills wired, take precedence over the hosted mirror',
+};
 
 async function checkReadPath(
   baseUrl: string,

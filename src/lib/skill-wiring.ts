@@ -2,69 +2,79 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SKILL_NAMES } from './skills-source';
+import type { SkillName } from './skills-source';
 
 /**
- * The two thin CLI adapter skills (roadmap C1). BOTH are wired by every
- * `tenjin install`, unconditionally: they are what makes the CLI usable from a
- * harness, and a machine with only `tenjin-search` can search but never publish
- * (#35).
+ * CLI_SKILL_NAMES are the thin adapter skills (roadmap C1), both required for the
+ * CLI to be usable from a harness; HOSTED_SKILL_NAME is the zero-install
+ * curriculum mirror (roadmap G4), typed as their complement so a rename in
+ * skills-source.ts is a compile error here rather than a silently-always-false
+ * `cliSkillsWired`.
  */
-export const CLI_SKILL_NAMES = ['tenjin-search', 'tenjin-publish'] as const;
+export const CLI_SKILL_NAMES = [
+  'tenjin-search',
+  'tenjin-publish',
+] as const satisfies readonly SkillName[];
+export type CliSkillName = (typeof CLI_SKILL_NAMES)[number];
+export type HostedSkillName = Exclude<SkillName, CliSkillName>;
+export const HOSTED_SKILL_NAME: HostedSkillName = 'tenjin';
 
-/**
- * The zero-install curriculum (the hosted skill mirrored from tenjin.blog/skills.md,
- * roadmap G4). PERMANENT and coexisting: install refreshes it and never removes it,
- * because it is the no-CLI path. The CLI skills supersede it in precedence whenever
- * the CLI is present, which its own description already says.
- */
-export const HOSTED_SKILL_NAME = 'tenjin';
+export type NotInvocableReason = 'disabled' | 'unreadable';
 
-/** Wiring state of one skill inside one skills directory. */
 export interface SkillWiring {
   name: string;
   present: boolean;
-  /**
-   * Whether a harness will surface this skill to the model. `undefined` when the
-   * skill is absent. `false` when its frontmatter carries
-   * `disable-model-invocation: true`, which installs the file but leaves it
-   * invisible to the model: on disk yet not wired.
-   */
+  /** Undefined when absent. False means on disk yet never surfaced to the model. */
   modelInvocable?: boolean;
-}
-
-/** Wiring state of one skills directory (a harness target). */
-export interface HarnessWiring {
-  dir: string;
-  /** Does the directory itself exist? A missing dir means nothing is wired there. */
-  exists: boolean;
-  skills: SkillWiring[];
+  reason?: NotInvocableReason;
 }
 
 /**
- * The skills directories a harness reads, in install order: Claude Code's own
- * `~/.claude/skills` and the harness-shared Agent Skills location
- * `~/.agents/skills` that Codex and Agent-Skills-compatible harnesses read.
- * Kept in one place so `install` writes and `doctor` inspects the same set.
+ * One directory's verdict. `shadowed` and `partial` are actionable; `hosted-only`
+ * is a working zero-install machine, not a defect; `empty` is not a Tenjin dir.
  */
+export type DirState = 'empty' | 'hosted-only' | 'partial' | 'shadowed' | 'wired';
+
+export interface HarnessWiring {
+  dir: string;
+  exists: boolean;
+  skills: SkillWiring[];
+  state: DirState;
+}
+
 export function skillsDirsFor(home: string): string[] {
   return [join(home, '.claude', 'skills'), join(home, '.agents', 'skills')];
 }
 
-/** Read the wiring state of every packaged skill inside one skills directory. */
+/**
+ * The `--harness` value that targets `dir`. A Claude-only machine never targets
+ * ~/.agents/skills by default, so a bare `tenjin install` cannot clear a problem
+ * found there.
+ */
+export function harnessFlagFor(home: string, dir: string): string {
+  return dir === join(home, '.claude', 'skills') ? 'claude' : 'shared';
+}
+
 export async function readHarnessWiring(dir: string): Promise<HarnessWiring> {
   const exists = existsSync(dir);
   const skills: SkillWiring[] = [];
-  for (const name of SKILL_NAMES) {
-    skills.push(await readSkillWiring(dir, name));
-  }
-  return { dir, exists, skills };
+  for (const name of SKILL_NAMES) skills.push(await readSkillWiring(dir, name));
+  return { dir, exists, skills, state: classify(skills) };
 }
 
-/** Read the wiring state of every skills directory under `home`. */
 export async function readAllWiring(home: string): Promise<HarnessWiring[]> {
   const out: HarnessWiring[] = [];
   for (const dir of skillsDirsFor(home)) out.push(await readHarnessWiring(dir));
   return out;
+}
+
+function classify(skills: SkillWiring[]): DirState {
+  const cli = CLI_SKILL_NAMES.map((n) => skills.find((s) => s.name === n)).filter(
+    (s) => s?.present === true,
+  );
+  if (cli.length === 0) return skills.some((s) => s.present) ? 'hosted-only' : 'empty';
+  if (cli.some((s) => s?.modelInvocable === false)) return 'shadowed';
+  return cli.length === CLI_SKILL_NAMES.length ? 'wired' : 'partial';
 }
 
 async function readSkillWiring(dir: string, name: string): Promise<SkillWiring> {
@@ -74,59 +84,54 @@ async function readSkillWiring(dir: string, name: string): Promise<SkillWiring> 
   try {
     text = await readFile(path, 'utf8');
   } catch {
-    // An unreadable file is present-but-unusable; report it as not invocable
-    // rather than throwing, because this feeds a diagnostic, never a mutation.
-    return { name, present: true, modelInvocable: false };
+    return { name, present: true, modelInvocable: false, reason: 'unreadable' };
   }
-  return { name, present: true, modelInvocable: !isModelInvocationDisabled(text) };
+  if (isModelInvocationDisabled(text)) {
+    return { name, present: true, modelInvocable: false, reason: 'disabled' };
+  }
+  return { name, present: true, modelInvocable: true };
 }
 
+/** YAML 1.1 truthy spellings a harness frontmatter parser may accept. */
+const YAML_TRUE = /^(?:true|yes|on)$/i;
+
 /**
- * Does this SKILL.md's frontmatter disable model invocation? Deliberately NOT a
- * general YAML parse: we only need the one boolean the harnesses key on, read
- * from the leading `---` block so a `disable-model-invocation` mentioned in the
- * body prose (this repo's own skills discuss it) can never be mistaken for the
- * frontmatter setting.
+ * Deliberately not a general YAML parse: only the leading `---` block is read,
+ * because this repo's own skills discuss the key in prose and a whole-file match
+ * would call a working skill disabled.
  */
 export function isModelInvocationDisabled(skillMd: string): boolean {
   const frontmatter = extractFrontmatter(skillMd);
   if (frontmatter === null) return false;
-  return frontmatter.some((line) => /^disable-model-invocation:\s*true\s*$/.test(line.trim()));
-}
-
-/** The lines of the leading `---` fenced block, or null when there is no frontmatter. */
-function extractFrontmatter(text: string): string[] | null {
-  const lines = text.split('\n');
-  if (lines[0]?.trim() !== '---') return null;
-  const end = lines.findIndex((l, i) => i > 0 && l.trim() === '---');
-  if (end === -1) return null;
-  return lines.slice(1, end);
-}
-
-/**
- * Are both CLI adapter skills wired (present AND model-invocable) in this
- * directory? This is the guarantee `tenjin install` owes every target and the
- * thing `tenjin doctor` reports on.
- */
-export function cliSkillsWired(wiring: HarnessWiring): boolean {
-  return CLI_SKILL_NAMES.every((name) => {
-    const s = wiring.skills.find((x) => x.name === name);
-    return s !== undefined && s.present && s.modelInvocable === true;
+  return frontmatter.some((line) => {
+    const m = /^disable-model-invocation:\s*(.+?)\s*$/.exec(line.trim());
+    if (m === null) return false;
+    // Strip an inline `# comment` and optional quotes before testing truthiness.
+    const value = (m[1] ?? '').replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '');
+    return YAML_TRUE.test(value);
   });
 }
 
-/** The CLI skills that are missing from disk entirely in this directory. */
+function extractFrontmatter(text: string): string[] | null {
+  // Tolerate a UTF-8 BOM, CRLF, and leading blank lines before the opening fence.
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+  const open = lines.findIndex((l) => l.trim().length > 0);
+  if (open === -1 || lines[open]?.trim() !== '---') return null;
+  const end = lines.findIndex((l, i) => i > open && l.trim() === '---');
+  if (end === -1) return null;
+  return lines.slice(open + 1, end);
+}
+
+export function cliSkillsWired(wiring: HarnessWiring): boolean {
+  return wiring.state === 'wired';
+}
+
 export function missingCliSkills(wiring: HarnessWiring): string[] {
   return CLI_SKILL_NAMES.filter(
     (name) => wiring.skills.find((x) => x.name === name)?.present !== true,
   );
 }
 
-/**
- * CLI skills that are on disk but carry `disable-model-invocation: true`, so the
- * harness never surfaces them to the model. This is the exact shape of #35: the
- * file was copied, the skill was never wired.
- */
 export function shadowedCliSkills(wiring: HarnessWiring): string[] {
   return CLI_SKILL_NAMES.filter((name) => {
     const s = wiring.skills.find((x) => x.name === name);
@@ -134,12 +139,10 @@ export function shadowedCliSkills(wiring: HarnessWiring): string[] {
   });
 }
 
-/** Is the hosted zero-install mirror present in this directory? */
 export function hostedPresent(wiring: HarnessWiring): boolean {
   return wiring.skills.find((x) => x.name === HOSTED_SKILL_NAME)?.present === true;
 }
 
-/** Any Tenjin skill at all in this directory? Used to decide if a target is "in play". */
 export function anyTenjinSkill(wiring: HarnessWiring): boolean {
-  return wiring.skills.some((s) => s.present);
+  return wiring.state !== 'empty';
 }

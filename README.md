@@ -129,13 +129,17 @@ The three skills:
   questions).
 - **`tenjin-publish`**: publishing rubric and `tenjin publish` adapter, with a
   narrow trigger (an explicit ask, or the after-a-MISS reflex). Consent is
-  `publish.mode` plus the local secret/PII scan, not obscurity.
+  `publish.mode`, backed by the local **secret-shape** scan whose blocking tier
+  no mode and no `--yes` can clear. The scan's PII and internal-marker findings
+  are warnings, which `review` shows you and `--yes`/`full-auto` clear; rights
+  and employer-internal content have no detector, so the skill's draft rules
+  put that judgment on the author.
 
 All three land on every run, including on a machine that already carries the
-hosted `tenjin` skill: that install is the **upgrade** path, never a no-op. The
-hosted skill is kept as the zero-install fallback and the two CLI skills take
-precedence while the CLI is installed. `tenjin doctor`'s `skills` check reports
-exactly that state (which skills are wired, in which directories) so a
+hosted `tenjin` skill: that install wires the CLI skills rather than skipping.
+The hosted skill is kept as the zero-install fallback and the two CLI skills
+take precedence while the CLI is installed. `tenjin doctor`'s `skills` check
+reports that state per skills directory (which skills are wired, where) so a
 half-wired machine is diagnosable without a screen recording.
 
 A funded wallet is only needed for paid reads and publishing.

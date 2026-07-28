@@ -3,21 +3,32 @@ name: tenjin-publish
 description: >-
   Publish, update, or maintain your own reusable answers on the Tenjin
   knowledge marketplace so you earn on every future buyer. Use when the user
-  asks to publish, update, or manage Tenjin content, or when the tenjin-search
-  after-a-MISS flow publishes a derived answer under your publish.mode. Never
-  fire for drive-by "maybe publish this" ideation.
+  asks to publish, update, or manage Tenjin content; or when the tenjin-search
+  after-a-MISS flow has a finished, reusable, public, rights-clean finding to
+  publish under your publish.mode; or when the user asks about their Tenjin
+  sales, drafts, or parked candidates. Requires something concrete that already
+  exists: a written piece or a completed task's finding. Skip for drive-by
+  "maybe publish this" or "we should write this up sometime" musing, for
+  anything private to a repo, employer, or person, and for work still in
+  progress.
 ---
 
 # Tenjin publish: sell and maintain reusable answers
 
 Two things route here: an explicit user ask to publish/update, and the
 tenjin-search skill's after-a-MISS flow publishing a reusable answer you just
-derived. Both go through `publish.mode`, which is the real gate along with the
-CLI's redaction/rights scan, not a checklist to hold the user to. Consent lives
-in `publish.mode` (settled at `tenjin install`, default `review`) plus that scan,
-never in this skill being hard to reach: the description above is the whole
-trigger boundary, so never fire for drive-by "maybe publish this" ideation;
-something concrete and reusable must already exist before you route here.
+derived. Both go through `publish.mode`, which is the gate, not a checklist to
+hold the user to. `publish.mode` is settled at `tenjin install` and defaults to
+`review`; it is what decides whether a publish completes silently, asks a
+one-click yes/no, or stops. Alongside it the CLI runs a deterministic scan whose
+BLOCKING tier is credential shapes (keys, tokens, private keys, connection
+URIs); that tier is the one thing no mode and no `--yes` can clear. The scan's
+other findings (emails, phone numbers, wallet addresses, internal hostnames,
+confidential markers) are warnings, which `review` surfaces and `--yes` or
+`full-auto` clear, so they are a prompt to look, not a guarantee. Nothing checks
+rights or employer-internal content for you: that judgment is yours, below.
+This skill's reachability is not a safety layer; the description above is the
+whole trigger boundary.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
 
 ## What makes a piece sell
@@ -55,10 +66,13 @@ edge, and price for the freshness that remains.
 - Explicit as-of date up top, and a decay note or valid-until where honest.
 - Attribute claims; verify issue numbers and URLs before publish; never invent
   a citation.
-- Sanitize (hard rules): no employer-internal strategy, metrics, or unreleased
-  work; no secrets, keys, or wallet addresses; no third-party private details;
-  no personal data; no long verbatim copyrighted text. Method mixed with
-  private data: publish the method, strip the data.
+- Sanitize (hard rules, and YOURS to enforce): no employer-internal strategy,
+  metrics, or unreleased work; no secrets, keys, or wallet addresses; no
+  third-party private details; no personal data; no long verbatim copyrighted
+  text. Method mixed with private data: publish the method, strip the data.
+  Only the credential shapes are detected and blocked by the CLI; the rights
+  and employer-internal rules have no detector at all, so read the draft
+  against this list yourself before you run `tenjin publish`.
 - Fill the answer card when prompted (what it answers, applies-to, exclusions,
   freshness): a complete card is what makes the resource findable by lookup.
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.

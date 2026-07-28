@@ -101,10 +101,12 @@ const CODEX_NETWORK_RULE = '[sandbox_workspace_write]\nnetwork_access = true';
 interface SkillResult {
   name: string;
   status: 'installed' | 'updated' | 'up-to-date' | 'would-install' | 'would-update';
-  /** Was a copy of this skill already on disk before this run? */
+  /** Was a real copy (a SKILL.md, not just the directory) already on disk before this run? */
   preexisting: boolean;
   /** Is this one of the two CLI adapter skills (as opposed to the hosted mirror)? */
   cli: boolean;
+  /** Will a harness surface it to the model after this run? False on a dry run that wrote nothing. */
+  modelInvocable: boolean;
 }
 
 interface AgentsMdResult {
@@ -124,9 +126,9 @@ interface HarnessResult {
   skillsDir: string;
   skills: SkillResult[];
   /**
-   * Was a Tenjin skill (usually the hosted zero-install one) already in this
-   * target before the run? Reported so an upgrade over a hosted-skill machine is
-   * visible in `--json`, which is exactly the state #35 was invisible in.
+   * Was the hosted zero-install `tenjin` skill already in this target before the
+   * run? Reported so an upgrade over a hosted-skill machine is visible in `--json`,
+   * which is exactly the state #35 was invisible in.
    */
   hostedPreexisting: boolean;
   agentsMd?: AgentsMdResult;
@@ -220,6 +222,7 @@ export async function runInstall(
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
+  await assertSkillsLanded(plans, dryRun);
   // The embedded doctor run inspects the same `home` install just wrote into, so
   // its skill-wiring check reports THIS run's result rather than os.homedir()'s.
   const doctorDeps: DoctorDeps = { ...(deps.doctorDeps ?? {}) };
@@ -359,14 +362,14 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
   return lines;
 }
 
-/** `tenjin-search + tenjin-publish (CLI) + tenjin (hosted, zero-install fallback)`. */
+/** `tenjin-search, tenjin-publish (CLI); tenjin (hosted, zero-install fallback)`. */
 function skillRoster(h: HarnessResult): string {
   const cli = h.skills.filter((s) => s.cli).map((s) => s.name);
   const hosted = h.skills.filter((s) => !s.cli).map((s) => s.name);
   const parts: string[] = [];
-  if (cli.length > 0) parts.push(`${cli.join(' + ')} (CLI)`);
-  if (hosted.length > 0) parts.push(`${hosted.join(' + ')} (hosted, zero-install fallback)`);
-  return parts.join(' + ');
+  if (cli.length > 0) parts.push(`${cli.join(', ')} (CLI)`);
+  if (hosted.length > 0) parts.push(`${hosted.join(', ')} (hosted, zero-install fallback)`);
+  return parts.join('; ');
 }
 
 /**
@@ -660,14 +663,10 @@ async function applyPlan(
       status,
       preexisting,
       cli: (CLI_SKILL_NAMES as readonly string[]).includes(name),
+      modelInvocable: await landedInvocable(plan.skillsDir, name, dryRun),
     });
     if (warning !== undefined) warnings.push(warning);
   }
-
-  // Post-write guarantee, not a report: after a real run every skill must be on
-  // disk in the target AND model-invocable. #35 shipped as "the file is there,
-  // the harness never surfaces it", so presence alone is not the assertion.
-  await assertWired(plan.skillsDir, dryRun);
 
   const hostedPreexisting = skills.some((s) => s.name === HOSTED_SKILL_NAME && s.preexisting);
   const result: HarnessResult = {
@@ -748,27 +747,44 @@ function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
 }
 
 /**
- * Assert the target is genuinely wired after a real run: each packaged skill's
- * SKILL.md exists and none of them carries `disable-model-invocation: true`,
- * which would install a file the harness never surfaces to the model. An INTERNAL
- * failure here means the packaged skills themselves regressed, so it is loud.
+ * Did the skill actually land model-invocable? Read back from the target so the
+ * reported value is the file a harness will read, not what we intended to write.
+ * A dry run wrote nothing, so it answers for the packaged source instead.
  */
-async function assertWired(skillsDir: string, dryRun: boolean): Promise<void> {
+async function landedInvocable(skillsDir: string, name: string, dryRun: boolean): Promise<boolean> {
+  if (dryRun) return true;
+  const path = join(skillsDir, name, 'SKILL.md');
+  if (!existsSync(path)) return false;
+  try {
+    return !isModelInvocationDisabled(await readFile(path, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every packaged skill landed in every target. Runs after ALL targets are written,
+ * never mid-loop: a throw between two targets would leave target 1 rewritten,
+ * target 2 untouched, and skip the doctor run, the publish-mode question and the
+ * wallet step, so a machine whose skills directory was just replaced would never
+ * settle `publish.mode`.
+ *
+ * Presence only. Whether a skill is model-invocable is a property of the PACKAGED
+ * source, checked up front by `assertSkillsSource` before anything is written.
+ */
+async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promise<void> {
   if (dryRun) return;
-  const broken: string[] = [];
-  for (const name of SKILL_NAMES) {
-    const path = join(skillsDir, name, 'SKILL.md');
-    if (!existsSync(path)) {
-      broken.push(`${name} (missing)`);
-      continue;
-    }
-    if (isModelInvocationDisabled(await readFile(path, 'utf8'))) {
-      broken.push(`${name} (disable-model-invocation: true)`);
+  const missing: string[] = [];
+  for (const plan of plans) {
+    for (const name of SKILL_NAMES) {
+      if (!existsSync(join(plan.skillsDir, name, 'SKILL.md'))) {
+        missing.push(join(plan.skillsDir, name));
+      }
     }
   }
-  if (broken.length === 0) return;
-  throw new CliError('INTERNAL', `Skills were not wired into ${skillsDir}: ${broken.join(', ')}`, {
-    fix: 'Reinstall tenjin-cli and re-run `tenjin install`; every packaged skill must be model-invocable.',
+  if (missing.length === 0) return;
+  throw new CliError('INTERNAL', `Skills were not written: ${missing.join(', ')}`, {
+    fix: 'Check permissions on the skills directory and re-run `tenjin install`.',
   });
 }
 
@@ -790,9 +806,15 @@ async function installSkill(
     // assertSkillsSource already guards SKILL.md; this is defensive for an empty dir.
     throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
   }
-  const preexisting = dest !== null;
+  // A real prior copy means a SKILL.md, not merely the directory: readTree returns
+  // an empty Map for a bare `mkdir`, and an interrupted write leaves a stray file
+  // with no SKILL.md. Neither is a skill that "was already here".
+  const preexisting = dest?.has('SKILL.md') === true;
 
-  const change = dest === null ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
+  // Keyed off `preexisting`, not `dest !== null`: a bare directory or an interrupted
+  // write has nothing to differ FROM, so it is a create. The rm below still clears
+  // any stray files either case left behind.
+  const change = !preexisting ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
 
   if (!dryRun && change !== 'none') {
     // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
@@ -809,12 +831,13 @@ async function installSkill(
     status: dryRun ? 'would-update' : 'updated',
     preexisting,
     // The hosted skill is a MIRROR of tenjin.blog/skills.md (roadmap G4), so a
-    // differing local copy there is an expected refresh, not the drift warning
-    // the CLI adapter skills get.
+    // differing local copy is a replacement, not the drift warning the CLI skills
+    // get. Neither side carries a version or date, so the wording claims no
+    // direction: the local file may well be a newer fetch than this package's copy.
     warning:
       name === HOSTED_SKILL_NAME
-        ? `${destDir}: the hosted Tenjin skill was ${dryRun ? 'would be ' : ''}refreshed from the packaged mirror of tenjin.blog/skills.md; it stays as the zero-install fallback.`
-        : `${destDir}: local skill copy differed and was ${dryRun ? 'would be ' : ''}overwritten (the packaged copy is canonical).`,
+        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.`
+        : `${destDir}: local skill copy differed and ${dryRun ? 'would be' : 'was'} overwritten (the packaged copy is canonical).`,
   };
 }
 
@@ -936,12 +959,36 @@ function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): s
 
 // --- Skills source guard ---------------------------------------------------------
 
+/**
+ * Guard the packaged source BEFORE any target is touched, so a bad package aborts
+ * with nothing written rather than mid-copy.
+ *
+ * The model-invocable assertion covers only CLI_SKILL_NAMES. The hosted `tenjin`
+ * mirror is written verbatim from tenjin.blog/skills.md by scripts/sync-skill.mjs
+ * and its frontmatter is not authored here: if upstream ever adds
+ * `disable-model-invocation: true` (a plausible way to say "prefer the CLI
+ * skills"), asserting on it would hard-fail every install with a fix that cannot
+ * work, and skill-drift.yml would stay green because the mirror still matches
+ * upstream. Doctor warns about the mirror instead.
+ */
 async function assertSkillsSource(dir: string): Promise<void> {
   for (const name of SKILL_NAMES) {
     if (!existsSync(join(dir, name, 'SKILL.md'))) {
       throw new CliError('INTERNAL', `Packaged skill "${name}" is missing under ${dir}`, {
         fix: 'Reinstall tenjin-cli; the published package must ship every skill under skills/.',
       });
+    }
+  }
+  for (const name of CLI_SKILL_NAMES) {
+    const text = await readFile(join(dir, name, 'SKILL.md'), 'utf8');
+    if (isModelInvocationDisabled(text)) {
+      throw new CliError(
+        'INTERNAL',
+        `Packaged skill "${name}" carries disable-model-invocation: true, so no harness would surface it`,
+        {
+          fix: 'Reinstall tenjin-cli; the published CLI skills must be model-invocable.',
+        },
+      );
     }
   }
 }
