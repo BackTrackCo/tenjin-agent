@@ -372,10 +372,21 @@ const LINE_DETECTORS: LineDetector[] = [
   // persona phrases ("you are an assistant", "as an AI") deliberately do NOT
   // fire — legitimate agent-engineering exposition quotes all of them
   // constantly (review r5), and only the imperative shapes are injection-typed.
+  // Two entries under one check name: the imperative shapes are case-INsensitive
+  // (adversarial text uses any case), while BEGIN SYSTEM/HIDDEN PROMPT is
+  // case-SENSITIVE — its signal is that it reads as a document header, and
+  // lowercase "begin system prompt" is ordinary prose on this marketplace's own
+  // subject matter (greptile r7), the #36 word-in-phrase class again.
   {
     check: 'embedded-instruction',
     severity: 'warn',
-    re: /\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|context|messages?)\b|\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\b|\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\b/gi,
+    re: /\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|context|messages?)\b|\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\b/gi,
+    excerpt: (m) => m[0],
+  },
+  {
+    check: 'embedded-instruction',
+    severity: 'warn',
+    re: /\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\b/g,
     excerpt: (m) => m[0],
   },
   // Personal data — warn. `email` subsumes corp-domain emails (an internal marker).
