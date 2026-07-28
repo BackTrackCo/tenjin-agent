@@ -5,7 +5,7 @@
     "rationale": "Version-specific compatibility: public, durable, needs a real install to answer, plausibly already tested."
   },
   {
-    "query": "Which x402 facilitators actually settle USDC on Base mainnet today, and which are still testnet only?",
+    "query": "Which x402 facilitators settle USDC on Base mainnet and which are still testnet only, verified recently?",
     "should_trigger": true,
     "rationale": "Dated operational probe across vendors: reproducing it means calling every facilitator."
   },

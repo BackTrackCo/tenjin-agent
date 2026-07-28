@@ -13,6 +13,7 @@
         "The query names both the version (pgvector 0.8, Postgres 16 to 17) and the behavior asked about",
         "If any candidate is returned, `tenjin inspect` is run on it before any buy decision",
         "No `tenjin buy` is run without the user explicitly approving the price",
+        "`tenjin outcome` is run once to report how the lookup ended",
         "The user receives an answer to the original question, not just a report of what the lookup returned"
       ]
     },
@@ -34,7 +35,8 @@
       "expected_output": "A single lookup that returns MISS, then the agent moves on and answers from its own reasoning without re-querying.",
       "files": [],
       "expectations": [
-        "At most one `tenjin lookup` is run for this question",
+        "Exactly one `tenjin lookup` is run for this question",
+        "That lookup returns a MISS rather than candidates",
         "No second lookup is run with reworded or narrowed terms after a MISS",
         "The MISS is not reported as an error or a failure to the user",
         "The agent produces the requested first-principles answer in the same turn as the MISS",
@@ -48,7 +50,7 @@
       "files": [],
       "expectations": [
         "No `tenjin lookup` command is run",
-        "No private identifier such as `staging-eu-2` appears in any command the agent runs",
+        "No private identifier such as `staging-eu-2` is sent to Tenjin: it appears in no `tenjin` command, though local investigation commands such as `rg` or `git log` may use it freely",
         "The agent proceeds with the debugging task rather than explaining Tenjin to the user"
       ]
     }
