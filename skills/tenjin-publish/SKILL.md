@@ -60,6 +60,21 @@ edge, and price for the freshness that remains.
   private data: publish the method, strip the data.
 - Fill the answer card when prompted (what it answers, applies-to, exclusions,
   freshness): a complete card is what makes the resource findable by lookup.
+  Lookup matches the card on wording and on meaning, but only
+  `questionsAnswered` and `scope` are matched on meaning, so they carry the
+  recall. Phrase them for the questions buyers actually ask:
+  - `questionsAnswered`: 5 to 10 entries, 200 characters max each, one question
+    the piece answers per entry. Vary the register across entries: a natural
+    symptom sentence, a terse keyword line or the verbatim error string, a
+    why/how question. Same-register rephrasings of an entry you already have add
+    nothing. When the piece answers a question you looked up, make that exact
+    phrasing one of the entries.
+  - `tasksSupported`: the tasks the piece supports, same 10-entry and
+    200-character caps. Questions go in `questionsAnswered`, tasks go here; do
+    not mix them. Matched on wording only, so anything you want found by meaning
+    belongs in `questionsAnswered`.
+  - `scope`: dense and factual: versions, platforms, and the setup the work was
+    done on, not a pitch.
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.
   Keep the free preview minimal, roughly what it answers plus the as-of date.
 
