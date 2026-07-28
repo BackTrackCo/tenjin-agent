@@ -114,6 +114,18 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
 }
 
 /**
+ * The one WALLET_EXISTS error, shared by the create pre-check and the exclusive
+ * write's race loser so the two surfaces can never drift apart.
+ */
+export function walletExistsError(dir: string, cause?: unknown): CliError {
+  const path = walletPath(dir);
+  return new CliError('WALLET_EXISTS', `A wallet already exists at ${path}.`, {
+    fix: `Run \`tenjin wallet create --replace\` to archive it and create a new one: its keystore is parked beside the new wallet and its passphrase stays preserved in the OS credential store (service tenjin-cli, account = its address), so its funds remain reachable. That passphrase is unrecoverable — never delete the credential-store entry, or the wallet's funds are stranded.`,
+    ...(cause !== undefined ? { cause } : {}),
+  });
+}
+
+/**
  * Persist a validated record at 0600 in a 0700 dir, NO-CLOBBER. The exclusive
  * write — not an earlier existence check — is the authority: two concurrent
  * `create` runs can both pass a pre-check, but only one can win the atomic
@@ -129,12 +141,7 @@ export async function writeWalletRecord(dir: string, record: WalletRecord): Prom
       dirMode: 0o700,
     });
   } catch (err) {
-    if (hasCode(err, 'EEXIST')) {
-      throw new CliError('WALLET_EXISTS', `A wallet already exists at ${path}.`, {
-        fix: `Run \`tenjin wallet create --replace\` to archive it and create a new one: its keystore is parked beside the new wallet and its passphrase stays preserved in the OS credential store (service tenjin-cli, account = its address), so its funds remain reachable. That passphrase is unrecoverable — never delete the credential-store entry, or the wallet's funds are stranded.`,
-        cause: err,
-      });
-    }
+    if (hasCode(err, 'EEXIST')) throw walletExistsError(dir, err);
     throw err;
   }
 }

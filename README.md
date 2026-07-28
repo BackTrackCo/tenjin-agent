@@ -240,7 +240,11 @@ approval.
   address in the OS store, parks the keystore beside the new one
   (`wallet.<address>.json.bak`), and only then creates the new wallet — a
   replace can never strand the old wallet's funds. `wallet show` lists archived
-  addresses as a recovery hint.
+  addresses as a recovery hint. To make an archived wallet active again: move
+  the current `wallet.json` aside (e.g. with another `--replace` later, or
+  manually), then `mv ~/.tenjin/wallet.<address>.json.bak ~/.tenjin/wallet.json`
+  — its passphrase entry is keyed by the wallet's address, so signing resumes
+  transparently.
 - The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE`, then the
   OS credential store, then an interactive prompt. On `wallet create` with no env
   passphrase, a strong random one is generated and saved to the OS store so later

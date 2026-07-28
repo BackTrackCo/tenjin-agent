@@ -6,6 +6,7 @@ import { passphraseBlobPath, passphraseBlobPathFor } from '../paths';
 import {
   resolvePassphrase,
   resolvePassphraseForCreate,
+  storePassphraseForWallet,
   walletStoreAccount,
   type ExecFn,
   type PromptFn,
@@ -324,6 +325,91 @@ describe('per-wallet entries and the legacy shared slot', () => {
     );
     await expect(res.migrateLegacy?.()).resolves.toBe(false);
     expect(calls.every((c) => c.args[0] !== 'delete-generic-password')).toBe(true);
+  });
+
+  it('a failed legacy REMOVAL does not fail the migration: the verified copy is the archive', async () => {
+    // Copy and read-back succeed; only the delete of the legacy slot fails.
+    const stored = new Map<string, string>([[LEGACY_ACCOUNT, 'legacy-pass']]);
+    const { exec } = recordingExec((call) => {
+      if (call.args[0] === '-i') {
+        const m = call.stdin?.match(/-a (\S+) -w '([^']*)'/);
+        stored.set(m?.[1] as string, m?.[2] as string);
+        return { stdout: '' };
+      }
+      if (call.args[0] === 'find-generic-password') {
+        const value = stored.get(call.args[call.args.indexOf('-a') + 1] as string);
+        return value !== undefined ? { stdout: `${value}\n` } : new Error('not found');
+      }
+      return new Error('delete refused'); // delete-generic-password fails
+    });
+    const res = await resolvePassphrase(
+      { env: {}, platform: 'darwin', isTTY: false, exec },
+      ADDRESS,
+    );
+    await expect(res.migrateLegacy?.()).resolves.toBe(true);
+    // Both copies survive: the per-address archive of record and the redundant legacy entry.
+    expect(stored.get(ACCOUNT)).toBe('legacy-pass');
+    expect(stored.get(LEGACY_ACCOUNT)).toBe('legacy-pass');
+  });
+});
+
+describe('storePassphraseForWallet — the --replace archive writer', () => {
+  it('stores and verifies under the wallet account (stored)', async () => {
+    const { exec, entries } = fakeKeychain();
+    await expect(
+      storePassphraseForWallet(
+        { env: {}, platform: 'darwin', isTTY: false, exec },
+        ADDRESS,
+        'typed-base64url-pass',
+      ),
+    ).resolves.toBe('stored');
+    expect(entries.get(ACCOUNT)).toBe('typed-base64url-pass');
+  });
+
+  it('an existing identical entry counts as stored without a write', async () => {
+    const { exec, entries, calls } = fakeKeychain({ [ACCOUNT]: 'already-there' });
+    await expect(
+      storePassphraseForWallet(
+        { env: {}, platform: 'darwin', isTTY: false, exec },
+        ADDRESS,
+        'already-there',
+      ),
+    ).resolves.toBe('stored');
+    expect(entries.get(ACCOUNT)).toBe('already-there');
+    expect(calls.every((c) => c.args[0] !== '-i')).toBe(true);
+  });
+
+  it('names the keychain character gate, not a missing store, for a spaced passphrase', async () => {
+    const { exec, calls } = fakeKeychain();
+    await expect(
+      storePassphraseForWallet(
+        { env: {}, platform: 'darwin', isTTY: false, exec },
+        ADDRESS,
+        'has spaces in it',
+      ),
+    ).resolves.toBe('rejected-characters');
+    expect(calls).toHaveLength(0); // refused before any exec — nothing was attempted
+  });
+
+  it('reports no-store on a platform without one', async () => {
+    const { exec, calls } = recordingExec(() => new Error('exec must not run'));
+    await expect(
+      storePassphraseForWallet({ env: {}, platform: 'freebsd', isTTY: false, exec }, ADDRESS, 'p'),
+    ).resolves.toBe('no-store');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reports store-failed when the write does not stick', async () => {
+    const { exec } = recordingExec((call) =>
+      call.args[0] === '-i' ? { stdout: '' } : new Error('not found'),
+    );
+    await expect(
+      storePassphraseForWallet(
+        { env: {}, platform: 'darwin', isTTY: false, exec },
+        ADDRESS,
+        'typed-base64url-pass',
+      ),
+    ).resolves.toBe('store-failed');
   });
 });
 

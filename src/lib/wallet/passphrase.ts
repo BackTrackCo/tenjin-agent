@@ -19,12 +19,8 @@ import { passphraseBlobPath, passphraseBlobPathFor } from '../paths';
  * the next source rather than hard-failing, and no plaintext is ever written to
  * disk (the Windows blob is DPAPI-encrypted, not the passphrase itself).
  *
- * Every durable entry is PER WALLET: the store account is the wallet's lowercase
- * address, so creating a new wallet can never overwrite the passphrase of an
- * existing one (issue #32 — the old fixed service/account slot plus `-U` made
- * every `wallet create` destroy the previous wallet's only passphrase copy,
- * stranding its funds). The legacy shared slot is only ever READ, for migration:
- * see `resolvePassphrase` and `ResolvedPassphrase.migrateLegacy`.
+ * Durable entries are PER WALLET (account = lowercase address); the legacy
+ * shared slot is only ever read, for migration (#32).
  */
 
 const KEYCHAIN_SERVICE = 'tenjin-cli';
@@ -38,14 +34,16 @@ const LEGACY_ACCOUNT = 'wallet';
 /** A lowercase 0x-prefixed 20-byte hex address — the per-wallet store account. */
 const ACCOUNT_ADDRESS_RE = /^0x[0-9a-f]{40}$/;
 
-/** base64url alphabet — exactly what `randomBytes(32).toString('base64url')` yields. */
+/**
+ * base64url alphabet — what generated passphrases use, and the injection gate
+ * for the piped `security -i` command line (no quote/backslash/space/newline):
+ * values outside it are refused by the keychain writer, never escaped.
+ */
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
- * The OS-store account for a wallet address: lowercased, so lookups are
- * insensitive to checksum casing. Throws INTERNAL on a non-address (defense in
- * depth: the account is interpolated into the piped `security -i` command line,
- * and this guarantees it is plain hex).
+ * The OS-store account for a wallet address: lowercased (checksum-insensitive)
+ * and validated as plain hex before it can reach the piped `security -i` line.
  */
 export function walletStoreAccount(address: string): string {
   const account = address.toLowerCase();
@@ -61,15 +59,10 @@ export interface ResolvedPassphrase {
   passphrase: string;
   source: PassphraseSource;
   /**
-   * Present ONLY when the passphrase came from the legacy shared slot rather
-   * than the wallet's own per-address entry. The caller must first PROVE the
-   * passphrase belongs to this wallet (by decrypting its keystore and verifying
-   * the derived address) and only then invoke this to re-key: copy to the
-   * per-address entry, verify the copy reads back, and only then remove the
-   * legacy entry. Any failure leaves the legacy entry untouched and returns
-   * false, so a passphrase copy is never lost mid-migration. If the decrypt
-   * fails instead (the legacy slot belongs to some other wallet), do NOT call
-   * this — surface the ambiguity and leave the legacy entry alone.
+   * Present ONLY when the passphrase came from the legacy shared slot. Call it
+   * strictly AFTER proving the passphrase decrypts this wallet's keystore; it
+   * re-keys the slot per migrateLegacyEntry's contract. On a decrypt failure
+   * do NOT call it — surface the ambiguity and leave the legacy entry alone.
    */
   migrateLegacy?: () => Promise<boolean>;
 }
@@ -105,12 +98,9 @@ export interface PassphraseDeps {
 
 /**
  * A per-platform durable passphrase store, keyed by ACCOUNT (the wallet's
- * lowercase address, or the read-only legacy `wallet` slot). `read` returns the
- * stored passphrase or null (miss / unavailable); `store` persists one entry and
- * reports whether it stuck — it must never clobber a different account's entry;
- * `remove` deletes one entry (used only to retire the legacy slot after a
- * verified copy). None of them throws: a store that cannot serve degrades to
- * null/false so resolution falls through to the next source.
+ * lowercase address, or the read-only legacy `wallet` slot). None of the
+ * methods throws: a store that cannot serve degrades to null/false so
+ * resolution falls through to the next source.
  */
 interface PassphraseStore {
   /** The source label reported when this store serves the passphrase. */
@@ -118,6 +108,12 @@ interface PassphraseStore {
   read(account: string): Promise<string | null>;
   store(account: string, passphrase: string): Promise<boolean>;
   remove(account: string): Promise<boolean>;
+  /**
+   * When present, a cheap pre-check for values this backend's writer refuses on
+   * principle (the keychain's base64url injection gate) — so callers can tell
+   * "this passphrase's characters" apart from "the store write failed".
+   */
+  storable?(passphrase: string): boolean;
 }
 
 const defaultExec: ExecFn = (file, args, stdin) =>
@@ -192,9 +188,11 @@ export async function resolvePassphrase(
 /**
  * Re-key the legacy shared slot under the owning wallet's own account: copy
  * first, verify the copy reads back byte-identical, and only then remove the
- * legacy entry. Any failure (store refused, verify mismatch, remove failed)
- * returns false with the legacy entry still in place — the invariant is that at
- * every step at least one durable copy of the passphrase exists.
+ * legacy entry. A failed copy or verify returns false with the legacy entry
+ * still in place — the invariant is that at every step at least one durable
+ * copy of the passphrase exists. The removal itself is best-effort: once the
+ * copy has verified, a legacy entry that refuses to delete is redundant, not
+ * unsafe (per-address reads win from then on), so it never fails the migration.
  */
 async function migrateLegacyEntry(
   store: PassphraseStore,
@@ -203,28 +201,35 @@ async function migrateLegacyEntry(
 ): Promise<boolean> {
   if (!(await store.store(account, passphrase))) return false;
   if ((await store.read(account)) !== passphrase) return false;
-  return store.remove(LEGACY_ACCOUNT);
+  await store.remove(LEGACY_ACCOUNT);
+  return true;
 }
+
+/** Why `storePassphraseForWallet` could not produce a durable per-address copy. */
+export type StorePassphraseOutcome = 'stored' | 'no-store' | 'rejected-characters' | 'store-failed';
 
 /**
  * Ensure `passphrase` has a durable per-address copy in the platform's OS store
  * (used by `wallet create --replace` to ARCHIVE the outgoing wallet's
- * prompt-entered passphrase before the switch). True only when the entry
- * verifiably reads back byte-identical; an existing identical entry counts. No
- * store, a refused write, or a failed read-back all report false — the caller
- * decides whether that blocks or just warns. Never touches any other entry.
+ * prompt-entered passphrase before the switch). `stored` only when the entry
+ * verifiably reads back byte-identical (an existing identical entry counts);
+ * otherwise the outcome says WHY — no store on this platform, the backend's
+ * writer refusing the passphrase's characters (the keychain's base64url gate),
+ * or a write/verify failure. The caller decides whether a non-`stored` outcome
+ * blocks or just warns. Never touches any other entry.
  */
 export async function storePassphraseForWallet(
   deps: PassphraseDeps,
   address: string,
   passphrase: string,
-): Promise<boolean> {
+): Promise<StorePassphraseOutcome> {
   const store = storeFor(deps);
-  if (store === null) return false;
+  if (store === null) return 'no-store';
   const account = walletStoreAccount(address);
-  if ((await store.read(account)) === passphrase) return true;
-  if (!(await store.store(account, passphrase))) return false;
-  return (await store.read(account)) === passphrase;
+  if (store.storable !== undefined && !store.storable(passphrase)) return 'rejected-characters';
+  if ((await store.read(account)) === passphrase) return 'stored';
+  if (!(await store.store(account, passphrase))) return 'store-failed';
+  return (await store.read(account)) === passphrase ? 'stored' : 'store-failed';
 }
 
 /**
@@ -302,11 +307,13 @@ function keychainStore(deps: PassphraseDeps): PassphraseStore {
         return null;
       }
     },
+    // The one backend that interpolates into a command line, so only base64url
+    // values pass; escaping is NOT a safe alternative (backslash bites even
+    // inside single quotes there).
+    storable: (passphrase) => BASE64URL_RE.test(passphrase),
     async store(account, passphrase) {
-      // We only ever store our own base64url passphrases under hex-address (or
-      // the legacy-shaped) accounts, so single-quoting the secret in the piped
-      // command line is safe (no quote or backslash to escape). Refuse anything
-      // else as a store-failure rather than attempting general escaping.
+      // Single-quoting is safe because base64url excludes quote/backslash/space;
+      // anything else is refused as a store-failure rather than escaped.
       // Deliberately NO `-U`: add-generic-password fails on a duplicate instead
       // of updating in place, so an existing entry can never be overwritten.
       if (!BASE64URL_RE.test(passphrase) || !BASE64URL_RE.test(account)) return false;
@@ -357,12 +364,11 @@ function powershellArgs(script: string): string[] {
 
 /**
  * Windows DPAPI-protected files, via preinstalled PowerShell 5.1 (zero
- * dependency), ONE BLOB PER ACCOUNT: `passphrase.<address>.dpapi` for wallet
- * accounts (so a new wallet's blob can never clobber an old wallet's) and the
- * legacy `passphrase.dpapi` for the pre-per-wallet slot (read/removed during
- * migration only). store(): protect the passphrase through DPAPI (CurrentUser)
- * and write the base64 blob. read(): a missing file is a miss; otherwise the
- * blob is unprotected back to the passphrase. Any PowerShell failure degrades.
+ * dependency), one blob per account: `passphrase.<address>.dpapi` for wallet
+ * accounts, legacy `passphrase.dpapi` for the pre-per-wallet slot. store():
+ * protect the passphrase through DPAPI (CurrentUser) and write the base64 blob.
+ * read(): a missing file is a miss; otherwise the blob is unprotected back to
+ * the passphrase. Any PowerShell failure degrades.
  */
 function dpapiStore(deps: PassphraseDeps): PassphraseStore {
   const exec = deps.exec ?? defaultExec;
@@ -403,7 +409,6 @@ function dpapiStore(deps: PassphraseDeps): PassphraseStore {
         // DPAPI CurrentUser encryption is the real protection here; `mode` is inert
         // on win32 (writeFileAtomic drops it there) and only bites when a POSIX host
         // exercises this store in tests. The blob is ciphertext, not the passphrase.
-        // The path is per-account, so a (re)write only ever touches its own blob.
         await writeFileAtomic(blobPathFor(account), blob, { mode: 0o600 });
         return true;
       } catch {
@@ -448,8 +453,6 @@ function secretServiceStore(deps: PassphraseDeps): PassphraseStore {
     },
     async store(account, passphrase) {
       try {
-        // `secret-tool store` replaces only an item with these exact attributes;
-        // per-address accounts make that this wallet's own entry and nothing else.
         await exec(
           'secret-tool',
           [

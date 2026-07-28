@@ -1,9 +1,10 @@
-import { readdir, rename } from 'node:fs/promises';
+import { link, readdir, rename, unlink } from 'node:fs/promises';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import * as Keystore from 'ox/Keystore';
 import { CliError } from '../errors';
+import { hasCode } from '../errno';
 import { archivedWalletPath, walletPath } from '../paths';
 import {
   PRIVATE_KEY_RE,
@@ -12,7 +13,13 @@ import {
   writeWalletRecord,
   type WalletRecord,
 } from './store';
-import { resolvePassphrase, storePassphraseForWallet, type PassphraseDeps } from './passphrase';
+import {
+  resolvePassphrase,
+  storePassphraseForWallet,
+  walletStoreAccount,
+  type PassphraseDeps,
+  type StorePassphraseOutcome,
+} from './passphrase';
 import type {
   TenjinSigner,
   WalletDescription,
@@ -51,7 +58,7 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
   return {
     id: 'local',
     async describe(): Promise<WalletDescription> {
-      const cred = resolveCredentialOrThrow(await loadCredential(deps));
+      const cred = await credentialOrThrow(deps);
       return {
         // A file credential's address is stored cleartext and returned as-is —
         // no decryption. An env credential derives (and thereby validates) its
@@ -63,7 +70,7 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
       };
     },
     async getSigner(): Promise<TenjinSigner> {
-      const cred = resolveCredentialOrThrow(await loadCredential(deps));
+      const cred = await credentialOrThrow(deps);
       const account = await accountForSigning(cred, deps);
       return {
         address: account.address,
@@ -151,56 +158,79 @@ export interface LocalWalletInfo {
 export type CreatePassphrase = string | ((address: Address) => Promise<string>);
 
 /**
- * Generate a fresh key, resolve the passphrase FOR THAT ADDRESS (the resolver
- * runs after key generation so per-wallet passphrase entries are keyed by the
- * new address, and before encryption so a stored passphrase always exists by the
- * time an encrypted wallet does), encrypt the key into a Keystore v3 document,
- * and persist the record NO-CLOBBER. The raw key exists only in memory here and
- * is never written to disk in cleartext. The write, not a caller's pre-check, is
- * the authority: a lost create race throws WALLET_EXISTS rather than overwriting
- * a funded key.
+ * A wallet fully built in memory but not yet on disk — so `--replace` can
+ * finish every fallible step BEFORE touching the active slot.
  */
-export async function createLocalWallet(
-  dir: string,
+export interface PreparedLocalWallet {
+  address: Address;
+  record: WalletRecord;
+}
+
+/**
+ * Generate a fresh key, resolve the passphrase FOR THAT ADDRESS (before
+ * encryption, so a stored passphrase always exists by the time an encrypted
+ * wallet does), and encrypt — no disk write, no cleartext key anywhere.
+ */
+export async function prepareLocalWallet(
   passphrase: CreatePassphrase,
-): Promise<LocalWalletInfo> {
+): Promise<PreparedLocalWallet> {
   const key = generatePrivateKey();
   const address = privateKeyToAccount(key).address;
   const resolved = typeof passphrase === 'string' ? passphrase : await passphrase(address);
   const keystore = await encryptToKeystore(key, resolved);
-  await writeWalletRecord(dir, walletRecord(address, keystore));
-  return { address, walletPath: walletPath(dir) };
+  return { address, record: walletRecord(address, keystore) };
+}
+
+/**
+ * Persist a prepared wallet NO-CLOBBER. The write, not a caller's pre-check, is
+ * the authority: a lost create race throws WALLET_EXISTS rather than
+ * overwriting a funded key.
+ */
+export async function commitLocalWallet(
+  dir: string,
+  prepared: PreparedLocalWallet,
+): Promise<LocalWalletInfo> {
+  await writeWalletRecord(dir, prepared.record);
+  return { address: prepared.address, walletPath: walletPath(dir) };
+}
+
+/** Prepare + commit in one step — the plain `wallet create` path. */
+export async function createLocalWallet(
+  dir: string,
+  passphrase: CreatePassphrase,
+): Promise<LocalWalletInfo> {
+  return commitLocalWallet(dir, await prepareLocalWallet(passphrase));
 }
 
 /** Where the archived wallet's passphrase remains durable after a --replace. */
 export type ArchivedPassphraseLocation = 'store' | 'env' | 'unarchived';
+/** When `unarchived`: why no durable OS-store copy could be made. */
+export type UnarchivedReason = Exclude<StorePassphraseOutcome, 'stored'>;
 
-export interface ArchivedWalletInfo {
+export interface PreservedWalletInfo {
   address: Address;
+  /** The wallet's OS-store account / archive filename key (lowercase address). */
+  account: string;
+  passphraseLocation: ArchivedPassphraseLocation;
+  unarchivedReason?: UnarchivedReason;
+}
+
+export interface ArchivedWalletInfo extends PreservedWalletInfo {
   /** Where the keystore file was parked (wallet.<address>.json.bak). */
   archivedPath: string;
-  passphraseLocation: ArchivedPassphraseLocation;
 }
 
 /**
- * Park the ACTIVE wallet for `wallet create --replace`, refusing anything that
- * could strand its funds. Order matters:
- *
- * 1. Resolve the wallet's passphrase and PROVE it decrypts this keystore (MAC +
- *    derived-address check). Failure → REFUSED, nothing has changed.
- * 2. Ensure a durable per-address copy of that passphrase exists BEFORE the
- *    switch: a legacy-slot passphrase is re-keyed under this wallet's address
- *    (verified copy, then legacy removal) and failure REFUSES; a per-address
- *    entry already is the archive; an env passphrase stays the user's durable
- *    copy; a prompt-entered one is archived best-effort (reported as
- *    `unarchived` when no store can hold it — the user just typed it, so
- *    refusing would strand nothing).
- * 3. Only then rename the keystore to wallet.<address>.json.bak, clearing the
- *    active slot for the new wallet.
- *
- * The caller runs this inside the create lock, before the new wallet exists.
+ * The verify-and-preserve half of `--replace`: prove the outgoing wallet's
+ * passphrase decrypts its keystore (MAC + derived-address check), then ensure a
+ * durable per-address copy exists (legacy slot re-keyed, REFUSING on failure;
+ * prompt-entered archived best-effort with the reason reported). Touches NO
+ * files — the park runs separately, after the replacement is fully prepared, so
+ * every failure here leaves the old wallet active and untouched.
  */
-export async function archiveLocalWallet(deps: LocalProviderDeps): Promise<ArchivedWalletInfo> {
+export async function verifyAndPreserveOutgoingWallet(
+  deps: LocalProviderDeps,
+): Promise<PreservedWalletInfo> {
   const record = await readWalletRecord(deps.dir);
   if (record === null) {
     throw new CliError('WALLET_MISSING', 'No wallet found to archive.', {
@@ -208,21 +238,28 @@ export async function archiveLocalWallet(deps: LocalProviderDeps): Promise<Archi
     });
   }
   const address = record.address as Address;
-  const account = address.toLowerCase();
+  const account = walletStoreAccount(address);
   const passphraseDeps: PassphraseDeps = { env: deps.env, dir: deps.dir, ...deps.passphrase };
   const resolved = await resolvePassphrase(passphraseDeps, address);
 
-  // Prove the resolved passphrase decrypts THIS keystore before anything moves.
   let key: Hex;
   try {
     const derived = await Keystore.toKeyAsync(record.keystore, { password: resolved.passphrase });
     key = Keystore.decrypt(record.keystore, derived);
   } catch (err) {
+    // Name the escape that actually applies to where the passphrase came from:
+    // once a store serves a value, resolution never falls through to a prompt.
+    const escape =
+      resolved.source === 'prompt'
+        ? "Retry and enter that wallet's correct passphrase at the prompt, or set TENJIN_WALLET_PASSPHRASE to it"
+        : resolved.source === 'env'
+          ? 'TENJIN_WALLET_PASSPHRASE is set but does not decrypt it; set it to the correct passphrase'
+          : `Set TENJIN_WALLET_PASSPHRASE to its passphrase, or fix its OS credential store entry (service tenjin-cli, account ${account})`;
     throw new CliError(
       'REFUSED',
       `Cannot verify the passphrase of the existing wallet ${address}; --replace refused.`,
       {
-        fix: `Replacing now could strand that wallet's funds. Make its passphrase resolvable first — TENJIN_WALLET_PASSPHRASE, its OS credential store entry (service tenjin-cli, account ${account}), or the interactive prompt — then retry.`,
+        fix: `Replacing now could strand that wallet's funds. ${escape}, then retry.`,
         cause: err,
       },
     );
@@ -236,10 +273,10 @@ export async function archiveLocalWallet(deps: LocalProviderDeps): Promise<Archi
   }
 
   // A durable per-address copy must exist BEFORE the active slot changes hands.
-  let passphraseLocation: ArchivedPassphraseLocation;
   if (resolved.source === 'env') {
-    passphraseLocation = 'env'; // The env var is the user's durable copy.
-  } else if (resolved.migrateLegacy !== undefined) {
+    return { address, account, passphraseLocation: 'env' };
+  }
+  if (resolved.migrateLegacy !== undefined) {
     if (!(await resolved.migrateLegacy())) {
       throw new CliError(
         'REFUSED',
@@ -249,22 +286,46 @@ export async function archiveLocalWallet(deps: LocalProviderDeps): Promise<Archi
         },
       );
     }
-    passphraseLocation = 'store';
-  } else if (resolved.source === 'prompt') {
-    passphraseLocation = (await storePassphraseForWallet(
-      passphraseDeps,
-      address,
-      resolved.passphrase,
-    ))
-      ? 'store'
-      : 'unarchived';
-  } else {
-    passphraseLocation = 'store'; // Served from its own per-address entry: already archived.
+    return { address, account, passphraseLocation: 'store' };
   }
+  if (resolved.source === 'prompt') {
+    const outcome = await storePassphraseForWallet(passphraseDeps, address, resolved.passphrase);
+    return outcome === 'stored'
+      ? { address, account, passphraseLocation: 'store' }
+      : { address, account, passphraseLocation: 'unarchived', unarchivedReason: outcome };
+  }
+  // Served from its own per-address entry: already archived.
+  return { address, account, passphraseLocation: 'store' };
+}
 
-  const archivedPath = archivedWalletPath(account, deps.dir);
-  await rename(walletPath(deps.dir), archivedPath);
-  return { address, archivedPath, passphraseLocation };
+/**
+ * The park half of `--replace`: move the outgoing keystore to
+ * wallet.<address>.json.bak, NO-CLOBBER (link + unlink, so an existing archive
+ * is never silently replaced — the .bak is the last copy of a funded key). Run
+ * only after verify-and-preserve succeeded AND the replacement is fully
+ * prepared. Returns the archive path.
+ */
+export async function parkOutgoingWallet(dir: string, account: string): Promise<string> {
+  const src = walletPath(dir);
+  const dst = archivedWalletPath(account, dir);
+  try {
+    await link(src, dst);
+  } catch (err) {
+    if (hasCode(err, 'EEXIST')) {
+      throw new CliError('REFUSED', `An archived wallet already exists at ${dst}.`, {
+        fix: `Move ${dst} aside, then retry \`tenjin wallet create --replace\`.`,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+  await unlink(src);
+  return dst;
+}
+
+/** Undo a park (rollback when the replacement failed to commit). */
+export async function restoreParkedWallet(dir: string, archivedPath: string): Promise<void> {
+  await rename(archivedPath, walletPath(dir));
 }
 
 type Credential =
@@ -290,16 +351,11 @@ async function loadCredential(deps: LocalProviderDeps): Promise<Credential | nul
 }
 
 /**
- * Build the viem account for SIGNING. An env credential uses its raw key; a file
- * credential resolves the passphrase FOR ITS ADDRESS (its own per-address OS
- * store entry, with the legacy shared slot as a migration fallback), decrypts
- * the keystore, then verifies the recovered key derives the stored cleartext
- * address (a tamper signal) before trusting it. A legacy-served passphrase is
- * re-keyed under the wallet's own address only AFTER that proof — a decrypt
- * failure means the legacy slot belongs to some other wallet, so it is left
- * untouched and the ambiguity is surfaced instead of guessed away. A wrong
- * passphrase or corrupt keystore surfaces as WALLET_INVALID_KEY that names where
- * the passphrase comes from.
+ * Build the viem account for SIGNING. An env credential uses its raw key; a
+ * file credential resolves the passphrase for its address, decrypts, then
+ * verifies the recovered key derives the stored address (tamper signal). A
+ * legacy-served passphrase migrates only AFTER that proof; a decrypt failure
+ * with one surfaces the ambiguity and leaves the legacy entry untouched.
  */
 async function accountForSigning(
   cred: Credential,
@@ -332,7 +388,7 @@ async function accountForSigning(
         'WALLET_INVALID_KEY',
         'The legacy shared passphrase entry (service tenjin-cli, account "wallet") does not decrypt this wallet.',
         {
-          fix: "That entry likely belongs to a different wallet created later and was left untouched. If you know this wallet's passphrase, set TENJIN_WALLET_PASSPHRASE or enter it at the prompt in a terminal.",
+          fix: "That entry likely belongs to a different wallet created later and was left untouched. If you know this wallet's passphrase, set TENJIN_WALLET_PASSPHRASE to it (a store-served passphrase is never re-asked at a prompt).",
           cause: err,
         },
       );
@@ -382,13 +438,19 @@ async function encryptToKeystore(key: Hex, passphrase: string): Promise<Keystore
   return Keystore.encrypt(key, derivedKey, opts);
 }
 
-function resolveCredentialOrThrow(cred: Credential | null): Credential {
-  if (cred === null) {
-    throw new CliError('WALLET_MISSING', 'No wallet found.', {
-      fix: 'Run `tenjin wallet create` to create one.',
-    });
-  }
-  return cred;
+async function credentialOrThrow(deps: LocalProviderDeps): Promise<Credential> {
+  const cred = await loadCredential(deps);
+  if (cred !== null) return cred;
+  // Name any archived (replaced) wallets so a missing active wallet never hides
+  // recoverable funds behind a bare "create one".
+  const archived = await listArchivedWallets(deps.dir);
+  const hint =
+    archived.length > 0
+      ? ` Archived wallets exist (${archived.join(', ')}); restore one with \`mv ${archivedWalletPath('<address>', deps.dir)} ${walletPath(deps.dir)}\`.`
+      : '';
+  throw new CliError('WALLET_MISSING', 'No wallet found.', {
+    fix: `Run \`tenjin wallet create\` to create one.${hint}`,
+  });
 }
 
 function walletRecord(address: Address, keystore: Keystore.Keystore): WalletRecord {

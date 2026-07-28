@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Hex } from 'viem';
 import { CliError } from '../errors';
-import { walletPath } from '../paths';
+import { passphraseBlobPath, passphraseBlobPathFor, walletPath } from '../paths';
 import { readWalletRecord, writeWalletRecord } from './store';
 import { createLocalProvider, createLocalWallet } from './local';
 import type { ExecFn } from './passphrase';
@@ -71,6 +71,18 @@ describe('createLocalProvider.describe', () => {
     const err = (await provider.describe().catch((e) => e)) as CliError;
     expect(err.code).toBe('WALLET_MISSING');
     expect(err.fix).toContain('tenjin wallet create');
+  });
+
+  it('WALLET_MISSING names archived wallets instead of hiding recoverable funds', async () => {
+    const archived = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, `wallet.${archived}.json.bak`), '{}');
+    const provider = createLocalProvider({ dir: dataDir, env: {} });
+    const err = (await provider.describe().catch((e) => e)) as CliError;
+    expect(err.code).toBe('WALLET_MISSING');
+    expect(err.fix).toContain(archived);
+    expect(err.fix).toContain('restore');
   });
 
   it('throws WALLET_INVALID_KEY for a malformed env key', async () => {
@@ -228,6 +240,70 @@ describe('createLocalProvider.getSigner', () => {
     // The ambiguous legacy entry was neither migrated nor deleted.
     expect(deletes).toEqual([]);
     expect(entries.get('wallet')).toBe('someone-elses-passphrase');
+  });
+
+  it('migrates a legacy Secret Service entry (linux) end to end through the provider', async () => {
+    const legacyPass = 'legacy-secret-service-pass';
+    const key = generatePrivateKey();
+    const address = privateKeyToAccount(key).address;
+    await writeWalletRecord(dataDir, await encryptedRecord(key, legacyPass));
+    const entries = new Map<string, string>([['wallet', legacyPass]]);
+    const exec: ExecFn = async (file, args, stdin) => {
+      expect(file).toBe('secret-tool');
+      const account = args[args.indexOf('account') + 1] as string;
+      if (args[0] === 'lookup') {
+        const v = entries.get(account);
+        if (v === undefined) throw new Error('not found');
+        return { stdout: v, stderr: '' };
+      }
+      if (args[0] === 'store') {
+        entries.set(account, stdin ?? '');
+        return { stdout: '', stderr: '' };
+      }
+      if (args[0] === 'clear') {
+        if (!entries.delete(account)) throw new Error('not found');
+        return { stdout: '', stderr: '' };
+      }
+      throw new Error(`unexpected secret-tool call: ${args.join(' ')}`);
+    };
+    const provider = createLocalProvider({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'linux', isTTY: false, exec },
+    });
+    expect((await provider.getSigner()).address).toBe(address);
+    expect(entries.get(address.toLowerCase())).toBe(legacyPass);
+    expect(entries.has('wallet')).toBe(false);
+  });
+
+  it('migrates a legacy DPAPI blob (win32) end to end through the provider', async () => {
+    const legacyPass = 'legacy-dpapi-provider-pass';
+    const key = generatePrivateKey();
+    const address = privateKeyToAccount(key).address;
+    await writeWalletRecord(dataDir, await encryptedRecord(key, legacyPass));
+    // The pre-per-wallet layout: only the shared blob exists (fake DPAPI = base64).
+    await writeFile(
+      passphraseBlobPath(dataDir),
+      Buffer.from(legacyPass, 'utf8').toString('base64'),
+    );
+    const fakeDpapi: ExecFn = async (file, args, stdin) => {
+      expect(file).toBe('powershell.exe');
+      const script = args[args.length - 1] ?? '';
+      if (script.includes('Unprotect')) {
+        return { stdout: Buffer.from((stdin ?? '').trim(), 'base64').toString('utf8'), stderr: '' };
+      }
+      return { stdout: Buffer.from(stdin ?? '', 'utf8').toString('base64'), stderr: '' };
+    };
+    const provider = createLocalProvider({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'win32', isTTY: false, exec: fakeDpapi },
+    });
+    expect((await provider.getSigner()).address).toBe(address);
+    // Re-keyed: the per-wallet blob decodes to the passphrase, the legacy blob is gone.
+    const migrated = await readFile(passphraseBlobPathFor(address.toLowerCase(), dataDir), 'utf8');
+    expect(Buffer.from(migrated.trim(), 'base64').toString('utf8')).toBe(legacyPass);
+    await expect(stat(passphraseBlobPath(dataDir))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('throws WALLET_MISSING with no credential', async () => {

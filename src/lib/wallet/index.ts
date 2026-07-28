@@ -7,12 +7,19 @@ import type { WalletDescription, WalletProvider } from './provider';
 
 export * from './provider';
 export {
-  archiveLocalWallet,
+  commitLocalWallet,
   createLocalWallet,
+  parkOutgoingWallet,
+  prepareLocalWallet,
+  restoreParkedWallet,
+  verifyAndPreserveOutgoingWallet,
   type ArchivedPassphraseLocation,
   type ArchivedWalletInfo,
   type CreatePassphrase,
   type LocalWalletInfo,
+  type PreparedLocalWallet,
+  type PreservedWalletInfo,
+  type UnarchivedReason,
 } from './local';
 export {
   createLocalSpendAuthorizer,

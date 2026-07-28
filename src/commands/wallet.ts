@@ -7,14 +7,18 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import {
-  archiveLocalWallet,
+  commitLocalWallet,
   createLocalWallet,
   describeWallet,
+  parkOutgoingWallet,
+  prepareLocalWallet,
   resolveWalletProvider,
+  restoreParkedWallet,
+  verifyAndPreserveOutgoingWallet,
   type ArchivedWalletInfo,
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
-import { walletFileExists } from '../lib/wallet/store';
+import { walletExistsError, walletFileExists } from '../lib/wallet/store';
 import { resolvePassphraseForCreate, type PassphraseSource } from '../lib/wallet/passphrase';
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
@@ -62,6 +66,9 @@ export async function runWalletCreate(
               address: replaced.address,
               archivedWalletPath: replaced.archivedPath,
               passphrasePreserved: replaced.passphraseLocation,
+              ...(replaced.unarchivedReason !== undefined
+                ? { unarchivedReason: replaced.unarchivedReason }
+                : {}),
             },
           }
         : {}),
@@ -71,25 +78,29 @@ export async function runWalletCreate(
       `Wallet created: ${address}`,
       `Key stored ${KEY_STORAGE}.`,
       passphraseNote(source, address),
-      ...(replaced !== undefined ? replacedNote(replaced) : []),
+      ...(replaced !== undefined ? replacedNote(replaced, path) : []),
       FUNDING_LINE,
       ...warnings,
     ],
   };
 }
 
-/** Where the outgoing wallet's funds live and why they remain reachable. */
-function replacedNote(replaced: ArchivedWalletInfo): string[] {
-  const account = replaced.address.toLowerCase();
+/** Where the outgoing wallet's funds live, why they remain reachable, and how to restore it. */
+function replacedNote(replaced: ArchivedWalletInfo, activeWalletPath: string): string[] {
   const passphraseLine =
     replaced.passphraseLocation === 'store'
-      ? `its passphrase is preserved in the OS credential store (service tenjin-cli, account ${account}).`
+      ? `its passphrase is preserved in the OS credential store (service tenjin-cli, account ${replaced.account}).`
       : replaced.passphraseLocation === 'env'
         ? 'its passphrase is TENJIN_WALLET_PASSPHRASE — keep that value.'
-        : 'its passphrase could NOT be archived to an OS store; it exists only where you keep it.';
+        : replaced.unarchivedReason === 'rejected-characters'
+          ? 'its passphrase was NOT archived: the macOS keychain writer only stores machine-generated (base64url) passphrases, and this typed one contains other characters. Keep it yourself, or set TENJIN_WALLET_PASSPHRASE to it.'
+          : replaced.unarchivedReason === 'no-store'
+            ? 'its passphrase was NOT archived: this platform has no OS credential store. It exists only where you keep it.'
+            : 'its passphrase was NOT archived: the OS credential store write failed. It exists only where you keep it.';
   return [
     `Previous wallet archived: ${replaced.address} still holds any funds sent to it.`,
     `Its keystore was moved to ${replaced.archivedPath}; ${passphraseLine}`,
+    `To make it the active wallet again later: move the current ${activeWalletPath} aside first, then \`mv ${replaced.archivedPath} ${activeWalletPath}\`.`,
   ];
 }
 
@@ -100,15 +111,20 @@ function replacedNote(replaced: ArchivedWalletInfo): string[] {
  * generates a distinct passphrase and persists it to the OS store BEFORE the
  * exclusive file write, so a different process could win the file while this
  * one's per-address entry names a wallet that never landed. Serializing means
- * the loser blocks until the winner commits, then trips refuseIfWalletExists and
+ * the loser blocks until the winner commits, then trips the exists check and
  * exits WALLET_EXISTS having never generated or stored a passphrase. The
  * store-before-write ordering stays (it still guards the single-process crash
  * window), and the exclusive write stays the final authority.
  *
- * The passphrase is resolved INSIDE createLocalWallet's address callback so the
- * OS-store entry is keyed to the new wallet's own address — a create can only
- * ever write its own entry and can never overwrite (or delete) the entry of any
- * existing wallet (issue #32).
+ * The passphrase is resolved inside the prepare step's address callback so the
+ * OS-store entry is keyed to the new wallet's own address (issue #32).
+ *
+ * `--replace` ordering closes the no-active-wallet window: verify-and-preserve
+ * the outgoing wallet (no file moves), fully PREPARE the replacement (key,
+ * stored passphrase, encrypted keystore — every fallible step) while the old
+ * wallet is still active, and only then park the old keystore and commit the
+ * new one. A commit failure rolls the park back, so at every exit either the
+ * old or the new wallet is the active one.
  */
 async function createWalletLocked(
   dir: string,
@@ -125,33 +141,47 @@ async function createWalletLocked(
   const lockPath = join(dir, 'wallet.create.lock');
   try {
     return await withFileLock(lockPath, async () => {
-      let replaced: ArchivedWalletInfo | undefined;
-      if (await walletFileExists(dir)) {
-        if (opts.replace !== true) throw walletExistsError(dir);
-        // Explicit --replace: park the outgoing wallet FIRST (passphrase proven
-        // against its keystore and preserved under its own address, keystore
-        // renamed aside) so the switch can never strand its funds. Any failure
-        // in there aborts before the active slot changes.
-        replaced = await archiveLocalWallet({
-          dir,
-          env: process.env,
-          ...(opts.passphrase !== undefined ? { passphrase: opts.passphrase } : {}),
-        });
-      }
       let source: PassphraseSource = 'env';
-      const { address, walletPath: path } = await createLocalWallet(dir, async (forAddress) => {
+      const passphraseFor = async (forAddress: string): Promise<string> => {
         const resolved = await resolvePassphraseForCreate(
-          {
-            env: process.env,
-            dir,
-            ...opts.passphrase,
-          },
+          { env: process.env, dir, ...opts.passphrase },
           forAddress,
         );
         source = resolved.source;
         return resolved.passphrase;
+      };
+
+      if (!(await walletFileExists(dir))) {
+        const { address, walletPath: path } = await createLocalWallet(dir, passphraseFor);
+        return { address, walletPath: path, source };
+      }
+
+      if (opts.replace !== true) throw walletExistsError(dir);
+      const preserved = await verifyAndPreserveOutgoingWallet({
+        dir,
+        env: process.env,
+        ...(opts.passphrase !== undefined ? { passphrase: opts.passphrase } : {}),
       });
-      return { address, walletPath: path, source, ...(replaced !== undefined ? { replaced } : {}) };
+      const prepared = await prepareLocalWallet(passphraseFor);
+      const archivedPath = await parkOutgoingWallet(dir, preserved.account);
+      try {
+        const { address, walletPath: path } = await commitLocalWallet(dir, prepared);
+        return { address, walletPath: path, source, replaced: { ...preserved, archivedPath } };
+      } catch (err) {
+        try {
+          await restoreParkedWallet(dir, archivedPath);
+        } catch (restoreErr) {
+          throw new CliError(
+            'INTERNAL',
+            'Creating the replacement wallet failed after the old wallet was parked, and restoring it also failed.',
+            {
+              fix: `Your old wallet ${preserved.address} is intact at ${archivedPath} with its passphrase preserved; restore it with \`mv ${archivedPath} ${walletPath(dir)}\`.`,
+              cause: restoreErr,
+            },
+          );
+        }
+        throw err; // Old wallet restored as the active one; surface the real failure.
+      }
     });
   } catch (err) {
     // A lock timeout is not the user's error; surface it as INTERNAL with the one
@@ -258,20 +288,6 @@ export async function runWalletBalance(
     data: { address: desc.address, balance },
     humanLines: [`Balance: ${balance.usd} USDC on Base`],
   };
-}
-
-/**
- * create refuses to overwrite by default: the wallet decrypts only with the
- * PASSPHRASE stored in the OS credential store, and losing either half strands
- * any funds. The explicit escape hatch is `--replace`, which archives the
- * outgoing wallet (verified passphrase preserved under its own address) rather
- * than destroying anything.
- */
-function walletExistsError(dir: string): CliError {
-  const path = walletPath(dir);
-  return new CliError('WALLET_EXISTS', `A wallet already exists at ${path}.`, {
-    fix: `Run \`tenjin wallet create --replace\` to archive it and create a new one: its keystore is parked beside the new wallet and its passphrase stays preserved in the OS credential store (service tenjin-cli, account = its address), so its funds remain reachable. That passphrase is unrecoverable — never delete the credential-store entry, or the wallet's funds are stranded.`,
-  });
 }
 
 function custodyWarnings(): string[] {

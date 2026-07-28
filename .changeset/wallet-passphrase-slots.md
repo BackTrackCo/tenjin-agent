@@ -1,5 +1,5 @@
 ---
-'tenjin-cli': patch
+'tenjin-cli': minor
 ---
 
 Fix a funds-loss bug: `tenjin wallet create` no longer overwrites the machine's

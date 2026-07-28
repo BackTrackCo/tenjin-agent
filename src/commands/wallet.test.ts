@@ -265,7 +265,7 @@ describe('runWalletCreate', () => {
     const derived = await Keystore.toKeyAsync(rec.keystore, { password: firstPass });
     const key = Keystore.decrypt(rec.keystore, derived);
     expect(privateKeyToAccount(key).address).toBe(firstAddress);
-  }, 30000);
+  });
 
   it('--replace refuses (REFUSED) when the outgoing passphrase cannot be verified, changing nothing', async () => {
     // Wallet encrypted with the env passphrase, which is then lost; the keychain
@@ -293,7 +293,7 @@ describe('runWalletCreate', () => {
     });
     expect(entries.size).toBe(1);
     expect(entries.get(account)).toBe('not-the-passphrase');
-  }, 30000);
+  });
 
   it('--replace re-keys a legacy shared slot under the outgoing address before switching', async () => {
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
@@ -318,7 +318,7 @@ describe('runWalletCreate', () => {
     expect(entries.has('wallet')).toBe(false);
     expect(entries.get(secondAccount)).toBeDefined();
     expect(entries.size).toBe(2);
-  }, 30000);
+  });
 
   it('--replace with the env passphrase archives the keystore and reports env as the durable copy', async () => {
     const firstRes = await runWalletCreate(makeCtx());
@@ -338,7 +338,97 @@ describe('runWalletCreate', () => {
     const derived = await Keystore.toKeyAsync(rec.keystore, { password: PASSPHRASE });
     const key = Keystore.decrypt(rec.keystore, derived);
     expect(privateKeyToAccount(key).address).toBe(firstAddress);
-  }, 30000);
+  });
+
+  // The post-rename window from the review: every fallible step of the
+  // replacement (passphrase store included) must run BEFORE the old keystore
+  // moves, so a failure leaves the OLD wallet active, visible, and untouched.
+  it('a failure while preparing the replacement leaves the old wallet active (no park, no loss)', async () => {
+    const created = await runWalletCreate(makeCtx()); // env passphrase
+    const address = (created.data as { address: string }).address;
+    const account = address.toLowerCase();
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    // A store that can READ (the old wallet's entry is there) but cannot WRITE:
+    // the archive half succeeds, then preparing the new wallet's passphrase fails.
+    const entries = new Map<string, string>([[account, PASSPHRASE]]);
+    const exec: ExecFn = async (file, args) => {
+      expect(file).toBe('security');
+      if (args[0] === 'find-generic-password') {
+        const value = entries.get(args[args.indexOf('-a') + 1] as string);
+        if (value === undefined) throw new Error('not found');
+        return { stdout: `${value}\n`, stderr: '' };
+      }
+      throw new Error('keychain is read-only'); // any write/delete fails
+    };
+    const before = await readFile(walletFile(), 'utf8');
+
+    const err = await catchCliError(
+      runWalletCreate(makeCtx(), {
+        replace: true,
+        passphrase: { platform: 'darwin', isTTY: false, exec },
+      }),
+    );
+    expect(err.code).toBe('USAGE'); // the new wallet's passphrase had nowhere durable to go
+    // The old wallet never moved: still the active wallet, no .bak, show still works.
+    expect(await readFile(walletFile(), 'utf8')).toBe(before);
+    await expect(stat(join(dataDir, `wallet.${account}.json.bak`))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect((await runWalletShow(makeCtx())).data).toMatchObject({ address });
+  });
+
+  it('--replace archives a prompt-entered passphrase to the store when its characters allow', async () => {
+    const created = await runWalletCreate(makeCtx()); // PASSPHRASE is base64url-safe
+    const address = (created.data as { address: string }).address;
+    const account = address.toLowerCase();
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    const { exec, entries } = fakeKeychain(); // both entries missing: resolution prompts
+    const prompt = vi.fn(async () => PASSPHRASE);
+
+    const res = await runWalletCreate(makeCtx(), {
+      replace: true,
+      passphrase: { platform: 'darwin', isTTY: true, exec, prompt },
+    });
+    const data = res.data as {
+      replaced?: { address: string; passphrasePreserved: string; unarchivedReason?: string };
+    };
+    expect(prompt).toHaveBeenCalled();
+    expect(data.replaced).toMatchObject({ address, passphrasePreserved: 'store' });
+    expect(data.replaced?.unarchivedReason).toBeUndefined();
+    // The typed passphrase was archived under the OLD wallet's own account.
+    expect(entries.get(account)).toBe(PASSPHRASE);
+  });
+
+  it('--replace names the keychain character gate when a typed passphrase cannot be archived', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', 'has spaces in it');
+    const created = await runWalletCreate(makeCtx());
+    const address = (created.data as { address: string }).address;
+    const account = address.toLowerCase();
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    const { exec, entries } = fakeKeychain();
+    const prompt = vi.fn(async () => 'has spaces in it');
+
+    const res = await runWalletCreate(makeCtx(), {
+      replace: true,
+      passphrase: { platform: 'darwin', isTTY: true, exec, prompt },
+    });
+    const data = res.data as {
+      replaced?: { passphrasePreserved: string; unarchivedReason?: string };
+    };
+    expect(data.replaced).toMatchObject({
+      passphrasePreserved: 'unarchived',
+      unarchivedReason: 'rejected-characters',
+    });
+    // The message blames the keychain's character gate, not a missing store.
+    const line = res.humanLines?.find((l) => l.includes('NOT archived'));
+    expect(line).toContain('base64url');
+    expect(line).not.toContain('no OS credential store');
+    // Nothing was written under the old account; the keystore was still parked.
+    expect(entries.has(account)).toBe(false);
+    await expect(
+      readFile(join(dataDir, `wallet.${account}.json.bak`), 'utf8'),
+    ).resolves.toBeTruthy();
+  });
 
   it('errors USAGE when no passphrase source is available (headless, non-mac)', async () => {
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
@@ -362,7 +452,7 @@ describe('runWalletCreate', () => {
     expect(((losers[0] as PromiseRejectedResult).reason as CliError).code).toBe('WALLET_EXISTS');
     const winner = (winners[0] as PromiseFulfilledResult<{ data: { address: string } }>).value.data;
     expect((await readStored()).address).toBe(winner.address);
-  }, 15000);
+  });
 
   // The store-write race the lock actually closes: with NO env passphrase each racer
   // auto-generates a distinct passphrase and persists it to the (shared, last-writer-
@@ -419,7 +509,7 @@ describe('runWalletCreate', () => {
     expect(keychain.value).not.toBeNull();
     const derived = await addressFromWalletFile(keychain.value as string);
     expect(derived.toLowerCase()).toBe(winner.address.toLowerCase());
-  }, 20000);
+  });
 });
 
 describe('runWalletShow', () => {
@@ -450,7 +540,7 @@ describe('runWalletShow', () => {
     expect(res.humanLines?.some((l) => l.includes('Archived') && l.includes(firstAccount))).toBe(
       true,
     );
-  }, 30000);
+  });
 
   it('does not decrypt and never leaks a private key', async () => {
     await runWalletCreate(makeCtx());
