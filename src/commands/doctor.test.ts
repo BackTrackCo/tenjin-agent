@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -32,9 +32,14 @@ const PRIVATE_KEY = `0x${'de'.repeat(32)}` as `0x${string}`;
 const ADDRESS = privateKeyToAccount(PRIVATE_KEY).address;
 
 let dir: string;
+// A temp HOME for the skill-wiring check. Every runDoctor call injects it so the
+// check reads a controlled tree, never the developer's real ~/.claude/skills,
+// which would pass locally and warn in CI.
+let skillHome: string;
 let prevWalletKey: string | undefined;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-doctor-'));
+  skillHome = await mkdtemp(join(tmpdir(), 'tenjin-doctor-home-'));
   balanceMock.mockReset();
   // The wallet provider resolves against process.env, so keep it hermetic: a
   // stray TENJIN_WALLET_KEY would shadow the file-based tests below.
@@ -43,6 +48,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
+  await rm(skillHome, { recursive: true, force: true });
   if (prevWalletKey === undefined) delete process.env.TENJIN_WALLET_KEY;
   else process.env.TENJIN_WALLET_KEY = prevWalletKey;
 });
@@ -101,13 +107,15 @@ async function writeWallet(mode: number): Promise<void> {
 
 describe('runDoctor — passing outcomes', () => {
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
     expect(find(data.checks, 'lookup-contract').status).toBe('ok');
-    expect(res.humanLines).toHaveLength(data.checks.length + 1); // wallet warn adds a fix line
+    // A bare temp HOME has no skills, so the wiring check warns with a fix too.
+    expect(find(data.checks, 'skills').status).toBe('warn');
+    expect(res.humanLines).toHaveLength(data.checks.length + 2); // wallet + skills warns add a fix line each
   });
 
   it('lookup-contract warns (never fails doctor) when the deploy omits the lookup path', async () => {
@@ -115,7 +123,7 @@ describe('runDoctor — passing outcomes', () => {
       '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
       '/api/articles': { body: ARTICLES_OK },
     });
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: noLookup });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: noLookup });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass'); // still passes: lookup-contract is not required
     expect(find(data.checks, 'lookup-contract').status).toBe('warn');
@@ -124,7 +132,7 @@ describe('runDoctor — passing outcomes', () => {
   it('wallet present but not 0600: warns on perms, still passes', async () => {
     await writeWallet(0o644);
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     // Perms surface via the provider's diagnostics as a wallet-custody warn,
@@ -148,6 +156,7 @@ describe('runDoctor — passing outcomes', () => {
     process.env.TENJIN_WALLET_KEY = envKey; // provider reads process.env
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
       env: { TENJIN_WALLET_KEY: envKey },
       fetchImpl: healthyFetch,
     });
@@ -164,7 +173,7 @@ describe('runDoctor — passing outcomes', () => {
   it('zero balance warns with the funding fix', async () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(0n);
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('warn');
     expect(balance.fix).toContain('Send USDC on Base');
@@ -173,7 +182,7 @@ describe('runDoctor — passing outcomes', () => {
   it('a positive balance is an ok check with dual-form amount', async () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('ok');
     expect(balance.detail).toContain('5');
@@ -183,7 +192,7 @@ describe('runDoctor — passing outcomes', () => {
   it('an RPC failure warns, never fails doctor', async () => {
     await writeWallet(0o600);
     balanceMock.mockRejectedValue(new Error('rpc down'));
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'balance').status).toBe('warn');
@@ -191,7 +200,7 @@ describe('runDoctor — passing outcomes', () => {
 
   it('a corrupt wallet file warns, never fails doctor', async () => {
     await writeFile(join(dir, 'wallet.json'), '{ not json');
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     const wallet = find(data.checks, 'wallet');
@@ -211,7 +220,7 @@ describe('runDoctor — passing outcomes', () => {
       const body = url.includes('/openapi.json') ? OPENAPI_OK : ARTICLES_OK;
       return new Response(JSON.stringify(body), { status: 200 });
     }) as typeof fetch;
-    await runDoctor(ctxFor(), { env: {}, fetchImpl: capturing });
+    await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: capturing });
     expect(readPathUrl).toBeDefined();
     expect(new URL(readPathUrl as string).searchParams.has('q')).toBe(false);
   });
@@ -219,7 +228,9 @@ describe('runDoctor — passing outcomes', () => {
 
 describe('runDoctor — required failures throw the mapped CliError', () => {
   async function catchDoctor(fetchImpl: typeof fetch): Promise<CliError> {
-    const err = await runDoctor(ctxFor(), { env: {}, fetchImpl }).catch((e: unknown) => e);
+    const err = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl }).catch(
+      (e: unknown) => e,
+    );
     expect(err).toBeInstanceOf(CliError);
     return err as CliError;
   }
@@ -299,6 +310,7 @@ describe('runDoctor — injected remote provider', () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
       env: {},
       fetchImpl: healthyFetch,
       provider: remoteProvider(address),
@@ -319,6 +331,7 @@ describe('runDoctor — injected remote provider', () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
       env: { TENJIN_WALLET_KEY: process.env.TENJIN_WALLET_KEY },
       fetchImpl: healthyFetch,
       provider: remoteProvider(address),
@@ -329,5 +342,91 @@ describe('runDoctor — injected remote provider', () => {
     expect(data.checks.filter((c) => c.name === 'wallet-custody')).toEqual([]);
     expect(balanceMock.mock.calls[0]?.[0]).toBe(address);
     expect(JSON.stringify(res.data)).not.toContain(PRIVATE_KEY);
+  });
+});
+
+// --- Skill wiring (#35) ------------------------------------------------------------
+//
+// The state this diagnoses: a machine with the hosted zero-install `tenjin` skill
+// and no CLI publish skill looked identical, from the outside, to a fully wired
+// one. Only a screen recording caught it. These assert the check names the state.
+
+/** Write a SKILL.md into <skillHome>/.claude/skills/<name>/, with optional frontmatter extras. */
+async function writeSkill(name: string, extraFrontmatter = ''): Promise<void> {
+  const skillDir = join(skillHome, '.claude', 'skills', name);
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, 'SKILL.md'),
+    `---\nname: ${name}\ndescription: test\n${extraFrontmatter}---\n\n# ${name}\n`,
+  );
+}
+
+describe('runDoctor — skill wiring', () => {
+  it('no skills anywhere: warns and points at tenjin install', async () => {
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    expect(data.status).toBe('pass'); // never required: a server machine has no harness
+    const skills = find(data.checks, 'skills');
+    expect(skills.status).toBe('warn');
+    expect(skills.required).toBe(false);
+    expect(skills.detail).toContain('No Tenjin skills wired');
+    expect(skills.fix).toBe('tenjin install');
+  });
+
+  it('hosted skill only: warns that both CLI skills are missing', async () => {
+    await writeSkill('tenjin');
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(skills.status).toBe('warn');
+    expect(skills.detail).toContain('tenjin-search');
+    expect(skills.detail).toContain('tenjin-publish');
+    expect(skills.detail).toContain('missing');
+    expect(skills.detail).toContain('hosted skill only');
+    expect(skills.fix).toContain('tenjin install');
+  });
+
+  it('hosted + search but no publish: names publish as the missing one', async () => {
+    await writeSkill('tenjin');
+    await writeSkill('tenjin-search');
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(skills.status).toBe('warn');
+    expect(skills.detail).toContain('tenjin-publish missing');
+    expect(skills.detail).not.toContain('tenjin-search missing');
+  });
+
+  it('publish on disk but disable-model-invocation: reported as shadowed, not wired', async () => {
+    await writeSkill('tenjin');
+    await writeSkill('tenjin-search');
+    await writeSkill('tenjin-publish', 'disable-model-invocation: true\n');
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(skills.status).toBe('warn');
+    expect(skills.detail).toContain('tenjin-publish installed but not model-invocable');
+    expect(skills.detail).toContain('[shadowed]');
+    expect(skills.fix).toContain('tenjin install');
+  });
+
+  it('both CLI skills wired alongside the hosted mirror: ok, and says which takes precedence', async () => {
+    await writeSkill('tenjin');
+    await writeSkill('tenjin-search');
+    await writeSkill('tenjin-publish');
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(skills.status).toBe('ok');
+    expect(skills.detail).toContain('tenjin-search + tenjin-publish wired');
+    expect(skills.detail).toContain('CLI skills take precedence, hosted mirror kept');
+  });
+
+  it('reports the shared ~/.agents/skills target too, not just Claude Code', async () => {
+    const shared = join(skillHome, '.agents', 'skills');
+    for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(shared, name), { recursive: true });
+      await writeFile(join(shared, name, 'SKILL.md'), `---\nname: ${name}\n---\n`);
+    }
+    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(skills.status).toBe('ok');
+    expect(skills.detail).toContain(shared);
   });
 });

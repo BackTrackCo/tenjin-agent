@@ -72,7 +72,8 @@ type Harnesses = Array<{
   detected: boolean;
   detectedBy: string[];
   skillsDir: string;
-  skills: Array<{ name: string; status: string }>;
+  skills: Array<{ name: string; status: string; preexisting: boolean; cli: boolean }>;
+  hostedPreexisting: boolean;
   agentsMd?: { path: string; status: string };
   claudeMd?: { path: string; status: string };
   codexNetworkRule?: string;
@@ -953,5 +954,138 @@ describe('runInstall: interactive walkthrough', () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
     expect(JSON.stringify(res.data).toLowerCase()).not.toContain('roadmap');
+  });
+});
+
+// --- #35: install on a machine that already has the hosted Tenjin skill ------------
+//
+// The reported shape: `tenjin install` on a machine carrying the hosted zero-install
+// `tenjin` skill (from tenjin.blog/skills.md) left publish unavailable — search
+// worked, publish was simply absent. Install on such a machine is the UPGRADE path,
+// never a no-op: both CLI adapter skills get wired, the hosted mirror is kept, and
+// nothing about a pre-existing skill may make the wiring conditional.
+
+/** Simulate a machine that already carries the hand-installed hosted `tenjin` skill. */
+async function seedHostedSkill(dir: string): Promise<void> {
+  const hosted = join(dir, 'tenjin');
+  await mkdir(hosted, { recursive: true });
+  await writeFile(
+    join(hosted, 'SKILL.md'),
+    '---\nname: tenjin\ndescription: hosted zero-install curriculum\n---\n\n# Tenjin (hosted copy)\n',
+  );
+}
+
+const isDisabled = (text: string): boolean =>
+  /^disable-model-invocation:\s*true\s*$/m.test(text.split('\n---')[0] ?? '');
+
+describe('runInstall: hosted skill already present (#35)', () => {
+  it('wires BOTH CLI skills next to a pre-existing hosted skill, model-invocable', async () => {
+    const claudeSkills = join(home, '.claude', 'skills');
+    await seedHostedSkill(claudeSkills);
+
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+
+    // The regression itself: publish is installed, not skipped.
+    const publish = h.skills.find((s) => s.name === 'tenjin-publish');
+    expect(publish?.status).toBe('installed');
+    expect(publish?.preexisting).toBe(false);
+    expect(h.skills.find((s) => s.name === 'tenjin-search')?.status).toBe('installed');
+
+    for (const name of SKILL_NAMES) {
+      expect(existsSync(join(claudeSkills, name, 'SKILL.md'))).toBe(true);
+    }
+    // On disk is not enough: a disable-model-invocation skill is installed but
+    // never surfaced to the model, which is how publish went missing.
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      const text = await readFile(join(claudeSkills, name, 'SKILL.md'), 'utf8');
+      expect(isDisabled(text)).toBe(false);
+    }
+  });
+
+  it('keeps the hosted skill (never removes it) and reports it as pre-existing', async () => {
+    const claudeSkills = join(home, '.claude', 'skills');
+    await seedHostedSkill(claudeSkills);
+
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+
+    expect(h.hostedPreexisting).toBe(true);
+    const hosted = h.skills.find((s) => s.name === 'tenjin');
+    expect(hosted?.preexisting).toBe(true);
+    expect(hosted?.status).toBe('updated'); // refreshed from the packaged mirror
+    expect(existsSync(join(claudeSkills, 'tenjin', 'SKILL.md'))).toBe(true);
+    // The mirror is permanent, so its refresh reads as a refresh, not skill drift.
+    expect(h.warnings.join('\n')).toContain('stays as the zero-install fallback');
+    expect(h.notes.join('\n')).toContain('take precedence');
+  });
+
+  it('tells the human that publish is wired and the hosted skill was superseded', async () => {
+    await seedHostedSkill(join(home, '.claude', 'skills'));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('tenjin-search + tenjin-publish (CLI)');
+    expect(text).toContain('zero-install fallback');
+    expect(text).toContain('take precedence');
+  });
+
+  it('re-running on top of a hosted-skill machine is idempotent', async () => {
+    const claudeSkills = join(home, '.claude', 'skills');
+    await seedHostedSkill(claudeSkills);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const before = await Promise.all(
+      SKILL_NAMES.map((n) => readFile(join(claudeSkills, n, 'SKILL.md'), 'utf8')),
+    );
+
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.skills.every((s) => s.status === 'up-to-date')).toBe(true);
+    expect(h.skills.every((s) => s.preexisting)).toBe(true);
+    expect(h.hostedPreexisting).toBe(true);
+    expect(h.warnings).toEqual([]); // nothing changed, so nothing to warn about
+
+    const after = await Promise.all(
+      SKILL_NAMES.map((n) => readFile(join(claudeSkills, n, 'SKILL.md'), 'utf8')),
+    );
+    expect(after).toEqual(before);
+  });
+
+  it('a stale disable-model-invocation publish skill is overwritten and re-wired', async () => {
+    // What an older CLI left behind: the file is there, the harness ignores it.
+    const claudeSkills = join(home, '.claude', 'skills');
+    const stale = join(claudeSkills, 'tenjin-publish');
+    await mkdir(stale, { recursive: true });
+    await writeFile(
+      join(stale, 'SKILL.md'),
+      '---\nname: tenjin-publish\ndescription: old\ndisable-model-invocation: true\n---\n\n# old\n',
+    );
+
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.skills.find((s) => s.name === 'tenjin-publish')?.status).toBe('updated');
+    const text = await readFile(join(stale, 'SKILL.md'), 'utf8');
+    expect(isDisabled(text)).toBe(false);
+  });
+
+  it('the packaged CLI skills are model-invocable (guards the frontmatter)', async () => {
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      const text = await readFile(join(SKILLS_SRC, name, 'SKILL.md'), 'utf8');
+      expect(isDisabled(text)).toBe(false);
+    }
+  });
+
+  it('wires the shared ~/.agents/skills target the same way', async () => {
+    const shared = join(home, '.agents', 'skills');
+    await seedHostedSkill(shared);
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    expect(h.hostedPreexisting).toBe(true);
+    expect(h.skills.find((s) => s.name === 'tenjin-publish')?.status).toBe('installed');
+    expect(existsSync(join(shared, 'tenjin-publish', 'SKILL.md'))).toBe(true);
   });
 });

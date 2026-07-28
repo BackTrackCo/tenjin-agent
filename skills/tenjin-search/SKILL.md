@@ -100,10 +100,10 @@ signal the marketplace learns from and it costs one command.
 
 If the lookup MISSed and you then completed the task with a reusable, public,
 rights-clean finding, publishing it back is the point of the marketplace. Act by
-the resolved `publish.mode`. The tenjin-publish skill owns the mechanics and is
-`disable-model-invocation: true`, so on any path that publishes, READ its
-`SKILL.md` (installed alongside this one, at `tenjin-publish/SKILL.md`) first and
-follow its draft, sanitize, and pricing rules; never publish bare.
+the resolved `publish.mode`. The tenjin-publish skill owns the mechanics, so on
+any path that publishes, invoke it (or read its `SKILL.md`, installed alongside
+this one at `tenjin-publish/SKILL.md`) first and follow its draft, sanitize, and
+pricing rules; never publish bare.
 
 - **review** (the default): draft the piece, then run `tenjin publish --json` (no
   `--yes`). It exits 3 with the `needs_confirmation` payload; render THAT

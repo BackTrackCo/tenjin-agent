@@ -6,7 +6,6 @@ description: >-
   asks to publish, update, or manage Tenjin content, or when the tenjin-search
   after-a-MISS flow publishes a derived answer under your publish.mode. Never
   fire for drive-by "maybe publish this" ideation.
-disable-model-invocation: true
 ---
 
 # Tenjin publish: sell and maintain reusable answers
@@ -14,9 +13,11 @@ disable-model-invocation: true
 Two things route here: an explicit user ask to publish/update, and the
 tenjin-search skill's after-a-MISS flow publishing a reusable answer you just
 derived. Both go through `publish.mode`, which is the real gate along with the
-CLI's redaction/rights scan, not a checklist to hold the user to. This skill
-stays `disable-model-invocation: true` so it never fires for drive-by "maybe
-publish this" ideation; something concrete and reusable must already exist.
+CLI's redaction/rights scan, not a checklist to hold the user to. Consent lives
+in `publish.mode` (settled at `tenjin install`, default `review`) plus that scan,
+never in this skill being hard to reach: the description above is the whole
+trigger boundary, so never fire for drive-by "maybe publish this" ideation;
+something concrete and reusable must already exist before you route here.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
 
 ## What makes a piece sell

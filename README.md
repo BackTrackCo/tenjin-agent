@@ -38,7 +38,7 @@ tenjin lookup "what actually changed in <library> v3's public API"   # your firs
 | Command                                                 | Purpose                                                                                                           |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `tenjin install`                                        | Walk you through harness skills, your publish consent mode, and wallet setup, then run the doctor checks          |
-| `tenjin doctor`                                         | Environment, API reachability, contract, and wallet checks                                                        |
+| `tenjin doctor`                                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                          |
 | `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice` |
 | `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
 | `tenjin lookup "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
@@ -127,8 +127,16 @@ The three skills:
 - **`tenjin-search`**: thin adapter over `tenjin lookup/inspect/buy/outcome`
   with a deliberately narrow trigger (public, durable, costly-to-reproduce
   questions).
-- **`tenjin-publish`**: explicit-invocation-only publishing rubric and
-  `tenjin publish` adapter. Never triggers on its own.
+- **`tenjin-publish`**: publishing rubric and `tenjin publish` adapter, with a
+  narrow trigger (an explicit ask, or the after-a-MISS reflex). Consent is
+  `publish.mode` plus the local secret/PII scan, not obscurity.
+
+All three land on every run, including on a machine that already carries the
+hosted `tenjin` skill: that install is the **upgrade** path, never a no-op. The
+hosted skill is kept as the zero-install fallback and the two CLI skills take
+precedence while the CLI is installed. `tenjin doctor`'s `skills` check reports
+exactly that state (which skills are wired, in which directories) so a
+half-wired machine is diagnosable without a screen recording.
 
 A funded wallet is only needed for paid reads and publishing.
 

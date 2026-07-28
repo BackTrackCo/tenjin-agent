@@ -1,6 +1,17 @@
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
+import { homedir } from 'node:os';
 import { CliError } from '../lib/errors';
+import {
+  CLI_SKILL_NAMES,
+  anyTenjinSkill,
+  cliSkillsWired,
+  hostedPresent,
+  missingCliSkills,
+  readAllWiring,
+  shadowedCliSkills,
+} from '../lib/skill-wiring';
+import type { HarnessWiring } from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
@@ -52,6 +63,9 @@ export interface DoctorDeps {
    * the provider owns its own describe() and diagnostics(), so a remote provider's
    * checks can't be contaminated by a stale local wallet file. */
   provider?: WalletProvider;
+  /** Home directory root for the skill-wiring check. Defaults to os.homedir(); tests
+   * (and `install`, which reuses these checks) inject their own. */
+  homeDir?: string;
 }
 
 /**
@@ -80,6 +94,7 @@ export async function collectDoctorChecks(
     await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkLookupContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    await checkSkills(deps.homeDir ?? homedir()),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -266,6 +281,92 @@ function hasLookupPath(json: unknown): boolean {
   if (!isRecord(json)) return false;
   const paths = json.paths;
   return isRecord(paths) && '/api/agent/lookup' in paths;
+}
+
+/**
+ * WARN-level (never fails doctor): is the harness skill wiring actually usable?
+ * This exists because #35 was invisible without a screen recording: the publish
+ * skill was on disk yet the model never saw it, and only the hosted zero-install
+ * skill answered "publish" asks. The check reports the three states that matter,
+ * per directory, in one line: which CLI skills are wired, whether the hosted
+ * mirror sits alongside them (expected and permanent, roadmap G4), and whether a
+ * CLI skill is present-but-shadowed (`disable-model-invocation: true`, an older
+ * CLI's copy) which is installed without being wired.
+ *
+ * Warn, never fail, and never required: skills are a harness convenience and a CI
+ * or server machine legitimately has none, so this must not change doctor's exit
+ * code.
+ */
+async function checkSkills(home: string): Promise<BuiltCheck> {
+  const wiring = await readAllWiring(home);
+  const inPlay = wiring.filter((w) => anyTenjinSkill(w));
+
+  if (inPlay.length === 0) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
+        fix: 'tenjin install',
+      },
+    };
+  }
+
+  const shadowed = new Set(inPlay.flatMap((w) => shadowedCliSkills(w)));
+  const missing = new Set(inPlay.flatMap((w) => missingCliSkills(w)));
+
+  if (shadowed.size > 0) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `${[...shadowed].join(', ')} installed but not model-invocable (disable-model-invocation: true), so the harness never surfaces ${shadowed.size === 1 ? 'it' : 'them'}: ${describeWiring(inPlay)}`,
+        fix: 'tenjin install (refreshes the skills to the packaged copies)',
+      },
+    };
+  }
+
+  if (missing.size > 0) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `${[...missing].join(', ')} missing: ${describeWiring(inPlay)}`,
+        fix: 'tenjin install (wires both CLI skills alongside the hosted skill)',
+      },
+    };
+  }
+
+  return {
+    result: {
+      name: 'skills',
+      status: 'ok',
+      required: false,
+      detail: `${CLI_SKILL_NAMES.join(' + ')} wired: ${describeWiring(inPlay)}`,
+    },
+  };
+}
+
+/** One-line per-directory wiring summary: `<dir> (tenjin-search, tenjin-publish, hosted tenjin)`. */
+function describeWiring(wiring: HarnessWiring[]): string {
+  return wiring
+    .map((w) => {
+      const parts = w.skills
+        .filter((s) => s.present)
+        .map((s) => (s.modelInvocable === false ? `${s.name} [shadowed]` : s.name));
+      const posture = cliSkillsWired(w)
+        ? hostedPresent(w)
+          ? 'CLI skills take precedence, hosted mirror kept'
+          : 'CLI skills wired'
+        : hostedPresent(w)
+          ? 'hosted skill only'
+          : 'partial';
+      return `${w.dir} -> ${parts.join(', ')} (${posture})`;
+    })
+    .join('; ');
 }
 
 async function checkReadPath(

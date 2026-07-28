@@ -10,6 +10,7 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, isModelInvocationDisabled } from '../lib/skill-wiring';
 import {
   CONFIG_DEFAULTS,
   loadRawConfig,
@@ -100,6 +101,10 @@ const CODEX_NETWORK_RULE = '[sandbox_workspace_write]\nnetwork_access = true';
 interface SkillResult {
   name: string;
   status: 'installed' | 'updated' | 'up-to-date' | 'would-install' | 'would-update';
+  /** Was a copy of this skill already on disk before this run? */
+  preexisting: boolean;
+  /** Is this one of the two CLI adapter skills (as opposed to the hosted mirror)? */
+  cli: boolean;
 }
 
 interface AgentsMdResult {
@@ -118,6 +123,12 @@ interface HarnessResult {
   detectedBy: string[];
   skillsDir: string;
   skills: SkillResult[];
+  /**
+   * Was a Tenjin skill (usually the hosted zero-install one) already in this
+   * target before the run? Reported so an upgrade over a hosted-skill machine is
+   * visible in `--json`, which is exactly the state #35 was invisible in.
+   */
+  hostedPreexisting: boolean;
   agentsMd?: AgentsMdResult;
   claudeMd?: ClaudeMdResult;
   codexNetworkRule?: string;
@@ -209,7 +220,11 @@ export async function runInstall(
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
-  const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, deps.doctorDeps ?? {}));
+  // The embedded doctor run inspects the same `home` install just wrote into, so
+  // its skill-wiring check reports THIS run's result rather than os.homedir()'s.
+  const doctorDeps: DoctorDeps = { ...(deps.doctorDeps ?? {}) };
+  doctorDeps.homeDir ??= home;
+  const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
   const doctor = await collect(ctx);
   const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
 
@@ -291,6 +306,19 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     lines.push(
       `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${suffix}`,
     );
+    // Name the skills, and say which is which. #35 shipped as "search worked,
+    // publish was simply absent" on a machine that already had the hosted skill;
+    // a bare "3 skills installed" cannot tell you publish is wired.
+    lines.push(paint(io, 'dim', `  ${skillRoster(h)} in ${h.skillsDir}`));
+    if (h.hostedPreexisting) {
+      lines.push(
+        paint(
+          io,
+          'dim',
+          `  The hosted ${HOSTED_SKILL_NAME} skill was already here: kept as the zero-install fallback, and the CLI skills now take precedence.`,
+        ),
+      );
+    }
     // When a nudge line was actually written or refreshed, disclose what it does
     // (question text leaves the machine) and how to undo it. This makes a re-run
     // that silently upgrades an older pointer line visible, not just the first write.
@@ -329,6 +357,16 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `  ! ${w}`));
   }
   return lines;
+}
+
+/** `tenjin-search + tenjin-publish (CLI) + tenjin (hosted, zero-install fallback)`. */
+function skillRoster(h: HarnessResult): string {
+  const cli = h.skills.filter((s) => s.cli).map((s) => s.name);
+  const hosted = h.skills.filter((s) => !s.cli).map((s) => s.name);
+  const parts: string[] = [];
+  if (cli.length > 0) parts.push(`${cli.join(' + ')} (CLI)`);
+  if (hosted.length > 0) parts.push(`${hosted.join(' + ')} (hosted, zero-install fallback)`);
+  return parts.join(' + ');
 }
 
 /**
@@ -593,6 +631,15 @@ function validateHarness(value: string): Harness {
 
 // --- Applying a plan -------------------------------------------------------------
 
+/**
+ * Wire one harness target. EVERY packaged skill is written on every run,
+ * unconditionally: an existing Tenjin skill in the target (typically the hosted
+ * zero-install one from tenjin.blog/skills.md) is never a reason to skip, because
+ * install on such a machine is the UPGRADE path (#35). The hosted mirror is kept
+ * and refreshed rather than removed (roadmap G4: it is the permanent zero-install
+ * curriculum); the two CLI adapter skills land beside it and supersede it while
+ * the CLI is present.
+ */
 async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
@@ -602,22 +649,35 @@ async function applyPlan(
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
   for (const name of SKILL_NAMES) {
-    const { status, warning } = await installSkill(
+    const { status, warning, preexisting } = await installSkill(
       join(skillsSource, name),
       join(plan.skillsDir, name),
       dryRun,
+      name,
     );
-    skills.push({ name, status });
+    skills.push({
+      name,
+      status,
+      preexisting,
+      cli: (CLI_SKILL_NAMES as readonly string[]).includes(name),
+    });
     if (warning !== undefined) warnings.push(warning);
   }
 
+  // Post-write guarantee, not a report: after a real run every skill must be on
+  // disk in the target AND model-invocable. #35 shipped as "the file is there,
+  // the harness never surfaces it", so presence alone is not the assertion.
+  await assertWired(plan.skillsDir, dryRun);
+
+  const hostedPreexisting = skills.some((s) => s.name === HOSTED_SKILL_NAME && s.preexisting);
   const result: HarnessResult = {
     harness: plan.harness,
     detected: plan.detected,
     detectedBy: plan.detectedBy,
     skillsDir: plan.skillsDir,
     skills,
-    notes: notesFor(plan),
+    hostedPreexisting,
+    notes: notesFor(plan, hostedPreexisting),
     warnings,
   };
 
@@ -670,15 +730,46 @@ async function wireClaudeMd(
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
-function notesFor(plan: HarnessPlan): string[] {
-  if (plan.harness === 'claude') {
-    return [
-      'Installed at the user level (~/.claude/skills). A Claude Code plugin will later make this automatic.',
-    ];
+function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
+  const notes =
+    plan.harness === 'claude'
+      ? [
+          'Installed at the user level (~/.claude/skills). A Claude Code plugin will later make this automatic.',
+        ]
+      : [
+          'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
+        ];
+  if (hostedPreexisting) {
+    notes.push(
+      `The hosted ${HOSTED_SKILL_NAME} skill was already here; it stays as the zero-install fallback and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
+    );
   }
-  return [
-    'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
-  ];
+  return notes;
+}
+
+/**
+ * Assert the target is genuinely wired after a real run: each packaged skill's
+ * SKILL.md exists and none of them carries `disable-model-invocation: true`,
+ * which would install a file the harness never surfaces to the model. An INTERNAL
+ * failure here means the packaged skills themselves regressed, so it is loud.
+ */
+async function assertWired(skillsDir: string, dryRun: boolean): Promise<void> {
+  if (dryRun) return;
+  const broken: string[] = [];
+  for (const name of SKILL_NAMES) {
+    const path = join(skillsDir, name, 'SKILL.md');
+    if (!existsSync(path)) {
+      broken.push(`${name} (missing)`);
+      continue;
+    }
+    if (isModelInvocationDisabled(await readFile(path, 'utf8'))) {
+      broken.push(`${name} (disable-model-invocation: true)`);
+    }
+  }
+  if (broken.length === 0) return;
+  throw new CliError('INTERNAL', `Skills were not wired into ${skillsDir}: ${broken.join(', ')}`, {
+    fix: 'Reinstall tenjin-cli and re-run `tenjin install`; every packaged skill must be model-invocable.',
+  });
 }
 
 /**
@@ -691,13 +782,15 @@ async function installSkill(
   srcDir: string,
   destDir: string,
   dryRun: boolean,
-): Promise<{ status: SkillResult['status']; warning?: string }> {
+  name: string,
+): Promise<{ status: SkillResult['status']; warning?: string; preexisting: boolean }> {
   const src = await readTree(srcDir);
   const dest = await readTree(destDir);
   if (src === null) {
     // assertSkillsSource already guards SKILL.md; this is defensive for an empty dir.
     throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
   }
+  const preexisting = dest !== null;
 
   const change = dest === null ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
 
@@ -710,11 +803,18 @@ async function installSkill(
     }
   }
 
-  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed' };
-  if (change === 'none') return { status: 'up-to-date' };
+  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed', preexisting };
+  if (change === 'none') return { status: 'up-to-date', preexisting };
   return {
     status: dryRun ? 'would-update' : 'updated',
-    warning: `${destDir}: local skill copy differed and was ${dryRun ? 'would be ' : ''}overwritten (the packaged copy is canonical).`,
+    preexisting,
+    // The hosted skill is a MIRROR of tenjin.blog/skills.md (roadmap G4), so a
+    // differing local copy there is an expected refresh, not the drift warning
+    // the CLI adapter skills get.
+    warning:
+      name === HOSTED_SKILL_NAME
+        ? `${destDir}: the hosted Tenjin skill was ${dryRun ? 'would be ' : ''}refreshed from the packaged mirror of tenjin.blog/skills.md; it stays as the zero-install fallback.`
+        : `${destDir}: local skill copy differed and was ${dryRun ? 'would be ' : ''}overwritten (the packaged copy is canonical).`,
   };
 }
 
