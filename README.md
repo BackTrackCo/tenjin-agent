@@ -234,11 +234,18 @@ approval.
   is never written to disk. The wallet address stays readable, so `show`,
   `balance`, and `doctor` work without a passphrase; only signing decrypts.
   Signing is local and the CLI talks only to the configured base URL.
+- There is exactly **one active wallet**. `wallet create` refuses when one
+  exists; the explicit `wallet create --replace` first verifies the outgoing
+  wallet's passphrase against its keystore, preserves it under the wallet's own
+  address in the OS store, parks the keystore beside the new one
+  (`wallet.<address>.json.bak`), and only then creates the new wallet — a
+  replace can never strand the old wallet's funds. `wallet show` lists archived
+  addresses as a recovery hint.
 - The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE`, then the
   OS credential store, then an interactive prompt. On `wallet create` with no env
   passphrase, a strong random one is generated and saved to the OS store so later
   signing is transparent. Every stored entry is **per wallet** — keyed by the
-  wallet's own address — so creating a new wallet never touches an existing
+  wallet's own address — so replacing a wallet never touches the outgoing
   wallet's passphrase. (Installs from before per-wallet entries used one shared
   slot; the first signing that proves ownership re-keys that slot under the
   owning wallet's address — the copy is verified before the old slot is

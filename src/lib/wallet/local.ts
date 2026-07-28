@@ -1,9 +1,10 @@
+import { readdir, rename } from 'node:fs/promises';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import * as Keystore from 'ox/Keystore';
 import { CliError } from '../errors';
-import { walletPath } from '../paths';
+import { archivedWalletPath, walletPath } from '../paths';
 import {
   PRIVATE_KEY_RE,
   readWalletRecord,
@@ -11,7 +12,7 @@ import {
   writeWalletRecord,
   type WalletRecord,
 } from './store';
-import { resolvePassphrase, type PassphraseDeps } from './passphrase';
+import { resolvePassphrase, storePassphraseForWallet, type PassphraseDeps } from './passphrase';
 import type {
   TenjinSigner,
   WalletDescription,
@@ -107,11 +108,34 @@ export async function localWalletDiagnostics(deps: LocalProviderDeps): Promise<W
     deps.env.TENJIN_WALLET_PASSPHRASE !== undefined && deps.env.TENJIN_WALLET_PASSPHRASE.length > 0
       ? 'TENJIN_WALLET_PASSPHRASE'
       : undefined;
+  const archivedWallets = await listArchivedWallets(deps.dir);
   return {
     ...(fileExists ? { walletPath: path, keyStorage: KEY_STORAGE } : {}),
     ...(fileExists && passphraseSource !== undefined ? { passphraseSource } : {}),
+    ...(archivedWallets.length > 0 ? { archivedWallets } : {}),
     warnings,
   };
+}
+
+/** Archive filenames written by `wallet create --replace`; group 1 is the address. */
+const ARCHIVED_WALLET_RE = /^wallet\.(0x[0-9a-f]{40})\.json\.bak$/;
+
+/**
+ * Addresses of wallets parked by `wallet create --replace`, from a cheap dir
+ * scan (no keychain probe, no file reads — the address is the filename). A
+ * recovery hint for `show`; the single-active-wallet model reads none of these.
+ */
+async function listArchivedWallets(dir: string): Promise<string[]> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return []; // No data dir yet: nothing archived.
+  }
+  return names
+    .map((name) => ARCHIVED_WALLET_RE.exec(name)?.[1])
+    .filter((address): address is string => address !== undefined)
+    .sort();
 }
 
 export interface LocalWalletInfo {
@@ -146,6 +170,101 @@ export async function createLocalWallet(
   const keystore = await encryptToKeystore(key, resolved);
   await writeWalletRecord(dir, walletRecord(address, keystore));
   return { address, walletPath: walletPath(dir) };
+}
+
+/** Where the archived wallet's passphrase remains durable after a --replace. */
+export type ArchivedPassphraseLocation = 'store' | 'env' | 'unarchived';
+
+export interface ArchivedWalletInfo {
+  address: Address;
+  /** Where the keystore file was parked (wallet.<address>.json.bak). */
+  archivedPath: string;
+  passphraseLocation: ArchivedPassphraseLocation;
+}
+
+/**
+ * Park the ACTIVE wallet for `wallet create --replace`, refusing anything that
+ * could strand its funds. Order matters:
+ *
+ * 1. Resolve the wallet's passphrase and PROVE it decrypts this keystore (MAC +
+ *    derived-address check). Failure → REFUSED, nothing has changed.
+ * 2. Ensure a durable per-address copy of that passphrase exists BEFORE the
+ *    switch: a legacy-slot passphrase is re-keyed under this wallet's address
+ *    (verified copy, then legacy removal) and failure REFUSES; a per-address
+ *    entry already is the archive; an env passphrase stays the user's durable
+ *    copy; a prompt-entered one is archived best-effort (reported as
+ *    `unarchived` when no store can hold it — the user just typed it, so
+ *    refusing would strand nothing).
+ * 3. Only then rename the keystore to wallet.<address>.json.bak, clearing the
+ *    active slot for the new wallet.
+ *
+ * The caller runs this inside the create lock, before the new wallet exists.
+ */
+export async function archiveLocalWallet(deps: LocalProviderDeps): Promise<ArchivedWalletInfo> {
+  const record = await readWalletRecord(deps.dir);
+  if (record === null) {
+    throw new CliError('WALLET_MISSING', 'No wallet found to archive.', {
+      fix: 'Run `tenjin wallet create` without --replace.',
+    });
+  }
+  const address = record.address as Address;
+  const account = address.toLowerCase();
+  const passphraseDeps: PassphraseDeps = { env: deps.env, dir: deps.dir, ...deps.passphrase };
+  const resolved = await resolvePassphrase(passphraseDeps, address);
+
+  // Prove the resolved passphrase decrypts THIS keystore before anything moves.
+  let key: Hex;
+  try {
+    const derived = await Keystore.toKeyAsync(record.keystore, { password: resolved.passphrase });
+    key = Keystore.decrypt(record.keystore, derived);
+  } catch (err) {
+    throw new CliError(
+      'REFUSED',
+      `Cannot verify the passphrase of the existing wallet ${address}; --replace refused.`,
+      {
+        fix: `Replacing now could strand that wallet's funds. Make its passphrase resolvable first — TENJIN_WALLET_PASSPHRASE, its OS credential store entry (service tenjin-cli, account ${account}), or the interactive prompt — then retry.`,
+        cause: err,
+      },
+    );
+  }
+  if (privateKeyToAccount(key).address.toLowerCase() !== account) {
+    throw new CliError(
+      'REFUSED',
+      `The wallet file's stored address ${address} does not match its key; --replace refused.`,
+      { fix: 'The wallet file may be tampered. Resolve that before replacing it.' },
+    );
+  }
+
+  // A durable per-address copy must exist BEFORE the active slot changes hands.
+  let passphraseLocation: ArchivedPassphraseLocation;
+  if (resolved.source === 'env') {
+    passphraseLocation = 'env'; // The env var is the user's durable copy.
+  } else if (resolved.migrateLegacy !== undefined) {
+    if (!(await resolved.migrateLegacy())) {
+      throw new CliError(
+        'REFUSED',
+        `Could not archive the existing wallet's passphrase under its own address; --replace refused.`,
+        {
+          fix: `The passphrase currently lives only in the legacy shared slot (service tenjin-cli, account "wallet"), and copying it to account ${account} failed. Retry, or check OS credential store access.`,
+        },
+      );
+    }
+    passphraseLocation = 'store';
+  } else if (resolved.source === 'prompt') {
+    passphraseLocation = (await storePassphraseForWallet(
+      passphraseDeps,
+      address,
+      resolved.passphrase,
+    ))
+      ? 'store'
+      : 'unarchived';
+  } else {
+    passphraseLocation = 'store'; // Served from its own per-address entry: already archived.
+  }
+
+  const archivedPath = archivedWalletPath(account, deps.dir);
+  await rename(walletPath(deps.dir), archivedPath);
+  return { address, archivedPath, passphraseLocation };
 }
 
 type Credential =

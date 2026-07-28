@@ -207,6 +207,27 @@ async function migrateLegacyEntry(
 }
 
 /**
+ * Ensure `passphrase` has a durable per-address copy in the platform's OS store
+ * (used by `wallet create --replace` to ARCHIVE the outgoing wallet's
+ * prompt-entered passphrase before the switch). True only when the entry
+ * verifiably reads back byte-identical; an existing identical entry counts. No
+ * store, a refused write, or a failed read-back all report false — the caller
+ * decides whether that blocks or just warns. Never touches any other entry.
+ */
+export async function storePassphraseForWallet(
+  deps: PassphraseDeps,
+  address: string,
+  passphrase: string,
+): Promise<boolean> {
+  const store = storeFor(deps);
+  if (store === null) return false;
+  const account = walletStoreAccount(address);
+  if ((await store.read(account)) === passphrase) return true;
+  if (!(await store.store(account, passphrase))) return false;
+  return (await store.read(account)) === passphrase;
+}
+
+/**
  * Resolve the passphrase to ENCRYPT the new wallet at `address`: env if set;
  * else a strong random passphrase auto-stored in the platform's OS store under
  * the wallet's OWN per-address entry (so signing later is transparent); else an

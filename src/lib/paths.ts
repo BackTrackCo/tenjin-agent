@@ -47,3 +47,14 @@ export function passphraseBlobPath(dir: string = dataDir()): string {
 export function passphraseBlobPathFor(account: string, dir: string = dataDir()): string {
   return join(dir, `passphrase.${account}.dpapi`);
 }
+
+/**
+ * Where `wallet create --replace` parks the outgoing wallet's keystore, keyed by
+ * its lowercase address so successive replaces can never collide. Together with
+ * the wallet's per-address passphrase entry in the OS store, this file keeps the
+ * replaced wallet's funds recoverable; it is never read by the active-wallet
+ * path.
+ */
+export function archivedWalletPath(account: string, dir: string = dataDir()): string {
+  return join(dir, `wallet.${account}.json.bak`);
+}
