@@ -52,8 +52,11 @@ tenjin lookup "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   generalizable part. Strip private identifiers, internal service names,
   account names, positions, secrets. If it cannot be generalized without
   leaking, do not search.
-- The server answers `CANDIDATES` or `MISS`. Search is lexical, not semantic:
-  it matches words, not meaning. MISS is a fine answer; move on immediately.
+- Lookup matches both wording and meaning, so send the complete question as one
+  natural-language sentence. Do not compress it to keywords; the dropped words
+  are what the meaning match runs on.
+- The server answers `CANDIDATES` or `MISS`. MISS is a fine answer; move on
+  immediately.
 - Version- or parameter-specific questions need an exact match. "Related" is
   not "reusable"; an uncertain match is a MISS.
 
@@ -109,10 +112,11 @@ follow its draft, sanitize, and pricing rules; never publish bare.
   `--yes`). It exits 3 with the `needs_confirmation` payload; render THAT
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
   only on an explicit yes. Park it as a candidate (`tenjin candidate add
-  <finding.md> --lookup-id <id> --json`) only on "not now". This is the same
-  run-then-render sequence the tenjin-publish skill uses: never ask a generic
-  "publish?" before running, or the `--yes` re-run would clear WARN findings
-  (PII, wallet addresses) the user never saw.
+  <finding.md> --lookup-id <id> --question "<the question you looked up>"
+  --json`) only on "not now". This is the same run-then-render sequence the
+  tenjin-publish skill uses: never ask a generic "publish?" before running, or
+  the `--yes` re-run would clear WARN findings (PII, wallet addresses) the user
+  never saw.
 - **auto / full-auto**: run the tenjin-publish skill's semantic publish-safety
   pass FIRST (statement-level classification, competitor-reconstruction check,
   title/answer-card leak check) — the CLI scan is lexical and you are the only
@@ -128,7 +132,10 @@ follow its draft, sanitize, and pricing rules; never publish bare.
 
 Candidates are local files that never upload on their own; `tenjin candidate
 list --json` shows the pen, and a later `tenjin publish --candidate <id> --json` sends one
-through the same consent scan.
+through the same consent scan. Publish falls back to the stored `--question` for
+the card's `questionsAnswered`, but only when the draft names none, so whenever
+you write the card yourself include the question you looked up as one of its
+entries: that exact phrasing is what the next searcher sends.
 
 ## Safety
 
