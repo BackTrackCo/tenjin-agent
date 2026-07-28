@@ -107,6 +107,14 @@ rules. The wording of those rules has exactly one home, `lib/agent-docs.ts` in t
 rendered as skills.md and vendored into `skills/`. If an expectation and a skill disagree, the
 skill is right and the expectation is stale.
 
+Card expectations grade the limits the CLI enforces (`src/lib/card.ts`: at most 10
+`questionsAnswered` or `tasksSupported` entries, 200 characters each, `scope` at most 500) plus
+what the skill asks for by name (as-of date, scope, exclusions, method without private data).
+An entry-count floor and a spread across phrasing registers are not in any skill, so nothing
+here grades them; an eval that fails a run on guidance the skill never gives corrupts the
+with-skill delta. If that guidance lands in `agent-docs.ts`, tighten these expectations to
+match it.
+
 ## Where these run
 
 Operator-side, on demand. Not in CI. They cost real money per run and grade with a model, so

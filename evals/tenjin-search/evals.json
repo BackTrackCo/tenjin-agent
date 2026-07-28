@@ -9,7 +9,7 @@
       "expectations": [
         "Exactly one `tenjin lookup` command is run for this question",
         "The lookup command includes `--json`",
-        "The quoted query is a single complete question sentence of at least eight words, not a keyword list, and contains no boolean operators or comma-separated term stacks",
+        "The quoted query is a single complete question sentence, not a keyword list, and contains no boolean operators or comma-separated term stacks",
         "The query names both the version (pgvector 0.8, Postgres 16 to 17) and the behavior asked about",
         "If any candidate is returned, `tenjin inspect` is run on it before any buy decision",
         "No `tenjin buy` is run without the user explicitly approving the price",
