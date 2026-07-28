@@ -42,6 +42,11 @@ function capturingFetch(responder: (call: CapturedCall, attempt: number) => Resp
   return { fetch: fetchFn, calls };
 }
 
+/** The signed body, or undefined for the bodiless GET branch of the union. */
+function signedBody(req: SignableRequest): string | undefined {
+  return req.method === 'GET' ? undefined : req.body;
+}
+
 /** A minimal WriteAuth that stamps a fixed header and records recover() calls. */
 function fakeAuth(recover: (code: string | undefined) => boolean = () => false): {
   auth: WriteAuth;
@@ -168,7 +173,7 @@ describe('publishPost — 201', () => {
       }),
     );
     // The signed digest covers exactly those bytes.
-    expect(signed[0]!.body).toBe(call.body);
+    expect(signedBody(signed[0]!)).toBe(call.body);
     expect(call.headers['tenjin-session-delegation']).toBe('D');
     expect(call.headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
 
@@ -459,7 +464,7 @@ describe('updatePost', () => {
     expect(call.body).toBe(
       JSON.stringify({ title: 'New', resource: { scope: null, questionsAnswered: [] } }),
     );
-    expect(signed[0]!.body).toBe(call.body);
+    expect(signedBody(signed[0]!)).toBe(call.body);
     expect(signed[0]!.method).toBe('PUT');
     expect(post.title).toBe('New');
   });

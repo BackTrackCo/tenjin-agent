@@ -441,9 +441,13 @@ export async function getOwnPost(
 
 /**
  * Merge-update one of your own posts (`PUT /api/posts/<id>`). Identical signing
- * and 401-recovery discipline to publishPost — every attempt is signed fresh
- * because each PUT burns a single-use nonce — and identical failure posture: a
- * non-recoverable failure after the caller approved the write is exit 4.
+ * and 401-recovery discipline to publishPost: every attempt is signed fresh,
+ * because each PUT burns a single-use nonce.
+ *
+ * Failure posture is publish's with one deliberate exception. A rejected write
+ * after the caller approved it is exit 4 (the settlement class), but a 404 is
+ * exit 1: the post does not exist or is not ours, so the write definitively did
+ * not land, and nothing about it is a half-completed operation.
  */
 export async function updatePost(
   id: string,

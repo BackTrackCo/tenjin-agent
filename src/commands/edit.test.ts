@@ -411,6 +411,44 @@ describe('runEdit — append convenience', () => {
     expect(stub.calls).toHaveLength(0);
   });
 
+  it('scans only the ADDED strings, never the stored ones it merges with', async () => {
+    // The stored question carries a block-tier secret. It is already public and
+    // no flag here can remove it, so blocking on it would trap the user behind a
+    // secret they never typed. The append still goes through; the merged array
+    // (secret included, because the server replaces arrays wholesale) is sent.
+    const poisoned = {
+      ...STORED,
+      resource: {
+        ...STORED.resource,
+        questionsAnswered: ['How do I use AKIAIOSFODNN7EXAMPLE?'],
+      },
+    };
+    const stub = stubServer({ get: poisoned });
+    const res = await runEdit(
+      args({ yes: true, addQuestion: ['What does it cost?'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toEqual({
+      resource: {
+        questionsAnswered: ['How do I use AKIAIOSFODNN7EXAMPLE?', 'What does it cost?'],
+      },
+    });
+    expect((res.data as { id: string }).id).toBe(POST_ID);
+
+    // Typing that same secret yourself still blocks: the gate moved scope, not away.
+    const typed = stubServer();
+    await expect(
+      runEdit(
+        args({ yes: true, addQuestion: ['How do I use AKIAIOSFODNN7EXAMPLE?'] }),
+        makeCtx(),
+        hermetic({ fetchImpl: typed.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(typed.puts()).toHaveLength(0);
+  });
+
   it('never leaks a server-owned key from the GET into the strictObject body', async () => {
     // The append path is the one place a stored card is read back; it must
     // contribute VALUES, never keys. cacheEligible / cacheEligibleMissing /
@@ -530,6 +568,41 @@ describe('runEdit — the confirmation gate', () => {
     expect(soft.puts()).toHaveLength(0);
   });
 
+  it('explains the default mode once on stderr, and stays quiet when it is configured', async () => {
+    const stub = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider, env: {} }),
+    );
+    expect(stderr()).toContain('publish.mode: review (default) - each edit asks you once.');
+    expect(stderr()).toContain('tenjin config set publish.mode auto');
+
+    const configured = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, scope: 'another new scope' }),
+      configured.ctx,
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+    );
+    expect(configured.stderr()).not.toContain('(default)');
+  });
+
+  it('warns instead of silently degrading on a mistyped TENJIN_PUBLISH_MODE', async () => {
+    const stub = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      ctx,
+      hermetic({
+        fetchImpl: stub.fetch,
+        provider: spyProvider().provider,
+        env: { TENJIN_PUBLISH_MODE: 'reveiw' },
+      }),
+    );
+    expect(stderr()).toContain('Ignoring invalid TENJIN_PUBLISH_MODE="reveiw"');
+  });
+
   it('a live secret in the new content hard-blocks in every mode, --yes included', async () => {
     for (const mode of ['auto', 'full-auto', 'review']) {
       const viaFlag = stubServer();
@@ -606,7 +679,7 @@ describe('runEdit — notes and the summary', () => {
     expect(stderr()).not.toContain('asOf is unchanged');
   });
 
-  it('renders a clear as (cleared) and reports a no-op edit honestly', async () => {
+  it('renders a clear as (cleared)', async () => {
     const stub = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
     await runEdit(
@@ -616,15 +689,47 @@ describe('runEdit — notes and the summary', () => {
     );
     expect(stderr()).toContain('scope: "L2 fees only" → (cleared)');
     expect(stderr()).toContain('questionsAnswered: 1 → 0 (cleared)');
+  });
+});
 
-    const noop = stubServer();
-    const second = makeCtxCapturingStderr();
-    await runEdit(
-      args({ yes: true, title: 'The Answer' }),
-      second.ctx,
-      hermetic({ fetchImpl: noop.fetch, provider: spyProvider().provider }),
+describe('runEdit — a no-op edit writes nothing', () => {
+  it('skips the PUT and reports no changes, in auto mode and with --yes', async () => {
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, title: STORED.title, price: '0.1', scope: STORED.resource.scope }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
-    expect(second.stderr()).toContain('No field changes');
+    expect(stub.puts()).toHaveLength(0);
+    expect(stub.calls.map((c) => c.method)).toEqual(['GET']);
+    expect(res.humanLines?.[0]).toContain('No changes');
+    // The empty list is the machine signal that nothing was written.
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+    expect(res.data).toMatchObject({ id: POST_ID, title: STORED.title });
+  });
+
+  it('never reports a phantom change count, and never stops to confirm one', async () => {
+    // review mode would otherwise ask before a write that changes nothing.
+    const stub = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runEdit(
+      args({ title: STORED.title }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider, env: {} }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+    expect(stderr()).not.toContain('change(s)');
+  });
+
+  it('an --add-question that only repeats a stored entry is a no-op', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, addQuestion: ['What is it?'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
   });
 });
 
@@ -654,6 +759,38 @@ describe('runEdit — the update receipt', () => {
       title: 'A Better Answer',
       warnings: ['dropped external image ./pic.png'],
     });
+  });
+
+  it('mirrors the change summary and notes into data, for a client with no stderr', async () => {
+    // The MCP adapter hands the core a discard sink for stderr, so a summary that
+    // lived only there would be one the client could never show the user.
+    const file = await writeDoc('---\ntitle: ignored\n---\n# New\n\nA fresh body.\n');
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, body: file, title: 'A Better Answer' }),
+      makeCtx(), // sink stderr, exactly like buildCtx() in the MCP server
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    const data = res.data as { changes: string[]; notes: string[] };
+    expect(data.changes).toContain('title: "The Answer" → "A Better Answer"');
+    expect(data.changes.some((c) => c.startsWith('body: '))).toBe(true);
+    expect(data.notes.some((n) => n.includes('frontmatter in the body file was ignored'))).toBe(
+      true,
+    );
+    expect(data.notes.some((n) => n.includes('the excerpt stays as-is'))).toBe(true);
+  });
+
+  it('omits notes when there are none, and always carries changes', async () => {
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { changes: string[] }).changes).toEqual([
+      'scope: "L2 fees only" → "a new scope"',
+    ]);
+    expect('notes' in (res.data as object)).toBe(false);
   });
 
   it('reports the missing rubric items when the card is still ineligible', async () => {

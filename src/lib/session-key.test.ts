@@ -161,6 +161,39 @@ describe('signWithSession emits a verifiable P-256 r||s signature', () => {
     );
     expect(ok).toBe(true);
   });
+
+  it('a bodiless GET sends no Content-Digest and covers only method + target-uri', async () => {
+    const { file, publicKey } = await realKeyFile();
+    const url = 'https://tenjin.blog/api/posts/0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const headers = await signWithSession(
+      file,
+      { method: 'GET', url },
+      { now: () => 1_700_000_000_000, nonce: () => 'cd'.repeat(16) },
+    );
+
+    // Nothing may claim to cover bytes the request never sends.
+    expect('Content-Digest' in headers).toBe(false);
+    expect(headers['Signature-Input']).toMatch(/^tenjin=\("@method" "@target-uri"\);/);
+    expect(headers['Signature-Input']).not.toContain('content-digest');
+
+    // And the signature verifies against the digest-free base.
+    const sig = Buffer.from(/^tenjin=:(.+):$/.exec(headers.Signature ?? '')![1] ?? '', 'base64');
+    const base = signatureBase({
+      method: 'GET',
+      url,
+      created: 1_700_000_000,
+      nonce: 'cd'.repeat(16),
+      keyid: `p256:${file.publicKeyRaw}`,
+    });
+    expect(
+      await subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        publicKey,
+        sig,
+        Buffer.from(base, 'utf8'),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('recoveryFor maps every documented 401 code', () => {

@@ -44,10 +44,16 @@ import type { CommandContext, CommandResult } from '../context';
  * The gates are publish's, deliberately: the same deterministic scan over the new
  * body + card text (a live secret hard-blocks in every mode) and the same
  * publish.mode consent cascade, because an edit ships content to the same public
- * page a publish does. Unlike publish, the wallet is touched BEFORE consent: the
- * before→after summary the user approves can only be built from the stored post,
- * and reading it is owner-scoped. That read signs, but it writes nothing and burns
- * no nonce.
+ * page a publish does.
+ *
+ * Unlike publish, the wallet is touched BEFORE consent, and that is a real
+ * tradeoff, not a technicality: the before→after summary the user approves can
+ * only be built from the stored post, and reading it is owner-scoped. The read
+ * itself changes nothing on the server and burns no nonce, but on first use it
+ * establishes the session key, which means one wallet signature and a 24h
+ * `read+write` delegation persisted to `~/.tenjin/session.json` before the user
+ * has approved anything. We accept that: the alternative is asking a human to
+ * approve a diff we cannot show them.
  *
  * Exit codes: 0 success (and the read-only show), 2 usage, 3 needs_confirmation /
  * non-bypassable publish_blocked, 4 a write failure after approval.
@@ -160,6 +166,12 @@ export async function runEdit(
   // prompt; updatePost rebuilds the same body for the wire (pure, so identical).
   const body = buildPostUpdateBody(input);
 
+  // A no-op edit is not an edit: when every value sent already matches the stored
+  // post there is nothing to confirm, nothing new to scan, and no reason to burn a
+  // nonce on a write that would change nothing. Exit 0 with the current post.
+  const changes = changeLines(stored, body);
+  if (changes.length === 0) return noChangeReceipt(stored);
+
   const settings = await resolvePublishSettings({ dataDir: ctx.dataDir, cwd, env });
   for (const warning of settings.warnings) ctx.io.stderr.write(`${warning}\n`);
   const envMode = env.TENJIN_PUBLISH_MODE;
@@ -172,15 +184,19 @@ export async function runEdit(
       `Ignoring invalid TENJIN_PUBLISH_MODE=${JSON.stringify(envMode)}; using ${settings.mode} (${settings.modeSource}).\n`,
     );
   }
+  // Say once what an unconfigured mode does, so a first edit that stops to confirm
+  // is explained rather than surprising (publish prints the same explainer).
+  if (settings.modeSource === 'default') {
+    ctx.io.stderr.write(
+      `publish.mode: ${settings.mode} (default) - each edit asks you once. Set auto to apply clean edits automatically: tenjin config set publish.mode auto.\n`,
+    );
+  }
 
-  // The scan covers exactly what this edit would newly publish: the file (whole,
-  // frontmatter included) plus the card and post text the flags carry. A secret
+  // The scan covers exactly what this edit would NEWLY publish: the body file
+  // (whole, frontmatter included) plus the text typed on this invocation. A secret
   // reaching the public page through `edit` blocks exactly as it does through
   // `publish` — never bypassable by --yes or full-auto.
-  const findings = dedupeFindings([
-    ...scan(bodyFile?.raw ?? ''),
-    ...scan(flagScanText(args, resource)),
-  ]);
+  const findings = dedupeFindings([...scan(bodyFile?.raw ?? ''), ...scan(typedScanText(args))]);
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
   if (blocking.length > 0) {
@@ -190,7 +206,6 @@ export async function runEdit(
     });
   }
 
-  const changes = changeLines(stored, body);
   const notes = editNotes(args, stored, bodyFile);
   for (const line of [...notes, ...changes]) ctx.io.stderr.write(`${line}\n`);
 
@@ -210,7 +225,7 @@ export async function runEdit(
   }
 
   const updated = await updatePost(args.postId, input, auth, client);
-  return updateReceipt(updated);
+  return updateReceipt(updated, changes, notes);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,14 +246,34 @@ function showReceipt(post: OwnPost): CommandResult {
   return { data: post, humanLines: lines };
 }
 
-function updateReceipt(post: OwnPost): CommandResult {
+/**
+ * The applied-update receipt. `changes` (and `notes`) are mirrored INTO the data
+ * as well as printed, the way publish mirrors its stderr warnings into the
+ * receipt: an MCP client gets a discard sink for stderr, so a summary that lives
+ * only there is a summary it can never show the user. `changes: []` is the
+ * unambiguous machine signal that nothing was written.
+ */
+function updateReceipt(post: OwnPost, changes: string[], notes: string[]): CommandResult {
   const card = post.resource;
   const lines = [
     `Updated ${sanitizeForTerminal(post.title)} → ${sanitizeForTerminal(post.url)}`,
     eligibilityLine(card),
     ...(post.warnings ?? []).map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
-  return { data: post, humanLines: lines };
+  return {
+    data: { ...post, changes, ...(notes.length > 0 ? { notes } : {}) },
+    humanLines: lines,
+  };
+}
+
+/** Nothing to write: the post as it stands, and an empty change list to prove it. */
+function noChangeReceipt(post: OwnPost): CommandResult {
+  return {
+    data: { ...post, changes: [] },
+    humanLines: [
+      `No changes: every value given already matches ${sanitizeForTerminal(post.title)}. Nothing was written.`,
+    ],
+  };
 }
 
 /** The card fields that are set, one per line; nothing for a post with no card. */
@@ -310,9 +345,9 @@ function changeLines(stored: OwnPost, body: PostUpdateBody): string[] {
     lines.push(`excerpt: ${preview(stored.excerpt)} → ${preview(body.excerpt)}`);
   }
   lines.push(...cardChangeLines(stored.resource, body.resource));
-  return lines.length > 0
-    ? lines
-    : ['No field changes: every value sent already matches the stored post.'];
+  // Empty means EMPTY: the caller reads no lines as "this edit is a no-op" and
+  // skips the write, so a sentinel line here would report a change that isn't one.
+  return lines;
 }
 
 function cardChangeLines(
@@ -646,30 +681,34 @@ function resolveWriteAuth(
 // ---------------------------------------------------------------------------
 
 /**
- * Everything this edit would newly publish that did NOT come from the body file:
- * the card's free text and the post fields the flags carry. A secret typed into
- * --provenance ships to the public card exactly like one in the body.
+ * The text this invocation TYPED, and only that: the post and card fields the
+ * flags carry, outside the body file. A secret typed into --provenance ships to
+ * the public card exactly like one in the body, so it faces the same gate.
+ *
+ * The append path contributes only its ADDED strings, never the merged array.
+ * Scanning the stored entries would block an edit on text that is already public
+ * and cannot be removed from here — trapping the user behind a secret they never
+ * typed, with no flag that fixes it.
  */
-function flagScanText(args: EditArgs, card: ResourceCardUpdate | undefined): string {
+function typedScanText(args: EditArgs): string {
   const parts: string[] = [];
-  const add = (v: string | null | undefined): void => {
-    if (typeof v === 'string') parts.push(v);
+  const add = (v: string | undefined): void => {
+    if (v !== undefined) parts.push(v);
   };
   add(args.title);
   add(args.excerpt);
-  if (card !== undefined) {
-    add(card.scope);
-    add(card.exclusions);
-    add(card.provenanceSummary);
-    add(card.methodologySummary);
-    add(card.mediaType);
-    add(card.maintenanceCadence);
-    add(card.asOf);
-    add(card.validUntil);
-    add(card.estimatedPaidInputCost);
-    for (const item of card.questionsAnswered ?? []) add(item);
-    for (const item of card.tasksSupported ?? []) add(item);
-    for (const values of Object.values(card.appliesTo ?? {})) parts.push(...values);
+  add(args.scope);
+  add(args.exclusions);
+  add(args.provenance);
+  add(args.methodology);
+  add(args.asOf);
+  add(args.validUntil);
+  for (const list of [args.question, args.task, args.addQuestion, args.addTask]) {
+    if (list !== undefined) parts.push(...list);
+  }
+  if (args.appliesTo !== undefined && args.appliesTo.length > 0) {
+    // The parsed values, matching what actually ships on the card.
+    for (const values of Object.values(parseAppliesToFlags(args.appliesTo))) parts.push(...values);
   }
   return parts.join('\n');
 }

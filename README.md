@@ -55,6 +55,13 @@ already-bought content from the local library without paying again, and refuses 
 sign if the price rose since it first saw the 402. Spend policy is enforced in the
 wallet provider layer before any payment.
 
+`edit` sends only the fields you pass, so an omitted field is kept; `--clear
+<field>` is the one way to empty a card field, and `--question` / `--task`
+replace the stored list while `--add-question` / `--add-task` append to it. The
+append flags read the post and then write it back, with no concurrency guard (the
+API offers no `If-Match`), so a web-panel edit landing between the two calls can
+be overwritten.
+
 Read output defaults to a heading outline, not the body: `--print-body` includes
 the full body, and `--sections <tokens>` includes the leading sections within a
 token budget (deterministic, no model calls).

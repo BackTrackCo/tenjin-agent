@@ -45,16 +45,15 @@ const SessionFileSchema = z.object({
 });
 export type SessionFile = z.infer<typeof SessionFileSchema>;
 
-export interface SignableRequest {
-  method: 'GET' | 'POST' | 'PUT';
-  url: string;
-  /**
-   * The exact request body bytes (JSON string); covered by Content-Digest.
-   * Omitted for a bodiless request (the owner-scoped GET), where content-digest
-   * drops out of the covered set per the signature contract.
-   */
-  body?: string;
-}
+/**
+ * A request to sign. The body is part of the METHOD, not an optional extra: a
+ * bodied request must carry the exact bytes Content-Digest covers, and a GET has
+ * no body to cover at all, so content-digest drops out of the covered set. As a
+ * union, "GET with a body" and "PUT without one" are both unrepresentable rather
+ * than merely wrong.
+ */
+export type SignableRequest =
+  { method: 'GET'; url: string } | { method: 'POST' | 'PUT'; url: string; body: string };
 
 /**
  * The write-auth seam a posts client signs through. `headersFor` attaches the
@@ -243,7 +242,7 @@ export async function signWithSession(
   // A bodiless request carries no Content-Digest, and content-digest leaves the
   // covered component set with it — signing a digest of "" would cover bytes the
   // request never sends.
-  const digest = req.body !== undefined ? contentDigest(req.body) : undefined;
+  const digest = req.method === 'GET' ? undefined : contentDigest(req.body);
   const created = Math.floor(now() / 1000);
   const params: SignatureParamsInput = {
     method: req.method,
