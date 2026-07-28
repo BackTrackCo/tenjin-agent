@@ -77,6 +77,20 @@ describe('buildTenjinMcpServer, tool surface', () => {
       ].sort(),
     );
   });
+
+  // `tenjin send` is the human-invoked funds-out escape hatch (issue #34). Doc
+  // 10's narrow-toolset rule keeps it OFF the MCP surface: no send tool, and no
+  // send action on tenjin_wallet. This pin fails if either ever appears.
+  it('never exposes the funds-out send verb (no tool, no wallet action)', async () => {
+    const client = await connect({ dataDir: dir });
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).not.toContain('tenjin_send');
+    const wallet = tools.find((t) => t.name === 'tenjin_wallet');
+    expect(wallet).toBeDefined();
+    const schema = JSON.stringify(wallet?.inputSchema ?? {});
+    expect(schema).toContain('show');
+    expect(schema).not.toContain('send');
+  });
 });
 
 describe('tenjin_lookup', () => {

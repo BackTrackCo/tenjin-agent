@@ -1,4 +1,4 @@
-import type { Address, Hex, TypedDataDefinition } from 'viem';
+import type { Address, Hex, TransactionSerializable, TypedDataDefinition } from 'viem';
 
 /**
  * The wallet seam. Commands resolve a WalletProvider and never touch a raw key:
@@ -59,11 +59,18 @@ export interface WalletDiagnostics {
  * Structural signer. All methods are async because a remote signer can require
  * network authorization and can refuse by policy — the local provider just wraps
  * a viem account, but callers must not assume signing is synchronous or free.
+ *
+ * `signTransaction` is the ONLY door to a raw signed transaction (the `tenjin
+ * send` escape hatch); there is deliberately no second signing path outside this
+ * seam. A hosted provider whose backend cannot produce a raw signed transaction
+ * (or refuses one by policy) must throw a coded error here rather than sign
+ * through some other channel.
  */
 export interface TenjinSigner {
   address: Address;
   signMessage(args: { message: string }): Promise<Hex>;
   signTypedData(args: TypedDataDefinition): Promise<Hex>;
+  signTransaction(tx: TransactionSerializable): Promise<Hex>;
 }
 
 export interface WalletProvider {

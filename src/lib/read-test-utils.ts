@@ -17,6 +17,7 @@ export function testSigner(): TenjinSigner {
     address: account.address,
     signMessage: (args) => account.signMessage({ message: args.message }),
     signTypedData: (args) => account.signTypedData(args),
+    signTransaction: (tx) => account.signTransaction(tx),
   };
 }
 

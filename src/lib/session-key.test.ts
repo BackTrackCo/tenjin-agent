@@ -33,6 +33,7 @@ function otherSigner(): TenjinSigner {
     address: account.address,
     signMessage: (a) => account.signMessage({ message: a.message }),
     signTypedData: (a) => account.signTypedData(a),
+    signTransaction: (tx) => account.signTransaction(tx),
   };
 }
 
@@ -225,6 +226,7 @@ describe('establishSession + cache (0600, address-bound)', () => {
         return signer.signMessage(a);
       },
       signTypedData: (a) => signer.signTypedData(a),
+      signTransaction: (tx) => signer.signTransaction(tx),
     };
     const file = await establishSession(config(spy));
     expect(signs).toBe(1);
@@ -265,6 +267,7 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
           return inner.signMessage(a);
         },
         signTypedData: (a) => inner.signTypedData(a),
+        signTransaction: (tx) => inner.signTransaction(tx),
       },
       count: () => n,
     };
@@ -339,6 +342,7 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
         return swapped.signMessage(a);
       },
       signTypedData: (a) => swapped.signTypedData(a),
+      signTransaction: (tx) => swapped.signTransaction(tx),
     };
     const h2 = await createSessionKeyAuth({
       signer: swapSpy,
@@ -377,6 +381,7 @@ describe('createSiwxAuth (plain-SIWX fallback)', () => {
         return inner.signMessage(a);
       },
       signTypedData: (a) => inner.signTypedData(a),
+      signTransaction: (tx) => inner.signTransaction(tx),
     };
     const auth = createSiwxAuth({
       signer,
@@ -451,6 +456,7 @@ describe('createSessionKeyAuth recovers from a bad on-disk session', () => {
           return inner.signMessage(a);
         },
         signTypedData: (a) => inner.signTypedData(a),
+        signTransaction: (tx) => inner.signTransaction(tx),
       },
     };
   }

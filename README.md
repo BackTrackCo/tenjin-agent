@@ -48,6 +48,15 @@ tenjin lookup "what actually changed in <library> v3's public API"   # your firs
 | `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
 | `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                 |
 | `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a lookup MISS nudges you about parked ones                           |
+| `tenjin send <amount> usdc <to> [--yes]`                | **Escape hatch:** move USDC on Base out of the agent wallet — preview, explicit confirm, then the tx hash         |
+
+`send` is human-invoked only: it is deliberately absent from the MCP toolset and
+the harness skills, and nothing is signed until the previewed (checksummed)
+recipient and amount are confirmed — interactively at a TTY, or explicitly with
+`--yes` when headless. It refuses when the active wallet's passphrase entry is
+missing. For routing FUTURE revenue away from the agent wallet entirely, connect
+the agent to your own Tenjin account instead (delegation); `send` exists for
+funds already sitting on the agent key.
 
 `buy` re-reads an entitled resource for free before ever paying, re-delivers
 already-bought content from the local library without paying again, and refuses to

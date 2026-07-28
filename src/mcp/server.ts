@@ -181,6 +181,12 @@ const candidateInput = {
 };
 
 // The wallet cores take no args beyond the action discriminator.
+//
+// `tenjin send` (the funds-out escape hatch, src/commands/send.ts) is
+// DELIBERATELY EXCLUDED from this toolset, as an action here and as a tool of
+// its own: the MCP surface stays narrower than the CLI (doc 10's narrow-toolset
+// rule — MCP agents discover and pay under policy; no wallet export, and no
+// moving funds out of the wallet). Do not add a send tool or action.
 const walletInput = {
   action: z.enum(['show', 'balance', 'create']).describe('show | balance | create'),
 } satisfies Record<'action', z.ZodTypeAny>;

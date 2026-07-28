@@ -214,6 +214,22 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // The funds-out ESCAPE HATCH (issue #34): human-invoked only. It is deliberately
+  // absent from the MCP toolset (src/mcp/server.ts) and from the skill adapters —
+  // no model-facing surface gains a send trigger.
+  addGlobalFlags(program.command('send <amount> <token> <to>'))
+    .description(
+      'Move funds OUT of the agent wallet (escape hatch): preview the resolved recipient and amount, confirm explicitly, then transfer on Base and print the tx hash. USDC only',
+    )
+    .option('--yes', 'skip the interactive confirm (required to send when not at a TTY)')
+    .action(async function (this: Command, amount: string, token: string, to: string) {
+      await runCommand('send', this, async (ctx) => {
+        const o = this.opts();
+        const { runSend } = await import('./commands/send');
+        return runSend({ amount, token, to, ...(o.yes === true ? { yes: true } : {}) }, ctx);
+      });
+    });
+
   addGlobalFlags(program.command('lookup <question>'))
     .description(
       'Ask for payable candidates or an honest MISS. Use when a task needs public knowledge someone may already have published; send only a generalized public question, never secrets or private context',
