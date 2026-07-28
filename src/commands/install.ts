@@ -54,7 +54,7 @@ interface PublishModeSelection {
 /**
  * The one line `install` keeps in an AGENTS.md (and, opt-in, in a CLAUDE.md) so the
  * harness reads it as global guidance, not the raw ~/.agents/skills scan. It is an
- * instinct nudge: run a free `tenjin lookup` before regenerating public research,
+ * instinct nudge: run a free `tenjin search` before regenerating public research,
  * then a pointer to where the skills live. The HTML-comment marker keeps re-runs
  * idempotent: a matching line is left untouched, a drifted line (an older install's
  * copy) is rewritten in place, and an absent line is appended, so we never duplicate.
@@ -63,10 +63,10 @@ const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
 
 /**
  * The instinct nudge line, pointed at `skillsDir`. One line, no em dashes: the
- * marker, the lookup-before-regenerating nudge, then where the skills live.
+ * marker, the search-before-regenerating nudge, then where the skills live.
  */
 function nudgeLine(skillsDir: string): string {
-  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin lookup "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
+  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin search "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
 }
 
 /**
@@ -277,13 +277,13 @@ async function buildWalkthrough(
   lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
   lines.push(...doctorSummary(io, s.doctor), '');
   lines.push(...permissionsWalkthrough(io), '');
-  lines.push(`Done. Try: tenjin lookup "${EXAMPLE_QUESTION}"`);
+  lines.push(`Done. Try: tenjin search "${EXAMPLE_QUESTION}"`);
   return lines;
 }
 
 /**
  * The recommended harness allowlist, printed at install time so an operator has
- * the lines BEFORE an auto-mode session denies `tenjin lookup` (#33). The heading
+ * the lines BEFORE an auto-mode session denies `tenjin search` (#33). The heading
  * is painted; the rules themselves stay unpainted so a copy-paste out of the
  * terminal is exactly the text the settings file wants.
  */
@@ -318,7 +318,7 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
         paint(
           io,
           'dim',
-          '  The nudge tells agents to run a free anonymous `tenjin lookup` before regenerating research; the generalized question text is sent to tenjin.blog.',
+          '  The nudge tells agents to run a free anonymous `tenjin search` before regenerating research; the generalized question text is sent to tenjin.blog.',
         ),
       );
       lines.push(
@@ -334,7 +334,7 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
         paint(
           io,
           'dim',
-          '  Add a Tenjin lookup nudge to ~/.claude/CLAUDE.md later: tenjin install --harness claude --claude-md',
+          '  Add a Tenjin search nudge to ~/.claude/CLAUDE.md later: tenjin install --harness claude --claude-md',
         ),
       );
     }
@@ -667,7 +667,7 @@ async function decideClaudeMd(
   if (dryRun || !canPrompt) return false;
   const confirm = deps.confirmClaudeMd ?? defaultConfirmYesNo;
   return confirm(
-    'Add a one-line nudge to ~/.claude/CLAUDE.md telling agents to try a free Tenjin lookup before regenerating research? It sends only generalized question text to tenjin.blog. [Y/n] ',
+    'Add a one-line nudge to ~/.claude/CLAUDE.md telling agents to try a free Tenjin search before regenerating research? It sends only generalized question text to tenjin.blog. [Y/n] ',
   );
 }
 

@@ -46,7 +46,7 @@ describe('recommended allowlist shape', () => {
 
   it('recommends every free read-only verb the command surface exposes', () => {
     expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.command)).toEqual([
-      'tenjin lookup',
+      'tenjin search',
       'tenjin inspect',
       'tenjin outcome',
       'tenjin doctor',
@@ -124,7 +124,7 @@ describe('the flag surface inside an allowed verb', () => {
   // after it. Pin that as a known property instead of an unstated assumption.
   it('a recommended rule also matches the same verb carrying --base-url', () => {
     expect(
-      ruleCovers('Bash(tenjin lookup:*)', 'tenjin lookup "q" --base-url https://elsewhere'),
+      ruleCovers('Bash(tenjin search:*)', 'tenjin search "q" --base-url https://elsewhere'),
     ).toBe(true);
     expect(
       ruleCovers('Bash(tenjin buy:*)', 'tenjin buy x --base-url https://elsewhere --yes'),
@@ -153,18 +153,18 @@ describe('the flag surface inside an allowed verb', () => {
 });
 
 describe('claims made about the recommended set are true of the code', () => {
-  // lookup and outcome both POST. Pre-clearing them is defensible; calling them
+  // search and outcome both POST. Pre-clearing them is defensible; calling them
   // read-only in order to justify it is not.
   it('does not call the free set read-only', () => {
     const block = renderPermissionsBlock().join('\n');
     expect(block).not.toMatch(/free, read-only verbs/i);
     expect(block).toContain('Free: no wallet, no signing, no payment');
-    expect(block).toMatch(/`lookup` and `outcome` POST/);
+    expect(block).toMatch(/`search` and `outcome` POST/);
   });
 
   it('discloses the non-read-only half in the per-entry notes too', () => {
     const byCommand = new Map(ALWAYS_SAFE_ALLOWLIST.map((e) => [e.command, e.note]));
-    expect(byCommand.get('tenjin lookup')).toMatch(/Not read-only/i);
+    expect(byCommand.get('tenjin search')).toMatch(/Not read-only/i);
     expect(byCommand.get('tenjin outcome')).toMatch(/Not read-only/i);
   });
 });

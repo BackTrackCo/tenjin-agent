@@ -95,7 +95,7 @@ export async function collectDoctorChecks(
     configCheck,
     await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkLookupContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -243,12 +243,12 @@ async function checkApiContract(
 }
 
 /**
- * WARN-level (never fails doctor): is the A2 lookup endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates A2 (the buy/lookup path will
+ * WARN-level (never fails doctor): is the A2 search endpoint advertised in the
+ * OpenAPI doc? Absent means the deployment predates A2 (the buy/search path will
  * not work against it yet). Warn-only because doctor's job is a working READ path,
- * and lookup is additive.
+ * and search is additive.
  */
-async function checkLookupContract(
+async function checkSearchContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
@@ -262,37 +262,37 @@ async function checkLookupContract(
   if (!res.ok) {
     return {
       result: {
-        name: 'lookup-contract',
+        name: 'search-contract',
         status: 'warn',
         required: false,
-        detail: `Could not confirm the lookup endpoint at ${url}`,
-        fix: 'Check the configured base URL (`tenjin config get baseUrl`); lookup/buy need the A2 endpoints deployed.',
+        detail: `Could not confirm the search endpoint at ${url}`,
+        fix: 'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
       },
     };
   }
-  const present = hasLookupPath(res.json);
+  const present = hasSearchPath(res.json);
   return {
     result: present
       ? {
-          name: 'lookup-contract',
+          name: 'search-contract',
           status: 'ok',
           required: false,
-          detail: 'Lookup endpoint advertised',
+          detail: 'Search endpoint advertised',
         }
       : {
-          name: 'lookup-contract',
+          name: 'search-contract',
           status: 'warn',
           required: false,
-          detail: 'This deployment does not advertise POST /api/agent/lookup (A2 not deployed)',
-          fix: 'lookup/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
+          detail: 'This deployment does not advertise POST /api/agent/search (A2 not deployed)',
+          fix: 'search/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
         },
   };
 }
 
-function hasLookupPath(json: unknown): boolean {
+function hasSearchPath(json: unknown): boolean {
   if (!isRecord(json)) return false;
   const paths = json.paths;
-  return isRecord(paths) && '/api/agent/lookup' in paths;
+  return isRecord(paths) && '/api/agent/search' in paths;
 }
 
 async function checkReadPath(
@@ -300,7 +300,7 @@ async function checkReadPath(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
-  // The shipped public read path. The A2 lookup-contract check is a B2 follow-up.
+  // The shipped public read path. The A2 search-contract check is a B2 follow-up.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.

@@ -32,7 +32,7 @@
  * `--timeout`, and `--base-url` on every leaf command, so every rule below also
  * clears `--base-url <url>` in trailing position. `--base-url` is validated as a
  * URL and nothing more, and it wins settings precedence, so it re-points the
- * trust boundary itself: the `lookup` question goes to that host, `doctor` probes
+ * trust boundary itself: the `search` question goes to that host, `doctor` probes
  * it, and `assertOnBaseOrigin` only checks that a resource URL shares an origin
  * with the CONFIGURED base, so an attacker-controlled pair satisfies the pin. No
  * prefix syntax expresses "this verb but not that flag", so the mitigation is
@@ -60,15 +60,15 @@ export interface ExcludedVerb {
 
 /**
  * FREE verbs: no wallet, no signing, no payment. Not all of them are read-only,
- * and the difference is disclosed rather than papered over — `lookup` POSTs the
+ * and the difference is disclosed rather than papered over — `search` POSTs the
  * (generalized, anonymous) question off-machine and records it locally, and
  * `outcome` POSTs a report that moves the marketplace's reuse signal. Both are
  * unauthenticated remote writes. Pre-clearing them is defensible because they
  * cost nothing and carry no credential; calling them read-only to justify it
  * would not be.
  *
- * Rules are PREFIX rules: `Bash(tenjin lookup:*)` clears commands that start with
- * `tenjin lookup` and nothing else. The narrow `wallet show` / `wallet balance` /
+ * Rules are PREFIX rules: `Bash(tenjin search:*)` clears commands that start with
+ * `tenjin search` and nothing else. The narrow `wallet show` / `wallet balance` /
  * `config get` / `candidate list` forms are deliberate: a `Bash(tenjin wallet:*)`
  * or `Bash(tenjin config:*)` rule would silently swallow `wallet create` and
  * `config set`, and `config set` can raise the spend caps.
@@ -84,12 +84,12 @@ export interface ExcludedVerb {
  */
 export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
   {
-    rule: 'Bash(tenjin lookup:*)',
-    command: 'tenjin lookup',
+    rule: 'Bash(tenjin search:*)',
+    command: 'tenjin search',
     note:
       'Free anonymous marketplace search. No wallet, no signing, no payment. ' +
       'Not read-only: it POSTs the generalized question off-machine and records ' +
-      'the lookup locally.',
+      'the search locally.',
   },
   {
     rule: 'Bash(tenjin inspect:*)',
@@ -100,7 +100,7 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
     rule: 'Bash(tenjin outcome:*)',
     command: 'tenjin outcome',
     note:
-      'Free honest outcome report on a past lookup. No wallet, no payment. ' +
+      'Free honest outcome report on a past search. No wallet, no payment. ' +
       'Not read-only: it POSTs a report that moves the marketplace reuse signal.',
   },
   {
@@ -272,7 +272,7 @@ export function renderPermissionsBlock(): string[] {
   ];
   for (const e of ALWAYS_SAFE_ALLOWLIST) lines.push(`  ${e.rule}`);
   lines.push('  Free: no wallet, no signing, no payment. Not all read-only, though:');
-  lines.push('  `lookup` and `outcome` POST to the marketplace (a question, a report).');
+  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report).');
   lines.push('');
   lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
   lines.push('');

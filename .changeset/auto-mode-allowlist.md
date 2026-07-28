@@ -6,7 +6,7 @@ Ship a recommended auto-mode permission allowlist so a harness running unattende
 stops denying the free Tenjin verbs. `tenjin install` prints the block and
 `tenjin doctor` reprints it on every run, on the failure envelope as well as the
 success one (also in `--json`, under `permissions`): eight always-safe lines
-covering the free verbs (`lookup`, `inspect`, `outcome`, `doctor`, `wallet show`,
+covering the free verbs (`search`, `inspect`, `outcome`, `doctor`, `wallet show`,
 `wallet balance`, `config get`, `candidate list`), `Bash(tenjin buy:*)` as a
 separate explicit opt-in, and a named exclusion list (`send`, `publish`,
 `wallet create`, `config set`, `candidate add` / `candidate drop`, `install`,
