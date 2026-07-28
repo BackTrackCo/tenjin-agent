@@ -21,7 +21,8 @@ parse. Without it, at an interactive terminal the CLI is human-first (prose, no
 envelope), so a PTY-allocating harness would otherwise get unparseable output.
 Every command below already includes it. Exit codes: `0` success (an honest MISS
 is success),
-`1` network/runtime, `2` usage, `3` policy refusal, `4` payment failure. On
+`1` network/runtime, `2` usage, `3` refused-on-purpose (a spend-policy refusal, or
+`tenjin read` declining to pay for a paid piece), `4` payment failure. On
 failure the commands self-diagnose; `tenjin doctor` is optional diagnostics,
 never a required first step.
 
@@ -64,8 +65,9 @@ tenjin inspect <resource-url-or-id> --json
 ```
 
 Free, never pays. Shows the answer card (what it answers, applies-to,
-exclusions, as-of and valid-until dates), price, and preview. Buy only when ALL
-of these hold:
+exclusions, as-of and valid-until dates), price, and preview. Its `nextCommand`
+field names the verb to use next: `tenjin read` when the piece is free or already
+yours, `tenjin buy` when it is paid and unowned. Buy only when ALL of these hold:
 
 - the card matches the exact versions/parameters of your question;
 - the price is below your cost to regenerate (tokens + paid data + latency);
@@ -73,6 +75,23 @@ of these hold:
 
 Purchases settle on-chain and are unrefundable, so buy when the two conditions
 above hold rather than on a hunch.
+
+## Read (free), then buy (paid)
+
+Delivery is split across two verbs so a zero-cost read never looks like a
+purchase. Reach for `read` first; it cannot spend.
+
+```bash
+tenjin read <resource-url-or-id> --json
+```
+
+- Delivers **free** pieces and anything already in your local library (a re-read
+  of something you bought costs nothing and needs no approval).
+- If the piece would cost money, it refuses with **exit 3**, naming the price and
+  the `tenjin buy` command to run. It never touches the wallet, so a refusal is
+  free and safe to attempt speculatively.
+- A piece you bought on another machine is not in this library, so `read` refuses
+  it; `buy` re-checks the entitlement and re-reads it free.
 
 ## Buy
 
@@ -86,6 +105,7 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 - The CLI re-checks entitlement first, so a returning buyer never pays twice.
 - The body is saved to `~/.tenjin/library/`; stdout gets the path and a heading
   outline, not the body. Use `--sections <budget>` or `--print-body` as needed.
+  `tenjin read` shares the same delivery output and the same two flags.
 
 ## Report the outcome (always)
 

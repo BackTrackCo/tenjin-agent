@@ -44,4 +44,25 @@ describe('runInspect', () => {
     const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
     expect((res.data as { access: string }).access).toBe('free');
   });
+
+  // The verb split (#42): delivery is free here, so the copy must NOT send an agent
+  // through the paying verb; paid-and-unowned still must.
+  it('points a free piece at `tenjin read`, never at buy', async () => {
+    const { fetch } = makeReadServer({ plain: () => reply.entitled(readBody({ price: '0' })) });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { nextCommand: string };
+    expect(data.nextCommand).toBe(`tenjin read ${URL_}`);
+    const human = (res.humanLines ?? []).join('\n');
+    expect(human).toContain('tenjin read');
+    expect(human).not.toContain('tenjin buy');
+  });
+
+  it('keeps pointing a paid, unowned piece at `tenjin buy`', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { nextCommand: string };
+    expect(data.nextCommand).toBe(`tenjin buy ${URL_}`);
+    expect((res.humanLines ?? []).join('\n')).toContain('run `tenjin buy`');
+  });
 });

@@ -45,9 +45,13 @@ export async function runInspect(
         title: body.title,
         price: toMoney(body.price),
         headings: headingOutline(body.bodyMd),
+        // The free/owned half of the verb split (#42): delivery here costs nothing,
+        // so point at the free-only verb, not at the paying one. Machine consumers
+        // read this; the human line below says the same thing.
+        nextCommand: `tenjin read ${ref.url}`,
       },
       humanLines: [
-        `${sanitizeForTerminal(body.title)}, free (${body.price} atomic). Read it with \`tenjin buy\`.`,
+        `${sanitizeForTerminal(body.title)}, free (${body.price} atomic). Read it with \`tenjin read ${ref.url}\`.`,
       ],
     };
   }
@@ -72,17 +76,26 @@ export async function runInspect(
               }
             : undefined,
         preview: result.preview,
+        // Paid and unowned: this one really does cost money, so it keeps pointing at
+        // `buy`. `tenjin read` would refuse it with exit 3.
+        nextCommand: `tenjin buy ${ref.url}`,
       },
       humanLines: [
         `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
-        'This is the pre-purchase card; run `tenjin buy` to pay and read.',
+        'This is the pre-purchase card; run `tenjin buy` to pay and read (`tenjin read` refuses paid pieces).',
       ],
     };
   }
 
   // already_purchased without a payment header is unexpected; report it plainly.
+  // Owned means delivery is free, so this branch points at `read` too.
   return {
-    data: { url: ref.url, access: 'entitled', message: result.message },
-    humanLines: [sanitizeForTerminal(result.message)],
+    data: {
+      url: ref.url,
+      access: 'entitled',
+      message: result.message,
+      nextCommand: `tenjin read ${ref.url}`,
+    },
+    humanLines: [`${sanitizeForTerminal(result.message)} Read it with \`tenjin read ${ref.url}\`.`],
   };
 }
