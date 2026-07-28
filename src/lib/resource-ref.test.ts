@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertOnBaseOrigin, resolveResourceRef } from './resource-ref';
-import { recordLookup } from './lookup-store';
+import { recordSearch } from './search-store';
 
 let dir: string;
 beforeEach(async () => {
@@ -23,8 +23,8 @@ describe('resolveResourceRef', () => {
   });
 
   it('resolves a uuid to the stored candidate URL', async () => {
-    await recordLookup(dir, {
-      lookupId: '0197aaaa-bbbb-cccc-dddd-000000000001',
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
       at: '2026-07-18T00:00:00.000Z',
       question: 'q',
       decision: 'CANDIDATES',
@@ -57,8 +57,8 @@ describe('origin pinning (SIWX/payment trust boundary)', () => {
   });
 
   it('refuses a stored candidate whose URL no longer matches the base origin', async () => {
-    await recordLookup(dir, {
-      lookupId: '0197aaaa-bbbb-cccc-dddd-000000000002',
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000002',
       at: '2026-07-18T00:00:00.000Z',
       question: 'q',
       decision: 'CANDIDATES',
