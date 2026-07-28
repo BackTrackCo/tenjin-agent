@@ -249,6 +249,99 @@ describe('README allowlist block does not drift from the constants', () => {
 });
 
 /**
+ * Source with comments removed and everything else kept, one entry per input
+ * line so an offender can be reported at its line number.
+ *
+ * A character scanner rather than the line-prefix heuristic this started as. The
+ * heuristic skipped whole lines, which silently dropped code sitting after a
+ * closing block comment on the same line, and it would have truncated a line at
+ * the `//` inside an `https://` URL. Both are FALSE NEGATIVES on a test whose
+ * only job is to fail, so string literals are tracked as well, and the scanner
+ * is pinned directly by its own table below instead of only through its effect.
+ */
+function stripComments(source: string): string[] {
+  type State = 'code' | 'block' | "'" | '"' | '`';
+  let state: State = 'code';
+  const out: string[] = [];
+  for (const raw of source.split('\n')) {
+    let kept = '';
+    let i = 0;
+    while (i < raw.length) {
+      const ch = raw[i] as string;
+      const two = raw.slice(i, i + 2);
+      if (state === 'block') {
+        if (two === '*/') {
+          state = 'code';
+          i += 2;
+        } else i += 1;
+        continue;
+      }
+      if (state !== 'code') {
+        kept += ch;
+        if (ch === '\\') {
+          kept += raw[i + 1] ?? '';
+          i += 2;
+          continue;
+        }
+        if (ch === state) state = 'code';
+        i += 1;
+        continue;
+      }
+      if (two === '//') break; // a line comment eats the rest of the line
+      if (two === '/*') {
+        state = 'block';
+        i += 2;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') state = ch;
+      kept += ch;
+      i += 1;
+    }
+    // Quoted strings do not span lines; a template literal does. Resetting here
+    // keeps one malformed line from swallowing the rest of the file.
+    if (state === "'" || state === '"') state = 'code';
+    out.push(kept);
+  }
+  return out;
+}
+
+describe('stripComments (the scanner the --base-url sweep depends on)', () => {
+  // Pinned directly, because every bug in it is a bug that makes the sweep pass
+  // when it should fail. The first three cases are exactly the ones the
+  // line-prefix version got wrong.
+  const cases: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      'code after a closing block comment on the same line',
+      "*/ x('--base-url');",
+      " x('--base-url');",
+    ],
+    ['code after an inline block comment', "/* note */ x('--base-url');", " x('--base-url');"],
+    ['a // inside a string literal', "x('https://a --base-url');", "x('https://a --base-url');"],
+    ['a trailing line comment', "x('keep'); // --base-url", "x('keep'); "],
+    ['a whole-line comment', '// --base-url', ''],
+    ['an escaped quote inside a string', "x('a\\' --base-url');", "x('a\\' --base-url');"],
+    ['a block comment opened and closed inline twice', '/*a*/ y /*b*/ z', ' y  z'],
+  ];
+  for (const [name, input, expected] of cases) {
+    it(`keeps ${name}`, () => {
+      // The first case starts mid-block, so feed the opener on a prior line.
+      const src = input.startsWith('*/') ? `/* open\n${input}` : input;
+      const lines = stripComments(src);
+      expect(lines[lines.length - 1]).toBe(expected);
+    });
+  }
+
+  it('a block comment spanning lines hides only the comment', () => {
+    expect(stripComments("a('--base-url')\n/* hide\n--base-url\n*/ b('--base-url')")).toEqual([
+      "a('--base-url')",
+      '',
+      '',
+      " b('--base-url')",
+    ]);
+  });
+});
+
+/**
  * The skill tells the agent never to pass `--base-url` on an allowlisted verb.
  * The CLI's own error copy is the loudest contrary voice available: `doctor` is
  * allowlisted and unattended, its `fix:` lines print to the agent and ride the
@@ -257,7 +350,7 @@ describe('README allowlist block does not drift from the constants', () => {
  * coach the move the skill forbids, so no user-facing string may name it.
  *
  * The pin is a source scan rather than a per-message assertion so a NEW string
- * fails it too. Comment lines are stripped: the flag is a real part of the CLI
+ * fails it too. Comments are stripped: the flag is a real part of the CLI
  * surface, and prose explaining why it is dangerous must stay writable.
  */
 describe('no user-facing CLI string coaches --base-url', () => {
@@ -267,24 +360,8 @@ describe('no user-facing CLI string coaches --base-url', () => {
   // is the caveat that discloses it. Both name it deliberately.
   const ALLOWED = new Set(['cli.ts', 'lib/permissions.ts']);
 
-  /** Source lines with block/line comments removed, in this repo's comment style. */
   function codeLines(file: string): string[] {
-    const out: string[] = [];
-    let inBlock = false;
-    for (const raw of readFileSync(join(SRC, file), 'utf8').split('\n')) {
-      const t = raw.trim();
-      if (inBlock) {
-        if (t.includes('*/')) inBlock = false;
-        continue;
-      }
-      if (t.startsWith('/*')) {
-        if (!t.includes('*/')) inBlock = true;
-        continue;
-      }
-      if (t.startsWith('//')) continue;
-      out.push(raw);
-    }
-    return out;
+    return stripComments(readFileSync(join(SRC, file), 'utf8'));
   }
 
   function sourceFiles(): string[] {
@@ -315,5 +392,14 @@ describe('no user-facing CLI string coaches --base-url', () => {
     const doctor = codeLines('commands/doctor.ts').join('\n');
     expect(doctor).toContain('config set baseUrl');
     expect(doctor).not.toContain('allowlisted verb (see FLAG_CAVEAT');
+  });
+
+  it('leaves real declarations standing in EVERY scanned file, not just one', () => {
+    // Per-file, so an unterminated block comment cannot swallow one file's worth
+    // of strings while the single-file check above stays green.
+    const blank = sourceFiles().filter(
+      (file) => !/\b(import|export|function|const)\b/.test(codeLines(file).join('\n')),
+    );
+    expect(blank).toEqual([]);
   });
 });

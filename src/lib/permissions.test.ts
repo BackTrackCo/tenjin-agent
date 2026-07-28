@@ -44,7 +44,10 @@ describe('recommended allowlist shape', () => {
     }
   });
 
-  it('recommends every free read-only verb the command surface exposes', () => {
+  // "free (non-paying)", NOT "read-only": `search` and `outcome` both POST. The
+  // disclosure tests further down assert the shipped block never says
+  // "free, read-only verbs"; a test title in the same file may not say it either.
+  it('recommends every free (non-paying) verb the command surface exposes', () => {
     expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.command)).toEqual([
       'tenjin search',
       'tenjin inspect',
