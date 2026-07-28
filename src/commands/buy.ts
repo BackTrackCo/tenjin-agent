@@ -3,7 +3,7 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
-import { findLookupForResource } from '../lib/lookup-store';
+import { findSearchForResource } from '../lib/search-store';
 import { fetchRead, type Preview, type ReadBody } from '../lib/read-client';
 import { buildSiwxHeader } from '../lib/siwx';
 import { buildExactPayment } from '../lib/x402-pay';
@@ -84,14 +84,14 @@ export async function runBuy(
     return deliverExisting(existing, presentOpts);
   }
 
-  const lookupId =
-    (await findLookupForResource(ctx.dataDir, {
+  const searchId =
+    (await findSearchForResource(ctx.dataDir, {
       ...(ref.resourceId !== undefined ? { resourceId: ref.resourceId } : {}),
       url: ref.url,
     })) ?? undefined;
 
-  // Attribution contract (spec 09 §3): X-Tenjin-Lookup-Id rides ONLY the paid
-  // re-request. The probe and SIWX re-check stay unattributed so a lookup that
+  // Attribution contract (spec 09 §3): X-Tenjin-Search-Id rides ONLY the paid
+  // re-request. The probe and SIWX re-check stay unattributed so a search that
   // never converts is not over-counted if the server ever classifies reads.
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
@@ -212,7 +212,7 @@ export async function runBuy(
     const paid = await fetchRead(ref.url, {
       ...fetchOpts,
       paymentHeaders: payment.headers,
-      ...(lookupId !== undefined ? { lookupId } : {}),
+      ...(searchId !== undefined ? { searchId } : {}),
     });
 
     if (paid.kind === 'entitled') {
@@ -308,7 +308,7 @@ async function siwxRedeliver(
   url: string,
   baseUrl: string,
   signer: TenjinSigner,
-  fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch; lookupId?: string },
+  fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch; searchId?: string },
   presentOpts: PresentOpts,
   network: string,
 ): Promise<CommandResult> {

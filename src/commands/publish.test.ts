@@ -499,7 +499,7 @@ describe('runPublish — source-project scan context (#36)', () => {
 
     const rec = await createCandidate(dir, {
       draft: '# T\n\nas shipped in AcmeCorp/secret-svc last week\n',
-      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       created: new Date().toISOString(),
       sourceProject: projectDir,
     });
@@ -555,7 +555,7 @@ describe('runPublish — publish --candidate', () => {
   async function park(over: { draft?: string; question?: string } = {}): Promise<string> {
     const rec = await createCandidate(dir, {
       draft: over.draft ?? CLEAN,
-      lookupId: LOOKUP,
+      searchId: LOOKUP,
       ...(over.question !== undefined ? { question: over.question } : {}),
       created: new Date().toISOString(),
       sourceProject: dir,

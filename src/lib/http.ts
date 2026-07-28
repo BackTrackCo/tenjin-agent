@@ -1,7 +1,7 @@
 import { CliError } from './errors';
 
 /**
- * The single JSON client the whole CLI grows on: `doctor` uses it in B1, `lookup`
+ * The single JSON client the whole CLI grows on: `doctor` uses it in B1, `search`
  * reuses it in B2. It never throws on a transport/protocol failure — it returns a
  * discriminated result so callers decide how each failure class maps to a check
  * or an error. `fetchImpl` is injectable so tests never touch the network.
@@ -129,7 +129,7 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * A full HTTP round trip that surfaces the STATUS, headers, and best-effort JSON
  * body for ANY status. Unlike fetchJson (2xx-only), the B2 read/pay flow needs
  * the body on a 402 (the leak-safe preview) and a 409 (the owned-re-pay gate),
- * and lookup/outcome need a 4xx validation envelope. A transport/timeout failure
+ * and search/outcome need a 4xx validation envelope. A transport/timeout failure
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {

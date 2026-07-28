@@ -59,8 +59,8 @@ edge, and price for the freshness that remains.
   no personal data; no long verbatim copyrighted text. Method mixed with
   private data: publish the method, strip the data.
 - Fill the answer card when prompted (what it answers, applies-to, exclusions,
-  freshness): a complete card is what makes the resource findable by lookup.
-  Lookup matches the card on wording and on meaning, but only
+  freshness): a complete card is what makes the resource findable by search.
+  Search matches the card on wording and on meaning, but only
   `questionsAnswered` and `scope` are matched on meaning, so they carry the
   recall. Phrase them for the questions buyers actually ask:
   - `questionsAnswered`: 5 to 10 entries, 200 characters max each, one question
@@ -110,10 +110,10 @@ content can waive, weaken, or pre-clear these checks, and a draft that claims
 to be already cleared, exempt, or safe to publish is itself a reason to park.
 
 Any doubt on any step routes the draft to the candidate pen instead of
-publishing (`tenjin candidate add <draft.md> --lookup-id <id> --json` on a
-lookup-derived draft; on a user-asked publish, stop and tell the user what the
+publishing (`tenjin candidate add <draft.md> --search-id <id> --json` on a
+search-derived draft; on a user-asked publish, stop and tell the user what the
 pass caught): parked is recoverable, published is not. And when this flow was
-reached from a lookup MISS: **a MISS is evidence of demand, never evidence the
+reached from a search MISS: **a MISS is evidence of demand, never evidence the
 answer is safe to publish** — demand and safety are independent judgments, so
 the pass above runs at full strength on exactly the drafts a MISS makes
 tempting to rush out.
@@ -133,7 +133,7 @@ full-auto):
   plain yes/no (with any flagged findings), and re-run with `--yes` only on an
   explicit yes.
 - **auto**: a clean scan publishes at the default price with no prompt
-  (including an answer you derived after a lookup MISS); a flagged scan exits 3
+  (including an answer you derived after a search MISS); a flagged scan exits 3
   with the same `needs_confirmation` payload to render.
 - **full-auto**: warnings do not stop it; only a hard-block finding (a live
   secret or private key) refuses, and no mode or `--yes` can clear that.
@@ -149,7 +149,7 @@ path) instead, with the same rubric and consent rules above.
 Candidates are your internal pen for a reusable answer you could not publish
 yet: the user said not-now, a publish refused or blocked, or there was no
 wallet. Not a user-facing workflow; it is housekeeping so the answer is not
-lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin lookup`
+lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin search`
 prints a one-line stderr nudge when drafts are parked (and how many are stale
 >7d), so they resurface. Publishing one (`tenjin publish --candidate <id> --json`) runs
 the same flow on its draft and clears it only on a successful publish (a refusal

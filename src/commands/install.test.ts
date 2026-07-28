@@ -228,10 +228,10 @@ describe('runInstall: idempotency', () => {
 describe('runInstall: AGENTS.md instinct nudge', () => {
   const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /somewhere (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
-  it('appends a lookup-first nudge that points at the skills dir', async () => {
+  it('appends a search-first nudge that points at the skills dir', async () => {
     await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(agents).toContain(`'tenjin lookup "<question>" --json'`);
+    expect(agents).toContain(`'tenjin search "<question>" --json'`);
     expect(agents).toContain('before regenerating public research');
     expect(agents).toContain('sends the generalized question text to tenjin.blog');
     expect(agents).toContain(join(home, '.agents', 'skills'));
@@ -249,7 +249,7 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
     expect(agents.split(MARKER).length - 1).toBe(1); // still exactly one marker
     expect(agents).not.toContain('installed at /somewhere'); // old text gone
-    expect(agents).toContain(`'tenjin lookup "<question>" --json'`); // new text in
+    expect(agents).toContain(`'tenjin search "<question>" --json'`); // new text in
     expect(agents.startsWith('# notes\n')).toBe(true); // surrounding lines preserved
     expect(agents.trimEnd().endsWith('more')).toBe(true);
   });
@@ -289,7 +289,7 @@ describe('runInstall: CLAUDE.md nudge', () => {
     );
     expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
     const md = await readFile(claudeMdPath(), 'utf8');
-    expect(md).toContain(`'tenjin lookup "<question>" --json'`);
+    expect(md).toContain(`'tenjin search "<question>" --json'`);
     expect(md).toContain('sends the generalized question text to tenjin.blog');
     expect(md).toContain(join(home, '.claude', 'skills'));
     expect(md.split(MARKER).length - 1).toBe(1);
@@ -810,7 +810,7 @@ describe('runInstall: interactive walkthrough', () => {
     const text = human(res);
     expect(text).toContain('Claude Code: 3 skills installed');
     expect(text).toContain('publish mode: review');
-    expect(text).toContain('Done. Try: tenjin lookup');
+    expect(text).toContain('Done. Try: tenjin search');
   });
 
   it('--json returns the envelope data and never prompts the wallet', async () => {
