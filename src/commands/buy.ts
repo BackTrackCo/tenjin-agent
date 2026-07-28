@@ -91,7 +91,7 @@ export async function runBuy(
     })) ?? undefined;
 
   // Attribution contract (spec 09 §3): X-Tenjin-Search-Id rides ONLY the paid
-  // re-request. The probe and SIWX re-check stay unattributed so a lookup that
+  // re-request. The probe and SIWX re-check stay unattributed so a search that
   // never converts is not over-counted if the server ever classifies reads.
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,

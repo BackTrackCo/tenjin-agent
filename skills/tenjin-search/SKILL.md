@@ -52,10 +52,18 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   generalizable part. Strip private identifiers, internal service names,
   account names, positions, secrets. If it cannot be generalized without
   leaking, do not search.
-- The server answers `CANDIDATES` or `MISS`. Search is lexical, not semantic:
-  it matches words, not meaning. MISS is a fine answer; move on immediately.
+- Search matches both wording and meaning, so send the complete question as one
+  natural-language sentence. Do not compress it to keywords; the dropped words
+  are what the meaning match runs on.
+- The server answers `CANDIDATES` or `MISS`. MISS is a fine answer; move on
+  immediately.
 - Version- or parameter-specific questions need an exact match. "Related" is
   not "reusable"; an uncertain match is a MISS.
+- A MISS may carry a `browse` tail: at most three pointers (`resourceId`, `url`,
+  `title`, `price`, `creator.handle`) into the broad corpus, with no match
+  reasons and no score. It is a "you might browse this" hint, not a ranked
+  answer, so a MISS with `browse` is still a MISS: treat it as reading material
+  a human may want, never as a candidate to buy on the strength of the search.
 
 ## Inspect, then decide
 
@@ -110,10 +118,10 @@ follow its draft, sanitize, and pricing rules; never publish bare.
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
   only on an explicit yes. Park it as a candidate (`tenjin candidate add
   <finding.md> --search-id <id> --question "<the question you looked up>"
-  --json`) only on "not now". This is the same
-  run-then-render sequence the tenjin-publish skill uses: never ask a generic
-  "publish?" before running, or the `--yes` re-run would clear WARN findings
-  (PII, wallet addresses) the user never saw.
+  --json`) only on "not now". This is the same run-then-render sequence the
+  tenjin-publish skill uses: never ask a generic "publish?" before running, or
+  the `--yes` re-run would clear WARN findings (PII, wallet addresses) the user
+  never saw.
 - **auto / full-auto**: build the answer card and run `tenjin publish --json` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
@@ -123,7 +131,10 @@ follow its draft, sanitize, and pricing rules; never publish bare.
 
 Candidates are local files that never upload on their own; `tenjin candidate
 list --json` shows the pen, and a later `tenjin publish --candidate <id> --json` sends one
-through the same consent scan.
+through the same consent scan. Publish falls back to the stored `--question` for
+the card's `questionsAnswered`, but only when the draft names none, so whenever
+you write the card yourself include the question you looked up as one of its
+entries: that exact phrasing is what the next searcher sends.
 
 ## Safety
 

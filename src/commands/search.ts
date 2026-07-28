@@ -14,8 +14,10 @@ import type { CommandContext, CommandResult } from '../context';
  * candidates locally so `outcome --last` and `buy <resourceId>` can use them. No
  * wallet, no signing: search is anonymous.
  *
- * The response's `searchId` keeps its name: it is the outcome-reporting capability
- * for POST /api/agent/searches/<searchId>/outcomes, which tenjin#463 left unchanged.
+ * The response's `searchId` is the outcome-reporting capability for
+ * POST /api/agent/searches/<searchId>/outcomes. tenjin#463 renamed both the field
+ * (from `lookupId`) and that path, and this client follows the rename end to end,
+ * so nothing on the wire or in the local store still speaks `lookupId`.
  */
 
 export interface SearchArgs {
@@ -107,12 +109,19 @@ export async function runSearch(
   // per-item detail, so a MISS still reads as a MISS and an agent is never
   // nudged to treat a browse pointer as an answer. The machine JSON keeps the
   // full `browse` array; this line is only the human tail.
+  //
+  // The price rides this line because a browse url IS payable: it is the read
+  // endpoint that answers a 402, and `buy <url>` resolves the URL arm by origin
+  // without consulting the search store, so a browse pointer can be bought even
+  // though `buy <resourceId>` can never reach one. All spend gates (price cap,
+  // session budget, allowlist, confirm) still run; showing the price keeps the
+  // only human-visible surface from being a blind spend.
   const browse = response.browse ?? [];
   const browseHint =
     browse.length > 0
       ? [
-          `no match — ${browse.length} piece(s) you could browse: ${browse
-            .map((b) => sanitizeForTerminal(b.title))
+          `no match, ${browse.length} piece(s) you could browse: ${browse
+            .map((b) => `${sanitizeForTerminal(b.title)} (${b.price} atomic)`)
             .join('; ')}`,
         ]
       : [];

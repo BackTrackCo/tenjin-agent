@@ -237,10 +237,15 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
       title: 'Search for payable answers',
       description:
         'Ask the marketplace for payable candidate pieces that answer a question, or an honest ' +
-        'MISS. Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: derive the smallest ' +
-        'public phrasing of your task and never include secrets, private identifiers, or ' +
-        'company-internal context. Returns the compact candidates/MISS envelope; records the ' +
-        'searchId locally so tenjin_buy and tenjin_outcome can refer to it.',
+        'MISS. Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: strip secrets, ' +
+        'private identifiers, and company-internal context, then send what is left as one ' +
+        'complete natural-language sentence. Retrieval matches wording and meaning, so ' +
+        'compressing the question to keywords throws away signal. Returns the compact ' +
+        'candidates/MISS envelope; records the searchId locally so tenjin_buy and tenjin_outcome ' +
+        'can refer to it. A MISS may also carry a `browse` array of at most three pointers ' +
+        '(resourceId, url, title, price, creator.handle) into the broad corpus: unscored ' +
+        '"you might browse this" hints with no match reasons, not answer candidates, and never ' +
+        'resolvable by tenjin_buy/tenjin_outcome via resourceId.',
       inputSchema: searchInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

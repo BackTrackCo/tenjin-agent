@@ -28,7 +28,7 @@ export async function runOutcome(
   ctx: CommandContext,
   deps: OutcomeDeps = {},
 ): Promise<CommandResult> {
-  const searchId = await resolveLookupId(args, ctx);
+  const searchId = await resolveSearchId(args, ctx);
   const item = buildOutcomeItem({
     status: args.status,
     ...(args.resource !== undefined ? { resourceId: args.resource } : {}),
@@ -48,7 +48,7 @@ export async function runOutcome(
   };
 }
 
-async function resolveLookupId(args: OutcomeArgs, ctx: CommandContext): Promise<string> {
+async function resolveSearchId(args: OutcomeArgs, ctx: CommandContext): Promise<string> {
   if (args.searchId !== undefined && args.last === true) {
     throw new CliError('USAGE', 'Pass either --search-id or --last, not both.', {
       fix: 'Use --search-id <id> for a specific search, or --last for the most recent.',

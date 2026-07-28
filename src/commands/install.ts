@@ -64,7 +64,7 @@ const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
  * marker, the search-before-regenerating nudge, then where the skills live.
  */
 function nudgeLine(skillsDir: string): string {
-  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin lookup "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
+  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin search "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
 }
 
 /**
@@ -270,7 +270,7 @@ async function buildWalkthrough(
   );
   lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
   lines.push(...doctorSummary(io, s.doctor), '');
-  lines.push(`Done. Try: tenjin lookup "${EXAMPLE_QUESTION}"`);
+  lines.push(`Done. Try: tenjin search "${EXAMPLE_QUESTION}"`);
   return lines;
 }
 
@@ -316,7 +316,7 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
         paint(
           io,
           'dim',
-          '  Add a Tenjin lookup nudge to ~/.claude/CLAUDE.md later: tenjin install --harness claude --claude-md',
+          '  Add a Tenjin search nudge to ~/.claude/CLAUDE.md later: tenjin install --harness claude --claude-md',
         ),
       );
     }
@@ -645,7 +645,7 @@ async function decideClaudeMd(
   if (dryRun || !canPrompt) return false;
   const confirm = deps.confirmClaudeMd ?? defaultConfirmYesNo;
   return confirm(
-    'Add a one-line nudge to ~/.claude/CLAUDE.md telling agents to try a free Tenjin lookup before regenerating research? It sends only generalized question text to tenjin.blog. [Y/n] ',
+    'Add a one-line nudge to ~/.claude/CLAUDE.md telling agents to try a free Tenjin search before regenerating research? It sends only generalized question text to tenjin.blog. [Y/n] ',
   );
 }
 

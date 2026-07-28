@@ -58,6 +58,14 @@ Read output defaults to a heading outline, not the body: `--print-body` includes
 the full body, and `--sections <tokens>` includes the leading sections within a
 token budget (deterministic, no model calls).
 
+A `MISS` may carry a `browse` tail: at most three pointers (`resourceId`, `url`,
+`title`, `price`, `creator.handle`) into the broad discoverable corpus, with no
+match reasons and no score. They are "you might browse this" hints, not ranked
+answers, so a MISS with `browse` is still a MISS. They are never recorded
+locally, so `buy <resourceId>` cannot reach one; the `url` is the payable read
+endpoint, so `buy <url>` can, which is why the human hint line prints each
+pointer's price alongside its title.
+
 The search question must be **generalized public text**: strip secrets, private
 identifiers, and internal context, then send what is left as one complete
 natural-language sentence. Retrieval matches wording and meaning, so compressing

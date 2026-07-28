@@ -9,7 +9,7 @@ import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-lookup-cmd-'));
+  dir = await mkdtemp(join(tmpdir(), 'tenjin-search-cmd-'));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -81,7 +81,7 @@ describe('runSearch', () => {
     });
   });
 
-  it('records the lookup so outcome --last and buy <id> can use it', async () => {
+  it('records the search so outcome --last and buy <id> can use it', async () => {
     const { fetch } = stub(CANDIDATES);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     const latest = await latestSearch(dir);
@@ -131,9 +131,13 @@ describe('runSearch', () => {
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines).toHaveLength(2);
     expect(res.humanLines?.[0]).toContain('MISS, no candidates');
+    // The price is on the line because `buy <browse url>` really does pay: the
+    // URL arm of resolveResourceRef never consults the store, so this is the
+    // only human-visible surface that can warn before the spend.
     expect(res.humanLines?.[1]).toBe(
-      'no match — 2 piece(s) you could browse: Browse one; Browse two',
+      'no match, 2 piece(s) you could browse: Browse one (100000 atomic); Browse two (200000 atomic)',
     );
+    expect(res.humanLines?.[1]).not.toContain('—');
   });
 
   it('keeps browse pointers out of candidates and out of the local store', async () => {

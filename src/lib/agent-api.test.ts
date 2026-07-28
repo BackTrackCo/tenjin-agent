@@ -241,6 +241,89 @@ describe('postSearch', () => {
     expect(res.decision).toBe('MISS');
     expect(res.candidates).toBeUndefined();
   });
+
+  const browsePointer = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
+    url: 'https://preview.example/api/read/alice/a-piece',
+    title: 'A browsable piece',
+    price: '250000',
+    creator: { handle: 'alice' },
+    ...over,
+  });
+  const miss = (browse: unknown[], decision = 'MISS'): unknown => ({
+    schemaVersion: 1,
+    searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    decision,
+    calibration: 'hybrid-v1',
+    browse,
+  });
+  const postMiss = async (body: unknown): Promise<SearchResponse> => {
+    const { fetch } = stubFetch(json(200, body));
+    return postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+  };
+
+  it('re-applies the browse bounds: 4 pointers slice to BROWSE_MAX, a 5000-char title caps at 200', async () => {
+    const res = await postMiss(
+      miss([
+        browsePointer({ title: 'T'.repeat(5000) }),
+        browsePointer(),
+        browsePointer(),
+        browsePointer(),
+      ]),
+    );
+    expect(res.browse).toHaveLength(3);
+    expect(res.browse?.[0]?.title).toHaveLength(200);
+  });
+
+  it('drops unknown browse keys instead of passing them through to --json', async () => {
+    // The schema is .passthrough() so the parse keeps a server-invented key; the
+    // explicit projection in truncateResponse is what must strip it, or a future
+    // `confidence` would reach agents as if it were a score.
+    const res = await postMiss(miss([browsePointer({ confidence: 0.9, note: 'x'.repeat(9000) })]));
+    expect(res.browse?.[0]).toEqual({
+      resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
+      url: 'https://preview.example/api/read/alice/a-piece',
+      title: 'A browsable piece',
+      price: '250000',
+      creator: { handle: 'alice' },
+    });
+  });
+
+  it('caps a runaway browse url and creator handle', async () => {
+    const res = await postMiss(
+      miss([
+        browsePointer({
+          url: `https://preview.example/${'u'.repeat(2000)}`,
+          creator: { handle: 'h'.repeat(500) },
+        }),
+      ]),
+    );
+    expect(res.browse?.[0]?.url).toHaveLength(512);
+    expect(res.browse?.[0]?.creator.handle).toHaveLength(64);
+  });
+
+  it('drops browse entirely on a CANDIDATES decision, where nothing would render it', async () => {
+    const res = await postMiss({ ...(miss([browsePointer()], 'CANDIDATES') as object) });
+    expect(res.decision).toBe('CANDIDATES');
+    expect(res.browse).toBeUndefined();
+  });
+
+  it('fails the whole response when one browse pointer is malformed', async () => {
+    // Deliberate and pinned: the client is fail-closed on every other contract
+    // deviation, so a bad decorative tail surfaces as drift rather than being
+    // silently dropped. Changing this to lenient is a product call, not a bugfix.
+    await expect(
+      postMiss(miss([browsePointer({ resourceId: 'not-a-uuid' })])),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    await expect(postMiss(miss([browsePointer({ creator: undefined })]))).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+    });
+  });
+
   it('maps a 400 validation error to API_UNREACHABLE with the server message', async () => {
     const { fetch } = stubFetch(json(400, { error: { message: 'Invalid request body' } }));
     await expect(

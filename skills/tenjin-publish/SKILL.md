@@ -78,7 +78,7 @@ full-auto):
   plain yes/no (with any flagged findings), and re-run with `--yes` only on an
   explicit yes.
 - **auto**: a clean scan publishes at the default price with no prompt
-  (including an answer you derived after a lookup MISS); a flagged scan exits 3
+  (including an answer you derived after a search MISS); a flagged scan exits 3
   with the same `needs_confirmation` payload to render.
 - **full-auto**: warnings do not stop it; only a hard-block finding (a live
   secret or private key) refuses, and no mode or `--yes` can clear that.
@@ -94,7 +94,7 @@ path) instead, with the same rubric and consent rules above.
 Candidates are your internal pen for a reusable answer you could not publish
 yet: the user said not-now, a publish refused or blocked, or there was no
 wallet. Not a user-facing workflow; it is housekeeping so the answer is not
-lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin lookup`
+lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin search`
 prints a one-line stderr nudge when drafts are parked (and how many are stale
 >7d), so they resurface. Publishing one (`tenjin publish --candidate <id> --json`) runs
 the same flow on its draft and clears it only on a successful publish (a refusal

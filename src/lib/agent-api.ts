@@ -135,8 +135,22 @@ export type SearchCandidate = z.infer<typeof searchCandidateSchema>;
 // A browse pointer, carried ONLY on a MISS (tenjin#460): a piece from the broad
 // discoverable corpus with deliberately NO matchReasons, NO estimatedTokens and
 // no confidence field. It is a "you might browse this" hint, never a scored
-// answer candidate — so it is kept strictly out of `candidates`, never recorded
-// in the local search store, and never reachable by `inspect`/`buy`/`outcome`.
+// answer candidate, so it is kept strictly out of `candidates` and never
+// recorded in the local search store.
+//
+// That store exclusion makes `inspect`/`buy`/`outcome` unreachable BY
+// `resourceId` (resolveResourceRef's uuid arm needs a store hit and fails with
+// RESOURCE_NOT_FOUND), but NOT by url: resolveResourceRef's URL arm is gated on
+// origin alone and never consults the store, so `tenjin buy <browse url>` does
+// pay. That is by design here, since the url is the payable read endpoint and
+// the contract re-emits it verbatim, but it is a real spend path, so the human
+// hint line carries the price and every spend gate still applies. Do not
+// restate the old "never reachable by inspect/buy/outcome" claim: it was false.
+//
+// A malformed pointer fails the WHOLE response into CONTRACT_MISMATCH rather
+// than being dropped. Deliberate: this client is fail-closed on every other
+// contract deviation, and silently swallowing a bad tail would hide server
+// drift that contract.test.ts exists to catch. Pinned in agent-api.test.ts.
 export const searchBrowseSchema = z
   .object({
     resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
@@ -156,6 +170,8 @@ export const searchResponseSchema = z.object({
   calibration: z.string(),
   candidates: z.array(searchCandidateSchema).optional(),
   // Omitted entirely by the server when empty, and only ever present on a MISS.
+  // Not enforced here (a stricter schema would reject an otherwise-usable
+  // response); truncateResponse drops it on a CANDIDATES decision instead.
   browse: z.array(searchBrowseSchema).optional(),
 });
 
@@ -265,16 +281,38 @@ const CAND_BOUNDS = {
   appliesToValueChars: 80,
 } as const;
 
+/** Per-field caps for a browse pointer's free-form strings. `url` gets its own,
+ *  looser bound so a legitimate read URL is never mangled while an invented one
+ *  still cannot run away. */
+const BROWSE_BOUNDS = { title: 200, url: 512, handle: 64 } as const;
+
+const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
+
 function truncateResponse(res: SearchResponse): SearchResponse {
   const out: SearchResponse = { ...res };
   if (res.candidates !== undefined) out.candidates = res.candidates.map(truncateCandidate);
-  // Browse pointers ride the same defensive discipline: cap the count at the
-  // server's BROWSE_MAX and the only free-form string at the candidate title cap.
-  if (res.browse !== undefined) {
+  // Browse pointers ride the same defensive discipline, and then some. The
+  // schema is `.passthrough()` so a server-invented key would otherwise survive
+  // at unbounded length into `--json` and MCP structuredContent; we rebuild each
+  // pointer explicitly from the five contract fields instead of spreading, which
+  // drops unknown keys and is what makes the contract.test.ts "no score-like
+  // field" pin hold at runtime and not just against the fixture. Count is capped
+  // at the server's BROWSE_MAX, and every free-form string (title, url, handle)
+  // at its own bound.
+  //
+  // `browse` is MISS-only by contract; drop it outright on a CANDIDATES decision
+  // rather than trust the server, since humanLines renders no hint line there and
+  // it would otherwise be an unrendered channel of server text and payable urls.
+  if (res.browse !== undefined && res.decision === 'MISS') {
     out.browse = res.browse.slice(0, BROWSE_MAX).map((b) => ({
-      ...b,
-      title: b.title.length > CAND_BOUNDS.title ? b.title.slice(0, CAND_BOUNDS.title) : b.title,
+      resourceId: b.resourceId,
+      url: cap(b.url, BROWSE_BOUNDS.url),
+      title: cap(b.title, BROWSE_BOUNDS.title),
+      price: b.price,
+      creator: { handle: cap(b.creator.handle, BROWSE_BOUNDS.handle) },
     }));
+  } else {
+    delete out.browse;
   }
   return out;
 }
@@ -284,7 +322,6 @@ function truncateResponse(res: SearchResponse): SearchResponse {
 const BROWSE_MAX = 3;
 
 function truncateCandidate(c: SearchCandidate): SearchCandidate {
-  const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
   const capList = (list: string[], items: number, chars: number): string[] =>
     list.slice(0, items).map((s) => cap(s, chars));
   const appliesTo: Record<string, string[]> = {};

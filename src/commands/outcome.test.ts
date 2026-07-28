@@ -60,7 +60,7 @@ describe('runOutcome', () => {
     expect(urls[0]).toContain(LOOKUP);
   });
 
-  it('--last with no local lookup is a SEARCH_NOT_FOUND error', async () => {
+  it('--last with no local search is a SEARCH_NOT_FOUND error', async () => {
     const { fetch } = stub();
     await expect(
       runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
