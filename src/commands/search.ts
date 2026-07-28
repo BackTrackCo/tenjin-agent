@@ -1,5 +1,5 @@
 import { CliError } from '../lib/errors';
-import { parseUsdToAtomic } from '../lib/money';
+import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
@@ -116,12 +116,19 @@ export async function runSearch(
   // though `buy <resourceId>` can never reach one. All spend gates (price cap,
   // session budget, allowlist, confirm) still run; showing the price keeps the
   // only human-visible surface from being a blind spend.
+  //
+  // It renders in DOLLARS, not atomic units, because the whole point of the line
+  // is that a human can size the spend against the gates they set, and every gate
+  // is entered in decimal USD (`--max-price 0.10`, the `maxAutoSpend` config).
+  // `formatUsdDisplay` is the canonical human-copy form (always two decimals, so
+  // a dime reads "0.10" and not "0.1"); the machine `browse` array in --json still
+  // carries the exact atomic string, per the money-units contract in the README.
   const browse = response.browse ?? [];
   const browseHint =
     browse.length > 0
       ? [
           `no match, ${browse.length} piece(s) you could browse: ${browse
-            .map((b) => `${sanitizeForTerminal(b.title)} (${b.price} atomic)`)
+            .map((b) => `${sanitizeForTerminal(b.title)} (${formatUsdDisplay(b.price)} USD)`)
             .join('; ')}`,
         ]
       : [];

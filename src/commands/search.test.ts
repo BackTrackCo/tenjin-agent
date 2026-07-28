@@ -133,11 +133,16 @@ describe('runSearch', () => {
     expect(res.humanLines?.[0]).toContain('MISS, no candidates');
     // The price is on the line because `buy <browse url>` really does pay: the
     // URL arm of resolveResourceRef never consults the store, so this is the
-    // only human-visible surface that can warn before the spend.
+    // only human-visible surface that can warn before the spend. It reads in
+    // dollars, the same unit every spend gate is entered in, and at the canonical
+    // two-decimal precision, so a dime is "0.10" and never "0.1" or "100000".
     expect(res.humanLines?.[1]).toBe(
-      'no match, 2 piece(s) you could browse: Browse one (100000 atomic); Browse two (200000 atomic)',
+      'no match, 2 piece(s) you could browse: Browse one (0.10 USD); Browse two (0.20 USD)',
     );
+    expect(res.humanLines?.[1]).not.toContain('atomic');
     expect(res.humanLines?.[1]).not.toContain('—');
+    // The machine envelope is unaffected: --json still carries exact atomic.
+    expect((res.data as { browse?: { price: string }[] }).browse?.[0]?.price).toBe('100000');
   });
 
   it('keeps browse pointers out of candidates and out of the local store', async () => {
@@ -148,11 +153,20 @@ describe('runSearch', () => {
     expect(latest?.candidates).toEqual([]);
   });
 
-  it('refuses a browse pointer whose url points off the configured base URL', async () => {
-    const evil = {
-      ...BROWSE_MISS,
-      browse: [{ ...BROWSE_MISS.browse[0], url: 'https://evil.example/api/read/iris/one' }],
-    };
+  // A plainly different host is the easy case. The two shapes this check exists
+  // to stop are the ones that survive a naive `startsWith`/`includes` rewrite:
+  // userinfo, where the real host is what follows the `@`, and a subdomain
+  // suffix, where the base URL is a prefix of an attacker-owned name. Pin all
+  // three so "simplifying" the origin comparison to a substring test fails here.
+  it.each([
+    ['a plainly different host', 'https://evil.example/api/read/iris/one'],
+    ['userinfo masquerading as the host', 'https://preview.example@evil.example/api/read/iris/one'],
+    [
+      'a subdomain suffix of the base host',
+      'https://preview.example.evil.example/api/read/iris/one',
+    ],
+  ])('refuses a browse pointer url off the configured base URL: %s', async (_label, url) => {
+    const evil = { ...BROWSE_MISS, browse: [{ ...BROWSE_MISS.browse[0], url }] };
     const { fetch } = stub(evil);
     await expect(
       runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),

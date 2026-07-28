@@ -293,17 +293,35 @@ describe('postSearch', () => {
     });
   });
 
-  it('caps a runaway browse url and creator handle', async () => {
+  it('drops unknown keys inside creator, not just at the top level', async () => {
+    // `creator` is its own .passthrough() object, so the top-level projection
+    // does not cover it: rebuilding it as `{ ...b.creator, handle }` would leak
+    // an invented `creator.score` while every other browse assertion still
+    // passed. Pin the nested rebuild separately from the outer one.
     const res = await postMiss(
-      miss([
-        browsePointer({
-          url: `https://preview.example/${'u'.repeat(2000)}`,
-          creator: { handle: 'h'.repeat(500) },
-        }),
-      ]),
+      miss([browsePointer({ creator: { handle: 'alice', score: 0.9, bio: 'b'.repeat(9000) } })]),
     );
-    expect(res.browse?.[0]?.url).toHaveLength(512);
+    expect(res.browse?.[0]?.creator).toEqual({ handle: 'alice' });
+  });
+
+  it('caps a runaway creator handle but leaves a legitimate url verbatim', async () => {
+    const url = `https://preview.example/api/read/alice/${'u'.repeat(400)}`;
+    const res = await postMiss(
+      miss([browsePointer({ url, creator: { handle: 'h'.repeat(500) } })]),
+    );
     expect(res.browse?.[0]?.creator.handle).toHaveLength(64);
+    // A url within bounds is never clipped: it has to stay payable.
+    expect(res.browse?.[0]?.url).toBe(url);
+  });
+
+  it('refuses a runaway browse url instead of truncating it into a broken pointer', async () => {
+    // Clipping a url does not shorten it, it changes it: the result still looks
+    // payable in --json but resolves to nothing, and it would reach runSearch's
+    // origin assertion as a string the server never sent. Fail closed instead,
+    // the same way a malformed pointer does.
+    await expect(
+      postMiss(miss([browsePointer({ url: `https://preview.example/${'u'.repeat(2000)}` })])),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 
   it('drops browse entirely on a CANDIDATES decision, where nothing would render it', async () => {

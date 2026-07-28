@@ -12,4 +12,5 @@ gone rather than aliased, so a stale invocation fails loudly instead of drifting
 A `MISS` can now carry a `browse` tail: at most three unscored pointers
 (`resourceId`, `url`, `title`, `price`, `creator.handle`) into the broad
 discoverable corpus, rendered as one human hint line with each pointer's price
-and kept out of `candidates` and out of the local store.
+in dollars (the `--json` envelope keeps the exact atomic value) and kept out of
+`candidates` and out of the local store.

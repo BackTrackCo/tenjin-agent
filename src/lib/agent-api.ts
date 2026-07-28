@@ -132,6 +132,12 @@ export const searchCandidateSchema = z
 
 export type SearchCandidate = z.infer<typeof searchCandidateSchema>;
 
+/** Per-field caps for a browse pointer's free-form strings. `url` gets its own,
+ *  looser bound so a legitimate read URL is never mangled while an invented one
+ *  still cannot run away. Declared above the schema because the schema enforces
+ *  the `url` bound at parse time (see below). */
+const BROWSE_BOUNDS = { title: 200, url: 512, handle: 64 } as const;
+
 // A browse pointer, carried ONLY on a MISS (tenjin#460): a piece from the broad
 // discoverable corpus with deliberately NO matchReasons, NO estimatedTokens and
 // no confidence field. It is a "you might browse this" hint, never a scored
@@ -151,10 +157,19 @@ export type SearchCandidate = z.infer<typeof searchCandidateSchema>;
 // than being dropped. Deliberate: this client is fail-closed on every other
 // contract deviation, and silently swallowing a bad tail would hide server
 // drift that contract.test.ts exists to catch. Pinned in agent-api.test.ts.
+//
+// The `url` bound is enforced HERE rather than by truncation in the projection
+// below, and that asymmetry with `title`/`handle` is deliberate. Those two are
+// display strings: clipping one degrades gracefully and the human still reads
+// something true. `url` is an actionable payable pointer, and a clipped url is
+// not a shorter url, it is a DIFFERENT and broken one that still looks payable
+// in `--json`. Refusing is also the only ordering-independent answer: capping
+// first would hand the origin assertion in `runSearch` a string the server never
+// sent. 512 is far above any real read endpoint, so exceeding it is server drift.
 export const searchBrowseSchema = z
   .object({
     resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
-    url: z.string(),
+    url: z.string().max(BROWSE_BOUNDS.url, `url must be at most ${BROWSE_BOUNDS.url} characters`),
     title: z.string(),
     price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
     creator: z.object({ handle: z.string() }).passthrough(),
@@ -281,11 +296,6 @@ const CAND_BOUNDS = {
   appliesToValueChars: 80,
 } as const;
 
-/** Per-field caps for a browse pointer's free-form strings. `url` gets its own,
- *  looser bound so a legitimate read URL is never mangled while an invented one
- *  still cannot run away. */
-const BROWSE_BOUNDS = { title: 200, url: 512, handle: 64 } as const;
-
 const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
 
 function truncateResponse(res: SearchResponse): SearchResponse {
@@ -306,7 +316,9 @@ function truncateResponse(res: SearchResponse): SearchResponse {
   if (res.browse !== undefined && res.decision === 'MISS') {
     out.browse = res.browse.slice(0, BROWSE_MAX).map((b) => ({
       resourceId: b.resourceId,
-      url: cap(b.url, BROWSE_BOUNDS.url),
+      // Not capped: the schema already refused anything over BROWSE_BOUNDS.url,
+      // so this is the url the server sent, verbatim and payable.
+      url: b.url,
       title: cap(b.title, BROWSE_BOUNDS.title),
       price: b.price,
       creator: { handle: cap(b.creator.handle, BROWSE_BOUNDS.handle) },
