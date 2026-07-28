@@ -24,6 +24,7 @@ import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
+import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -439,8 +440,12 @@ function doctorSummary(io: Io, doctor: DoctorChecks): string[] {
   const lines = [paint(io, 'yellow', 'Some checks need attention:')];
   for (const c of problems) {
     const icon = c.status === 'fail' ? paint(io, 'red', '✗') : paint(io, 'yellow', '!');
-    lines.push(`  ${icon} ${c.name}: ${c.detail}`);
-    if (c.fix !== undefined) lines.push(paint(io, 'dim', `    fix: ${c.fix}`));
+    // Same seam as renderDoctorHuman: `detail`/`fix` carry server-sourced
+    // substrings and now sit directly above the pasteable allowlist block.
+    lines.push(`  ${icon} ${c.name}: ${sanitizeForTerminal(c.detail)}`);
+    if (c.fix !== undefined) {
+      lines.push(paint(io, 'dim', `    fix: ${sanitizeForTerminal(c.fix)}`));
+    }
   }
   return lines;
 }

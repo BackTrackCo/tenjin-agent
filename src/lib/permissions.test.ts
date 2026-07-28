@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALWAYS_SAFE_ALLOWLIST,
+  FLAG_CAVEAT,
+  MCP_CAVEAT,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
   recommendedPermissions,
@@ -71,6 +73,17 @@ describe('buy is opt-in, never always-safe', () => {
     // The load-bearing half: the harness line is not a spend grant.
     expect(note).toMatch(/never raises a spend cap/i);
   });
+
+  // `--yes` is an ordinary flag on the same allowlisted verb and confirmSpend
+  // returns true on it before any TTY check, so on CONFIG_DEFAULTS nothing
+  // denies. The note must not let "never raises a spend cap" imply otherwise.
+  it('says the line authorizes unattended spending, and never claims a human gate', () => {
+    const note = OPT_IN_ALLOWLIST[0]?.note ?? '';
+    expect(note).toMatch(/UNATTENDED purchases/);
+    expect(note).toMatch(/`--yes`.*clears the\s*confirm gate/is);
+    expect(note).toMatch(/sessionBudget 0 means NO ceiling/);
+    expect(note).not.toMatch(/human (is still )?on every purchase/i);
+  });
 });
 
 describe('money-moving and state-changing verbs are never recommended', () => {
@@ -101,6 +114,58 @@ describe('money-moving and state-changing verbs are never recommended', () => {
       expect(rule).not.toBe('Bash(tenjin config:*)');
       expect(rule).not.toBe('Bash(tenjin candidate:*)');
     }
+  });
+});
+
+describe('the flag surface inside an allowed verb', () => {
+  // ruleCovers() above models a rule against a bare verb string. The
+  // security-relevant question is what a rule matches against a whole COMMAND
+  // LINE, and the answer is that a prefix rule constrains the verb and nothing
+  // after it. Pin that as a known property instead of an unstated assumption.
+  it('a recommended rule also matches the same verb carrying --base-url', () => {
+    expect(
+      ruleCovers('Bash(tenjin lookup:*)', 'tenjin lookup "q" --base-url https://elsewhere'),
+    ).toBe(true);
+    expect(
+      ruleCovers('Bash(tenjin buy:*)', 'tenjin buy x --base-url https://elsewhere --yes'),
+    ).toBe(true);
+  });
+
+  it('ships the flag caveat, because no rule syntax can express the restriction', () => {
+    const flags = FLAG_CAVEAT.join(' ');
+    expect(flags).toContain('--base-url');
+    expect(flags).toMatch(/pins the VERB, not the flags/i);
+    expect(flags).toMatch(/convention, not an enforced boundary/i);
+  });
+
+  it('ships the MCP caveat naming the tools to leave gated', () => {
+    const mcp = MCP_CAVEAT.join(' ');
+    expect(mcp).toContain('mcp__tenjin__tenjin_publish');
+    expect(mcp).toContain('mcp__tenjin__tenjin_wallet');
+    expect(mcp).toContain('mcp__tenjin__tenjin_candidate');
+  });
+
+  it('carries both caveats in the machine payload', () => {
+    const p = recommendedPermissions();
+    expect(p.caveats.flags).toEqual([...FLAG_CAVEAT]);
+    expect(p.caveats.mcp).toEqual([...MCP_CAVEAT]);
+  });
+});
+
+describe('claims made about the recommended set are true of the code', () => {
+  // lookup and outcome both POST. Pre-clearing them is defensible; calling them
+  // read-only in order to justify it is not.
+  it('does not call the free set read-only', () => {
+    const block = renderPermissionsBlock().join('\n');
+    expect(block).not.toMatch(/free, read-only verbs/i);
+    expect(block).toContain('Free: no wallet, no signing, no payment');
+    expect(block).toMatch(/`lookup` and `outcome` POST/);
+  });
+
+  it('discloses the non-read-only half in the per-entry notes too', () => {
+    const byCommand = new Map(ALWAYS_SAFE_ALLOWLIST.map((e) => [e.command, e.note]));
+    expect(byCommand.get('tenjin lookup')).toMatch(/Not read-only/i);
+    expect(byCommand.get('tenjin outcome')).toMatch(/Not read-only/i);
   });
 });
 

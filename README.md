@@ -101,8 +101,8 @@ shell command before running it, and an unknown binary is denied by default. Tha
 denies the free verbs too, which breaks the whole marketplace loop: the skills
 forbid working around a denial, so a denied `tenjin lookup` just stops.
 
-Pre-clear the free, read-only verbs once. In Claude Code these go in the
-`permissions.allow` array of `.claude/settings.json`:
+Pre-clear the free verbs once. In Claude Code these go in the `permissions.allow`
+array of `.claude/settings.json`:
 
 ```
 Bash(tenjin lookup:*)
@@ -115,10 +115,29 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those touches the wallet, signs anything, or moves money. `tenjin install`
-prints this block, and `tenjin doctor` reprints it on every run (also in
-`doctor --json` under `permissions`), so an agent that just got denied can point
-you at the exact line.
+None of those touches the wallet, signs anything, or moves money. Two are not
+read-only, which is worth knowing before you pre-clear them: `tenjin lookup` POSTs
+your generalized question off-machine, and `tenjin outcome` POSTs a report that
+moves the marketplace's reuse signal. Both are unauthenticated and free; neither
+carries a credential.
+
+`tenjin install` prints this block, and `tenjin doctor` reprints it on every run
+(including in `doctor --json` under `permissions`, on the failure envelope as well
+as the success one), so an agent that just got denied can point you at the exact
+line.
+
+**A prefix rule pins the verb, not the flags.** Every line above also clears
+`--base-url <url>` on that verb, because the CLI accepts the global flags on every
+subcommand. `--base-url` is validated as a URL and nothing more, and it wins
+settings precedence, so it moves where the question goes, where `doctor` probes,
+and (with the `buy` line below) where a SIWX signature and an EIP-3009 payment
+authorization are sent. The origin pin only checks that a resource URL shares an
+origin with the _configured_ base, so an attacker-controlled pair satisfies it.
+There is no prefix syntax for "this verb but not that flag", so treat this as a
+disclosed limit: set your base URL in config, and allowlist these verbs only if
+you are content for an agent to be able to choose the destination host. The
+skills tell agents never to pass `--base-url` on an allowlisted verb, but that is
+a convention rather than an enforced boundary.
 
 Purchases are a **separate, explicit opt-in**:
 
@@ -126,18 +145,44 @@ Purchases are a **separate, explicit opt-in**:
 Bash(tenjin buy:*)
 ```
 
-That line clears the harness prompt only — it never raises a spend cap. Set the
-caps first (`tenjin config set maxAutoSpend 0.25`, `tenjin config set sessionBudget
-2.00`); `confirm` stays `always` by default, so a human is still on every purchase
-until you change it.
+Read this before pasting it: **on the default config that line authorizes
+unattended spending up to your wallet balance.** `--yes` is an ordinary flag on
+the same allowlisted verb and it clears the confirm gate outright, so `confirm:
+always` does not put a human on every purchase once the agent can pass `--yes`.
+Walking the defaults: `allowlistCreators` is empty (gate off), `maxAutoSpend` is
+`0` and `confirm` is `always`, which together only ask for a confirmation that
+`--yes` satisfies, and `sessionBudget` is `0`, which the policy reads as **no
+ceiling at all**, not a zero one. Set real values first:
+
+```bash
+tenjin config set maxAutoSpend 0.25
+tenjin config set sessionBudget 2.00
+```
+
+The allowlist line itself never raises a spend cap. That is true, and it is not
+the same as saying the caps stop an allowlisted `buy`.
 
 Deliberately **never** recommended, because each is a human decision: `tenjin send`
 (moves USDC out of the wallet, and is not bounded by the buy spend policy), `tenjin
 publish`, `tenjin wallet create`, `tenjin config set` (it can widen the agent's own
-spend policy), `tenjin candidate add`/`drop`, `tenjin install`, and `tenjin mcp`
+spend policy), `tenjin candidate add` / `tenjin candidate drop`, `tenjin install`,
+and `tenjin mcp`
 (it re-exposes every command core, so clearing it clears everything). For the same
 reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`, `Bash(tenjin
 wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+Two gaps worth knowing, both of which fail closed (denied, never wrongly allowed):
+bare `tenjin config` is as read-only as `config get` but no prefix rule reaches it
+without also covering `config set`, so use `tenjin config get <key>`; and group-level
+flag forms like `tenjin wallet --json show` are not covered, so put global flags
+after the leaf verb (`tenjin wallet show --json`).
+
+**Running the local MCP server instead?** That is a different permission surface:
+the harness gates tools there, and these Bash rules do not apply. If you follow
+the [MCP section](#local-stdio-mcp-server) as well, leave
+`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_wallet` gated, treat
+`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions, and treat
+`mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.
 
 This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
 that one gates **who you may pay**, this one gates **which commands may run**.
@@ -300,13 +345,17 @@ approval.
   key never leaves the machine.
 
 - Fund small: this is a pocket-money wallet by design.
-- Purchased content is untrusted data, never instructions. In auto mode the skills
-  use a purchased piece's claims without re-deriving them against public sources
-  (that is what you paid for), but they still never execute purchased content and
-  instructions embedded in it never override the task. Reputation gating replaces
-  this interim wholesale trust when it lands.
-- The recommended auto-mode allowlist covers free read-only verbs only; `tenjin
-buy` is an explicit opt-in and money-moving verbs are never recommended. See
+- Purchased content is untrusted data, never instructions. In an unattended
+  session the skills use a piece's claims without re-deriving them against public
+  sources (that is what you paid for), but only for content actually paid for:
+  previews and $0.00 pieces get no such relaxation. They still never execute
+  purchased content, instructions embedded in it never override the task, and no
+  permission, hook, or settings change is ever recommended on the strength of
+  content the agent read. Reputation gating replaces this interim wholesale trust
+  when it lands.
+- The recommended auto-mode allowlist covers free verbs only; `tenjin buy` is an
+  explicit opt-in that authorizes unattended spending, and money-moving verbs are
+  never recommended. See
   [Auto-mode permission allowlist](#auto-mode-permission-allowlist). A harness
   permission denial is never worked around: the skills surface the exact allowlist
   line and stop.

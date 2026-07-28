@@ -8,6 +8,7 @@ import { trimSlash } from '../lib/url';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
+import { sanitizeForTerminal } from '../lib/output';
 import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
 import type { ErrorCode } from '../schemas';
@@ -102,14 +103,19 @@ export async function runDoctor(
   const { checks, failure } = await collectDoctorChecks(ctx, deps);
   if (failure !== undefined) {
     const r = failure.result;
+    // The allowlist rides on the FAILURE envelope too. An operator whose fresh
+    // install is broken is the likeliest one to be reading doctor output at all,
+    // and the earlier version dropped the block on exactly that path while the
+    // comment below claimed otherwise. The human failure path still renders only
+    // the error and its fix (that is emitFailure's contract, not doctor's), so
+    // the machine payload is where this has to land.
     throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
-      details: { checks },
+      details: { checks, permissions: recommendedPermissions() },
     });
   }
 
-  // The recommended harness allowlist rides on every doctor run, pass or human.
-  // It is the discoverability surface for the auto-mode denial problem (#33): an
+  // The discoverability surface for the auto-mode denial problem (#33): an
   // operator whose agent just got denied runs doctor and gets the exact lines to
   // paste, without having to already know they exist. It reports nothing about the
   // local machine, so it is deliberately NOT a check: it can never pass or fail.
@@ -460,9 +466,18 @@ export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
         : c.status === 'warn'
           ? paint(io, 'yellow', '!')
           : paint(io, 'red', '✗');
-    lines.push(`${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', c.detail)}`);
+    // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
+    // info.version, a provider's error text). doctor now prints them directly
+    // above the allowlist block the operator is told to paste, so a newline or
+    // ANSI in a hostile deployment's version string could forge a second, wider
+    // "allowlist" section in the terminal. Sanitize at the render seam: output.ts
+    // exempts doctor on the assumption it only paints its OWN text, which stopped
+    // being true the moment these lines sat next to a copy-paste block.
+    lines.push(
+      `${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
+    );
     if (c.status !== 'ok' && c.fix !== undefined) {
-      lines.push(`    ${paint(io, 'dim', `fix: ${c.fix}`)}`);
+      lines.push(`    ${paint(io, 'dim', `fix: ${sanitizeForTerminal(c.fix)}`)}`);
     }
   }
   return lines;

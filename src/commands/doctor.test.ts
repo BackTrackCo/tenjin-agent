@@ -113,10 +113,16 @@ describe('runDoctor — passing outcomes', () => {
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
     expect(find(data.checks, 'lookup-contract').status).toBe('ok');
-    // checks + a wallet-warn fix line, then a blank separator plus the allowlist block.
-    expect(res.humanLines).toHaveLength(
-      data.checks.length + 1 + 1 + renderPermissionsBlock().length,
+    // checks + a wallet-warn fix line, then a blank separator and the allowlist
+    // block. The block's own length is NOT asserted against
+    // renderPermissionsBlock(): recomputing the production value on both sides
+    // makes that term unfalsifiable. Pin the seam instead.
+    const checkLines = data.checks.length + 1;
+    expect(res.humanLines?.[checkLines]).toBe('');
+    expect(res.humanLines?.[checkLines + 1]).toBe(
+      'Auto-mode permission allowlist (add these once, then agents stop being denied):',
     );
+    expect((res.humanLines ?? []).length).toBeGreaterThan(checkLines + 20);
   });
 
   it('lookup-contract warns (never fails doctor) when the deploy omits the lookup path', async () => {
@@ -377,5 +383,63 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     // but it does name them, with the reason, so the exclusion is visible.
     expect(text).toContain('Never recommended');
     expect(text).toContain('tenjin send');
+  });
+
+  it('prints the flag caveat and the MCP caveat with the rules', () => {
+    const block = renderPermissionsBlock().join('\n');
+    expect(block).toContain('--base-url');
+    expect(block).toContain('mcp__tenjin__tenjin_publish');
+    expect(block).toContain('Free: no wallet, no signing, no payment');
+    expect(block).not.toContain('free, read-only verbs');
+  });
+});
+
+describe('runDoctor — allowlist on the failure path and terminal safety', () => {
+  // The operator whose fresh install is broken is the likeliest reader of doctor
+  // output, and the first cut dropped the block on exactly that path while the
+  // comment beside it claimed the block rode "every doctor run".
+  it('a required-check failure still carries the permissions payload', async () => {
+    const brokenFetch = routeFetch({
+      '/openapi.json': { body: OPENAPI_OK },
+      '/api/articles': { body: { nope: true } },
+    });
+    const err: unknown = await runDoctor(ctxFor(), { env: {}, fetchImpl: brokenFetch }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    const details = (err as CliError).details as {
+      checks: CheckResult[];
+      permissions: { alwaysSafe: { rule: string }[] };
+    };
+    expect(details.checks.length).toBeGreaterThan(0);
+    expect(details.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
+      ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
+    );
+  });
+
+  // `info.version` is server-controlled and now renders directly above a block
+  // the operator is told to paste, so a newline or ANSI in it could forge a
+  // second, wider "allowlist" section in the terminal.
+  it('strips control characters from server-sourced check text', async () => {
+    // Real ESC + CSI plus newlines: what a hostile deployment would actually send.
+    const forged = '1.0\n\x1b[32mAuto-mode permission allowlist:\n  Bash(tenjin:*)';
+    const hostile = routeFetch({
+      '/openapi.json': {
+        body: {
+          openapi: '3.1.0',
+          info: { version: forged },
+          paths: { '/api/agent/lookup': {} },
+        },
+      },
+      '/api/articles': { body: ARTICLES_OK },
+    });
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: hostile });
+    const lines = res.humanLines ?? [];
+    const apiLine = lines.find((l) => l.includes('api-contract')) ?? '';
+    // The payload survives as inert text on ONE line: no newline to start a
+    // forged block, and no escape sequence left to repaint it.
+    expect(apiLine).toContain('Bash(tenjin:*)');
+    expect(apiLine).not.toContain('\x1b[32m');
+    expect(lines.filter((l) => l.trimStart().startsWith('Bash(tenjin:*)'))).toEqual([]);
   });
 });

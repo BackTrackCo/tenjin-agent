@@ -833,6 +833,13 @@ describe('runInstall: interactive walkthrough', () => {
     }
     expect(text).toContain('tenjin send');
     expect(text).toContain('.claude/settings.json');
+    // The caveats qualify the rules, so they travel with them or the block lies.
+    expect(text).toContain('--base-url');
+    expect(text).toContain('mcp__tenjin__tenjin_publish');
+    // And the corrected claims, not the ones the first cut shipped.
+    expect(text).toMatch(/authorizes UNATTENDED purchases/);
+    expect(text).not.toMatch(/still puts a human on every purchase/);
+    expect(text).not.toContain('free, read-only verbs');
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
