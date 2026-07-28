@@ -1,6 +1,6 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { SKILL_NAMES } from './skills-source';
 import type { SkillName } from './skills-source';
 
@@ -53,6 +53,78 @@ export function skillsDirsFor(home: string): string[] {
  */
 export function harnessFlagFor(home: string, dir: string): string {
   return dir === join(home, '.claude', 'skills') ? 'claude' : 'shared';
+}
+
+/** The harnesses `install` probes for. `shared` is a fallback target, never detected. */
+export type DetectableHarness = 'claude' | 'codex';
+
+/**
+ * Why we think `harness` is on this machine: its home dir (~/.claude, ~/.codex) and
+ * its binary on PATH. Single-sourced so `install` picks its targets and `doctor`
+ * decides which directories MUST be wired from the same two probes — a directory no
+ * harness here reads is a leftover, not a defect.
+ */
+export function harnessDetectedBy(
+  home: string,
+  harness: DetectableHarness,
+  which: (bin: string) => boolean,
+): string[] {
+  const reasons: string[] = [];
+  if (existsSync(join(home, `.${harness}`))) reasons.push('home-dir');
+  if (which(harness)) reasons.push('binary');
+  return reasons;
+}
+
+export interface HarnessPresence {
+  claude: boolean;
+  codex: boolean;
+}
+
+export function detectHarnesses(home: string, which: (bin: string) => boolean): HarnessPresence {
+  return {
+    claude: harnessDetectedBy(home, 'claude', which).length > 0,
+    codex: harnessDetectedBy(home, 'codex', which).length > 0,
+  };
+}
+
+/**
+ * Does a harness ON THIS MACHINE read `dir`? Claude Code reads ~/.claude/skills and
+ * Codex reads ~/.agents/skills, so a wired .agents does NOT make Claude Code wired:
+ * the question has to be asked per directory. When neither harness is detected the
+ * shared directory is still in play, because that is the fallback target `install`
+ * writes to, so a half-written fallback install is still reported.
+ */
+export function harnessReads(home: string, dir: string, present: HarnessPresence): boolean {
+  return harnessFlagFor(home, dir) === 'claude' ? present.claude : present.codex || !present.claude;
+}
+
+/**
+ * Is `bin` a real executable file on PATH? Gates on statSync().isFile() so a
+ * same-named DIRECTORY on PATH never false-positives as the binary, and probes the
+ * PATHEXT extensions on win32 where the real binary is `claude.cmd`/`claude.exe`
+ * rather than a bare `claude`.
+ */
+export function onPath(bin: string, env: NodeJS.ProcessEnv): boolean {
+  const raw = env.PATH ?? '';
+  const exts =
+    process.platform === 'win32'
+      ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e.length > 0)]
+      : [''];
+  for (const part of raw.split(delimiter)) {
+    if (part.length === 0) continue;
+    for (const ext of exts) {
+      if (isFile(join(part, bin + ext))) return true;
+    }
+  }
+  return false;
+}
+
+function isFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export async function readHarnessWiring(dir: string): Promise<HarnessWiring> {
@@ -137,10 +209,6 @@ export function shadowedCliSkills(wiring: HarnessWiring): string[] {
     const s = wiring.skills.find((x) => x.name === name);
     return s?.present === true && s.modelInvocable === false;
   });
-}
-
-export function hostedPresent(wiring: HarnessWiring): boolean {
-  return wiring.skills.find((x) => x.name === HOSTED_SKILL_NAME)?.present === true;
 }
 
 export function anyTenjinSkill(wiring: HarnessWiring): boolean {

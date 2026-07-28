@@ -1,8 +1,8 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile, readdir, rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { delimiter, join, relative } from 'node:path';
+import { join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { styleText } from 'node:util';
@@ -10,7 +10,13 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
-import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, isModelInvocationDisabled } from '../lib/skill-wiring';
+import {
+  CLI_SKILL_NAMES,
+  HOSTED_SKILL_NAME,
+  harnessDetectedBy,
+  isModelInvocationDisabled,
+  onPath,
+} from '../lib/skill-wiring';
 import {
   CONFIG_DEFAULTS,
   loadRawConfig,
@@ -105,7 +111,8 @@ interface SkillResult {
   preexisting: boolean;
   /** Is this one of the two CLI adapter skills (as opposed to the hosted mirror)? */
   cli: boolean;
-  /** Will a harness surface it to the model after this run? False on a dry run that wrote nothing. */
+  /** Will a harness surface it to the model after this run? On a --dry-run nothing is
+   * written, so it answers for the packaged copy that would land. */
   modelInvocable: boolean;
 }
 
@@ -225,8 +232,11 @@ export async function runInstall(
   await assertSkillsLanded(plans, dryRun);
   // The embedded doctor run inspects the same `home` install just wrote into, so
   // its skill-wiring check reports THIS run's result rather than os.homedir()'s.
+  // `which` goes with it: the check gates its verdicts on harness detection, and a
+  // different probe there would judge directories this run never targeted.
   const doctorDeps: DoctorDeps = { ...(deps.doctorDeps ?? {}) };
   doctorDeps.homeDir ??= home;
+  doctorDeps.which ??= which;
   const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
   const doctor = await collect(ctx);
   const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
@@ -582,8 +592,9 @@ function resolvePlans(
   }
 
   const plans: HarnessPlan[] = [];
-  const claudeBy = detectReasons(existsSync(join(home, '.claude')), which('claude'));
-  const codexBy = detectReasons(existsSync(join(home, '.codex')), which('codex'));
+  // Same two probes doctor's skills check gates its per-directory verdicts on.
+  const claudeBy = harnessDetectedBy(home, 'claude', which);
+  const codexBy = harnessDetectedBy(home, 'codex', which);
   if (claudeBy.length > 0)
     plans.push(planFor('claude', claudeBy, true, home, claudeDir, sharedDir));
   if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home, claudeDir, sharedDir));
@@ -593,13 +604,6 @@ function resolvePlans(
     plans.push(planFor('shared', ['fallback'], false, home, claudeDir, sharedDir));
   }
   return dedupeBySkillsDir(plans);
-}
-
-function detectReasons(homeDirPresent: boolean, onPathPresent: boolean): string[] {
-  const reasons: string[] = [];
-  if (homeDirPresent) reasons.push('home-dir');
-  if (onPathPresent) reasons.push('binary');
-  return reasons;
 }
 
 function planFor(
@@ -663,7 +667,7 @@ async function applyPlan(
       status,
       preexisting,
       cli: (CLI_SKILL_NAMES as readonly string[]).includes(name),
-      modelInvocable: await landedInvocable(plan.skillsDir, name, dryRun),
+      modelInvocable: await landedInvocable(plan.skillsDir, skillsSource, name, dryRun),
     });
     if (warning !== undefined) warnings.push(warning);
   }
@@ -749,11 +753,19 @@ function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
 /**
  * Did the skill actually land model-invocable? Read back from the target so the
  * reported value is the file a harness will read, not what we intended to write.
- * A dry run wrote nothing, so it answers for the packaged source instead.
+ * A dry run wrote nothing, so it READS THE PACKAGED SOURCE — the file that would
+ * land. Hardcoding `true` there was wrong for the one skill whose value can
+ * legitimately be false: `assertSkillsSource` exempts the hosted mirror from the
+ * invocability assertion, so a shadowed mirror ships and must report as shadowed on
+ * both paths.
  */
-async function landedInvocable(skillsDir: string, name: string, dryRun: boolean): Promise<boolean> {
-  if (dryRun) return true;
-  const path = join(skillsDir, name, 'SKILL.md');
+async function landedInvocable(
+  skillsDir: string,
+  skillsSource: string,
+  name: string,
+  dryRun: boolean,
+): Promise<boolean> {
+  const path = join(dryRun ? skillsSource : skillsDir, name, 'SKILL.md');
   if (!existsSync(path)) return false;
   try {
     return !isModelInvocationDisabled(await readFile(path, 'utf8'));
@@ -764,10 +776,9 @@ async function landedInvocable(skillsDir: string, name: string, dryRun: boolean)
 
 /**
  * Every packaged skill landed in every target. Runs after ALL targets are written,
- * never mid-loop: a throw between two targets would leave target 1 rewritten,
- * target 2 untouched, and skip the doctor run, the publish-mode question and the
- * wallet step, so a machine whose skills directory was just replaced would never
- * settle `publish.mode`.
+ * never mid-loop: a throw between two targets would leave target 1 rewritten and
+ * target 2 untouched. (It still sits ahead of the doctor run, the publish-mode
+ * question and the wallet step, so a throw here skips those either way.)
  *
  * Presence only. Whether a skill is model-invocable is a property of the PACKAGED
  * source, checked up front by `assertSkillsSource` before anything is written.
@@ -811,10 +822,13 @@ async function installSkill(
   // with no SKILL.md. Neither is a skill that "was already here".
   const preexisting = dest?.has('SKILL.md') === true;
 
-  // Keyed off `preexisting`, not `dest !== null`: a bare directory or an interrupted
-  // write has nothing to differ FROM, so it is a create. The rm below still clears
-  // any stray files either case left behind.
-  const change = !preexisting ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
+  // `change` is keyed off BYTES, not off `preexisting`: the rm below deletes whatever
+  // is in the destination, so anything with content in it is an overwrite and must
+  // carry the warning, even with no SKILL.md — a hand-saved `skills.md` and a
+  // directory of the user's own notes both live here. Only a bare `mkdir` (or a dir
+  // that does not exist) is a create, which is what `preexisting` reporting is for.
+  const change =
+    dest === null || dest.size === 0 ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
 
   if (!dryRun && change !== 'none') {
     // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
@@ -917,37 +931,6 @@ function chooseAgentsMdPath(home: string): string {
   if (existsSync(codex)) return codex;
   if (existsSync(join(home, '.codex'))) return codex;
   return shared;
-}
-
-// --- PATH probe ------------------------------------------------------------------
-
-/**
- * Is `bin` a real executable file on PATH? Gates on statSync().isFile() so a
- * same-named DIRECTORY on PATH never false-positives as the binary, and probes the
- * PATHEXT extensions on win32 where the real binary is `claude.cmd`/`claude.exe`
- * rather than a bare `claude`.
- */
-function onPath(bin: string, env: NodeJS.ProcessEnv): boolean {
-  const raw = env.PATH ?? '';
-  const exts =
-    process.platform === 'win32'
-      ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e.length > 0)]
-      : [''];
-  for (const part of raw.split(delimiter)) {
-    if (part.length === 0) continue;
-    for (const ext of exts) {
-      if (isFile(join(part, bin + ext))) return true;
-    }
-  }
-  return false;
-}
-
-function isFile(p: string): boolean {
-  try {
-    return statSync(p).isFile();
-  } catch {
-    return false;
-  }
 }
 
 // --- Human rendering -------------------------------------------------------------

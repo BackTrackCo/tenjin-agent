@@ -1155,6 +1155,29 @@ describe('runInstall: packaged-source wiring guard (#35)', () => {
     const h = asData(d).harnesses[0]!;
     expect(h.skills.filter((s) => s.cli).every((s) => s.modelInvocable)).toBe(true);
   });
+
+  it('--dry-run answers for the PACKAGED source, not a hardcoded true', async () => {
+    // The mirror is the one skill whose value can legitimately be false (the guard
+    // exempts it), and the dry run used to be the one place that always said true.
+    const src = await fixtureSource();
+    await writeFile(
+      join(src, 'tenjin', 'SKILL.md'),
+      '---\nname: tenjin\ndisable-model-invocation: true\n---\n',
+    );
+    try {
+      const { data: d } = await runInstall(
+        { harness: ['claude'], dryRun: true },
+        makeCtx(),
+        deps({ skillsSourceDir: src }),
+      );
+      const h = asData(d).harnesses[0]!;
+      expect(h.skills.find((s) => s.name === 'tenjin')?.modelInvocable).toBe(false);
+      expect(h.skills.find((s) => s.name === 'tenjin-publish')?.modelInvocable).toBe(true);
+      expect(existsSync(join(home, '.claude', 'skills'))).toBe(false); // still wrote nothing
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('runInstall: preexisting means a real prior copy', () => {
@@ -1177,10 +1200,38 @@ describe('runInstall: preexisting means a real prior copy', () => {
     const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const h = asData(d).harnesses[0]!;
     expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
-    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('installed');
     expect(h.hostedPreexisting).toBe(false);
     // The stray file is cleared by the wholesale overwrite.
     expect(existsSync(join(home, '.claude', 'skills', 'tenjin', 'asset.bin'))).toBe(false);
+    // ...and because bytes were destroyed, the destruction is still reported:
+    // `preexisting` answers "was a real copy here", `status`/`warnings` answer
+    // "did this run delete anything", and they are different questions.
+    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('updated');
+    expect(h.warnings.join('\n')).toContain(dir);
+  });
+
+  it('a destination holding the user OWN files keeps the overwrite warning', async () => {
+    // ~/.claude/skills/tenjin/skills.md is what `curl tenjin.blog/skills.md -o`
+    // leaves behind, and NOTES.md is the user's. rm(recursive) deletes both, so a
+    // silent `installed` with no warning was the only notice they ever got.
+    const searchDir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(join(searchDir, 'references'), { recursive: true });
+    await writeFile(join(searchDir, 'NOTES.md'), 'mine');
+    await writeFile(join(searchDir, 'references', 'mine.md'), 'also mine');
+    const hostedDir = join(home, '.claude', 'skills', 'tenjin');
+    await mkdir(hostedDir, { recursive: true });
+    await writeFile(join(hostedDir, 'skills.md'), '# a hand-saved hosted skill');
+
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const h = asData(d).harnesses[0]!;
+    const warnings = h.warnings.join('\n');
+    expect(warnings).toContain(searchDir);
+    expect(warnings).toContain(hostedDir);
+    expect(h.skills.find((s) => s.name === 'tenjin-search')?.status).toBe('updated');
+    // The `preexisting` semantics are unchanged: neither held a SKILL.md.
+    expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
+    expect(h.hostedPreexisting).toBe(false);
+    expect(existsSync(join(searchDir, 'NOTES.md'))).toBe(false);
   });
 
   it('the mirror-replacement warning claims no direction about which copy is newer', async () => {

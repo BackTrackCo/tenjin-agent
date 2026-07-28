@@ -183,8 +183,10 @@ const LINE_DETECTORS: LineDetector[] = [
   },
   // Generic secret-named assignment — WARN, not block (review): a keyword match is
   // lower-confidence than a structured shape, and a warn still forces confirmation
-  // in auto mode (and review always asks), so nothing publishes unseen while benign
-  // config (SECRET_NAME=…, MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. The
+  // under `review` and `auto`, while benign config (SECRET_NAME=…,
+  // MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. `full-auto` and a bare
+  // `--yes` DO clear it unseen, which is the price of that choice; the publish skill
+  // says so rather than implying keys and tokens are all in the blocking tier. The
   // excerpt stays masked. Placeholder and structural (path/URL/regex) values are
   // skipped entirely.
   {

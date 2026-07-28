@@ -367,6 +367,17 @@ async function writeSkillIn(dir: string, name: string, extraFrontmatter = ''): P
 const writeSkill = (name: string, extraFrontmatter = ''): Promise<void> =>
   writeSkillIn(claudeSkills(), name, extraFrontmatter);
 
+/**
+ * Make Codex detectable. The check only judges a directory a harness on THIS
+ * machine reads: ~/.claude/skills is judged because writing a skill there creates
+ * ~/.claude, and ~/.agents/skills is judged when Codex is installed (or when
+ * nothing is, since it is then install's fallback target). `env: {}` everywhere
+ * below means the PATH half of detection never fires, so these tests never depend
+ * on whether the developer running them has claude/codex installed.
+ */
+const installCodex = (): Promise<string | undefined> =>
+  mkdir(join(skillHome, '.codex'), { recursive: true });
+
 describe('runDoctor — skill wiring', () => {
   it('no skills anywhere: warns and points at tenjin install', async () => {
     const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
@@ -384,7 +395,9 @@ describe('runDoctor — skill wiring', () => {
     const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
-    expect(skills.detail).toContain('neither CLI skill is wired anywhere');
+    expect(skills.detail).toContain(
+      `${claudeSkills()}: the hosted tenjin skill is here but neither CLI skill is wired`,
+    );
     expect(skills.detail).toContain('hosted skill only, no CLI skills here');
     expect(skills.fix).toBe('tenjin install --harness claude');
   });
@@ -483,6 +496,7 @@ describe('runDoctor — skill wiring', () => {
     });
 
     it('shadowed in one directory and missing in the other names BOTH, with both fixes', async () => {
+      await installCodex();
       await writeSkillIn(claudeSkills(), 'tenjin-search');
       await writeSkillIn(claudeSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
       await writeSkillIn(sharedSkills(), 'tenjin-search');
@@ -501,6 +515,7 @@ describe('runDoctor — skill wiring', () => {
     });
 
     it('a problem only in .agents/skills gets the --harness shared fix that can clear it', async () => {
+      await installCodex();
       for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
         await writeSkillIn(claudeSkills(), name);
       }
@@ -515,6 +530,82 @@ describe('runDoctor — skill wiring', () => {
       expect(skills.status).toBe('warn');
       // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
       // machine, so it would reproduce the warning forever.
+      expect(skills.fix).toBe('tenjin install --harness shared');
+    });
+
+    // Unioning the SUCCESSES is the same bug as unioning the problems, inverted:
+    // green on a machine where publish is genuinely unreachable from Claude Code.
+    it('wired .agents does not answer for a hosted-only .claude when Claude Code is here', async () => {
+      await writeSkillIn(claudeSkills(), 'tenjin'); // creates ~/.claude: Claude Code is here
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+        await writeSkillIn(sharedSkills(), name);
+      }
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain(
+        `${claudeSkills()}: the hosted tenjin skill is here but neither CLI skill is wired`,
+      );
+      // The fix must target the directory Claude Code actually reads.
+      expect(skills.fix).toBe('tenjin install --harness claude');
+    });
+
+    it('an EMPTY .claude/skills with Claude Code installed is a problem too', async () => {
+      await mkdir(join(skillHome, '.claude'), { recursive: true });
+      await installCodex();
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+        await writeSkillIn(sharedSkills(), name);
+      }
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain(`${claudeSkills()}: neither CLI skill is wired`);
+      expect(skills.fix).toBe('tenjin install --harness claude');
+    });
+
+    // The mirror image: gating on detection is what keeps a leftover quiet.
+    it('a half-wired .agents with no Codex is not a problem to fix', async () => {
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+        await writeSkillIn(claudeSkills(), name);
+      }
+      await writeSkillIn(sharedSkills(), 'tenjin-search');
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('ok');
+      expect(skills.fix).toBeUndefined();
+      // Still fully described, just not warned about.
+      expect(skills.detail).toContain(`${sharedSkills()} -> tenjin-search (only one CLI skill)`);
+    });
+
+    it('the PATH probe detects a harness with no home dir', async () => {
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
+        await writeSkillIn(claudeSkills(), name);
+      }
+      await writeSkillIn(sharedSkills(), 'tenjin');
+
+      const res = await runDoctor(ctxFor(), {
+        homeDir: skillHome,
+        env: {},
+        fetchImpl: healthyFetch,
+        which: (bin) => bin === 'codex',
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
       expect(skills.fix).toBe('tenjin install --harness shared');
     });
   });

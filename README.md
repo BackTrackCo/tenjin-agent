@@ -129,11 +129,14 @@ The three skills:
   questions).
 - **`tenjin-publish`**: publishing rubric and `tenjin publish` adapter, with a
   narrow trigger (an explicit ask, or the after-a-MISS reflex). Consent is
-  `publish.mode`, backed by the local **secret-shape** scan whose blocking tier
-  no mode and no `--yes` can clear. The scan's PII and internal-marker findings
-  are warnings, which `review` shows you and `--yes`/`full-auto` clear; rights
-  and employer-internal content have no detector, so the skill's draft rules
-  put that judgment on the author.
+  `publish.mode`, backed by the local **secret-shape** scan. Its blocking tier —
+  structured provider token formats, private keys, connection URIs with an
+  embedded password — is what no mode and no `--yes` can clear. Everything else
+  is a warning, which `review` shows you and `--yes`/`full-auto` clear:
+  generically named `API_KEY=`-style assignments, PII, wallet addresses,
+  internal hostnames, confidential markers, long verbatim quotes. So rights and
+  employer-internal content have no _blocking_ detector — those last four are
+  warn-tier only — and the skill's draft rules put that judgment on the author.
 
 All three land on every run, including on a machine that already carries the
 hosted `tenjin` skill: that install wires the CLI skills rather than skipping.

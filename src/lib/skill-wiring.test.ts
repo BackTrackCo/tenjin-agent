@@ -8,13 +8,15 @@ import {
   HOSTED_SKILL_NAME,
   anyTenjinSkill,
   cliSkillsWired,
-  hostedPresent,
   isModelInvocationDisabled,
   missingCliSkills,
   readAllWiring,
   readHarnessWiring,
   shadowedCliSkills,
   harnessFlagFor,
+  detectHarnesses,
+  harnessDetectedBy,
+  harnessReads,
   skillsDirsFor,
 } from './skill-wiring';
 
@@ -141,7 +143,7 @@ describe('readHarnessWiring', () => {
     const dir = join(home, '.claude', 'skills');
     await seed(dir, HOSTED_SKILL_NAME);
     const w = await readHarnessWiring(dir);
-    expect(hostedPresent(w)).toBe(true);
+    expect(w.state).toBe('hosted-only');
     expect(cliSkillsWired(w)).toBe(false);
     expect(missingCliSkills(w)).toEqual([...CLI_SKILL_NAMES]);
     expect(shadowedCliSkills(w)).toEqual([]);
@@ -177,7 +179,7 @@ describe('readHarnessWiring', () => {
     for (const name of [...CLI_SKILL_NAMES, HOSTED_SKILL_NAME]) await seed(dir, name);
     const w = await readHarnessWiring(dir);
     expect(cliSkillsWired(w)).toBe(true);
-    expect(hostedPresent(w)).toBe(true);
+    expect(w.state).toBe('wired');
     expect(shadowedCliSkills(w)).toEqual([]);
   });
 });
@@ -191,5 +193,38 @@ describe('readAllWiring', () => {
     const [claude, shared] = await readAllWiring(home);
     expect(cliSkillsWired(claude!)).toBe(false);
     expect(cliSkillsWired(shared!)).toBe(true);
+  });
+});
+
+describe('harness detection', () => {
+  const noBinaries = (): boolean => false;
+
+  it('names both probes: the home dir and the binary', async () => {
+    await mkdir(join(home, '.codex'), { recursive: true });
+    expect(harnessDetectedBy(home, 'codex', noBinaries)).toEqual(['home-dir']);
+    expect(harnessDetectedBy(home, 'claude', (b) => b === 'claude')).toEqual(['binary']);
+    expect(harnessDetectedBy(home, 'claude', noBinaries)).toEqual([]);
+  });
+
+  it('a directory is only judged when a harness HERE reads it', async () => {
+    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    await mkdir(join(home, '.claude'), { recursive: true });
+
+    const claudeOnly = detectHarnesses(home, noBinaries);
+    expect(claudeOnly).toEqual({ claude: true, codex: false });
+    expect(harnessReads(home, claudeDir, claudeOnly)).toBe(true);
+    // The leftover-mirror case: nothing here reads ~/.agents/skills.
+    expect(harnessReads(home, sharedDir, claudeOnly)).toBe(false);
+
+    const both = detectHarnesses(home, (b) => b === 'codex');
+    expect(harnessReads(home, sharedDir, both)).toBe(true);
+  });
+
+  it('with NO harness detected the shared dir is still judged: it is the fallback target', () => {
+    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    const none = detectHarnesses(home, noBinaries);
+    expect(none).toEqual({ claude: false, codex: false });
+    expect(harnessReads(home, claudeDir, none)).toBe(false);
+    expect(harnessReads(home, sharedDir, none)).toBe(true);
   });
 });

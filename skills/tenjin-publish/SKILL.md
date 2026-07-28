@@ -21,12 +21,18 @@ derived. Both go through `publish.mode`, which is the gate, not a checklist to
 hold the user to. `publish.mode` is settled at `tenjin install` and defaults to
 `review`; it is what decides whether a publish completes silently, asks a
 one-click yes/no, or stops. Alongside it the CLI runs a deterministic scan whose
-BLOCKING tier is credential shapes (keys, tokens, private keys, connection
-URIs); that tier is the one thing no mode and no `--yes` can clear. The scan's
-other findings (emails, phone numbers, wallet addresses, internal hostnames,
-confidential markers) are warnings, which `review` surfaces and `--yes` or
-`full-auto` clear, so they are a prompt to look, not a guarantee. Nothing checks
-rights or employer-internal content for you: that judgment is yours, below.
+BLOCKING tier is structured credential shapes only: provider token formats (AWS,
+GitHub, Slack, Stripe, OpenAI, Anthropic, Google, npm, JWT, `Authorization:
+Bearer`), private keys, and connection URIs with an embedded password. That tier
+is the one thing no mode and no `--yes` can clear. Everything else is a warning,
+which `review` surfaces and `--yes` or `full-auto` clear: a generically named
+`API_KEY=`/`PASSWORD=`/`TOKEN=` assignment, emails, phone numbers, wallet
+addresses, internal hostnames, confidential markers, long verbatim quotes. So a
+secret that is not a recognizable shape is a prompt to look, not a stop, and
+under `full-auto` or a bare `--yes` it is not even that. Rights and
+employer-internal content have no BLOCKING detector — the four warn-tier ones
+(confidential markers, internal hostnames, wallet addresses, long verbatim
+quotes) are the whole coverage, so that judgment is yours, below.
 This skill's reachability is not a safety layer; the description above is the
 whole trigger boundary.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
@@ -70,9 +76,11 @@ edge, and price for the freshness that remains.
   metrics, or unreleased work; no secrets, keys, or wallet addresses; no
   third-party private details; no personal data; no long verbatim copyrighted
   text. Method mixed with private data: publish the method, strip the data.
-  Only the credential shapes are detected and blocked by the CLI; the rights
-  and employer-internal rules have no detector at all, so read the draft
-  against this list yourself before you run `tenjin publish`.
+  Only the structured credential shapes are BLOCKED by the CLI; the rights and
+  employer-internal rules have no blocking detector — confidential markers,
+  internal hostnames, wallet addresses and long verbatim quotes are flagged at
+  warn tier only, and `--yes`/`full-auto` clear them — so read the draft against
+  this list yourself before you run `tenjin publish`.
 - Fill the answer card when prompted (what it answers, applies-to, exclusions,
   freshness): a complete card is what makes the resource findable by lookup.
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.
@@ -124,3 +132,9 @@ local files and never upload by themselves.
 - When new information lands: update the body, refresh the as-of date, add a
   one-line "updated: what changed" note, and reprice if warranted. Buyers
   re-read updates free; staleness is what kills repeat purchases.
+- Sales and earnings have no CLI command: they are a hosted surface. Answer
+  "how are my sales doing?" with `GET https://tenjin.blog/api/me/stats`
+  (this-month earnings + paid-read totals) and `GET
+  https://tenjin.blog/api/me/events` (one entry per settled sale, poll and
+  diff). Both take the `SIGN-IN-WITH-X` wallet header the hosted `tenjin`
+  skill documents; that skill is the reference for this whole surface.
