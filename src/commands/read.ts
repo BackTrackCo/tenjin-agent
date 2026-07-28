@@ -91,7 +91,7 @@ export async function runRead(
   };
 
   // 2. First GET, unauthenticated — the same probe buy opens with, and like buy's
-  //    probe it is unattributed (no lookup id rides a non-purchase).
+  //    probe it is unattributed (no search id rides a non-purchase).
   const first = await fetchRead(ref.url, fetchOpts);
 
   if (first.kind === 'entitled') {

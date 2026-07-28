@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runRead } from './read';
 import { findDelivered, libraryDir, saveDelivery } from '../lib/library';
-import { recordLookup } from '../lib/lookup-store';
+import { recordSearch } from '../lib/search-store';
 import {
   buildPaymentRequired,
   makeReadServer,
@@ -137,9 +137,9 @@ describe('runRead, entitled re-read', () => {
 
   it('re-delivers by resource id as well as by url', async () => {
     const body = readBody();
-    // A bare id resolves through the local lookup store, exactly as it does for buy.
-    await recordLookup(dir, {
-      lookupId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
+    // A bare id resolves through the local search store, exactly as it does for buy.
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
       at: new Date().toISOString(),
       question: 'q',
       decision: 'CANDIDATES',

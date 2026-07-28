@@ -59,7 +59,22 @@ edge, and price for the freshness that remains.
   no personal data; no long verbatim copyrighted text. Method mixed with
   private data: publish the method, strip the data.
 - Fill the answer card when prompted (what it answers, applies-to, exclusions,
-  freshness): a complete card is what makes the resource findable by lookup.
+  freshness): a complete card is what makes the resource findable by search.
+  Search matches the card on wording and on meaning, but only
+  `questionsAnswered` and `scope` are matched on meaning, so they carry the
+  recall. Phrase them for the questions buyers actually ask:
+  - `questionsAnswered`: 5 to 10 entries, 200 characters max each, one question
+    the piece answers per entry. Vary the register across entries: a natural
+    symptom sentence, a terse keyword line or the verbatim error string, a
+    why/how question. Same-register rephrasings of an entry you already have add
+    nothing. When the piece answers a question you looked up, make that exact
+    phrasing one of the entries.
+  - `tasksSupported`: the tasks the piece supports, same 10-entry and
+    200-character caps. Questions go in `questionsAnswered`, tasks go here; do
+    not mix them. Matched on wording only, so anything you want found by meaning
+    belongs in `questionsAnswered`.
+  - `scope`: dense and factual: versions, platforms, and the setup the work was
+    done on, not a pitch.
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.
   Keep the free preview minimal, roughly what it answers plus the as-of date.
 
@@ -78,7 +93,7 @@ full-auto):
   plain yes/no (with any flagged findings), and re-run with `--yes` only on an
   explicit yes.
 - **auto**: a clean scan publishes at the default price with no prompt
-  (including an answer you derived after a lookup MISS); a flagged scan exits 3
+  (including an answer you derived after a search MISS); a flagged scan exits 3
   with the same `needs_confirmation` payload to render.
 - **full-auto**: warnings do not stop it; only a hard-block finding (a live
   secret or private key) refuses, and no mode or `--yes` can clear that.
@@ -94,7 +109,7 @@ path) instead, with the same rubric and consent rules above.
 Candidates are your internal pen for a reusable answer you could not publish
 yet: the user said not-now, a publish refused or blocked, or there was no
 wallet. Not a user-facing workflow; it is housekeeping so the answer is not
-lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin lookup`
+lost. `tenjin candidate list --json` shows the pen with age, and a `tenjin search`
 prints a one-line stderr nudge when drafts are parked (and how many are stale
 >7d), so they resurface. Publishing one (`tenjin publish --candidate <id> --json`) runs
 the same flow on its draft and clears it only on a successful publish (a refusal

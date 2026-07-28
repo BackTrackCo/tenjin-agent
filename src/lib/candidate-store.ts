@@ -15,13 +15,13 @@ import { newId, UUID_RE } from './ids';
  * Custody mirrors the wallet key discipline: the candidates tree is 0700 and
  * every file 0600, written create-once through writeFileAtomicExclusive so a
  * reader sees a complete file or none and a uuid collision is loud, never a
- * silent overwrite. Unlike lookup-store's single shared ledger, there is no shared
+ * silent overwrite. Unlike search-store's single shared ledger, there is no shared
  * mutable file here — a fresh uuid per add means two concurrent adds land in two
  * distinct dirs and cannot contend — so no cross-process lock is needed. The
  * meta.json is written LAST and atomically, making it the commit point: `list`
  * skips any dir whose meta is absent or unreadable, so a torn or half-written
  * add reads as not-yet-there rather than a broken candidate, the same
- * best-effort posture loadLookups takes on a corrupt store. A crash mid-add is
+ * best-effort posture loadSearches takes on a corrupt store. A crash mid-add is
  * cleaned up eagerly (the dir is removed on any write failure), and `drop` can
  * still remove a metaless orphan by id so a leaked draft is never stranded.
  */
@@ -31,7 +31,7 @@ const META_FILE = 'meta.json';
 
 const CandidateMetaSchema = z.object({
   schemaVersion: z.literal(1),
-  lookupId: z.string(),
+  searchId: z.string(),
   question: z.string().optional(),
   // Fixed-width UTC ISO-8601 (a trailing Z, never an offset): listCandidates
   // sorts newest-first lexicographically on this string, which is only a valid
@@ -55,7 +55,7 @@ export interface CandidateRecord {
 export interface CreateCandidateInput {
   /** The draft markdown, copied verbatim into the candidate. */
   draft: string;
-  lookupId: string;
+  searchId: string;
   question?: string;
   /** ISO-8601 creation time; the command supplies it via its clock seam. */
   created: string;
@@ -85,7 +85,7 @@ export async function createCandidate(
   const draftPath = join(dir, DRAFT_FILE);
   const meta: CandidateMeta = {
     schemaVersion: 1,
-    lookupId: input.lookupId,
+    searchId: input.searchId,
     ...(input.question !== undefined ? { question: input.question } : {}),
     created: input.created,
     sourceProject: input.sourceProject,

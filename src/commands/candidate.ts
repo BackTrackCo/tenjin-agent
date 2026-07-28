@@ -17,7 +17,7 @@ import type { CommandContext, CommandResult } from '../context';
 
 export interface CandidateAddArgs {
   file: string;
-  lookupId: string;
+  searchId: string;
   question?: string;
 }
 
@@ -33,9 +33,9 @@ export async function runCandidateAdd(
   ctx: CommandContext,
   deps: CandidateDeps = {},
 ): Promise<CommandResult> {
-  if (!UUID_RE.test(args.lookupId)) {
-    throw new CliError('USAGE', `Invalid --lookup-id: ${JSON.stringify(args.lookupId)}.`, {
-      fix: 'Pass the lookupId from a prior `tenjin lookup` (a uuid).',
+  if (!UUID_RE.test(args.searchId)) {
+    throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
+      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
     });
   }
   // Cap the question at the server's questionsAnswered item bound (200) at PARK
@@ -63,7 +63,7 @@ export async function runCandidateAdd(
 
   const record = await createCandidate(ctx.dataDir, {
     draft,
-    lookupId: args.lookupId,
+    searchId: args.searchId,
     ...(args.question !== undefined ? { question: args.question } : {}),
     created,
     sourceProject,
@@ -73,7 +73,7 @@ export async function runCandidateAdd(
     data: {
       id: record.id,
       path: record.dir,
-      lookupId: record.meta.lookupId,
+      searchId: record.meta.searchId,
       ...(record.meta.question !== undefined ? { question: record.meta.question } : {}),
       created: record.meta.created,
       sourceProject: record.meta.sourceProject,
@@ -91,7 +91,7 @@ export async function runCandidateList(
 
   const candidates = records.map((r) => ({
     id: r.id,
-    lookupId: r.meta.lookupId,
+    searchId: r.meta.searchId,
     ...(r.meta.question !== undefined ? { question: r.meta.question } : {}),
     created: r.meta.created,
     sourceProject: r.meta.sourceProject,

@@ -5,7 +5,7 @@ import { writeFileAtomic } from './atomic-json';
 import { withFileLock } from './lock';
 
 /**
- * A small local ledger of recent lookups so `outcome --last` can target the most
+ * A small local ledger of recent searches so `outcome --last` can target the most
  * recent one and `buy <resourceId>` can resolve the payable read URL a candidate
  * carried (the read route is keyed by handle/slug, not id, so an id alone can't
  * build the URL). Bounded and best-effort: a corrupt file reads as empty rather
@@ -22,25 +22,25 @@ const StoredCandidateSchema = z.object({
 });
 export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
 
-const StoredLookupSchema = z.object({
-  lookupId: z.string(),
+const StoredSearchSchema = z.object({
+  searchId: z.string(),
   at: z.string(),
   question: z.string(),
   decision: z.string(),
   candidates: z.array(StoredCandidateSchema),
 });
-export type StoredLookup = z.infer<typeof StoredLookupSchema>;
+export type StoredSearch = z.infer<typeof StoredSearchSchema>;
 
 const StoreSchema = z.object({
   schemaVersion: z.literal(1),
-  lookups: z.array(StoredLookupSchema),
+  searches: z.array(StoredSearchSchema),
 });
 
 function storePath(dataDir: string): string {
-  return join(dataDir, 'lookups.json');
+  return join(dataDir, 'searches.json');
 }
 
-export async function loadLookups(dataDir: string): Promise<StoredLookup[]> {
+export async function loadSearches(dataDir: string): Promise<StoredSearch[]> {
   let raw: string;
   try {
     raw = await readFile(storePath(dataDir), 'utf8');
@@ -54,58 +54,58 @@ export async function loadLookups(dataDir: string): Promise<StoredLookup[]> {
     return [];
   }
   const parsed = StoreSchema.safeParse(json);
-  return parsed.success ? parsed.data.lookups : [];
+  return parsed.success ? parsed.data.searches : [];
 }
 
-/** Prepend a lookup (newest first), cap to MAX_ENTRIES, persist under a lock so
- *  concurrent lookups don't drop each other's entry. */
-export async function recordLookup(dataDir: string, entry: StoredLookup): Promise<void> {
+/** Prepend a search (newest first), cap to MAX_ENTRIES, persist under a lock so
+ *  concurrent searches don't drop each other's entry. */
+export async function recordSearch(dataDir: string, entry: StoredSearch): Promise<void> {
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const lockPath = `${storePath(dataDir)}.lock`;
   await withFileLock(lockPath, async () => {
-    const existing = await loadLookups(dataDir);
-    const lookups = [entry, ...existing.filter((l) => l.lookupId !== entry.lookupId)].slice(
+    const existing = await loadSearches(dataDir);
+    const searches = [entry, ...existing.filter((l) => l.searchId !== entry.searchId)].slice(
       0,
       MAX_ENTRIES,
     );
     await writeFileAtomic(
       storePath(dataDir),
-      `${JSON.stringify({ schemaVersion: 1, lookups }, null, 2)}\n`,
+      `${JSON.stringify({ schemaVersion: 1, searches }, null, 2)}\n`,
       { mode: 0o644, dirMode: 0o700 },
     );
   });
 }
 
-export async function latestLookup(dataDir: string): Promise<StoredLookup | null> {
-  const lookups = await loadLookups(dataDir);
-  return lookups[0] ?? null;
+export async function latestSearch(dataDir: string): Promise<StoredSearch | null> {
+  const searches = await loadSearches(dataDir);
+  return searches[0] ?? null;
 }
 
-/** The stored candidate for a resourceId across recent lookups (newest first). */
+/** The stored candidate for a resourceId across recent searches (newest first). */
 export async function findStoredCandidate(
   dataDir: string,
   resourceId: string,
 ): Promise<StoredCandidate | null> {
-  for (const lookup of await loadLookups(dataDir)) {
-    const hit = lookup.candidates.find((c) => c.resourceId === resourceId);
+  for (const search of await loadSearches(dataDir)) {
+    const hit = search.candidates.find((c) => c.resourceId === resourceId);
     if (hit) return hit;
   }
   return null;
 }
 
-/** The most recent lookupId that surfaced this resource (by id or url), for
- *  purchase attribution (`X-Tenjin-Lookup-Id`). Null when no local lookup did. */
-export async function findLookupForResource(
+/** The most recent searchId that surfaced this resource (by id or url), for
+ *  purchase attribution (`X-Tenjin-Search-Id`). Null when no local search did. */
+export async function findSearchForResource(
   dataDir: string,
   match: { resourceId?: string; url?: string },
 ): Promise<string | null> {
-  for (const lookup of await loadLookups(dataDir)) {
-    const hit = lookup.candidates.some(
+  for (const search of await loadSearches(dataDir)) {
+    const hit = search.candidates.some(
       (c) =>
         (match.resourceId !== undefined && c.resourceId === match.resourceId) ||
         (match.url !== undefined && c.url === match.url),
     );
-    if (hit) return lookup.lookupId;
+    if (hit) return search.searchId;
   }
   return null;
 }
