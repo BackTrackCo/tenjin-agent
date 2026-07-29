@@ -12,6 +12,7 @@ import {
   reply,
   testSigner,
   testWalletProvider,
+  withTrailingSlashRedirect,
 } from '../lib/read-test-utils';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 import { CliError } from '../lib/errors';
@@ -107,6 +108,65 @@ describe('runRead, free delivery', () => {
     await expect(
       runRead({ ref: URL_, sections: 'lots' }, makeCtx(), { fetchImpl: neverFetch }),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+  });
+});
+
+/**
+ * The read route canonicalizes `/api/read/<handle>/<slug>/` to the no-slash form
+ * with a 308, and `fetchRead` refuses to follow ANY redirect. So a URL a user
+ * pasted with a trailing slash — a shape `parseReadPath` has always accepted —
+ * has to be canonicalized before it reaches the transport, or the very first
+ * probe fails. `resolveResourceRef` does that for `read`, `buy`, and `inspect`
+ * alike; these tests drive it through the route mock that actually 308s.
+ */
+describe('runRead, a URL pasted with a trailing slash', () => {
+  it('reads it, asking the route only for the canonical path', async () => {
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0' })),
+    });
+    const result = await runRead({ ref: `${URL_}/` }, makeCtx(), {
+      fetchImpl: withTrailingSlashRedirect(fetch),
+      // Still the free path: canonicalizing a URL must not reach for a keystore.
+      provider: neverSignsProvider(),
+    });
+    const data = result.data as { entitlement: string; url: string; bodyPath: string };
+
+    expect(data.entitlement).toBe('free');
+    // The transport was never handed the slashed spelling, so no 308 was ever
+    // refused: exactly one served call, at the canonical URL.
+    expect(calls.map((c) => c.url)).toEqual([URL_]);
+    await expect(readFile(data.bodyPath, 'utf8')).resolves.toContain('full body');
+  });
+
+  it('records the canonical URL, so a re-read is a library hit with no network', async () => {
+    const { fetch } = makeReadServer({ plain: () => reply.entitled(readBody({ price: '0' })) });
+    await runRead({ ref: `${URL_}/` }, makeCtx(), {
+      fetchImpl: withTrailingSlashRedirect(fetch),
+      provider: neverSignsProvider(),
+    });
+    // Second read, slashed again, network fatal: the receipt written by the first
+    // read has to match it. (parseReadPath is slash-insensitive, so this holds
+    // either way — it pins that canonicalization did not break the match.)
+    const again = await runRead({ ref: `${URL_}/` }, makeCtx(), {
+      fetchImpl: neverFetch,
+      provider: neverSignsProvider(),
+    });
+    expect((again.data as { alreadyDelivered: boolean }).alreadyDelivered).toBe(true);
+  });
+
+  it('still refuses a redirect that is NOT a trailing-slash hop, and saves nothing', async () => {
+    // The pin stays strict. A canonical URL the route redirects anyway (here
+    // cross-origin, the case the pin exists for) is a hard failure, and no bytes
+    // from the other host become a durable entitlement record.
+    const fetchImpl = (async () =>
+      new Response('', {
+        status: 302,
+        headers: { location: 'https://evil.example/api/read/iris/slug' },
+      })) as unknown as typeof fetch;
+    await expect(
+      runRead({ ref: URL_ }, makeCtx(), { fetchImpl, provider: neverSignsProvider() }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    await expect(readdir(libraryDir(dir))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 

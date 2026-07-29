@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   bodyPath,
+  canonicalReadUrl,
   contentHash,
   findDelivered,
   findDeliveredByUrl,
@@ -144,6 +145,52 @@ describe('parseReadPath + findDeliveredByUrl', () => {
     expect(
       await findDeliveredByUrl(dir, 'https://tenjin.blog/api/read/iris/other-slug'),
     ).toBeNull();
+  });
+});
+
+// `parseReadPath` tolerates a trailing slash, but `fetchRead` pins redirects, and
+// the read route canonicalizes the slashed form away with a 3xx. This is the
+// function that makes those two agree, so its edges are worth pinning exactly.
+describe('canonicalReadUrl', () => {
+  it('removes the trailing slash parseReadPath tolerates', () => {
+    expect(canonicalReadUrl('https://tenjin.blog/api/read/iris/my-slug/')).toBe(
+      'https://tenjin.blog/api/read/iris/my-slug',
+    );
+  });
+
+  it('leaves an already-canonical read URL byte-identical', () => {
+    const url = 'https://tenjin.blog/api/read/iris/my-slug';
+    expect(canonicalReadUrl(url)).toBe(url);
+  });
+
+  it('agrees with parseReadPath: both spellings name the same piece', () => {
+    const slashed = 'https://tenjin.blog/api/read/iris/my-slug/';
+    expect(parseReadPath(slashed)).toEqual(parseReadPath(canonicalReadUrl(slashed)));
+  });
+
+  it('preserves the query and fragment, and never touches the origin', () => {
+    expect(canonicalReadUrl('https://tenjin.blog/api/read/iris/my-slug/?a=1&b=2')).toBe(
+      'https://tenjin.blog/api/read/iris/my-slug?a=1&b=2',
+    );
+    expect(canonicalReadUrl('https://tenjin.blog/api/read/iris/my-slug/#top')).toBe(
+      'https://tenjin.blog/api/read/iris/my-slug#top',
+    );
+    expect(canonicalReadUrl('http://localhost:3000/api/read/iris/my-slug/')).toBe(
+      'http://localhost:3000/api/read/iris/my-slug',
+    );
+  });
+
+  it('leaves anything parseReadPath does not accept exactly as it came in', () => {
+    // Not a read path, a doubled slash parseReadPath already rejects, and a
+    // non-URL: canonicalization is not a general-purpose slash stripper.
+    for (const url of [
+      'https://tenjin.blog/not-a-read/',
+      'https://tenjin.blog/api/read/iris/my-slug//',
+      'https://tenjin.blog/',
+      'not-a-url/',
+    ]) {
+      expect(canonicalReadUrl(url)).toBe(url);
+    }
   });
 });
 

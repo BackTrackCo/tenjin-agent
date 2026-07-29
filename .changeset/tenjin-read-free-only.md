@@ -28,6 +28,13 @@ order — the local library, an unauthenticated fetch, then a SIWX entitlement c
 The delivery and rendering internals are now shared between the two verbs in
 `lib/delivery.ts`; `buy`'s paying path is unchanged.
 
+Hardening that applies to `buy` and `inspect` too: a request on the read route
+never follows a redirect, because a 3xx would re-send a wallet-signed header to
+whatever host `Location` names, and because the response becomes a durable local
+entitlement record. So that the strictness costs nothing at the keyboard, a read
+URL is canonicalized when it is resolved — a trailing slash, which the route
+itself redirects away, is removed before the request goes out.
+
 `tenjin inspect` copy follows the split: free and already-owned pieces point at
 `tenjin read`, paid unowned pieces keep pointing at `tenjin buy`, and both now
 emit a machine-readable `nextCommand` field.

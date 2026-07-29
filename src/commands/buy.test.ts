@@ -11,6 +11,7 @@ import {
   readBody,
   reply,
   testWalletProvider,
+  withTrailingSlashRedirect,
 } from '../lib/read-test-utils';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -81,6 +82,23 @@ describe('runBuy, free resource', () => {
     expect(data.entitlement).toBe('free');
     expect(calls.map((c) => c.phase)).toEqual(['plain']);
     expect(await findDelivered(dir, readBody().id)).not.toBeNull();
+  });
+
+  // `buy` resolves through `resolveResourceRef` too, so the trailing-slash
+  // canonicalization covers it identically: without it the route's 308 meets
+  // `fetchRead`'s redirect pin and buy dies at its own first probe, before any
+  // price is even seen. Same origin, same handle/slug, same piece — the URL
+  // spelling is all that changed, so nothing about what buy pays for moves.
+  it('probes the canonical path when the URL was pasted with a trailing slash', async () => {
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0' })),
+    });
+    const result = await runBuy({ ref: `${URL_}/` }, makeCtx(), {
+      fetchImpl: withTrailingSlashRedirect(fetch),
+    });
+    expect((result.data as { entitlement: string }).entitlement).toBe('free');
+    expect(calls.map((c) => c.url)).toEqual([URL_]);
+    expect(calls.some((c) => c.phase === 'payment')).toBe(false);
   });
 });
 

@@ -114,16 +114,34 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     // receipts by handle+slug alone — so a followed cross-origin redirect
     // would let another host's bytes short-circuit future buys as owned.
     // `assertOnBaseOrigin` cannot catch this; it checks only the URL asked for.
+    //
+    // Refused for ANY 3xx, same-origin hops included. The transport failing closed
+    // on the whole class is the point: an exemption for "benign" redirects is a
+    // second origin check living in the one place that already proved it cannot see
+    // enough to make one. Keeping a canonical URL is the CALLER's job instead, and
+    // `resolveResourceRef` does it for every verb that gets here.
     blockRedirects: true,
   });
   if (!res.ok) {
-    // A redirect refused mid-flight is a server-contract problem, not a flaky
-    // network: retrying a signed request re-sends the same signature into the
-    // same redirect, and retrying the unsigned probe re-fetches bytes the
-    // library must never record as this origin's.
+    // A redirect refused mid-flight is a URL-shape problem, not a flaky network:
+    // retrying a signed request re-sends the same signature into the same
+    // redirect, and retrying the unsigned probe re-fetches bytes the library must
+    // never record as this origin's. The `fix` names the URL, not the route: the
+    // route is allowed to redirect (canonicalizing a path is what a redirect is
+    // FOR), and pointing an agent at the base URL for a hop the base URL did not
+    // cause spends two useless steps and still does not read the piece.
+    // `resolveResourceRef` canonicalizes what it can (the trailing slash); what
+    // reaches here is a spelling it could not.
     if (res.kind === 'blocked-redirect') {
       throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
-        fix: 'The read route must not redirect. Check the configured base URL, or update tenjin-cli.',
+        fix:
+          'A redirect is never followed here, so nothing was read and retrying this ' +
+          'exact URL will answer the same. The route is not broken: this is what a ' +
+          'non-canonical URL looks like. Ask for the URL in the spelling the read ' +
+          'route serves (the form a `tenjin search` candidate or `tenjin inspect` ' +
+          'reports), and check that --base-url names the origin that answers without ' +
+          'a hop of its own (http where the deployment serves https, or an apex host ' +
+          'it sends to www).',
       });
     }
     const code =

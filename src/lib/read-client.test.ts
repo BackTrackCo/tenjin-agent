@@ -132,4 +132,63 @@ describe('fetchRead', () => {
     expect(inits).toHaveLength(1);
     expect(inits[0]?.redirect).toBe('manual');
   });
+
+  // The pin is a WHOLE-CLASS refusal, and these are the tests that say so. The
+  // trailing-slash regression was fixed by canonicalizing the URL in
+  // `resolveResourceRef`, NOT by teaching the transport that a same-origin hop is
+  // benign — an exemption here would be a second origin check in the one place
+  // that already cannot see enough to make one. If someone ever relaxes
+  // `blockRedirects` to permit same-origin, these fail.
+  it('refuses a SAME-ORIGIN redirect on the unsigned probe (the pin was not relaxed)', async () => {
+    const inits: (RequestInit | undefined)[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      inits.push(init);
+      return new Response('', {
+        status: 308,
+        headers: { location: 'https://tenjin.blog/api/read/iris/slug' },
+      });
+    };
+    await expect(fetchRead(`${URL_}/`, { timeoutMs: 1000, fetchImpl })).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+    });
+    // One attempt, unfollowed: the transport does not silently retry the target.
+    expect(inits).toHaveLength(1);
+    expect(inits[0]?.redirect).toBe('manual');
+  });
+
+  it('refuses a SAME-ORIGIN redirect while carrying a signed header', async () => {
+    let seen = 0;
+    const fetchImpl: typeof fetch = async () => {
+      seen += 1;
+      return new Response('', {
+        status: 307,
+        headers: { location: 'https://tenjin.blog/api/read/iris/slug' },
+      });
+    };
+    await expect(
+      fetchRead(`${URL_}/`, { timeoutMs: 1000, fetchImpl, siwxHeader: 'siwx-value' }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    expect(seen).toBe(1);
+  });
+
+  // The finding's second half: the old `fix` said "The read route must not
+  // redirect. Check the configured base URL" — three claims, all wrong for a route
+  // canonicalizing a path. An agent that follows it does two useless things and
+  // still cannot read the piece.
+  it('does not blame the route or the base URL for a redirect the caller can fix', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response('', { status: 308, headers: { location: URL_ } });
+    const caught = await fetchRead(`${URL_}/`, { timeoutMs: 1000, fetchImpl }).then(
+      () => null,
+      (err: unknown) => err as { fix?: string },
+    );
+    expect(caught).not.toBeNull();
+    const fix = caught?.fix ?? '';
+    expect(fix).not.toMatch(/must not redirect/);
+    expect(fix).not.toMatch(/update tenjin-cli/);
+    // It names the two things that are actually true: retrying will not help, and
+    // the URL spelling is what to change.
+    expect(fix).toMatch(/retrying/i);
+    expect(fix).toMatch(/non-canonical URL/);
+  });
 });
