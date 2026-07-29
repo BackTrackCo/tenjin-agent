@@ -43,7 +43,7 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   POLICY_REFUSED: 3,
   PAYMENT_FAILED: 4,
   RESOURCE_NOT_FOUND: 1,
-  LOOKUP_NOT_FOUND: 1,
+  SEARCH_NOT_FOUND: 1,
   RATE_LIMITED: 1,
   // A publish awaiting confirmation or hard-blocked is understood-but-refused (3),
   // the same posture as POLICY_REFUSED; a write that failed after approval is a

@@ -456,7 +456,7 @@ describe('runPublish — publish --candidate', () => {
   async function park(over: { draft?: string; question?: string } = {}): Promise<string> {
     const rec = await createCandidate(dir, {
       draft: over.draft ?? CLEAN,
-      lookupId: LOOKUP,
+      searchId: LOOKUP,
       ...(over.question !== undefined ? { question: over.question } : {}),
       created: new Date().toISOString(),
       sourceProject: dir,

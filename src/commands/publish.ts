@@ -323,9 +323,9 @@ function receipt(
   const human = [
     `Published ${title} (${result.status}) for ${price.usd} USD → ${result.url}`,
     cacheEligible
-      ? 'Answer card is lookup-eligible.'
+      ? 'Answer card is search-eligible.'
       : missing.length > 0
-        ? `Answer card not lookup-eligible yet: ${missing.join(' ')}`
+        ? `Answer card not search-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
     ...(candidateInfo?.cleared === true ? [`Cleared candidate ${candidateInfo.id}.`] : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),

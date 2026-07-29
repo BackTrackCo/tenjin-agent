@@ -14,7 +14,7 @@ export const ATOMIC_RE = /^\d{1,39}$/;
 
 /**
  * Mint a fresh opaque id for a locally-created entity (a parked candidate). A v4
- * uuid: the same shape a lookupId takes, so UUID_RE validates it and a `drop
+ * uuid: the same shape a searchId takes, so UUID_RE validates it and a `drop
  * <id>` argument that reaches a filesystem path can't traverse out of the store.
  */
 export function newId(): string {

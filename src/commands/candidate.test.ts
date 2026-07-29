@@ -33,12 +33,12 @@ describe('runCandidateAdd', () => {
     const file = join(dir, 'draft.md');
     await writeFile(file, '# hi\n', 'utf8');
     const res = await runCandidateAdd(
-      { file, lookupId: LOOKUP, question: 'how do I X?' },
+      { file, searchId: LOOKUP, question: 'how do I X?' },
       makeCtx(),
       { now: at('2026-07-20T00:00:00.000Z'), cwd: dir },
     );
     const data = res.data as Record<string, unknown>;
-    expect(data.lookupId).toBe(LOOKUP);
+    expect(data.searchId).toBe(LOOKUP);
     expect(data.question).toBe('how do I X?');
     expect(data.created).toBe('2026-07-20T00:00:00.000Z');
     expect(typeof data.id).toBe('string');
@@ -55,7 +55,7 @@ describe('runCandidateAdd', () => {
     await mkdir(nested, { recursive: true });
     const file = join(dir, 'draft.md');
     await writeFile(file, 'x', 'utf8');
-    const res = await runCandidateAdd({ file, lookupId: LOOKUP }, makeCtx(), { cwd: nested });
+    const res = await runCandidateAdd({ file, searchId: LOOKUP }, makeCtx(), { cwd: nested });
     expect((res.data as Record<string, unknown>).sourceProject).toBe(repo);
   });
 
@@ -64,20 +64,20 @@ describe('runCandidateAdd', () => {
     await mkdir(plain, { recursive: true });
     const file = join(dir, 'draft.md');
     await writeFile(file, 'x', 'utf8');
-    const res = await runCandidateAdd({ file, lookupId: LOOKUP }, makeCtx(), { cwd: plain });
+    const res = await runCandidateAdd({ file, searchId: LOOKUP }, makeCtx(), { cwd: plain });
     expect((res.data as Record<string, unknown>).sourceProject).toBe(plain);
   });
 
   it('an unreadable draft file is a USAGE error (exit 2)', async () => {
     await expect(
-      runCandidateAdd({ file: join(dir, 'nope.md'), lookupId: LOOKUP }, makeCtx()),
+      runCandidateAdd({ file: join(dir, 'nope.md'), searchId: LOOKUP }, makeCtx()),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
   });
 
-  it('a non-uuid --lookup-id is a USAGE error before any file read (exit 2)', async () => {
+  it('a non-uuid --search-id is a USAGE error before any file read (exit 2)', async () => {
     // No draft file on disk: validation must reject the id first, not ENOENT.
     await expect(
-      runCandidateAdd({ file: join(dir, 'draft.md'), lookupId: 'not-a-uuid' }, makeCtx(), {
+      runCandidateAdd({ file: join(dir, 'draft.md'), searchId: 'not-a-uuid' }, makeCtx(), {
         cwd: dir,
       }),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
@@ -88,13 +88,13 @@ describe('runCandidateAdd', () => {
     await writeFile(file, '# hi\n', 'utf8');
     // 200 is accepted; 201 is USAGE (a longer question would only fail at publish).
     const ok = await runCandidateAdd(
-      { file, lookupId: LOOKUP, question: 'q'.repeat(200) },
+      { file, searchId: LOOKUP, question: 'q'.repeat(200) },
       makeCtx(),
       { cwd: dir },
     );
     expect((ok.data as { question: string }).question).toHaveLength(200);
     await expect(
-      runCandidateAdd({ file, lookupId: LOOKUP, question: 'q'.repeat(201) }, makeCtx(), {
+      runCandidateAdd({ file, searchId: LOOKUP, question: 'q'.repeat(201) }, makeCtx(), {
         cwd: dir,
       }),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
@@ -105,11 +105,11 @@ describe('runCandidateList', () => {
   it('lists newest-first with humanized age in human lines and ISO in data', async () => {
     const file = join(dir, 'draft.md');
     await writeFile(file, 'x', 'utf8');
-    await runCandidateAdd({ file, lookupId: LOOKUP, question: 'older' }, makeCtx(), {
+    await runCandidateAdd({ file, searchId: LOOKUP, question: 'older' }, makeCtx(), {
       now: at('2026-07-18T00:00:00.000Z'),
       cwd: dir,
     });
-    await runCandidateAdd({ file, lookupId: LOOKUP, question: 'newer' }, makeCtx(), {
+    await runCandidateAdd({ file, searchId: LOOKUP, question: 'newer' }, makeCtx(), {
       now: at('2026-07-20T00:00:00.000Z'),
       cwd: dir,
     });
@@ -135,7 +135,7 @@ describe('runCandidateList', () => {
     const seed = (msAgo: number, question: string) =>
       createCandidate(dir, {
         draft: 'x',
-        lookupId: LOOKUP,
+        searchId: LOOKUP,
         question,
         created: new Date(base - msAgo).toISOString(),
         sourceProject: '/p',
@@ -158,7 +158,7 @@ describe('runCandidateList', () => {
   it('sanitizes a question with control/escape sequences in the human list', async () => {
     await createCandidate(dir, {
       draft: 'x',
-      lookupId: LOOKUP,
+      searchId: LOOKUP,
       question: 'evil\x1b[31mred\nnewline',
       created: '2026-07-20T00:00:00.000Z',
       sourceProject: '/p',
@@ -176,7 +176,7 @@ describe('runCandidateDrop', () => {
   it('drops a known candidate', async () => {
     const file = join(dir, 'draft.md');
     await writeFile(file, 'x', 'utf8');
-    const added = await runCandidateAdd({ file, lookupId: LOOKUP }, makeCtx(), { cwd: dir });
+    const added = await runCandidateAdd({ file, searchId: LOOKUP }, makeCtx(), { cwd: dir });
     const id = (added.data as Record<string, unknown>).id as string;
     const res = await runCandidateDrop({ id }, makeCtx());
     expect(res.data).toEqual({ id, dropped: true });
@@ -214,7 +214,7 @@ describe('candidate via main (one JSON object per invocation)', () => {
     const file = join(dir, 'draft.md');
     await writeFile(file, '# hi\n', 'utf8');
     const cap = captureIo();
-    const code = await main(['candidate', 'add', file, '--lookup-id', LOOKUP, '--json'], cap.io);
+    const code = await main(['candidate', 'add', file, '--search-id', LOOKUP, '--json'], cap.io);
     expect(code).toBe(0);
     const parsed = JSON.parse(cap.stdout());
     expect(parsed).toMatchObject({ ok: true, command: 'candidate.add' });

@@ -70,7 +70,7 @@ describe('buildTenjinMcpServer, tool surface', () => {
         'tenjin_buy',
         'tenjin_candidate',
         'tenjin_inspect',
-        'tenjin_lookup',
+        'tenjin_search',
         'tenjin_outcome',
         'tenjin_publish',
         'tenjin_wallet',
@@ -79,11 +79,11 @@ describe('buildTenjinMcpServer, tool surface', () => {
   });
 });
 
-describe('tenjin_lookup', () => {
+describe('tenjin_search', () => {
   it('returns the exact success envelope as structuredContent with a non-empty text summary', async () => {
     const miss = {
       schemaVersion: 1,
-      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
     };
@@ -95,17 +95,17 @@ describe('tenjin_lookup', () => {
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
-      deps: { lookup: { fetchImpl } },
+      deps: { search: { fetchImpl } },
     });
     const res = await client.callTool({
-      name: 'tenjin_lookup',
+      name: 'tenjin_search',
       arguments: { question: 'how do I cache in framework X' },
     });
 
     expect(res.isError).toBeFalsy();
     const sc = res.structuredContent as SuccessEnvelope;
     expect(sc.ok).toBe(true);
-    expect(sc.command).toBe('lookup');
+    expect(sc.command).toBe('search');
     expect(sc.data.decision).toBe('MISS');
     expect((res.content as { text: string }[])[0]?.text ?? '').not.toBe('');
   });
@@ -225,11 +225,11 @@ describe('MCP adapter never writes to real stdout', () => {
   it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
       schemaVersion: 1,
-      lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
     };
-    const lookupFetch = (async () =>
+    const searchFetch = (async () =>
       new Response(JSON.stringify(miss), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -246,7 +246,7 @@ describe('MCP adapter never writes to real stdout', () => {
       dataDir: dir,
       flags: { baseUrl: BASE },
       deps: {
-        lookup: { fetchImpl: lookupFetch },
+        search: { fetchImpl: searchFetch },
         buy: {
           fetchImpl: buyFetch,
           provider: testWalletProvider(),
@@ -261,7 +261,7 @@ describe('MCP adapter never writes to real stdout', () => {
     const spy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     try {
       await client.callTool({
-        name: 'tenjin_lookup',
+        name: 'tenjin_search',
         arguments: { question: 'anything public' },
       });
       await client.callTool({ name: 'tenjin_buy', arguments: { ref: URL_ } });

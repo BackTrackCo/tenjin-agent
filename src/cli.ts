@@ -126,7 +126,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
     .option('--no-wallet', 'skip the wallet-setup step of the interactive walkthrough')
-    .option('--claude-md', 'append the Tenjin lookup nudge to ~/.claude/CLAUDE.md')
+    .option('--claude-md', 'append the Tenjin search nudge to ~/.claude/CLAUDE.md')
     .option('--no-claude-md', 'skip the CLAUDE.md nudge (and its interactive question)')
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
@@ -214,7 +214,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  addGlobalFlags(program.command('lookup <question>'))
+  addGlobalFlags(program.command('search <question>'))
     .description(
       'Ask for payable candidates or an honest MISS. Use when a task needs public knowledge someone may already have published; send only a generalized public question, never secrets or private context',
     )
@@ -223,10 +223,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--limit <n>', 'maximum candidates (1-10, default 5)')
     .option('--applies-to <pair>', 'applicability filter key=value (repeatable)', collect, [])
     .action(async function (this: Command, question: string) {
-      await runCommand('lookup', this, async (ctx) => {
+      await runCommand('search', this, async (ctx) => {
         const o = this.opts();
-        const { runLookup } = await import('./commands/lookup');
-        return runLookup(
+        const { runSearch } = await import('./commands/search');
+        return runSearch(
           {
             question,
             ...(typeof o.maxPrice === 'string' ? { maxPrice: o.maxPrice } : {}),
@@ -243,7 +243,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('inspect <resource>'))
     .description(
-      "Show a candidate's pre-purchase card / preview. Use after lookup, before buy, to check price, scope, and freshness; it never pays",
+      "Show a candidate's pre-purchase card / preview. Use after search, before buy, to check price, scope, and freshness; it never pays",
     )
     .action(async function (this: Command, resource: string) {
       await runCommand('inspect', this, async (ctx) => {
@@ -338,10 +338,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('outcome'))
     .description(
-      'Report how a lookup ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a lookup; this closes the loop the marketplace learns from',
+      'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
-    .option('--lookup-id <id>', 'the lookup to report against')
-    .option('--last', 'target the most recent local lookup')
+    .option('--search-id <id>', 'the search to report against')
+    .option('--last', 'target the most recent local search')
     .requiredOption(
       '--status <status>',
       'used | partially_used | rejected | regenerated | purchase_declined',
@@ -355,7 +355,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runOutcome(
           {
             status: String(o.status),
-            ...(typeof o.lookupId === 'string' ? { lookupId: o.lookupId } : {}),
+            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.last === true ? { last: true } : {}),
             ...(typeof o.resource === 'string' ? { resource: o.resource } : {}),
             ...(typeof o.contentHash === 'string' ? { contentHash: o.contentHash } : {}),
@@ -376,8 +376,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       ),
   );
   addGlobalFlags(candidate.command('add <file>'))
-    .description('Park a Markdown draft as a publish candidate, tied to a lookup')
-    .requiredOption('--lookup-id <id>', 'the lookup whose unmet demand this draft answers')
+    .description('Park a Markdown draft as a publish candidate, tied to a search')
+    .requiredOption('--search-id <id>', 'the search whose unmet demand this draft answers')
     .option('--question <q>', 'the question this draft answers')
     .action(async function (this: Command, file: string) {
       await runCommand('candidate.add', this, async (ctx) => {
@@ -386,7 +386,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runCandidateAdd(
           {
             file,
-            lookupId: String(o.lookupId),
+            searchId: String(o.searchId),
             ...(typeof o.question === 'string' ? { question: o.question } : {}),
           },
           ctx,
