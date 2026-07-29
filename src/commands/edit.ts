@@ -315,10 +315,10 @@ function cardLines(card: OwnPostCard | undefined): string[] {
 function eligibilityLine(card: OwnPostCard | undefined): string {
   if (card === undefined) return 'No answer card (browse-only document).';
   const missing = missingSentences(card.cacheEligibleMissing);
-  if (card.cacheEligible) return 'Answer card is lookup-eligible.';
+  if (card.cacheEligible) return 'Answer card is search-eligible.';
   return missing.length > 0
-    ? `Answer card not lookup-eligible: ${missing.join(' ')}`
-    : 'Answer card is not lookup-eligible.';
+    ? `Answer card not search-eligible yet: ${missing.join(' ')}`
+    : 'Answer card is not search-eligible.';
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +414,7 @@ function editNotes(args: EditArgs, stored: OwnPost, bodyFile: BodyFile | undefin
   }
   if (stored.resource?.temporalMode === 'snapshot' && args.asOf === undefined) {
     notes.push(
-      `note: asOf is unchanged (${preview(stored.resource.asOf)}) on this snapshot card, and lookup freshness gating uses it. Pass --as-of to move it.`,
+      `note: asOf is unchanged (${preview(stored.resource.asOf)}) on this snapshot card, and search freshness gating uses it. Pass --as-of to move it.`,
     );
   }
   return notes;

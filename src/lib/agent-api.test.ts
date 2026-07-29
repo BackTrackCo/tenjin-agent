@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
-  buildLookupRequest,
+  buildSearchRequest,
   buildOutcomeItem,
-  postLookup,
+  postSearch,
   postOutcomes,
-  type LookupResponse,
+  type SearchResponse,
 } from './agent-api';
 import { CliError } from './errors';
 
@@ -30,9 +30,9 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-const CANDIDATES: LookupResponse = {
+const CANDIDATES: SearchResponse = {
   schemaVersion: 1,
-  lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   decision: 'CANDIDATES',
   calibration: 'lexical-v1',
   candidates: [
@@ -57,16 +57,16 @@ const CANDIDATES: LookupResponse = {
   ],
 };
 
-describe('buildLookupRequest', () => {
+describe('buildSearchRequest', () => {
   it('builds a minimal request with the default limit', () => {
-    expect(buildLookupRequest({ question: 'hi' })).toEqual({
+    expect(buildSearchRequest({ question: 'hi' })).toEqual({
       schemaVersion: 1,
       question: 'hi',
       limit: 5,
     });
   });
   it('trims the question and carries the optional gates', () => {
-    const r = buildLookupRequest({
+    const r = buildSearchRequest({
       question: '  does it work?  ',
       freshWithin: 'P30D',
       maxPrice: '100000',
@@ -83,54 +83,54 @@ describe('buildLookupRequest', () => {
     });
   });
   it('rejects an empty question', () => {
-    expect(() => buildLookupRequest({ question: '   ' })).toThrowError(CliError);
+    expect(() => buildSearchRequest({ question: '   ' })).toThrowError(CliError);
   });
   it('rejects a question over 512 chars', () => {
-    expect(() => buildLookupRequest({ question: 'x'.repeat(513) })).toThrowError(/512/);
+    expect(() => buildSearchRequest({ question: 'x'.repeat(513) })).toThrowError(/512/);
   });
   it('rejects a malformed freshWithin', () => {
-    expect(() => buildLookupRequest({ question: 'q', freshWithin: '30 days' })).toThrowError(
+    expect(() => buildSearchRequest({ question: 'q', freshWithin: '30 days' })).toThrowError(
       /fresh/i,
     );
   });
   it('rejects a non-atomic maxPrice', () => {
-    expect(() => buildLookupRequest({ question: 'q', maxPrice: '0.10' })).toThrowError(
+    expect(() => buildSearchRequest({ question: 'q', maxPrice: '0.10' })).toThrowError(
       /max-price/i,
     );
   });
   it('rejects a limit outside 1-10', () => {
-    expect(() => buildLookupRequest({ question: 'q', limit: 0 })).toThrowError(/limit/i);
-    expect(() => buildLookupRequest({ question: 'q', limit: 11 })).toThrowError(/limit/i);
+    expect(() => buildSearchRequest({ question: 'q', limit: 0 })).toThrowError(/limit/i);
+    expect(() => buildSearchRequest({ question: 'q', limit: 11 })).toThrowError(/limit/i);
   });
   it('rejects a non-canonical appliesTo key', () => {
     expect(() =>
-      buildLookupRequest({ question: 'q', appliesTo: { Products: ['x'] } }),
+      buildSearchRequest({ question: 'q', appliesTo: { Products: ['x'] } }),
     ).toThrowError(/appliesTo key/);
   });
 });
 
-describe('buildLookupRequest bounds (server strictObject mirror)', () => {
+describe('buildSearchRequest bounds (server strictObject mirror)', () => {
   it.each(['P0D', 'P0W', 'P00M', 'P0000Y'])('rejects the zero-valued window %s', (w) => {
-    expect(() => buildLookupRequest({ question: 'q', freshWithin: w })).toThrowError(
+    expect(() => buildSearchRequest({ question: 'q', freshWithin: w })).toThrowError(
       expect.objectContaining({ code: 'USAGE' }),
     );
   });
 
   it('rejects an applies-to value over 120 chars, an empty value, >20 values, and >8 keys', () => {
     expect(() =>
-      buildLookupRequest({ question: 'q', appliesTo: { products: ['v'.repeat(121)] } }),
+      buildSearchRequest({ question: 'q', appliesTo: { products: ['v'.repeat(121)] } }),
     ).toThrowError(expect.objectContaining({ code: 'USAGE' }));
-    expect(() => buildLookupRequest({ question: 'q', appliesTo: { products: [''] } })).toThrowError(
+    expect(() => buildSearchRequest({ question: 'q', appliesTo: { products: [''] } })).toThrowError(
       expect.objectContaining({ code: 'USAGE' }),
     );
     expect(() =>
-      buildLookupRequest({
+      buildSearchRequest({
         question: 'q',
         appliesTo: { products: Array.from({ length: 21 }, (_, i) => `v${i}`) },
       }),
     ).toThrowError(expect.objectContaining({ code: 'USAGE' }));
     expect(() =>
-      buildLookupRequest({
+      buildSearchRequest({
         question: 'q',
         appliesTo: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`key_${i}`, ['v']])),
       }),
@@ -138,7 +138,7 @@ describe('buildLookupRequest bounds (server strictObject mirror)', () => {
   });
 
   it('accepts a nonzero window and in-bounds appliesTo', () => {
-    const body = buildLookupRequest({
+    const body = buildSearchRequest({
       question: 'q',
       freshWithin: 'P30D',
       appliesTo: { products: ['Vercel'] },
@@ -148,16 +148,16 @@ describe('buildLookupRequest bounds (server strictObject mirror)', () => {
   });
 });
 
-describe('postLookup', () => {
+describe('postSearch', () => {
   it('POSTs the request with the client-attribution header and parses CANDIDATES', async () => {
     const { fetch, calls } = stubFetch(json(200, CANDIDATES));
-    const res = await postLookup(buildLookupRequest({ question: 'q' }), {
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
     expect(res.decision).toBe('CANDIDATES');
-    expect(calls[0]?.url).toBe('https://preview.example/api/agent/lookup');
+    expect(calls[0]?.url).toBe('https://preview.example/api/agent/search');
     expect(calls[0]?.init.method).toBe('POST');
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
@@ -169,7 +169,7 @@ describe('postLookup', () => {
   });
   it('omits the eval-cohort header by default and sends it when opted in', async () => {
     const a = stubFetch(json(200, CANDIDATES));
-    await postLookup(buildLookupRequest({ question: 'q' }), {
+    await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: a.fetch,
@@ -178,7 +178,7 @@ describe('postLookup', () => {
     expect(aHeaders['x-tenjin-eval-cohort']).toBeUndefined();
 
     const b = stubFetch(json(200, CANDIDATES));
-    await postLookup(buildLookupRequest({ question: 'q' }), {
+    await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       evalCohort: true,
@@ -208,7 +208,7 @@ describe('postLookup', () => {
       ],
     };
     const { fetch } = stubFetch(json(200, bloated));
-    const res = await postLookup(buildLookupRequest({ question: 'q' }), {
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
@@ -228,12 +228,12 @@ describe('postLookup', () => {
     const { fetch } = stubFetch(
       json(200, {
         schemaVersion: 1,
-        lookupId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         decision: 'MISS',
         calibration: 'lexical-v1',
       }),
     );
-    const res = await postLookup(buildLookupRequest({ question: 'q' }), {
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
@@ -241,10 +241,111 @@ describe('postLookup', () => {
     expect(res.decision).toBe('MISS');
     expect(res.candidates).toBeUndefined();
   });
+
+  const browsePointer = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
+    url: 'https://preview.example/api/read/alice/a-piece',
+    title: 'A browsable piece',
+    price: '250000',
+    creator: { handle: 'alice' },
+    ...over,
+  });
+  const miss = (browse: unknown[], decision = 'MISS'): unknown => ({
+    schemaVersion: 1,
+    searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    decision,
+    calibration: 'hybrid-v1',
+    browse,
+  });
+  const postMiss = async (body: unknown): Promise<SearchResponse> => {
+    const { fetch } = stubFetch(json(200, body));
+    return postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+  };
+
+  it('re-applies the browse bounds: 4 pointers slice to BROWSE_MAX, a 5000-char title caps at 200', async () => {
+    const res = await postMiss(
+      miss([
+        browsePointer({ title: 'T'.repeat(5000) }),
+        browsePointer(),
+        browsePointer(),
+        browsePointer(),
+      ]),
+    );
+    expect(res.browse).toHaveLength(3);
+    expect(res.browse?.[0]?.title).toHaveLength(200);
+  });
+
+  it('drops unknown browse keys instead of passing them through to --json', async () => {
+    // The schema is .passthrough() so the parse keeps a server-invented key; the
+    // explicit projection in truncateResponse is what must strip it, or a future
+    // `confidence` would reach agents as if it were a score.
+    const res = await postMiss(miss([browsePointer({ confidence: 0.9, note: 'x'.repeat(9000) })]));
+    expect(res.browse?.[0]).toEqual({
+      resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
+      url: 'https://preview.example/api/read/alice/a-piece',
+      title: 'A browsable piece',
+      price: '250000',
+      creator: { handle: 'alice' },
+    });
+  });
+
+  it('drops unknown keys inside creator, not just at the top level', async () => {
+    // `creator` is its own .passthrough() object, so the top-level projection
+    // does not cover it: rebuilding it as `{ ...b.creator, handle }` would leak
+    // an invented `creator.score` while every other browse assertion still
+    // passed. Pin the nested rebuild separately from the outer one.
+    const res = await postMiss(
+      miss([browsePointer({ creator: { handle: 'alice', score: 0.9, bio: 'b'.repeat(9000) } })]),
+    );
+    expect(res.browse?.[0]?.creator).toEqual({ handle: 'alice' });
+  });
+
+  it('caps a runaway creator handle but leaves a legitimate url verbatim', async () => {
+    const url = `https://preview.example/api/read/alice/${'u'.repeat(400)}`;
+    const res = await postMiss(
+      miss([browsePointer({ url, creator: { handle: 'h'.repeat(500) } })]),
+    );
+    expect(res.browse?.[0]?.creator.handle).toHaveLength(64);
+    // A url within bounds is never clipped: it has to stay payable.
+    expect(res.browse?.[0]?.url).toBe(url);
+  });
+
+  it('refuses a runaway browse url instead of truncating it into a broken pointer', async () => {
+    // Clipping a url does not shorten it, it changes it: the result still looks
+    // payable in --json but resolves to nothing, and it would reach runSearch's
+    // origin assertion as a string the server never sent. Fail closed instead,
+    // the same way a malformed pointer does.
+    await expect(
+      postMiss(miss([browsePointer({ url: `https://preview.example/${'u'.repeat(2000)}` })])),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('drops browse entirely on a CANDIDATES decision, where nothing would render it', async () => {
+    const res = await postMiss({ ...(miss([browsePointer()], 'CANDIDATES') as object) });
+    expect(res.decision).toBe('CANDIDATES');
+    expect(res.browse).toBeUndefined();
+  });
+
+  it('fails the whole response when one browse pointer is malformed', async () => {
+    // Deliberate and pinned: the client is fail-closed on every other contract
+    // deviation, so a bad decorative tail surfaces as drift rather than being
+    // silently dropped. Changing this to lenient is a product call, not a bugfix.
+    await expect(
+      postMiss(miss([browsePointer({ resourceId: 'not-a-uuid' })])),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    await expect(postMiss(miss([browsePointer({ creator: undefined })]))).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+    });
+  });
+
   it('maps a 400 validation error to API_UNREACHABLE with the server message', async () => {
     const { fetch } = stubFetch(json(400, { error: { message: 'Invalid request body' } }));
     await expect(
-      postLookup(buildLookupRequest({ question: 'q' }), {
+      postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
         timeoutMs: 5000,
         fetchImpl: fetch,
@@ -254,7 +355,7 @@ describe('postLookup', () => {
   it('flags a contract mismatch when the body is not the expected shape', async () => {
     const { fetch } = stubFetch(json(200, { schemaVersion: 1, decision: 'MAYBE' }));
     await expect(
-      postLookup(buildLookupRequest({ question: 'q' }), {
+      postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
         timeoutMs: 5000,
         fetchImpl: fetch,
@@ -265,7 +366,7 @@ describe('postLookup', () => {
     const withExtra = structuredClone(CANDIDATES);
     (withExtra.candidates![0] as Record<string, unknown>).futureField = 'keep me';
     const { fetch } = stubFetch(json(200, withExtra));
-    const res = await postLookup(buildLookupRequest({ question: 'q' }), {
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
@@ -302,28 +403,28 @@ describe('buildOutcomeItem', () => {
 });
 
 describe('postOutcomes', () => {
-  const LOOKUP_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const SEARCH_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   it('POSTs a single outcome as an object (not an array) and returns accepted', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 1 }));
-    const res = await postOutcomes(LOOKUP_ID, [buildOutcomeItem({ status: 'used' })], {
+    const res = await postOutcomes(SEARCH_ID, [buildOutcomeItem({ status: 'used' })], {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
     expect(res.accepted).toBe(1);
-    expect(calls[0]?.url).toBe(`https://preview.example/api/agent/lookups/${LOOKUP_ID}/outcomes`);
+    expect(calls[0]?.url).toBe(`https://preview.example/api/agent/searches/${SEARCH_ID}/outcomes`);
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ status: 'used' });
   });
   it('POSTs a batch as an array', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 2 }));
     await postOutcomes(
-      LOOKUP_ID,
+      SEARCH_ID,
       [buildOutcomeItem({ status: 'used' }), buildOutcomeItem({ status: 'rejected' })],
       { baseUrl: 'https://preview.example', timeoutMs: 5000, fetchImpl: fetch },
     );
     expect(Array.isArray(JSON.parse(String(calls[0]?.init.body)))).toBe(true);
   });
-  it('rejects an invalid lookup id before any request', async () => {
+  it('rejects an invalid search id before any request', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 1 }));
     await expect(
       postOutcomes('not-a-uuid', [buildOutcomeItem({ status: 'used' })], {
@@ -338,7 +439,7 @@ describe('postOutcomes', () => {
     const { fetch } = stubFetch(json(202, { accepted: 11 }));
     const items = Array.from({ length: 11 }, () => buildOutcomeItem({ status: 'used' }));
     await expect(
-      postOutcomes(LOOKUP_ID, items, {
+      postOutcomes(SEARCH_ID, items, {
         baseUrl: 'https://preview.example',
         timeoutMs: 5000,
         fetchImpl: fetch,

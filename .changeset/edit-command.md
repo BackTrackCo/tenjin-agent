@@ -4,7 +4,7 @@
 
 Edit a published piece from the CLI. `tenjin edit <postId>` with no flags prints
 the stored post and its answer card (title, status, price, url, excerpt, every
-card field, and whether the card is lookup-eligible); with change flags it
+card field, and whether the card is search-eligible); with change flags it
 merge-updates the post through `PUT /api/posts/<id>`, where an omitted field is
 kept, `--clear <field>` sends the explicit clear, and an array flag replaces the
 stored list. `--add-question` / `--add-task` are the append convenience: they read

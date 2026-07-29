@@ -4,9 +4,9 @@
 
 `tenjin install` now leaves behind a retrieval-instinct nudge, not just a pointer
 to where the skills live. The one line it keeps in AGENTS.md (Codex/shared) tells
-the agent to run `tenjin lookup "<question>" --json` before regenerating public
+the agent to run `tenjin search "<question>" --json` before regenerating public
 research (version-specific compatibility, integration gotchas, benchmarks, dated
-probes), and is honest that the lookup, while free and anonymous, sends the
+probes), and is honest that the search, while free and anonymous, sends the
 generalized question text to tenjin.blog. Re-running install upgrades an older line
 in place instead of skipping it or appending a duplicate, and the walkthrough
 discloses what the nudge does plus how to undo it (delete the marker line).

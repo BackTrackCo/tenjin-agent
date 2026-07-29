@@ -475,7 +475,7 @@ describe('runEdit — show mode (no change flags)', () => {
     expect(human).toContain('questionsAnswered (1): What is it?');
     expect(human).toContain('scope: "L2 fees only"');
     expect(human).toContain(
-      'Answer card not lookup-eligible: State the exclusions (what this piece does not cover).',
+      'Answer card not search-eligible yet: State the exclusions (what this piece does not cover).',
     );
   });
 
@@ -648,7 +648,7 @@ describe('runEdit — notes and the summary', () => {
     expect(out).toContain('the excerpt stays as-is ("A short stored excerpt.")');
     expect(out).toContain('remains lexically indexed');
     expect(out).toContain('asOf is unchanged ("2026-07-01T00:00:00Z")');
-    expect(out).toContain('lookup freshness gating uses it');
+    expect(out).toContain('search freshness gating uses it');
     expect(out).toContain('body: 31 → 19 characters');
   });
 
@@ -750,7 +750,7 @@ describe('runEdit — the update receipt', () => {
     );
     expect(res.humanLines).toEqual([
       'Updated A Better Answer → https://preview.example/a/iris/the-answer',
-      'Answer card is lookup-eligible.',
+      'Answer card is search-eligible.',
       'warning: dropped external image ./pic.png',
     ]);
     // --json emits the full PUT response data.
@@ -801,7 +801,7 @@ describe('runEdit — the update receipt', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'Answer card not lookup-eligible: State the exclusions',
+      'Answer card not search-eligible yet: State the exclusions',
     );
   });
 });

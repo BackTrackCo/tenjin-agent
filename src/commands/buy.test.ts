@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBuy } from './buy';
 import { findDelivered, saveDelivery } from '../lib/library';
-import { recordLookup } from '../lib/lookup-store';
+import { recordSearch } from '../lib/search-store';
 import {
   buildPaymentRequired,
   makeReadServer,
@@ -194,10 +194,10 @@ describe('runBuy, paid path', () => {
     expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100_000n);
   });
 
-  it('attaches X-Tenjin-Client on every request and X-Tenjin-Lookup-Id after a lookup', async () => {
+  it('attaches X-Tenjin-Client on every request and X-Tenjin-Search-Id after a search', async () => {
     const pr = buildPaymentRequired();
-    await recordLookup(dir, {
-      lookupId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
       at: new Date().toISOString(),
       question: 'q',
       decision: 'CANDIDATES',
@@ -217,11 +217,11 @@ describe('runBuy, paid path', () => {
       expect(call.headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
     }
     // The attribution header rides ONLY the paid re-request (spec 09 §3), so a
-    // lookup that never converts is not over-counted by probe/SIWX reads.
+    // search that never converts is not over-counted by probe/SIWX reads.
     const paidCall = calls.find((c) => c.phase === 'payment');
-    expect(paidCall?.headers['x-tenjin-lookup-id']).toBe('0197aaaa-bbbb-cccc-dddd-abcabcabcabc');
+    expect(paidCall?.headers['x-tenjin-search-id']).toBe('0197aaaa-bbbb-cccc-dddd-abcabcabcabc');
     for (const call of calls.filter((c) => c.phase !== 'payment')) {
-      expect(call.headers['x-tenjin-lookup-id']).toBeUndefined();
+      expect(call.headers['x-tenjin-search-id']).toBeUndefined();
     }
   });
 });
@@ -239,8 +239,8 @@ describe('runBuy, library idempotence', () => {
       entitlement: 'purchased',
       bodyMd: body.bodyMd,
     });
-    await recordLookup(dir, {
-      lookupId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
       at: new Date().toISOString(),
       question: 'q',
       decision: 'CANDIDATES',
