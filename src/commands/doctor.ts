@@ -352,10 +352,17 @@ async function checkSkills(
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
 
   if (inPlay.length === 0) {
-    // Same fixFor path every other branch uses, over the requested set: a past
-    // `install --harness shared` recorded a target, and a bare `tenjin install`
-    // would wire .claude only, leaving a second doctor run to still ask for it.
-    const targeted = wiring.filter((w) => harnessRequested(home, w.dir, requested));
+    // Same fixFor path every other branch uses, over the same harnessInPlay
+    // predicate (detected OR requested) — filtering on `requested` alone named
+    // only the recorded directory and left a DETECTED one unwired, which just
+    // swapped which directory the first command missed. Gated on
+    // `requested.length > 0` so a machine with no record at all keeps the plain
+    // `tenjin install` rather than newly spelling out a detected harness that
+    // nobody asked to see named.
+    const targeted =
+      requested.length > 0
+        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested))
+        : [];
     return {
       result: {
         name: 'skills',

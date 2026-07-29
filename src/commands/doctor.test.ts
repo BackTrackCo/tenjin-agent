@@ -743,6 +743,41 @@ describe('runDoctor — skill wiring', () => {
         const skillsAfter = find((after.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skillsAfter.status).toBe('ok');
       });
+
+      it('nothing wired anywhere, with a DETECTED harness alongside the recorded target: the fix names both', async () => {
+        // Claude Code detected (a bare .claude dir, no skill written into it yet)
+        // AND a different target recorded via a past `install --harness shared`.
+        // Filtering on `requested` alone named only the recorded directory;
+        // wiring it left the DETECTED .claude directory empty, and a second
+        // doctor run then asked for --harness claude — two commands either way,
+        // just a swapped which-directory-is-left-behind. The round-4 test above
+        // could not catch this: with no `.claude` dir and `env: {}`, nothing was
+        // ever detected, so filtering on `requested` alone looked sufficient.
+        await mkdir(join(skillHome, '.claude'), { recursive: true });
+        await recordHarness('shared');
+
+        const res = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+        expect(skills.status).toBe('warn');
+        expect(skills.fix).toBe('tenjin install --harness claude --harness shared');
+
+        // The fix clears the warning in one pass: wiring what it names, both
+        // directories, is enough. Wiring only one of the two would still warn.
+        for (const dirOf of [claudeSkills(), sharedSkills()]) {
+          for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
+        }
+        const after = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skillsAfter = find((after.data as { checks: CheckResult[] }).checks, 'skills');
+        expect(skillsAfter.status).toBe('ok');
+      });
     });
 
     it('the PATH probe detects a harness with no home dir', async () => {

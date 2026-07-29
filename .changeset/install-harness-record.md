@@ -16,7 +16,9 @@ check treats a recorded directory as in play alongside the detected ones. Its
 leftover directory that is neither detected nor requested is still described
 rather than warned about.
 
-When NOTHING is wired anywhere, the `fix` now also names a recorded
-`install.harness` target instead of always suggesting a bare `tenjin install`:
-before, that first run wired `.claude` only, and a second `doctor` was needed
-to learn about `--harness shared`.
+When NOTHING is wired anywhere, the `fix` now also names every directory in
+play, detected or recorded, instead of always suggesting a bare
+`tenjin install`: naming the recorded directory alone still left a detected
+one unwired, so the first run cleared one directory and a second `doctor` was
+needed to learn about the other. A machine with no record at all keeps the
+plain `tenjin install`.
