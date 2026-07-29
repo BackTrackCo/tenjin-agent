@@ -352,13 +352,17 @@ async function checkSkills(
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
 
   if (inPlay.length === 0) {
+    // Same fixFor path every other branch uses, over the requested set: a past
+    // `install --harness shared` recorded a target, and a bare `tenjin install`
+    // would wire .claude only, leaving a second doctor run to still ask for it.
+    const targeted = wiring.filter((w) => harnessRequested(home, w.dir, requested));
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
         detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
-        fix: 'tenjin install',
+        fix: targeted.length > 0 ? fixFor(home, targeted) : 'tenjin install',
         data,
       },
     };

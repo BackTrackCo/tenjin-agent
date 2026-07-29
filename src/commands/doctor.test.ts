@@ -713,6 +713,36 @@ describe('runDoctor — skill wiring', () => {
         expect(skills.status).toBe('ok');
         expect(skills.fix).toBeUndefined();
       });
+
+      it('nothing wired anywhere: the first fix names the recorded target, not a bare tenjin install', async () => {
+        // Both directories empty, but a past `install --harness shared` recorded
+        // where the user wants it. Before this fix, this branch hardcoded
+        // `tenjin install`, which wires .claude only; a second `doctor` run was
+        // then needed to learn about --harness shared. One recorded target, one fix.
+        await recordHarness('shared');
+
+        const res = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+        expect(skills.status).toBe('warn');
+        expect(skills.detail).toContain('No Tenjin skills wired');
+        expect(skills.fix).toBe('tenjin install --harness shared');
+
+        // The fix clears the warning in one pass: wiring what it names is enough.
+        for (const name of ['tenjin-search', 'tenjin-publish']) {
+          await writeSkillIn(sharedSkills(), name);
+        }
+        const after = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skillsAfter = find((after.data as { checks: CheckResult[] }).checks, 'skills');
+        expect(skillsAfter.status).toBe('ok');
+      });
     });
 
     it('the PATH probe detects a harness with no home dir', async () => {
