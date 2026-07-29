@@ -104,7 +104,7 @@ export async function runSend(
   } catch (err) {
     if (err instanceof FeeCapExceededError) {
       throw new CliError('REFUSED', 'The RPC gas/fee estimate is abnormal for Base; refusing.', {
-        fix: 'Check `tenjin config get rpcUrl` points at a trusted Base RPC, then retry.',
+        fix: 'Check `tenjin config get rpcUrl` points at a trusted Base RPC; if the RPC is fine, Base fees are spiking — wait and retry.',
         cause: err,
       });
     }

@@ -36,6 +36,8 @@ export async function getUsdcBalance(address: Address, rpcUrl: string): Promise<
  * as fees. An ERC-20 transfer is ~65k gas and Base fees run well under a gwei,
  * so estimates past these bounds mean something is wrong: refuse, never clamp
  * (a clamped maxFeePerGas below the real base fee would just strand the tx).
+ * A genuine extreme fee spike on Base trips the same refusal; that is intended
+ * — waiting it out beats signing an irreversible transfer at panic prices.
  */
 export const SEND_GAS_CAP = 150_000n;
 export const SEND_MAX_FEE_PER_GAS_CAP = 10_000_000_000n; // 10 gwei
@@ -72,7 +74,12 @@ export interface PrepareUsdcSendArgs {
   rpcUrl: string;
 }
 
-/** Everything signed later, fixed at prepare time, plus the gas-cost preview. */
+/**
+ * Everything signed later, fixed at prepare time, plus the gas-cost preview.
+ * The nonce is pinned here, BEFORE the human confirm, so anything else spending
+ * from this key during that window makes the later broadcast fail nonce-stale
+ * (an RPC_ERROR from the node; nothing double-spends — re-run to re-prepare).
+ */
 export interface PreparedUsdcSend {
   to: Address;
   amountAtomic: bigint;
@@ -146,6 +153,8 @@ export async function broadcastUsdcSend({
     type: 'eip1559',
     chainId: base.id,
     to: USDC_ADDRESS,
+    // Explicitly zero: an ERC-20 transfer carries no native value (test-pinned).
+    value: 0n,
     data: prepared.data,
     nonce: prepared.nonce,
     gas: prepared.gas,
