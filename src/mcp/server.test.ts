@@ -82,7 +82,7 @@ describe('buildTenjinMcpServer, tool surface', () => {
 describe('tenjin_search', () => {
   it('returns the exact success envelope as structuredContent with a non-empty text summary', async () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
@@ -224,7 +224,7 @@ describe('tenjin_publish consent', () => {
 describe('MCP adapter never writes to real stdout', () => {
   it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',

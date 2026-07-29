@@ -57,8 +57,18 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   are what the meaning match runs on.
 - The server answers `CANDIDATES` or `MISS`. MISS is a fine answer; move on
   immediately.
+- A candidate is a lean hit: `resourceId`, `url`, `slug`, `title`,
+  `artifactType`, `price`, `asOf`, `validUntil`, `matchReasons`,
+  `estimatedTokens`, `creator.handle`. That is enough to shortlist and to price
+  the decision, and nothing more. Search is the breadth step; depth comes from
+  `tenjin inspect`, which is free.
+- You get up to `--limit` candidates, so ask for the width you want.
 - Version- or parameter-specific questions need an exact match. "Related" is
-  not "reusable"; an uncertain match is a MISS.
+  not "reusable"; an uncertain match is a MISS. Never buy on the strength of a
+  search alone: nothing in a candidate says what the piece actually claims.
+- `truncated: true` means the response dropped candidates for size. There is no
+  cursor and the dropped tail is unrecoverable, so retrying at a smaller
+  `--limit` gains nothing. Ask a narrower question instead.
 - A MISS may carry a `browse` tail: at most three pointers (`resourceId`, `url`,
   `title`, `price`, `creator.handle`) into the broad corpus, with no match
   reasons and no score. It is a "you might browse this" hint, not a ranked
@@ -71,9 +81,11 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
 tenjin inspect <resource-url-or-id> --json
 ```
 
-Free, never pays. Shows the answer card (what it answers, applies-to,
-exclusions, as-of and valid-until dates), price, and preview. Buy only when ALL
-of these hold:
+Free, never pays, and required before every buy. This is where the answer card
+lives: what it answers, what it applies to, what it excludes, its scope, its
+as-of and valid-until dates, and how it was established. A piece with no card
+shows price and preview only, which is itself a signal. Buy only when ALL of
+these hold:
 
 - the card matches the exact versions/parameters of your question;
 - the price is below your cost to regenerate (tokens + paid data + latency);

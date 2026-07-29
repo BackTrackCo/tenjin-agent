@@ -44,6 +44,34 @@ const readBodySchema = z
 
 export type ReadBody = z.infer<typeof readBodySchema>;
 
+/**
+ * The public half of the piece's answer card, carried on the 402 body when the
+ * piece has one. The key is ABSENT (never null) on an uncarded piece, so callers
+ * branch on presence; the projection emits every field whenever it emits the card
+ * at all, so a present card is never partial. Nullable fields carry null.
+ *
+ * This is the depth half of the search/inspect split: the card left the search
+ * candidate in search v2 and lives here, one free unpaid GET away.
+ */
+export const previewCardSchema = z
+  .object({
+    artifactType: z.string(),
+    temporalMode: z.string(),
+    asOf: z.string().nullable(),
+    validUntil: z.string().nullable(),
+    questionsAnswered: z.array(z.string()),
+    tasksSupported: z.array(z.string()),
+    appliesTo: z.record(z.string(), z.array(z.string())),
+    scope: z.string().nullable(),
+    exclusions: z.string().nullable(),
+    provenanceSummary: z.string().nullable(),
+    methodologySummary: z.string().nullable(),
+    maintenanceCadence: z.string().nullable(),
+  })
+  .passthrough();
+
+export type PreviewCard = z.infer<typeof previewCardSchema>;
+
 /** The leak-safe 402 preview body, never the paid content. */
 const previewSchema = z
   .object({
@@ -51,6 +79,11 @@ const previewSchema = z
     title: z.string().optional(),
     price: z.string().optional(),
     creator: z.record(z.string(), z.unknown()).optional(),
+    // `.catch` keeps a botched card from taking the rest of the preview with it:
+    // every other preview field is optional, so before the card existed a parse
+    // failure here was near-impossible, and a server that half-fills the card
+    // should still not cost the caller the title and the price it came for.
+    card: previewCardSchema.optional().catch(undefined),
   })
   .passthrough();
 

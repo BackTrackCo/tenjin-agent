@@ -14,6 +14,10 @@ import type { CommandContext, CommandResult } from '../context';
  * candidates locally so `outcome --last` and `buy <resourceId>` can use them. No
  * wallet, no signing: search is anonymous.
  *
+ * Search is the breadth step: a candidate is a lean hit (identity, price,
+ * freshness, why it matched), and the full answer card comes from `tenjin inspect`,
+ * which is free. So a candidate line stays short on purpose.
+ *
  * The response's `searchId` is the outcome-reporting capability for
  * POST /api/agent/searches/<searchId>/outcomes. tenjin#463 renamed both the field
  * (from `lookupId`) and that path, and this client follows the rename end to end,
@@ -133,15 +137,29 @@ export async function runSearch(
         ]
       : [];
 
+  // `truncated` means the server's size backstop dropped candidates the limit had
+  // room for, and there is no cursor to page to them: a smaller --limit would not
+  // recover the tail, only shorten it further. So the line says what actually
+  // works, which is asking a narrower question. It rides both decisions, since a
+  // MISS is reported the same way, and the flag stays in the machine envelope
+  // (--json) untouched, where it is omitted rather than false when it did not fire.
+  const truncatedHint =
+    response.truncated === true
+      ? [
+          'some candidates were dropped for size; narrow the question, a smaller --limit will not recover them',
+        ]
+      : [];
+
   const humanLines =
     response.decision === 'MISS'
-      ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint]
+      ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint, ...truncatedHint]
       : [
           `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
           ...candidates.map(
             (c, i) =>
               `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${c.price} atomic, ${sanitizeForTerminal(c.url)}`,
           ),
+          ...truncatedHint,
         ];
 
   return { data: response, humanLines };

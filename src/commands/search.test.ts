@@ -37,7 +37,7 @@ function stub(body: unknown, status = 200): { fetch: typeof fetch; bodies: unkno
 }
 
 const CANDIDATES = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   decision: 'CANDIDATES',
   calibration: 'lexical-v1',
@@ -45,17 +45,12 @@ const CANDIDATES = {
     {
       resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
       url: 'https://preview.example/api/read/iris/slug',
+      slug: 'slug',
       title: 'A resource',
       artifactType: 'document',
       price: '100000',
       asOf: null,
       validUntil: null,
-      temporalMode: 'evergreen',
-      appliesTo: {},
-      questionsAnswered: [],
-      tasksSupported: [],
-      scope: null,
-      exclusions: null,
       matchReasons: [],
       estimatedTokens: 1,
       creator: { handle: 'iris' },
@@ -72,7 +67,7 @@ describe('runSearch', () => {
       { fetchImpl: fetch },
     );
     expect(bodies[0]).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       question: 'q',
       maxPrice: '100000',
       freshWithin: 'P30D',
@@ -91,7 +86,7 @@ describe('runSearch', () => {
 
   it('returns the MISS verbatim and records it', async () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
       decision: 'MISS',
       calibration: 'lexical-v1',
@@ -104,7 +99,7 @@ describe('runSearch', () => {
   // The browse tail (tenjin#460) is MISS-only and must stay a hint: one human
   // line, never merged into candidates, never recorded as a buyable candidate.
   const BROWSE_MISS = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     searchId: '0197aaaa-bbbb-cccc-dddd-00000000000b',
     decision: 'MISS',
     calibration: 'lexical-v1',
@@ -173,6 +168,21 @@ describe('runSearch', () => {
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 
+  // `truncated` fires when the server dropped candidates the limit had room for,
+  // and there is no cursor: the hint has to point at narrowing the question, since
+  // a smaller --limit would only shorten the list further.
+  it('adds one line when the response is truncated, and none when it is not', async () => {
+    const truncated = stub({ ...CANDIDATES, truncated: true });
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: truncated.fetch });
+    expect(res.humanLines?.at(-1)).toContain('narrow the question');
+    expect((res.data as { truncated?: true }).truncated).toBe(true);
+
+    const clean = stub(CANDIDATES);
+    const res2 = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: clean.fetch });
+    expect(res2.humanLines?.some((l) => l.includes('narrow the question'))).toBe(false);
+    expect((res2.data as { truncated?: true }).truncated).toBeUndefined();
+  });
+
   it('rejects a malformed --applies-to', async () => {
     const { fetch } = stub(CANDIDATES);
     await expect(
@@ -183,7 +193,7 @@ describe('runSearch', () => {
 
 describe('runSearch — parked-candidate nudge', () => {
   const miss = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
     decision: 'MISS',
     calibration: 'lexical-v1',
@@ -258,7 +268,7 @@ describe('evalCohort threading', () => {
       headers.push((init?.headers ?? {}) as Record<string, string>);
       return new Response(
         JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
           searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
           decision: 'MISS',
           calibration: 'lexical-v1',
