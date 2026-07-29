@@ -341,6 +341,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'Show or update one of your own posts: with no change flags it prints the stored post and answer card, with them it merge-updates (omitted field = kept). Use to fix a price, sharpen a card, or ship a revised body; changes need --yes under your publish.mode consent',
     )
     .option('--yes', 'apply the update without the confirmation stop')
+    .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
     .option('--title <text>', 'new post title')
     .option('--price <usd>', 'new post price in decimal USD')
     .option('--body <file>', 'replace the body with this Markdown file (frontmatter ignored)')
@@ -392,6 +393,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           {
             postId,
             ...(o.yes === true ? { yes: true } : {}),
+            ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
             ...(typeof o.title === 'string' ? { title: o.title } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
             ...(typeof o.body === 'string' ? { body: o.body } : {}),

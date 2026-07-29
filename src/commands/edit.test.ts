@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
 import { testSigner } from '../lib/read-test-utils';
+import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
 
@@ -225,8 +226,9 @@ describe('runEdit — flag to body mapping', () => {
       resource: {
         artifactType: 'skill',
         temporalMode: 'maintained',
-        asOf: '2026-07-20T00:00:00Z',
-        validUntil: '2026-08-20T00:00:00Z',
+        // Sent canonicalized, so a re-run compares equal instead of re-writing.
+        asOf: '2026-07-20T00:00:00.000Z',
+        validUntil: '2026-08-20T00:00:00.000Z',
         questionsAnswered: ['What changed?'],
         tasksSupported: ['estimate the fee'],
         scope: 'L2 execution fees',
@@ -280,20 +282,36 @@ describe('runEdit — flag to body mapping', () => {
 
 describe('runEdit — --clear', () => {
   it('clears nullable scalars with an explicit null and containers with []/{}', async () => {
-    const { stub } = await edit({
-      clear: [
-        'scope',
-        'exclusions',
-        'asOf',
-        'validUntil',
-        'provenance',
-        'methodology',
-        'supersedesPostId',
-        'questionsAnswered',
-        'tasksSupported',
-        'appliesTo',
-      ],
-    });
+    // A card with every clearable field SET, so every clear is a real change.
+    const full = {
+      ...STORED,
+      resource: {
+        ...STORED.resource,
+        exclusions: 'L1 data fees',
+        validUntil: '2026-09-01T00:00:00.000Z',
+        supersedesPostId: '0197dddd-bbbb-cccc-dddd-eeeeeeeeeeee',
+        provenanceSummary: 'measured',
+        methodologySummary: 'median of ten',
+        tasksSupported: ['estimate the fee'],
+      },
+    };
+    const { stub } = await edit(
+      {
+        clear: [
+          'scope',
+          'exclusions',
+          'asOf',
+          'validUntil',
+          'provenance',
+          'methodology',
+          'supersedesPostId',
+          'questionsAnswered',
+          'tasksSupported',
+          'appliesTo',
+        ],
+      },
+      { get: full },
+    );
     expect(stub.putBody()).toEqual({
       resource: {
         scope: null,
@@ -308,6 +326,23 @@ describe('runEdit — --clear', () => {
         appliesTo: {},
       },
     });
+  });
+
+  it('drops a clear of a field that is already empty, rather than re-clearing it', async () => {
+    // STORED already has exclusions/provenance/methodology/supersedesPostId null
+    // and tasksSupported empty. Sending those keys anyway would count as a card
+    // write server-side and re-run the embedding for a card nobody changed.
+    const { stub } = await edit({
+      clear: [
+        'scope',
+        'exclusions',
+        'provenance',
+        'methodology',
+        'supersedesPostId',
+        'tasksSupported',
+      ],
+    });
+    expect(stub.putBody()).toEqual({ resource: { scope: null } });
   });
 
   it('combines a clear with a set on a different field', async () => {
@@ -928,5 +963,247 @@ describe('runEdit — session reuse', () => {
       hermetic({ fetchImpl: stub.fetch, provider }),
     );
     expect(signCount()).toBe(1);
+  });
+});
+
+describe('runEdit — the session is scoped to what the run does', () => {
+  /** The scope of the delegation cached on disk, or null when none was minted. */
+  async function cachedScope(): Promise<string | null> {
+    try {
+      const raw = await readFile(sessionPath(dir), 'utf8');
+      return (JSON.parse(raw) as { scope?: string }).scope ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  it('a no-flag show mints a read-scoped session, not a write-capable one', async () => {
+    const stub = stubServer();
+    const { provider, signCount } = spyProvider();
+    await runEdit(args(), makeCtx(), hermetic({ fetchImpl: stub.fetch, provider }));
+    expect(await cachedScope()).toBe('read');
+    expect(signCount()).toBe(1);
+  });
+
+  it('an invocation that intends to write mints read+write', async () => {
+    const stub = stubServer();
+    const { provider } = spyProvider();
+    await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider }),
+    );
+    expect(await cachedScope()).toBe('read+write');
+  });
+
+  it('a cached read+write session serves a later show with no new signature', async () => {
+    const { provider, signCount } = spyProvider();
+    await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider }),
+    );
+    expect(signCount()).toBe(1);
+
+    await runEdit(args(), makeCtx(), hermetic({ fetchImpl: stubServer().fetch, provider }));
+    expect(signCount()).toBe(1); // wider covers narrower: no second popup
+    expect(await cachedScope()).toBe('read+write'); // and never rebuilt downward
+  });
+
+  it('a cached read session re-establishes before a write, rather than being refused', async () => {
+    const { provider, signCount } = spyProvider();
+    await runEdit(args(), makeCtx(), hermetic({ fetchImpl: stubServer().fetch, provider }));
+    expect(signCount()).toBe(1);
+    expect(await cachedScope()).toBe('read');
+
+    const write = stubServer();
+    await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      makeCtx(),
+      hermetic({ fetchImpl: write.fetch, provider }),
+    );
+    // The read-scoped delegation cannot carry a write (the server answers
+    // insufficient_scope), so the write run pays for one more signature.
+    expect(signCount()).toBe(2);
+    expect(await cachedScope()).toBe('read+write');
+    expect(write.puts()).toHaveLength(1);
+  });
+});
+
+describe('runEdit — every typed source faces the scan', () => {
+  // A live-shaped AWS key: block tier, never clearable by --yes or any mode.
+  const SECRET = 'AKIAIOSFODNN7EXAMPLE';
+  const cases: Array<[string, Partial<EditArgs>]> = [
+    ['title', { title: SECRET }],
+    ['excerpt', { excerpt: SECRET }],
+    ['scope', { scope: SECRET }],
+    ['exclusions', { exclusions: SECRET }],
+    ['provenance', { provenance: SECRET }],
+    ['methodology', { methodology: SECRET }],
+    ['question', { question: [SECRET] }],
+    ['task', { task: [SECRET] }],
+    ['add-question', { addQuestion: [SECRET] }],
+    ['add-task', { addTask: [SECRET] }],
+    ['applies-to', { appliesTo: [`products=${SECRET}`] }],
+  ];
+
+  it.each(cases)('a secret in --%s hard-blocks and writes nothing', async (_label, over) => {
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ yes: true, ...over }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('the ISO fields cannot carry a secret at all: they fail validation first', async () => {
+    // --as-of / --valid-until are in the scanned set for symmetry, but an
+    // ISO-8601 check rejects anything secret-shaped before the scan sees it, so
+    // USAGE (exit 2) is the honest outcome to pin, not a block.
+    const stub = stubServer();
+    for (const over of [{ asOf: SECRET }, { validUntil: SECRET }]) {
+      await expect(
+        runEdit(
+          args({ yes: true, ...over }),
+          makeCtx(),
+          hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    }
+    expect(stub.puts()).toHaveLength(0);
+  });
+});
+
+describe('runEdit — appliesTo is compared as a value, not a key count', () => {
+  it('re-sending the stored pair writes nothing', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, appliesTo: ['products=Base'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('detects a same-size value swap and renders the values, not the counts', async () => {
+    const stub = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, appliesTo: ['products=Vercel'] }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ resource: { appliesTo: { products: ['Vercel'] } } });
+    expect(stderr()).toContain('appliesTo: products=Base → products=Vercel');
+  });
+
+  it('detects a reordered value list (order is meaning for a replace)', async () => {
+    const stub = stubServer({
+      get: {
+        ...STORED,
+        resource: { ...STORED.resource, appliesTo: { products: ['Base', 'Vercel'] } },
+      },
+    });
+    await runEdit(
+      args({ yes: true, appliesTo: ['products=Vercel', 'products=Base'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({
+      resource: { appliesTo: { products: ['Vercel', 'Base'] } },
+    });
+  });
+});
+
+describe('runEdit — a post with no answer card', () => {
+  const CARDLESS = { ...STORED, resource: undefined };
+
+  it('clearing a card field writes nothing (there is no card to clear)', async () => {
+    const stub = stubServer({ get: CARDLESS });
+    const res = await runEdit(
+      args({ yes: true, clear: ['scope', 'questionsAnswered', 'appliesTo'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+  });
+
+  it('omits resource entirely when a real post change rides alongside a clear', async () => {
+    // Any resource key at all mints an all-default card row server-side, turning a
+    // browse-only document into a card-bearing one. The title must travel alone.
+    const stub = stubServer({ get: CARDLESS });
+    await runEdit(
+      args({ yes: true, clear: ['scope'], title: 'A Better Answer' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ title: 'A Better Answer' });
+  });
+
+  it('still lets a genuine card field CREATE the card', async () => {
+    const stub = stubServer({ get: CARDLESS });
+    await runEdit(
+      args({ yes: true, scope: 'L2 fees only' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ resource: { scope: 'L2 fees only' } });
+  });
+});
+
+describe('runEdit — normalization keeps an edit idempotent', () => {
+  it('a timestamp that differs only in spelling is not a change', async () => {
+    // The server echoes timestamptz through toISOString(); a flag carries whatever
+    // the user typed. Same instant, two spellings: re-writing it forever is the bug.
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, asOf: '2026-07-01T00:00:00.000Z' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+
+    // And the same instant written with an offset instead of Z.
+    const offset = stubServer();
+    await runEdit(
+      args({ yes: true, asOf: '2026-06-30T20:00:00-04:00' }),
+      makeCtx(),
+      hermetic({ fetchImpl: offset.fetch, provider: spyProvider().provider }),
+    );
+    expect(offset.puts()).toHaveLength(0);
+  });
+
+  it('an excerpt that differs only in surrounding whitespace is not a change', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, excerpt: `  ${STORED.excerpt}  ` }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('a title that differs only in surrounding whitespace is not a change', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, title: `  ${STORED.title}  ` }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('a real timestamp move IS sent, canonicalized', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, asOf: '2026-07-20T00:00:00Z' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ resource: { asOf: '2026-07-20T00:00:00.000Z' } });
   });
 });

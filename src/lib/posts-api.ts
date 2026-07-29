@@ -8,16 +8,18 @@ import type { ResourceCardInput } from './card';
 import type { WriteAuth } from './session-key';
 
 /**
- * The owned-post write contract: `POST /api/posts` (publish, A3 tenjin#382) plus
- * the owner-scoped `GET`/`PUT /api/posts/<id>` the edit command reads and merges
- * through. Request building and
- * response validation live here; the wire shape is validated defensively and an
- * unknown shape degrades to a CONTRACT_MISMATCH rather than a guess — the same
- * discipline as agent-api.ts, which this models. Both `POST /api/posts` and
- * `PUT /api/posts/<id>` are `z.strictObject` server-side, so the body carries
- * ONLY the fields below; `cacheEligible`/`schemaVersion` are server-owned and
- * never sent. Every write is signed through the injected WriteAuth (session key
- * by default, plain SIWX as a fallback); a 401 is recovered per the auth's rules.
+ * The owned-post contract: `POST /api/posts` (publish, A3 tenjin#382) plus the
+ * owner-scoped `GET`/`PUT /api/posts/<id>` that `edit` reads and merges through.
+ *
+ * Request building and response validation both live here. The wire shape is
+ * validated defensively, and an unknown shape degrades to a CONTRACT_MISMATCH
+ * rather than a guess — the same discipline as agent-api.ts, which this models.
+ * `POST /api/posts` and `PUT /api/posts/<id>` are each `z.strictObject`
+ * server-side, so a body carries ONLY the fields declared below;
+ * `cacheEligible`/`cacheEligibleMissing`/`schemaVersion` are server-owned and are
+ * never sent. Every write is signed through the injected WriteAuth (a session key
+ * by default, plain SIWX as the fallback), and a 401 is recovered per the auth's
+ * own rules.
  */
 
 /** The status vocabulary; the as-const source the PublishStatus union derives from. */
@@ -91,7 +93,10 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   if (bodyMd !== undefined && bodyMd.length > 200_000) {
     throw new CliError('USAGE', 'bodyMd must be at most 200000 characters.');
   }
-  if (input.excerpt !== undefined && input.excerpt.length > 500) {
+  // Trimmed to match the server's `z.string().trim()`: sending " x" for a stored
+  // "x" would otherwise look like a change on every run and never converge.
+  const excerpt = input.excerpt?.trim();
+  if (excerpt !== undefined && excerpt.length > 500) {
     throw new CliError('USAGE', 'excerpt must be at most 500 characters.');
   }
   if (input.tags !== undefined) {
@@ -138,7 +143,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
 // The stored card values are typed leniently (nullish) because they are read, not
 // sent: a server that starts omitting one must not turn a working read into a
 // CONTRACT_MISMATCH. Only the two eligibility fields are demanded.
-const resourceEchoSchema = z
+export const resourceEchoSchema = z
   .object({
     artifactType: z.string().nullish(),
     mediaType: z.string().nullish(),
@@ -161,7 +166,7 @@ const resourceEchoSchema = z
   })
   .passthrough();
 
-const ownPostSchema = z
+export const ownPostSchema = z
   .object({
     id: z.string(),
     slug: z.string(),
@@ -354,7 +359,10 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
       throw new CliError('USAGE', 'bodyMd must be at most 200000 characters.');
     }
   }
-  if (input.excerpt !== undefined && input.excerpt.length > 500) {
+  // Trimmed to match the server's `z.string().trim()`: sending " x" for a stored
+  // "x" would otherwise look like a change on every run and never converge.
+  const excerpt = input.excerpt?.trim();
+  if (excerpt !== undefined && excerpt.length > 500) {
     throw new CliError('USAGE', 'excerpt must be at most 500 characters.');
   }
   if (input.tags !== undefined) {
@@ -374,7 +382,7 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
   const body: PostUpdateBody = {
     ...(title !== undefined ? { title } : {}),
     ...(input.bodyMd !== undefined ? { bodyMd: input.bodyMd } : {}),
-    ...(input.excerpt !== undefined ? { excerpt: input.excerpt } : {}),
+    ...(excerpt !== undefined ? { excerpt } : {}),
     ...(input.tags !== undefined ? { tags: input.tags } : {}),
     ...(input.priceAtomic !== undefined ? { price: input.priceAtomic } : {}),
     ...(input.status !== undefined ? { status: input.status } : {}),

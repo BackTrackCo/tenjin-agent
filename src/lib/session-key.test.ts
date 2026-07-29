@@ -119,7 +119,7 @@ describe('RFC 9421 primitives are byte-exact', () => {
 
 describe('delegation URN construction (D35)', () => {
   it('binds pubkey/exp/scope as the three tenjin session URNs', () => {
-    const urns = delegationResources('PUBB64URL', '2026-07-22T00:00:00.000Z');
+    const urns = delegationResources('PUBB64URL', '2026-07-22T00:00:00.000Z', 'read+write');
     expect(urns).toEqual([
       'urn:tenjin:session:pubkey:p256:PUBB64URL',
       'urn:tenjin:session:exp:2026-07-22T00:00:00.000Z',
@@ -221,17 +221,32 @@ describe('isSessionUsable', () => {
   };
 
   it('accepts a bound, unexpired, read+write session', () => {
-    expect(isSessionUsable(base, '0xABC', 1_000_000_000_000)).toBe(true);
+    expect(isSessionUsable(base, '0xABC', 1_000_000_000_000, 'read+write')).toBe(true);
   });
   it('rejects a different wallet address', () => {
-    expect(isSessionUsable(base, '0xdef', 1_000_000_000_000)).toBe(false);
+    expect(isSessionUsable(base, '0xdef', 1_000_000_000_000, 'read+write')).toBe(false);
   });
   it('rejects one at/near expiry (60s skew)', () => {
-    expect(isSessionUsable(base, '0xabc', 2_000_000_000_000)).toBe(false);
-    expect(isSessionUsable(base, '0xabc', 1_999_999_999_000)).toBe(false);
+    expect(isSessionUsable(base, '0xabc', 2_000_000_000_000, 'read+write')).toBe(false);
+    expect(isSessionUsable(base, '0xabc', 1_999_999_999_000, 'read+write')).toBe(false);
   });
-  it('rejects a non read+write scope', () => {
-    expect(isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000)).toBe(false);
+  it('a read-scoped session does not satisfy a write run', () => {
+    expect(
+      isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read+write'),
+    ).toBe(false);
+  });
+  it('a read+write session satisfies a read run (wider covers narrower)', () => {
+    expect(isSessionUsable(base, '0xabc', 1_000_000_000_000, 'read')).toBe(true);
+  });
+  it('a read-scoped session satisfies a read run', () => {
+    expect(isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read')).toBe(
+      true,
+    );
+  });
+  it('an unrecognized cached scope satisfies nothing', () => {
+    expect(isSessionUsable({ ...base, scope: 'write' }, '0xabc', 1_000_000_000_000, 'read')).toBe(
+      false,
+    );
   });
 });
 
@@ -245,7 +260,13 @@ describe('establishSession + cache (0600, address-bound)', () => {
   });
 
   function config(signer: TenjinSigner = testSigner()) {
-    return { signer, baseUrl: 'https://tenjin.blog', chainId: 'eip155:8453', dataDir: dir };
+    return {
+      signer,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: dir,
+      scope: 'read+write' as const,
+    };
   }
 
   it('wallet-signs once, binds the URNs, and caches the delegation + key 0600', async () => {
@@ -274,7 +295,9 @@ describe('establishSession + cache (0600, address-bound)', () => {
     // The delegation is a base64 SIWX header binding the three URNs.
     const decoded = Buffer.from(file.delegation, 'base64').toString('utf8');
     const payload = JSON.parse(decoded) as { resources?: string[] };
-    expect(payload.resources).toEqual(delegationResources(file.publicKeyRaw, file.exp));
+    expect(payload.resources).toEqual(
+      delegationResources(file.publicKeyRaw, file.exp, 'read+write'),
+    );
   });
 });
 
@@ -305,7 +328,13 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
 
   it('mints on first use, then signs subsequent writes with the P-256 key only', async () => {
     const { signer, count } = spySigner();
-    const config = { signer, baseUrl: 'https://tenjin.blog', chainId: 'eip155:8453', dataDir: dir };
+    const config = {
+      signer,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: dir,
+      scope: 'read+write' as const,
+    };
 
     const auth1 = createSessionKeyAuth(config);
     const h1 = await auth1.headersFor({
@@ -330,7 +359,13 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
 
   it('recover(reestablish-code) forces one fresh wallet signature; fatal code does not retry', async () => {
     const { signer, count } = spySigner();
-    const config = { signer, baseUrl: 'https://tenjin.blog', chainId: 'eip155:8453', dataDir: dir };
+    const config = {
+      signer,
+      baseUrl: 'https://tenjin.blog',
+      chainId: 'eip155:8453',
+      dataDir: dir,
+      scope: 'read+write' as const,
+    };
     const auth = createSessionKeyAuth(config);
     await auth.headersFor({ method: 'POST', url: 'https://tenjin.blog/api/posts', body: '{}' });
     expect(count()).toBe(1);
@@ -353,6 +388,7 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
       baseUrl: 'https://tenjin.blog',
       chainId: 'eip155:8453',
       dataDir: dir,
+      scope: 'read+write' as const,
     };
     const h1 = await createSessionKeyAuth(config1).headersFor({
       method: 'POST',
@@ -378,6 +414,7 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
       baseUrl: 'https://tenjin.blog',
       chainId: 'eip155:8453',
       dataDir: dir,
+      scope: 'read+write',
     }).headersFor({ method: 'POST', url: 'https://tenjin.blog/api/posts', body: '{}' });
     expect(swapSigns).toBe(1);
     expect(h2['Tenjin-Session-Delegation']).not.toBe(h1['Tenjin-Session-Delegation']);
@@ -416,6 +453,7 @@ describe('createSiwxAuth (plain-SIWX fallback)', () => {
       baseUrl: 'https://tenjin.blog',
       chainId: 'eip155:8453',
       dataDir: '/nonexistent',
+      scope: 'read+write',
     });
     const h = await auth.headersFor({
       method: 'POST',
@@ -499,6 +537,7 @@ describe('createSessionKeyAuth recovers from a bad on-disk session', () => {
       baseUrl: 'https://tenjin.blog',
       chainId: 'eip155:8453',
       dataDir: d,
+      scope: 'read+write',
     });
     await auth.headersFor(req);
     expect(count()).toBe(1); // one fresh establish
@@ -519,6 +558,7 @@ describe('createSessionKeyAuth recovers from a bad on-disk session', () => {
       baseUrl: 'https://tenjin.blog',
       chainId: 'eip155:8453',
       dataDir: d,
+      scope: 'read+write',
     });
     await auth.headersFor(req);
     expect(count()).toBe(1);

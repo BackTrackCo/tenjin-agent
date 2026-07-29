@@ -3,7 +3,12 @@ import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { searchBrowseSchema, searchCandidateSchema, searchResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
-import { buildPostCreateBody, buildPostUpdateBody } from './lib/posts-api';
+import {
+  buildPostCreateBody,
+  buildPostUpdateBody,
+  ownPostSchema,
+  resourceEchoSchema,
+} from './lib/posts-api';
 import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
@@ -440,6 +445,35 @@ describe('contract fixture pins the publish endpoints', () => {
     }
     expect(get(card, 'appliesTo', 'type')).toBe('object');
     expect(get(card, 'appliesTo', 'minProperties')).toBeUndefined();
+  });
+
+  it('every field the CLI DEMANDS back is one the fixture guarantees', () => {
+    // The request side is pinned above; this is the response side. A key the CLI
+    // requires but the server may omit is a CONTRACT_MISMATCH on a good response,
+    // so what we demand must be a subset of what the contract guarantees.
+    const postRequired = get(fixtureDoc, 'components', 'schemas', 'OwnPost', 'required');
+    expect(Array.isArray(postRequired)).toBe(true);
+    for (const key of requiredKeys(ownPostSchema)) {
+      expect(postRequired, `OwnPost.required must guarantee ${key}`).toContain(key);
+    }
+    const cardRequired = get(fixtureDoc, 'components', 'schemas', 'ResourceCard', 'required');
+    expect(Array.isArray(cardRequired)).toBe(true);
+    for (const key of requiredKeys(resourceEchoSchema)) {
+      expect(cardRequired, `ResourceCard.required must guarantee ${key}`).toContain(key);
+    }
+  });
+
+  it('every optional field the CLI READS is a declared response field', () => {
+    // Optional keys never fail parsing, so they fail silently instead: a renamed
+    // `bodyMd` would quietly make every diff look like a body change.
+    const postProps = get(fixtureDoc, 'components', 'schemas', 'OwnPost', 'properties');
+    for (const key of Object.keys(ownPostSchema.shape)) {
+      expect(get(postProps, key), `OwnPost.properties.${key} missing`).toBeDefined();
+    }
+    const cardProps = get(fixtureDoc, 'components', 'schemas', 'ResourceCard', 'properties');
+    for (const key of Object.keys(resourceEchoSchema.shape)) {
+      expect(get(cardProps, key), `ResourceCard.properties.${key} missing`).toBeDefined();
+    }
   });
 
   it('every field deriveCard emits is a declared resource field', () => {

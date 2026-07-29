@@ -16,4 +16,13 @@ take the same flags publish does. Before anything is written you get a terse
 before/after summary, and the update is gated by the same deterministic scan and
 `publish.mode` consent as publishing: a live secret in the new content hard-blocks
 in every mode, and a `review`-mode edit returns NEEDS_CONFIRMATION until you pass
-`--yes`. The MCP server exposes the same core as `tenjin_edit`.
+`--yes` (or `--mode` for one run). The MCP server exposes the same core as
+`tenjin_edit`.
+
+An edit sends only what actually changes, so re-running the same command writes
+nothing: values that already match are dropped, timestamps compare as instants
+rather than spellings, and an edit with nothing left to do skips the write
+entirely. Clearing a card field on a post that has no answer card is likewise a
+no-op instead of a write that would create an empty card. Sessions are now minted
+at the scope the run needs, so reading one of your own posts no longer leaves a
+write-capable delegation cached on disk.

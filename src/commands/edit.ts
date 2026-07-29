@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
-import { PublishModeSchema } from '../lib/config';
+import { parsePublishModeFlag } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
 import { scan, type ScanFinding } from '../lib/scan';
 import { sanitizeForTerminal } from '../lib/output';
@@ -20,17 +20,18 @@ import {
   updatePost,
   type OwnPost,
   type OwnPostCard,
-  type PostUpdateBody,
   type PostUpdateInput,
   type ResourceCardUpdate,
 } from '../lib/posts-api';
-import { createSessionKeyAuth, createSiwxAuth, type WriteAuth } from '../lib/session-key';
 import {
-  describeWallet,
-  resolveWalletProvider,
-  type TenjinSigner,
-  type WalletProvider,
-} from '../lib/wallet';
+  dedupeFindings,
+  describeFindings,
+  needsConfirmation,
+  publicFinding,
+  resolveWriteAuth,
+  writeModeNotices,
+} from '../lib/consent';
+import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -49,18 +50,16 @@ import type { CommandContext, CommandResult } from '../context';
  * Unlike publish, the wallet is touched BEFORE consent, and that is a real
  * tradeoff, not a technicality: the before→after summary the user approves can
  * only be built from the stored post, and reading it is owner-scoped. The read
- * itself changes nothing on the server and burns no nonce, but on first use it
- * establishes the session key, which means one wallet signature and a 24h
- * `read+write` delegation persisted to `~/.tenjin/session.json` before the user
- * has approved anything. We accept that: the alternative is asking a human to
- * approve a diff we cannot show them.
+ * changes nothing on the server and burns no nonce, but on first use it
+ * establishes a session key, so one wallet signature and a delegation persisted to
+ * `~/.tenjin/session.json` precede any approval. What that delegation can DO is
+ * scoped to the run: a no-flag show mints `read`, and only an invocation that
+ * intends to write asks for `read+write`. We accept the remaining cost, because
+ * the alternative is asking a human to approve a diff we cannot show them.
  *
  * Exit codes: 0 success (and the read-only show), 2 usage, 3 needs_confirmation /
  * non-bypassable publish_blocked, 4 a write failure after approval.
  */
-
-/** Writes require Base mainnet per the server's SIWX chain constraint. */
-const WRITE_CHAIN_ID = 'eip155:8453';
 
 export interface EditArgs {
   /** The post uuid to edit. */
@@ -90,6 +89,8 @@ export interface EditArgs {
   /** Card fields to clear (repeatable); see CLEAR_FIELDS. */
   clear?: string[];
   yes?: boolean;
+  /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
+  mode?: string;
 }
 
 export interface EditDeps {
@@ -116,6 +117,9 @@ export async function runEdit(
       fix: 'Pass the post uuid from `tenjin publish`’s receipt or your desk.',
     });
   }
+  // A mistyped --mode must never silently land on a looser mode and apply an edit
+  // unconfirmed; validate it at the edge, exactly as publish does.
+  if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
   // Every edge check that can fail on the FLAGS alone runs before the wallet: a
   // typo must cost nothing, not a signature and a round trip.
   rejectEmptyValues(args);
@@ -133,7 +137,18 @@ export async function runEdit(
   );
   await describeWallet(provider); // surfaces WALLET_MISSING with its own fix
   const signer = await provider.getSigner();
-  const auth = resolveWriteAuth(signer, runtime.baseUrl, ctx.dataDir, deps, env);
+  // Least privilege, decided before the wallet is asked for anything: a show is a
+  // READ, so it mints a read-scoped delegation rather than leaving a write-capable
+  // one on disk for a command that never writes. A cached read+write session still
+  // serves it, so this costs no extra signature.
+  const auth = resolveWriteAuth({
+    signer,
+    baseUrl: runtime.baseUrl,
+    dataDir: ctx.dataDir,
+    scope: wantsChange ? 'read+write' : 'read',
+    ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
+    env,
+  });
   const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
@@ -154,43 +169,35 @@ export async function runEdit(
 
   // deriveCard validates the set fields against the server's bounds and reports
   // them under the same dotted `resource.<field>` keys the server would.
-  const resource = mergeClears(deriveCard({}, cardFlags), clears);
-  const input: PostUpdateInput = {
+  const intent: PostUpdateInput = {
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...(bodyFile !== undefined ? { bodyMd: bodyFile.body } : {}),
     ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
     ...(priceAtomic !== undefined ? { priceAtomic } : {}),
-    ...(resource !== undefined ? { resource } : {}),
+    ...withClears(deriveCard({}, cardFlags), clears, stored.resource),
   };
-  // Build once here so a bounds miss is USAGE before the scan and the consent
-  // prompt; updatePost rebuilds the same body for the wire (pure, so identical).
-  const body = buildPostUpdateBody(input);
 
-  // A no-op edit is not an edit: when every value sent already matches the stored
-  // post there is nothing to confirm, nothing new to scan, and no reason to burn a
-  // nonce on a write that would change nothing. Exit 0 with the current post.
-  const changes = changeLines(stored, body);
+  // Diff before deciding anything: a no-op edit is not an edit. With nothing left
+  // after pruning there is nothing to confirm, nothing new to scan, and no reason
+  // to burn a nonce on a write that changes nothing. Exit 0 with the current post.
+  const { input, lines: changes } = diffUpdate(stored, intent);
   if (changes.length === 0) return noChangeReceipt(stored);
+  // Bounds-check the pruned body here so a miss is USAGE before the consent
+  // prompt; updatePost rebuilds the same body for the wire (pure, so identical).
+  buildPostUpdateBody(input);
 
-  const settings = await resolvePublishSettings({ dataDir: ctx.dataDir, cwd, env });
-  for (const warning of settings.warnings) ctx.io.stderr.write(`${warning}\n`);
-  const envMode = env.TENJIN_PUBLISH_MODE;
-  if (
-    envMode !== undefined &&
-    envMode.length > 0 &&
-    !PublishModeSchema.safeParse(envMode).success
-  ) {
-    ctx.io.stderr.write(
-      `Ignoring invalid TENJIN_PUBLISH_MODE=${JSON.stringify(envMode)}; using ${settings.mode} (${settings.modeSource}).\n`,
-    );
-  }
-  // Say once what an unconfigured mode does, so a first edit that stops to confirm
-  // is explained rather than surprising (publish prints the same explainer).
-  if (settings.modeSource === 'default') {
-    ctx.io.stderr.write(
-      `publish.mode: ${settings.mode} (default) - each edit asks you once. Set auto to apply clean edits automatically: tenjin config set publish.mode auto.\n`,
-    );
-  }
+  const settings = await resolvePublishSettings({
+    dataDir: ctx.dataDir,
+    cwd,
+    ...(args.mode !== undefined ? { flag: args.mode } : {}),
+    env,
+  });
+  writeModeNotices(
+    ctx.io.stderr,
+    settings,
+    env,
+    'each edit asks you once. Set auto to apply clean edits automatically',
+  );
 
   // The scan covers exactly what this edit would NEWLY publish: the body file
   // (whole, frontmatter included) plus the text typed on this invocation. A secret
@@ -209,8 +216,7 @@ export async function runEdit(
   const notes = editNotes(args, stored, bodyFile);
   for (const line of [...notes, ...changes]) ctx.io.stderr.write(`${line}\n`);
 
-  const needsConfirm = settings.mode === 'review' || (settings.mode === 'auto' && warns.length > 0);
-  if (needsConfirm && args.yes !== true) {
+  if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
     throw new CliError('NEEDS_CONFIRMATION', confirmMessage(warns.length, changes.length), {
       fix: 'Review the changes, then re-run with --yes.',
       details: {
@@ -314,7 +320,7 @@ function cardLines(card: OwnPostCard | undefined): string[] {
 
 function eligibilityLine(card: OwnPostCard | undefined): string {
   if (card === undefined) return 'No answer card (browse-only document).';
-  const missing = missingSentences(card.cacheEligibleMissing);
+  const missing = missingSentences(card.cacheEligibleMissing).map(sanitizeForTerminal);
   if (card.cacheEligible) return 'Answer card is search-eligible.';
   return missing.length > 0
     ? `Answer card not search-eligible yet: ${missing.join(' ')}`
@@ -325,77 +331,161 @@ function eligibilityLine(card: OwnPostCard | undefined): string {
 // The before→after summary.
 // ---------------------------------------------------------------------------
 
-/** One terse line per field the PUT would actually move; nothing for a no-op. */
-function changeLines(stored: OwnPost, body: PostUpdateBody): string[] {
+/**
+ * Diff what the flags ASK for against what is stored, and return both the terse
+ * summary and an input pruned to the fields that actually move.
+ *
+ * Pruning is not cosmetic. A card key that rides along unchanged still counts as a
+ * card write server-side, which re-runs the embedding for a card nobody edited;
+ * and on a post with NO card, a lone `scope: null` mints an all-default card row,
+ * turning a browse-only document into a card-bearing one. Comparing first and
+ * sending only the difference is what keeps `edit` idempotent.
+ */
+function diffUpdate(
+  stored: OwnPost,
+  intent: PostUpdateInput,
+): { input: PostUpdateInput; lines: string[] } {
   const lines: string[] = [];
-  if (body.title !== undefined && body.title !== stored.title) {
-    lines.push(`title: ${preview(stored.title)} → ${preview(body.title)}`);
+  const input: PostUpdateInput = {};
+
+  // Both sides trimmed, because the server trims these before storing them: an
+  // untrimmed compare would call " x" a change from "x" forever.
+  const title = intent.title?.trim();
+  if (title !== undefined && title !== stored.title) {
+    input.title = title;
+    lines.push(`title: ${preview(stored.title)} → ${preview(title)}`);
   }
-  if (body.price !== undefined && body.price !== stored.price) {
+  if (intent.priceAtomic !== undefined && intent.priceAtomic !== stored.price) {
     const before = toMoney(stored.price);
-    const after = toMoney(body.price);
+    const after = toMoney(intent.priceAtomic);
+    input.priceAtomic = intent.priceAtomic;
     lines.push(
       `price: ${before.usd} USD (${before.atomic} atomic) → ${after.usd} USD (${after.atomic} atomic)`,
     );
   }
-  if (body.bodyMd !== undefined && body.bodyMd !== stored.bodyMd) {
-    lines.push(`body: ${(stored.bodyMd ?? '').length} → ${body.bodyMd.length} characters`);
+  if (intent.bodyMd !== undefined && intent.bodyMd !== stored.bodyMd) {
+    input.bodyMd = intent.bodyMd;
+    lines.push(`body: ${(stored.bodyMd ?? '').length} → ${intent.bodyMd.length} characters`);
   }
-  if (body.excerpt !== undefined && body.excerpt !== stored.excerpt) {
-    lines.push(`excerpt: ${preview(stored.excerpt)} → ${preview(body.excerpt)}`);
+  const excerpt = intent.excerpt?.trim();
+  if (excerpt !== undefined && excerpt !== (stored.excerpt ?? '')) {
+    input.excerpt = excerpt;
+    lines.push(`excerpt: ${preview(stored.excerpt)} → ${preview(excerpt)}`);
   }
-  lines.push(...cardChangeLines(stored.resource, body.resource));
+
+  const card = diffCard(stored.resource, intent.resource);
+  lines.push(...card.lines);
+  if (card.card !== undefined) input.resource = card.card;
+
   // Empty means EMPTY: the caller reads no lines as "this edit is a no-op" and
   // skips the write, so a sentinel line here would report a change that isn't one.
-  return lines;
+  return { input, lines };
 }
 
-function cardChangeLines(
+/**
+ * The card half of the diff. Every comparison treats an ABSENT stored value as
+ * already-cleared, which is what makes clearing a field on a cardless post the
+ * no-op it should be rather than a card-creating write.
+ */
+function diffCard(
   stored: OwnPostCard | undefined,
   next: ResourceCardUpdate | undefined,
-): string[] {
-  if (next === undefined) return [];
+): { card?: ResourceCardUpdate; lines: string[] } {
   const lines: string[] = [];
-  const listChange = (
-    label: string,
-    before: string[] | null | undefined,
-    after: string[] | undefined,
-  ): void => {
-    if (after === undefined) return;
+  const card: Record<string, unknown> = {};
+  const keep = (key: keyof ResourceCardUpdate, value: unknown, line: string): void => {
+    card[key] = value;
+    lines.push(line);
+  };
+  if (next === undefined) return { lines };
+
+  // Lists replace wholesale, so order counts; an absent stored list reads as empty.
+  for (const [key, before] of [
+    ['questionsAnswered', stored?.questionsAnswered],
+    ['tasksSupported', stored?.tasksSupported],
+  ] as const) {
+    const after = next[key];
+    if (after === undefined) continue;
     const old = before ?? [];
-    if (sameList(old, after)) return;
+    if (sameList(old, after)) continue;
     const added = after.filter((v) => !old.includes(v));
     const detail =
       after.length === 0 ? ' (cleared)' : added.length > 0 ? ` (new: ${previewList(added)})` : '';
-    lines.push(`${label}: ${old.length} → ${after.length}${detail}`);
-  };
-  listChange('questionsAnswered', stored?.questionsAnswered, next.questionsAnswered);
-  listChange('tasksSupported', stored?.tasksSupported, next.tasksSupported);
+    keep(key, after, `${key}: ${old.length} → ${after.length}${detail}`);
+  }
 
-  for (const [label, before, after] of [
-    ['scope', stored?.scope, next.scope],
-    ['exclusions', stored?.exclusions, next.exclusions],
-    ['artifactType', stored?.artifactType, next.artifactType],
-    ['temporalMode', stored?.temporalMode, next.temporalMode],
-    ['asOf', stored?.asOf, next.asOf],
-    ['validUntil', stored?.validUntil, next.validUntil],
-    ['provenance', stored?.provenanceSummary, next.provenanceSummary],
-    ['methodology', stored?.methodologySummary, next.methodologySummary],
-    ['supersedesPostId', stored?.supersedesPostId, next.supersedesPostId],
+  // The timestamps compare as INSTANTS and are sent canonicalized. The server
+  // echoes a timestamptz through toISOString(), while a flag carries whatever the
+  // user typed, so "2026-07-01T00:00:00Z" and "2026-07-01T00:00:00.000Z" are the
+  // same moment spelled two ways — comparing the spellings would re-write the
+  // field on every single run.
+  for (const [key, before] of [
+    ['asOf', stored?.asOf],
+    ['validUntil', stored?.validUntil],
   ] as const) {
+    const after = next[key];
+    if (after === undefined) continue;
+    const from = isoInstant(before);
+    const to = isoInstant(after);
+    if (from === to) continue;
+    keep(key, to, `${key}: ${preview(from)} → ${to === null ? '(cleared)' : preview(to)}`);
+  }
+
+  for (const [label, key, before] of [
+    ['scope', 'scope', stored?.scope],
+    ['exclusions', 'exclusions', stored?.exclusions],
+    ['artifactType', 'artifactType', stored?.artifactType],
+    ['temporalMode', 'temporalMode', stored?.temporalMode],
+    ['provenance', 'provenanceSummary', stored?.provenanceSummary],
+    ['methodology', 'methodologySummary', stored?.methodologySummary],
+    ['supersedesPostId', 'supersedesPostId', stored?.supersedesPostId],
+  ] as const) {
+    const after = next[key];
     if (after === undefined) continue;
     const from = before ?? null;
     if (from === after) continue;
-    lines.push(`${label}: ${preview(from)} → ${after === null ? '(cleared)' : preview(after)}`);
+    keep(
+      key,
+      after,
+      `${label}: ${preview(from)} → ${after === null ? '(cleared)' : preview(after)}`,
+    );
   }
 
-  if (next.appliesTo !== undefined) {
-    const beforeKeys = Object.keys(stored?.appliesTo ?? {}).length;
-    const afterKeys = Object.keys(next.appliesTo).length;
-    const detail = afterKeys === 0 ? ' (cleared)' : ` (${appliesToPreview(next.appliesTo)})`;
-    lines.push(`appliesTo: ${beforeKeys} → ${afterKeys} keys${detail}`);
+  // appliesTo is one value, not a key count: a same-size swap (products=Base →
+  // products=Vercel) has identical counts on both sides, so a count compare would
+  // call a real change a no-op and a count RENDER would print it as one.
+  const after = next.appliesTo;
+  if (after !== undefined) {
+    const before = stored?.appliesTo ?? {};
+    if (!sameAppliesTo(before, after)) {
+      keep(
+        'appliesTo',
+        after,
+        `appliesTo: ${appliesToPreview(before)} → ${appliesToPreview(after)}`,
+      );
+    }
   }
-  return lines;
+
+  return { ...(Object.keys(card).length > 0 ? { card: card as ResourceCardUpdate } : {}), lines };
+}
+
+/**
+ * A timestamp as its canonical instant, so two spellings of one moment compare
+ * equal. An unparseable value (never from a flag — validateIso ran — but possible
+ * from a future server format) passes through rather than being silently dropped.
+ */
+function isoInstant(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
+}
+
+/** Map equality: keys order-insensitive, each key's values order-sensitive. */
+function sameAppliesTo(a: Record<string, string[]>, b: Record<string, string[]>): boolean {
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+  if (!sameList(aKeys, bKeys)) return false;
+  return aKeys.every((key) => sameList(a[key] ?? [], b[key] ?? []));
 }
 
 /** The advisory notes a --body edit needs, in the order a human reads them. */
@@ -439,18 +529,37 @@ const CLEAR_FIELDS = [
 ] as const;
 type ClearField = (typeof CLEAR_FIELDS)[number];
 
-/** clear name → the card key it targets and the value that clears it server-side. */
-const CLEAR_TARGET: Record<ClearField, { key: keyof ResourceCardUpdate; value: unknown }> = {
-  scope: { key: 'scope', value: null },
-  exclusions: { key: 'exclusions', value: null },
-  asOf: { key: 'asOf', value: null },
-  validUntil: { key: 'validUntil', value: null },
-  provenance: { key: 'provenanceSummary', value: null },
-  methodology: { key: 'methodologySummary', value: null },
-  supersedesPostId: { key: 'supersedesPostId', value: null },
-  questionsAnswered: { key: 'questionsAnswered', value: [] },
-  tasksSupported: { key: 'tasksSupported', value: [] },
-  appliesTo: { key: 'appliesTo', value: {} },
+/** clear name → the card key it targets. */
+const CLEAR_KEY = {
+  scope: 'scope',
+  exclusions: 'exclusions',
+  asOf: 'asOf',
+  validUntil: 'validUntil',
+  provenance: 'provenanceSummary',
+  methodology: 'methodologySummary',
+  supersedesPostId: 'supersedesPostId',
+  questionsAnswered: 'questionsAnswered',
+  tasksSupported: 'tasksSupported',
+  appliesTo: 'appliesTo',
+} as const satisfies Record<ClearField, keyof ResourceCardUpdate>;
+
+/**
+ * clear name → the value that clears its key server-side. Each value is typed as
+ * the card field it lands on, so sending the wrong shape (a null where the merge
+ * clears with `[]`, or an `[]` where it wants null) is a compile error, not a
+ * validation_failed discovered in production.
+ */
+const CLEAR_VALUE: { [F in ClearField]: ResourceCardUpdate[(typeof CLEAR_KEY)[F]] } = {
+  scope: null,
+  exclusions: null,
+  asOf: null,
+  validUntil: null,
+  provenance: null,
+  methodology: null,
+  supersedesPostId: null,
+  questionsAnswered: [],
+  tasksSupported: [],
+  appliesTo: {},
 };
 
 /** clear name → the set-flags that would contradict it in the same invocation. */
@@ -611,22 +720,28 @@ function cardFlagsFrom(args: EditArgs): CardFlags {
 }
 
 /**
- * The card the PUT carries: the validated set fields plus the clears. Built from
- * an allowlist (deriveCard's output keys and CLEAR_TARGET) and never from a
+ * The card this edit ASKS for: the validated set fields plus the clears. Built
+ * from an allowlist (deriveCard's output keys and CLEAR_KEY) and never from a
  * spread of the GET, so a server-owned key (cacheEligible, cacheEligibleMissing,
  * schemaVersion) cannot reach a strictObject body that would reject it.
+ *
+ * A clear on a post with NO card is dropped here rather than sent: there is
+ * nothing to clear, and any `resource` key on a browse-only post mints an
+ * all-default card row server-side, quietly turning a plain document into a
+ * card-bearing one. The diff prunes the rest (a clear of an already-empty field).
  */
-function mergeClears(
+function withClears(
   set: ResourceCardInput | undefined,
   clears: ClearField[],
-): ResourceCardUpdate | undefined {
-  if (set === undefined && clears.length === 0) return undefined;
+  stored: OwnPostCard | undefined,
+): { resource?: ResourceCardUpdate } {
+  const applicable = stored !== undefined ? clears : [];
+  if (set === undefined && applicable.length === 0) return {};
   const card: Record<string, unknown> = { ...(set ?? {}) };
-  for (const name of clears) {
-    const target = CLEAR_TARGET[name];
-    card[target.key] = target.value;
+  for (const name of applicable) {
+    card[CLEAR_KEY[name]] = CLEAR_VALUE[name];
   }
-  return card as ResourceCardUpdate;
+  return Object.keys(card).length > 0 ? { resource: card as ResourceCardUpdate } : {};
 }
 
 interface BodyFile {
@@ -662,18 +777,6 @@ function appendUnique(stored: string[], additions: string[]): string[] {
     if (!out.includes(item)) out.push(item);
   }
   return out;
-}
-
-function resolveWriteAuth(
-  signer: TenjinSigner,
-  baseUrl: string,
-  dataDir: string,
-  deps: EditDeps,
-  env: NodeJS.ProcessEnv,
-): WriteAuth {
-  const config = { signer, baseUrl, chainId: WRITE_CHAIN_ID, dataDir };
-  const useSession = deps.useSession ?? env.TENJIN_NO_SESSION !== '1';
-  return useSession ? createSessionKeyAuth(config) : createSiwxAuth(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -713,30 +816,8 @@ function typedScanText(args: EditArgs): string {
   return parts.join('\n');
 }
 
-/** Collapse findings that share a check + excerpt, keeping the first. */
-function dedupeFindings(findings: ScanFinding[]): ScanFinding[] {
-  const seen = new Set<string>();
-  return findings.filter((f) => {
-    const key = `${f.check}:${f.excerpt}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-/** A finding safe to echo: block excerpts are already masked by the scanner. */
-function publicFinding(f: ScanFinding): {
-  check: string;
-  severity: string;
-  line: number;
-  excerpt: string;
-} {
-  return { check: f.check, severity: f.severity, line: f.line, excerpt: f.excerpt };
-}
-
 function blockMessage(blocking: ScanFinding[]): string {
-  const checks = [...new Set(blocking.map((f) => f.check))].join(', ');
-  return `Edit blocked: the new content contains ${blocking.length} secret finding(s) (${checks}).`;
+  return `Edit blocked: the new content contains ${describeFindings(blocking)}.`;
 }
 
 function confirmMessage(warnCount: number, changeCount: number): string {
@@ -765,8 +846,11 @@ function previewList(values: string[]): string {
   return values.map((v) => preview(v)).join(', ');
 }
 
+/** `products=Base|Vercel, runtimes=node` — the VALUES, so a swap reads as a swap. */
 function appliesToPreview(appliesTo: Record<string, string[]>): string {
-  return Object.entries(appliesTo)
+  const entries = Object.entries(appliesTo);
+  if (entries.length === 0) return '(unset)';
+  return entries
     .map(
       ([key, values]) => `${sanitizeForTerminal(key)}=${values.map(sanitizeForTerminal).join('|')}`,
     )

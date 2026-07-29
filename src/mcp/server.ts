@@ -166,7 +166,10 @@ const editInput = {
   yes: z
     .boolean()
     .optional()
-    .describe('Apply the update after user approval (omit to get the change summary first)'),
+    .describe(
+      'Clear the review confirm and soft findings after user approval (never a hard block)',
+    ),
+  mode: z.string().optional().describe('Consent mode for this run: review | auto | full-auto'),
   title: z.string().optional().describe('New post title'),
   price: z.coerce.string().optional().describe('New post price in decimal USD, e.g. "0.25"'),
   body: z
@@ -434,7 +437,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         're-calling with yes:true, and a live secret in the new content returns PUBLISH_BLOCKED, ' +
         'which yes never clears.',
       inputSchema: editInput,
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) =>
       runCore('edit', (ctx) =>
@@ -442,6 +445,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           {
             postId: args.postId,
             ...(args.yes !== undefined ? { yes: args.yes } : {}),
+            ...(args.mode !== undefined ? { mode: args.mode } : {}),
             ...(args.title !== undefined ? { title: args.title } : {}),
             ...(args.price !== undefined ? { price: args.price } : {}),
             ...(args.body !== undefined ? { body: args.body } : {}),
