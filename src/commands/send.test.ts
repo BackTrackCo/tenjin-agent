@@ -70,6 +70,10 @@ beforeEach(async () => {
   balanceMock.mockResolvedValue(10_000_000n); // $10 by default
   prepareMock.mockResolvedValue(preparedFixture());
   broadcastMock.mockResolvedValue('0xabc123');
+  // sendMaxAmount has NO default: unset refuses (the require-set-before-first-
+  // send posture, pinned in its own describe below). Every other test therefore
+  // carries an explicit cap decision — 'none' is the explicit uncapped opt-in.
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ sendMaxAmount: 'none' }));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -255,6 +259,54 @@ describe('runSend, sendMaxAmount policy gate (never satisfied by --yes)', () => 
 
   it('an amount exactly at the cap passes the gate', async () => {
     await setCap('1000000'); // $1 cap
+    const { provider } = spiedProvider();
+    const result = await runSend(
+      { amount: '1', token: 'usdc', to: TO_LOWER, yes: true },
+      makeCtx(),
+      { provider },
+    );
+    expect((result.data as { txHash: string }).txHash).toBe('0xabc123');
+  });
+});
+
+describe('runSend, unset sendMaxAmount refuses (require-set-before-first-send)', () => {
+  beforeEach(async () => {
+    // The fresh-install shape: no config.json at all, so sendMaxAmount was
+    // never set. There is no numeric fallback; the send must refuse.
+    await rm(join(dir, 'config.json'), { force: true });
+  });
+
+  it('refuses as POLICY_REFUSED even with --yes: no chain read, no signer, no broadcast', async () => {
+    const { provider, getSigner } = spiedProvider();
+    await expect(
+      runSend({ amount: '0.01', token: 'usdc', to: TO_LOWER, yes: true }, makeCtx(), { provider }),
+    ).rejects.toMatchObject({
+      code: 'POLICY_REFUSED',
+      exitCode: 3,
+      // The refusal must name the exact command that sets the cap.
+      fix: expect.stringContaining('tenjin config set sendMaxAmount'),
+    });
+    expect(getSigner).not.toHaveBeenCalled();
+    expect(broadcastMock).not.toHaveBeenCalled();
+    expect(balanceMock).not.toHaveBeenCalled(); // the gate fires before any chain read
+  });
+
+  it('an interactive confirm is never consulted: the gate is policy, not consent', async () => {
+    const { provider, getSigner } = spiedProvider();
+    const confirm = vi.fn(async () => true); // would approve, must never be asked
+    await expect(
+      runSend({ amount: '0.01', token: 'usdc', to: TO_LOWER }, makeCtx({}, true), {
+        provider,
+        confirm,
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_REFUSED', exitCode: 3 });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(getSigner).not.toHaveBeenCalled();
+    expect(broadcastMock).not.toHaveBeenCalled();
+  });
+
+  it('an explicit "none" in the file is honored as the uncapped opt-in', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ sendMaxAmount: 'none' }));
     const { provider } = spiedProvider();
     const result = await runSend(
       { amount: '1', token: 'usdc', to: TO_LOWER, yes: true },

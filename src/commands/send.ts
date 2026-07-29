@@ -1,4 +1,5 @@
 import { formatEther, getAddress, isAddress, type Address } from 'viem';
+import { SEND_MAX_UNSET } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { promptYesNo } from '../lib/prompt';
@@ -23,7 +24,9 @@ import type { CommandContext, CommandResult } from '../context';
  *   - the confirm (buy's posture: interactive y/N, `--yes` bypasses the prompt
  *     only, headless without it refuses) runs BEFORE the signer is resolved, so
  *     no refusal branch ever touches key material;
- *   - `sendMaxAmount` is a spend-policy gate, NOT satisfiable by --yes;
+ *   - `sendMaxAmount` is a spend-policy gate, NOT satisfiable by --yes, and it
+ *     has NO default: unset refuses until `config set sendMaxAmount` is run
+ *     (require-set-before-first-send; "none" is an explicit uncapped opt-in);
  *   - the verb is deliberately absent from the MCP toolset (spec 10's narrow
  *     toolset) and the skill adapters — human-invoked only, both pinned by tests.
  */
@@ -179,8 +182,25 @@ export async function runSend(
   };
 }
 
-/** The hard per-send cap (`config set sendMaxAmount`): a policy gate, not a confirm. */
-function enforceSendCap(amountAtomic: bigint, capAtomic: bigint | null): void {
+/**
+ * The hard per-send cap (`config set sendMaxAmount`): a policy gate, not a
+ * confirm — no branch here is satisfiable by --yes. There is no default cap:
+ * an unset key refuses (require-set-before-first-send), exactly as strict as
+ * the set-cap refusals below.
+ */
+function enforceSendCap(
+  amountAtomic: bigint,
+  capAtomic: bigint | null | typeof SEND_MAX_UNSET,
+): void {
+  if (capAtomic === SEND_MAX_UNSET) {
+    throw new CliError(
+      'POLICY_REFUSED',
+      'No sendMaxAmount is configured; a per-send cap must be set before the first send.',
+      {
+        fix: 'Run `tenjin config set sendMaxAmount <usd>` (or `0` to disable send, or `none` to opt in to uncapped), then retry. --yes does not bypass this.',
+      },
+    );
+  }
   if (capAtomic === null) return;
   if (capAtomic === 0n) {
     throw new CliError('POLICY_REFUSED', 'Sending is disabled by sendMaxAmount = 0.', {

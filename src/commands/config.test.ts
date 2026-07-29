@@ -48,7 +48,9 @@ describe('runConfigList', () => {
     expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
-    expect(d.sendMaxAmount).toEqual({ value: 'none', source: 'default' });
+    // No numeric or 'none' default: absent resolves to the 'unset' sentinel and
+    // `tenjin send` refuses until the cap is set (require-set-before-first-send).
+    expect(d.sendMaxAmount).toEqual({ value: 'unset', source: 'default' });
     expect(d['publish.mode']).toEqual({ value: 'review', source: 'default' });
     expect(d['publish.defaultPrice']).toEqual({
       value: { atomic: '100000', usd: '0.1' },
@@ -57,8 +59,15 @@ describe('runConfigList', () => {
     expect(humanLines).toHaveLength(10);
   });
 
-  it('sendMaxAmount round-trips: none by default, decimal USD in, Money out, 0 valid', async () => {
+  it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
     const ctx = makeCtx();
+    const fresh = await runConfigGet({ key: 'sendMaxAmount' }, ctx);
+    expect(fresh.data).toMatchObject({ value: 'unset', source: 'default' });
+    // The sentinel is a resolved view, never a settable/persistable value.
+    const sentinel = await caught(() =>
+      runConfigSet({ key: 'sendMaxAmount', value: 'unset' }, ctx),
+    );
+    expect(sentinel.code).toBe('USAGE');
     const set = await runConfigSet({ key: 'sendMaxAmount', value: '20' }, ctx);
     expect(set.data).toMatchObject({
       key: 'sendMaxAmount',

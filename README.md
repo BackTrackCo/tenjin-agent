@@ -54,8 +54,10 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 the harness skills, and nothing is signed until the previewed (checksummed)
 recipient, amount, and network fee are confirmed, interactively at a TTY or
 explicitly with `--yes` when headless. It refuses when the active wallet's
-passphrase entry is missing, and `tenjin config set sendMaxAmount <usd|0|none>`
-adds a hard per-send cap that `--yes` can never bypass (`0` disables the verb).
+passphrase entry is missing. The `sendMaxAmount` hard per-send cap has no
+default: `tenjin send` refuses until you run `tenjin config set sendMaxAmount
+<usd|0|none>` (`0` disables the verb, `none` opts in to uncapped), and `--yes`
+can never bypass the cap or the unset refusal.
 For routing FUTURE revenue away from the agent wallet entirely, connect the
 agent to your own Tenjin account instead (delegation); `send` exists for funds
 already sitting on the agent key.

@@ -6,6 +6,7 @@ import {
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
+  SEND_MAX_UNSET,
   loadRawConfig,
   resolveSettings,
 } from '../lib/config';
@@ -51,7 +52,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sessionBudget: 'cap on total auto-spend per session',
   confirm: 'when to ask before paying',
   sendMaxAmount:
-    'hard cap per tenjin send (0 disables send, none = uncapped); never bypassed by --yes',
+    'hard cap per tenjin send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   baseUrl: 'Tenjin API base URL',
   rpcUrl: 'Base RPC endpoint for balance reads',
@@ -214,7 +215,11 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
-  if (key === 'sendMaxAmount') return { value: stored === 'none' ? stored : toMoney(stored) };
+  if (key === 'sendMaxAmount') {
+    // 'unset' is the resolved sentinel for an absent key (send refuses), never
+    // a stored value; 'none' is the explicit uncapped opt-in.
+    return { value: stored === 'none' || stored === SEND_MAX_UNSET ? stored : toMoney(stored) };
+  }
   if (key === 'confirm' && stored.startsWith(CONFIRM_ABOVE)) {
     return { value: stored, threshold: toMoney(stored.slice(CONFIRM_ABOVE.length)) };
   }
