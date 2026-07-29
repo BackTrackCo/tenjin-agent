@@ -232,11 +232,13 @@ describe('runSend, sendMaxAmount policy gate (never satisfied by --yes)', () => 
     await writeFile(join(dir, 'config.json'), JSON.stringify({ sendMaxAmount: atomic }));
   }
 
-  it('refuses an amount over the cap as POLICY_REFUSED even with --yes', async () => {
-    await setCap('500000'); // $0.50 cap
+  it('refuses an amount one atomic unit over the cap as POLICY_REFUSED even with --yes', async () => {
+    await setCap('500000'); // $0.50 cap; the send is cap + 1n, pinning the boundary
     const { provider, getSigner } = spiedProvider();
     await expect(
-      runSend({ amount: '1', token: 'usdc', to: TO_LOWER, yes: true }, makeCtx(), { provider }),
+      runSend({ amount: '0.500001', token: 'usdc', to: TO_LOWER, yes: true }, makeCtx(), {
+        provider,
+      }),
     ).rejects.toMatchObject({ code: 'POLICY_REFUSED', exitCode: 3 });
     expect(getSigner).not.toHaveBeenCalled();
     expect(broadcastMock).not.toHaveBeenCalled();

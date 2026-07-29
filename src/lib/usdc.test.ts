@@ -11,6 +11,7 @@ vi.mock('viem', async () => {
 import {
   createPublicClient,
   decodeFunctionData,
+  encodeFunctionData,
   erc20Abi,
   getAddress,
   parseTransaction,
@@ -150,6 +151,20 @@ describe('broadcastUsdcSend', () => {
     const decoded = decodeFunctionData({ abi: erc20Abi, data: tx.data as `0x${string}` });
     expect(decoded.functionName).toBe('transfer');
     expect(decoded.args).toEqual([TO, 250_000n]);
+  });
+
+  it('refuses to sign calldata that no longer matches the previewed recipient/amount', async () => {
+    const p = await prepared();
+    p.data = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: 'transfer',
+      args: [FROM, 250_000n], // tampered: recipient is no longer the previewed TO
+    });
+    const client = stubClient();
+    await expect(
+      broadcastUsdcSend({ signer: testSigner(), prepared: p, rpcUrl: RPC }),
+    ).rejects.toThrow(/does not decode to the previewed/);
+    expect(client.sendRawTransaction).not.toHaveBeenCalled();
   });
 
   it('throws SendRevertedError (with the hash) when the receipt is a revert', async () => {

@@ -1,5 +1,6 @@
 import {
   createPublicClient,
+  decodeFunctionData,
   encodeFunctionData,
   erc20Abi,
   http,
@@ -79,6 +80,8 @@ export interface PrepareUsdcSendArgs {
  * The nonce is pinned here, BEFORE the human confirm, so anything else spending
  * from this key during that window makes the later broadcast fail nonce-stale
  * (an RPC_ERROR from the node; nothing double-spends — re-run to re-prepare).
+ * `to` and `amountAtomic` are the previewed intent; broadcastUsdcSend re-decodes
+ * `data` against them before signing.
  */
 export interface PreparedUsdcSend {
   to: Address;
@@ -149,6 +152,20 @@ export async function broadcastUsdcSend({
   receiptTimeoutMs = 120_000,
 }: BroadcastUsdcSendArgs): Promise<Hex> {
   const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
+  // Pre-sign cross-check, the calldata twin of send.ts's signer/preview match:
+  // the bytes about to be signed must still decode to the previewed recipient
+  // and amount. Unreachable unless prepare-time state was corrupted; refusing
+  // here means nothing is signed against a preview it does not match.
+  const decoded = decodeFunctionData({ abi: erc20Abi, data: prepared.data });
+  if (
+    decoded.functionName !== 'transfer' ||
+    decoded.args[0].toLowerCase() !== prepared.to.toLowerCase() ||
+    decoded.args[1] !== prepared.amountAtomic
+  ) {
+    throw new Error(
+      'Prepared calldata does not decode to the previewed recipient and amount; nothing was signed.',
+    );
+  }
   const serializedTransaction = await signer.signTransaction({
     type: 'eip1559',
     chainId: base.id,

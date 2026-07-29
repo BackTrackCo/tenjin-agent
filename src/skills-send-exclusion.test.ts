@@ -11,15 +11,17 @@ import { fileURLToPath } from 'node:url';
  * content, so a remote edit mentioning send would otherwise land here silently.
  */
 describe('skill adapters never teach the send verb', () => {
-  it('no SKILL.md mentions tenjin send (or a tenjin_send tool)', async () => {
+  it('no SKILL.md mentions tenjin send (or tenjin_send / tenjin-send)', async () => {
     const skillsDir = fileURLToPath(new URL('../skills', import.meta.url));
     const entries = await readdir(skillsDir, { withFileTypes: true });
     const skillDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
     expect(skillDirs.length).toBeGreaterThan(0);
     for (const name of skillDirs) {
       const body = await readFile(join(skillsDir, name, 'SKILL.md'), 'utf8');
+      // \s+ catches "tenjin send" wrapped across lines; _ and - catch the
+      // tool-name and branch-name spellings (tenjin_send, tenjin-send).
       expect(body, `skills/${name}/SKILL.md must not mention the send verb`).not.toMatch(
-        /\btenjin[ _]send\b/i,
+        /\btenjin[\s_-]+send\b/i,
       );
     }
   });
