@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './cli';
 import type { Io } from './lib/output';
@@ -11,8 +11,22 @@ import type { Io } from './lib/output';
 // command rename turns into a red build here rather than an expectation that
 // quietly grades a command nobody will ever run.
 
-const read = (path: string): string =>
-  readFileSync(fileURLToPath(new URL(`../evals/${path}`, import.meta.url)), 'utf8');
+const EVALS_DIR = fileURLToPath(new URL('../evals/', import.meta.url));
+const SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url));
+
+const read = (path: string): string => readFileSync(`${EVALS_DIR}${path}`, 'utf8');
+
+/**
+ * Every `.json` and `.md` under `evals/`, relative to it. Walked rather than
+ * listed: a hardcoded list guards whatever it happens to name, and the day
+ * someone adds a fixture it guards less than it claims while staying green.
+ */
+function walkFixtures(dir = EVALS_DIR, prefix = ''): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.isDirectory()) return walkFixtures(`${dir}${entry.name}/`, `${prefix}${entry.name}/`);
+    return /\.(json|md)$/.test(entry.name) ? [`${prefix}${entry.name}`] : [];
+  });
+}
 
 interface EvalCase {
   id: number;
@@ -35,7 +49,7 @@ interface TriggerCase {
 
 const OUTPUT_FILES = ['tenjin-search/evals.json', 'tenjin-publish/evals.json'] as const;
 
-const SOURCES = [...OUTPUT_FILES, 'tenjin-search/trigger-eval.json', 'README.md'] as const;
+const SOURCES = walkFixtures();
 
 // Verbs the CLI has retired, and what replaced them. The invocation check below
 // only sees backtick-quoted commands, so on its own it reddens the build for
@@ -85,6 +99,13 @@ describe('eval fixtures', () => {
     expect(parsed.skill_name).toBe(path.split('/')[0]);
     expect(parsed.evals.length).toBeGreaterThan(0);
 
+    // Both sides of the assertion above come from evals/, so on its own it
+    // would stay green while the fixtures point at a skill nobody ships.
+    expect(
+      existsSync(`${SKILLS_DIR}${parsed.skill_name}/SKILL.md`),
+      `${path} grades skills/${parsed.skill_name}/SKILL.md, which does not exist`,
+    ).toBe(true);
+
     const ids = parsed.evals.map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
 
@@ -93,6 +114,10 @@ describe('eval fixtures', () => {
       expect(c.expected_output.length, `case ${c.id} expected_output`).toBeGreaterThan(0);
       expect(Array.isArray(c.files), `case ${c.id} files`).toBe(true);
       expect(c.expectations.length, `case ${c.id} expectations`).toBeGreaterThan(0);
+      // A seeded file the harness cannot find makes the case silently untestable.
+      for (const f of c.files) {
+        expect(existsSync(`${EVALS_DIR}${f}`), `case ${c.id} seeds missing file ${f}`).toBe(true);
+      }
     }
   });
 
@@ -114,9 +139,13 @@ describe('eval fixtures', () => {
       for (const invocation of quotedInvocations(read(path))) {
         const verb = invocation.split(' ')[0] ?? invocation;
         // A verb that owns subcommands proves nothing on its own: `candidate`
-        // is registered whether or not `candidate frobnicate` is, so the pair
-        // has to match rather than falling back to the first word.
-        const known = reg.parents.has(verb) ? reg.pairs.has(invocation) : reg.verbs.has(verb);
+        // is registered whether or not `candidate frobnicate` is, so a two-word
+        // form has to match as a pair rather than falling back to the first
+        // word. The bare group name is still a legitimate thing for prose to
+        // name, so it passes on its own.
+        const known = reg.parents.has(verb)
+          ? invocation === verb || reg.pairs.has(invocation)
+          : reg.verbs.has(verb);
         expect(
           known,
           `${path} names \`tenjin ${invocation}\`, which the CLI does not register`,

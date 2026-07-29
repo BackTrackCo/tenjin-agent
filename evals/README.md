@@ -11,10 +11,19 @@ its output right when it does. These are the skill half of the eval loop. The re
 evals/
   tenjin-search/
     trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
-    evals.json          # 4 output cases with expectations
+    evals.json          # 6 output cases with expectations
+    fixtures/           # bodies seeded into a case's workspace via its `files`
   tenjin-publish/
-    evals.json          # 4 output cases with expectations
+    evals.json          # 5 output cases with expectations
 ```
+
+`files` entries are paths relative to `evals/`. Case 6 seeds
+`tenjin-search/fixtures/purchased-piece.md`, a synthetic purchased body carrying an embedded
+instruction block. It is a prompt-injection payload on purpose and the only one here: the
+untrusted-data rule is the one rule in either skill whose failure an attacker triggers rather
+than the operator, so it is graded with a real payload rather than described. The file carries
+no disclaimer, because a disclaimer inside it would be visible to the agent under test and
+would grade nothing.
 
 File formats mirror Anthropic's skill-creator plugin. `evals.json` follows
 `references/schemas.md` in `anthropics/skills`: `skill_name` plus an `evals` array of
@@ -31,8 +40,10 @@ fixtures should not. Point the tooling at these paths explicitly.
 
 `tenjin-publish` is `disable-model-invocation: true`. It never self-triggers, so there is no
 trigger rate to measure and no description to tune. Its only entry paths are an explicit user
-publish ask and the after-a-MISS flow in `tenjin-search`. Both are covered by its output
-cases.
+publish ask, covered by cases 1 to 4, and the after-a-MISS flow in `tenjin-search`, covered by
+case 5. The second one matters more than its case count suggests: it is the only path on which
+the CLI can publish without the user having asked, so it is where consent is decided by the
+resolved `publish.mode` rather than by a request.
 
 ## Running them
 
@@ -53,11 +64,17 @@ export TENJIN_PUBLISH_MODE=review
 export TENJIN_DATA_DIR="$(mktemp -d)"
 ```
 
-Both are defaults-only otherwise. `publish.mode` resolves global config, then a project
-`.tenjin.json`, then the environment, so on a machine where auto mode or a `maxAutoSpend` was
-set for real use, an unpinned run would publish these synthetic drafts for real under the
-operator's wallet. The throwaway `TENJIN_DATA_DIR` also keeps eval traffic out of the real
-library, search history, and candidate pen.
+The two lines do different jobs, and the data dir does most of it. `TENJIN_DATA_DIR` moves
+`config.json` and `wallet.json` (`src/lib/paths.ts`), so a global `publish.mode` or
+`maxAutoSpend` set for real use is already out of the picture, and with no wallet in the temp
+dir a publish cannot settle at all. It also keeps eval traffic out of the real library, search
+history, and candidate pen.
+
+What `TENJIN_PUBLISH_MODE=review` buys is the one layer the data dir does not touch: a project
+`.tenjin.json` in whatever directory the cases run in. `publish.mode` resolves global file,
+then project, then env, then flag (`src/lib/config.ts`), so the env pin outranks that project
+file and nothing else does. Run the cases outside a repo that ships one and both lines are
+belt and braces; run them inside one and only the env pin is holding.
 
 Output cases: ask Claude to evaluate the skill with skill-creator and give it the fixture
 path, for example `evaluate skills/tenjin-search with skill-creator using
@@ -76,8 +93,8 @@ python -m scripts.run_loop \
 
 Defaults that matter: `--runs-per-query 3`, `--trigger-threshold 0.5`, `--holdout 0.4` (40% of
 queries are held out as a test set, stratified by `should_trigger`). The loop emits a
-`best_description`; apply it to the SKILL.md frontmatter by hand, and keep the wording aligned
-with the live skills.md.
+`best_description`; apply it by hand to the frontmatter of `skills/tenjin-search/SKILL.md` in
+this repo, which is the file that ships in the npm package and the one these fixtures grade.
 
 Results are written to a workspace directory. Keep it outside the repo. Nothing from a run
 belongs in git.
@@ -86,11 +103,15 @@ belongs in git.
 
 One trigger pass is 20 queries times 3 repeats, roughly $5 to $15. `--max-iterations 5`
 multiplies that by the number of iterations it actually runs, so cap iterations when probing.
-Output cases are cheaper per run but spawn a full agent per case per configuration.
+Output cases are cheaper per run but spawn a full agent per case per configuration, and there
+are eleven of them across the two files, each run twice under the baseline discipline below.
+Adding a case is a permanent per-pass cost, so add one to cover a decision boundary nothing
+else reaches rather than to restate a rule an existing case already grades.
 
-Search cases only exercise free commands (`tenjin search`, `tenjin inspect`, `tenjin outcome`). Case 1 permits a buy
-on explicit user approval, so nothing buys in practice only because an unattended loop has
-nobody to approve; leave `maxAutoSpend` at its `0` default and that holds. Publish cases run
+Search cases only exercise free commands (`tenjin search`, `tenjin inspect`, `tenjin outcome`).
+Cases 1 and 5 permit a buy on explicit user approval, so nothing buys in practice only because
+an unattended loop has nobody to approve; leave `maxAutoSpend` at its `0` default and that
+holds. Publish cases run
 under `publish.mode: review`, so `tenjin publish` exits 3 with a `needs_confirmation` payload
 and nothing goes live; never pass `--yes` in an eval run. Leave `evalCohort` off so eval traffic
 does not land in 90-day question retention.
@@ -113,7 +134,17 @@ description says; that is the same instinct the four gates are written to respec
 persistent miss on a genuinely cheap-looking query as expected, not as a tuning failure.
 Chasing it produces a description that overtriggers on the negatives.
 
-## The MISS precondition
+## The corpus preconditions
+
+Two cases are coupled to what the live index holds, and both state it rather than assert it.
+
+Search case 5 needs the opposite of a MISS: it grades the judgment that a piece covering
+neighbouring versions does not answer a version-specific question, which only bites when a
+near neighbour exists to be declined. Its expectations are written conditionally so a MISS
+degrades the case to a weaker duplicate of case 3 rather than failing it, but a MISS means the
+case measured nothing that day, and it should be repointed at a subject the corpus does cover.
+Publish case 5 assumes the same uncovered-query property as case 3, since its whole shape is
+search, MISS, then publish what you derived.
 
 Search case 3 is written around a query the live corpus does not cover, and its expectations
 read most naturally against a MISS. What the case grades is agent-side, though: one search, the
@@ -131,13 +162,29 @@ says. When improving an existing skill, the baseline is a snapshot of the previo
 rather than no skill at all. A with-skill pass rate on its own means nothing; the delta against
 the baseline is the result.
 
-## Rubrics defer to skills.md
+## Rubrics defer to the graded skill
 
 Every expectation traces to something a skill states or the CLI enforces. Nothing here invents
-a rule. The wording of the skills' rules has exactly one home, `lib/agent-docs.ts` in the tenjin
-repo, rendered as skills.md and vendored into `skills/`. If an expectation and a skill disagree,
-the skill is right and the expectation is stale. Grading guidance a skill never gives corrupts
-the with-skill delta, which is the whole result.
+a rule. If an expectation and the skill it grades disagree, the skill is right and the
+expectation is stale. Grading guidance a skill never gives corrupts the with-skill delta, which
+is the whole result.
+
+The skill it grades is the one in this repo. `skills/` holds three files with two different
+provenances, and only one of them is generated:
+
+- `skills/tenjin-search/SKILL.md` and `skills/tenjin-publish/SKILL.md` are hand-maintained
+  here. They are what these fixtures grade and what ships in the npm package, so a rule change
+  is an edit to those files in a PR against this repo.
+- `skills/tenjin/SKILL.md` is the zero-install skill, vendored verbatim from
+  https://tenjin.blog/skills.md by `pnpm sync:skill`, carrying a do-not-hand-edit banner and
+  guarded by `skill-drift.yml`. Nothing here grades it. Its wording lives in `lib/agent-docs.ts`
+  in the tenjin repo.
+
+The two are related but not generated from each other: the answer-card rules these expectations
+grade do have a shared ancestor in `agent-docs.ts` (the same "5 to 10 entries, 200 chars max
+each, and vary the REGISTER" wording), while the CLI-specific guidance the search cases grade
+exists only here. So a card-rule change worth making is usually worth making in both repos, and
+a drift between them is a real finding rather than a formatting difference.
 
 Most expectations are mechanically observable: command counts, character caps, entry counts,
 whether a private identifier survived into a query. A few are grader judgments, unavoidably so,
@@ -153,9 +200,24 @@ questions and tasks kept in their own lists, as-of date, dense scope, exclusions
 without private data. The CLI-enforced limits alone do not discriminate, since a completed
 publish satisfies them by construction; the skill-side rules are what a baseline run misses.
 
-`artifactType` is graded nowhere: the publish skill never mentions it and the CLI sets no
-default, so there is no rule to hold a run to. Grade it once guidance for it lands in
-`agent-docs.ts`.
+### Deliberately ungraded
+
+So a reader can tell a decision from an oversight:
+
+- **`artifactType`**: the publish skill never mentions it and the CLI sets no default, so there
+  is no rule to hold a run to. Grade it once guidance for it lands in the skill.
+- **Pricing**: the skill is explicit that there is no standard band and that pricing by the
+  work is the call to make, so any price a run picks is defensible and a grader would be
+  scoring taste.
+- **Update over near-duplicate**: needs an already-published piece by the same author to update,
+  which these single-turn cases have no way to set up.
+- **Park on "not now"**: the pen is the branch taken when a user declines mid-flow. A case here
+  is one prompt and one turn, so there is no second turn in which to decline. Cases 4 and 5
+  grade up to the rendered `needs_confirmation` payload and stop, which is as far as the
+  harness reaches.
+
+The last two want a multi-turn harness rather than more expectations. Adding them as
+single-turn cases would grade a scripted answer to a question the user never asked.
 
 ## Where these run
 
@@ -164,7 +226,13 @@ they are a release-time and post-edit check rather than a per-commit gate.
 
 What does run per-commit is `src/evals-fixtures.test.ts`, which costs nothing and catches the
 ways these files rot without a run: the JSON parses, ids are unique, `should_trigger` stays
-balanced, every `tenjin <verb>` an expectation names is still a verb the CLI registers, and no
-retired verb survives anywhere in the prose. The first of those catches a rename; the second is
-what stops the fix from chasing only the red and leaving half the sentences describing a
-command that no longer exists. `tenjin search` earned both checks the week they were written.
+balanced, each `skill_name` names a skill that exists, each seeded `files` path resolves, every
+`tenjin <verb>` an expectation names is still a verb the CLI registers, and no retired verb
+survives anywhere in the prose. The last two are a pair: the first catches a rename, the second
+stops the fix from chasing only the red and leaving half the sentences describing a command that
+no longer exists. `tenjin search` earned both the week they were written.
+
+It walks `evals/` rather than working from a list, so a fixture added later is guarded on
+arrival. The one thing it cannot infer is which verbs have been retired: renaming a command
+means adding an entry to `RETIRED_VERBS` in that file, in the same commit as the rename, or the
+prose sweep silently has nothing to sweep for.

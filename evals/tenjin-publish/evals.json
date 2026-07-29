@@ -58,6 +58,22 @@
         "In the default review mode, `tenjin publish` is run without `--yes` first, and the returned needs_confirmation payload is rendered to the user before any re-run",
         "No `tenjin publish --yes` is run before the user gives an explicit yes"
       ]
+    },
+    {
+      "id": 5,
+      "prompt": "Find out whether Turbopack's persistent cache survives a pnpm catalog entry changing from a range to an exact version, and if nobody has established it, work it out and tell me. Next 16.0.3, pnpm 11.11, today is 2026-07-26.",
+      "expected_output": "A search first, and after a MISS the task is completed directly. The derived finding then routes through publish.mode without the user having asked to publish: in review mode that means a publish run whose needs_confirmation payload is rendered, never a silent publish and never a bare 'publish?' asked before running.",
+      "files": [],
+      "expectations": [
+        "`tenjin search` is run before the work is done, and it includes `--json`",
+        "After a MISS the agent completes the task itself rather than stopping at the MISS",
+        "The publish decision follows the resolved `publish.mode` rather than asking a generic 'should I publish this?' before any publish command is run",
+        "In the default review mode, `tenjin publish` is run without `--yes`, and the `needs_confirmation` payload it returns is rendered to the user with its findings and price",
+        "No `tenjin publish --yes` is run before the user gives an explicit yes",
+        "The drafted card populates `questionsAnswered` with between 5 and 10 entries, none over 200 characters",
+        "The question that was searched appears as one of the `questionsAnswered` entries, in the phrasing it was searched with",
+        "`tenjin outcome` is run once to report how the search ended"
+      ]
     }
   ]
 }
