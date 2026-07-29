@@ -108,10 +108,19 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     timeoutMs: opts.timeoutMs,
     headers,
     fetchImpl: opts.fetchImpl,
+    // Pinned even when UNSIGNED (the first probe): a 200 from this route is
+    // written to the library by `deliverFresh` as an entitlement record under
+    // the server-chosen id/slug, and `findDeliveredByUrl` later matches saved
+    // receipts by handle+slug alone — so a followed cross-origin redirect
+    // would let another host's bytes short-circuit future buys as owned.
+    // `assertOnBaseOrigin` cannot catch this; it checks only the URL asked for.
+    blockRedirects: true,
   });
   if (!res.ok) {
     // A redirect refused mid-flight is a server-contract problem, not a flaky
-    // network: retrying re-sends the same signature into the same redirect.
+    // network: retrying a signed request re-sends the same signature into the
+    // same redirect, and retrying the unsigned probe re-fetches bytes the
+    // library must never record as this origin's.
     if (res.kind === 'blocked-redirect') {
       throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
         fix: 'The read route must not redirect. Check the configured base URL, or update tenjin-cli.',

@@ -261,10 +261,16 @@ describe('runRead, module boundary', () => {
    * green in this codebase specifically: `src/cli.ts` loads its commands through
    * `await import(...)` in 18 places, so a dynamic hop is the idiom here rather
    * than an exotic case, and a guard blind to it would wave through exactly the
-   * refactor it exists to stop.
+   * refactor it exists to stop. All three QUOTE styles too: prettier normalizes
+   * string literals to single quotes but is happy with a template-literal
+   * specifier, so `import(\`../lib/x402-pay\`)` could land while a single-quote
+   * matcher waved it through; double quotes cannot survive `format:check` but
+   * cost nothing to cover.
    */
   function importSpecs(source: string): string[] {
-    return [...source.matchAll(/(?:from|import)\s*\(?\s*'(\.[^']+)'/g)].map((m) => m[1] as string);
+    return [...source.matchAll(/(?:from|import)\s*\(?\s*(['"`])(\.[^'"`]+)\1/g)].map(
+      (m) => m[2] as string,
+    );
   }
 
   // Pin the matcher itself. Everything below is only as good as this regex, and its
@@ -278,6 +284,12 @@ describe('runRead, module boundary', () => {
     ]);
     expect(importSpecs("import '../lib/x402-pay';")).toEqual(['../lib/x402-pay']);
     expect(importSpecs("import { z } from 'zod';")).toEqual([]); // bare specifiers are not local
+    // Quote-style evasions: template literal (prettier-clean, so a live path) and
+    // double quotes (format:check-blocked, but covered anyway).
+    expect(importSpecs('const m = await import(`../lib/x402-pay`);')).toEqual(['../lib/x402-pay']);
+    expect(importSpecs('const m = await import("../lib/x402-pay");')).toEqual(['../lib/x402-pay']);
+    // Mismatched quotes are not an import the runtime would accept; stay silent.
+    expect(importSpecs("await import('../lib/x402-pay`)")).toEqual([]);
   });
 
   // The structural pin the whole verb rests on: `read` must be UNABLE to pay, not

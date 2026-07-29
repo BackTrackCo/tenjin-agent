@@ -114,4 +114,22 @@ describe('fetchRead', () => {
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
     expect(seen).toBe(1);
   });
+
+  // The UNSIGNED first probe is pinned too, for a different reason than the
+  // credential guard: its 200 is written to the library as an entitlement record
+  // under the server-chosen id/slug, and findDeliveredByUrl matches saved
+  // receipts on handle+slug alone — so a followed cross-origin redirect would
+  // let another host's bytes short-circuit a later `tenjin buy` as owned.
+  it('refuses a redirect on the unsigned probe as well (the response becomes a durable record)', async () => {
+    const inits: (RequestInit | undefined)[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      inits.push(init);
+      return new Response('', { status: 302, headers: { location: 'https://evil.example/' } });
+    };
+    await expect(fetchRead(URL_, { timeoutMs: 1000, fetchImpl })).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+    });
+    expect(inits).toHaveLength(1);
+    expect(inits[0]?.redirect).toBe('manual');
+  });
 });

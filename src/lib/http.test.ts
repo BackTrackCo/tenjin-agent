@@ -159,6 +159,52 @@ describe('httpRequest, signed requests never follow redirects', () => {
     expect(calls[0]?.redirect).toBe('manual');
   });
 
+  it('refuses a 3xx carrying the session delegation header (reusable SIWX signature)', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => redirect(302, 'https://evil.example/'));
+    const res = await httpRequest('https://tenjin.blog/api/posts', {
+      method: 'POST',
+      timeoutMs: 1000,
+      // The literal `session-key.ts` sends: a session-lifetime wallet signature,
+      // re-sent verbatim on every session-signed write, so the most replayable
+      // credential of the set.
+      headers: { 'Tenjin-Session-Delegation': 'delegation-value' },
+      jsonBody: {},
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 302 });
+    expect(calls[0]?.redirect).toBe('manual');
+  });
+
+  it('refuses a 3xx carrying the x402 v1 X-PAYMENT spelling (drift insurance)', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => redirect(302, 'https://evil.example/'));
+    const res = await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: { 'X-PAYMENT': 'pay-value' },
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 302 });
+    expect(calls[0]?.redirect).toBe('manual');
+  });
+
+  it('pins an UNSIGNED request when the caller sets blockRedirects (durable-artifact case)', async () => {
+    const { fetchImpl, calls } = recordingFetch(() =>
+      redirect(302, 'https://evil.example/content'),
+    );
+    const res = await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: { accept: 'application/json' },
+      blockRedirects: true,
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 302 });
+    expect(calls[0]?.redirect).toBe('manual');
+    // The unsigned message must not claim a signed header was involved.
+    expect((res as { message: string }).message).not.toContain('signed header');
+  });
+
   it('leaves unsigned requests alone, redirects and all', async () => {
     const { fetchImpl, calls } = recordingFetch(
       () => new Response(JSON.stringify({ ok: 1 }), { status: 200 }),
