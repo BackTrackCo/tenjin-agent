@@ -35,19 +35,43 @@ interface TriggerCase {
 
 const OUTPUT_FILES = ['tenjin-search/evals.json', 'tenjin-publish/evals.json'] as const;
 
-function registeredVerbs(): Set<string> {
+const SOURCES = [...OUTPUT_FILES, 'tenjin-search/trigger-eval.json', 'README.md'] as const;
+
+// Verbs the CLI has retired, and what replaced them. The invocation check below
+// only sees backtick-quoted commands, so on its own it reddens the build for
+// `tenjin lookup` while leaving "the lookup command includes --json" standing.
+// This sweeps the prose too, which is the half a rename actually forgets.
+const RETIRED_VERBS: ReadonlyArray<{ verb: string; replacement: string }> = [
+  { verb: 'lookup', replacement: 'search' },
+];
+
+// `scripts/eval-lookup-recall.ts` is a script in the tenjin repo, not a CLI verb,
+// and it kept its name through the search rename.
+const RETIRED_EXEMPT = /eval-lookup-recall/g;
+
+interface Registry {
+  /** Top-level verbs: `search`, `publish`, `candidate`. */
+  verbs: Set<string>;
+  /** Two-word forms: `candidate add`, `config set`. */
+  pairs: Set<string>;
+  /** Verbs that own subcommands, so a bare first word proves nothing. */
+  parents: Set<string>;
+}
+
+function registry(): Registry {
   const sink = { write: () => true } as unknown as NodeJS.WritableStream;
   const io: Io = { stdout: sink, stderr: sink, isTTY: false };
   const program = buildProgram(io, () => {});
-  const verbs = new Set<string>();
+  const reg: Registry = { verbs: new Set(), pairs: new Set(), parents: new Set() };
   for (const command of program.commands) {
-    verbs.add(command.name());
-    for (const sub of command.commands) verbs.add(`${command.name()} ${sub.name()}`);
+    reg.verbs.add(command.name());
+    if (command.commands.length > 0) reg.parents.add(command.name());
+    for (const sub of command.commands) reg.pairs.add(`${command.name()} ${sub.name()}`);
   }
-  return verbs;
+  return reg;
 }
 
-// Only backtick-quoted invocations: `tenjin lookup`, `tenjin candidate add`. The
+// Only backtick-quoted invocations: `tenjin search`, `tenjin candidate add`. The
 // leading backtick is what keeps prose like "the tenjin repo" out of the match.
 function quotedInvocations(text: string): string[] {
   return [...text.matchAll(/`tenjin ((?:[a-z][a-z0-9-]*)(?: [a-z][a-z0-9-]*)?)/g)].flatMap((m) =>
@@ -84,17 +108,34 @@ describe('eval fixtures', () => {
 
   // The drift guard. A fixture may only name a command the CLI actually has.
   it('every tenjin command named in a fixture or the README is registered', () => {
-    const verbs = registeredVerbs();
-    const sources = [...OUTPUT_FILES, 'tenjin-search/trigger-eval.json', 'README.md'];
+    const reg = registry();
 
-    for (const path of sources) {
+    for (const path of SOURCES) {
       for (const invocation of quotedInvocations(read(path))) {
         const verb = invocation.split(' ')[0] ?? invocation;
-        const known = verbs.has(invocation) || verbs.has(verb);
+        // A verb that owns subcommands proves nothing on its own: `candidate`
+        // is registered whether or not `candidate frobnicate` is, so the pair
+        // has to match rather than falling back to the first word.
+        const known = reg.parents.has(verb) ? reg.pairs.has(invocation) : reg.verbs.has(verb);
         expect(
           known,
           `${path} names \`tenjin ${invocation}\`, which the CLI does not register`,
         ).toBe(true);
+      }
+    }
+  });
+
+  // The prose half of the same guard: a retired verb has to be gone from the
+  // sentences and the fenced blocks too, not just from the quoted invocations.
+  it('no retired verb survives anywhere in the fixture text', () => {
+    for (const path of SOURCES) {
+      const text = read(path).replace(RETIRED_EXEMPT, '');
+      for (const { verb, replacement } of RETIRED_VERBS) {
+        const hit = new RegExp(`\\b${verb}`, 'i').exec(text);
+        expect(
+          hit,
+          `${path} still says "${hit?.[0] ?? verb}"; the CLI retired \`tenjin ${verb}\` in favor of \`tenjin ${replacement}\``,
+        ).toBeNull();
       }
     }
   });

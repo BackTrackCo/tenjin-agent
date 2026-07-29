@@ -57,7 +57,7 @@ Both are defaults-only otherwise. `publish.mode` resolves global config, then a 
 `.tenjin.json`, then the environment, so on a machine where auto mode or a `maxAutoSpend` was
 set for real use, an unpinned run would publish these synthetic drafts for real under the
 operator's wallet. The throwaway `TENJIN_DATA_DIR` also keeps eval traffic out of the real
-library, lookup history, and candidate pen.
+library, search history, and candidate pen.
 
 Output cases: ask Claude to evaluate the skill with skill-creator and give it the fixture
 path, for example `evaluate skills/tenjin-search with skill-creator using
@@ -88,7 +88,7 @@ One trigger pass is 20 queries times 3 repeats, roughly $5 to $15. `--max-iterat
 multiplies that by the number of iterations it actually runs, so cap iterations when probing.
 Output cases are cheaper per run but spawn a full agent per case per configuration.
 
-Search cases only exercise free commands (`lookup`, `inspect`, `outcome`). Case 1 permits a buy
+Search cases only exercise free commands (`tenjin search`, `tenjin inspect`, `tenjin outcome`). Case 1 permits a buy
 on explicit user approval, so nothing buys in practice only because an unattended loop has
 nobody to approve; leave `maxAutoSpend` at its `0` default and that holds. Publish cases run
 under `publish.mode: review`, so `tenjin publish` exits 3 with a `needs_confirmation` payload
@@ -108,10 +108,20 @@ exactly one gate while keeping a positive's subject matter, are where a lazily t
 description loses. Read the negative pass rate first.
 
 Some misses are architectural and no description edit fixes them. When a question is one the
-model can answer instantly and confidently, it will answer rather than look up, whatever the
+model can answer instantly and confidently, it will answer rather than search, whatever the
 description says; that is the same instinct the four gates are written to respect. Treat a
 persistent miss on a genuinely cheap-looking query as expected, not as a tuning failure.
 Chasing it produces a description that overtriggers on the negatives.
+
+## The MISS precondition
+
+Search case 3 is written around a query the live corpus does not cover, and its expectations
+read most naturally against a MISS. What the case grades is agent-side, though: one search, the
+returned decision treated as final, no buy on a `browse` pointer, an answer in the same turn. It
+does not assert that the server returns MISS, because that is a property of what the index holds
+on the day of the run rather than of the skill. If someone publishes a measured edge-runtime
+cold-start comparison, the case stops testing the MISS path and starts testing the candidate
+path, and it should be repointed at a fresh uncovered query rather than read as a regression.
 
 ## Baseline discipline
 
@@ -154,6 +164,7 @@ they are a release-time and post-edit check rather than a per-commit gate.
 
 What does run per-commit is `src/evals-fixtures.test.ts`, which costs nothing and catches the
 ways these files rot without a run: the JSON parses, ids are unique, `should_trigger` stays
-balanced, and every `tenjin <verb>` an expectation names is still a verb the CLI registers.
-That last check is why a command rename cannot silently turn an expectation into one that
-grades a command nobody runs.
+balanced, every `tenjin <verb>` an expectation names is still a verb the CLI registers, and no
+retired verb survives anywhere in the prose. The first of those catches a rename; the second is
+what stops the fix from chasing only the red and leaving half the sentences describing a
+command that no longer exists. `tenjin search` earned both checks the week they were written.

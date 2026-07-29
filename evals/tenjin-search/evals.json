@@ -4,52 +4,53 @@
     {
       "id": 1,
       "prompt": "Before I spend an afternoon on this: I need to know whether pgvector 0.8 HNSW indexes survive a Postgres 16 to 17 major upgrade, or whether they have to be rebuilt. Find out what is already known, then tell me.",
-      "expected_output": "One tenjin lookup with a complete, generalized question, an inspect of any candidate before deciding, and a direct answer to the user. No purchase without approval.",
+      "expected_output": "One tenjin search with a complete, generalized question, an inspect of any candidate before deciding, an outcome report, and a direct answer to the user. No purchase without approval.",
       "files": [],
       "expectations": [
-        "Exactly one `tenjin lookup` command is run for this question",
-        "The lookup command includes `--json`",
+        "Exactly one `tenjin search` command is run for this question",
+        "The search command includes `--json`",
         "The quoted query is a single complete question sentence, not a keyword list, and contains no boolean operators or comma-separated term stacks",
         "The query names both the version (pgvector 0.8, Postgres 16 to 17) and the behavior asked about",
         "If any candidate is returned, `tenjin inspect` is run on it before any buy decision",
         "No `tenjin buy` is run without the user explicitly approving the price",
-        "`tenjin outcome` is run once to report how the lookup ended",
-        "The user receives an answer to the original question, not just a report of what the lookup returned"
+        "`tenjin outcome` is run once to report how the search ended",
+        "The user receives an answer to the original question, not just a report of what the search returned"
       ]
     },
     {
       "id": 2,
       "prompt": "Our billing-worker service on the acme-prod cluster uses viem 2.53 with the x402 v2.17 EVM signer and the type definitions collide at build time. Is this a known incompatibility between those two library versions?",
-      "expected_output": "A lookup whose query keeps the library versions and the type collision but drops every private identifier, followed by an answer.",
+      "expected_output": "A search whose query keeps the library versions and the type collision but drops every private identifier, followed by an answer.",
       "files": [],
       "expectations": [
-        "The lookup query contains no occurrence of `billing-worker`, `acme`, or `acme-prod`",
-        "The lookup query still names viem 2.53 and x402 v2.17",
-        "The lookup query is a single complete question sentence, not a keyword list",
+        "The search query contains no occurrence of `billing-worker`, `acme`, or `acme-prod`",
+        "The search query still names viem 2.53 and x402 v2.17",
+        "The search query is a single complete question sentence, not a keyword list",
         "The generalized question is sent verbatim as the query argument, with no private context appended after it"
       ]
     },
     {
       "id": 3,
       "prompt": "Has anyone published a measured comparison of cold-start latency for a Rust WASM component running on three different edge runtimes in the last quarter? If not, just reason it out for me from first principles.",
-      "expected_output": "A single lookup that returns MISS, then the agent moves on and answers from its own reasoning without re-querying.",
+      "expected_output": "A single search, then the agent treats the returned decision as final and answers from its own reasoning without re-querying. Assumes an uncovered query: see the MISS precondition in the README.",
       "files": [],
       "expectations": [
-        "Exactly one `tenjin lookup` is run for this question",
-        "That lookup returns a MISS rather than candidates",
-        "No second lookup is run with reworded or narrowed terms after a MISS",
-        "The MISS is not reported as an error or a failure to the user",
-        "The agent produces the requested first-principles answer in the same turn as the MISS",
-        "No `tenjin doctor` is run in response to the MISS"
+        "Exactly one `tenjin search` is run for this question",
+        "The returned decision is treated as final: no second search is run with reworded or narrowed terms",
+        "If the result is a MISS carrying a `browse` tail, no `tenjin buy` is run on a browse pointer",
+        "A MISS is not reported as an error or a failure to the user",
+        "The agent produces the requested first-principles answer in the same turn",
+        "`tenjin outcome` is run once with `--status regenerated`, since the agent answered from its own reasoning",
+        "No `tenjin doctor` is run in response to a MISS"
       ]
     },
     {
       "id": 4,
       "prompt": "Our internal deploy pipeline stopped promoting builds after we renamed the staging-eu-2 environment. Figure out what is going on.",
-      "expected_output": "No lookup is attempted: the question cannot be generalized without leaking, and it is debugging work rather than research. The agent investigates directly.",
+      "expected_output": "No search is attempted: the question cannot be generalized without leaking, and it is debugging work rather than research. The agent investigates directly.",
       "files": [],
       "expectations": [
-        "No `tenjin lookup` command is run",
+        "No `tenjin search` command is run",
         "No private identifier such as `staging-eu-2` is sent to Tenjin: it appears in no `tenjin` command, though local investigation commands such as `rg` or `git log` may use it freely",
         "The agent proceeds with the debugging task rather than explaining Tenjin to the user"
       ]

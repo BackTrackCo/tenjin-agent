@@ -52,7 +52,7 @@
   {
     "query": "Does our payments-worker service still pin viem 2.53, and what breaks in our signer if I bump it?",
     "should_trigger": false,
-    "rationale": "Fails the public gate only: same versions as a valid lookup, but the answer lives in a private repo."
+    "rationale": "Fails the public gate only: same versions as a valid search, but the answer lives in a private repo."
   },
   {
     "query": "What is the gas price on Base mainnet right now for a USDC transfer?",
@@ -67,7 +67,7 @@
   {
     "query": "My pgvector similarity query started returning zero rows after I switched to the pg16 image, help me debug it.",
     "should_trigger": false,
-    "rationale": "Debugging work itself: same subject as a valid gotcha lookup, but the task is to fix this instance."
+    "rationale": "Debugging work itself: same subject as a valid gotcha search, but the task is to fix this instance."
   },
   {
     "query": "What is the best way to structure a TypeScript monorepo that holds a CLI and a Next app?",
