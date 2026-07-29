@@ -47,6 +47,21 @@ export function skillsDirsFor(home: string): string[] {
 }
 
 /**
+ * Every value `install --harness` accepts: the two detectable harnesses plus the
+ * `shared` fallback. It lives beside the detection probes because `doctor` has to map
+ * a PERSISTED choice back to a directory using the same rules `install` targeted it
+ * with, and a second copy of that mapping is exactly the drift this module exists to
+ * prevent.
+ */
+export const HARNESS_TARGETS = ['claude', 'codex', 'shared'] as const;
+export type HarnessTarget = (typeof HARNESS_TARGETS)[number];
+
+/** The skills directory a target writes to. `codex` and `shared` share ~/.agents/skills. */
+export function harnessTargetDir(home: string, harness: HarnessTarget): string {
+  return harness === 'claude' ? join(home, '.claude', 'skills') : join(home, '.agents', 'skills');
+}
+
+/**
  * The `--harness` value that targets `dir`. A Claude-only machine never targets
  * ~/.agents/skills by default, so a bare `tenjin install` cannot clear a problem
  * found there.
@@ -56,7 +71,7 @@ export function harnessFlagFor(home: string, dir: string): string {
 }
 
 /** The harnesses `install` probes for. `shared` is a fallback target, never detected. */
-export type DetectableHarness = 'claude' | 'codex';
+export type DetectableHarness = Exclude<HarnessTarget, 'shared'>;
 
 /**
  * Why we think `harness` is on this machine: its home dir (~/.claude, ~/.codex) and
@@ -96,6 +111,34 @@ export function detectHarnesses(home: string, which: (bin: string) => boolean): 
  */
 export function harnessReads(home: string, dir: string, present: HarnessPresence): boolean {
   return harnessFlagFor(home, dir) === 'claude' ? present.claude : present.codex || !present.claude;
+}
+
+/**
+ * Did a past `tenjin install --harness ...` name `dir` on purpose? Detection only sees
+ * the harnesses this CLI probes for, and ~/.agents/skills is the cross-harness Agent
+ * Skills convention, so "no Codex here" is not "nothing reads it". `requested` is the
+ * user's own answer to that question and outranks the probes.
+ */
+export function harnessRequested(
+  home: string,
+  dir: string,
+  requested: readonly HarnessTarget[],
+): boolean {
+  return requested.some((h) => harnessTargetDir(home, h) === dir);
+}
+
+/**
+ * Is `dir` this machine's business at all: read by a detected harness, or explicitly
+ * requested. The union is kept separate from `harnessReads` so the reported
+ * `harnessPresent` stays a detection fact and does not quietly absorb a config value.
+ */
+export function harnessInPlay(
+  home: string,
+  dir: string,
+  present: HarnessPresence,
+  requested: readonly HarnessTarget[],
+): boolean {
+  return harnessReads(home, dir, present) || harnessRequested(home, dir, requested);
 }
 
 /**

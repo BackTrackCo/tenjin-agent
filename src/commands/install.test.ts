@@ -642,6 +642,69 @@ describe('runInstall: doctor as the final step', () => {
   });
 });
 
+// An explicit --harness is the user telling the CLI which directory they use.
+// Detection cannot see a harness Tenjin does not probe for, so the choice is recorded
+// and `doctor` keeps judging that directory on later runs (#39 review).
+describe('runInstall: recording an explicit --harness', () => {
+  async function recorded(): Promise<string[] | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    return (JSON.parse(raw) as { install?: { harness?: string[] } }).install?.harness;
+  }
+
+  it('records the requested targets', async () => {
+    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+    expect(await recorded()).toEqual(['shared']);
+  });
+
+  it('records the DE-DUPED target set, matching what was written', async () => {
+    // codex + shared are one directory, so one recorded entry, like one install target.
+    await runInstall({ harness: ['codex', 'shared'] }, makeCtx(), deps());
+    expect(await recorded()).toEqual(['codex']);
+  });
+
+  it('a later explicit run REPLACES the record rather than unioning', async () => {
+    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    // The way out of a mistaken --harness is re-running install with the right one.
+    expect(await recorded()).toEqual(['claude']);
+  });
+
+  it('a bare install records nothing: detection is re-probed every time', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await runInstall({}, makeCtx(), deps());
+    expect(await recorded()).toBeUndefined();
+  });
+
+  it('a bare install leaves an earlier explicit record alone', async () => {
+    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await runInstall({}, makeCtx(), deps());
+    expect(await recorded()).toEqual(['shared']);
+  });
+
+  it('--dry-run records nothing, like the publish-mode write', async () => {
+    await runInstall({ harness: ['shared'], dryRun: true }, makeCtx(), deps());
+    expect(await recorded()).toBeUndefined();
+  });
+
+  it('the record is merged, never an overwrite of a sibling block', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ publish: { mode: 'auto' }, evalCohort: true }),
+    );
+    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+    const json = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
+      install?: { harness?: string[] };
+      publish?: { mode?: string };
+      evalCohort?: boolean;
+    };
+    expect(json.install?.harness).toEqual(['shared']);
+    expect(json.publish?.mode).toBe('auto');
+    expect(json.evalCohort).toBe(true);
+  });
+});
+
 describe('runInstall: publish-mode selection', () => {
   type ModeData = { publishMode: { value: string; source: string } };
   const modeOf = (d: unknown) => (d as ModeData).publishMode;

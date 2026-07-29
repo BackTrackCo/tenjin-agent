@@ -9,13 +9,20 @@ import {
   cliSkillsWired,
   detectHarnesses,
   harnessFlagFor,
+  harnessInPlay,
   harnessReads,
+  harnessRequested,
   missingCliSkills,
   onPath,
   readAllWiring,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
-import type { DirState, HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
+import type {
+  DirState,
+  HarnessTarget,
+  HarnessWiring,
+  NotInvocableReason,
+} from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
@@ -107,7 +114,11 @@ export async function collectDoctorChecks(
     await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkSkills(deps.homeDir ?? homedir(), deps.which ?? ((bin) => onPath(bin, env))),
+    await checkSkills(
+      deps.homeDir ?? homedir(),
+      deps.which ?? ((bin) => onPath(bin, env)),
+      config.install?.harness ?? [],
+    ),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -319,11 +330,24 @@ function hasSearchPath(json: unknown): boolean {
  * Warn and never required: a CI or server machine legitimately has no harness, so
  * this must not move the exit code.
  */
-async function checkSkills(home: string, which: (bin: string) => boolean): Promise<BuiltCheck> {
+/**
+ * `requested` is the `--harness` set a past `install` recorded (config `install.harness`).
+ * It joins detection in deciding which directories are in play, and rides in the data as
+ * its own field so `harnessPresent` keeps meaning "a harness detected here reads this".
+ */
+async function checkSkills(
+  home: string,
+  which: (bin: string) => boolean,
+  requested: readonly HarnessTarget[],
+): Promise<BuiltCheck> {
   const present = detectHarnesses(home, which);
   const wiring = await readAllWiring(home);
   const data = {
-    directories: wiring.map((w) => ({ ...w, harnessPresent: harnessReads(home, w.dir, present) })),
+    directories: wiring.map((w) => ({
+      ...w,
+      harnessPresent: harnessReads(home, w.dir, present),
+      requested: harnessRequested(home, w.dir, requested),
+    })),
   };
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
 
@@ -340,10 +364,12 @@ async function checkSkills(home: string, which: (bin: string) => boolean): Promi
     };
   }
 
-  // Every directory a harness here reads must carry BOTH CLI skills, model-invocable.
-  // Anything less is the defect, whether it is shadowed, half-installed, hosted-only
-  // or absent; a directory nothing here reads is described but never warned about.
-  const broken = wiring.filter((w) => harnessReads(home, w.dir, present) && !cliSkillsWired(w));
+  // Every directory in play must carry BOTH CLI skills, model-invocable. Anything less
+  // is the defect, whether it is shadowed, half-installed, hosted-only or absent; a
+  // directory neither detected nor asked for is described but never warned about.
+  const broken = wiring.filter(
+    (w) => harnessInPlay(home, w.dir, present, requested) && !cliSkillsWired(w),
+  );
   if (broken.length > 0) {
     return {
       result: {

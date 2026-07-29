@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { CliError } from './errors';
 import { configPath } from './paths';
+import { HARNESS_TARGETS } from './skill-wiring';
 import { writeFileAtomic } from './atomic-json';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -35,6 +36,18 @@ const PublishConfigSchema = z.object({
 });
 
 /**
+ * What `install` recorded about its OWN targets. `harness` is the explicit
+ * `--harness` set of the last install that passed the flag, and it exists so
+ * `doctor` keeps judging a directory the user named by hand: detection cannot see a
+ * harness this CLI does not probe for, and without the record such a directory is a
+ * target for one run and invisible to every later check. Written by `install`, not a
+ * `config set` key.
+ */
+const InstallConfigSchema = z.object({
+  harness: z.array(z.enum(HARNESS_TARGETS)),
+});
+
+/**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
  * USD at the command edge, see lib/money); `confirm` is the stored form
  * "always" | "above:<atomic>". These are client-enforced guardrails, not a
@@ -54,6 +67,7 @@ export const ConfigSchema = z.object({
    */
   evalCohort: z.boolean(),
   publish: PublishConfigSchema,
+  install: InstallConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -69,7 +83,10 @@ export const RawConfigSchema = ConfigSchema.partial()
   // writes only the one subkey, and a subkey a newer CLI adds (e.g. publish.*
   // beyond mode/defaultPrice) survives an older binary's set, same reason the
   // outer object passes unknown keys through.
-  .extend({ publish: PublishConfigSchema.partial().passthrough().optional() })
+  .extend({
+    publish: PublishConfigSchema.partial().passthrough().optional(),
+    install: InstallConfigSchema.partial().passthrough().optional(),
+  })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
 
@@ -82,16 +99,19 @@ export const CONFIG_DEFAULTS: Config = {
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   publish: { mode: 'review', defaultPrice: '100000' },
+  install: { harness: [] },
 };
 
 /**
- * Scalar keys `config get/set/list` render one line each. `publish` is excluded:
- * it is a nested block addressed by the dotted `publish.mode`/`publish.defaultPrice`
- * keys (see PUBLISH_CONFIG_KEYS), so it is never rendered as a bare scalar.
+ * Scalar keys `config get/set/list` render one line each. Both nested blocks are
+ * excluded: `publish` is addressed by the dotted `publish.mode`/`publish.defaultPrice`
+ * keys (see PUBLISH_CONFIG_KEYS), and `install` is a record `install` writes about
+ * itself rather than a setting to hand-edit, so neither is ever a bare scalar.
  */
-export type ScalarConfigKey = Exclude<keyof Config, 'publish'>;
+export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install'>;
+const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install']);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
-  (key): key is ScalarConfigKey => key !== 'publish',
+  (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
 
 /** The dotted keys `config get/set` accept for the nested publish block. */
@@ -146,6 +166,7 @@ export async function loadConfig(dir: string): Promise<Config> {
       mode: raw.publish?.mode ?? CONFIG_DEFAULTS.publish.mode,
       defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
     },
+    install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
   };
 }
 

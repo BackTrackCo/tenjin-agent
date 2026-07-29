@@ -110,7 +110,8 @@ what actually chooses a price before it calls the command.
 place, wires the pointers each harness needs, and runs the `doctor` checks as its
 last step. It is idempotent: re-run any time, `--dry-run` previews the changes
 without writing, and `--harness claude|codex|shared` (repeatable) targets a
-specific one. `--publish-mode <mode>` sets your consent mode non-interactively.
+specific one, which is remembered so `doctor` keeps checking it. `--publish-mode
+<mode>` sets your consent mode non-interactively.
 
 Where the skills land:
 
@@ -153,7 +154,11 @@ hosted `tenjin` skill: that install wires the CLI skills rather than skipping.
 The hosted skill is kept as the zero-install fallback and the two CLI skills
 take precedence while the CLI is installed. `tenjin doctor`'s `skills` check
 reports that state per skills directory (which skills are wired, where) so a
-half-wired machine is diagnosable without a screen recording.
+half-wired machine is diagnosable without a screen recording. It judges each
+directory a harness it detected here reads, plus any directory you named with
+`--harness` — an explicit choice is recorded, because detection cannot see a
+harness Tenjin does not probe for. A leftover directory that is neither is
+described, not warned about.
 
 A funded wallet is only needed for paid reads and publishing.
 

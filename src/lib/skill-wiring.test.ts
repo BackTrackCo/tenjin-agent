@@ -17,6 +17,9 @@ import {
   detectHarnesses,
   harnessDetectedBy,
   harnessReads,
+  harnessRequested,
+  harnessInPlay,
+  harnessTargetDir,
   skillsDirsFor,
 } from './skill-wiring';
 
@@ -226,5 +229,47 @@ describe('harness detection', () => {
     expect(none).toEqual({ claude: false, codex: false });
     expect(harnessReads(home, claudeDir, none)).toBe(false);
     expect(harnessReads(home, sharedDir, none)).toBe(true);
+  });
+
+  it('harnessTargetDir maps every target the way install writes it', () => {
+    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    expect(harnessTargetDir(home, 'claude')).toBe(claudeDir);
+    // Codex and the shared fallback are the same directory, hence one dir, two flags.
+    expect(harnessTargetDir(home, 'codex')).toBe(sharedDir);
+    expect(harnessTargetDir(home, 'shared')).toBe(sharedDir);
+  });
+});
+
+describe('an explicitly requested harness', () => {
+  const noBinaries = (): boolean => false;
+
+  it('puts a directory in play that detection alone would skip', async () => {
+    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    await mkdir(join(home, '.claude'), { recursive: true });
+    const claudeOnly = detectHarnesses(home, noBinaries);
+
+    // `tenjin install --harness shared` on this machine: nothing DETECTED reads the
+    // shared dir, but the user named it, so it is still this machine's business.
+    expect(harnessReads(home, sharedDir, claudeOnly)).toBe(false);
+    expect(harnessRequested(home, sharedDir, ['shared'])).toBe(true);
+    expect(harnessInPlay(home, sharedDir, claudeOnly, ['shared'])).toBe(true);
+    // And the record says nothing about the other directory.
+    expect(harnessRequested(home, claudeDir, ['shared'])).toBe(false);
+    expect(harnessInPlay(home, claudeDir, claudeOnly, ['shared'])).toBe(true); // detected
+  });
+
+  it('a recorded `codex` covers the shared directory it writes to', () => {
+    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    expect(harnessRequested(home, sharedDir, ['codex'])).toBe(true);
+    expect(harnessRequested(home, claudeDir, ['codex'])).toBe(false);
+  });
+
+  it('an empty record changes nothing', async () => {
+    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    await mkdir(join(home, '.claude'), { recursive: true });
+    const claudeOnly = detectHarnesses(home, noBinaries);
+    for (const dir of [claudeDir, sharedDir]) {
+      expect(harnessInPlay(home, dir, claudeOnly, [])).toBe(harnessReads(home, dir, claudeOnly));
+    }
   });
 });

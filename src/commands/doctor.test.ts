@@ -628,6 +628,93 @@ describe('runDoctor — skill wiring', () => {
       expect(skills.detail).toContain(`${sharedSkills()} -> tenjin-search (only one CLI skill)`);
     });
 
+    // The other half of the narrowing: detection cannot see a harness the CLI does
+    // not probe for, so `install --harness X` records X and doctor honours the record.
+    describe('a directory an explicit --harness asked for', () => {
+      /** Stand in for a past `tenjin install --harness ...` by writing what it records. */
+      const recordHarness = (...harness: string[]): Promise<void> =>
+        writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness } }));
+
+      it('is judged on later runs, with a fix that names it', async () => {
+        // Claude machine, no Codex, and the user chose the shared directory by hand.
+        for (const name of ['tenjin-search', 'tenjin-publish']) {
+          await writeSkillIn(claudeSkills(), name);
+        }
+        await writeSkillIn(sharedSkills(), 'tenjin-search');
+        await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
+        await recordHarness('shared');
+
+        const res = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+        // Before the record existed this shadowed publish skill — the #35 defect, in
+        // the directory the user picked — appeared only in the "Full state" tail.
+        expect(skills.status).toBe('warn');
+        expect(skills.detail).toContain(
+          `${sharedSkills()}: tenjin-publish installed but not model-invocable`,
+        );
+        expect(skills.fix).toBe('tenjin install --harness shared');
+        // The healthy .claude directory is not dragged into the warning.
+        expect(skills.detail).not.toContain(`${claudeSkills()}: `);
+      });
+
+      it('is the ONLY reason that state warns: no record, no warning', async () => {
+        for (const name of ['tenjin-search', 'tenjin-publish']) {
+          await writeSkillIn(claudeSkills(), name);
+        }
+        await writeSkillIn(sharedSkills(), 'tenjin-search');
+        await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
+
+        const res = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+        expect(skills.status).toBe('ok');
+      });
+
+      it('rides in the data as `requested`, leaving `harnessPresent` a detection fact', async () => {
+        for (const name of ['tenjin-search', 'tenjin-publish']) {
+          await writeSkillIn(claudeSkills(), name);
+        }
+        await recordHarness('codex'); // `codex` and `shared` are the same directory
+
+        const res = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+        const dirs = (skills.data as { directories: Array<Record<string, unknown>> }).directories;
+        const shared = dirs.find((d) => d.dir === sharedSkills());
+        expect(shared?.requested).toBe(true);
+        expect(shared?.harnessPresent).toBe(false); // no Codex here, and that stays true
+        // An empty requested directory the user asked for is still the defect.
+        expect(skills.status).toBe('warn');
+        expect(skills.fix).toBe('tenjin install --harness shared');
+      });
+
+      it('a recorded directory that is properly wired stays quiet', async () => {
+        for (const dirOf of [claudeSkills(), sharedSkills()]) {
+          for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
+        }
+        await recordHarness('shared');
+
+        const res = await runDoctor(ctxFor(), {
+          homeDir: skillHome,
+          env: {},
+          fetchImpl: healthyFetch,
+        });
+        const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+        expect(skills.status).toBe('ok');
+        expect(skills.fix).toBeUndefined();
+      });
+    });
+
     it('the PATH probe detects a harness with no home dir', async () => {
       for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
         await writeSkillIn(claudeSkills(), name);

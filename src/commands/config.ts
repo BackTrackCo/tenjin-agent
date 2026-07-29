@@ -17,6 +17,7 @@ import type {
   PublishMode,
   ScalarConfigKey,
 } from '../lib/config';
+import type { HarnessTarget } from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -163,6 +164,23 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   await persist(dir, (existing) => ({
     ...existing,
     publish: { ...existing.publish, mode },
+  }));
+}
+
+/**
+ * Record the explicit `--harness` set `install` was given, through the same locked
+ * merge-write. It REPLACES the previous record rather than unioning with it: the last
+ * explicit request is the current intent, and re-running install with the right flag
+ * is then the way out of a mistaken one. Detected harnesses are never recorded — they
+ * are re-probed on every `doctor` — so this file holds only what detection cannot see.
+ */
+export async function persistInstallHarness(
+  dir: string,
+  harness: readonly HarnessTarget[],
+): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    install: { ...existing.install, harness: [...harness] },
   }));
 }
 

@@ -12,11 +12,14 @@ import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
   CLI_SKILL_NAMES,
+  HARNESS_TARGETS,
   HOSTED_SKILL_NAME,
   harnessDetectedBy,
+  harnessTargetDir,
   isModelInvocationDisabled,
   onPath,
 } from '../lib/skill-wiring';
+import type { HarnessTarget } from '../lib/skill-wiring';
 import {
   CONFIG_DEFAULTS,
   loadRawConfig,
@@ -24,7 +27,7 @@ import {
   parsePublishModeFlag,
 } from '../lib/config';
 import type { PublishMode } from '../lib/config';
-import { persistPublishMode } from './config';
+import { persistInstallHarness, persistPublishMode } from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
@@ -33,8 +36,11 @@ import { walletFileExists } from '../lib/wallet/store';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
-const HARNESSES = ['claude', 'codex', 'shared'] as const;
-type Harness = (typeof HARNESSES)[number];
+// The `--harness` vocabulary and its directory mapping are single-sourced in
+// skill-wiring beside the detection probes, because `doctor` maps a persisted choice
+// back to a directory with the same rules.
+const HARNESSES = HARNESS_TARGETS;
+type Harness = HarnessTarget;
 
 const InstallInputSchema = z.object({
   harness: z.array(z.string()).optional(),
@@ -220,6 +226,9 @@ export async function runInstall(
   await assertSkillsSource(skillsSource);
 
   const plans = resolvePlans(parsed.data.harness, home, which);
+  // Same condition resolvePlans treats as an override, so what gets recorded below is
+  // exactly what overrode detection.
+  const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
   // The CLAUDE.md nudge is opt-in and only relevant when a Claude target exists.
   // Resolve it once (may prompt) so the loop just writes the settled decision.
   const claudeMdWrite = plans.some((p) => p.harness === 'claude')
@@ -230,6 +239,17 @@ export async function runInstall(
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
   await assertSkillsLanded(plans, dryRun);
+  // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
+  // own check already honours it. Detection cannot see a harness we do not probe for,
+  // so without the record a directory the user named by hand is a target for one run
+  // and then invisible to every later doctor — including for the #35 shadowing defect
+  // it was chosen to hold. `--dry-run` records nothing, like the publish-mode write.
+  if (explicitHarness && !dryRun) {
+    await persistInstallHarness(
+      ctx.dataDir,
+      plans.map((p) => p.harness),
+    );
+  }
   // The embedded doctor run inspects the same `home` install just wrote into, so
   // its skill-wiring check reports THIS run's result rather than os.homedir()'s.
   // `which` goes with it: the check gates its verdicts on harness detection, and a
@@ -581,13 +601,8 @@ function resolvePlans(
   home: string,
   which: (bin: string) => boolean,
 ): HarnessPlan[] {
-  const claudeDir = join(home, '.claude', 'skills');
-  const sharedDir = join(home, '.agents', 'skills');
-
   if (override !== undefined && override.length > 0) {
-    const plans = override.map((v) =>
-      planFor(validateHarness(v), ['override'], true, home, claudeDir, sharedDir),
-    );
+    const plans = override.map((v) => planFor(validateHarness(v), ['override'], true, home));
     return dedupeBySkillsDir(plans);
   }
 
@@ -595,13 +610,12 @@ function resolvePlans(
   // Same two probes doctor's skills check gates its per-directory verdicts on.
   const claudeBy = harnessDetectedBy(home, 'claude', which);
   const codexBy = harnessDetectedBy(home, 'codex', which);
-  if (claudeBy.length > 0)
-    plans.push(planFor('claude', claudeBy, true, home, claudeDir, sharedDir));
-  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home, claudeDir, sharedDir));
+  if (claudeBy.length > 0) plans.push(planFor('claude', claudeBy, true, home));
+  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home));
   if (plans.length === 0) {
     // Nothing detected: the shared Agent Skills location is the fallback target, so
     // a harness installed later still finds the skills.
-    plans.push(planFor('shared', ['fallback'], false, home, claudeDir, sharedDir));
+    plans.push(planFor('shared', ['fallback'], false, home));
   }
   return dedupeBySkillsDir(plans);
 }
@@ -611,10 +625,8 @@ function planFor(
   detectedBy: string[],
   detected: boolean,
   home: string,
-  claudeDir: string,
-  sharedDir: string,
 ): HarnessPlan {
-  const skillsDir = harness === 'claude' ? claudeDir : sharedDir;
+  const skillsDir = harnessTargetDir(home, harness);
   return { harness, detected, detectedBy, skillsDir, wiresAgentsMd: harness !== 'claude', home };
 }
 

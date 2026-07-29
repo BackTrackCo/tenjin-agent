@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, loadRawConfig, resolveSettings, writeConfig, CONFIG_DEFAULTS } from './config';
+import {
+  loadConfig,
+  loadRawConfig,
+  resolveSettings,
+  writeConfig,
+  CONFIG_DEFAULTS,
+  CONFIG_KEYS,
+} from './config';
 import { CliError } from './errors';
 
 let dir: string;
@@ -111,5 +118,27 @@ describe('publish block', () => {
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.publishMode).toEqual({ value: 'review', source: 'file' });
     expect(s.publishDefaultPrice).toEqual({ value: '250000', source: 'file' });
+  });
+});
+
+describe('install block', () => {
+  it('defaults to no recorded harness', async () => {
+    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [] });
+    expect((await loadConfig(dir)).install).toEqual({ harness: [] });
+  });
+
+  it('reads back the recorded targets', async () => {
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'shared'] } }));
+    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'shared']);
+  });
+
+  it('rejects a harness name install could not have written', async () => {
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['cursor'] } }));
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+  });
+
+  it('is not a `config set` key: it is never rendered as a scalar', () => {
+    expect(CONFIG_KEYS as readonly string[]).not.toContain('install');
+    expect(CONFIG_KEYS as readonly string[]).not.toContain('publish');
   });
 });
