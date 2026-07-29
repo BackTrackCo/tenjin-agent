@@ -51,7 +51,7 @@ export async function runInspect(
         nextCommand: `tenjin read ${ref.url}`,
       },
       humanLines: [
-        `${sanitizeForTerminal(body.title)}, free (${body.price} atomic). Read it with \`tenjin read ${ref.url}\`.`,
+        `${sanitizeForTerminal(body.title)}, free (${body.price} atomic). Read it with \`tenjin read ${sanitizeForTerminal(ref.url)}\`.`,
       ],
     };
   }
@@ -96,6 +96,8 @@ export async function runInspect(
       message: result.message,
       nextCommand: `tenjin read ${ref.url}`,
     },
-    humanLines: [`${sanitizeForTerminal(result.message)} Read it with \`tenjin read ${ref.url}\`.`],
+    humanLines: [
+      `${sanitizeForTerminal(result.message)} Read it with \`tenjin read ${sanitizeForTerminal(ref.url)}\`.`,
+    ],
   };
 }

@@ -254,10 +254,31 @@ describe('runRead, paid refusal', () => {
 describe('runRead, module boundary', () => {
   const here = new URL('.', import.meta.url).pathname;
 
-  /** Every local (relative) import specifier in a source file. */
+  /**
+   * Every local (relative) import specifier in a source file, in ALL THREE forms:
+   * static `from '<spec>'`, dynamic `await import('<spec>')`, and the bare
+   * side-effect `import '<spec>'`. Matching only the static form would be a false
+   * green in this codebase specifically: `src/cli.ts` loads its commands through
+   * `await import(...)` in 18 places, so a dynamic hop is the idiom here rather
+   * than an exotic case, and a guard blind to it would wave through exactly the
+   * refactor it exists to stop.
+   */
   function importSpecs(source: string): string[] {
-    return [...source.matchAll(/from\s+'(\.[^']+)'/g)].map((m) => m[1] as string);
+    return [...source.matchAll(/(?:from|import)\s*\(?\s*'(\.[^']+)'/g)].map((m) => m[1] as string);
   }
+
+  // Pin the matcher itself. Everything below is only as good as this regex, and its
+  // failure mode is silence: an unmatched form yields [], which reads as "clean".
+  it('importSpecs catches static, dynamic, and side-effect imports alike', () => {
+    expect(importSpecs("import { fetchRead } from '../lib/read-client';")).toEqual([
+      '../lib/read-client',
+    ]);
+    expect(importSpecs("const { buildExactPayment } = await import('../lib/x402-pay');")).toEqual([
+      '../lib/x402-pay',
+    ]);
+    expect(importSpecs("import '../lib/x402-pay';")).toEqual(['../lib/x402-pay']);
+    expect(importSpecs("import { z } from 'zod';")).toEqual([]); // bare specifiers are not local
+  });
 
   // The structural pin the whole verb rests on: `read` must be UNABLE to pay, not
   // merely choose not to. lib/x402-pay is the payment module, imported by exactly
