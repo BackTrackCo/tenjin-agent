@@ -140,9 +140,13 @@ export async function runSearch(
   // `truncated` means the server's size backstop dropped candidates the limit had
   // room for, and there is no cursor to page to them: a smaller --limit would not
   // recover the tail, only shorten it further. So the line says what actually
-  // works, which is asking a narrower question. It rides both decisions, since a
-  // MISS is reported the same way, and the flag stays in the machine envelope
-  // (--json) untouched, where it is omitted rather than false when it did not fire.
+  // works, which is asking a narrower question. The flag stays in the machine
+  // envelope (--json) untouched, where it is omitted rather than false when it did
+  // not fire.
+  //
+  // Rendering it on a MISS too is DEFENSIVE, not wire behavior: the server only
+  // ever sets the flag alongside candidates it dropped. Handling both keeps the
+  // flag from going unrendered if that ever changes.
   const truncatedHint =
     response.truncated === true
       ? [

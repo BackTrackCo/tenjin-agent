@@ -263,6 +263,17 @@ export async function postSearch(
   if (!res.ok) throw apiFailure(url, res);
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   if (res.status !== 200) {
+    // The REQUEST gate is where a pre-v2 server actually refuses us, and it is
+    // the arm that fires in practice. Old tenjin declares `schemaVersion:
+    // z.literal(1)` inside a strictObject, so a v2 request never reaches the
+    // handler: it comes back 400 "Invalid request body" with the zod flatten in
+    // `error.details`, and the response check further down can never see it.
+    // Without this the operator is told to retry a request that cannot succeed.
+    if (res.status === 400 && rejectedSchemaVersion(res.json)) {
+      throw outdatedServerError('The server rejected schemaVersion 2: it predates search v2.', {
+        details: res.json,
+      });
+    }
     throw new CliError(
       'API_UNREACHABLE',
       serverErrorMessage(res.json) ?? `Search failed (${res.status})`,
@@ -274,26 +285,41 @@ export async function postSearch(
   }
   const parsed = searchResponseSchema.safeParse(res.json);
   if (!parsed.success) {
-    // A wrong `schemaVersion` is the one mismatch with a specific remedy, and the
-    // likely one after search v2: this CLI speaks 2 only, so a server still
-    // answering 1 is an older deployment, not arbitrary drift. Name that rather
-    // than sending the operator to a generic "the contract may have changed".
+    // The other way a stale server surfaces: it answered 200 with a v1 body.
+    // Unreachable against today's old tenjin (the request gate above refuses
+    // first), but correct for anything that accepts the request and replies v1.
     const served = serverSchemaVersion(res.json);
-    const versionMismatch = served !== undefined && served !== 2;
-    throw new CliError(
-      'CONTRACT_MISMATCH',
-      versionMismatch
-        ? `Search response is schemaVersion ${served}; this CLI requires 2 (search v2).`
-        : 'Search response did not match the expected contract',
-      {
-        fix: versionMismatch
-          ? 'The server predates search v2. Point --base-url at an updated deployment, or install an older tenjin-cli.'
-          : 'Update tenjin-cli; the server contract may have changed.',
-        details: parsed.error.issues,
-      },
-    );
+    if (served !== undefined && served !== 2) {
+      throw outdatedServerError(
+        `Search response is schemaVersion ${served}; this CLI requires 2 (search v2).`,
+        { details: parsed.error.issues },
+      );
+    }
+    throw new CliError('CONTRACT_MISMATCH', 'Search response did not match the expected contract', {
+      fix: 'Update tenjin-cli; the server contract may have changed.',
+      details: parsed.error.issues,
+    });
   }
   return truncateResponse(parsed.data);
+}
+
+/** One wording for both ways a pre-v2 server refuses this CLI, so the request-gate
+ *  arm and the response arm can never drift apart. */
+function outdatedServerError(message: string, opts: { details: unknown }): CliError {
+  return new CliError('CONTRACT_MISMATCH', message, {
+    fix: 'The server predates search v2. Point --base-url at an updated deployment, or install an older tenjin-cli.',
+    details: opts.details,
+  });
+}
+
+/** True when a 400 body is the old server's request-gate refusal of our
+ *  `schemaVersion`: an ApiError envelope whose zod `flatten()` details carry a
+ *  `schemaVersion` fieldError. Keyed on the field, never the message text. */
+function rejectedSchemaVersion(json: unknown): boolean {
+  const record = (v: unknown): Record<string, unknown> | undefined =>
+    typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
+  const fieldErrors = record(record(record(json)?.error)?.details)?.fieldErrors;
+  return Array.isArray(record(fieldErrors)?.schemaVersion);
 }
 
 /** The `schemaVersion` an unparsed body claims, when it claims a number at all. */

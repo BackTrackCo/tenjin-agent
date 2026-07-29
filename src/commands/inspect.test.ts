@@ -68,9 +68,8 @@ describe('runInspect, the 402 answer card', () => {
     return runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
   }
 
-  it('hoists the card into the envelope and renders every populated field', async () => {
+  it('renders every populated card field', async () => {
     const res = await inspect402(cardedPreview());
-    expect((res.data as { card?: { scope: string } }).card?.scope).toBe('L2 execution fees only');
     const lines = (res.humanLines ?? []).join('\n');
     expect(lines).toContain('Answers: What does a Base transaction cost?');
     expect(lines).toContain('Applies to: products=Base');
@@ -116,15 +115,55 @@ describe('runInspect, the 402 answer card', () => {
     ]);
   });
 
-  it('drops a malformed card without losing the rest of the preview', async () => {
+  it('drops a malformed card without losing the rest of the preview, and says so', async () => {
     // Every other preview field is optional, so a half-filled card must not cost
-    // the caller the title and price it came for.
+    // the caller the title and price it came for. But the drop cannot be silent:
+    // "no card" is a signal a buyer acts on, and a dropped card is not that.
     const res = await inspect402({
       title: 'The Answer',
       price: '100000',
       card: { artifactType: 'document' },
     });
-    expect(res.data).not.toHaveProperty('card');
-    expect((res.data as { preview: { title?: string } }).preview.title).toBe('The Answer');
+    const data = res.data as { cardError?: true; preview: { title?: string; card?: unknown } };
+    expect(data.preview.card).toBeUndefined();
+    expect(data.preview.title).toBe('The Answer');
+    expect(data.cardError).toBe(true);
+    expect((res.humanLines ?? []).join('\n')).toContain('could not parse');
+  });
+
+  it('does not flag cardError on a genuinely uncarded piece', async () => {
+    const res = await inspect402({ title: 'The Answer', price: '100000' });
+    expect(res.data).not.toHaveProperty('cardError');
+  });
+
+  // The card is the biggest object in the envelope; a second hoisted copy would
+  // double every inspect payload to save one key of depth.
+  it('emits the card exactly once in the machine envelope', async () => {
+    const res = await inspect402(cardedPreview());
+    const occurrences = JSON.stringify(res.data).match(/"card":/g) ?? [];
+    expect(occurrences).toHaveLength(1);
+    expect((res.data as { preview: { card?: { scope: string } } }).preview.card?.scope).toBe(
+      'L2 execution fees only',
+    );
+  });
+
+  // The old 300-char cap clipped cards the server considers perfectly valid, and
+  // clipped them unmarked, so a partial claim read as a whole one.
+  it('does not clip a card at the server write-time bounds', async () => {
+    const tenQuestions = Array.from({ length: 10 }, (_, i) => `${i}`.repeat(200));
+    const res = await inspect402(
+      cardedPreview({ questionsAnswered: tenQuestions, scope: 'S'.repeat(500) }),
+    );
+    const lines = res.humanLines ?? [];
+    expect(lines.find((l) => l.startsWith('Answers: '))).toBe(
+      `Answers: ${tenQuestions.join('; ')}`,
+    );
+    expect(lines.find((l) => l.startsWith('Scope: '))).toBe(`Scope: ${'S'.repeat(500)}`);
+  });
+
+  it('marks the clip when a server breaks its own bounds', async () => {
+    const res = await inspect402(cardedPreview({ scope: 'S'.repeat(900) }));
+    const scope = (res.humanLines ?? []).find((l) => l.startsWith('Scope: '));
+    expect(scope).toBe(`Scope: ${'S'.repeat(500)}...`);
   });
 });

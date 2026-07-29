@@ -77,15 +77,21 @@ export async function runInspect(
                 amount: requirement.amount,
               }
             : undefined,
+        // The card stays where the wire puts it, inside `preview`, and is emitted
+        // exactly once: it is the largest object in this envelope, and a second
+        // hoisted copy would double every inspect payload to save one key of
+        // depth.
         preview: result.preview,
-        // Hoisted out of `preview` so the card is a first-class part of the
-        // envelope, which is what an agent decides to buy on. Absent, never null,
-        // when the piece carries no card, matching the wire.
-        ...(card !== undefined ? { card } : {}),
+        ...(result.cardError === true ? { cardError: true } : {}),
       },
       humanLines: [
         `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
         ...cardLines(card),
+        ...(result.cardError === true
+          ? [
+              'The server sent an answer card this CLI could not parse; judging on price and preview only.',
+            ]
+          : []),
         'This is the pre-purchase card; run `tenjin buy` to pay and read.',
       ],
     };
@@ -98,18 +104,35 @@ export async function runInspect(
   };
 }
 
-/** Per-line cap for the rendered card. Every card field is already bounded at
- *  write time (lists 10x200 chars, prose 500, cadence 120), so this only bites a
- *  misbehaving server, and it bites only the terminal: the `--json` payload keeps
- *  the card exactly as the server sent it, because that copy is what an agent
- *  decides a non-refundable purchase on. */
-const CARD_LINE_CHARS = 300;
+/**
+ * Per-line caps for the rendered card, each derived from the server's write-time
+ * bound for that field, so a VALID card is never clipped: the two lists are 10
+ * items x 200 chars joined with '; '; appliesTo is 8 keys (<=32 chars) x 20
+ * values x 120 chars; the prose fields have a 500-char column bound and cadence
+ * 120. Exceeding one means a server that broke its own bounds.
+ *
+ * When that happens the clip is MARKED. A silently shortened claim reads as a
+ * whole one, and "applies to Postgres 14, 15" is a different promise from
+ * "applies to Postgres 14, 15, 16". The `--json` payload stays verbatim either
+ * way, because that copy is what an agent decides a non-refundable purchase on.
+ */
+const CARD_BOUNDS = {
+  list: 10 * 200 + 9 * 2,
+  appliesTo: 8 * (32 + 1 + 20 * 120 + 19 * 2) + 7 * 2,
+  prose: 500,
+  cadence: 120,
+  // artifactType and temporalMode are open strings on the wire, so the composed
+  // freshness line gets a bound of its own rather than trusting them.
+  freshness: 200,
+} as const;
 
-function cardLine(label: string, value: string | null): string[] {
+const CLIP_MARKER = '...';
+
+function cardLine(label: string, value: string | null, max: number): string[] {
   if (value === null) return [];
   const text = sanitizeForTerminal(value).trim();
   if (text.length === 0) return [];
-  return [`${label}: ${text.length > CARD_LINE_CHARS ? text.slice(0, CARD_LINE_CHARS) : text}`];
+  return [`${label}: ${text.length > max ? `${text.slice(0, max)}${CLIP_MARKER}` : text}`];
 }
 
 /**
@@ -125,15 +148,15 @@ function cardLines(card: PreviewCard | undefined): string[] {
     ([key, values]) => `${key}=${values.join(', ')}`,
   );
   return [
-    ...cardLine('Answers', list(card.questionsAnswered)),
-    ...cardLine('Tasks', list(card.tasksSupported)),
-    ...cardLine('Applies to', list(appliesTo)),
-    ...cardLine('Scope', card.scope),
-    ...cardLine('Excludes', card.exclusions),
-    ...cardLine('Freshness', freshness(card)),
-    ...cardLine('Provenance', card.provenanceSummary),
-    ...cardLine('Method', card.methodologySummary),
-    ...cardLine('Maintenance', card.maintenanceCadence),
+    ...cardLine('Answers', list(card.questionsAnswered), CARD_BOUNDS.list),
+    ...cardLine('Tasks', list(card.tasksSupported), CARD_BOUNDS.list),
+    ...cardLine('Applies to', list(appliesTo), CARD_BOUNDS.appliesTo),
+    ...cardLine('Scope', card.scope, CARD_BOUNDS.prose),
+    ...cardLine('Excludes', card.exclusions, CARD_BOUNDS.prose),
+    ...cardLine('Freshness', freshness(card), CARD_BOUNDS.freshness),
+    ...cardLine('Provenance', card.provenanceSummary, CARD_BOUNDS.prose),
+    ...cardLine('Method', card.methodologySummary, CARD_BOUNDS.prose),
+    ...cardLine('Maintenance', card.maintenanceCadence, CARD_BOUNDS.cadence),
   ];
 }
 

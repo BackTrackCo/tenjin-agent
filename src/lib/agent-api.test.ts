@@ -370,12 +370,63 @@ describe('postSearch', () => {
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 
-  it('names the version when an older server still answers search v1', async () => {
-    // The expected failure mode of the v2 break, and the one with a specific
-    // remedy: an operator pointed at a stale deployment should be told that, not
-    // sent to update a CLI that is already current.
-    const v1 = { ...CANDIDATES, schemaVersion: 1 };
-    const { fetch } = stubFetch(json(200, v1));
+  it('names the outdated server when a pre-v2 deployment refuses the request', async () => {
+    // The REAL failure mode of the v2 break, and the whole reason this arm
+    // exists. Pre-v2 tenjin declares `schemaVersion: z.literal(1)` inside a
+    // strictObject, so our v2 request dies at the REQUEST gate and never reaches
+    // the handler: the body below is verbatim what old main emits (an ApiError
+    // envelope wrapping `parsed.error.flatten()`), reproduced against its actual
+    // schema. Routed as API_UNREACHABLE it would tell the operator to retry a
+    // request that can never succeed.
+    const { fetch } = stubFetch(
+      json(400, {
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid request body',
+          details: {
+            formErrors: [],
+            fieldErrors: { schemaVersion: ['Invalid input: expected 1'] },
+          },
+        },
+      }),
+    );
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: expect.stringContaining('predates search v2'),
+    });
+  });
+
+  it('leaves an unrelated 400 on the API_UNREACHABLE path', async () => {
+    // The version arm keys on a `schemaVersion` fieldError, so an ordinary
+    // validation failure must not be mistaken for a stale deployment.
+    const { fetch } = stubFetch(
+      json(400, {
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid request body',
+          details: { formErrors: [], fieldErrors: { question: ['Too big: expected <=512'] } },
+        },
+      }),
+    );
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
+  });
+
+  it('names the version when a server answers 200 with a v1 body', async () => {
+    // Unreachable against today's old tenjin (the request gate refuses first),
+    // but correct for any server that accepts the request and replies v1.
+    const { fetch } = stubFetch(json(200, { ...CANDIDATES, schemaVersion: 1 }));
     await expect(
       postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
