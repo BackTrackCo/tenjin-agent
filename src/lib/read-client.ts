@@ -110,6 +110,13 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     fetchImpl: opts.fetchImpl,
   });
   if (!res.ok) {
+    // A redirect refused mid-flight is a server-contract problem, not a flaky
+    // network: retrying re-sends the same signature into the same redirect.
+    if (res.kind === 'blocked-redirect') {
+      throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
+        fix: 'The read route must not redirect. Check the configured base URL, or update tenjin-cli.',
+      });
+    }
     const code =
       res.kind === 'network' || res.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
     throw new CliError(code, `${url}: ${res.message}`, {

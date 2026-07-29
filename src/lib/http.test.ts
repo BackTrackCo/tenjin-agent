@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { fetchJson, fetchFailureToCliError } from './http';
+import { fetchJson, fetchFailureToCliError, httpRequest } from './http';
+import { SIWX_HEADER } from './siwx';
 import { CliError } from './errors';
 import type { FetchJsonFailure } from './http';
 
@@ -99,5 +100,91 @@ describe('fetchFailureToCliError', () => {
     const err = fetchFailureToCliError(failure, { fix: 'retry', details: { status: 503 } });
     expect(err.fix).toBe('retry');
     expect(err.details).toEqual({ status: 503 });
+  });
+});
+
+/**
+ * The signed-redirect guard. `resource-ref` promises "nothing signed may leave for
+ * a host the user did not configure", but it only checks the URL the caller asked
+ * for — `fetch`'s default `redirect: 'follow'` re-sends request headers verbatim to
+ * whatever `Location` names, stripping only `Authorization`. So a 3xx on the read
+ * route would hand a signature bound to the real domain to another host, replayable
+ * against it for the signature's lifetime. These pin that it cannot happen.
+ */
+describe('httpRequest, signed requests never follow redirects', () => {
+  /** Records the init `httpRequest` passed to fetch, so the redirect mode is assertable. */
+  function recordingFetch(response: () => Response): {
+    fetchImpl: typeof fetch;
+    calls: { url: string; redirect: RequestInit['redirect'] }[];
+  } {
+    const calls: { url: string; redirect: RequestInit['redirect'] }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), redirect: init?.redirect });
+      return response();
+    };
+    return { fetchImpl, calls };
+  }
+
+  const redirect = (status: number, location: string): Response =>
+    new Response('', { status, headers: { location } });
+
+  it('refuses a cross-origin 3xx carrying a SIWX header, and never re-sends it', async () => {
+    const { fetchImpl, calls } = recordingFetch(() =>
+      redirect(302, 'https://evil.example/collect'),
+    );
+    const res = await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: { [SIWX_HEADER]: 'siwx-value' },
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 302 });
+    // The signature left exactly once, to the configured origin, and was not replayed.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe('https://tenjin.blog/api/read/x');
+    expect(calls[0]?.redirect).toBe('manual');
+  });
+
+  it('refuses a 3xx carrying a payment signature, matching the header case-insensitively', async () => {
+    const { fetchImpl, calls } = recordingFetch(() => redirect(301, 'https://evil.example/'));
+    const res = await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      // Lower-cased on purpose: header names are case-insensitive, and the guard
+      // must not be dodgeable by changing how a caller spells the credential.
+      headers: { 'payment-signature': 'pay-value' },
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 301 });
+    expect(calls[0]?.redirect).toBe('manual');
+  });
+
+  it('leaves unsigned requests alone, redirects and all', async () => {
+    const { fetchImpl, calls } = recordingFetch(
+      () => new Response(JSON.stringify({ ok: 1 }), { status: 200 }),
+    );
+    const res = await httpRequest('https://tenjin.blog/api/search', {
+      timeoutMs: 1000,
+      headers: { accept: 'application/json' },
+      fetchImpl,
+    });
+
+    // No credential, so no opt-out: the transport keeps its default follow behavior
+    // and this stays a plain 200. The guard is scoped to signed traffic only.
+    expect(res).toMatchObject({ ok: true, status: 200 });
+    expect(calls[0]?.redirect).toBeUndefined();
+  });
+
+  it('lets a signed request through untouched when nothing redirects', async () => {
+    const { fetchImpl } = recordingFetch(
+      () => new Response(JSON.stringify({ id: 'ok' }), { status: 200 }),
+    );
+    const res = await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: { [SIWX_HEADER]: 'siwx-value' },
+      fetchImpl,
+    });
+
+    expect(res).toMatchObject({ ok: true, status: 200 });
   });
 });

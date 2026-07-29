@@ -11,7 +11,12 @@ import {
   parseSectionsBudget,
   type PresentOpts,
 } from '../lib/delivery';
-import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
+import {
+  describeWallet,
+  resolveWalletProvider,
+  type TenjinSigner,
+  type WalletProvider,
+} from '../lib/wallet';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -181,13 +186,21 @@ async function siwxRecheck(
     ctx,
     opts.provider !== undefined ? { provider: opts.provider } : {},
   );
+  // Both doors are covered, and for different reasons. `describe()` is the KEYLESS
+  // probe — it answers "is there a wallet" without decrypting, which is what keeps
+  // the no-wallet case from ever prompting, whatever a provider's getSigner does
+  // first. But a provider may describe cleanly and only then find no credential, so
+  // getSigner needs the same catch or that case escapes as a runtime error instead
+  // of the exit-3 refusal this function promises. Keeping the probe and extending
+  // the catch gets both; they were never alternatives.
+  let signer: TenjinSigner;
   try {
     await describeWallet(provider);
+    signer = await provider.getSigner();
   } catch (err) {
     if (err instanceof CliError && err.code === 'WALLET_MISSING') return null;
     throw err;
   }
-  const signer = await provider.getSigner();
   const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: opts.network });
   return await fetchRead(url, { ...opts.fetchOpts, siwxHeader });
 }

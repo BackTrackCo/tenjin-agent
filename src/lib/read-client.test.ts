@@ -97,4 +97,21 @@ describe('fetchRead', () => {
     });
     await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
+
+  // A signed request that gets redirected is refused by the transport (see
+  // http.test.ts). Here: that refusal must surface as a CONTRACT_MISMATCH, not as
+  // the API_UNREACHABLE the generic failure branch would otherwise give it. The
+  // distinction is practical, not cosmetic — API_UNREACHABLE invites a retry, and
+  // retrying re-sends the same signature into the same redirect.
+  it('maps a refused redirect on a signed read to CONTRACT_MISMATCH', async () => {
+    let seen = 0;
+    const fetchImpl: typeof fetch = async () => {
+      seen += 1;
+      return new Response('', { status: 302, headers: { location: 'https://evil.example/' } });
+    };
+    await expect(
+      fetchRead(URL_, { timeoutMs: 1000, fetchImpl, siwxHeader: 'siwx-value' }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    expect(seen).toBe(1);
+  });
 });
