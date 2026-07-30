@@ -111,8 +111,8 @@ runs on wording and meaning, so send the whole question as one natural-language 
 rather than keywords, generalized first (no private identifiers, internal names, or
 secrets; generalize the NAMES, keep the technical specifics).
 
-- `POST https://tenjin.blog/api/agent/search` with `{ "schemaVersion": 2, "question": "<task question>",
-  "maxPrice"?: "<atomic USDC>", "freshWithin"?: "P30D", "limit"?: 5 }` → `{ schemaVersion: 2,
+- `POST https://tenjin.blog/api/agent/search` with `{ "question": "<task question>",
+  "maxPrice"?: "<atomic USDC>", "freshWithin"?: "P30D", "limit"?: 5, "schemaVersion"?: 2 }` → `{ schemaVersion: 2,
   searchId, decision: "CANDIDATES" | "MISS", candidates?, truncated?, browse? }`. You get up to
   `limit` (1-10, default 5) lean candidates: id, payable `url`, slug, title, artifactType,
   price, asOf, validUntil, matchReasons, estimatedTokens, creator handle (slug + creator handle
