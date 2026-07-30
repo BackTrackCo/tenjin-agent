@@ -22,8 +22,10 @@ const BRANCH = 'bot/skill-resync';
 const REAL_GIT = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 
 /** A mirror shaped like the real one: frontmatter, then body. */
-const mirror = (body: string, description = 'zero-install skill'): string =>
-  `---\nname: tenjin\ndescription: ${description}\n---\n\n${body}\n`;
+const mirror = (body: string, description = 'zero-install skill', name = 'tenjin'): string =>
+  `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}\n`;
+
+const NAME_PREFIX = 'FRONTMATTER NAME CHANGED: ';
 
 type Pr = { number: number; isCrossRepository: boolean };
 
@@ -62,7 +64,8 @@ if (argv[0] === 'pr' && argv[1] === 'list') {
   const visible = filtersForks ? prs.filter((pr) => !pr.isCrossRepository) : prs;
   process.stdout.write(visible.length > 0 ? String(visible[0].number) + '\\n' : '');
 } else if (argv[0] === 'pr' && argv[1] === 'view') {
-  process.stdout.write(process.env.GH_STUB_BODY ?? '');
+  const wantsTitle = value('--json').includes('title');
+  process.stdout.write((wantsTitle ? process.env.GH_STUB_TITLE : process.env.GH_STUB_BODY) ?? '');
 } else {
   // Inline --body-file so an assertion sees the body itself; the script's trap
   // deletes the file before the test could read it.
@@ -152,7 +155,13 @@ interface Run {
   output: string;
 }
 
-function run(lab: Lab, syncOutput: string, prs: Pr[] = [], existingBody = ''): Run {
+/** State of the open PR the run will find, when a scenario has one. */
+interface OpenPr {
+  body?: string;
+  title?: string;
+}
+
+function run(lab: Lab, syncOutput: string, prs: Pr[] = [], open: OpenPr = {}): Run {
   const options = {
     cwd: lab.work,
     encoding: 'utf8' as const,
@@ -161,7 +170,8 @@ function run(lab: Lab, syncOutput: string, prs: Pr[] = [], existingBody = ''): R
       PATH: `${lab.stubs}:${process.env.PATH ?? ''}`,
       SYNC_OUTPUT: syncOutput,
       GH_STUB_PRS: JSON.stringify(prs),
-      GH_STUB_BODY: existingBody,
+      GH_STUB_BODY: open.body ?? '',
+      GH_STUB_TITLE: open.title ?? 'chore(skills): resync vendored skill mirror',
       GH_STUB_LOG: lab.ghLog,
       GIT_TERMINAL_PROMPT: '0',
     },
@@ -195,6 +205,9 @@ async function soleGhCall(lab: Lab): Promise<string[]> {
 
 const bodyOf = (call: string[]): string => call[call.indexOf('--body') + 1] ?? '';
 
+const titleOf = (call: string[]): string =>
+  call.includes('--title') ? (call[call.indexOf('--title') + 1] ?? '') : '';
+
 const remoteBranches = (lab: Lab): string =>
   execFileSync('git', ['--git-dir', lab.origin, 'branch', '--list'], { encoding: 'utf8' });
 
@@ -227,6 +240,7 @@ describe('open-skill-resync-pr.sh', () => {
 
     const create = await soleGhCall(lab);
     expect(create.slice(0, 2)).toEqual(['pr', 'create']);
+    expect(titleOf(create)).toBe('chore(skills): resync vendored skill mirror');
     const body = bodyOf(create);
     expect(body).toContain('Mirror diff: +1 / -1 lines');
     expect(body).toContain('Frontmatter: unchanged');
@@ -237,11 +251,59 @@ describe('open-skill-resync-pr.sh', () => {
     expect(body).toContain('<!-- skill-resync:end -->');
   }, 30_000);
 
-  it('flags a frontmatter change in the PR body', async () => {
+  it('flags a frontmatter change in the PR body, without escalating the title', async () => {
     const lab = makeLab(mirror('body', 'zero-install skill'));
     run(lab, mirror('body', 'renamed description'));
 
-    expect(bodyOf(await soleGhCall(lab))).toContain('Frontmatter: CHANGED');
+    const create = await soleGhCall(lab);
+    expect(bodyOf(create)).toContain('Frontmatter: CHANGED');
+    // A description edit is still the same skill; only `name` escalates.
+    expect(titleOf(create)).not.toContain(NAME_PREFIX);
+  }, 30_000);
+
+  it('screams in the title when the frontmatter name changes', async () => {
+    const lab = makeLab(mirror('body', 'zero-install skill', 'tenjin'));
+    // The mirror becoming a different skill still opens a PR rather than failing
+    // the run: a red scheduled run notifies by unread email, so refusing would
+    // make the pathological case the quietest one. It escalates where it shows.
+    const result = run(lab, mirror('body', 'zero-install skill', 'not-tenjin'));
+
+    expect(result.status).toBe(0);
+    const create = await soleGhCall(lab);
+    expect(create.slice(0, 2)).toEqual(['pr', 'create']);
+    expect(titleOf(create)).toBe(`${NAME_PREFIX}chore(skills): resync vendored skill mirror`);
+  }, 30_000);
+
+  it('escalates an open PR title when the name changes on a later day', async () => {
+    const lab = makeLab(mirror('old wording', 'd', 'tenjin'));
+    seedBotBranch(lab, 'yesterday');
+    const result = run(
+      lab,
+      mirror('new wording', 'd', 'not-tenjin'),
+      [{ number: 7, isCrossRepository: false }],
+      { title: 'chore(skills): resync vendored skill mirror' },
+    );
+
+    expect(result.status).toBe(0);
+    // Prepended to the current title, so a human rename survives.
+    expect(titleOf(await soleGhCall(lab))).toBe(
+      `${NAME_PREFIX}chore(skills): resync vendored skill mirror`,
+    );
+  }, 30_000);
+
+  it('does not stack the prefix on a title that already screams', async () => {
+    const lab = makeLab(mirror('old wording', 'd', 'tenjin'));
+    seedBotBranch(lab, 'yesterday');
+    const result = run(
+      lab,
+      mirror('new wording', 'd', 'not-tenjin'),
+      [{ number: 7, isCrossRepository: false }],
+      { title: `${NAME_PREFIX}chore(skills): resync vendored skill mirror` },
+    );
+
+    expect(result.status).toBe(0);
+    // No --title at all: the body still refreshes, the title is left as it is.
+    expect(titleOf(await soleGhCall(lab))).toBe('');
   }, 30_000);
 
   it('ignores a fork PR that squats the bot branch name', async () => {
@@ -280,12 +342,9 @@ describe('open-skill-resync-pr.sh', () => {
       '',
       'Checked paragraphs 1-3, the rest is new. Holding until Tuesday.',
     ].join('\n');
-    const result = run(
-      lab,
-      mirror('new wording'),
-      [{ number: 7, isCrossRepository: false }],
-      existing,
-    );
+    const result = run(lab, mirror('new wording'), [{ number: 7, isCrossRepository: false }], {
+      body: existing,
+    });
 
     expect(result.status).toBe(0);
     const body = bodyOf(await soleGhCall(lab));
@@ -299,12 +358,9 @@ describe('open-skill-resync-pr.sh', () => {
   it('appends its block rather than overwriting a body whose fence was removed', async () => {
     const lab = makeLab(mirror('old wording'));
     seedBotBranch(lab, 'yesterday');
-    const result = run(
-      lab,
-      mirror('new wording'),
-      [{ number: 7, isCrossRepository: false }],
-      'Rewrote this body by hand. Do not lose this.',
-    );
+    const result = run(lab, mirror('new wording'), [{ number: 7, isCrossRepository: false }], {
+      body: 'Rewrote this body by hand. Do not lose this.',
+    });
 
     expect(result.status).toBe(0);
     const body = bodyOf(await soleGhCall(lab));

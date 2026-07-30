@@ -108,6 +108,26 @@ else
   frontmatter_note='CHANGED — check name/description before merging'
 fi
 
+# The frontmatter `name` is the skill's identity: it decides whether an agent
+# loads this file at all, so a change there is the mirror becoming a DIFFERENT
+# skill rather than the same one being edited — a wholesale upstream rewrite, or
+# someone in the middle. That case still opens a PR rather than failing the run,
+# because a red scheduled run here notifies by unread email and would make the
+# pathological case the quietest event in the system. It escalates where it can
+# actually be seen instead: in the title, which is what a notification list shows.
+skill_name() {
+  awk '/^---$/ { if (++seen == 2) exit; next } seen == 1 && /^name:/ {
+    sub(/^name:[[:space:]]*/, ""); print; exit }'
+}
+TITLE='chore(skills): resync vendored skill mirror'
+TITLE_PREFIX='FRONTMATTER NAME CHANGED: '
+if [ "$(git show "$base_sha:$MIRROR" | skill_name)" = "$(skill_name <"$MIRROR")" ]; then
+  name_changed=''
+else
+  name_changed=yes
+  TITLE="$TITLE_PREFIX$TITLE"
+fi
+
 # Fenced so a later run can refresh the numbers without touching the rest of the
 # body. A PR about wording is exactly where a reviewer leaves notes, and the bot
 # owns only what it wrote — the same rule the changeset above follows.
@@ -152,11 +172,27 @@ if [ -n "$pr_number" ]; then
         process.stdout.write(BLOCK);
       }
     ' >"$synced.body"
-  gh pr edit "$pr_number" --body-file "$synced.body"
+  # Escalate an open PR's title too, in case the name changed on a later day.
+  # Prepend to whatever the title is now rather than overwriting it, so a human
+  # rename survives, and don't stack the prefix on a PR that already screams.
+  retitled=''
+  if [ -n "$name_changed" ]; then
+    current_title=$(gh pr view "$pr_number" --json title --jq .title)
+    case "$current_title" in
+      "$TITLE_PREFIX"*) ;;
+      *) retitled="$TITLE_PREFIX$current_title" ;;
+    esac
+  fi
+
+  if [ -n "$retitled" ]; then
+    gh pr edit "$pr_number" --body-file "$synced.body" --title "$retitled"
+  else
+    gh pr edit "$pr_number" --body-file "$synced.body"
+  fi
   echo "skill-resync: updated PR #$pr_number."
   exit 0
 fi
 
 gh pr create --base main --head "$BRANCH" \
-  --title "chore(skills): resync vendored skill mirror" \
+  --title "$TITLE" \
   --body "$(pr_block)"
