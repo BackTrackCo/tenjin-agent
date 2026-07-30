@@ -192,8 +192,10 @@ export const searchResponseSchema = z.object({
   candidates: z.array(searchCandidateSchema).optional(),
   // Set only when the server's size backstop dropped trailing candidates the
   // requested limit had room for; omitted entirely otherwise. There is no cursor,
-  // so the dropped tail is UNRECOVERABLE: the remedy is a narrower question, never
-  // a retry at a smaller limit.
+  // so a retry at a SMALLER limit returns strictly fewer rows; the ceiling scales
+  // with the candidates returned, so a LARGER limit (up to MAX_LIMIT) is what
+  // recovers the tail, and at MAX_LIMIT the tail is unrecoverable and narrowing the
+  // question is the remedy. `runSearch` picks the half that applies.
   truncated: z.literal(true).optional(),
   // Omitted entirely by the server when empty, and only ever present on a MISS.
   // Not enforced here (a stricter schema would reject an otherwise-usable
