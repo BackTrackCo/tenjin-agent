@@ -40,12 +40,16 @@ export function scopeSatisfies(cached: string, required: SessionScope): boolean 
 const EXP_SKEW_MS = 60_000;
 
 /**
- * The P-256 private key, validated as one. A loose record let `{}` or a garbage
- * `d` past the load boundary and into `subtle.importKey`, which throws a raw
- * DOMException — surfacing as an exit-1 INTERNAL with no fix, from a command
- * whose contract is that a bad session file degrades into the ordinary refusal.
- * Validating the shape here keeps that promise: a malformed key is an unusable
- * cache, which is already a handled state.
+ * The P-256 private key's SHAPE. This catches a structurally wrong file — `{}`, a
+ * missing `d`, the wrong curve — at the load boundary, so those never reach the
+ * crypto at all.
+ *
+ * It is deliberately not the whole guard, because it cannot be: a JWK can satisfy
+ * every field here and still be cryptographically invalid (a 31-byte `d`, `d = 0`,
+ * `d = n`, `x`/`y` off the curve), and nothing short of reimplementing P-256
+ * validation in zod would catch that. The import site translates what WebCrypto
+ * throws instead — see `importSigningKey` — so the two together are what make a
+ * bad key a handled state rather than a crash.
  */
 const P256JwkSchema = z
   .object({
@@ -162,14 +166,32 @@ export function signatureBase(input: SignatureParamsInput): string {
 // Key import + per-request signing (generation lives with the mint half).
 // ---------------------------------------------------------------------------
 
+/**
+ * Import the cached key, translating WebCrypto's raw DOMException into the error
+ * contract every other failure here uses.
+ *
+ * Without this, a schema-valid but cryptographically invalid `d` (too short, zero,
+ * ≥ n) or an off-curve point escapes as an exit-1 INTERNAL reading `Invalid
+ * keyData`, with no `fix` — and it escapes from `publish` and `edit` too, which
+ * have no equivalent of read's fall-through. Translating at the ONE place the key
+ * becomes a key means every caller degrades the same way, and the fix line names
+ * the one action that resolves it.
+ */
 async function importSigningKey(jwk: Record<string, unknown>): Promise<webcrypto.CryptoKey> {
-  return subtle.importKey(
-    'jwk',
-    jwk as webcrypto.JsonWebKey,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign'],
-  );
+  try {
+    return await subtle.importKey(
+      'jwk',
+      jwk as webcrypto.JsonWebKey,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign'],
+    );
+  } catch (err) {
+    throw new CliError('INTERNAL', 'The cached session key is not a usable P-256 key.', {
+      fix: 'Delete the session cache and run `tenjin session start --scope read`; a write command re-establishes on its own.',
+      cause: err,
+    });
+  }
 }
 
 /** P-256/SHA-256, IEEE-P1363 64-byte r||s. */
@@ -224,9 +246,11 @@ export async function signWithSession(
  */
 export type SessionFileState =
   | { kind: 'absent' }
+  /** `mode` is the FULL permission bits, not the offending subset: a tamper
+   *  report that prints a mode the file does not have is worse than no number. */
   | { kind: 'loosened'; mode: number }
   | { kind: 'corrupt'; reason: string }
-  | { kind: 'unreadable'; message: string }
+  | { kind: 'unreadable'; message: string; cause: unknown }
   | { kind: 'ok'; file: SessionFile };
 
 export async function readSessionFile(dir: string): Promise<SessionFileState> {
@@ -236,11 +260,11 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
   // No-op on win32, which has no unix mode.
   if (process.platform !== 'win32') {
     try {
-      const mode = (await stat(path)).mode & 0o077;
-      if (mode !== 0) return { kind: 'loosened', mode };
+      const mode = (await stat(path)).mode & 0o777;
+      if ((mode & 0o077) !== 0) return { kind: 'loosened', mode };
     } catch (err) {
       if (hasCode(err, 'ENOENT')) return { kind: 'absent' };
-      return { kind: 'unreadable', message: messageOf(err) };
+      return { kind: 'unreadable', message: messageOf(err), cause: err };
     }
   }
   let raw: string;
@@ -248,7 +272,7 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
     raw = await readFile(path, 'utf8');
   } catch (err) {
     if (hasCode(err, 'ENOENT')) return { kind: 'absent' };
-    return { kind: 'unreadable', message: messageOf(err) };
+    return { kind: 'unreadable', message: messageOf(err), cause: err };
   }
   let json: unknown;
   try {
@@ -258,7 +282,16 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
   }
   const parsed = SessionFileSchema.safeParse(json);
   if (!parsed.success) {
-    return { kind: 'corrupt', reason: parsed.error.issues[0]?.message ?? 'schema mismatch' };
+    const issue = parsed.error.issues[0];
+    const field = issue?.path.join('.');
+    const message = issue?.message ?? 'schema mismatch';
+    // Field-qualified, because "expected string, received undefined" names no
+    // field and the migration case (a pre-origin file) is exactly that message.
+    // zod never echoes the received VALUE, so no key material reaches this string.
+    return {
+      kind: 'corrupt',
+      reason: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,
+    };
   }
   return { kind: 'ok', file: parsed.data };
 }
@@ -273,6 +306,7 @@ export async function loadSessionFile(dir: string): Promise<SessionFile | null> 
   if (state.kind === 'unreadable') {
     throw new CliError('INTERNAL', `Could not read the session cache at ${sessionPath(dir)}`, {
       fix: `Check file permissions on ${sessionPath(dir)}, or delete it to re-establish.`,
+      cause: state.cause,
     });
   }
   return null;

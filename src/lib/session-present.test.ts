@@ -21,6 +21,7 @@ import {
 // on this file — and writing the fixture through the production writer is what
 // makes the 0600 / loosened-mode branches below test the real pairing.
 import { saveSessionFile } from './session-key';
+import { CliError } from './errors';
 import { sessionPath } from './paths';
 import { testSessionKey } from './read-test-utils';
 
@@ -388,11 +389,15 @@ describe('readSessionFile distinguishes what loadSessionFile collapses', () => {
     expect(await readSessionFile(d)).toMatchObject({ kind: 'corrupt', reason: 'not valid JSON' });
   });
 
-  it('loosened, carrying the offending mode bits', async () => {
+  // The FULL mode, not the offending subset: a tamper report that prints a mode
+  // the file does not have (0755 rendered as 0655) is worse than no number.
+  it('loosened, carrying the real mode the file has', async () => {
     if (process.platform === 'win32') return;
     await saveSessionFile(d, (await testSessionKey()).file);
     await chmod(sessionPath(d), 0o644);
-    expect(await readSessionFile(d)).toMatchObject({ kind: 'loosened', mode: 0o044 });
+    expect(await readSessionFile(d)).toMatchObject({ kind: 'loosened', mode: 0o644 });
+    await chmod(sessionPath(d), 0o755);
+    expect(await readSessionFile(d)).toMatchObject({ kind: 'loosened', mode: 0o755 });
   });
 
   it('unreadable is the ONE state loadSessionFile refuses to flatten to null', async () => {
@@ -409,5 +414,49 @@ describe('readSessionFile distinguishes what loadSessionFile collapses', () => {
     const { file } = await testSessionKey();
     await saveSessionFile(d, file);
     expect(await readSessionFile(d)).toEqual({ kind: 'ok', file });
+  });
+});
+
+/**
+ * The half the schema cannot cover. A JWK can satisfy every field of
+ * P256JwkSchema and still be cryptographically invalid, at which point
+ * subtle.importKey throws a raw DOMException — an exit-1 INTERNAL reading
+ * "Invalid keyData" with no `fix`, out of `publish` and `edit` as well as `read`.
+ * Translating at the import site is what makes every caller degrade identically.
+ */
+describe('a schema-valid but cryptographically invalid key is a typed error', () => {
+  const req = { method: 'GET' as const, url: 'https://tenjin.blog/api/read/iris/slug' };
+
+  it.each([
+    ['a one-character d', 'AA'],
+    ['a 31-byte d', Buffer.alloc(31, 1).toString('base64url')],
+    ['d = 0', Buffer.alloc(32, 0).toString('base64url')],
+    ['d = n (the curve order)', 'AAAAAP__________vOb6racXnoTzucrC_GMlUQ'],
+  ])('%s throws a CliError with a fix, not a DOMException', async (_name, d) => {
+    const { file } = await testSessionKey();
+    const err = await signWithSession({ ...file, privateKeyJwk: { ...file.privateKeyJwk, d } }, req)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    const cliErr = err as CliError;
+    expect(cliErr.code).toBe('INTERNAL');
+    expect(cliErr.message).toMatch(/not a usable P-256 key/i);
+    // The half a bare DOMException never had: something to actually do.
+    expect(cliErr.fix).toMatch(/tenjin session start --scope read/);
+    // And the original is preserved for anyone debugging it.
+    expect(cliErr.cause).toBeDefined();
+  });
+
+  it('an off-curve public point is caught the same way', async () => {
+    const { file } = await testSessionKey();
+    const bad = { ...file.privateKeyJwk, x: Buffer.alloc(32, 9).toString('base64url') };
+    await expect(signWithSession({ ...file, privateKeyJwk: bad }, req)).rejects.toMatchObject({
+      code: 'INTERNAL',
+    });
+  });
+
+  it('a real key still signs, so the guard is not refusing everything', async () => {
+    const { file } = await testSessionKey();
+    await expect(signWithSession(file, req)).resolves.toHaveProperty('Signature');
   });
 });

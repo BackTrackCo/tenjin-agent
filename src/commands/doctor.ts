@@ -26,7 +26,7 @@ import type {
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { originOf, trimSlash } from '../lib/url';
+import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
@@ -138,7 +138,7 @@ export async function collectDoctorChecks(
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
     ),
-    await checkSession(ctx.dataDir, deps.now ?? Date.now, originOf(baseUrl)),
+    await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -550,7 +550,7 @@ const POSTURE: Record<DirState, string> = {
 async function checkSession(
   dataDir: string,
   now: () => number,
-  origin: string,
+  origin: string | null,
 ): Promise<BuiltCheck> {
   const warn = (detail: string, data?: unknown): BuiltCheck => ({
     result: {
@@ -577,7 +577,7 @@ async function checkSession(
   }
   if (state.kind === 'loosened') {
     return warn(
-      `Session key at ${sessionPath(dataDir)} is mode 0${(state.mode | 0o600).toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
+      `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
     );
   }
   if (state.kind === 'corrupt') {
@@ -588,6 +588,21 @@ async function checkSession(
   }
 
   const file = state.file;
+  // A base URL that is not an http(s) origin cannot be compared against, and this
+  // is the diagnostic verb: it reports that and keeps going. The `config` check
+  // above owns the fix for the value itself.
+  if (origin === null) {
+    return {
+      result: {
+        name: 'session',
+        status: 'warn',
+        required: false,
+        detail: `Session key was minted for ${file.origin}, but the configured base URL is not an http(s) origin, so it cannot be matched`,
+        fix: 'Set an absolute http(s) base URL: `tenjin config set baseUrl <url>`.',
+        data: { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp },
+      },
+    };
+  }
   const data = { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp };
   if (file.origin !== origin) {
     return warn(

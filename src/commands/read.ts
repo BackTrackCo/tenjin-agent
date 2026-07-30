@@ -120,14 +120,12 @@ export async function runRead(
   //    would need the wallet this module cannot reach.
   const cached = await loadSessionFile(ctx.dataDir);
   const now = deps.now ?? Date.now;
-  const session =
-    cached !== null && isSessionPresentable(cached, now(), 'read', originOf(settings.baseUrl))
-      ? cached
-      : null;
-  const outcome =
-    session === null
-      ? { kind: 'refuse' as const, check: 'not_performed' as const }
-      : await present(session, ref.url, fetchOpts, now);
+  // Against the origin of the URL actually being signed, not the configured base
+  // URL. They are equal only because `resolveResourceRef` asserted it in another
+  // module; checking the request target makes this guard locally sound instead of
+  // dependent on a pin someone could move.
+  const origin = originOf(ref.url);
+  const outcome = await presentIfUsable(cached, origin, now, ref.url, fetchOpts);
   if (outcome.kind === 'entitled') {
     return await deliverFresh(
       ctx.dataDir,
@@ -145,17 +143,54 @@ export async function runRead(
 }
 
 /** What the entitlement question got, which is not the same as what was asked. */
-type EntitlementCheck = 'not_performed' | 'session' | 'session_rejected' | 'session_inconclusive';
+type EntitlementCheck =
+  | 'not_performed'
+  | 'session'
+  | 'session_rejected'
+  | 'session_inconclusive'
+  | 'session_origin_mismatch';
 
 type PresentOutcome =
   { kind: 'entitled'; body: ReadBody } | { kind: 'refuse'; check: EntitlementCheck };
 
+/** Failures that must NOT be folded into a price refusal; see `present`. */
+const LOUD_CODES = new Set(['CONTRACT_MISMATCH', 'RATE_LIMITED']);
+
+/**
+ * Decide whether the cached session may be presented, and present it if so.
+ *
+ * The origin mismatch is its own outcome rather than "no session": the two are
+ * indistinguishable to an agent, and the remedy for one is the remedy the other
+ * must NOT get. `not_performed` tells the agent to run `session start`, which is
+ * the single verb that opens the keystore — and an agent that reached a mismatch
+ * by carrying `--base-url` would carry it straight into that suggestion, minting
+ * a wallet-signed delegation against the wrong host and clobbering the good one.
+ */
+async function presentIfUsable(
+  cached: SessionFile | null,
+  origin: string,
+  now: () => number,
+  url: string,
+  fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch },
+): Promise<PresentOutcome> {
+  if (cached === null) return { kind: 'refuse', check: 'not_performed' };
+  if (cached.origin !== origin) {
+    return { kind: 'refuse', check: 'session_origin_mismatch' };
+  }
+  if (!isSessionPresentable(cached, now(), 'read', origin)) {
+    return { kind: 'refuse', check: 'not_performed' };
+  }
+  return await present(cached, url, fetchOpts, now);
+}
+
 /**
  * The one signed GET. Never throws for a transport failure: the first 402 already
  * told us the price, and losing it turns a recoverable refusal into a bare
- * network error that says nothing about the piece. A blocked redirect is the
- * exception — it is a signal about where a credential was nearly sent, so it
- * stays loud.
+ * network error that says nothing about the piece. Two exceptions stay loud: a
+ * blocked redirect (a signal about where a credential was nearly sent) and a
+ * rate limit (a recoverable pause the CLI models explicitly everywhere else —
+ * swallowing it costs a looping agent its backoff and points it at a
+ * keystore-opening command instead).
  */
 async function present(
   session: SessionFile,
@@ -168,7 +203,7 @@ async function present(
     const sessionHeaders = await signWithSession(session, { method: 'GET', url }, { now });
     second = await fetchRead(url, { ...fetchOpts, sessionHeaders });
   } catch (err) {
-    if (err instanceof CliError && err.code === 'CONTRACT_MISMATCH') throw err;
+    if (err instanceof CliError && LOUD_CODES.has(err.code)) throw err;
     return { kind: 'refuse', check: 'session_inconclusive' };
   }
   switch (second.kind) {
@@ -192,11 +227,18 @@ async function present(
 }
 
 /**
- * The exit-3 refusal: the price, in human money, plus the verbs that can get past
- * it. `entitlementCheck` reports what the server actually said, because the four
- * states need different next moves — `'session'` is the only one where buying is
- * the answer, and the other three all leave `sessionCommand` in place so an agent
- * re-mints instead of spending.
+ * The exit-3 refusal: the price, in human money, plus the move that actually gets
+ * past it. `entitlementCheck` reports what the server said, and the fix follows
+ * from it rather than from a single default:
+ *
+ *  - `session` — the server answered "you do not own this". Buying is the answer.
+ *  - `session_origin_mismatch` — a session exists, for a DIFFERENT origin. The
+ *    remedy is to stop redirecting the CLI, never to mint. `sessionCommand` is
+ *    deliberately absent: recommending it here would send an agent that still
+ *    carries `--base-url` to wallet-sign a delegation against the wrong host and
+ *    overwrite the good one.
+ *  - everything else — the question is still open, so re-minting may deliver it
+ *    free and `sessionCommand` rides.
  */
 function refusal(
   ref: { url: string; resourceId?: string },
@@ -209,11 +251,15 @@ function refusal(
   const priceText = `${formatUsdDisplay(price.atomic)} USD (${price.atomic} atomic)`;
   const url = sanitizeForTerminal(ref.url);
   const buyFix = `Run \`tenjin buy ${url}\` to pay and read it, or \`tenjin inspect\` for the card first.`;
-  const owned = check === 'session';
+  const mismatch = check === 'session_origin_mismatch';
+  const mintable = check !== 'session' && !mismatch;
+  const fix = mismatch
+    ? `Your session key was minted for a different Tenjin deployment, so it was not presented. Read from the origin it belongs to — check with \`tenjin config get baseUrl\` and drop any host override — rather than minting a new session against this one. ${buyFix}`
+    : mintable
+      ? `${buyFix} If you already bought it, \`tenjin session start --scope read\` lets this read recover it free.`
+      : buyFix;
   return new CliError('REFUSED', `This piece costs ${priceText}; \`tenjin read\` never pays.`, {
-    fix: owned
-      ? buyFix
-      : `${buyFix} If you already bought it, \`tenjin session start --scope read\` lets this read recover it free.`,
+    fix,
     details: {
       reason: 'payment_required',
       entitlementCheck: check,
@@ -222,7 +268,7 @@ function refusal(
       price,
       network: requirement.network,
       buyCommand: `tenjin buy ${ref.url}`,
-      ...(owned ? {} : { sessionCommand: 'tenjin session start --scope read' }),
+      ...(mintable ? { sessionCommand: 'tenjin session start --scope read' } : {}),
     },
   });
 }

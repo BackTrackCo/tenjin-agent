@@ -498,8 +498,8 @@ describe('runRead, module boundary', () => {
   // stayed in lib/session-key, which is still banned above. The key read can
   // therefore hold is P-256: wrong curve for the EIP-712/secp256k1 signature an
   // EIP-3009 payment authorization needs, so no refactor inside this graph pays
-  // for anything, and the delegation is read-scoped, which the SERVER refuses on
-  // any write method.
+  // for anything. That is the whole claim — the delegation's SCOPE is not part of
+  // it, and must not be re-imported here (see permissions.ts).
   //
   // A future refactor that routes read through a paying or MINTING helper fails
   // here rather than in production.
@@ -668,13 +668,48 @@ describe('runRead, the session key is bound to the origin it was minted for', ()
       fetchImpl: fetch,
     }).catch((e: unknown) => e);
 
-    expect((err as CliError).code).toBe('REFUSED');
+    const cliErr = err as CliError;
+    expect(cliErr.code).toBe('REFUSED');
     // The load-bearing assertion: one call, unsigned. No delegation left the machine.
     expect(calls.map((c) => c.phase)).toEqual(['plain']);
     expect(calls[0]?.headers['tenjin-session-delegation']).toBeUndefined();
     expect(calls[0]?.headers.signature).toBeUndefined();
-    // And the agent is told a session may help, because none was usable here.
-    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'not_performed' });
+    expect(cliErr.details).toMatchObject({ entitlementCheck: 'session_origin_mismatch' });
+  });
+
+  // The refusal after a redirected read must NOT read like "you have no session",
+  // because the remedy for that is `session start` — the one verb that opens the
+  // keystore. An agent still carrying the `--base-url` that caused the mismatch
+  // would wallet-sign a delegation against the attacker host and clobber the good
+  // prod session. So the mismatch state drops sessionCommand entirely.
+  it('never recommends minting a session after an origin mismatch', async () => {
+    const { file } = await testSessionKey(); // minted for TEST_ORIGIN
+    await saveSessionFile(dir, file);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const err = (await runRead(
+      { ref: `${OTHER}/api/read/iris/slug` },
+      makeCtx({ baseUrl: OTHER }),
+      { fetchImpl: fetch },
+    ).catch((e: unknown) => e)) as CliError;
+
+    expect(err.details).not.toHaveProperty('sessionCommand');
+    expect(err.fix).not.toContain('tenjin session start');
+    // The remedy it DOES give: stop redirecting the CLI.
+    expect(err.fix).toMatch(/minted for a different Tenjin deployment/i);
+    expect(err.fix).toContain('tenjin config get baseUrl');
+    // ...while an ordinary no-session refusal still points at minting, so this is
+    // a real distinction rather than the fix line having been blanked.
+    await rm(join(dir, 'session.json'));
+    const plain = (await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    )) as CliError;
+    expect(plain.details).toMatchObject({
+      entitlementCheck: 'not_performed',
+      sessionCommand: 'tenjin session start --scope read',
+    });
   });
 
   it('presents to the origin it WAS minted for, so the binding is not just a refusal', async () => {
@@ -785,5 +820,39 @@ describe('runRead, the clock seam covers the signature too', () => {
     });
     await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch, now: () => 1_700_000_000_000 });
     expect(calls[1]?.headers['signature-input']).toContain('created=1700000000');
+  });
+});
+
+describe('runRead, failures that must stay loud on the signed GET', () => {
+  it('re-throws RATE_LIMITED with retryAfterSeconds instead of swallowing the backoff', async () => {
+    // A 429 is a recoverable pause the CLI models explicitly everywhere else.
+    // Folding it into a price refusal costs a looping agent its backoff signal
+    // AND points it at the one command that opens the keystore.
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => new Response('{}', { status: 429, headers: { 'retry-after': '30' } }),
+    });
+    await expect(runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch })).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      details: { retryAfterSeconds: 30 },
+    });
+  });
+
+  it('a cryptographically invalid cached key fails with a fix, never a bare DOMException', async () => {
+    // Schema-valid (kty/crv/d/x/y all present, non-empty) but not a real key, so
+    // it reaches subtle.importKey. read still degrades into its refusal, but the
+    // translated error is what stops publish/edit exiting 1 on "Invalid keyData".
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, { ...file, privateKeyJwk: { ...file.privateKeyJwk, d: 'AA' } });
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const err = (await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    )) as CliError;
+    expect(err.code).toBe('REFUSED');
+    expect(calls.map((c) => c.phase)).toEqual(['plain']);
   });
 });

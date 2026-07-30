@@ -1071,3 +1071,42 @@ describe('runDoctor — session key, the states loadSessionFile flattens', () =>
     expect(check.fix).toBe('tenjin session start --scope read');
   });
 });
+
+/**
+ * The regression this round nearly shipped: `originOf` throws USAGE, and calling
+ * it inline while building the check array took down the whole diagnostic before
+ * a single check existed — on the one command an operator runs when the install
+ * is broken, and one line above the check that had just fixed that same class.
+ * The `--base-url` flag is validated at the CLI boundary; the environment and
+ * config routes are not.
+ */
+describe('runDoctor — a base URL that is not an origin never aborts the run', () => {
+  // TENJIN_BASE_URL is the live route: `--base-url` is URL-validated at the CLI
+  // boundary and a bad config.json value fails the `config` check, but the env
+  // var reaches settings unvalidated. This is vraspar's exact repro.
+  it.each([
+    ['unparseable', 'tenjin.blog'],
+    ['a non-http scheme', 'foo://tenjin.blog'],
+  ])('still produces a check list with %s in TENJIN_BASE_URL', async (_name, baseUrl) => {
+    const res = await runDoctor(ctxFor(), {
+      env: { TENJIN_BASE_URL: baseUrl },
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { checks: CheckResult[] };
+    // The run produced a check list at all, which is the whole point.
+    expect(data.checks.length).toBeGreaterThan(3);
+    expect(find(data.checks, 'session').status).toBe('ok'); // absent, and absent is ok
+  });
+
+  it('warns that a cached session cannot be matched, instead of throwing', async () => {
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const res = await runDoctor(ctxFor(), {
+      env: { TENJIN_BASE_URL: 'foo://tenjin.blog' },
+      fetchImpl: healthyFetch,
+    });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/not an http\(s\) origin/i);
+    expect(check.fix).toMatch(/config set baseUrl/);
+  });
+});
