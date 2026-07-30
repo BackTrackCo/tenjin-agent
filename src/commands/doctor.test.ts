@@ -17,6 +17,8 @@ import {
 } from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
+import { saveSessionFile } from '../lib/session-key';
+import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
@@ -849,7 +851,10 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     expect(data.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
       ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
     );
-    expect(data.permissions.optIn.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
+    expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
+      'Bash(tenjin buy:*)',
+      'Bash(tenjin session start:*)',
+    ]);
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
   });
 
@@ -878,7 +883,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     const block = renderPermissionsBlock().join('\n');
     expect(block).toContain('--base-url');
     expect(block).toContain('mcp__tenjin__tenjin_publish');
-    expect(block).toContain('Free: no wallet, no signing, no payment');
+    expect(block).toContain('Free: cannot spend and cannot open the keystore');
     expect(block).not.toContain('free, read-only verbs');
   });
 });
@@ -930,5 +935,60 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
     expect(apiLine).toContain('Bash(tenjin:*)');
     expect(apiLine).not.toContain('\x1b[32m');
     expect(lines.filter((l) => l.trimStart().startsWith('Bash(tenjin:*)'))).toEqual([]);
+  });
+});
+
+/**
+ * The session check. `read` presents a cached delegation to recover an owned
+ * piece, so "is there one, at what scope, until when" is a real diagnostic — and
+ * ABSENT is the normal posture rather than a defect, which is why it is `ok` and
+ * not a warn: most machines never need one, and a permanent yellow line teaches
+ * operators to ignore the yellow lines.
+ */
+describe('runDoctor — session key', () => {
+  it('reports ok with no session, naming the verb that would mint one', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('ok');
+    expect(check.required).toBe(false);
+    expect(check.detail).toContain('No session key');
+    expect(check.detail).toContain('tenjin session start --scope read');
+    expect(check.data).toBeUndefined();
+  });
+
+  it('reports a live session as ok with address, scope and expiry — never key material', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('ok');
+    expect(check.data).toEqual({ address: file.address, scope: 'read', exp: file.exp });
+    const rendered = JSON.stringify(res.data) + (res.humanLines ?? []).join('\n');
+    expect(rendered).not.toContain(file.delegation);
+    expect(rendered).not.toContain(String((file.privateKeyJwk as { d?: string }).d));
+  });
+
+  it('warns (never fails) on an expired session, with the fix that renews it', async () => {
+    const { file } = await testSessionKey({ exp: new Date(Date.now() - 1000).toISOString() });
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    const check = find(data.checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.required).toBe(false);
+    expect(check.fix).toBe('tenjin session start --scope read');
+    // A stale session is never an exit-code event.
+    expect(data.status).toBe('pass');
+  });
+
+  it('uses the injected clock, so expiry is decided rather than observed', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), {
+      env: {},
+      fetchImpl: healthyFetch,
+      now: () => Date.parse(file.exp) + 1,
+    });
+    expect(find((res.data as { checks: CheckResult[] }).checks, 'session').status).toBe('warn');
   });
 });

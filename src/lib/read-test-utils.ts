@@ -1,6 +1,8 @@
+import { webcrypto } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import type { PaymentRequired } from '@x402/core/types';
+import type { SessionFile } from './session-present';
 import type { TenjinSigner, WalletProvider } from './wallet/provider';
 
 /** Shared B2 test fixtures: a real (offline) viem signer, a fake wallet provider
@@ -32,6 +34,35 @@ export function testWalletProvider(signer: TenjinSigner = testSigner()): WalletP
     }),
     getSigner: async () => signer,
     diagnostics: async () => ({ warnings: [] }),
+  };
+}
+
+/**
+ * A REAL P-256 session file (generated, not canned), plus its public key so a
+ * test can verify the signature the CLI produced rather than only its shape.
+ * Defaults to a live 1h `read` session bound to the test signer's address.
+ */
+export async function testSessionKey(
+  over: Partial<SessionFile> = {},
+): Promise<{ file: SessionFile; publicKey: webcrypto.CryptoKey }> {
+  const subtle = webcrypto.subtle;
+  const pair = (await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+    'sign',
+    'verify',
+  ])) as webcrypto.CryptoKeyPair;
+  const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
+  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as Record<string, unknown>;
+  return {
+    file: {
+      address: testSigner().address.toLowerCase(),
+      delegation: 'DELEGATION',
+      exp: new Date(Date.now() + 3_600_000).toISOString(),
+      scope: 'read',
+      publicKeyRaw: Buffer.from(rawPub).toString('base64url'),
+      privateKeyJwk: jwk,
+      ...over,
+    },
+    publicKey: pair.publicKey,
   };
 }
 
@@ -131,9 +162,12 @@ export const reply = {
   ): Response => jsonResponse(402, preview, { 'PAYMENT-REQUIRED': fixture.header }),
   alreadyPurchased: (): Response =>
     jsonResponse(409, { code: 'already_purchased', message: 'Already purchased.' }),
+  /** A 401 rejecting the presented delegation (expired, revoked, unbound). */
+  sessionRejected: (code = 'session_expired'): Response =>
+    jsonResponse(401, { code, message: 'The session delegation is not valid.' }),
 };
 
-export type ReadPhase = 'plain' | 'siwx' | 'payment';
+export type ReadPhase = 'plain' | 'siwx' | 'session' | 'payment';
 
 export interface RecordedCall {
   url: string;
@@ -142,15 +176,21 @@ export interface RecordedCall {
 }
 
 /**
- * A read-route mock that classifies each request by its headers, a
+ * A read-route mock that classifies each request by its headers: a
  * PAYMENT-SIGNATURE is a `payment` attempt, a SIGN-IN-WITH-X is a `siwx`
- * re-check, otherwise a plain GET, and returns the configured Response for that
- * phase. Records every call so a test can assert the exact ORDER of attempts and
- * that (e.g.) a payment was never attempted.
+ * re-check, a Tenjin-Session-Delegation is a `session` presentation, otherwise a
+ * plain GET — and returns the configured Response for that phase. Records every
+ * call so a test can assert the exact ORDER of attempts and that (e.g.) a payment
+ * was never attempted.
+ *
+ * An unconfigured phase THROWS rather than falling back, which is what makes an
+ * absent phase a real assertion: a test that pins `['plain']` would otherwise
+ * pass just as well against a mock that quietly served the second request.
  */
 export function makeReadServer(config: {
   plain: () => Response;
   siwx?: () => Response;
+  session?: () => Response;
   payment?: () => Response;
 }): { fetch: typeof fetch; calls: RecordedCall[] } {
   const calls: RecordedCall[] = [];
@@ -161,10 +201,18 @@ export function makeReadServer(config: {
         ? 'payment'
         : headers['sign-in-with-x'] !== undefined
           ? 'siwx'
-          : 'plain';
+          : headers['tenjin-session-delegation'] !== undefined
+            ? 'session'
+            : 'plain';
     calls.push({ url: String(url), phase, headers });
     const handler =
-      phase === 'payment' ? config.payment : phase === 'siwx' ? config.siwx : config.plain;
+      phase === 'payment'
+        ? config.payment
+        : phase === 'siwx'
+          ? config.siwx
+          : phase === 'session'
+            ? config.session
+            : config.plain;
     if (handler === undefined) throw new Error(`no mock configured for phase ${phase}`);
     return handler();
   }) as unknown as typeof fetch;

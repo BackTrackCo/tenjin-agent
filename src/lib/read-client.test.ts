@@ -44,6 +44,46 @@ describe('fetchRead', () => {
     expect(calls[0]?.headers['payment-signature']).toBe('pay-value');
   });
 
+  it('sends the session-key headers when provided, alongside the usual ones', async () => {
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.entitled(readBody()),
+      session: () => reply.entitled(readBody()),
+    });
+    await fetchRead(URL_, {
+      ...opts(fetch),
+      sessionHeaders: {
+        'Tenjin-Session-Delegation': 'DELEGATION',
+        'Signature-Input': 'tenjin=("@method" "@target-uri");created=1',
+        Signature: 'tenjin=:sig:',
+      },
+    });
+    expect(calls[0]?.headers['tenjin-session-delegation']).toBe('DELEGATION');
+    expect(calls[0]?.headers.signature).toBe('tenjin=:sig:');
+    // The client's own headers survive the merge.
+    expect(calls[0]?.headers.accept).toBe('application/json');
+    expect(calls[0]?.headers['x-tenjin-client']).toBeDefined();
+  });
+
+  it('reports session_rejected with the server code on a 401 to a session-signed read', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => reply.entitled(readBody()),
+      session: () => reply.sessionRejected('session_expired'),
+    });
+    const res = await fetchRead(URL_, {
+      ...opts(fetch),
+      sessionHeaders: { 'Tenjin-Session-Delegation': 'DELEGATION' },
+    });
+    expect(res).toEqual({ kind: 'session_rejected', code: 'session_expired' });
+  });
+
+  it('still throws on a 401 that presented NO session key (no silent soft outcome)', async () => {
+    // The soft outcome exists because the session caller has a defined answer for
+    // it. An unsigned or SIWX 401 has none, so widening it would hand `buy` and
+    // `inspect` a state they cannot act on.
+    const { fetch } = makeReadServer({ plain: () => reply.sessionRejected() });
+    await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
+  });
+
   it('maps a 404 to RESOURCE_NOT_FOUND', async () => {
     const { fetch } = makeReadServer({ plain: () => new Response('{}', { status: 404 }) });
     await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({

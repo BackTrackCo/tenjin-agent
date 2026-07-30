@@ -59,13 +59,24 @@ export interface ExcludedVerb {
 }
 
 /**
- * FREE verbs: no wallet, no signing, no payment. Not all of them are read-only,
- * and the difference is disclosed rather than papered over — `search` POSTs the
- * (generalized, anonymous) question off-machine and records it locally, and
- * `outcome` POSTs a report that moves the marketplace's reuse signal. Both are
- * unauthenticated remote writes. Pre-clearing them is defensible because they
- * cost nothing and carry no credential; calling them read-only to justify it
- * would not be.
+ * FREE verbs: they CANNOT SPEND AND CANNOT OPEN THE KEYSTORE. That is the whole
+ * definition of this tier, and it is deliberately narrower than the older "no
+ * wallet, no signing, no payment" — which stopped being true the moment `read`
+ * gained the ability to PRESENT a cached session key. `read` signs, with a P-256
+ * delegation loaded from disk; it cannot mint one (that needs the wallet, and its
+ * import graph is test-pinned clear of it) and cannot produce the
+ * secp256k1/EIP-712 signature a payment authorization needs (wrong curve), and
+ * the delegation it presents is read-scoped, which the server independently
+ * refuses on any write method. Money and key material stay out of reach; a
+ * signature as such no longer does, so the tier says what it means.
+ *
+ * Not all of them are read-only, and the difference is disclosed rather than
+ * papered over — `search` POSTs the (generalized, anonymous) question off-machine
+ * and records it locally, `outcome` POSTs a report that moves the marketplace's
+ * reuse signal (both unauthenticated remote writes), and `read` writes locally,
+ * saving a delivered piece to the library. Pre-clearing them is defensible
+ * because they cost nothing and cannot reach the key; calling them read-only to
+ * justify it would not be.
  *
  * Rules are PREFIX rules: `Bash(tenjin search:*)` clears commands that start with
  * `tenjin search` and nothing else. The narrow `wallet show` / `wallet balance` /
@@ -100,9 +111,13 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
     rule: 'Bash(tenjin read:*)',
     command: 'tenjin read',
     note:
-      'Free-only delivery: free pieces and local-library re-reads. No wallet, no ' +
-      'signing, no payment — the wallet and payment modules are absent from its ' +
-      'import graph. Not read-only: a fresh free piece is saved to the library.',
+      'Free-only delivery: free pieces, local-library re-reads, and pieces this ' +
+      'wallet already owns when a read-scoped session key is cached. Cannot spend ' +
+      'and cannot open the keystore — the wallet, payment, and session-MINTING ' +
+      'modules are all absent from its import graph, so the key it may present is ' +
+      'a P-256 delegation loaded from disk that cannot sign a payment and that the ' +
+      'server refuses on any write. Not read-only: a freshly delivered piece is ' +
+      'saved to the library.',
   },
   {
     rule: 'Bash(tenjin outcome:*)',
@@ -142,10 +157,10 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
 ];
 
 /**
- * The one paying verb, offered as an EXPLICIT opt-in line rather than shipped in
- * the safe set.
+ * The verbs offered as EXPLICIT opt-in lines rather than shipped in the safe set:
+ * the one that spends, and the one that opens the keystore.
  *
- * Read the note carefully before pasting the line: on the DEFAULT config this
+ * Read the buy note carefully before pasting the line: on the DEFAULT config this
  * rule authorizes unattended spending up to the wallet balance. Walking
  * evaluateSpendPolicy (lib/policy.ts) against CONFIG_DEFAULTS with an agent that
  * passes `--yes` (which this repo's own skill snippet offers):
@@ -172,6 +187,21 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
       '`tenjin config set sessionBudget <usd>` (sessionBudget 0 means NO ceiling, ' +
       'not a zero one). This line never raises a spend cap by itself, but do not ' +
       'read that as a human being on every purchase. Fund small.',
+  },
+  {
+    rule: 'Bash(tenjin session start:*)',
+    command: 'tenjin session start',
+    note:
+      'OPENS THE KEYSTORE (one wallet signature), but SPENDS NOTHING and cannot: ' +
+      'it mints a ≤24h P-256 session key so `tenjin read` can recover pieces you ' +
+      'already own without paying. The delegated key is the wrong curve for a ' +
+      'payment authorization and is read-scoped, which the server refuses on any ' +
+      'write. What you are opting into is unattended keystore access: on an ' +
+      'encrypted wallet that means the passphrase prompt is skipped or answered ' +
+      'from the environment, and the `--base-url` caveat below bites harder here ' +
+      'than elsewhere — a delegation minted against an attacker-chosen host is ' +
+      'domain-bound and useless at the real origin, but it is still a wallet ' +
+      'signature you did not intend to make.',
   },
 ];
 
@@ -286,13 +316,15 @@ export function renderPermissionsBlock(): string[] {
     'Auto-mode permission allowlist (add these once, then agents stop being denied):',
   ];
   for (const e of ALWAYS_SAFE_ALLOWLIST) lines.push(`  ${e.rule}`);
-  lines.push('  Free: no wallet, no signing, no payment. Not all read-only, though:');
+  lines.push('  Free: cannot spend and cannot open the keystore. Not all read-only, though:');
   lines.push('  `search` and `outcome` POST to the marketplace (a question, a report),');
-  lines.push('  and `read` saves a delivered free piece to your local library.');
+  lines.push('  and `read` saves a delivered piece to your local library. `read` may also');
+  lines.push('  present a cached read-scoped session key: it cannot mint one, cannot sign a');
+  lines.push('  payment with it (wrong curve), and the server refuses it on any write.');
   lines.push('');
   lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
   lines.push('');
-  lines.push('Opt in separately, only if you want unattended purchases:');
+  lines.push('Opt in separately (unattended purchases; unattended keystore access):');
   for (const e of OPT_IN_ALLOWLIST) {
     lines.push(`  ${e.rule}`);
     lines.push(`    ${e.note}`);

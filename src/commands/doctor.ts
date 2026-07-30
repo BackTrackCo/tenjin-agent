@@ -30,6 +30,7 @@ import { trimSlash } from '../lib/url';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
+import { isSessionPresentable, loadSessionFile } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
@@ -102,6 +103,8 @@ export interface DoctorDeps {
   /** PATH probe for the `claude`/`codex` binaries, half of harness detection. Defaults
    * to probing `env.PATH`, so a test passing `env: {}` detects neither. */
   which?: (bin: string) => boolean;
+  /** Clock seam (ms since epoch) for the session-expiry check. */
+  now?: () => number;
 }
 
 /**
@@ -135,6 +138,7 @@ export async function collectDoctorChecks(
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
     ),
+    await checkSession(ctx.dataDir, deps.now ?? Date.now),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -520,6 +524,55 @@ const POSTURE: Record<DirState, string> = {
   shadowed: 'at least one CLI skill present but not model-invocable',
   wired: 'CLI skills wired, take precedence over the hosted mirror',
 };
+
+/**
+ * The delegated session key `tenjin read` presents to recover a piece this wallet
+ * already owns (`tenjin session start --scope read` mints it). Never required and
+ * never a fail: `read` works without one, it just cannot recover an owned piece
+ * that is not cached locally, so ABSENT is `ok` — the normal posture, not a
+ * defect. A session that exists but is expired, out of scope, or unreadable IS
+ * worth a warn: you minted one deliberately and it silently stopped working.
+ *
+ * Reports address / scope / expiry and nothing else. The delegation and the
+ * private JWK never reach this output — doctor's payload is the single most
+ * likely thing in this CLI to be pasted into an issue.
+ */
+async function checkSession(dataDir: string, now: () => number): Promise<BuiltCheck> {
+  const file = await loadSessionFile(dataDir);
+  if (file === null) {
+    return {
+      result: {
+        name: 'session',
+        status: 'ok',
+        required: false,
+        detail:
+          'No session key; `tenjin read` delivers free and locally-cached pieces (`tenjin session start --scope read` adds owned-piece recovery)',
+      },
+    };
+  }
+  const data = { address: file.address, scope: file.scope, exp: file.exp };
+  if (!isSessionPresentable(file, now(), 'read')) {
+    return {
+      result: {
+        name: 'session',
+        status: 'warn',
+        required: false,
+        detail: `Session key for ${file.address} is expired or out of scope (scope ${file.scope}, exp ${file.exp})`,
+        fix: 'tenjin session start --scope read',
+        data,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'session',
+      status: 'ok',
+      required: false,
+      detail: `Session key ${file.address}, scope ${file.scope}, expires ${file.exp}`,
+      data,
+    },
+  };
+}
 
 async function checkReadPath(
   baseUrl: string,

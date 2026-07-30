@@ -1,28 +1,28 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, stat, mkdir, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { webcrypto } from 'node:crypto';
 import {
-  contentDigest,
   createSessionKeyAuth,
   createSiwxAuth,
   delegationResources,
   establishSession,
-  isSessionUsable,
   loadSessionFile,
   saveSessionFile,
   recoveryFor,
-  signWithSession,
-  signatureBase,
-  signatureParams,
-  targetUri,
-  type SessionFile,
+  SESSION_CHAIN_ID,
 } from './session-key';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sessionPath } from './paths';
-import { testSigner } from './read-test-utils';
+import { testSessionKey, testSigner } from './read-test-utils';
 import type { TenjinSigner } from './wallet/provider';
+
+/**
+ * The MINT half: establishing a delegation, caching it, and the two WriteAuth
+ * implementations. The present-only half it re-exports (RFC 9421 primitives,
+ * signWithSession, loadSessionFile, the usability predicates) is covered in
+ * session-present.test.ts, where `read` can reach it.
+ */
 
 /** A second, distinct signer (a different wallet address) for swap-invalidation. */
 function otherSigner(): TenjinSigner {
@@ -37,84 +37,9 @@ function otherSigner(): TenjinSigner {
   };
 }
 
-const subtle = webcrypto.subtle;
-
-// A real generated key for the round-trip signing test.
-async function realKeyFile(): Promise<{ file: SessionFile; publicKey: webcrypto.CryptoKey }> {
-  const pair = (await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
-    'sign',
-    'verify',
-  ])) as webcrypto.CryptoKeyPair;
-  const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
-  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as Record<string, unknown>;
-  const file: SessionFile = {
-    address: '0xabc',
-    delegation: 'DELEGATION',
-    exp: new Date(Date.now() + 3600_000).toISOString(),
-    scope: 'read+write',
-    publicKeyRaw: Buffer.from(rawPub).toString('base64url'),
-    privateKeyJwk: jwk,
-  };
-  return { file, publicKey: pair.publicKey };
-}
-
-describe('RFC 9421 primitives are byte-exact', () => {
-  it('Content-Digest is sha-256=:<base64 SHA-256(body)>: over the exact bytes', () => {
-    const body = JSON.stringify({ title: 'Hi', bodyMd: '# Hi\n', status: 'published' });
-    expect(contentDigest(body)).toBe('sha-256=:12Jb+/1pH+nxlw3RQadJjJ8a/hzIDFoxWX8Y8StWWVo=:');
-  });
-
-  it('@target-uri is scheme://host[:port]path[?query], nothing more', () => {
-    expect(targetUri('https://tenjin.blog/api/posts')).toBe('https://tenjin.blog/api/posts');
-    expect(targetUri('http://localhost:3000/api/posts?x=1')).toBe(
-      'http://localhost:3000/api/posts?x=1',
-    );
-  });
-
-  it('signature-params covers content-digest on a bodied request', () => {
-    const params = signatureParams({
-      method: 'POST',
-      url: 'https://tenjin.blog/api/posts',
-      contentDigest: 'sha-256=:abc:',
-      created: 1_700_000_000,
-      nonce: 'deadbeefdeadbeefdeadbeefdeadbeef',
-      keyid: 'p256:PUB',
-    });
-    expect(params).toBe(
-      '("@method" "@target-uri" "content-digest");created=1700000000;nonce="deadbeefdeadbeefdeadbeefdeadbeef";keyid="p256:PUB";alg="ecdsa-p256-sha256"',
-    );
-  });
-
-  it('signature-params omits content-digest on a bodyless request', () => {
-    const params = signatureParams({
-      method: 'GET',
-      url: 'https://tenjin.blog/api/posts',
-      created: 1_700_000_000,
-      nonce: 'ab',
-      keyid: 'p256:PUB',
-    });
-    expect(params.startsWith('("@method" "@target-uri");')).toBe(true);
-    expect(params).not.toContain('content-digest');
-  });
-
-  it('the signing base is the LF-joined canonical block with no trailing newline', () => {
-    const base = signatureBase({
-      method: 'POST',
-      url: 'https://tenjin.blog/api/posts',
-      contentDigest: 'sha-256=:12Jb+/1pH+nxlw3RQadJjJ8a/hzIDFoxWX8Y8StWWVo=:',
-      created: 1_700_000_000,
-      nonce: 'deadbeefdeadbeefdeadbeefdeadbeef',
-      keyid: 'p256:PUB',
-    });
-    expect(base).toBe(
-      [
-        '"@method": POST',
-        '"@target-uri": https://tenjin.blog/api/posts',
-        '"content-digest": sha-256=:12Jb+/1pH+nxlw3RQadJjJ8a/hzIDFoxWX8Y8StWWVo=:',
-        '"@signature-params": ("@method" "@target-uri" "content-digest");created=1700000000;nonce="deadbeefdeadbeefdeadbeefdeadbeef";keyid="p256:PUB";alg="ecdsa-p256-sha256"',
-      ].join('\n'),
-    );
-    expect(base.endsWith('\n')).toBe(false);
+describe('the session chain id is shared, not re-declared per caller', () => {
+  it('is Base mainnet, the chain the server constrains SIWX to', () => {
+    expect(SESSION_CHAIN_ID).toBe('eip155:8453');
   });
 });
 
@@ -129,74 +54,6 @@ describe('delegation URN construction (D35)', () => {
   });
 });
 
-describe('signWithSession emits a verifiable P-256 r||s signature', () => {
-  it('produces a 64-byte IEEE-P1363 signature that verifies against the pubkey', async () => {
-    const { file, publicKey } = await realKeyFile();
-    const req = { method: 'POST' as const, url: 'https://tenjin.blog/api/posts', body: '{"a":1}' };
-    const headers = await signWithSession(file, req, {
-      now: () => 1_700_000_000_000,
-      nonce: () => 'ab'.repeat(16),
-    });
-
-    expect(headers['Tenjin-Session-Delegation']).toBe('DELEGATION');
-    expect(headers['Content-Digest']).toBe(contentDigest('{"a":1}'));
-    expect(headers['Signature-Input']).toMatch(/^tenjin=\(/);
-    const m = /^tenjin=:(.+):$/.exec(headers.Signature ?? '');
-    expect(m).not.toBeNull();
-    const sig = Buffer.from(m![1] ?? '', 'base64');
-    expect(sig.length).toBe(64); // r||s, 32+32
-
-    const base = signatureBase({
-      method: 'POST',
-      url: req.url,
-      contentDigest: headers['Content-Digest'],
-      created: 1_700_000_000,
-      nonce: 'ab'.repeat(16),
-      keyid: `p256:${file.publicKeyRaw}`,
-    });
-    const ok = await subtle.verify(
-      { name: 'ECDSA', hash: 'SHA-256' },
-      publicKey,
-      sig,
-      Buffer.from(base, 'utf8'),
-    );
-    expect(ok).toBe(true);
-  });
-
-  it('a bodiless GET sends no Content-Digest and covers only method + target-uri', async () => {
-    const { file, publicKey } = await realKeyFile();
-    const url = 'https://tenjin.blog/api/posts/0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-    const headers = await signWithSession(
-      file,
-      { method: 'GET', url },
-      { now: () => 1_700_000_000_000, nonce: () => 'cd'.repeat(16) },
-    );
-
-    // Nothing may claim to cover bytes the request never sends.
-    expect('Content-Digest' in headers).toBe(false);
-    expect(headers['Signature-Input']).toMatch(/^tenjin=\("@method" "@target-uri"\);/);
-    expect(headers['Signature-Input']).not.toContain('content-digest');
-
-    // And the signature verifies against the digest-free base.
-    const sig = Buffer.from(/^tenjin=:(.+):$/.exec(headers.Signature ?? '')![1] ?? '', 'base64');
-    const base = signatureBase({
-      method: 'GET',
-      url,
-      created: 1_700_000_000,
-      nonce: 'cd'.repeat(16),
-      keyid: `p256:${file.publicKeyRaw}`,
-    });
-    expect(
-      await subtle.verify(
-        { name: 'ECDSA', hash: 'SHA-256' },
-        publicKey,
-        sig,
-        Buffer.from(base, 'utf8'),
-      ),
-    ).toBe(true);
-  });
-});
-
 describe('recoveryFor maps every documented 401 code', () => {
   it.each([
     ['proof_expired', 'resign'],
@@ -208,46 +65,6 @@ describe('recoveryFor maps every documented 401 code', () => {
     ['something_else', 'fatal'],
   ])('%s -> %s', (code, expected) => {
     expect(recoveryFor(code as string | undefined)).toBe(expected);
-  });
-});
-
-describe('isSessionUsable', () => {
-  const base: SessionFile = {
-    address: '0xabc',
-    delegation: 'D',
-    exp: new Date(2_000_000_000_000).toISOString(),
-    scope: 'read+write',
-    publicKeyRaw: 'P',
-    privateKeyJwk: {},
-  };
-
-  it('accepts a bound, unexpired, read+write session', () => {
-    expect(isSessionUsable(base, '0xABC', 1_000_000_000_000, 'read+write')).toBe(true);
-  });
-  it('rejects a different wallet address', () => {
-    expect(isSessionUsable(base, '0xdef', 1_000_000_000_000, 'read+write')).toBe(false);
-  });
-  it('rejects one at/near expiry (60s skew)', () => {
-    expect(isSessionUsable(base, '0xabc', 2_000_000_000_000, 'read+write')).toBe(false);
-    expect(isSessionUsable(base, '0xabc', 1_999_999_999_000, 'read+write')).toBe(false);
-  });
-  it('a read-scoped session does not satisfy a write run', () => {
-    expect(
-      isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read+write'),
-    ).toBe(false);
-  });
-  it('a read+write session satisfies a read run (wider covers narrower)', () => {
-    expect(isSessionUsable(base, '0xabc', 1_000_000_000_000, 'read')).toBe(true);
-  });
-  it('a read-scoped session satisfies a read run', () => {
-    expect(isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read')).toBe(
-      true,
-    );
-  });
-  it('an unrecognized cached scope satisfies nothing', () => {
-    expect(isSessionUsable({ ...base, scope: 'write' }, '0xabc', 1_000_000_000_000, 'read')).toBe(
-      false,
-    );
   });
 });
 
@@ -426,20 +243,6 @@ describe('createSessionKeyAuth reuses a cached session (no second wallet signatu
   });
 });
 
-describe('signWithSession freshness', () => {
-  it('two signings of the same request differ in created, nonce, and signature', async () => {
-    const { file } = await realKeyFile();
-    const req = { method: 'POST' as const, url: 'https://tenjin.blog/api/posts', body: '{"a":1}' };
-    let clock = 1_700_000_000_000;
-    const sign = () => signWithSession(file, req, { now: () => (clock += 2000) });
-    const a = await sign();
-    const b = await sign();
-    expect(a['Signature-Input']).not.toBe(b['Signature-Input']); // created + nonce move
-    expect(a.Signature).not.toBe(b.Signature); // a fresh ECDSA signature each time
-    expect(a['Content-Digest']).toBe(b['Content-Digest']); // same body ⇒ same digest
-  });
-});
-
 describe('createSiwxAuth (plain-SIWX fallback)', () => {
   it('signs each write with a fresh SIGN-IN-WITH-X header (one wallet sig per write)', async () => {
     const inner = testSigner();
@@ -469,40 +272,6 @@ describe('createSiwxAuth (plain-SIWX fallback)', () => {
     expect(n).toBe(1);
     expect(await auth.recover('nonce_already_used')).toBe(true);
     expect(await auth.recover('session_key_unbound')).toBe(false);
-  });
-});
-
-describe('loadSessionFile degradation branches', () => {
-  let d: string;
-  beforeEach(async () => {
-    d = await mkdtemp(join(tmpdir(), 'tenjin-session-load-'));
-  });
-  afterEach(async () => {
-    await rm(d, { recursive: true, force: true });
-  });
-
-  it('returns null when the cache is absent', async () => {
-    expect(await loadSessionFile(d)).toBeNull();
-  });
-
-  it('returns null on invalid JSON (a corrupt cache re-establishes, not throws)', async () => {
-    await mkdir(d, { recursive: true });
-    await writeFile(sessionPath(d), 'not json {{{', { mode: 0o600 });
-    expect(await loadSessionFile(d)).toBeNull();
-  });
-
-  it('returns null on a schema mismatch (tampered/partial file)', async () => {
-    await mkdir(d, { recursive: true });
-    await writeFile(sessionPath(d), JSON.stringify({ address: '0xabc' }), { mode: 0o600 });
-    expect(await loadSessionFile(d)).toBeNull();
-  });
-
-  it('fails closed on a group/world-readable cache (ssh posture)', async () => {
-    if (process.platform === 'win32') return;
-    const { file } = await realKeyFile();
-    await saveSessionFile(d, file); // 0600
-    await chmod(sessionPath(d), 0o644); // loosened out of band
-    expect(await loadSessionFile(d)).toBeNull();
   });
 });
 
@@ -553,7 +322,7 @@ describe('createSessionKeyAuth recovers from a bad on-disk session', () => {
 
   it('re-establishes from an expired on-disk session', async () => {
     const { signer, count } = countingSigner();
-    const { file } = await realKeyFile();
+    const { file } = await testSessionKey();
     await saveSessionFile(d, {
       ...file,
       address: signer.address.toLowerCase(),

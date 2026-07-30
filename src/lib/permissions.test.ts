@@ -63,15 +63,19 @@ describe('recommended allowlist shape', () => {
   });
 });
 
-describe('buy is opt-in, never always-safe', () => {
-  it('is absent from the always-safe set', () => {
+describe('buy and session start are opt-in, never always-safe', () => {
+  it('neither is covered by an always-safe rule', () => {
     for (const e of ALWAYS_SAFE_ALLOWLIST) {
       expect(ruleCovers(e.rule, 'tenjin buy')).toBe(false);
+      expect(ruleCovers(e.rule, 'tenjin session start')).toBe(false);
     }
   });
 
-  it('is the opt-in entry, and its note carries the spend-cap warning', () => {
-    expect(OPT_IN_ALLOWLIST.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
+  it('buy heads the opt-in tier, and its note carries the spend-cap warning', () => {
+    expect(OPT_IN_ALLOWLIST.map((e) => e.rule)).toEqual([
+      'Bash(tenjin buy:*)',
+      'Bash(tenjin session start:*)',
+    ]);
     const note = OPT_IN_ALLOWLIST[0]?.note ?? '';
     expect(note).toContain('maxAutoSpend');
     expect(note).toContain('sessionBudget');
@@ -88,6 +92,22 @@ describe('buy is opt-in, never always-safe', () => {
     expect(note).toMatch(/`--yes`.*clears the\s*confirm gate/is);
     expect(note).toMatch(/sessionBudget 0 means NO ceiling/);
     expect(note).not.toMatch(/human (is still )?on every purchase/i);
+  });
+
+  // `session start` is the one opt-in that costs nothing and still is not safe:
+  // it opens the keystore. Its note has to lead with that and must NOT borrow
+  // buy's spend language, or an operator reads "opt-in" as "this can spend".
+  it('session start discloses keystore access and denies the spend it cannot do', () => {
+    const entry = OPT_IN_ALLOWLIST.find((e) => e.command === 'tenjin session start');
+    expect(entry?.rule).toBe('Bash(tenjin session start:*)');
+    const note = entry?.note ?? '';
+    expect(note).toMatch(/OPENS THE KEYSTORE/);
+    expect(note).toMatch(/SPENDS NOTHING/);
+    // Why it cannot spend, stated as a property rather than a promise.
+    expect(note).toMatch(/curve/i);
+    expect(note).toMatch(/read-scoped/i);
+    // The flag interaction that is worse for this verb than for the others.
+    expect(note).toContain('--base-url');
   });
 });
 
@@ -173,8 +193,20 @@ describe('claims made about the recommended set are true of the code', () => {
   it('does not call the free set read-only', () => {
     const block = renderPermissionsBlock().join('\n');
     expect(block).not.toMatch(/free, read-only verbs/i);
-    expect(block).toContain('Free: no wallet, no signing, no payment');
+    expect(block).toContain('Free: cannot spend and cannot open the keystore');
     expect(block).toMatch(/`search` and `outcome` POST/);
+  });
+
+  // The old definition said "no wallet, no signing, no payment". `read` now signs
+  // (P-256, with a delegation it loaded), so that sentence would be a false claim
+  // printed directly above the lines an operator is told to paste. Pinned as a
+  // negative: the tier is defined by what it CANNOT do, and signing left the list.
+  it('never claims the safe verbs sign nothing', () => {
+    const block = renderPermissionsBlock().join('\n');
+    expect(block).not.toMatch(/no wallet, no signing, no payment/i);
+    // ...and the replacement discloses what read may present, rather than hiding it.
+    expect(block).toMatch(/read-scoped session key/i);
+    expect(block).toMatch(/wrong curve/i);
   });
 
   it('discloses the non-read-only half in the per-entry notes too', () => {
@@ -184,6 +216,15 @@ describe('claims made about the recommended set are true of the code', () => {
     // `read` writes locally rather than remotely — a different shape of
     // not-read-only, disclosed on the same terms rather than glossed over.
     expect(byCommand.get('tenjin read')).toMatch(/Not read-only/i);
+  });
+
+  // read presents a P-256 session key on a cold 402. An entry that still said
+  // "no signing" would be the safe tier's own note contradicting the code.
+  it("read's note states what it presents and why that is still not spending", () => {
+    const note = ALWAYS_SAFE_ALLOWLIST.find((e) => e.command === 'tenjin read')?.note ?? '';
+    expect(note).toMatch(/cannot spend and cannot open the keystore/i);
+    expect(note).not.toMatch(/no signing/i);
+    expect(note).toMatch(/session/i);
   });
 });
 

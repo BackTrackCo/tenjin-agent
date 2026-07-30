@@ -35,22 +35,23 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 
 ## Commands
 
-| Command                                                 | Purpose                                                                                                           |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `tenjin install`                                        | Walk you through harness skills, your publish consent mode, and wallet setup, then run the doctor checks          |
-| `tenjin doctor`                                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                          |
-| `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice` |
-| `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
-| `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
-| `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                |
-| `tenjin read <url-or-id>`                               | Deliver a free piece or re-deliver from the local library (never a payment); refuses with exit 3 if it would cost |
-| `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                             |
-| `tenjin outcome --search-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
-| `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
-| `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                 |
-| `tenjin edit <postId> [flags] [--yes]`                  | Show one of your posts and its card, or merge-update it: omitted fields are kept, `--clear <field>` clears one    |
-| `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a search MISS nudges you about parked ones                           |
-| `tenjin send <amount> usdc <to> [--yes]`                | **Escape hatch:** move USDC on Base out of the agent wallet (preview, explicit confirm, then the tx hash)         |
+| Command                                                 | Purpose                                                                                                                                                           |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenjin install`                                        | Walk you through harness skills, your publish consent mode, and wallet setup, then run the doctor checks                                                          |
+| `tenjin doctor`                                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                                                                          |
+| `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice`                                                 |
+| `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                                                                               |
+| `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                                                                    |
+| `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                                                                |
+| `tenjin read <url-or-id>`                               | Deliver a free piece, re-deliver from the local library, or recover one you own with a cached session key (never a payment); refuses with exit 3 if it would cost |
+| `tenjin session start [--scope read]`                   | Open the wallet once to mint a ≤24h read-scoped session key, so `read` can recover owned pieces unattended; spends nothing                                        |
+| `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                                                                             |
+| `tenjin outcome --search-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                                                                               |
+| `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                                                                |
+| `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                                                                 |
+| `tenjin edit <postId> [flags] [--yes]`                  | Show one of your posts and its card, or merge-update it: omitted fields are kept, `--clear <field>` clears one                                                    |
+| `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a search MISS nudges you about parked ones                                                                           |
+| `tenjin send <amount> usdc <to> [--yes]`                | **Escape hatch:** move USDC on Base out of the agent wallet (preview, explicit confirm, then the tx hash)                                                         |
 
 `send` is human-invoked only: it is deliberately absent from the MCP toolset and
 the harness skills, and nothing is signed until the previewed (checksummed)
@@ -65,16 +66,22 @@ agent to your own Tenjin account instead (delegation); `send` exists for funds
 already sitting on the agent key.
 
 `read` and `buy` split delivery by whether money can move, not by how much work is
-involved. `read` is free-only and tries two things in order: the local library,
-then an unauthenticated fetch (which delivers free pieces). A paid piece not
-already on disk hard-refuses (exit 3) with the price and a pointer at `buy` —
-including a piece you own but have not cached on this machine, which `buy`'s own
-entitlement re-check then delivers free.
+involved. `read` is free-only and tries three things in order: the local library,
+then an unauthenticated fetch (which delivers free pieces), then — only if a
+read-scoped session key is already cached — one signed GET presenting that
+delegation, which delivers a piece this wallet already bought. A paid piece that
+none of the three reaches hard-refuses (exit 3) with the price and a pointer at
+`buy`; the refusal's `entitlementCheck` says whether a session was actually
+presented (`session`) or there was none to present (`not_performed`).
 
-`read` imports no wallet, signing, or payment module — its import graph is
-test-pinned to stay clear of all three — and never consults the spend policy,
-which is what makes it safe to put in a harness allowlist. It cannot unlock a
-keystore at all.
+`tenjin session start --scope read` is what mints that key: one wallet signature,
+≤24h, spends nothing. It is a separate opt-in verb precisely so `read` never needs
+the wallet — `read` imports no wallet, payment, or session-MINTING module, and its
+import graph is test-pinned to stay clear of all three. It cannot unlock a
+keystore at all and never consults the spend policy. The key it may present is
+P-256: the wrong curve for the EIP-712/secp256k1 signature an EIP-3009 transfer
+authorization needs, so `read` cannot pay however it is refactored, and the
+delegation is read-scoped, which the server independently refuses on any write.
 
 `buy` is the paying verb: it re-reads an entitled resource for free before ever
 paying, re-delivers already-bought content from the local library without paying
@@ -163,12 +170,17 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those touches the wallet, signs anything, or moves money. Three are not
-read-only, which is worth knowing before you pre-clear them: `tenjin search` POSTs
-your generalized question off-machine, and `tenjin outcome` POSTs a report that
-moves the marketplace's reuse signal — both unauthenticated and free, neither
-carrying a credential — while `tenjin read` writes locally, saving a delivered
-free piece to your library.
+None of those can spend, and none can open the keystore. That is the definition of
+this tier, and it is deliberately narrower than "signs nothing": `tenjin read` can
+present a session key that already exists (below), which is a signature — a P-256
+delegation, the wrong curve to authorize a USDC transfer, and one the server
+refuses on any write method. It cannot mint one; that needs the wallet.
+
+Three are not read-only, which is worth knowing before you pre-clear them:
+`tenjin search` POSTs your generalized question off-machine, and `tenjin outcome`
+POSTs a report that moves the marketplace's reuse signal — both unauthenticated
+and free, neither carrying a credential — while `tenjin read` writes locally,
+saving a delivered piece to your library.
 
 `tenjin install` prints this block, and `tenjin doctor` reprints it on every run
 (including in `doctor --json` under `permissions`, on the failure envelope as well
@@ -210,6 +222,26 @@ tenjin config set sessionBudget 2.00
 
 The allowlist line itself never raises a spend cap. That is true, and it is not
 the same as saying the caps stop an allowlisted `buy`.
+
+Minting a session key is the **other** explicit opt-in — it spends nothing and
+cannot spend, but it opens the keystore:
+
+```
+Bash(tenjin session start:*)
+```
+
+`tenjin session start --scope read` takes one wallet signature and leaves a ≤24h
+P-256 delegation in `~/.tenjin/session.json` (0600), which `tenjin read` then
+presents to recover pieces you already own. The key is the wrong curve to sign an
+EIP-3009 payment authorization, and the delegation is read-scoped, which the
+server refuses (`insufficient_scope`) on any write — so the line cannot become a
+spend grant or a publish grant. What you are clearing is **unattended keystore
+access**: on an encrypted wallet the passphrase comes from the environment rather
+than from you, and the `--base-url` caveat above bites harder here than anywhere
+else, because a delegation minted against a host an agent chose is a wallet
+signature you did not intend to make (it is domain-bound, so it is useless at the
+real origin, but it was still made). `tenjin doctor` reports whether a session
+exists, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision: `tenjin send`
 (moves USDC out of the wallet, and is not bounded by the buy spend policy), `tenjin

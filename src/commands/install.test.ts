@@ -893,8 +893,9 @@ describe('runInstall: interactive walkthrough', () => {
     const text = human(res);
     for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).toContain(e.rule);
     // buy appears only under the opt-in heading, never inside the safe block.
-    expect(text).toContain('Opt in separately, only if you want unattended purchases:');
+    expect(text).toContain('Opt in separately (unattended purchases; unattended keystore access):');
     expect(text).toContain('Bash(tenjin buy:*)');
+    expect(text).toContain('Bash(tenjin session start:*)');
     expect(text).toContain('maxAutoSpend');
     // No rule is ever offered for a money-moving or state-changing verb.
     for (const e of NEVER_ALLOWLISTED) {
@@ -924,7 +925,10 @@ describe('runInstall: interactive walkthrough', () => {
     expect(d.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
       ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
     );
-    expect(d.permissions.optIn.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
+    expect(d.permissions.optIn.map((e) => e.rule)).toEqual([
+      'Bash(tenjin buy:*)',
+      'Bash(tenjin session start:*)',
+    ]);
   });
 
   it('--json returns the envelope data and never prompts the wallet', async () => {

@@ -11,6 +11,7 @@ import {
   type PresentOpts,
 } from '../lib/delivery';
 import { sanitizeForTerminal } from '../lib/output';
+import { isSessionPresentable, loadSessionFile, signWithSession } from '../lib/session-present';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -22,20 +23,27 @@ import type { CommandContext, CommandResult } from '../context';
  * `read` is the half of `buy` that never spends:
  *   1. local library (already delivered → re-deliver from disk, no network)
  *   2. first GET, unauthenticated → a FREE resource delivers immediately
- *   3. a PAID resource → REFUSED (exit 3) straight off the 402, naming the price
- *      and pointing at `tenjin buy`. Nothing is charged, and the refusal lands
- *      before any payment could be constructed, because none can be.
+ *   3. a PAID resource, with a read-scoped session key already on disk → present
+ *      it on ONE bodyless signed GET; a 200 means this wallet owns the piece and
+ *      it delivers, free
+ *   4. anything else → REFUSED (exit 3), naming the price and pointing at
+ *      `tenjin buy` (and at `tenjin session start` when no session was presented).
+ *      Nothing is charged, and the refusal lands before any payment could be
+ *      constructed, because none can be.
  *
  * The hard invariant, test-pinned rather than merely intended: this module — and
  * its entire transitive import graph — never reaches `lib/x402-pay`, `lib/wallet`,
- * or `lib/session-key`. `read` cannot open a keystore or produce a signature of
- * any kind; its inability to pay is structural, not disciplinary.
+ * or `lib/session-key`. Step 3 imports the PRESENT-ONLY half of the session layer
+ * (`lib/session-present`): load a delegation that already exists and sign one
+ * request with it. Minting one needs a wallet signature and lives in
+ * `lib/session-key`, which stays banned from this graph.
  *
- * Operator decision (#43, superseding the earlier hold): the SIWX entitlement
- * re-check that used to sit between steps 2 and 3 was cut. An owned-but-uncached
- * paid piece today falls through to `tenjin buy`, whose own re-check delivers it
- * free; a dedicated follow-up restores unattended owned-library recovery on a
- * read-scoped session key that cannot spend by construction.
+ * So what read can hold is a P-256 key. It cannot produce the secp256k1/EIP-712
+ * signature an EIP-3009 transfer authorization needs, so it cannot pay however it
+ * is refactored; and the delegation is `read`-scoped, which the SERVER refuses
+ * (`insufficient_scope`) on any write method, so the bound does not depend on
+ * this code being careful. `read` never mints, never re-establishes, and never
+ * retries a refusal.
  */
 
 export interface ReadArgs {
@@ -49,9 +57,13 @@ export interface ReadArgs {
 export interface ReadDeps {
   /**
    * There is deliberately no `provider` or `authorizer` seam here, unlike
-   * BuyDeps: this command has no signing or spend path to inject one into.
+   * BuyDeps: this command has no wallet or spend path to inject one into. The
+   * session key it may present is loaded from disk, never minted, so there is
+   * nothing for a provider seam to provide.
    */
   fetchImpl?: typeof fetch;
+  /** Clock seam (ms since epoch) for the session-expiry decision. */
+  now?: () => number;
 }
 
 export async function runRead(
@@ -107,32 +119,73 @@ export async function runRead(
     });
   }
 
-  // 3. Paid and not on disk: refuse (exit 3) straight off the 402, on the price
-  //    buy would price a purchase against. No entitlement check is performed —
-  //    this module has no wallet to check with — and no payment is constructed,
-  //    because none can be.
-  throw refusal(ref, firstRequirement);
+  // 3. Paid and not on disk. If a read-scoped session key is already cached, this
+  //    wallet may already OWN the piece — present the delegation on one bodyless
+  //    signed GET and let the server decide. Scope and expiry are checked here;
+  //    the address is not, because there is no wallet in this process to compare
+  //    against and the delegation is self-authenticating server-side (a file from
+  //    another wallet simply does not entitle, and lands on the same refusal).
+  //
+  //    Exactly ONE retry, and no recovery: an unusable file, a second 402, or a
+  //    rejected delegation all fall through to the refusal below. Re-establishing
+  //    would need the wallet this module structurally cannot reach.
+  const cached = await loadSessionFile(ctx.dataDir);
+  const session =
+    cached !== null && isSessionPresentable(cached, (deps.now ?? Date.now)(), 'read')
+      ? cached
+      : null;
+  if (session !== null) {
+    const sessionHeaders = await signWithSession(session, { method: 'GET', url: ref.url });
+    const second = await fetchRead(ref.url, { ...fetchOpts, sessionHeaders });
+    if (second.kind === 'entitled') {
+      return await deliverFresh(
+        ctx.dataDir,
+        ref.url,
+        second.body,
+        'entitled',
+        undefined,
+        presentOpts,
+      );
+    }
+  }
+
+  // 4. Not entitled (or nothing to present with): refuse (exit 3) on the price buy
+  //    would price a purchase against. No payment is constructed, because none can be.
+  throw refusal(ref, firstRequirement, session !== null);
 }
 
-/** The exit-3 refusal: the price, in human money, plus the verb that can pay it. */
+/**
+ * The exit-3 refusal: the price, in human money, plus the verbs that can get past
+ * it. `entitlementCheck` distinguishes the two shapes an agent should act on
+ * differently — `'session'` means a live delegation was presented and the server
+ * said this wallet does not own the piece (so buying is the only route), while
+ * `'not_performed'` means no session key existed to check with (so minting one
+ * may deliver it for free, if the piece was bought on another machine).
+ */
 function refusal(
   ref: { url: string; resourceId?: string },
   requirement: { amount: string; network: string },
+  presented: boolean,
 ): CliError {
   const price = toMoney(requirement.amount);
   // formatUsdDisplay (not the machine `usd`) because this string is human copy:
   // a price a person reads renders as 0.10, never 0.1.
   const priceText = `${formatUsdDisplay(price.atomic)} USD (${price.atomic} atomic)`;
+  const url = sanitizeForTerminal(ref.url);
+  const buyFix = `Run \`tenjin buy ${url}\` to pay and read it, or \`tenjin inspect\` for the card first.`;
   return new CliError('REFUSED', `This piece costs ${priceText}; \`tenjin read\` never pays.`, {
-    fix: `Run \`tenjin buy ${sanitizeForTerminal(ref.url)}\` to pay and read it, or \`tenjin inspect\` for the card first.`,
+    fix: presented
+      ? buyFix
+      : `${buyFix} If you already bought it on another machine, \`tenjin session start --scope read\` lets this read recover it free.`,
     details: {
       reason: 'payment_required',
-      entitlementCheck: 'not_performed',
+      entitlementCheck: presented ? 'session' : 'not_performed',
       url: ref.url,
       ...(ref.resourceId !== undefined ? { resourceId: ref.resourceId } : {}),
       price,
       network: requirement.network,
       buyCommand: `tenjin buy ${ref.url}`,
+      ...(presented ? {} : { sessionCommand: 'tenjin session start --scope read' }),
     },
   });
 }
