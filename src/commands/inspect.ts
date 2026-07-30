@@ -161,9 +161,13 @@ function cardLines(card: PreviewCard | undefined): string[] {
 }
 
 /** Type, temporal mode and the two dates on one line: they answer the single
- *  question a buyer asks of freshness, which is whether this is still true here. */
+ *  question a buyer asks of freshness, which is whether this is still true here.
+ *
+ *  Both labels are open strings on the wire, so an empty one is dropped rather
+ *  than joined: otherwise the line leads with a comma and reads as a rendering
+ *  bug. All four empty yields '', and cardLine then omits the line entirely. */
 function freshness(card: PreviewCard): string {
-  const parts = [card.artifactType, card.temporalMode];
+  const parts = [card.artifactType, card.temporalMode].filter((s) => s.trim().length > 0);
   if (card.asOf !== null) parts.push(`as of ${card.asOf}`);
   if (card.validUntil !== null) parts.push(`valid until ${card.validUntil}`);
   return parts.join(', ');

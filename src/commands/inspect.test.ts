@@ -161,6 +161,22 @@ describe('runInspect, the 402 answer card', () => {
     expect(lines.find((l) => l.startsWith('Scope: '))).toBe(`Scope: ${'S'.repeat(500)}`);
   });
 
+  // artifactType and temporalMode are open strings on the wire, so an empty one
+  // must drop out of the join rather than leaving the line to lead with a comma.
+  it('never renders a freshness line that leads with a comma', async () => {
+    const res = await inspect402(cardedPreview({ artifactType: '', temporalMode: 'snapshot' }));
+    expect((res.humanLines ?? []).find((l) => l.startsWith('Freshness: '))).toBe(
+      'Freshness: snapshot, as of 2026-07-01T00:00:00.000Z, valid until 2026-08-01T00:00:00.000Z',
+    );
+  });
+
+  it('omits the freshness line entirely when it would carry nothing', async () => {
+    const res = await inspect402(
+      cardedPreview({ artifactType: '', temporalMode: '  ', asOf: null, validUntil: null }),
+    );
+    expect((res.humanLines ?? []).some((l) => l.startsWith('Freshness'))).toBe(false);
+  });
+
   it('marks the clip when a server breaks its own bounds', async () => {
     const res = await inspect402(cardedPreview({ scope: 'S'.repeat(900) }));
     const scope = (res.humanLines ?? []).find((l) => l.startsWith('Scope: '));
