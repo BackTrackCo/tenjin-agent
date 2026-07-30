@@ -97,6 +97,14 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
     note: 'Free pre-purchase card and preview. Never signs, never pays, never saves.',
   },
   {
+    rule: 'Bash(tenjin read:*)',
+    command: 'tenjin read',
+    note:
+      'Free-only delivery: free pieces and local-library re-reads. No wallet, no ' +
+      'signing, no payment — the wallet and payment modules are absent from its ' +
+      'import graph. Not read-only: a fresh free piece is saved to the library.',
+  },
+  {
     rule: 'Bash(tenjin outcome:*)',
     command: 'tenjin outcome',
     note:
@@ -279,7 +287,8 @@ export function renderPermissionsBlock(): string[] {
   ];
   for (const e of ALWAYS_SAFE_ALLOWLIST) lines.push(`  ${e.rule}`);
   lines.push('  Free: no wallet, no signing, no payment. Not all read-only, though:');
-  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report).');
+  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report),');
+  lines.push('  and `read` saves a delivered free piece to your local library.');
   lines.push('');
   lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
   lines.push('');

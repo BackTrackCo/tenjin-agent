@@ -43,6 +43,7 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 | `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
 | `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
 | `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                |
+| `tenjin read <url-or-id>`                               | Deliver a free piece or re-deliver from the local library (never a payment); refuses with exit 3 if it would cost |
 | `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                             |
 | `tenjin outcome --search-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
 | `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
@@ -63,10 +64,22 @@ For routing FUTURE revenue away from the agent wallet entirely, connect the
 agent to your own Tenjin account instead (delegation); `send` exists for funds
 already sitting on the agent key.
 
-`buy` re-reads an entitled resource for free before ever paying, re-delivers
-already-bought content from the local library without paying again, and refuses to
-sign if the price rose since it first saw the 402. Spend policy is enforced in the
-wallet provider layer before any payment.
+`read` and `buy` split delivery by whether money can move, not by how much work is
+involved. `read` is free-only and tries two things in order: the local library,
+then an unauthenticated fetch (which delivers free pieces). A paid piece not
+already on disk hard-refuses (exit 3) with the price and a pointer at `buy` —
+including a piece you own but have not cached on this machine, which `buy`'s own
+entitlement re-check then delivers free.
+
+`read` imports no wallet, signing, or payment module — its import graph is
+test-pinned to stay clear of all three — and never consults the spend policy,
+which is what makes it safe to put in a harness allowlist. It cannot unlock a
+keystore at all.
+
+`buy` is the paying verb: it re-reads an entitled resource for free before ever
+paying, re-delivers already-bought content from the local library without paying
+again, and refuses to sign if the price rose since it first saw the 402. Spend
+policy is enforced in the wallet provider layer before any payment.
 
 `edit` sends only the fields you pass, so an omitted field is kept; `--clear
 <field>` is the one way to empty a card field, and `--question` / `--task`
@@ -141,6 +154,7 @@ array of `.claude/settings.json`:
 ```
 Bash(tenjin search:*)
 Bash(tenjin inspect:*)
+Bash(tenjin read:*)
 Bash(tenjin outcome:*)
 Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
@@ -149,11 +163,12 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those touches the wallet, signs anything, or moves money. Two are not
+None of those touches the wallet, signs anything, or moves money. Three are not
 read-only, which is worth knowing before you pre-clear them: `tenjin search` POSTs
 your generalized question off-machine, and `tenjin outcome` POSTs a report that
-moves the marketplace's reuse signal. Both are unauthenticated and free; neither
-carries a credential.
+moves the marketplace's reuse signal — both unauthenticated and free, neither
+carrying a credential — while `tenjin read` writes locally, saving a delivered
+free piece to your library.
 
 `tenjin install` prints this block, and `tenjin doctor` reprints it on every run
 (including in `doctor --json` under `permissions`, on the failure envelope as well

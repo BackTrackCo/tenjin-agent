@@ -52,6 +52,7 @@ describe('recommended allowlist shape', () => {
     expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.command)).toEqual([
       'tenjin search',
       'tenjin inspect',
+      'tenjin read',
       'tenjin outcome',
       'tenjin doctor',
       'tenjin wallet show',
@@ -180,6 +181,9 @@ describe('claims made about the recommended set are true of the code', () => {
     const byCommand = new Map(ALWAYS_SAFE_ALLOWLIST.map((e) => [e.command, e.note]));
     expect(byCommand.get('tenjin search')).toMatch(/Not read-only/i);
     expect(byCommand.get('tenjin outcome')).toMatch(/Not read-only/i);
+    // `read` writes locally rather than remotely — a different shape of
+    // not-read-only, disclosed on the same terms rather than glossed over.
+    expect(byCommand.get('tenjin read')).toMatch(/Not read-only/i);
   });
 });
 

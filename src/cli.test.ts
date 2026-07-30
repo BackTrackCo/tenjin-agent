@@ -40,6 +40,19 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  // The verb split (#42) is only useful if the free verb is the one you meet first:
+  // `read` is registered, and listed ahead of the paying verb in help.
+  it('lists `read` in help, ahead of `buy`', async () => {
+    const cap = captureIo();
+    const code = await main(['--help'], cap.io);
+    expect(code).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('read [options] <resource>');
+    expect(help.indexOf('read [options] <resource>')).toBeLessThan(
+      help.indexOf('buy [options] <resource>'),
+    );
+  });
+
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
     const cap = captureIo(true);
     const code = await main([], cap.io);

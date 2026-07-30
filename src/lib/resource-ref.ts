@@ -1,5 +1,6 @@
 import { CliError } from './errors';
 import { findStoredCandidate } from './search-store';
+import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
 
 /**
@@ -15,6 +16,14 @@ import { UUID_RE } from './ids';
  * URL names. An off-origin URL, whether typed by hand or planted in a search
  * candidate, would hand both to that host. Nothing signed may leave for a host
  * the user did not configure.
+ *
+ * This is also the one place a read URL is CANONICALIZED, because it is the one
+ * place `read`, `buy`, and `inspect` all resolve through: a trailing slash is
+ * removed (see `canonicalReadUrl`) so the URL that goes to the transport is the
+ * spelling the read route serves without a redirect. The origin check runs on the
+ * canonicalized string, so the URL that was checked is exactly the URL that is
+ * sent. Canonicalization touches the path spelling only — same origin, same
+ * handle/slug, same piece, same price — so what `buy` pays for is unchanged.
  */
 
 export interface ResourceRef {
@@ -56,8 +65,9 @@ export async function resolveResourceRef(
 ): Promise<ResourceRef> {
   const trimmed = arg.trim();
   if (/^https?:\/\//i.test(trimmed)) {
-    assertOnBaseOrigin(trimmed, baseUrl, 'resource URL');
-    return { url: trimmed };
+    const url = canonicalReadUrl(trimmed);
+    assertOnBaseOrigin(url, baseUrl, 'resource URL');
+    return { url };
   }
   if (UUID_RE.test(trimmed)) {
     const candidate = await findStoredCandidate(dataDir, trimmed);
@@ -68,8 +78,12 @@ export async function resolveResourceRef(
     }
     // The stored url was origin-checked at search time, but the config can have
     // changed since; re-assert against the CURRENT base URL before any send.
-    assertOnBaseOrigin(candidate.url, baseUrl, 'stored candidate URL');
-    return { url: candidate.url, resourceId: trimmed };
+    // Canonicalized on the same terms as a hand-typed URL: the server's own
+    // candidates arrive without a trailing slash, so this is insurance against a
+    // deployment that ever emits one, not a case seen in practice.
+    const url = canonicalReadUrl(candidate.url);
+    assertOnBaseOrigin(url, baseUrl, 'stored candidate URL');
+    return { url, resourceId: trimmed };
   }
   throw new CliError('USAGE', `Not a resource URL or id: ${JSON.stringify(arg)}`, {
     fix: 'Pass a full https read URL (a candidate `url`) or a resourceId uuid.',

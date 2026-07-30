@@ -50,6 +50,27 @@ describe('runInspect', () => {
     const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
     expect((res.data as { access: string }).access).toBe('free');
   });
+
+  // The verb split (#42): delivery is free here, so the copy must NOT send an agent
+  // through the paying verb; paid-and-unowned still must.
+  it('points a free piece at `tenjin read`, never at buy', async () => {
+    const { fetch } = makeReadServer({ plain: () => reply.entitled(readBody({ price: '0' })) });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { nextCommand: string };
+    expect(data.nextCommand).toBe(`tenjin read ${URL_}`);
+    const human = (res.humanLines ?? []).join('\n');
+    expect(human).toContain('tenjin read');
+    expect(human).not.toContain('tenjin buy');
+  });
+
+  it('keeps pointing a paid, unowned piece at `tenjin buy`', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { nextCommand: string };
+    expect(data.nextCommand).toBe(`tenjin buy ${URL_}`);
+    expect((res.humanLines ?? []).join('\n')).toContain('run `tenjin buy`');
+  });
 });
 
 // The answer card left the search candidate in search v2, so this free 402 fetch
@@ -111,7 +132,9 @@ describe('runInspect, the 402 answer card', () => {
     expect(res.data).not.toHaveProperty('card');
     expect(res.humanLines).toEqual([
       'Paid resource, 0.1 USD (100000 atomic).',
-      'This is the pre-purchase card; run `tenjin buy` to pay and read.',
+      // The parenthetical is this branch's (#43): inspect tells humans up front
+      // that the free verb refuses paid pieces.
+      'This is the pre-purchase card; run `tenjin buy` to pay and read (`tenjin read` refuses paid pieces).',
     ]);
   });
 

@@ -157,8 +157,43 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     timeoutMs: opts.timeoutMs,
     headers,
     fetchImpl: opts.fetchImpl,
+    // Pinned even when UNSIGNED (the first probe): a 200 from this route is
+    // written to the library by `deliverFresh` as an entitlement record under
+    // the server-chosen id/slug, and `findDeliveredByUrl` later matches saved
+    // receipts by handle+slug alone — so a followed cross-origin redirect
+    // would let another host's bytes short-circuit future buys as owned.
+    // `assertOnBaseOrigin` cannot catch this; it checks only the URL asked for.
+    //
+    // Refused for ANY 3xx, same-origin hops included. The transport failing closed
+    // on the whole class is the point: an exemption for "benign" redirects is a
+    // second origin check living in the one place that already proved it cannot see
+    // enough to make one. Keeping a canonical URL is the CALLER's job instead, and
+    // `resolveResourceRef` does it for every verb that gets here.
+    blockRedirects: true,
   });
   if (!res.ok) {
+    // A redirect refused mid-flight is a URL-shape problem, not a flaky network:
+    // retrying a signed request re-sends the same signature into the same
+    // redirect, and retrying the unsigned probe re-fetches bytes the library must
+    // never record as this origin's. The `fix` names the URL, not the route: the
+    // route is allowed to redirect (canonicalizing a path is what a redirect is
+    // FOR), and pointing an agent at the base URL for a hop the base URL did not
+    // cause spends two useless steps and still does not read the piece.
+    // `resolveResourceRef` canonicalizes what it can (the trailing slash); what
+    // reaches here is a spelling it could not.
+    if (res.kind === 'blocked-redirect') {
+      throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
+        // The origin half of this hint deliberately does NOT name the base-URL
+        // flag. `read` is meant to be allowlistable, the skill tells the agent
+        // never to pass that flag on an allowlisted verb, and a `fix:` naming it
+        // would coach exactly the move the skill forbids. `doctor` is the
+        // allowlisted verb that owns the question — its `checkReadPath` probes
+        // this route and its own copy names the config command when it should.
+        fix:
+          'Ask for the URL in the spelling `tenjin search` or `tenjin inspect` ' +
+          'reports. If every read hops, `tenjin doctor` checks the configured origin.',
+      });
+    }
     const code =
       res.kind === 'network' || res.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
     throw new CliError(code, `${url}: ${res.message}`, {
