@@ -98,8 +98,10 @@ export const CONFIG_DEFAULTS: Config = {
   // A type placeholder only, never honored: Config requires every key (and
   // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
   // absent key resolves to SEND_MAX_UNSET and `tenjin send` refuses until the
-  // cap is set.
-  sendMaxAmount: 'none',
+  // cap is set. '0' (send disabled) rather than 'none' (uncapped) so that if a
+  // future caller ever DOES read the cap through loadConfig/fileOrDefault, the
+  // leak fails closed instead of silently running uncapped.
+  sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
