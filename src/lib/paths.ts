@@ -30,10 +30,31 @@ export function sessionPath(dir: string = dataDir()): string {
 }
 
 /**
- * Where the Windows DPAPI-protected wallet passphrase blob lives. The file holds
- * a DPAPI CurrentUser ciphertext, not the passphrase in plaintext, and is only
- * ever written on win32; other platforms use their own OS store.
+ * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
+ * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
+ * New writes go to the per-wallet path below; this one is only read as a
+ * migration fallback and removed after a verified per-wallet copy exists.
  */
 export function passphraseBlobPath(dir: string = dataDir()): string {
   return join(dir, 'passphrase.dpapi');
+}
+
+/**
+ * The per-wallet Windows DPAPI passphrase blob: one file per wallet address
+ * (lowercase), so creating a new wallet never clobbers an old wallet's blob.
+ * Only ever written on win32; other platforms use their own OS store.
+ */
+export function passphraseBlobPathFor(account: string, dir: string = dataDir()): string {
+  return join(dir, `passphrase.${account}.dpapi`);
+}
+
+/**
+ * Where `wallet create --replace` parks the outgoing wallet's keystore, keyed by
+ * its lowercase address so successive replaces can never collide. Together with
+ * the wallet's per-address passphrase entry in the OS store, this file keeps the
+ * replaced wallet's funds recoverable; it is never read by the active-wallet
+ * path.
+ */
+export function archivedWalletPath(account: string, dir: string = dataDir()): string {
+  return join(dir, `wallet.${account}.json.bak`);
 }

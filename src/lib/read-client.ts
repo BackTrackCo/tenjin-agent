@@ -208,7 +208,7 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
         'CONTRACT_MISMATCH',
         'The 402 challenge is not a valid x402 v2 payment declaration.',
         {
-          fix: 'Update tenjin-cli, or check --base-url points at a Tenjin deployment.',
+          fix: 'Update tenjin-cli, or check the configured base URL (`tenjin config get baseUrl`) points at a Tenjin deployment.',
           details: validated.error.issues,
         },
       );

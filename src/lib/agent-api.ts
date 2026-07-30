@@ -216,7 +216,7 @@ function apiFailure(url: string, result: Exclude<HttpResult, { ok: true }>): Cli
   const code =
     result.kind === 'network' || result.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
   return new CliError(code, `${url}: ${result.message}`, {
-    fix: 'Check --base-url and your network, then retry.',
+    fix: 'Check your network and the configured base URL (`tenjin config get baseUrl`), then retry.',
   });
 }
 
@@ -314,7 +314,7 @@ export async function postSearch(
  *  arm and the response arm can never drift apart. */
 function outdatedServerError(message: string, opts: { details: unknown }): CliError {
   return new CliError('CONTRACT_MISMATCH', message, {
-    fix: 'The server predates search v2. Point --base-url at an updated deployment, or install an older tenjin-cli.',
+    fix: 'The server predates search v2. Point the configured base URL (`tenjin config set baseUrl`) at an updated deployment, or install an older tenjin-cli.',
     details: opts.details,
   });
 }

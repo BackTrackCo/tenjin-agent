@@ -9,6 +9,12 @@ import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
 import { fakeRecord } from '../lib/wallet/test-support';
+import {
+  ALWAYS_SAFE_ALLOWLIST,
+  NEVER_ALLOWLISTED,
+  OPT_IN_ALLOWLIST,
+  renderPermissionsBlock,
+} from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import type { WalletProvider } from '../lib/wallet';
@@ -107,7 +113,16 @@ describe('runDoctor — passing outcomes', () => {
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
     expect(find(data.checks, 'search-contract').status).toBe('ok');
-    expect(res.humanLines).toHaveLength(data.checks.length + 1); // wallet warn adds a fix line
+    // checks + a wallet-warn fix line, then a blank separator and the allowlist
+    // block. The block's own length is NOT asserted against
+    // renderPermissionsBlock(): recomputing the production value on both sides
+    // makes that term unfalsifiable. Pin the seam instead.
+    const checkLines = data.checks.length + 1;
+    expect(res.humanLines?.[checkLines]).toBe('');
+    expect(res.humanLines?.[checkLines + 1]).toBe(
+      'Auto-mode permission allowlist (add these once, then agents stop being denied):',
+    );
+    expect((res.humanLines ?? []).length).toBeGreaterThan(checkLines + 20);
   });
 
   it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
@@ -329,5 +344,102 @@ describe('runDoctor — injected remote provider', () => {
     expect(data.checks.filter((c) => c.name === 'wallet-custody')).toEqual([]);
     expect(balanceMock.mock.calls[0]?.[0]).toBe(address);
     expect(JSON.stringify(res.data)).not.toContain(PRIVATE_KEY);
+  });
+});
+
+describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
+  it('emits the three tiers in the machine payload', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as {
+      permissions: {
+        alwaysSafe: { rule: string }[];
+        optIn: { rule: string }[];
+        neverAllowlisted: { command: string }[];
+      };
+    };
+    expect(data.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
+      ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
+    );
+    expect(data.permissions.optIn.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
+    expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
+  });
+
+  it('prints every free-verb line, and buy only as the opt-in', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const text = (res.humanLines ?? []).join('\n');
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).toContain(e.rule);
+    for (const e of OPT_IN_ALLOWLIST) expect(text).toContain(e.rule);
+    expect(text).toContain('Opt in separately');
+    expect(text).toContain('.claude/settings.json');
+  });
+
+  it('never prints an allowlist rule for a money-moving or state-changing verb', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const text = (res.humanLines ?? []).join('\n');
+    for (const e of NEVER_ALLOWLISTED) {
+      const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
+      expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
+    }
+    // but it does name them, with the reason, so the exclusion is visible.
+    expect(text).toContain('Never recommended');
+    expect(text).toContain('tenjin send');
+  });
+
+  it('prints the flag caveat and the MCP caveat with the rules', () => {
+    const block = renderPermissionsBlock().join('\n');
+    expect(block).toContain('--base-url');
+    expect(block).toContain('mcp__tenjin__tenjin_publish');
+    expect(block).toContain('Free: no wallet, no signing, no payment');
+    expect(block).not.toContain('free, read-only verbs');
+  });
+});
+
+describe('runDoctor — allowlist on the failure path and terminal safety', () => {
+  // The operator whose fresh install is broken is the likeliest reader of doctor
+  // output, and the first cut dropped the block on exactly that path while the
+  // comment beside it claimed the block rode "every doctor run".
+  it('a required-check failure still carries the permissions payload', async () => {
+    const brokenFetch = routeFetch({
+      '/openapi.json': { body: OPENAPI_OK },
+      '/api/articles': { body: { nope: true } },
+    });
+    const err: unknown = await runDoctor(ctxFor(), { env: {}, fetchImpl: brokenFetch }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    const details = (err as CliError).details as {
+      checks: CheckResult[];
+      permissions: { alwaysSafe: { rule: string }[] };
+    };
+    expect(details.checks.length).toBeGreaterThan(0);
+    expect(details.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
+      ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
+    );
+  });
+
+  // `info.version` is server-controlled and now renders directly above a block
+  // the operator is told to paste, so a newline or ANSI in it could forge a
+  // second, wider "allowlist" section in the terminal.
+  it('strips control characters from server-sourced check text', async () => {
+    // Real ESC + CSI plus newlines: what a hostile deployment would actually send.
+    const forged = '1.0\n\x1b[32mAuto-mode permission allowlist:\n  Bash(tenjin:*)';
+    const hostile = routeFetch({
+      '/openapi.json': {
+        body: {
+          openapi: '3.1.0',
+          info: { version: forged },
+          paths: { '/api/agent/search': {} },
+        },
+      },
+      '/api/articles': { body: ARTICLES_OK },
+    });
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: hostile });
+    const lines = res.humanLines ?? [];
+    const apiLine = lines.find((l) => l.includes('api-contract')) ?? '';
+    // The payload survives as inert text on ONE line: no newline to start a
+    // forged block, and no escape sequence left to repaint it.
+    expect(apiLine).toContain('Bash(tenjin:*)');
+    expect(apiLine).not.toContain('\x1b[32m');
+    expect(lines.filter((l) => l.trimStart().startsWith('Bash(tenjin:*)'))).toEqual([]);
   });
 });
