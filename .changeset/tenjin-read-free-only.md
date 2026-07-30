@@ -9,21 +9,21 @@ piece, or a re-read of something already in your library — was indistinguishab
 from a purchase, both to a human reading a transcript and to a harness permission
 classifier that matches on the command prefix.
 
-`tenjin read` is the half of `buy` that cannot spend. It tries three things in
-order — the local library, an unauthenticated fetch, then a SIWX entitlement check
-— and only refuses when you are genuinely unentitled:
+`tenjin read` is the half of `buy` that cannot spend. It tries two things in
+order — the local library, then an unauthenticated fetch — and refuses as soon as
+payment would be required:
 
-- delivers free pieces, anything already in the local library, and anything the
-  wallet is already entitled to (including a piece bought on another machine,
-  which it stores locally), with the same output shape and the same
-  `--print-body` / `--sections` flags as `buy`;
-- hard-refuses with exit 3 (`REFUSED`) when payment would be required, naming the
-  price and the `tenjin buy` command to run instead;
-- signs an **authentication** message only, the same class of signature `publish`
-  makes. It imports no payment module and never consults the spend policy —
-  pinned by an import-graph test and a source-usage test, not just by control
-  flow. Signer resolution is lazy, so a library hit or a free read never unlocks
-  the keystore.
+- delivers free pieces and anything already in the local library, with the same
+  output shape and the same `--print-body` / `--sections` flags as `buy`;
+- hard-refuses with exit 3 (`REFUSED`) on a paid piece that is not already on
+  disk, naming the price and the `tenjin buy` command to run instead. That
+  includes a piece you already own but have not cached on this machine: `buy`'s
+  own entitlement re-check delivers it without charging;
+- signs nothing at all. It reaches no wallet, signing, or payment module —
+  `lib/wallet`, `lib/session-key`, and `lib/x402-pay` are all absent from its
+  transitive import graph, pinned by an import-graph test plus a source-usage
+  test — and never consults the spend policy. `read` cannot open a keystore, so
+  its inability to spend is structural rather than a matter of control flow.
 
 The delivery and rendering internals are now shared between the two verbs in
 `lib/delivery.ts`; `buy`'s paying path is unchanged.
