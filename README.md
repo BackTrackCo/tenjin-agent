@@ -43,7 +43,7 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 | `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
 | `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
 | `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                |
-| `tenjin read <url-or-id>`                               | Deliver a free or already-entitled piece (SIWX auth check, never a payment); refuses with exit 3 if it would cost |
+| `tenjin read <url-or-id>`                               | Deliver a free piece or re-deliver from the local library (never a payment); refuses with exit 3 if it would cost |
 | `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                             |
 | `tenjin outcome --search-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
 | `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
@@ -64,17 +64,16 @@ agent to your own Tenjin account instead (delegation); `send` exists for funds
 already sitting on the agent key.
 
 `read` and `buy` split delivery by whether money can move, not by how much work is
-involved. `read` is free-only and tries three things in order: the local library,
-then an unauthenticated fetch (which delivers free pieces), then a SIWX entitlement
-check — so a piece you already bought, including one bought on another machine,
-re-reads free and lands in the local library. Only when you are genuinely
-unentitled does it hard-refuse (exit 3) with the price and a pointer at `buy`.
+involved. `read` is free-only and tries two things in order: the local library,
+then an unauthenticated fetch (which delivers free pieces). A paid piece not
+already on disk hard-refuses (exit 3) with the price and a pointer at `buy` —
+including a piece you own but have not cached on this machine, which `buy`'s own
+entitlement re-check then delivers free.
 
-That entitlement check signs an **authentication** message, the same class of
-signature `publish` makes; it moves no money. `read` imports no payment module and
-never consults the spend policy, which is what makes it safe to put in a harness
-allowlist. Signer resolution is lazy: a library hit or a free read never unlocks
-the keystore at all.
+`read` imports no wallet, signing, or payment module — its import graph is
+test-pinned to stay clear of all three — and never consults the spend policy,
+which is what makes it safe to put in a harness allowlist. It cannot unlock a
+keystore at all.
 
 `buy` is the paying verb: it re-reads an entitled resource for free before ever
 paying, re-delivers already-bought content from the local library without paying

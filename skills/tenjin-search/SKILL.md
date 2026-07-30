@@ -181,16 +181,15 @@ purchase. Reach for `read` first; it cannot spend.
 tenjin read <resource-url-or-id> --json
 ```
 
-- Delivers **free** pieces, anything already in your local library, and anything
-  your wallet is already **entitled** to — including a piece bought on another
-  machine, which it fetches and stores locally. A re-read of something you bought
-  costs nothing and needs no approval.
-- Proving that entitlement signs an **authentication** message (the same kind
-  `publish` signs), never a payment. `read` cannot pay: it has no payment code
-  path and never consults the spend policy.
-- If you are genuinely unentitled, it refuses with **exit 3**, naming the price
-  and the `tenjin buy` command to run. Nothing is charged, so `read` is safe to
-  attempt before deciding whether a purchase is worth it.
+- Delivers **free** pieces and anything already in your local library. A re-read
+  of something you bought costs nothing and needs no approval.
+- `read` cannot pay or sign: it has no wallet code path at all and never
+  consults the spend policy.
+- For a paid piece not in your library, it refuses with **exit 3**, naming the
+  price and the `tenjin buy` command to run — including a piece bought on
+  another machine, which `buy`'s own entitlement re-check then delivers free.
+  Nothing is charged, so `read` is safe to attempt before deciding whether a
+  purchase is worth it.
 
 ## Buy
 
