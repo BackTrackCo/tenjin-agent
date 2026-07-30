@@ -8,6 +8,7 @@
     "auto-mode-allowlist",
     "b3-publish",
     "cli-search-rename",
+    "edit-command",
     "install-harness-record",
     "install-instinct-nudge",
     "install-walkthrough",
