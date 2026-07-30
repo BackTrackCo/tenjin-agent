@@ -142,8 +142,8 @@ full-auto):
 
 **If the harness denies permission to run `tenjin publish`, stop and surface it;
 never retry.** `tenjin publish` is deliberately NOT in the recommended auto-mode
-allowlist (neither are `tenjin wallet create` or `tenjin config set`):
-publishing puts the user's content on a public marketplace under their
+allowlist (neither are `tenjin send`, `tenjin wallet create`, or `tenjin config
+set`): publishing puts the user's content on a public marketplace under their
 identity, so a denial is the gate working, not a misconfiguration. Tell the user
 what you wanted to publish and let them run it or clear it themselves. Do not
 propose an allowlist line for it, do not reword the command, and do not route
