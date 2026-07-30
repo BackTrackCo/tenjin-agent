@@ -15,7 +15,7 @@
         "`exclusions` states at least one thing the piece does not cover",
         "`asOf` is an ISO-8601 timestamp with an offset, for example `2026-07-26T00:00:00Z`, carrying the stated test date",
         "The measured numbers from the source notes (median 1.4s, 40 transfers) appear in the body, not only in the card",
-        "`tenjin publish` is run, and the card it carries is accepted on that first invocation with no card-validation retry"
+        "`tenjin publish` is run once and its card passes validation on that first invocation: no card-validation error and no retry loop before the `needs_confirmation` payload comes back"
       ]
     },
     {
@@ -65,7 +65,7 @@
       "expected_output": "A search first, and after a MISS the task is completed directly. The derived finding then routes through publish.mode without the user having asked to publish: in review mode that means a publish run whose needs_confirmation payload is rendered, never a silent publish and never a bare 'publish?' asked before running.",
       "files": [],
       "expectations": [
-        "`tenjin search` is run before the work is done, and it includes `--json`",
+        "`tenjin search` is run before the work is done, and its command line contains the literal `--json` flag",
         "After a MISS the agent completes the task itself rather than stopping at the MISS",
         "The publish decision follows the resolved `publish.mode` rather than asking a generic 'should I publish this?' before any publish command is run",
         "In the default review mode, `tenjin publish` is run without `--yes`, and the `needs_confirmation` payload it returns is rendered to the user with its findings and price",

@@ -80,6 +80,8 @@ Output cases: ask Claude to evaluate the skill with skill-creator and give it th
 path, for example `evaluate skills/tenjin-search with skill-creator using
 evals/tenjin-search/evals.json`. It spawns one subagent per case per configuration, grades
 each expectation with evidence into `grading.json`, and aggregates into `benchmark.json`.
+Compute pass rates from the graded expectation arrays, never from a grader's summary block: a
+grader can emit a summary that contradicts its own per-expectation grades, and one did.
 
 Trigger tuning, from the plugin directory:
 
@@ -140,9 +142,10 @@ Two cases are coupled to what the live index holds, and both state it rather tha
 
 Search case 5 needs the opposite of a MISS: it grades the judgment that a piece covering
 neighbouring versions does not answer a version-specific question, which only bites when a
-near neighbour exists to be declined. Its expectations are written conditionally so a MISS
-degrades the case to a weaker duplicate of case 3 rather than failing it, but a MISS means the
-case measured nothing that day, and it should be repointed at a subject the corpus does cover.
+near neighbour exists to be declined. Its expectations grade in every run, a MISS included,
+where they hold the agent to telling the user that nothing covers v2.19; that degrades the case
+to a weaker duplicate of case 3 rather than failing it. The trap itself still measured nothing
+on a MISS, so record it as such and repoint the case at a subject the corpus does cover.
 Publish case 5 assumes the same uncovered-query property as case 3, since its whole shape is
 search, MISS, then publish what you derived.
 
@@ -185,6 +188,14 @@ grade do have a shared ancestor in `agent-docs.ts` (the same "5 to 10 entries, 2
 each, and vary the REGISTER" wording), while the CLI-specific guidance the search cases grade
 exists only here. So a card-rule change worth making is usually worth making in both repos, and
 a drift between them is a real finding rather than a formatting difference.
+
+Two grading rules the fixtures depend on. The `--json` expectations grade the literal command
+text, because the CLI already emits JSON when stdout is not a TTY: a run that dropped the flag
+produces identical output, so only the command line shows whether the agent followed the
+skill's instruction to pass it. And an expectation whose condition never fires in a run graded
+nothing; record it as ungraded rather than as a pass, or the negatives read as safety the run
+never demonstrated. Cases whose negatives could otherwise pass on a turn that barely acts carry
+an activity floor for the same reason.
 
 Most expectations are mechanically observable: command counts, character caps, entry counts,
 whether a private identifier survived into a query. A few are grader judgments, unavoidably so,

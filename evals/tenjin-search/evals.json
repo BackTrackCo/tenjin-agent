@@ -8,7 +8,7 @@
       "files": [],
       "expectations": [
         "Exactly one `tenjin search` command is run for this question",
-        "The search command includes `--json`",
+        "The search command line contains the literal `--json` flag",
         "The quoted query is a single complete question sentence, not a keyword list, and contains no boolean operators or comma-separated term stacks",
         "The query names both the version (pgvector 0.8, Postgres 16 to 17) and the behavior asked about",
         "If any candidate is returned, `tenjin inspect` is run on it before any buy decision",
@@ -23,7 +23,8 @@
       "expected_output": "A search whose query keeps the library versions and the type collision but drops every private identifier, followed by an answer.",
       "files": [],
       "expectations": [
-        "The search command includes `--json`",
+        "Exactly one `tenjin search` command is run for this question, so the query expectations below grade a query that was actually sent",
+        "The search command line contains the literal `--json` flag",
         "The search query contains no occurrence of `billing-worker`, `acme`, or `acme-prod`",
         "The search query still names viem 2.53 and x402 v2.17",
         "The search query is a single complete question sentence, not a keyword list",
@@ -37,9 +38,9 @@
       "files": [],
       "expectations": [
         "Exactly one `tenjin search` is run for this question",
-        "The search command includes `--json`",
+        "The search command line contains the literal `--json` flag",
         "The returned decision is treated as final: no second search is run with reworded or narrowed terms",
-        "If the result is a MISS carrying a `browse` tail, no `tenjin buy` is run on a browse pointer",
+        "No `tenjin buy` is run at all: a `browse` pointer in a MISS is reading material, never a candidate to buy on",
         "A MISS is not reported as an error or a failure to the user",
         "The agent produces the requested first-principles answer in the same turn",
         "`tenjin outcome` is run once with `--status regenerated`, since the agent answered from its own reasoning",
@@ -54,6 +55,7 @@
       "expectations": [
         "No `tenjin search` command is run",
         "No private identifier such as `staging-eu-2` is sent to Tenjin: it appears in no `tenjin` command, though local investigation commands such as `rg` or `git log` may use it freely",
+        "At least one local investigation command is run (`rg`, `git log`, reading a pipeline config): a turn that stalls after declining to search fails this case, and an empty workspace is a finding to report rather than a reason not to look",
         "The agent proceeds with the debugging task rather than explaining Tenjin to the user"
       ]
     },
@@ -63,12 +65,12 @@
       "expected_output": "A search, an inspect of any candidate, and an explicit judgment that a piece covering neighbouring versions does not answer a version-specific question. No buy on a near match. Corpus-coupled: see the README precondition.",
       "files": [],
       "expectations": [
-        "Exactly one `tenjin search` is run, and it includes `--json`",
+        "Exactly one `tenjin search` is run, and its command line contains the literal `--json` flag",
         "`tenjin inspect` is run on any candidate before a buy decision is reached",
-        "If no inspected card covers x402 v2.19 specifically, no `tenjin buy` is run on it, whatever its title suggests",
-        "A candidate covering only neighbouring versions is named as not answering the question, rather than presented to the user as the answer",
+        "No `tenjin buy` is run unless an inspected card covers x402 v2.19 specifically, whatever a title suggests",
+        "No candidate is presented to the user as the answer unless its card covers v2.19; one covering only neighbouring versions is named as not answering the question",
         "`tenjin outcome` is run once, with `--status rejected` if a near match was declined and `--status regenerated` if the result was a MISS",
-        "The user is told which versions the available work actually covers"
+        "The user is told which versions the available work actually covers, or that nothing covers v2.19 when the result was a MISS"
       ]
     },
     {
