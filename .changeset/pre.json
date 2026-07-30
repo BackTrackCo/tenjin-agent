@@ -5,7 +5,19 @@
     "tenjin-cli": "0.1.0-alpha.1"
   },
   "changesets": [
+    "auto-mode-allowlist",
     "b3-publish",
-    "unified-publish-modes"
+    "cli-search-rename",
+    "install-harness-record",
+    "install-instinct-nudge",
+    "install-walkthrough",
+    "mcp-stdio",
+    "search-v2-lean-candidates",
+    "semantic-publish-safety",
+    "skill-hybrid-harmony",
+    "skill-resync",
+    "tenjin-send",
+    "unified-publish-modes",
+    "wallet-passphrase-slots"
   ]
 }

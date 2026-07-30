@@ -190,11 +190,16 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     program.command('wallet').description('Manage the local x402 payment wallet'),
   );
   addGlobalFlags(wallet.command('create'))
-    .description('Create a new local wallet')
+    .description('Create a new local wallet (refuses if one exists; see --replace)')
+    .option(
+      '--replace',
+      'archive the existing wallet first — keystore parked beside the new one, passphrase verified and preserved under its address — then create a new active wallet',
+    )
     .action(async function (this: Command) {
       await runCommand('wallet.create', this, async (ctx) => {
+        const o = this.opts();
         const { runWalletCreate } = await import('./commands/wallet');
-        return runWalletCreate(ctx);
+        return runWalletCreate(ctx, o.replace === true ? { replace: true } : {});
       });
     });
   addGlobalFlags(wallet.command('show'))
@@ -211,6 +216,22 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runCommand('wallet.balance', this, async (ctx) => {
         const { runWalletBalance } = await import('./commands/wallet');
         return runWalletBalance(ctx);
+      });
+    });
+
+  // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
+  // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
+  // surface gains a send trigger (both exclusions are pinned by tests).
+  addGlobalFlags(program.command('send <amount> <token> <to>'))
+    .description(
+      'Move funds OUT of the agent wallet (escape hatch): preview the resolved recipient and amount, confirm explicitly, then transfer on Base and print the tx hash. USDC only',
+    )
+    .option('--yes', 'skip the interactive confirm (required to send when not at a TTY)')
+    .action(async function (this: Command, amount: string, token: string, to: string) {
+      await runCommand('send', this, async (ctx) => {
+        const o = this.opts();
+        const { runSend } = await import('./commands/send');
+        return runSend({ amount, token, to, ...(o.yes === true ? { yes: true } : {}) }, ctx);
       });
     });
 

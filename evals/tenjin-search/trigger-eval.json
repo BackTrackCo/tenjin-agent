@@ -1,0 +1,102 @@
+[
+  {
+    "query": "Does viem 2.53 work with the x402 v2.17 EVM signer, or do their type definitions conflict?",
+    "should_trigger": true,
+    "rationale": "Version-specific compatibility: public, durable, needs a real install to answer, plausibly already tested."
+  },
+  {
+    "query": "Which x402 facilitators settle USDC on Base mainnet and which are still testnet only, verified recently?",
+    "should_trigger": true,
+    "rationale": "Dated operational probe across vendors: reproducing it means calling every facilitator."
+  },
+  {
+    "query": "What breaks when you point a Drizzle migration suite at the pgvector Postgres image instead of the stock one?",
+    "should_trigger": true,
+    "rationale": "Verified integration gotcha: only surfaces after actually running the migrations."
+  },
+  {
+    "query": "Is there a maintained benchmark comparing pgvector HNSW against IVFFlat recall and latency at one million rows?",
+    "should_trigger": true,
+    "rationale": "Maintained benchmark: paid compute and elapsed time to reproduce."
+  },
+  {
+    "query": "Does Next 16 with React 19.2 server actions and Sentry 9 break source maps in production builds?",
+    "should_trigger": true,
+    "rationale": "Three-way version compatibility question that takes a full build to settle."
+  },
+  {
+    "query": "Has anyone verified whether Vercel's cacheComponents flag still returns a soft 404 for notFound() routes on the current release?",
+    "should_trigger": true,
+    "rationale": "Dated behavioral probe on a shipping platform flag: needs a deployed app to check."
+  },
+  {
+    "query": "What is the tested workaround for the MCP TypeScript SDK stdio transport exiting non-zero on a clean stdin EOF?",
+    "should_trigger": true,
+    "rationale": "Verified integration gotcha with a known fix, cheap to reuse and expensive to rediscover."
+  },
+  {
+    "query": "Which managed Postgres providers support the vector extension on their cheapest paid tier, checked recently?",
+    "should_trigger": true,
+    "rationale": "Maintained vendor comparison: requires signing up across providers."
+  },
+  {
+    "query": "Does USDC transfer finality on Base mainnet actually stay under two seconds when measured across a full week?",
+    "should_trigger": true,
+    "rationale": "Elapsed-time observation: the measurement window itself is the cost, and the conclusion is durable."
+  },
+  {
+    "query": "Is there a tested migration report for moving a Next app router monorepo from Tailwind 3 to Tailwind 4?",
+    "should_trigger": true,
+    "rationale": "Migration report: explicitly the shape of work someone plausibly published."
+  },
+  {
+    "query": "Does our payments-worker service still pin viem 2.53, and what breaks in our signer if I bump it?",
+    "should_trigger": false,
+    "rationale": "Fails the public gate only: same versions as a valid search, but the answer lives in a private repo."
+  },
+  {
+    "query": "What is the gas price on Base mainnet right now for a USDC transfer?",
+    "should_trigger": false,
+    "rationale": "Fails the durable gate only: a live price, stale the moment it is written down."
+  },
+  {
+    "query": "Which HTTP status code does the x402 protocol use for its payment-required challenge?",
+    "should_trigger": false,
+    "rationale": "Fails the costly gate only: protocol-specific vocabulary, but a one-line known fact."
+  },
+  {
+    "query": "My pgvector similarity query started returning zero rows after I switched to the pg16 image, help me debug it.",
+    "should_trigger": false,
+    "rationale": "Debugging work itself: same subject as a valid gotcha search, but the task is to fix this instance."
+  },
+  {
+    "query": "What is the best way to structure a TypeScript monorepo that holds a CLI and a Next app?",
+    "should_trigger": false,
+    "rationale": "Fails the costly gate only: generic architecture advice, fully answerable in one model response."
+  },
+  {
+    "query": "Is the Base mainnet RPC endpoint up right now?",
+    "should_trigger": false,
+    "rationale": "Fails the durable gate only: a live status check."
+  },
+  {
+    "query": "Why did our staging deploy start returning 402 on every read after last night's release?",
+    "should_trigger": false,
+    "rationale": "Fails the public gate only: an incident in a private deployment, no generalizable form."
+  },
+  {
+    "query": "What is the minimum Node version Next 16 requires?",
+    "should_trigger": false,
+    "rationale": "Fails the costly gate only: a documented one-liner wearing version-compatibility clothes."
+  },
+  {
+    "query": "Write me a Drizzle migration that adds an HNSW index to the embeddings table.",
+    "should_trigger": false,
+    "rationale": "Implementation work itself, not research about it."
+  },
+  {
+    "query": "Review this diff for security issues before I merge the x402 settlement change.",
+    "should_trigger": false,
+    "rationale": "Review work itself: domain vocabulary, but no question to look up."
+  }
+]

@@ -1,5 +1,5 @@
-import { createInterface } from 'node:readline';
 import { CliError } from '../lib/errors';
+import { promptYesNo } from '../lib/prompt';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
@@ -321,21 +321,5 @@ async function confirmSpend(
   // The real prompt reads stdin, so stdin must be interactive too: at EOF the
   // question could never be answered and the process would exit with no answer.
   if (!process.stdin.isTTY) return false;
-  return promptYesNo(prompt);
-}
-
-/** stdin closing mid-prompt (ctrl-D) resolves as decline, never a hang. */
-function promptYesNo(prompt: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    let settled = false;
-    const settle = (value: boolean): void => {
-      if (settled) return;
-      settled = true;
-      rl.close();
-      resolve(value);
-    };
-    rl.once('close', () => settle(false));
-    rl.question(prompt, (answer) => settle(/^y(es)?$/i.test(answer.trim())));
-  });
+  return promptYesNo(prompt); // default-no: only an explicit y/yes approves
 }

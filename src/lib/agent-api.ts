@@ -18,6 +18,13 @@ import { trimSlash } from './url';
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
+/** The server's `limit` ceiling. Exported because the truncation advice in
+ *  `search` has to name it: past search v2 the response budget scales with the
+ *  candidates returned, so a truncated page is recovered by asking for MORE, and
+ *  this is the value to ask for. One definition, so the cap the CLI enforces and
+ *  the number it tells the operator to retry with cannot drift apart. */
+export const MAX_LIMIT = 10;
+
 /** Client-side search request (mirrors the server lookupRequestSchema bounds
  *  so a malformed flag fails locally as USAGE, before a round trip). */
 export interface SearchInput {
@@ -29,7 +36,7 @@ export interface SearchInput {
 }
 
 export interface SearchRequestBody {
-  schemaVersion: 1;
+  schemaVersion: 2;
   question: string;
   freshWithin?: string;
   maxPrice?: string;
@@ -60,9 +67,9 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     });
   }
   const limit = input.limit ?? 5;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 10) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
     throw new CliError('USAGE', `Invalid --limit: ${JSON.stringify(input.limit)}`, {
-      fix: 'Pass an integer between 1 and 10.',
+      fix: `Pass an integer between 1 and ${MAX_LIMIT}.`,
     });
   }
   if (input.appliesTo !== undefined) {
@@ -97,7 +104,7 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     }
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     question,
     ...(input.freshWithin !== undefined ? { freshWithin: input.freshWithin } : {}),
     ...(input.maxPrice !== undefined ? { maxPrice: input.maxPrice } : {}),
@@ -109,21 +116,20 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
 // Response schemas. `.passthrough()` on the candidate keeps unknown future fields
 // instead of stripping them (forward-compatible), while still requiring the
 // contract fields this CLI reads. `decision` is uppercase on the wire.
+//
+// A candidate is a LEAN hit (search v2): identity, price, freshness and why it
+// matched, and nothing more. The full answer card is one free unpaid GET of `url`
+// away, which is what `tenjin inspect` does, so breadth here costs no depth there.
 export const searchCandidateSchema = z
   .object({
     resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
     url: z.string(),
+    slug: z.string(),
     title: z.string(),
     artifactType: z.string(),
     price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
     asOf: z.string().nullable(),
     validUntil: z.string().nullable(),
-    temporalMode: z.string(),
-    appliesTo: z.record(z.string(), z.array(z.string())),
-    questionsAnswered: z.array(z.string()),
-    tasksSupported: z.array(z.string()),
-    scope: z.string().nullable(),
-    exclusions: z.string().nullable(),
     matchReasons: z.array(z.string()),
     estimatedTokens: z.number(),
     creator: z.object({ handle: z.string() }).passthrough(),
@@ -179,11 +185,18 @@ export const searchBrowseSchema = z
 export type SearchBrowse = z.infer<typeof searchBrowseSchema>;
 
 export const searchResponseSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   searchId: z.string().regex(UUID_RE, 'searchId must be a uuid'),
   decision: z.enum(['CANDIDATES', 'MISS']),
   calibration: z.string(),
   candidates: z.array(searchCandidateSchema).optional(),
+  // Set only when the server's size backstop dropped trailing candidates the
+  // requested limit had room for; omitted entirely otherwise. There is no cursor,
+  // so a retry at a SMALLER limit returns strictly fewer rows; the ceiling scales
+  // with the candidates returned, so a LARGER limit (up to MAX_LIMIT) is what
+  // recovers the tail, and at MAX_LIMIT the tail is unrecoverable and narrowing the
+  // question is the remedy. `runSearch` picks the half that applies.
+  truncated: z.literal(true).optional(),
   // Omitted entirely by the server when empty, and only ever present on a MISS.
   // Not enforced here (a stricter schema would reject an otherwise-usable
   // response); truncateResponse drops it on a CANDIDATES decision instead.
@@ -205,7 +218,7 @@ function apiFailure(url: string, result: Exclude<HttpResult, { ok: true }>): Cli
   const code =
     result.kind === 'network' || result.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
   return new CliError(code, `${url}: ${result.message}`, {
-    fix: 'Check --base-url and your network, then retry.',
+    fix: 'Check your network and the configured base URL (`tenjin config get baseUrl`), then retry.',
   });
 }
 
@@ -259,6 +272,17 @@ export async function postSearch(
   if (!res.ok) throw apiFailure(url, res);
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   if (res.status !== 200) {
+    // The REQUEST gate is where a pre-v2 server actually refuses us, and it is
+    // the arm that fires in practice. Old tenjin declares `schemaVersion:
+    // z.literal(1)` inside a strictObject, so a v2 request never reaches the
+    // handler: it comes back 400 "Invalid request body" with the zod flatten in
+    // `error.details`, and the response check further down can never see it.
+    // Without this the operator is told to retry a request that cannot succeed.
+    if (res.status === 400 && rejectedSchemaVersion(res.json)) {
+      throw outdatedServerError('The server rejected schemaVersion 2: it predates search v2.', {
+        details: res.json,
+      });
+    }
     throw new CliError(
       'API_UNREACHABLE',
       serverErrorMessage(res.json) ?? `Search failed (${res.status})`,
@@ -270,6 +294,16 @@ export async function postSearch(
   }
   const parsed = searchResponseSchema.safeParse(res.json);
   if (!parsed.success) {
+    // The other way a stale server surfaces: it answered 200 with a v1 body.
+    // Unreachable against today's old tenjin (the request gate above refuses
+    // first), but correct for anything that accepts the request and replies v1.
+    const served = serverSchemaVersion(res.json);
+    if (served !== undefined && served !== 2) {
+      throw outdatedServerError(
+        `Search response is schemaVersion ${served}; this CLI requires 2 (search v2).`,
+        { details: parsed.error.issues },
+      );
+    }
     throw new CliError('CONTRACT_MISMATCH', 'Search response did not match the expected contract', {
       fix: 'Update tenjin-cli; the server contract may have changed.',
       details: parsed.error.issues,
@@ -278,22 +312,47 @@ export async function postSearch(
   return truncateResponse(parsed.data);
 }
 
+/** One wording for both ways a pre-v2 server refuses this CLI, so the request-gate
+ *  arm and the response arm can never drift apart. */
+function outdatedServerError(message: string, opts: { details: unknown }): CliError {
+  return new CliError('CONTRACT_MISMATCH', message, {
+    fix: 'The server predates search v2. Point the configured base URL (`tenjin config set baseUrl`) at an updated deployment, or install an older tenjin-cli.',
+    details: opts.details,
+  });
+}
+
+/** True when a 400 body is the old server's request-gate refusal of our
+ *  `schemaVersion`: an ApiError envelope whose zod `flatten()` details carry a
+ *  `schemaVersion` fieldError. Keyed on the field, never the message text. */
+function rejectedSchemaVersion(json: unknown): boolean {
+  const record = (v: unknown): Record<string, unknown> | undefined =>
+    typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
+  const fieldErrors = record(record(record(json)?.error)?.details)?.fieldErrors;
+  return Array.isArray(record(fieldErrors)?.schemaVersion);
+}
+
+/** The `schemaVersion` an unparsed body claims, when it claims a number at all. */
+function serverSchemaVersion(json: unknown): number | undefined {
+  if (typeof json !== 'object' || json === null) return undefined;
+  const v = (json as { schemaVersion?: unknown }).schemaVersion;
+  return typeof v === 'number' ? v : undefined;
+}
+
 /**
- * The server bounds every card string (response budget ~1k tokens, spec 09);
- * re-apply the same caps defensively so a misbehaving server cannot blow up an
- * agent transcript through the CLI (spec 10 response-size discipline).
+ * The server bounds every free-form candidate string (spec 09); re-apply the same
+ * caps defensively so a misbehaving server cannot blow up an agent transcript
+ * through the CLI (spec 10 response-size discipline).
+ *
+ * `slug` is deliberately absent: it is an identifier, not display text, so
+ * clipping it would not shorten it but change it into a slug that resolves to
+ * nothing while still looking usable in `--json`. The server tolerates an
+ * uncapped slug for the same reason (that is the one case its `truncated` flag
+ * exists for), so capping here would fail on a response the server calls valid.
  */
 const CAND_BOUNDS = {
   title: 200,
-  scope: 240,
-  exclusions: 240,
-  listItems: 4,
-  listItemChars: 160,
   matchReasons: 3,
   matchReasonChars: 80,
-  appliesToKeys: 6,
-  appliesToValues: 5,
-  appliesToValueChars: 80,
 } as const;
 
 const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
@@ -334,29 +393,12 @@ function truncateResponse(res: SearchResponse): SearchResponse {
 const BROWSE_MAX = 3;
 
 function truncateCandidate(c: SearchCandidate): SearchCandidate {
-  const capList = (list: string[], items: number, chars: number): string[] =>
-    list.slice(0, items).map((s) => cap(s, chars));
-  const appliesTo: Record<string, string[]> = {};
-  for (const key of Object.keys(c.appliesTo).slice(0, CAND_BOUNDS.appliesToKeys)) {
-    appliesTo[cap(key, CAND_BOUNDS.appliesToValueChars)] = capList(
-      c.appliesTo[key] ?? [],
-      CAND_BOUNDS.appliesToValues,
-      CAND_BOUNDS.appliesToValueChars,
-    );
-  }
   return {
     ...c,
     title: cap(c.title, CAND_BOUNDS.title),
-    scope: c.scope === null ? null : cap(c.scope, CAND_BOUNDS.scope),
-    exclusions: c.exclusions === null ? null : cap(c.exclusions, CAND_BOUNDS.exclusions),
-    questionsAnswered: capList(
-      c.questionsAnswered,
-      CAND_BOUNDS.listItems,
-      CAND_BOUNDS.listItemChars,
-    ),
-    tasksSupported: capList(c.tasksSupported, CAND_BOUNDS.listItems, CAND_BOUNDS.listItemChars),
-    matchReasons: capList(c.matchReasons, CAND_BOUNDS.matchReasons, CAND_BOUNDS.matchReasonChars),
-    appliesTo,
+    matchReasons: c.matchReasons
+      .slice(0, CAND_BOUNDS.matchReasons)
+      .map((r) => cap(r, CAND_BOUNDS.matchReasonChars)),
   };
 }
 

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { CliError } from './errors';
 import { configPath } from './paths';
+import { HARNESS_TARGETS } from './skill-wiring';
 import { writeFileAtomic } from './atomic-json';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -35,6 +36,18 @@ const PublishConfigSchema = z.object({
 });
 
 /**
+ * What `install` recorded about its OWN targets. `harness` is the explicit
+ * `--harness` set of the last install that passed the flag, and it exists so
+ * `doctor` keeps judging a directory the user named by hand: detection cannot see a
+ * harness this CLI does not probe for, and without the record such a directory is a
+ * target for one run and invisible to every later check. Written by `install`, not a
+ * `config set` key.
+ */
+const InstallConfigSchema = z.object({
+  harness: z.array(z.enum(HARNESS_TARGETS)),
+});
+
+/**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
  * USD at the command edge, see lib/money); `confirm` is the stored form
  * "always" | "above:<atomic>". These are client-enforced guardrails, not a
@@ -44,6 +57,16 @@ export const ConfigSchema = z.object({
   maxAutoSpend: atomicString,
   sessionBudget: atomicString,
   confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
+  /**
+   * Hard per-send cap for `tenjin send`, NOT satisfiable by --yes or a prompt
+   * (the spend-policy posture): an atomic amount caps each send, "0" disables
+   * the verb entirely, and "none" = explicitly uncapped (send exists to drain
+   * the wallet, but uncapped is an opt-in, never a default). The key has NO
+   * usable default: absent from config.json, `tenjin send` refuses until it is
+   * set (see resolveSendMaxAmount). Client-enforced like every spend key (see
+   * the note above).
+   */
+  sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
   rpcUrl: z.url(),
@@ -54,6 +77,7 @@ export const ConfigSchema = z.object({
    */
   evalCohort: z.boolean(),
   publish: PublishConfigSchema,
+  install: InstallConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -69,29 +93,50 @@ export const RawConfigSchema = ConfigSchema.partial()
   // writes only the one subkey, and a subkey a newer CLI adds (e.g. publish.*
   // beyond mode/defaultPrice) survives an older binary's set, same reason the
   // outer object passes unknown keys through.
-  .extend({ publish: PublishConfigSchema.partial().passthrough().optional() })
+  .extend({
+    publish: PublishConfigSchema.partial().passthrough().optional(),
+    install: InstallConfigSchema.partial().passthrough().optional(),
+  })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
+
+/**
+ * The resolved-view sentinel for an absent sendMaxAmount. Never a persistable
+ * value (ConfigSchema rejects it, and `config set` has no way to produce it);
+ * while the resolved value is this sentinel, `tenjin send` refuses —
+ * require-set-before-first-send.
+ */
+export const SEND_MAX_UNSET = 'unset';
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',
   confirm: 'always',
+  // A type placeholder only, never honored: Config requires every key (and
+  // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
+  // absent key resolves to SEND_MAX_UNSET and `tenjin send` refuses until the
+  // cap is set. '0' (send disabled) rather than 'none' (uncapped) so that if a
+  // future caller ever DOES read the cap through loadConfig/fileOrDefault, the
+  // leak fails closed instead of silently running uncapped.
+  sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   publish: { mode: 'review', defaultPrice: '100000' },
+  install: { harness: [] },
 };
 
 /**
- * Scalar keys `config get/set/list` render one line each. `publish` is excluded:
- * it is a nested block addressed by the dotted `publish.mode`/`publish.defaultPrice`
- * keys (see PUBLISH_CONFIG_KEYS), so it is never rendered as a bare scalar.
+ * Scalar keys `config get/set/list` render one line each. Both nested blocks are
+ * excluded: `publish` is addressed by the dotted `publish.mode`/`publish.defaultPrice`
+ * keys (see PUBLISH_CONFIG_KEYS), and `install` is a record `install` writes about
+ * itself rather than a setting to hand-edit, so neither is ever a bare scalar.
  */
-export type ScalarConfigKey = Exclude<keyof Config, 'publish'>;
+export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install'>;
+const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install']);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
-  (key): key is ScalarConfigKey => key !== 'publish',
+  (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
 
 /** The dotted keys `config get/set` accept for the nested publish block. */
@@ -146,6 +191,7 @@ export async function loadConfig(dir: string): Promise<Config> {
       mode: raw.publish?.mode ?? CONFIG_DEFAULTS.publish.mode,
       defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
     },
+    install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
   };
 }
 
@@ -179,6 +225,7 @@ export interface EffectiveSettings {
   maxAutoSpend: ResolvedSetting<string>;
   sessionBudget: ResolvedSetting<string>;
   confirm: ResolvedSetting<string>;
+  sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
@@ -213,6 +260,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
     confirm: fileOrDefault('confirm', config),
+    sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
@@ -299,6 +347,18 @@ export async function writeConfig(dir: string, config: Config): Promise<void> {
     mode: 0o644,
     dirMode: 0o700,
   });
+}
+
+/**
+ * sendMaxAmount deliberately bypasses fileOrDefault: it has no usable default
+ * (the operator's require-set-before-first-send posture). Absent from
+ * config.json it resolves to the SEND_MAX_UNSET sentinel with source 'default',
+ * which `tenjin send` refuses outright — the cap must be set to an amount, "0"
+ * (disable), or an explicit "none" (uncapped opt-in) before the first send.
+ */
+function resolveSendMaxAmount(config: PartialConfig): ResolvedSetting<string> {
+  if (config.sendMaxAmount !== undefined) return { value: config.sendMaxAmount, source: 'file' };
+  return { value: SEND_MAX_UNSET, source: 'default' };
 }
 
 function fileOrDefault<K extends keyof Config>(

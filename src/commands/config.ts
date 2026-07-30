@@ -6,6 +6,7 @@ import {
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
+  SEND_MAX_UNSET,
   loadRawConfig,
   resolveSettings,
 } from '../lib/config';
@@ -17,6 +18,7 @@ import type {
   PublishMode,
   ScalarConfigKey,
 } from '../lib/config';
+import type { HarnessTarget } from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -50,6 +52,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   maxAutoSpend: 'auto-approve a read up to this amount',
   sessionBudget: 'cap on total auto-spend per session',
   confirm: 'when to ask before paying',
+  sendMaxAmount:
+    'hard cap per tenjin send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   baseUrl: 'Tenjin API base URL',
   rpcUrl: 'Base RPC endpoint for balance reads',
@@ -166,6 +170,23 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   }));
 }
 
+/**
+ * Record the explicit `--harness` set `install` was given, through the same locked
+ * merge-write. It REPLACES the previous record rather than unioning with it: the last
+ * explicit request is the current intent, and re-running install with the right flag
+ * is then the way out of a mistaken one. Detected harnesses are never recorded — they
+ * are re-probed on every `doctor` — so this file holds only what detection cannot see.
+ */
+export async function persistInstallHarness(
+  dir: string,
+  harness: readonly HarnessTarget[],
+): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    install: { ...existing.install, harness: [...harness] },
+  }));
+}
+
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
@@ -212,6 +233,11 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
+  if (key === 'sendMaxAmount') {
+    // 'unset' is the resolved sentinel for an absent key (send refuses), never
+    // a stored value; 'none' is the explicit uncapped opt-in.
+    return { value: stored === 'none' || stored === SEND_MAX_UNSET ? stored : toMoney(stored) };
+  }
   if (key === 'confirm' && stored.startsWith(CONFIRM_ABOVE)) {
     return { value: stored, threshold: toMoney(stored.slice(CONFIRM_ABOVE.length)) };
   }
@@ -224,6 +250,8 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'maxAutoSpend':
     case 'sessionBudget':
       return parseUsdToAtomic(value); // throws USAGE on a bad amount
+    case 'sendMaxAmount':
+      return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'confirm':
       return parseConfirm(value);
     case 'allowlistCreators':
