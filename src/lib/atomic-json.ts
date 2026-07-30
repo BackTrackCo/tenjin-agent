@@ -103,8 +103,8 @@ export async function writeFileAtomicExclusive(
   }
 }
 
-/** fsync a directory so a freshly linked entry is durable. Never called on win32. */
-async function fsyncDir(dir: string): Promise<void> {
+/** fsync a directory so a freshly linked entry is durable. Never call on win32. */
+export async function fsyncDir(dir: string): Promise<void> {
   const handle = await open(dir, 'r');
   try {
     await handle.sync();

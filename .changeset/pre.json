@@ -6,6 +6,12 @@
   },
   "changesets": [
     "b3-publish",
+    "cli-search-rename",
+    "install-instinct-nudge",
+    "install-walkthrough",
+    "mcp-stdio",
+    "skill-hybrid-harmony",
+    "skill-resync",
     "unified-publish-modes"
   ]
 }

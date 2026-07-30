@@ -52,6 +52,15 @@ export interface WalletDiagnostics {
    * would require a keychain or TTY probe — `show` must never trigger one.
    */
   passphraseSource?: string;
+  /**
+   * Addresses of wallets parked by `wallet create --replace` (their keystores
+   * live at wallet.<address>.json.bak beside the active wallet, with their
+   * passphrases preserved per-address in the OS store). A recovery hint only —
+   * the single-active-wallet model is unchanged and nothing else reads these.
+   * Present only when at least one archive exists; discovered by a cheap dir
+   * scan, never a keychain probe.
+   */
+  archivedWallets?: string[];
   warnings: string[];
 }
 

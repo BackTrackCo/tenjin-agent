@@ -190,11 +190,16 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     program.command('wallet').description('Manage the local x402 payment wallet'),
   );
   addGlobalFlags(wallet.command('create'))
-    .description('Create a new local wallet')
+    .description('Create a new local wallet (refuses if one exists; see --replace)')
+    .option(
+      '--replace',
+      'archive the existing wallet first — keystore parked beside the new one, passphrase verified and preserved under its address — then create a new active wallet',
+    )
     .action(async function (this: Command) {
       await runCommand('wallet.create', this, async (ctx) => {
+        const o = this.opts();
         const { runWalletCreate } = await import('./commands/wallet');
-        return runWalletCreate(ctx);
+        return runWalletCreate(ctx, o.replace === true ? { replace: true } : {});
       });
     });
   addGlobalFlags(wallet.command('show'))
