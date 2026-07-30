@@ -15,8 +15,11 @@
     "mcp-stdio",
     "search-v2-lean-candidates",
     "semantic-publish-safety",
+    "skill-eval-wording",
     "skill-hybrid-harmony",
+    "skill-resync-2",
     "skill-resync",
+    "tenjin-read-free-only",
     "tenjin-send",
     "unified-publish-modes",
     "wallet-passphrase-slots"
