@@ -1,6 +1,6 @@
 {
   "name": "tenjin-cli",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "type": "module",
   "description": "Tenjin agent CLI for the x402 knowledge marketplace.",
   "license": "MIT",

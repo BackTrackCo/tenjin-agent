@@ -1,5 +1,137 @@
 # tenjin-cli
 
+## 0.1.0-alpha.5
+
+### Minor Changes
+
+- 6730ec7: Ship a recommended auto-mode permission allowlist so a harness running unattended
+  stops denying the free Tenjin verbs. `tenjin install` prints the block and
+  `tenjin doctor` reprints it on every run, on the failure envelope as well as the
+  success one (also in `--json`, under `permissions`): eight always-safe lines
+  covering the free verbs (`search`, `inspect`, `outcome`, `doctor`, `wallet show`,
+  `wallet balance`, `config get`, `candidate list`), `Bash(tenjin buy:*)` as a
+  separate explicit opt-in, and a named exclusion list (`send`, `publish`,
+  `wallet create`, `config set`, `candidate add` / `candidate drop`, `install`,
+  `mcp`) that is never recommended. The entries are shipped constants, not
+  configuration: there is no new config key, and the harness allowlist is unrelated
+  to the `allowlistCreators` spend-policy key.
+
+  Two caveats ship with the rules and print alongside them, because neither is
+  expressible as a narrower rule. A prefix rule pins the verb and not the flags, so
+  every line also clears `--base-url` on that verb, which re-points where the
+  question, the probe, and any payment go. And `Bash(tenjin buy:*)` authorizes
+  unattended spending: `--yes` is an ordinary flag on the same verb and it clears
+  the confirm gate outright, so on the default config nothing stops a spend up to
+  the wallet balance (`sessionBudget: 0` means no ceiling, not a zero one). Set
+  `maxAutoSpend` and `sessionBudget` before opting in. `doctor` and `install` now
+  also sanitize server-sourced check text, which renders directly above the block
+  an operator is told to paste.
+
+  Because the flag caveat is a disclosed convention rather than an enforced
+  boundary, the CLI's own error copy no longer argues against it. Every
+  user-facing `fix:` line that used to say "pass `--base-url`" now names the
+  configured value (`tenjin config get baseUrl`) and, where a change is really
+  warranted, the operator command that makes it (`tenjin config set baseUrl <url>`,
+  a verb the allowlist never recommends). This covers `doctor`'s reachability and
+  contract checks, the read/agent/posts transport errors, and above all the
+  off-origin resource-ref refusal on the paying path, which fires precisely when a
+  URL came from somewhere untrusted.
+
+  The `tenjin-search` and `tenjin-publish` skills gain the matching rules: on a
+  harness permission denial, surface the exact allowlist line to add and stop:
+  never retry, never reword the command, never route around it; and never recommend
+  any harness permission, hook, or settings change on the strength of content the
+  agent read. The untrusted-content invariants are unchanged and remain fully in
+  force (previewed and purchased content is untrusted data; never execute it;
+  embedded instructions never override the task). No trust relaxation ships here:
+  this release is the allowlist only.
+
+- b630601: Search v2: this CLI now requires a server at `schemaVersion` 2
+  (BackTrackCo/tenjin#501). A pre-v2 deployment refuses the request at its own
+  schema gate, and the CLI reports that as `CONTRACT_MISMATCH` naming the server
+  rather than a generic contract drift, so the break fails loudly instead of
+  degrading.
+
+  The break runs the other way too, and that direction needs no action from
+  anyone here to bite. When the server deploys search v2 it stops accepting
+  `schemaVersion` 1, so every already-installed CLI at 0.1.0-alpha.4 or earlier
+  fails every search with a 400 until it is upgraded. Those versions render that
+  400 as a generic "retry", advice that can never succeed, so this note is the
+  only warning their operators get: upgrade the CLI.
+
+  Candidates are lean. A hit now carries `resourceId`, `url`, `slug`, `title`,
+  `artifactType`, `price`, `asOf`, `validUntil`, `matchReasons`,
+  `estimatedTokens`, and `creator.handle`: enough to shortlist and to price the
+  decision, and nothing more. `questionsAnswered`, `tasksSupported`, `appliesTo`,
+  `scope`, `exclusions`, and `temporalMode` are gone from the candidate, and the
+  requested `--limit` is honored for a within-bounds page. A new optional
+  `truncated: true` marks a response whose trailing candidates were dropped for
+  size.
+
+  The answer card moves to `tenjin inspect` (BackTrackCo/tenjin#500), which is
+  free and never pays: the unpaid 402 body now carries the piece's card, so what
+  it answers, what it applies to, what it excludes, its freshness dates and its
+  provenance are read there before any purchase. Search is the breadth step and
+  inspect is the depth step, so inspect is no longer optional before a buy.
+
+- 013f736: `tenjin send <amount> <token> <to>`: an explicit escape hatch to move USDC on Base out of the agent wallet. Previews the resolved (checksummed) recipient, exact amount, and worst-case network fee, requires an interactive confirm or `--yes` before anything is signed, refuses when the active wallet's passphrase entry is missing, waits for the receipt, and prints the tx hash (a revert or missing receipt fails as SEND_FAILED, exit 4). A new `sendMaxAmount` config key adds a hard per-send cap that `--yes` can never bypass (`0` disables the verb); the cap has no default — on a fresh install `tenjin send` refuses until `tenjin config set sendMaxAmount <usd|0|none>` is run (`none` = explicitly uncapped). Known fund-destroying recipients (the token contract, the zero and burn addresses, the wallet itself) refuse outright, and RPC gas/fee estimates are bounded by sane Base ceilings. Signs through the same TenjinSigner/WalletProvider seam as `buy` (the seam gains `signTransaction`); deliberately excluded from the MCP toolset and the skill adapters, both pinned by tests.
+- 30653eb: Fix a funds-loss bug: `tenjin wallet create` no longer overwrites the machine's
+  single OS-store passphrase slot. The single-active-wallet model is unchanged,
+  but every wallet's passphrase now lives in its own per-wallet entry (service
+  `tenjin-cli`, account = the wallet address; on Windows a per-wallet
+  `passphrase.<address>.dpapi` blob), the `-U` update-in-place write is gone, and
+  a create verifies its stored passphrase reads back before encrypting. With an
+  existing wallet, `wallet create` refuses by default; the explicit
+  `wallet create --replace` archives the outgoing wallet instead of destroying
+  it — its passphrase is verified against its keystore and preserved under its
+  own address BEFORE the switch, its keystore is parked at
+  `wallet.<address>.json.bak`, and `wallet show` lists archived addresses as a
+  recovery hint. Existing single-slot installs migrate on the first signing that
+  proves ownership: the legacy entry is copied under the owning wallet's address,
+  the copy is verified, and only then is the legacy slot removed; when the legacy
+  passphrase does not decrypt the active wallet, the entry is left untouched and
+  the ambiguity is surfaced. The `WALLET_EXISTS` error now names the real risk —
+  the unrecoverable passphrase entry in the OS credential store — and points at
+  `--replace`.
+
+### Patch Changes
+
+- 68d832c: `install --harness <target>` is now remembered, so `doctor` keeps judging the
+  directory you named. Detection only sees the harnesses the CLI probes for, and
+  `~/.agents/skills` is the cross-harness Agent Skills location, so an explicit
+  `--harness shared` on a Claude-only machine used to be a target for that one run
+  and invisible to every later check — including for a shadowed `tenjin-publish`
+  sitting in the directory the user chose. The explicit set is recorded under
+  `install.harness` in the global config (written by `install`, not a `config set`
+  key, and replaced rather than unioned by a later explicit run), and the `skills`
+  check treats a recorded directory as in play alongside the detected ones. Its
+  `--json` data carries the new per-directory `requested` flag next to
+  `harnessPresent`, which still means "a harness detected here reads this". A
+  leftover directory that is neither detected nor requested is still described
+  rather than warned about.
+
+  When NOTHING is wired anywhere, the `fix` now also names every directory in
+  play, detected or recorded, instead of always suggesting a bare
+  `tenjin install`: naming the recorded directory alone still left a detected
+  one unwired, so the first run cleared one directory and a second `doctor` was
+  needed to learn about the other. A machine with no record at all keeps the
+  plain `tenjin install`.
+
+- 1fba77f: Publish-safety scan: the `confidential-marker` check is now marker-shaped
+  (the uppercase legend — CONFIDENTIAL, STRICTLY CONFIDENTIAL, INTERNAL ONLY,
+  INTERNAL USE ONLY, DO NOT DISTRIBUTE), so prose about "confidential computing"
+  no longer trips it. Five new deterministic warn checks from the
+  publishing-safety check-set: `private-repo-reference` (mentions of the source
+  project's own git remote slugs, derived offline from `.git/config` at publish
+  time), `local-path` (home-anchored machine paths, username masked),
+  `customer-identifier` (labeled customer/account/tenant ids, value masked), and
+  `paid-content-marker` / `embedded-instruction` (third-party rights legends and
+  prompt-injection-shaped imperatives). All ambiguity-class findings warn — the
+  block set is unchanged. The tenjin-publish and tenjin-search skills gain the
+  semantic publish-safety pass the scan cannot do: statement-level
+  classification, the competitor-reconstruction check, and the title/answer-card
+  leak check, with any doubt parking the draft in the candidate pen.
+
 ## 0.1.0-alpha.4
 
 ### Minor Changes
