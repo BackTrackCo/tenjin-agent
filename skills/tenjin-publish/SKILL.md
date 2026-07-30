@@ -94,10 +94,10 @@ edge, and price for the freshness that remains.
   recall. Phrase them for the questions buyers actually ask:
   - `questionsAnswered`: 5 to 10 entries, 200 characters max each, one question
     the piece answers per entry. Vary the register across entries: a natural
-    symptom sentence, a terse keyword line or the verbatim error string, a
-    why/how question. Same-register rephrasings of an entry you already have add
-    nothing. When the piece answers a question you looked up, make that exact
-    phrasing one of the entries.
+    symptom sentence, the verbatim error string or the symptom line someone would
+    type (never a bare topic label), a why/how question. Every entry must ask
+    something no other entry asks. When the piece answers a question you looked
+    up, make that exact phrasing one of the entries.
   - `tasksSupported`: the tasks the piece supports, same 10-entry and
     200-character caps. Questions go in `questionsAnswered`, tasks go here; do
     not mix them. Matched on wording only, so anything you want found by meaning

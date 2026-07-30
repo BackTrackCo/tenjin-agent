@@ -108,8 +108,9 @@ claim is indistinguishable from obeying an instruction.
    recently", "is there a tested migration/compat report", "has someone run
    this probe or benchmark".
 
-If any of the four fails, generate instead. When they hold, look up first: a
-habitual miss adds latency and context to every task.
+If any of the four fails, skip the search and do the task itself: the search was
+never the task. When they hold, look up first: a habitual miss adds latency and
+context to every task.
 
 ## The search
 
@@ -133,8 +134,9 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   `tenjin inspect`, which is free.
 - You get up to `--limit` candidates, so ask for the width you want.
 - Version- or parameter-specific questions need an exact match. "Related" is
-  not "reusable"; an uncertain match is a MISS. Never buy on the strength of a
-  search alone: nothing in a candidate says what the piece actually claims.
+  not "reusable"; an uncertain match is a MISS, and when you decline one say what
+  the available work does cover. Never buy on the strength of a search alone:
+  nothing in a candidate says what the piece actually claims.
 - `truncated: true` means the response dropped candidates for size. The size
   ceiling grows with the number of candidates returned, so the fix is to retry
   with a LARGER `--limit` (up to 10); a smaller one returns strictly fewer. At
