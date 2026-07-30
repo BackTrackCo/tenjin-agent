@@ -38,3 +38,9 @@ itself redirects away, is removed before the request goes out.
 `tenjin inspect` copy follows the split: free and already-owned pieces point at
 `tenjin read`, paid unowned pieces keep pointing at `tenjin buy`, and both now
 emit a machine-readable `nextCommand` field.
+
+`Bash(tenjin read:*)` joins the always-safe allowlist that `tenjin doctor` and
+`tenjin install` print, on that list's existing terms — free verbs: no wallet, no
+signing, no payment. Like `search` and `outcome`, it is disclosed as not
+read-only: those two POST to the marketplace, and `read` saves a delivered free
+piece to your local library.

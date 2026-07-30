@@ -40,6 +40,7 @@ Say which line to add and let the operator add it:
 ```
 Bash(tenjin search:*)
 Bash(tenjin inspect:*)
+Bash(tenjin read:*)
 Bash(tenjin outcome:*)
 Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
@@ -48,9 +49,10 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-Those verbs are free: no wallet, no signing, no payment. Two of them are not
+Those verbs are free: no wallet, no signing, no payment. Three of them are not
 read-only, and say so if asked: `search` POSTs your generalized question
-off-machine, and `outcome` POSTs a report to the marketplace. In Claude Code the
+off-machine, `outcome` POSTs a report to the marketplace, and `read` saves a
+delivered free piece to the local library. In Claude Code the
 lines go in the `permissions.allow` array of `.claude/settings.json`. `tenjin
 doctor` prints the same block, so "run `tenjin doctor`" is a fine pointer.
 

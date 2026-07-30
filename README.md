@@ -143,6 +143,7 @@ array of `.claude/settings.json`:
 ```
 Bash(tenjin search:*)
 Bash(tenjin inspect:*)
+Bash(tenjin read:*)
 Bash(tenjin outcome:*)
 Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
@@ -151,11 +152,12 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those touches the wallet, signs anything, or moves money. Two are not
+None of those touches the wallet, signs anything, or moves money. Three are not
 read-only, which is worth knowing before you pre-clear them: `tenjin search` POSTs
 your generalized question off-machine, and `tenjin outcome` POSTs a report that
-moves the marketplace's reuse signal. Both are unauthenticated and free; neither
-carries a credential.
+moves the marketplace's reuse signal — both unauthenticated and free, neither
+carrying a credential — while `tenjin read` writes locally, saving a delivered
+free piece to your library.
 
 `tenjin install` prints this block, and `tenjin doctor` reprints it on every run
 (including in `doctor --json` under `permissions`, on the failure envelope as well
