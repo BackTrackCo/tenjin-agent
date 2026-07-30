@@ -166,9 +166,12 @@ export async function runSearch(
       ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint, ...truncatedHint]
       : [
           `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
+          // Dollars for the same reason the browse hint uses them: this is the
+          // human's cue to size the spend against gates they entered in decimal
+          // USD. The machine `candidates` array in --json keeps atomic.
           ...candidates.map(
             (c, i) =>
-              `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${c.price} atomic, ${sanitizeForTerminal(c.url)}`,
+              `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${formatUsdDisplay(c.price)} USD, ${sanitizeForTerminal(c.url)}`,
           ),
           ...truncatedHint,
         ];

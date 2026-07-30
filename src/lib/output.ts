@@ -103,12 +103,14 @@ export function emitFailure(
 }
 
 /**
- * Strip C0/C1 control characters and ANSI escape sequences from a string headed
- * for a terminal. Commands apply this to every SERVER-sourced string (titles,
- * handles) they put into human lines or the buy confirm prompt; without it a
- * malicious deployment could use cursor-movement escapes to overwrite the very
- * price a human is being asked to confirm. It is not applied to whole human
- * lines here because trusted callers (doctor) paint their own ANSI colors. JSON
+ * Strip ANSI escape sequences, C0/C1 control characters, and Unicode
+ * bidirectional formatting from a string headed for a terminal. Commands apply
+ * this to every SERVER-sourced string (titles, handles) they put into human
+ * lines or the buy confirm prompt; without it a malicious deployment could use
+ * cursor-movement escapes to overwrite the very price a human is being asked to
+ * confirm, or a right-to-left override to reorder that same line on screen into
+ * one that reads as a different price. It is not applied to whole human lines
+ * here because trusted callers (doctor) paint their own ANSI colors. JSON
  * stdout is untouched (JSON.stringify escapes control characters itself).
  */
 export function sanitizeForTerminal(text: string): string {
@@ -120,6 +122,13 @@ export function sanitizeForTerminal(text: string): string {
       .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g, '')
       // eslint-disable-next-line no-control-regex
       .replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, '')
+      // The UAX#9 directional formatting set: the marks (LRM/RLM/ALM), the
+      // embeddings and overrides (U+202A-U+202E), and the isolates
+      // (U+2066-U+2069). Removed, not escaped, so what a human reads is the
+      // order the bytes are in. Deliberately this set and NOT all of category
+      // Cf: U+200D (ZWJ) joins legitimate emoji sequences, and dropping it
+      // would corrupt honest titles to defend against dishonest ones.
+      .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
   );
 }
 

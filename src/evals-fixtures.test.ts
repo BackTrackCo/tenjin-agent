@@ -55,12 +55,34 @@ interface TriggerCase {
 
 const OUTPUT_FILES = ['tenjin-search/evals.json', 'tenjin-publish/evals.json'] as const;
 
-const SOURCES = walkFixtures();
+// The two skills that ship to npm (package.json `files`), so a stale verb in
+// them reaches every installed agent. The vendored `skills/tenjin/` mirror is
+// deliberately NOT here: it is generated from the tenjin repo and the
+// skill-drift CI owns whether it matches its source.
+const SHIPPED_SKILLS = ['tenjin-search/SKILL.md', 'tenjin-publish/SKILL.md'] as const;
+
+/**
+ * Everything both guards below sweep, read once, each carrying the label a
+ * failure names it by. The fixtures and the shipped skills live under different
+ * roots, so the text travels with the entry rather than the path.
+ */
+const SOURCES: ReadonlyArray<{ label: string; text: string }> = [
+  ...walkFixtures().map((path) => ({ label: `evals/${path}`, text: read(path) })),
+  ...SHIPPED_SKILLS.map((path) => ({
+    label: `skills/${path}`,
+    text: readFileSync(`${SKILLS_DIR}${path}`, 'utf8'),
+  })),
+];
 
 // Verbs the CLI has retired, and what replaced them. The invocation check below
 // only sees backtick-quoted commands, so on its own it reddens the build for
 // `tenjin lookup` while leaving "the lookup command includes --json" standing.
 // This sweeps the prose too, which is the half a rename actually forgets.
+//
+// The sweep matches on the word-boundary PREFIX (`\blookup`) and has to stay
+// that shape: the shipped skill prose says "look up" as plain English in
+// several places, and a looser pattern would redden the build on a sentence
+// that is not naming a command at all.
 const RETIRED_VERBS: ReadonlyArray<{ verb: string; replacement: string }> = [
   { verb: 'lookup', replacement: 'search' },
 ];
@@ -138,11 +160,11 @@ describe('eval fixtures', () => {
   });
 
   // The drift guard. A fixture may only name a command the CLI actually has.
-  it('every tenjin command named in a fixture or the README is registered', () => {
+  it('every tenjin command named in a fixture or a shipped skill is registered', () => {
     const reg = registry();
 
-    for (const path of SOURCES) {
-      for (const invocation of quotedInvocations(read(path))) {
+    for (const { label, text } of SOURCES) {
+      for (const invocation of quotedInvocations(text)) {
         const verb = invocation.split(' ')[0] ?? invocation;
         // A verb that owns subcommands proves nothing on its own: `candidate`
         // is registered whether or not `candidate frobnicate` is, so a two-word
@@ -154,7 +176,7 @@ describe('eval fixtures', () => {
           : reg.verbs.has(verb);
         expect(
           known,
-          `${path} names \`tenjin ${invocation}\`, which the CLI does not register`,
+          `${label} names \`tenjin ${invocation}\`, which the CLI does not register`,
         ).toBe(true);
       }
     }
@@ -163,13 +185,13 @@ describe('eval fixtures', () => {
   // The prose half of the same guard: a retired verb has to be gone from the
   // sentences and the fenced blocks too, not just from the quoted invocations.
   it('no retired verb survives anywhere in the fixture text', () => {
-    for (const path of SOURCES) {
-      const text = read(path).replace(RETIRED_EXEMPT, '');
+    for (const { label, text } of SOURCES) {
+      const swept = text.replace(RETIRED_EXEMPT, '');
       for (const { verb, replacement } of RETIRED_VERBS) {
-        const hit = new RegExp(`\\b${verb}`, 'i').exec(text);
+        const hit = new RegExp(`\\b${verb}`, 'i').exec(swept);
         expect(
           hit,
-          `${path} still says "${hit?.[0] ?? verb}"; the CLI retired \`tenjin ${verb}\` in favor of \`tenjin ${replacement}\``,
+          `${label} still says "${hit?.[0] ?? verb}"; the CLI retired \`tenjin ${verb}\` in favor of \`tenjin ${replacement}\``,
         ).toBeNull();
       }
     }

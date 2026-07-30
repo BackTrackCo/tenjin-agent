@@ -145,6 +145,10 @@ describe('normalizeError', () => {
   });
 });
 
+// Every codepoint the sanitizer is expected to remove, so a case asserts the set
+// is gone rather than eyeballing an invisible character in an expected string.
+const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+
 describe('sanitizeForTerminal', () => {
   it('strips CSI cursor-repaint sequences that could spoof a confirm prompt', () => {
     const attack = 'Guide\x1b[2K\rBuy "Guide" for 0.05 USD? [y/N] ';
@@ -160,5 +164,27 @@ describe('sanitizeForTerminal', () => {
 
   it('leaves ordinary unicode text alone', () => {
     expect(sanitizeForTerminal('日本語 títle — ok')).toBe('日本語 títle — ok');
+  });
+
+  // The RLO reorders what follows it on screen, so a server-controlled title can
+  // rewrite the confirm line the human is reading without touching its bytes.
+  it('strips the bidi override that could reorder the buy confirm prompt', () => {
+    // Composed the way buy.ts composes it: the sanitized server string sits in
+    // the same line as the price it must not be able to move.
+    const prompt = `Pay 0.05 USD to ${sanitizeForTerminal('\u202etitle')}? [y/N] `;
+    expect(prompt).toBe('Pay 0.05 USD to title? [y/N] ');
+    expect(BIDI.test(prompt)).toBe(false);
+  });
+
+  it('strips the isolates, the directional marks, and ALM', () => {
+    expect(sanitizeForTerminal('a\u2066b\u2067c\u2068d\u2069e')).toBe('abcde');
+    expect(sanitizeForTerminal('a\u200eb\u200fc\u061cd')).toBe('abcd');
+  });
+
+  // Only the directional set, not all of category Cf: ZWJ is what holds an emoji
+  // sequence together, so stripping it would corrupt honest titles.
+  it('keeps ZWJ so an emoji sequence in a title survives', () => {
+    const title = '\u{1f469}\u200d\u{1f680} launch log';
+    expect(sanitizeForTerminal(title)).toBe(title);
   });
 });
