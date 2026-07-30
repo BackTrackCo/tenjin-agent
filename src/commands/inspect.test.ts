@@ -132,7 +132,9 @@ describe('runInspect, the 402 answer card', () => {
     expect(res.data).not.toHaveProperty('card');
     expect(res.humanLines).toEqual([
       'Paid resource, 0.1 USD (100000 atomic).',
-      'This is the pre-purchase card; run `tenjin buy` to pay and read.',
+      // The parenthetical is this branch's (#43): inspect tells humans up front
+      // that the free verb refuses paid pieces.
+      'This is the pre-purchase card; run `tenjin buy` to pay and read (`tenjin read` refuses paid pieces).',
     ]);
   });
 
