@@ -134,9 +134,15 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     // reaches here is a spelling it could not.
     if (res.kind === 'blocked-redirect') {
       throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
+        // The origin half of this hint deliberately does NOT name the base-URL
+        // flag. `read` is meant to be allowlistable, the skill tells the agent
+        // never to pass that flag on an allowlisted verb, and a `fix:` naming it
+        // would coach exactly the move the skill forbids. `doctor` is the
+        // allowlisted verb that owns the question — its `checkReadPath` probes
+        // this route and its own copy names the config command when it should.
         fix:
           'Ask for the URL in the spelling `tenjin search` or `tenjin inspect` ' +
-          'reports, and check --base-url names an origin that answers without a hop.',
+          'reports. If every read hops, `tenjin doctor` checks the configured origin.',
       });
     }
     const code =

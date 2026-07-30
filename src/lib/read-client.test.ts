@@ -193,7 +193,13 @@ describe('fetchRead', () => {
     // instead of the 452 it used to be.
     expect(fix).toMatch(/tenjin search/);
     expect(fix).toMatch(/tenjin inspect/);
-    expect(fix).toMatch(/--base-url/);
+    expect(fix).toMatch(/tenjin doctor/);
     expect(fix.length).toBeLessThanOrEqual(160);
+    // The origin half points at `doctor`, never at the base-URL flag: `read` is
+    // meant to be allowlistable and the skill forbids that flag on an allowlisted
+    // verb, so coaching it here would contradict the skill. main carries a
+    // repo-wide source scan for this; this assertion is the local echo of it, so a
+    // rewrite of THIS string fails on the branch instead of waiting for the merge.
+    expect(fix).not.toMatch(/--base-url/);
   });
 });
