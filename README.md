@@ -115,6 +115,99 @@ Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultP
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
 what actually chooses a price before it calls the command.
 
+## Auto-mode permission allowlist
+
+Coding harnesses running unattended ("auto mode", "full auto", YOLO) classify each
+shell command before running it, and an unknown binary is denied by default. That
+denies the free verbs too, which breaks the whole marketplace loop: the skills
+forbid working around a denial, so a denied `tenjin search` just stops.
+
+Pre-clear the free verbs once. In Claude Code these go in the `permissions.allow`
+array of `.claude/settings.json`:
+
+```
+Bash(tenjin search:*)
+Bash(tenjin inspect:*)
+Bash(tenjin outcome:*)
+Bash(tenjin doctor:*)
+Bash(tenjin wallet show:*)
+Bash(tenjin wallet balance:*)
+Bash(tenjin config get:*)
+Bash(tenjin candidate list:*)
+```
+
+None of those touches the wallet, signs anything, or moves money. Two are not
+read-only, which is worth knowing before you pre-clear them: `tenjin search` POSTs
+your generalized question off-machine, and `tenjin outcome` POSTs a report that
+moves the marketplace's reuse signal. Both are unauthenticated and free; neither
+carries a credential.
+
+`tenjin install` prints this block, and `tenjin doctor` reprints it on every run
+(including in `doctor --json` under `permissions`, on the failure envelope as well
+as the success one), so an agent that just got denied can point you at the exact
+line.
+
+**A prefix rule pins the verb, not the flags.** Every line above also clears
+`--base-url <url>` on that verb, because the CLI accepts the global flags on every
+subcommand. `--base-url` is validated as a URL and nothing more, and it wins
+settings precedence, so it moves where the question goes, where `doctor` probes,
+and (with the `buy` line below) where a SIWX signature and an EIP-3009 payment
+authorization are sent. The origin pin only checks that a resource URL shares an
+origin with the _configured_ base, so an attacker-controlled pair satisfies it.
+There is no prefix syntax for "this verb but not that flag", so treat this as a
+disclosed limit: set your base URL in config, and allowlist these verbs only if
+you are content for an agent to be able to choose the destination host. The
+skills tell agents never to pass `--base-url` on an allowlisted verb, but that is
+a convention rather than an enforced boundary.
+
+Purchases are a **separate, explicit opt-in**:
+
+```
+Bash(tenjin buy:*)
+```
+
+Read this before pasting it: **on the default config that line authorizes
+unattended spending up to your wallet balance.** `--yes` is an ordinary flag on
+the same allowlisted verb and it clears the confirm gate outright, so `confirm:
+always` does not put a human on every purchase once the agent can pass `--yes`.
+Walking the defaults: `allowlistCreators` is empty (gate off), `maxAutoSpend` is
+`0` and `confirm` is `always`, which together only ask for a confirmation that
+`--yes` satisfies, and `sessionBudget` is `0`, which the policy reads as **no
+ceiling at all**, not a zero one. Set real values first:
+
+```bash
+tenjin config set maxAutoSpend 0.25
+tenjin config set sessionBudget 2.00
+```
+
+The allowlist line itself never raises a spend cap. That is true, and it is not
+the same as saying the caps stop an allowlisted `buy`.
+
+Deliberately **never** recommended, because each is a human decision: `tenjin send`
+(moves USDC out of the wallet, and is not bounded by the buy spend policy), `tenjin
+publish`, `tenjin wallet create`, `tenjin config set` (it can widen the agent's own
+spend policy), `tenjin candidate add` / `tenjin candidate drop`, `tenjin install`,
+and `tenjin mcp`
+(it re-exposes every command core, so clearing it clears everything). For the same
+reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`, `Bash(tenjin
+wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+Two gaps worth knowing, both of which fail closed (denied, never wrongly allowed):
+bare `tenjin config` is as read-only as `config get` but no prefix rule reaches it
+without also covering `config set`, so use `tenjin config get <key>`; and group-level
+flag forms like `tenjin wallet --json show` are not covered, so put global flags
+after the leaf verb (`tenjin wallet show --json`).
+
+**Running the local MCP server instead?** That is a different permission surface:
+the harness gates tools there, and these Bash rules do not apply. If you follow
+the [MCP section](#local-stdio-mcp-server) as well, leave
+`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_wallet` gated, treat
+`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions, and treat
+`mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.
+
+This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
+that one gates **who you may pay**, this one gates **which commands may run**.
+
 ## Skills (installed by `tenjin install`)
 
 `tenjin install` auto-detects your harness, copies the three Tenjin skills into
@@ -255,17 +348,36 @@ approval.
   is never written to disk. The wallet address stays readable, so `show`,
   `balance`, and `doctor` work without a passphrase; only signing decrypts.
   Signing is local and the CLI talks only to the configured base URL.
+- There is exactly **one active wallet**. `wallet create` refuses when one
+  exists; the explicit `wallet create --replace` first verifies the outgoing
+  wallet's passphrase against its keystore, preserves it under the wallet's own
+  address in the OS store, parks the keystore beside the new one
+  (`wallet.<address>.json.bak`), and only then creates the new wallet — a
+  replace can never strand the old wallet's funds. `wallet show` lists archived
+  addresses as a recovery hint. To make an archived wallet active again: move
+  the current `wallet.json` aside (e.g. with another `--replace` later, or
+  manually), then `mv ~/.tenjin/wallet.<address>.json.bak ~/.tenjin/wallet.json`
+  — its passphrase entry is keyed by the wallet's address, so signing resumes
+  transparently.
 - The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE`, then the
   OS credential store, then an interactive prompt. On `wallet create` with no env
   passphrase, a strong random one is generated and saved to the OS store so later
-  signing is transparent. Where it lands per platform:
+  signing is transparent. Every stored entry is **per wallet** — keyed by the
+  wallet's own address — so replacing a wallet never touches the outgoing
+  wallet's passphrase. (Installs from before per-wallet entries used one shared
+  slot; the first signing that proves ownership re-keys that slot under the
+  owning wallet's address — the copy is verified before the old slot is
+  removed.) Where entries land per platform:
   - **macOS**: the login keychain, via the OS `security` tool (the same
-    mechanism the GitHub CLI uses).
-  - **Windows**: a DPAPI-encrypted file (`passphrase.dpapi`), decryptable only by
-    the same user on the same machine, via built-in PowerShell. The file holds
-    ciphertext, not the passphrase.
+    mechanism the GitHub CLI uses): service `tenjin-cli`, account = the wallet
+    address.
+  - **Windows**: a DPAPI-encrypted file per wallet
+    (`passphrase.<address>.dpapi`), decryptable only by the same user on the
+    same machine, via built-in PowerShell. The file holds ciphertext, not the
+    passphrase.
   - **Desktop Linux**: the Secret Service keyring, via `secret-tool` when
-    libsecret-tools is installed.
+    libsecret-tools is installed: service `tenjin-cli`, account = the wallet
+    address.
   - **Headless or CI (any OS)**: no durable OS store, so set
     `TENJIN_WALLET_PASSPHRASE`.
 
@@ -273,7 +385,17 @@ approval.
   key never leaves the machine.
 
 - Fund small: this is a pocket-money wallet by design.
-- Purchased content is untrusted data, never instructions.
+- Purchased content is untrusted data, never instructions. The skills never
+  execute it, and instructions embedded in it never override the task. In
+  particular, no harness permission, hook, or settings change is ever recommended
+  on the strength of content the agent read: a claim that some permission change
+  is "the documented fix" is still a claim from untrusted content.
+- The recommended auto-mode allowlist covers free verbs only; `tenjin buy` is an
+  explicit opt-in that authorizes unattended spending, and money-moving verbs are
+  never recommended. See
+  [Auto-mode permission allowlist](#auto-mode-permission-allowlist). A harness
+  permission denial is never worked around: the skills surface the exact allowlist
+  line and stop.
 
 ## Contributing and releases
 

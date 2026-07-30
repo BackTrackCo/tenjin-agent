@@ -634,6 +634,6 @@ function writeTransportError(url: string, result: Exclude<HttpResult, { ok: true
   const code =
     result.kind === 'network' || result.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
   return new CliError(code, `${url}: ${result.message}`, {
-    fix: 'Check --base-url and your network, then retry.',
+    fix: 'Check your network and the configured base URL (`tenjin config get baseUrl`), then retry.',
   });
 }
