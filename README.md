@@ -38,7 +38,7 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 | Command                                                 | Purpose                                                                                                           |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `tenjin install`                                        | Walk you through harness skills, your publish consent mode, and wallet setup, then run the doctor checks          |
-| `tenjin doctor`                                         | Environment, API reachability, contract, and wallet checks                                                        |
+| `tenjin doctor`                                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                          |
 | `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice` |
 | `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
 | `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
@@ -214,7 +214,8 @@ that one gates **who you may pay**, this one gates **which commands may run**.
 place, wires the pointers each harness needs, and runs the `doctor` checks as its
 last step. It is idempotent: re-run any time, `--dry-run` previews the changes
 without writing, and `--harness claude|codex|shared` (repeatable) targets a
-specific one. `--publish-mode <mode>` sets your consent mode non-interactively.
+specific one, which is remembered so `doctor` keeps checking it. `--publish-mode
+<mode>` sets your consent mode non-interactively.
 
 Where the skills land:
 
@@ -241,8 +242,29 @@ The three skills:
 - **`tenjin-search`**: thin adapter over `tenjin search/inspect/buy/outcome`
   with a deliberately narrow trigger (public, durable, costly-to-reproduce
   questions).
-- **`tenjin-publish`**: explicit-invocation-only publishing rubric and
-  `tenjin publish` adapter. Never triggers on its own.
+- **`tenjin-publish`**: publishing rubric and `tenjin publish` adapter, with a
+  narrow trigger (an explicit ask, or the after-a-MISS reflex). Consent is
+  `publish.mode`, backed by the local **secret-shape** scan. Its blocking tier —
+  structured provider token formats, private keys, connection URIs with an
+  embedded password — is what no mode and no `--yes` can clear. Everything else
+  is a warning, which `review` shows you and `--yes`/`full-auto` clear:
+  generically named `API_KEY=`-style assignments, PII, wallet addresses,
+  internal hostnames, confidential markers, long verbatim quotes,
+  paid/licensed-content legends, the caller's own project references, and
+  labeled customer/account identifiers. So rights and employer-internal
+  content have no _blocking_ detector — those are warn-tier only — and the
+  skill's draft rules put that judgment on the author.
+
+All three land on every run, including on a machine that already carries the
+hosted `tenjin` skill: that install wires the CLI skills rather than skipping.
+The hosted skill is kept as the zero-install fallback and the two CLI skills
+take precedence while the CLI is installed. `tenjin doctor`'s `skills` check
+reports that state per skills directory (which skills are wired, where) so a
+half-wired machine is diagnosable without a screen recording. It judges each
+directory a harness it detected here reads, plus any directory you named with
+`--harness` — an explicit choice is recorded, because detection cannot see a
+harness Tenjin does not probe for. A leftover directory that is neither is
+described, not warned about.
 
 A funded wallet is only needed for paid reads and publishing.
 

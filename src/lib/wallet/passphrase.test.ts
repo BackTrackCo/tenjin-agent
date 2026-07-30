@@ -196,7 +196,14 @@ describe('macOS keychain backend', () => {
     expect(add.stdin).toBe(
       `add-generic-password -s tenjin-cli -a ${ACCOUNT} -w '${res.passphrase}'\n`,
     );
-    expect(add.stdin).not.toContain('-U'); // never update-in-place over an existing entry
+    // Check the command's own flags, not the whole stdin: `res.passphrase` is a
+    // real random base64url value (the alphabet includes both `-` and `U`), and
+    // a `.not.toContain('-U')` against the full string spuriously fails whenever
+    // those two characters land adjacent inside the secret rather than in a flag
+    // (observed in CI: a passphrase containing `...KU-Uza...`). Slicing off the
+    // quoted `-w` value before asserting keeps the check about the command shape.
+    const flagsOnly = add.stdin?.split(` -w '`)[0] ?? '';
+    expect(flagsOnly).not.toContain('-U'); // never update-in-place over an existing entry
     expect(add.args.some((a) => a.includes(res.passphrase))).toBe(false);
     expect(entries.get(ACCOUNT)).toBe(res.passphrase);
     expect(entries.has(LEGACY_ACCOUNT)).toBe(false); // create never touches the legacy slot

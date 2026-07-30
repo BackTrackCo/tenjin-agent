@@ -1,8 +1,8 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile, readdir, rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { delimiter, join, relative } from 'node:path';
+import { join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { styleText } from 'node:util';
@@ -11,13 +11,23 @@ import { CliError } from '../lib/errors';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
+  CLI_SKILL_NAMES,
+  HARNESS_TARGETS,
+  HOSTED_SKILL_NAME,
+  harnessDetectedBy,
+  harnessTargetDir,
+  isModelInvocationDisabled,
+  onPath,
+} from '../lib/skill-wiring';
+import type { HarnessTarget } from '../lib/skill-wiring';
+import {
   CONFIG_DEFAULTS,
   loadRawConfig,
   PublishModeSchema,
   parsePublishModeFlag,
 } from '../lib/config';
 import type { PublishMode } from '../lib/config';
-import { persistPublishMode } from './config';
+import { persistInstallHarness, persistPublishMode } from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
@@ -28,8 +38,11 @@ import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
-const HARNESSES = ['claude', 'codex', 'shared'] as const;
-type Harness = (typeof HARNESSES)[number];
+// The `--harness` vocabulary and its directory mapping are single-sourced in
+// skill-wiring beside the detection probes, because `doctor` maps a persisted choice
+// back to a directory with the same rules.
+const HARNESSES = HARNESS_TARGETS;
+type Harness = HarnessTarget;
 
 const InstallInputSchema = z.object({
   harness: z.array(z.string()).optional(),
@@ -102,6 +115,13 @@ const CODEX_NETWORK_RULE = '[sandbox_workspace_write]\nnetwork_access = true';
 interface SkillResult {
   name: string;
   status: 'installed' | 'updated' | 'up-to-date' | 'would-install' | 'would-update';
+  /** Was a real copy (a SKILL.md, not just the directory) already on disk before this run? */
+  preexisting: boolean;
+  /** Is this one of the two CLI adapter skills (as opposed to the hosted mirror)? */
+  cli: boolean;
+  /** Will a harness surface it to the model after this run? On a --dry-run nothing is
+   * written, so it answers for the packaged copy that would land. */
+  modelInvocable: boolean;
 }
 
 interface AgentsMdResult {
@@ -120,6 +140,12 @@ interface HarnessResult {
   detectedBy: string[];
   skillsDir: string;
   skills: SkillResult[];
+  /**
+   * Was the hosted zero-install `tenjin` skill already in this target before the
+   * run? Reported so an upgrade over a hosted-skill machine is visible in `--json`,
+   * which is exactly the state #35 was invisible in.
+   */
+  hostedPreexisting: boolean;
   agentsMd?: AgentsMdResult;
   claudeMd?: ClaudeMdResult;
   codexNetworkRule?: string;
@@ -202,6 +228,9 @@ export async function runInstall(
   await assertSkillsSource(skillsSource);
 
   const plans = resolvePlans(parsed.data.harness, home, which);
+  // Same condition resolvePlans treats as an override, so what gets recorded below is
+  // exactly what overrode detection.
+  const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
   // The CLAUDE.md nudge is opt-in and only relevant when a Claude target exists.
   // Resolve it once (may prompt) so the loop just writes the settled decision.
   const claudeMdWrite = plans.some((p) => p.harness === 'claude')
@@ -211,7 +240,26 @@ export async function runInstall(
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
-  const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, deps.doctorDeps ?? {}));
+  await assertSkillsLanded(plans, dryRun);
+  // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
+  // own check already honours it. Detection cannot see a harness we do not probe for,
+  // so without the record a directory the user named by hand is a target for one run
+  // and then invisible to every later doctor — including for the #35 shadowing defect
+  // it was chosen to hold. `--dry-run` records nothing, like the publish-mode write.
+  if (explicitHarness && !dryRun) {
+    await persistInstallHarness(
+      ctx.dataDir,
+      plans.map((p) => p.harness),
+    );
+  }
+  // The embedded doctor run inspects the same `home` install just wrote into, so
+  // its skill-wiring check reports THIS run's result rather than os.homedir()'s.
+  // `which` goes with it: the check gates its verdicts on harness detection, and a
+  // different probe there would judge directories this run never targeted.
+  const doctorDeps: DoctorDeps = { ...(deps.doctorDeps ?? {}) };
+  doctorDeps.homeDir ??= home;
+  doctorDeps.which ??= which;
+  const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
   const doctor = await collect(ctx);
   const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
 
@@ -309,6 +357,19 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     lines.push(
       `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${suffix}`,
     );
+    // Name the skills, and say which is which. #35 shipped as "search worked,
+    // publish was simply absent" on a machine that already had the hosted skill;
+    // a bare "3 skills installed" cannot tell you publish is wired.
+    lines.push(paint(io, 'dim', `  ${skillRoster(h)} in ${h.skillsDir}`));
+    if (h.hostedPreexisting) {
+      lines.push(
+        paint(
+          io,
+          'dim',
+          `  The hosted ${HOSTED_SKILL_NAME} skill was already here: kept as the zero-install fallback, and the CLI skills now take precedence.`,
+        ),
+      );
+    }
     // When a nudge line was actually written or refreshed, disclose what it does
     // (question text leaves the machine) and how to undo it. This makes a re-run
     // that silently upgrades an older pointer line visible, not just the first write.
@@ -347,6 +408,16 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `  ! ${w}`));
   }
   return lines;
+}
+
+/** `tenjin-search, tenjin-publish (CLI); tenjin (hosted, zero-install fallback)`. */
+function skillRoster(h: HarnessResult): string {
+  const cli = h.skills.filter((s) => s.cli).map((s) => s.name);
+  const hosted = h.skills.filter((s) => !s.cli).map((s) => s.name);
+  const parts: string[] = [];
+  if (cli.length > 0) parts.push(`${cli.join(', ')} (CLI)`);
+  if (hosted.length > 0) parts.push(`${hosted.join(', ')} (hosted, zero-install fallback)`);
+  return parts.join('; ');
 }
 
 /**
@@ -552,35 +623,23 @@ function resolvePlans(
   home: string,
   which: (bin: string) => boolean,
 ): HarnessPlan[] {
-  const claudeDir = join(home, '.claude', 'skills');
-  const sharedDir = join(home, '.agents', 'skills');
-
   if (override !== undefined && override.length > 0) {
-    const plans = override.map((v) =>
-      planFor(validateHarness(v), ['override'], true, home, claudeDir, sharedDir),
-    );
+    const plans = override.map((v) => planFor(validateHarness(v), ['override'], true, home));
     return dedupeBySkillsDir(plans);
   }
 
   const plans: HarnessPlan[] = [];
-  const claudeBy = detectReasons(existsSync(join(home, '.claude')), which('claude'));
-  const codexBy = detectReasons(existsSync(join(home, '.codex')), which('codex'));
-  if (claudeBy.length > 0)
-    plans.push(planFor('claude', claudeBy, true, home, claudeDir, sharedDir));
-  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home, claudeDir, sharedDir));
+  // Same two probes doctor's skills check gates its per-directory verdicts on.
+  const claudeBy = harnessDetectedBy(home, 'claude', which);
+  const codexBy = harnessDetectedBy(home, 'codex', which);
+  if (claudeBy.length > 0) plans.push(planFor('claude', claudeBy, true, home));
+  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home));
   if (plans.length === 0) {
     // Nothing detected: the shared Agent Skills location is the fallback target, so
     // a harness installed later still finds the skills.
-    plans.push(planFor('shared', ['fallback'], false, home, claudeDir, sharedDir));
+    plans.push(planFor('shared', ['fallback'], false, home));
   }
   return dedupeBySkillsDir(plans);
-}
-
-function detectReasons(homeDirPresent: boolean, onPathPresent: boolean): string[] {
-  const reasons: string[] = [];
-  if (homeDirPresent) reasons.push('home-dir');
-  if (onPathPresent) reasons.push('binary');
-  return reasons;
 }
 
 function planFor(
@@ -588,10 +647,8 @@ function planFor(
   detectedBy: string[],
   detected: boolean,
   home: string,
-  claudeDir: string,
-  sharedDir: string,
 ): HarnessPlan {
-  const skillsDir = harness === 'claude' ? claudeDir : sharedDir;
+  const skillsDir = harnessTargetDir(home, harness);
   return { harness, detected, detectedBy, skillsDir, wiresAgentsMd: harness !== 'claude', home };
 }
 
@@ -615,6 +672,15 @@ function validateHarness(value: string): Harness {
 
 // --- Applying a plan -------------------------------------------------------------
 
+/**
+ * Wire one harness target. EVERY packaged skill is written on every run,
+ * unconditionally: an existing Tenjin skill in the target (typically the hosted
+ * zero-install one from tenjin.blog/skills.md) is never a reason to skip, because
+ * install on such a machine is the UPGRADE path (#35). The hosted mirror is kept
+ * and refreshed rather than removed (roadmap G4: it is the permanent zero-install
+ * curriculum); the two CLI adapter skills land beside it and supersede it while
+ * the CLI is present.
+ */
 async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
@@ -624,22 +690,31 @@ async function applyPlan(
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
   for (const name of SKILL_NAMES) {
-    const { status, warning } = await installSkill(
+    const { status, warning, preexisting } = await installSkill(
       join(skillsSource, name),
       join(plan.skillsDir, name),
       dryRun,
+      name,
     );
-    skills.push({ name, status });
+    skills.push({
+      name,
+      status,
+      preexisting,
+      cli: (CLI_SKILL_NAMES as readonly string[]).includes(name),
+      modelInvocable: await landedInvocable(plan.skillsDir, skillsSource, name, dryRun),
+    });
     if (warning !== undefined) warnings.push(warning);
   }
 
+  const hostedPreexisting = skills.some((s) => s.name === HOSTED_SKILL_NAME && s.preexisting);
   const result: HarnessResult = {
     harness: plan.harness,
     detected: plan.detected,
     detectedBy: plan.detectedBy,
     skillsDir: plan.skillsDir,
     skills,
-    notes: notesFor(plan),
+    hostedPreexisting,
+    notes: notesFor(plan, hostedPreexisting),
     warnings,
   };
 
@@ -692,15 +767,70 @@ async function wireClaudeMd(
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
-function notesFor(plan: HarnessPlan): string[] {
-  if (plan.harness === 'claude') {
-    return [
-      'Installed at the user level (~/.claude/skills). A Claude Code plugin will later make this automatic.',
-    ];
+function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
+  const notes =
+    plan.harness === 'claude'
+      ? [
+          'Installed at the user level (~/.claude/skills). A Claude Code plugin will later make this automatic.',
+        ]
+      : [
+          'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
+        ];
+  if (hostedPreexisting) {
+    notes.push(
+      `The hosted ${HOSTED_SKILL_NAME} skill was already here; it stays as the zero-install fallback and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
+    );
   }
-  return [
-    'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
-  ];
+  return notes;
+}
+
+/**
+ * Did the skill actually land model-invocable? Read back from the target so the
+ * reported value is the file a harness will read, not what we intended to write.
+ * A dry run wrote nothing, so it READS THE PACKAGED SOURCE — the file that would
+ * land. Hardcoding `true` there was wrong for the one skill whose value can
+ * legitimately be false: `assertSkillsSource` exempts the hosted mirror from the
+ * invocability assertion, so a shadowed mirror ships and must report as shadowed on
+ * both paths.
+ */
+async function landedInvocable(
+  skillsDir: string,
+  skillsSource: string,
+  name: string,
+  dryRun: boolean,
+): Promise<boolean> {
+  const path = join(dryRun ? skillsSource : skillsDir, name, 'SKILL.md');
+  if (!existsSync(path)) return false;
+  try {
+    return !isModelInvocationDisabled(await readFile(path, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every packaged skill landed in every target. Runs after ALL targets are written,
+ * never mid-loop: a throw between two targets would leave target 1 rewritten and
+ * target 2 untouched. (It still sits ahead of the doctor run, the publish-mode
+ * question and the wallet step, so a throw here skips those either way.)
+ *
+ * Presence only. Whether a skill is model-invocable is a property of the PACKAGED
+ * source, checked up front by `assertSkillsSource` before anything is written.
+ */
+async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promise<void> {
+  if (dryRun) return;
+  const missing: string[] = [];
+  for (const plan of plans) {
+    for (const name of SKILL_NAMES) {
+      if (!existsSync(join(plan.skillsDir, name, 'SKILL.md'))) {
+        missing.push(join(plan.skillsDir, name));
+      }
+    }
+  }
+  if (missing.length === 0) return;
+  throw new CliError('INTERNAL', `Skills were not written: ${missing.join(', ')}`, {
+    fix: 'Check permissions on the skills directory and re-run `tenjin install`.',
+  });
 }
 
 /**
@@ -713,15 +843,26 @@ async function installSkill(
   srcDir: string,
   destDir: string,
   dryRun: boolean,
-): Promise<{ status: SkillResult['status']; warning?: string }> {
+  name: string,
+): Promise<{ status: SkillResult['status']; warning?: string; preexisting: boolean }> {
   const src = await readTree(srcDir);
   const dest = await readTree(destDir);
   if (src === null) {
     // assertSkillsSource already guards SKILL.md; this is defensive for an empty dir.
     throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
   }
+  // A real prior copy means a SKILL.md, not merely the directory: readTree returns
+  // an empty Map for a bare `mkdir`, and an interrupted write leaves a stray file
+  // with no SKILL.md. Neither is a skill that "was already here".
+  const preexisting = dest?.has('SKILL.md') === true;
 
-  const change = dest === null ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
+  // `change` is keyed off BYTES, not off `preexisting`: the rm below deletes whatever
+  // is in the destination, so anything with content in it is an overwrite and must
+  // carry the warning, even with no SKILL.md — a hand-saved `skills.md` and a
+  // directory of the user's own notes both live here. Only a bare `mkdir` (or a dir
+  // that does not exist) is a create, which is what `preexisting` reporting is for.
+  const change =
+    dest === null || dest.size === 0 ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
 
   if (!dryRun && change !== 'none') {
     // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
@@ -732,11 +873,19 @@ async function installSkill(
     }
   }
 
-  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed' };
-  if (change === 'none') return { status: 'up-to-date' };
+  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed', preexisting };
+  if (change === 'none') return { status: 'up-to-date', preexisting };
   return {
     status: dryRun ? 'would-update' : 'updated',
-    warning: `${destDir}: local skill copy differed and was ${dryRun ? 'would be ' : ''}overwritten (the packaged copy is canonical).`,
+    preexisting,
+    // The hosted skill is a MIRROR of tenjin.blog/skills.md (roadmap G4), so a
+    // differing local copy is a replacement, not the drift warning the CLI skills
+    // get. Neither side carries a version or date, so the wording claims no
+    // direction: the local file may well be a newer fetch than this package's copy.
+    warning:
+      name === HOSTED_SKILL_NAME
+        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.`
+        : `${destDir}: local skill copy differed and ${dryRun ? 'would be' : 'was'} overwritten (the packaged copy is canonical).`,
   };
 }
 
@@ -818,37 +967,6 @@ function chooseAgentsMdPath(home: string): string {
   return shared;
 }
 
-// --- PATH probe ------------------------------------------------------------------
-
-/**
- * Is `bin` a real executable file on PATH? Gates on statSync().isFile() so a
- * same-named DIRECTORY on PATH never false-positives as the binary, and probes the
- * PATHEXT extensions on win32 where the real binary is `claude.cmd`/`claude.exe`
- * rather than a bare `claude`.
- */
-function onPath(bin: string, env: NodeJS.ProcessEnv): boolean {
-  const raw = env.PATH ?? '';
-  const exts =
-    process.platform === 'win32'
-      ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e.length > 0)]
-      : [''];
-  for (const part of raw.split(delimiter)) {
-    if (part.length === 0) continue;
-    for (const ext of exts) {
-      if (isFile(join(part, bin + ext))) return true;
-    }
-  }
-  return false;
-}
-
-function isFile(p: string): boolean {
-  try {
-    return statSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
 // --- Human rendering -------------------------------------------------------------
 
 function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): string {
@@ -858,12 +976,36 @@ function paint(io: Io, format: Parameters<typeof styleText>[0], text: string): s
 
 // --- Skills source guard ---------------------------------------------------------
 
+/**
+ * Guard the packaged source BEFORE any target is touched, so a bad package aborts
+ * with nothing written rather than mid-copy.
+ *
+ * The model-invocable assertion covers only CLI_SKILL_NAMES. The hosted `tenjin`
+ * mirror is written verbatim from tenjin.blog/skills.md by scripts/sync-skill.mjs
+ * and its frontmatter is not authored here: if upstream ever adds
+ * `disable-model-invocation: true` (a plausible way to say "prefer the CLI
+ * skills"), asserting on it would hard-fail every install with a fix that cannot
+ * work, and skill-drift.yml would stay green because the mirror still matches
+ * upstream. Doctor warns about the mirror instead.
+ */
 async function assertSkillsSource(dir: string): Promise<void> {
   for (const name of SKILL_NAMES) {
     if (!existsSync(join(dir, name, 'SKILL.md'))) {
       throw new CliError('INTERNAL', `Packaged skill "${name}" is missing under ${dir}`, {
         fix: 'Reinstall tenjin-cli; the published package must ship every skill under skills/.',
       });
+    }
+  }
+  for (const name of CLI_SKILL_NAMES) {
+    const text = await readFile(join(dir, name, 'SKILL.md'), 'utf8');
+    if (isModelInvocationDisabled(text)) {
+      throw new CliError(
+        'INTERNAL',
+        `Packaged skill "${name}" carries disable-model-invocation: true, so no harness would surface it`,
+        {
+          fix: 'Reinstall tenjin-cli; the published CLI skills must be model-invocable.',
+        },
+      );
     }
   }
 }

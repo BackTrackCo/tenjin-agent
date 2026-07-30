@@ -3,20 +3,42 @@ name: tenjin-publish
 description: >-
   Publish, update, or maintain your own reusable answers on the Tenjin
   knowledge marketplace so you earn on every future buyer. Use when the user
-  asks to publish, update, or manage Tenjin content, or when the tenjin-search
-  after-a-MISS flow publishes a derived answer under your publish.mode. Never
-  fire for drive-by "maybe publish this" ideation.
-disable-model-invocation: true
+  asks to publish, update, or manage Tenjin content; or when the tenjin-search
+  after-a-MISS flow has a finished, reusable, public, rights-clean finding to
+  publish under your publish.mode; or when the user asks about their Tenjin
+  sales, drafts, or parked candidates. Requires something concrete that already
+  exists: a written piece or a completed task's finding. Skip for drive-by
+  "maybe publish this" or "we should write this up sometime" musing, for
+  anything private to a repo, employer, or person, and for work still in
+  progress.
 ---
 
 # Tenjin publish: sell and maintain reusable answers
 
 Two things route here: an explicit user ask to publish/update, and the
 tenjin-search skill's after-a-MISS flow publishing a reusable answer you just
-derived. Both go through `publish.mode`, which is the real gate along with the
-CLI's redaction/rights scan, not a checklist to hold the user to. This skill
-stays `disable-model-invocation: true` so it never fires for drive-by "maybe
-publish this" ideation; something concrete and reusable must already exist.
+derived. Both go through `publish.mode`, which is the gate, not a checklist to
+hold the user to. `publish.mode` is settled at `tenjin install` and defaults to
+`review`; it is what decides whether a publish completes silently, asks a
+one-click yes/no, or stops. Alongside it the CLI runs a deterministic scan whose
+BLOCKING tier is structured credential shapes only: provider token formats (AWS,
+GitHub, Slack, Stripe, OpenAI, Anthropic, Google, npm, JWT, `Authorization:
+Bearer`), private keys, and connection URIs with an embedded password. That tier
+is the one thing no mode and no `--yes` can clear. Everything else is a warning,
+which `review` surfaces and `--yes` or `full-auto` clear: a generically named
+`API_KEY=`/`PASSWORD=`/`TOKEN=` assignment, emails, phone numbers, wallet
+addresses, internal hostnames, confidential markers, long verbatim quotes, the
+caller's own project references, home-anchored local paths, labeled
+customer/account identifiers, paid/licensed-content legends, and
+injection-shaped embedded instructions. So a secret that is not a recognizable
+shape is a prompt to look, not a stop, and under `full-auto` or a bare `--yes`
+it is not even that. Rights and employer-internal content have no BLOCKING
+detector — confidential markers, internal hostnames, wallet addresses, long
+verbatim quotes, paid/licensed-content legends, the caller's own project
+references, and labeled customer/account identifiers are warn-tier coverage,
+so that judgment is still yours, below.
+This skill's reachability is not a safety layer; the description above is the
+whole trigger boundary.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
 
 ## What makes a piece sell
@@ -54,10 +76,17 @@ edge, and price for the freshness that remains.
 - Explicit as-of date up top, and a decay note or valid-until where honest.
 - Attribute claims; verify issue numbers and URLs before publish; never invent
   a citation.
-- Sanitize (hard rules): no employer-internal strategy, metrics, or unreleased
-  work; no secrets, keys, or wallet addresses; no third-party private details;
-  no personal data; no long verbatim copyrighted text. Method mixed with
-  private data: publish the method, strip the data.
+- Sanitize (hard rules, and YOURS to enforce): no employer-internal strategy,
+  metrics, or unreleased work; no secrets, keys, or wallet addresses; no
+  third-party private details; no personal data; no long verbatim copyrighted
+  text. Method mixed with private data: publish the method, strip the data.
+  Only the structured credential shapes are BLOCKED by the CLI; the rights and
+  employer-internal rules have no blocking detector — confidential markers,
+  internal hostnames, wallet addresses, long verbatim quotes,
+  paid/licensed-content legends, the caller's own project references, and
+  labeled customer/account identifiers are flagged at warn tier only, and
+  `--yes`/`full-auto` clear them — so read the draft against this list
+  yourself before you run `tenjin publish`.
 - Fill the answer card when prompted (what it answers, applies-to, exclusions,
   freshness): a complete card is what makes the resource findable by search.
   Search matches the card on wording and on meaning, but only
@@ -182,3 +211,9 @@ local files and never upload by themselves.
   stored list wholesale, so passing one question drops every other one. To add
   without losing what is there, use `--add-question` / `--add-task`, which read the
   stored list first and append to it.
+- Sales and earnings have no CLI command: they are a hosted surface. Answer
+  "how are my sales doing?" with `GET https://tenjin.blog/api/me/stats`
+  (this-month earnings + paid-read totals) and `GET
+  https://tenjin.blog/api/me/events` (one entry per settled sale, poll and
+  diff). Both take the `SIGN-IN-WITH-X` wallet header the hosted `tenjin`
+  skill documents; that skill is the reference for this whole surface.
