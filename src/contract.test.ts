@@ -4,7 +4,12 @@ import fixtureJson from './fixtures/openapi.fixture.json';
 import { searchBrowseSchema, searchCandidateSchema, searchResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
 import { previewCardSchema } from './lib/read-client';
-import { buildPostCreateBody } from './lib/posts-api';
+import {
+  buildPostCreateBody,
+  buildPostUpdateBody,
+  ownPostSchema,
+  resourceEchoSchema,
+} from './lib/posts-api';
 import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
@@ -359,6 +364,7 @@ const CARD_INPUT_FIELDS = [
 
 function assertPostPaths(doc: unknown): void {
   expect(get(doc, 'paths', '/api/posts', 'post', 'operationId')).toBe('createPost');
+  expect(get(doc, 'paths', '/api/posts/{id}', 'get', 'operationId')).toBe('getOwnPost');
   expect(get(doc, 'paths', '/api/posts/{id}', 'put', 'operationId')).toBe('updatePost');
 }
 
@@ -440,6 +446,38 @@ function assertPublishContract(doc: unknown): void {
   ).toBeDefined();
 }
 
+function postUpdateProps(doc: unknown): unknown {
+  return get(doc, 'components', 'schemas', 'PostUpdate', 'properties');
+}
+function cardUpdateProps(doc: unknown): unknown {
+  return get(postUpdateProps(doc), 'resource', 'properties');
+}
+
+/**
+ * PostUpdate is the merge-update twin of PostCreate: strict at both levels, every
+ * field optional, and carrying the same bounds the CLI validates locally. The one
+ * deliberate difference is `handle`, which is create-only.
+ */
+function assertUpdateContract(doc: unknown): void {
+  expect(get(doc, 'components', 'schemas', 'PostUpdate', 'additionalProperties')).toBe(false);
+  expect(get(doc, 'components', 'schemas', 'PostUpdate', 'required')).toBeUndefined();
+  for (const field of ['title', 'bodyMd', 'excerpt', 'tags', 'price', 'status']) {
+    expect(get(postUpdateProps(doc), field), `PostUpdate.${field} missing`).toBeDefined();
+  }
+  expect(get(postUpdateProps(doc), 'resource', 'additionalProperties')).toBe(false);
+  for (const field of CARD_INPUT_FIELDS) {
+    expect(get(cardUpdateProps(doc), field), `PostUpdate resource.${field} missing`).toBeDefined();
+  }
+  const top = postUpdateProps(doc);
+  expect(bound(top, 'title', 'maxLength')).toBe(200);
+  expect(bound(top, 'bodyMd', 'maxLength')).toBe(200000);
+  expect(bound(top, 'excerpt', 'maxLength')).toBe(500);
+  expect(bound(top, 'tags', 'maxItems')).toBe(5);
+  expect(bound(top, 'tags', 'items', 'maxLength')).toBe(50);
+  expect(bound(top, 'price', 'pattern')).toBe('^(0|[1-9]\\d{0,12})$');
+  expect(bound(top, 'status', 'enum')).toEqual(['draft', 'published', 'unlisted']);
+}
+
 describe('contract fixture pins the publish endpoints', () => {
   it('declares POST /api/posts and PUT /api/posts/{id}', () => {
     assertPostPaths(fixtureDoc);
@@ -462,6 +500,86 @@ describe('contract fixture pins the publish endpoints', () => {
     const declared = postCreateProps(fixtureDoc);
     for (const key of Object.keys(body)) {
       expect(get(declared, key), `fixture does not declare PostCreate field ${key}`).toBeDefined();
+    }
+  });
+
+  it('the PostUpdate shape the CLI merge-updates through is fully declared', () => {
+    assertUpdateContract(fixtureDoc);
+  });
+
+  it('every field buildPostUpdateBody emits is a declared PostUpdate field', () => {
+    const body = buildPostUpdateBody({
+      title: 'T',
+      bodyMd: 'B',
+      excerpt: 'e',
+      tags: ['x'],
+      priceAtomic: '100000',
+      status: 'published',
+      resource: { scope: 's' },
+    });
+    const declared = postUpdateProps(fixtureDoc);
+    for (const key of Object.keys(body)) {
+      expect(get(declared, key), `fixture does not declare PostUpdate field ${key}`).toBeDefined();
+    }
+    // handle is create-only; sending it on an update would trip the strict body.
+    expect(get(declared, 'handle')).toBeUndefined();
+  });
+
+  it('every clear the CLI sends is a shape PostUpdate accepts', () => {
+    const card = cardUpdateProps(fixtureDoc);
+    // The nullable scalars: an explicit null is the clear, so each must declare a
+    // null branch or `--clear <field>` would be a validation_failed.
+    for (const field of [
+      'scope',
+      'exclusions',
+      'asOf',
+      'validUntil',
+      'provenanceSummary',
+      'methodologySummary',
+      'supersedesPostId',
+    ]) {
+      const branches = get(get(card, field), 'anyOf');
+      expect(Array.isArray(branches), `resource.${field} must be nullable`).toBe(true);
+      expect(
+        (branches as unknown[]).some((b) => get(b, 'type') === 'null'),
+        `resource.${field} declares no null branch`,
+      ).toBe(true);
+    }
+    // The containers clear with an empty value, so neither may demand a minimum.
+    for (const field of ['questionsAnswered', 'tasksSupported']) {
+      expect(get(card, field, 'type')).toBe('array');
+      expect(get(card, field, 'minItems')).toBeUndefined();
+    }
+    expect(get(card, 'appliesTo', 'type')).toBe('object');
+    expect(get(card, 'appliesTo', 'minProperties')).toBeUndefined();
+  });
+
+  it('every field the CLI DEMANDS back is one the fixture guarantees', () => {
+    // The request side is pinned above; this is the response side. A key the CLI
+    // requires but the server may omit is a CONTRACT_MISMATCH on a good response,
+    // so what we demand must be a subset of what the contract guarantees.
+    const postRequired = get(fixtureDoc, 'components', 'schemas', 'OwnPost', 'required');
+    expect(Array.isArray(postRequired)).toBe(true);
+    for (const key of requiredKeys(ownPostSchema)) {
+      expect(postRequired, `OwnPost.required must guarantee ${key}`).toContain(key);
+    }
+    const cardRequired = get(fixtureDoc, 'components', 'schemas', 'ResourceCard', 'required');
+    expect(Array.isArray(cardRequired)).toBe(true);
+    for (const key of requiredKeys(resourceEchoSchema)) {
+      expect(cardRequired, `ResourceCard.required must guarantee ${key}`).toContain(key);
+    }
+  });
+
+  it('every optional field the CLI READS is a declared response field', () => {
+    // Optional keys never fail parsing, so they fail silently instead: a renamed
+    // `bodyMd` would quietly make every diff look like a body change.
+    const postProps = get(fixtureDoc, 'components', 'schemas', 'OwnPost', 'properties');
+    for (const key of Object.keys(ownPostSchema.shape)) {
+      expect(get(postProps, key), `OwnPost.properties.${key} missing`).toBeDefined();
+    }
+    const cardProps = get(fixtureDoc, 'components', 'schemas', 'ResourceCard', 'properties');
+    for (const key of Object.keys(resourceEchoSchema.shape)) {
+      expect(get(cardProps, key), `ResourceCard.properties.${key} missing`).toBeDefined();
     }
   });
 
@@ -525,6 +643,7 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
     it('declares the publish endpoints and the resource-card shape the CLI sends', () => {
       assertPostPaths(liveDoc);
       assertPublishContract(liveDoc);
+      assertUpdateContract(liveDoc);
     });
 
     it('the 402 preview declares the optional answer card', () => {

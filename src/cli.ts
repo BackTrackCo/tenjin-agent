@@ -357,6 +357,96 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  addGlobalFlags(program.command('edit <postId>'))
+    .description(
+      'Show or update one of your own posts: with no change flags it prints the stored post and answer card, with them it merge-updates (omitted field = kept). Use to fix a price, sharpen a card, or ship a revised body; changes need --yes under your publish.mode consent. Reading is owner-scoped, so even the no-flag show signs with your wallet on first use, minting a read-scoped 24h session',
+    )
+    .option('--yes', 'apply the update without the confirmation stop')
+    .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
+    .option('--title <text>', 'new post title')
+    .option('--price <usd>', 'new post price in decimal USD')
+    .option('--body <file>', 'replace the body with this Markdown file (frontmatter ignored)')
+    .option('--excerpt <text>', 'new excerpt')
+    .option(
+      '--question <text>',
+      'replace the questions this piece answers (repeatable)',
+      collect,
+      [],
+    )
+    .option('--task <text>', 'replace the tasks this piece supports (repeatable)', collect, [])
+    .option(
+      '--add-question <text>',
+      'append one question, keeping the stored ones (repeatable)',
+      collect,
+      [],
+    )
+    .option(
+      '--add-task <text>',
+      'append one task, keeping the stored ones (repeatable)',
+      collect,
+      [],
+    )
+    .option('--scope <text>', 'what the piece covers (card scope)')
+    .option('--exclusions <text>', 'what the piece does not cover (card exclusions)')
+    .option(
+      '--applies-to <pair>',
+      'replace applicability with these key=value pairs (repeatable)',
+      collect,
+      [],
+    )
+    .option('--as-of <iso>', 'as-of timestamp, ISO-8601 with offset')
+    .option('--valid-until <iso>', 'valid-until timestamp, ISO-8601 with offset')
+    .option('--artifact-type <type>', 'document | skill | dataset')
+    .option('--temporal-mode <mode>', 'snapshot | maintained | evergreen')
+    .option('--provenance <text>', 'provenance summary (card)')
+    .option('--methodology <text>', 'methodology summary (card)')
+    .option(
+      '--clear <field>',
+      'clear a card field: scope, exclusions, asOf, validUntil, provenance, methodology, supersedesPostId, questionsAnswered, tasksSupported, appliesTo (repeatable)',
+      collect,
+      [],
+    )
+    .action(async function (this: Command, postId: string) {
+      await runCommand('edit', this, async (ctx) => {
+        const o = this.opts();
+        const { runEdit } = await import('./commands/edit');
+        return runEdit(
+          {
+            postId,
+            ...(o.yes === true ? { yes: true } : {}),
+            ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
+            ...(typeof o.title === 'string' ? { title: o.title } : {}),
+            ...(typeof o.price === 'string' ? { price: o.price } : {}),
+            ...(typeof o.body === 'string' ? { body: o.body } : {}),
+            ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
+            ...(Array.isArray(o.question) && o.question.length > 0
+              ? { question: o.question as string[] }
+              : {}),
+            ...(Array.isArray(o.task) && o.task.length > 0 ? { task: o.task as string[] } : {}),
+            ...(Array.isArray(o.addQuestion) && o.addQuestion.length > 0
+              ? { addQuestion: o.addQuestion as string[] }
+              : {}),
+            ...(Array.isArray(o.addTask) && o.addTask.length > 0
+              ? { addTask: o.addTask as string[] }
+              : {}),
+            ...(typeof o.scope === 'string' ? { scope: o.scope } : {}),
+            ...(typeof o.exclusions === 'string' ? { exclusions: o.exclusions } : {}),
+            ...(Array.isArray(o.appliesTo) && o.appliesTo.length > 0
+              ? { appliesTo: o.appliesTo as string[] }
+              : {}),
+            ...(typeof o.asOf === 'string' ? { asOf: o.asOf } : {}),
+            ...(typeof o.validUntil === 'string' ? { validUntil: o.validUntil } : {}),
+            ...(typeof o.artifactType === 'string' ? { artifactType: o.artifactType } : {}),
+            ...(typeof o.temporalMode === 'string' ? { temporalMode: o.temporalMode } : {}),
+            ...(typeof o.provenance === 'string' ? { provenance: o.provenance } : {}),
+            ...(typeof o.methodology === 'string' ? { methodology: o.methodology } : {}),
+            ...(Array.isArray(o.clear) && o.clear.length > 0 ? { clear: o.clear as string[] } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
   addGlobalFlags(program.command('outcome'))
     .description(
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',

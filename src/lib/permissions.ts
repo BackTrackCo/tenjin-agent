@@ -186,6 +186,13 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason: 'Puts your content on a public marketplace under your identity.',
   },
   {
+    command: 'tenjin edit',
+    reason:
+      'Write-capable despite the no-flag form reading as a pure show: it edits live posts ' +
+      'and answer cards under your identity, and moves prices. A prefix rule pins the verb, ' +
+      'not the flags, so no rule can clear the read half without clearing the write half.',
+  },
+  {
     command: 'tenjin wallet create',
     reason: 'Creates the payment credential; a stray run is a wallet you did not mean to have.',
   },
@@ -234,9 +241,9 @@ export const FLAG_CAVEAT: readonly string[] = [
 export const MCP_CAVEAT: readonly string[] = [
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
-  '`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_wallet` gated, and treat',
-  '`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions. `tenjin_buy` is the',
-  'same opt-in decision as the buy line above.',
+  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
+  '`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_candidate` as gated',
+  'for its add/drop actions. `tenjin_buy` is the same opt-in decision as the buy line above.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */

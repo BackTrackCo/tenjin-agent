@@ -169,3 +169,92 @@ describe('global flags are position-independent', () => {
     }
   });
 });
+
+// `edit` has nineteen flags, hand-mapped from commander's camelCase options into
+// EditArgs. A swapped pair (--provenance landing on methodology) changes nothing
+// about whether the command runs, so it needs a check that reads the flag NAME
+// back out. Every set-flag rejects an explicit empty value and names itself doing
+// it, which happens before any wallet or network work — so the error message is a
+// hermetic probe of the mapping, one flag at a time.
+describe('edit flag forwarding (the dispatcher mapping)', () => {
+  const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  const flags = [
+    '--title',
+    '--price',
+    '--body',
+    '--excerpt',
+    '--question',
+    '--task',
+    '--add-question',
+    '--add-task',
+    '--scope',
+    '--exclusions',
+    '--applies-to',
+    '--as-of',
+    '--valid-until',
+    '--artifact-type',
+    '--temporal-mode',
+    '--provenance',
+    '--methodology',
+  ];
+
+  it.each(flags)('%s reaches the arg it names', async (flag) => {
+    const cap = captureIo();
+    const code = await main(['edit', POST_ID, flag, '', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('edit');
+    expect(parsed.error.code).toBe('USAGE');
+    // The message is derived from the ARG KEY the value landed on, so a swap in the
+    // dispatcher renders some other flag's name here.
+    expect(parsed.error.message).toBe(`${flag} cannot be empty.`);
+  });
+
+  it('--clear reaches the clear list and reports the valid field names', async () => {
+    const cap = captureIo();
+    const code = await main(['edit', POST_ID, '--clear', 'bodyMd', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('edit');
+    expect(parsed.error.message).toContain('Cannot clear "bodyMd"');
+    expect(parsed.error.fix).toContain('questionsAnswered');
+  });
+
+  it('--question and --add-question stay distinct args (not one aliased pair)', async () => {
+    const cap = captureIo();
+    const code = await main(
+      ['edit', POST_ID, '--question', 'a', '--add-question', 'b', '--json'],
+      cap.io,
+    );
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toBe(
+      'Pass either --question or --add-question, not both.',
+    );
+  });
+
+  it('--task and --add-task stay distinct args', async () => {
+    const cap = captureIo();
+    const code = await main(['edit', POST_ID, '--task', 'a', '--add-task', 'b', '--json'], cap.io);
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toBe(
+      'Pass either --task or --add-task, not both.',
+    );
+  });
+
+  it('--mode is validated at the edge, before any wallet or network work', async () => {
+    const cap = captureIo();
+    const code = await main(['edit', POST_ID, '--mode', 'reveiw', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('edit');
+    expect(parsed.error.code).toBe('USAGE');
+  });
+
+  it('the postId positional is validated, and a bad one costs nothing', async () => {
+    const cap = captureIo();
+    const code = await main(['edit', 'not-a-uuid', '--title', 'x', '--json'], cap.io);
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toContain('Invalid post id');
+  });
+});
