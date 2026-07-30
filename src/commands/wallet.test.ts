@@ -219,7 +219,15 @@ describe('runWalletCreate', () => {
     const write = writes[0] as { args: string[]; stdin?: string };
     expect(write.args).toEqual(['-i']);
     expect(write.stdin).toContain(`-a ${account} `);
-    expect(write.stdin).not.toContain('-U');
+    // Check the command's own flags, not the whole stdin: the payload embeds a
+    // real random base64url passphrase (the alphabet includes both `-` and `U`),
+    // and a `.not.toContain('-U')` against the full string spuriously fails
+    // whenever those two characters land adjacent inside the secret rather than
+    // in a flag — ~1% of runs. Same defect #39 fixed in passphrase.test.ts
+    // (0577b95); fakeKeychain's strict payload regex above already pins the full
+    // command shape, so slicing off the quoted `-w` value loses no coverage.
+    const flagsOnly = write.stdin?.split(` -w '`)[0] ?? '';
+    expect(flagsOnly).not.toContain('-U');
     const stored = entries.get(account);
     expect(stored).toBeDefined();
     expect((stored as string).length).toBeGreaterThanOrEqual(32);
