@@ -1351,8 +1351,8 @@
     "/api/agent/search": {
       "post": {
         "operationId": "agentSearch",
-        "summary": "Search paid resources for a task question (honest lexical)",
-        "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return budget-bounded candidates to buy, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours) — pointers to browse, never scored candidates. The response is budget-bounded (~4k chars serialized), so trailing candidates may drop and long card fields truncate. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `searchId` as `X-Tenjin-Search-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
+        "summary": "Search paid resources for a task question",
+        "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return up to `limit` lean candidates to shortlist, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. This is the breadth step of a two-step flow: search wide, then fetch a candidate `url` unpaid to inspect it for free, then buy the one you want. Unpaid, a PAID piece answers 402 with a `card` object (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode) beside the preview, present only when the card has public content, while a FREE piece answers 200 with the whole piece and no `card`. A maximal card is roughly 25kB, so inspect the 2 or 3 most promising candidates, not all of them. The response size is bounded per candidate RETURNED, so a within-caps page always comes back whole; only a pathological slug can cost a trailing candidate, and when that happens the response carries `truncated: true` and a larger `limit` is what recovers the tail. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours), which are pointers to browse, never scored candidates. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `searchId` as `X-Tenjin-Search-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
         "security": [],
         "requestBody": {
           "required": true,
@@ -1464,7 +1464,7 @@
       "get": {
         "operationId": "listArticles",
         "summary": "Article directory + full-text search",
-        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags — NOT a body search), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned.",
+        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags plus the body text that is already public — a free piece's whole body, a paid piece's pre-paywall preview only, never text below a paywall), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned.",
         "security": [],
         "parameters": [
           {
@@ -1475,7 +1475,7 @@
               "type": "string",
               "maxLength": 256
             },
-            "description": "Full-text search over title + excerpt + tags (also matches a creator handle substring). Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
+            "description": "Full-text search over title + excerpt + tags plus the body text that is already public — a free piece's whole body, a paid piece's pre-paywall preview only, never text below a paywall (also matches a creator handle substring). Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
           },
           {
             "name": "tag",
@@ -2148,7 +2148,7 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-            "description": "Optional. The agent lookup id (uuid) whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it on a draft but not change it."
+            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it while the column is still empty, on a draft or on an already-published piece, but never change a set value."
           }
         },
         "additionalProperties": false
@@ -2354,7 +2354,7 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-            "description": "Optional. The agent lookup id (uuid) whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it on a draft but not change it."
+            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it while the column is still empty, on a draft or on an already-published piece, but never change a set value."
           }
         },
         "additionalProperties": false
@@ -2564,7 +2564,8 @@
         "properties": {
           "schemaVersion": {
             "type": "number",
-            "const": 1
+            "const": 2,
+            "description": "Must be 2. Version 1 is rejected with validation_failed: v2 candidates dropped the per-candidate answer-card fields (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode), which now come from an unpaid GET of the candidate url, so a v1 client is failed loudly instead of handed a shape it would misparse."
           },
           "question": {
             "type": "string",
@@ -3350,7 +3351,7 @@
       },
       "ReadArticlePreview": {
         "type": "object",
-        "description": "The pre-payment article preview — also the JSON body of the 402 challenge. Public fields only; bodyMd is absent until the read gate passes.",
+        "description": "The pre-payment article preview, and also the JSON body of the 402 challenge. Public fields only; bodyMd is absent until the read gate passes. Carries the piece's answer card in `card` when it has one, so you can judge fit before paying.",
         "properties": {
           "id": {
             "type": "string",
@@ -3411,6 +3412,91 @@
               }
             },
             "required": ["handle", "displayName", "walletAddress"]
+          },
+          "card": {
+            "type": "object",
+            "description": "The piece's answer card: what it answers, what it applies to, what it excludes, how it is dated, and what backs it. Present only when the piece carries a card; the key is absent (never null) otherwise. Read it before paying to decide whether the piece answers your question and still applies to your versions.",
+            "properties": {
+              "artifactType": {
+                "type": "string",
+                "enum": ["document", "skill", "dataset"],
+                "description": "document | skill | dataset."
+              },
+              "temporalMode": {
+                "type": "string",
+                "enum": ["snapshot", "maintained", "evergreen"],
+                "description": "snapshot | maintained | evergreen."
+              },
+              "asOf": {
+                "type": ["string", "null"],
+                "format": "date-time",
+                "description": "When the claim was observed; null when the piece pins no date."
+              },
+              "validUntil": {
+                "type": ["string", "null"],
+                "format": "date-time",
+                "description": "When the claim stops being current; null when it has no stated expiry."
+              },
+              "questionsAnswered": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "tasksSupported": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "appliesTo": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "description": "Versions/platforms/tools the claim holds for, as canonical lowercase keys to value lists."
+              },
+              "scope": {
+                "type": ["string", "null"]
+              },
+              "exclusions": {
+                "type": ["string", "null"],
+                "description": "What the piece deliberately does NOT cover."
+              },
+              "provenanceSummary": {
+                "type": ["string", "null"],
+                "description": "Where the evidence came from."
+              },
+              "methodologySummary": {
+                "type": ["string", "null"],
+                "description": "How the claim was established or tested."
+              },
+              "maintenanceCadence": {
+                "type": ["string", "null"],
+                "description": "How often a maintained piece is refreshed."
+              }
+            },
+            "required": [
+              "artifactType",
+              "temporalMode",
+              "asOf",
+              "validUntil",
+              "questionsAnswered",
+              "tasksSupported",
+              "appliesTo",
+              "scope",
+              "exclusions",
+              "provenanceSummary",
+              "methodologySummary",
+              "maintenanceCadence"
+            ]
+          },
+          "cardUnavailable": {
+            "type": "boolean",
+            "description": "Present and `true` only when the piece HAS an answer card the server could not load. Absent `card` with no flag means the piece is uncarded; absent `card` with this flag means the card exists but is temporarily unreadable, so retry later rather than recording the piece as having attested nothing. Never `false`, and never present alongside `card`."
           },
           "bodyMdPreview": {
             "type": "string",
@@ -3751,7 +3837,7 @@
       },
       "SearchCandidate": {
         "type": "object",
-        "description": "One matched resource to buy (lib/search-response.ts SearchCandidate). Card fields are the author-attested public claims; no paid body is ever included.",
+        "description": "One matched resource to shortlist (lib/search-response.ts SearchCandidate). A lean hit: identity, price, freshness, and why it matched. Fetch `url` unpaid to inspect it for free (a paid piece answers 402 with a `card` object plus preview, a free piece answers 200 with the whole piece); no paid body is ever included in a search response.",
         "properties": {
           "resourceId": {
             "type": "string",
@@ -3761,7 +3847,11 @@
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "The payable GET /api/read/{handle}/{slug} endpoint (answers a 402); run the x402 read loop there to buy. Never a browser permalink."
+            "description": "The payable GET /api/read/{handle}/{slug} endpoint. Fetch it WITHOUT a payment to inspect the candidate for free: a paid piece answers 402 whose body carries a `card` object (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode) beside the preview, present only when the card has public content, and a free piece answers 200 with the whole piece and no `card`. Run the x402 read loop against the same url to buy. Never a browser permalink."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The post slug. With `creator.handle` it satisfies any handle/slug API (MCP `get_article`, the CLI) directly, so a client never parses `url`."
           },
           "title": {
             "type": "string"
@@ -3782,44 +3872,12 @@
             "type": ["string", "null"],
             "format": "date-time"
           },
-          "temporalMode": {
-            "type": "string",
-            "description": "snapshot | maintained | evergreen (open string)."
-          },
-          "appliesTo": {
-            "type": "object",
-            "description": "Author-attested applicability, projected requested-and-matching keys first, bounded. Comparison is case-insensitive; display casing is preserved.",
-            "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "questionsAnswered": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "tasksSupported": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "scope": {
-            "type": ["string", "null"]
-          },
-          "exclusions": {
-            "type": ["string", "null"]
-          },
           "matchReasons": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Server-built lexical match explanation (answer-card vs title/excerpt hit) — honest lexical, not a semantic score."
+            "description": "Server-built labels for WHICH signal matched (answer-card hit, title/excerpt hit, `semantic match`), not a rank tier and not a confidence score."
           },
           "estimatedTokens": {
             "type": "integer",
@@ -3839,17 +3897,12 @@
         "required": [
           "resourceId",
           "url",
+          "slug",
           "title",
           "artifactType",
           "price",
           "asOf",
           "validUntil",
-          "temporalMode",
-          "appliesTo",
-          "questionsAnswered",
-          "tasksSupported",
-          "scope",
-          "exclusions",
           "matchReasons",
           "estimatedTokens",
           "creator"
@@ -3891,11 +3944,11 @@
       },
       "SearchResponse": {
         "type": "object",
-        "description": "The search decision. The four top-level fields are always present; MISS omits `candidates` entirely (and may carry a `browse` tail). `calibration` is `lexical-v1` (honest lexical retrieval) or `hybrid-v1` (lexical fused with dense semantic retrieval) — a retrieval-mode label, NOT a semantic confidence score.",
+        "description": "The search decision. The four top-level fields are always present; MISS omits `candidates` entirely (and may carry a `browse` tail). Search is the BREADTH step: it returns up to `limit` lean hits, and you inspect the ones worth inspecting by fetching their `url` unpaid (free) before you buy. `calibration` is `lexical-v1` (lexical retrieval alone) or `hybrid-v1` (lexical fused with dense semantic retrieval), a retrieval-mode label and NOT a semantic confidence score. Do not branch on it or discount `lexical-v1` candidates.",
         "properties": {
           "schemaVersion": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "searchId": {
             "type": "string",
@@ -3915,14 +3968,19 @@
             "items": {
               "$ref": "#/components/schemas/SearchCandidate"
             },
-            "description": "Present only on CANDIDATES, rank-ordered. Every candidate carries an eligible answer card (a bare post is never a candidate). The whole response is budget-bounded (~4k chars serialized), so trailing candidates may be dropped and long card fields truncated."
+            "description": "Present only on CANDIDATES, rank-ordered, up to the requested `limit`. Every candidate carries an eligible answer card (a bare post is never a candidate); fetch a candidate `url` unpaid to read that card in full for free."
+          },
+          "truncated": {
+            "type": "boolean",
+            "const": true,
+            "description": "Present and true only when the size backstop dropped trailing candidates the `limit` had room for, or kept a single candidate that alone exceeds the ceiling, so a short or oversized response is never ambiguous. The ceiling grows with the number of candidates returned, so retrying with a LARGER `limit` (up to 10) genuinely returns more; a smaller one returns strictly fewer. At `limit` 10 the tail is unrecoverable and narrowing the question is the remedy. Omitted entirely otherwise."
           },
           "browse": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/SearchBrowse"
             },
-            "description": "Present only on a MISS that found broad-corpus neighbors (≤3), omitted entirely when empty. A MISS stays a MISS: `browse` is a browse hint, never merged into `candidates`, and rides the same ~4k-char budget."
+            "description": "Present only on a MISS that found broad-corpus neighbors (≤3), omitted entirely when empty. A MISS stays a MISS: `browse` is a browse hint, never merged into `candidates`, and rides the same serialized-size backstop."
           }
         },
         "required": ["schemaVersion", "searchId", "decision", "calibration"]

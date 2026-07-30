@@ -77,6 +77,7 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
         address: account.address,
         signMessage: (args) => account.signMessage({ message: args.message }),
         signTypedData: (args) => account.signTypedData(args),
+        signTransaction: (tx) => account.signTransaction(tx),
       };
     },
     diagnostics(): Promise<WalletDiagnostics> {

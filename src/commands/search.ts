@@ -1,7 +1,7 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
-import { buildSearchRequest, postSearch, type SearchInput } from '../lib/agent-api';
+import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
 import { listCandidates } from '../lib/candidate-store';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
@@ -13,6 +13,10 @@ import type { CommandContext, CommandResult } from '../context';
  * CANDIDATES/MISS response verbatim (spec 10), and records the searchId +
  * candidates locally so `outcome --last` and `buy <resourceId>` can use them. No
  * wallet, no signing: search is anonymous.
+ *
+ * Search is the breadth step: a candidate is a lean hit (identity, price,
+ * freshness, why it matched), and the full answer card comes from `tenjin inspect`,
+ * which is free. So a candidate line stays short on purpose.
  *
  * The response's `searchId` is the outcome-reporting capability for
  * POST /api/agent/searches/<searchId>/outcomes. tenjin#463 renamed both the field
@@ -133,15 +137,40 @@ export async function runSearch(
         ]
       : [];
 
+  // `truncated` means the server's size backstop dropped candidates, either a
+  // trailing few the limit had room for or a single oversized one. The response
+  // ceiling GROWS with the number of candidates returned (tenjin#501), so the
+  // remedy is counter-intuitive and worth stating outright: a larger --limit
+  // recovers the tail, a smaller one returns strictly fewer. Only at the maximum
+  // is the tail unrecoverable and narrowing the question the answer.
+  //
+  // The CLI knows the limit it sent, so it names the next step instead of
+  // restating the rule and leaving the reader to work out which half applies.
+  // The flag stays in the machine envelope (--json) untouched, where it is
+  // omitted rather than false when it did not fire.
+  //
+  // Rendering it on a MISS too is DEFENSIVE, not wire behavior: the server only
+  // ever sets the flag alongside candidates it dropped. Handling both keeps the
+  // flag from going unrendered if that ever changes.
+  const truncatedHint =
+    response.truncated === true
+      ? [
+          request.limit < MAX_LIMIT
+            ? `some candidates were dropped for size; retry with --limit ${MAX_LIMIT} (the size ceiling grows with the number of candidates returned)`
+            : `some candidates were dropped for size; at --limit ${MAX_LIMIT} the dropped tail cannot be recovered, so narrow the question`,
+        ]
+      : [];
+
   const humanLines =
     response.decision === 'MISS'
-      ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint]
+      ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint, ...truncatedHint]
       : [
           `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
           ...candidates.map(
             (c, i) =>
               `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${c.price} atomic, ${sanitizeForTerminal(c.url)}`,
           ),
+          ...truncatedHint,
         ];
 
   return { data: response, humanLines };

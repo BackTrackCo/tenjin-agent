@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { searchBrowseSchema, searchCandidateSchema, searchResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
+import { previewCardSchema } from './lib/read-client';
 import {
   buildPostCreateBody,
   buildPostUpdateBody,
@@ -50,22 +51,47 @@ function requiredKeys(schema: { shape: Record<string, z.ZodType> }): string[] {
 // The contract the CLI relies on, written out long-hand: if either the CLI
 // schema or the fixture drifts from these lists, the drift is the failure.
 const RESPONSE_REQUIRED = ['calibration', 'decision', 'schemaVersion', 'searchId'];
+// The lean candidate of search v2: eleven keys, no card fields. Everything the
+// candidate used to carry about what a piece actually says now lives on the read
+// route's 402 body, one free unpaid GET away (see READ_CARD_REQUIRED below).
 const CANDIDATE_REQUIRED = [
-  'appliesTo',
   'artifactType',
   'asOf',
   'creator',
   'estimatedTokens',
-  'exclusions',
   'matchReasons',
   'price',
-  'questionsAnswered',
   'resourceId',
+  'slug',
+  'title',
+  'url',
+  'validUntil',
+];
+// The card fields that MOVED from the candidate to the 402 preview. Pinned as a
+// negative: a server that puts them back on a candidate has un-done search v2, and
+// the CLI would be re-reading depth from the breadth step.
+const CANDIDATE_MOVED_TO_INSPECT = [
+  'questionsAnswered',
+  'tasksSupported',
+  'appliesTo',
+  'scope',
+  'exclusions',
+  'temporalMode',
+];
+// The answer card on the unpaid 402 body: twelve fields, all required WITHIN the
+// card, with the card itself optional (an uncarded piece omits the key entirely).
+const READ_CARD_REQUIRED = [
+  'appliesTo',
+  'artifactType',
+  'asOf',
+  'exclusions',
+  'maintenanceCadence',
+  'methodologySummary',
+  'provenanceSummary',
+  'questionsAnswered',
   'scope',
   'tasksSupported',
   'temporalMode',
-  'title',
-  'url',
   'validUntil',
 ];
 // The MISS-only browse tail (tenjin#460). Deliberately minimal: if the server
@@ -165,6 +191,87 @@ describe('contract fixture covers every field the CLI requires', () => {
       ).toBeUndefined();
     }
   });
+
+  it('SearchCandidate carries none of the card fields that moved to inspect', () => {
+    const properties = get(fixtureDoc, 'components', 'schemas', 'SearchCandidate', 'properties');
+    for (const moved of CANDIDATE_MOVED_TO_INSPECT) {
+      expect(get(properties, moved), `SearchCandidate must not declare ${moved}`).toBeUndefined();
+    }
+  });
+});
+
+// The 402 preview's answer card (tenjin#500): the depth half of the two-step
+// flow, and the only place the CLI can now read what a piece actually claims
+// before paying. Pinned here rather than trusted, because search v2 removed the
+// fallback: if the card silently vanishes from the preview, `tenjin inspect`
+// renders a price and nothing to judge it against.
+function readCardProps(doc: unknown): unknown {
+  return get(
+    doc,
+    'components',
+    'schemas',
+    'ReadArticlePreview',
+    'properties',
+    'card',
+    'properties',
+  );
+}
+
+function assertReadCard(doc: unknown): void {
+  const preview = get(doc, 'components', 'schemas', 'ReadArticlePreview');
+  expect(preview, 'components.schemas.ReadArticlePreview missing').toBeDefined();
+  // The card is OPTIONAL on the preview: an uncarded piece omits the key rather
+  // than sending null, which is exactly what the CLI branches on.
+  expect(get(preview, 'required'), 'ReadArticlePreview must not require card').not.toContain(
+    'card',
+  );
+  const card = get(preview, 'properties', 'card');
+  expect(card, 'ReadArticlePreview.properties.card missing').toBeDefined();
+  const required = get(card, 'required');
+  for (const field of READ_CARD_REQUIRED) {
+    expect(get(readCardProps(doc), field), `card.properties.${field} missing`).toBeDefined();
+    expect(required, `card.required must list ${field}`).toContain(field);
+  }
+  // The third state (tenjin#500): a piece that HAS a card the server could not
+  // load. Also optional, because it is absent for both an uncarded piece and a
+  // carded one, and the CLI reads it only to keep "attests nothing" from being
+  // confused with "temporarily unreadable".
+  expect(
+    get(preview, 'properties', 'cardUnavailable'),
+    'ReadArticlePreview.properties.cardUnavailable missing',
+  ).toBeDefined();
+  expect(
+    get(preview, 'required'),
+    'ReadArticlePreview must not require cardUnavailable',
+  ).not.toContain('cardUnavailable');
+}
+
+describe('contract fixture pins the 402 answer card', () => {
+  it('the CLI requires exactly the pinned card fields', () => {
+    expect(requiredKeys(previewCardSchema)).toEqual(READ_CARD_REQUIRED);
+  });
+
+  it('ReadArticlePreview declares an optional card with every required field', () => {
+    assertReadCard(fixtureDoc);
+  });
+
+  it('a 402 body shaped like the fixture parses through the CLI preview schema', () => {
+    const parsed = previewCardSchema.parse({
+      artifactType: 'document',
+      temporalMode: 'snapshot',
+      asOf: '2026-07-01T00:00:00.000Z',
+      validUntil: null,
+      questionsAnswered: ['What do Base transactions cost right now?'],
+      tasksSupported: ['estimate gas spend'],
+      appliesTo: { products: ['Base'] },
+      scope: 'L2 execution fees only',
+      exclusions: null,
+      provenanceSummary: 'Measured against mainnet over one week.',
+      methodologySummary: null,
+      maintenanceCadence: null,
+    });
+    expect(parsed.artifactType).toBe('document');
+  });
 });
 
 describe('contract fixture request shapes', () => {
@@ -184,23 +291,18 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   const candidate = {
     resourceId: '5b3e2b1a-8c4d-4f6e-9a2b-1c3d5e7f9a0b',
     url: 'https://tenjin.blog/api/read/alice/base-fee-snapshot',
+    slug: 'base-fee-snapshot',
     title: 'Base fee snapshot, July 2026',
     artifactType: 'document',
     price: '500000',
     asOf: '2026-07-01T00:00:00.000Z',
     validUntil: null,
-    temporalMode: 'snapshot',
-    appliesTo: { products: ['Base'] },
-    questionsAnswered: ['What do Base transactions cost right now?'],
-    tasksSupported: ['estimate gas spend'],
-    scope: 'L2 execution fees only',
-    exclusions: null,
     matchReasons: ['answer-card: base fees'],
     estimatedTokens: 1200,
     creator: { handle: 'alice' },
   };
   const response = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     searchId: '0f8b2d4c-6a1e-4b3f-8c5d-7e9f1a2b3c4d',
     decision: 'CANDIDATES',
     calibration: 'lexical-v1',
@@ -222,12 +324,17 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
 
   it('searchResponseSchema.parse accepts a MISS with candidates omitted', () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: response.searchId,
       decision: 'MISS',
       calibration: 'lexical-v1',
     };
     expect(searchResponseSchema.parse(miss).candidates).toBeUndefined();
+  });
+
+  it('searchResponseSchema.parse keeps the optional truncated flag', () => {
+    expect(searchResponseSchema.parse({ ...response, truncated: true }).truncated).toBe(true);
+    expect(searchResponseSchema.parse(response).truncated).toBeUndefined();
   });
 });
 
@@ -537,6 +644,10 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
       assertPostPaths(liveDoc);
       assertPublishContract(liveDoc);
       assertUpdateContract(liveDoc);
+    });
+
+    it('the 402 preview declares the optional answer card', () => {
+      assertReadCard(liveDoc);
     });
   },
 );
