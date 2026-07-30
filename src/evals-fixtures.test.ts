@@ -204,6 +204,17 @@ describe('skill text follows the wire schema', () => {
     expect(new Set(named).size, `the bullet repeats a field: ${named.join(', ')}`).toBe(
       named.length,
     );
-    expect([...named].sort()).toEqual(Object.keys(searchCandidateSchema.shape).sort());
+
+    // Compared as the symmetric difference rather than as two arrays, so a
+    // failure names the field that moved instead of printing two eleven-item
+    // lists for the reader to eyeball.
+    const declared = Object.keys(searchCandidateSchema.shape);
+    expect(
+      {
+        omittedByTheDoc: declared.filter((key) => !named.includes(key)),
+        notInTheSchema: named.filter((key) => !declared.includes(key)),
+      },
+      'skills/tenjin-search/SKILL.md and searchCandidateSchema disagree; update whichever is stale',
+    ).toEqual({ omittedByTheDoc: [], notInTheSchema: [] });
   });
 });

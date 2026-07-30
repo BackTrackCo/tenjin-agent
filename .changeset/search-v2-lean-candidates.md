@@ -8,6 +8,13 @@ schema gate, and the CLI reports that as `CONTRACT_MISMATCH` naming the server
 rather than a generic contract drift, so the break fails loudly instead of
 degrading.
 
+The break runs the other way too, and that direction needs no action from
+anyone here to bite. When the server deploys search v2 it stops accepting
+`schemaVersion` 1, so every already-installed CLI at 0.1.0-alpha.4 or earlier
+fails every search with a 400 until it is upgraded. Those versions render that
+400 as a generic "retry", advice that can never succeed, so this note is the
+only warning their operators get: upgrade the CLI.
+
 Candidates are lean. A hit now carries `resourceId`, `url`, `slug`, `title`,
 `artifactType`, `price`, `asOf`, `validUntil`, `matchReasons`,
 `estimatedTokens`, and `creator.handle`: enough to shortlist and to price the
