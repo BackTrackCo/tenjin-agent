@@ -186,9 +186,14 @@ describe('fetchRead', () => {
     const fix = caught?.fix ?? '';
     expect(fix).not.toMatch(/must not redirect/);
     expect(fix).not.toMatch(/update tenjin-cli/);
-    // It names the two things that are actually true: retrying will not help, and
-    // the URL spelling is what to change.
-    expect(fix).toMatch(/retrying/i);
-    expect(fix).toMatch(/non-canonical URL/);
+    // It names the two actionable things: the spelling to ask for, and the origin
+    // to check. Why retrying cannot help is rationale for a reader of the code, so
+    // it lives in the comment at the throw site rather than in an agent-facing
+    // `fix` — which is also what keeps this one near the repo's 152-char maximum
+    // instead of the 452 it used to be.
+    expect(fix).toMatch(/tenjin search/);
+    expect(fix).toMatch(/tenjin inspect/);
+    expect(fix).toMatch(/--base-url/);
+    expect(fix.length).toBeLessThanOrEqual(160);
   });
 });

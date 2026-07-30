@@ -135,13 +135,8 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     if (res.kind === 'blocked-redirect') {
       throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
         fix:
-          'A redirect is never followed here, so nothing was read and retrying this ' +
-          'exact URL will answer the same. The route is not broken: this is what a ' +
-          'non-canonical URL looks like. Ask for the URL in the spelling the read ' +
-          'route serves (the form a `tenjin search` candidate or `tenjin inspect` ' +
-          'reports), and check that --base-url names the origin that answers without ' +
-          'a hop of its own (http where the deployment serves https, or an apex host ' +
-          'it sends to www).',
+          'Ask for the URL in the spelling `tenjin search` or `tenjin inspect` ' +
+          'reports, and check --base-url names an origin that answers without a hop.',
       });
     }
     const code =
