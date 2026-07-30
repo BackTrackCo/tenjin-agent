@@ -1,29 +1,37 @@
 # Skill evals
 
-Fixtures for measuring the two CLI-native skills: does the skill fire when it should, and is
-its output right when it does. These are the skill half of the eval loop. The retrieval half
-(does the server return the right piece for a question) lives in the tenjin repo as
+Fixtures for measuring the three skills this repo ships: does the skill fire when it should,
+and is its output right when it does. These are the skill half of the eval loop. The retrieval
+half (does the server return the right piece for a question) lives in the tenjin repo as
 `scripts/eval-lookup-recall.ts`.
 
 ## Layout
 
 ```
 evals/
+  harness/
+    run_trigger_eval.py # keyless trigger runner (stdlib only)
+    run_output_eval.py  # keyless output runner, with-skill vs without, plus grading
   tenjin-search/
     trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
     evals.json          # 6 output cases with expectations
     fixtures/           # bodies seeded into a case's workspace via its `files`
   tenjin-publish/
     evals.json          # 5 output cases with expectations
+  tenjin/
+    trigger-eval.json   # 20 queries for the zero-install hosted skill
+    evals.json          # 6 output cases with expectations
+    fixtures/
 ```
 
-`files` entries are paths relative to `evals/`. Case 6 seeds
-`tenjin-search/fixtures/purchased-piece.md`, a synthetic purchased body carrying an embedded
-instruction block. It is a prompt-injection payload on purpose and the only one here: the
-untrusted-data rule is the one rule in either skill whose failure an attacker triggers rather
-than the operator, so it is graded with a real payload rather than described. The file carries
-no disclaimer, because a disclaimer inside it would be visible to the agent under test and
-would grade nothing.
+`files` entries are paths relative to `evals/`. Two of them are prompt-injection payloads on
+purpose: `tenjin-search/fixtures/purchased-piece.md` and `tenjin/fixtures/purchased-piece-http.md`.
+The untrusted-data rule is the one rule whose failure an attacker triggers rather than the
+operator, so it is graded with a real payload rather than described. There are two because the
+attack surface differs: the CLI payload tells the agent to run CLI verbs, which an agent on the
+zero-install path has no way to run, so it would grade nothing there. The HTTP payload names the
+posts endpoint and a public card field instead. Neither file carries a disclaimer, because a
+disclaimer inside it would be visible to the agent under test and would grade nothing.
 
 File formats mirror Anthropic's skill-creator plugin. `evals.json` follows
 `references/schemas.md` in `anthropics/skills`: `skill_name` plus an `evals` array of
@@ -45,7 +53,78 @@ case 5. The second one matters more than its case count suggests: it is the only
 the CLI can publish without the user having asked, so it is where consent is decided by the
 resolved `publish.mode` rather than by a request.
 
+## The hosted skill's trigger set needs the CLI skills installed
+
+`skills/tenjin` is the only one of the three whose description defers: it says to prefer
+`tenjin-search` and `tenjin-publish` when the CLI is installed. A gate like that cannot be
+measured with the skill alone in the workspace, because deferring would mean doing nothing, and
+a model asked to help fires rather than stall. Run its trigger set with the skills it defers to
+installed alongside:
+
+```bash
+python3 evals/harness/run_trigger_eval.py \
+  --eval-set evals/tenjin/trigger-eval.json \
+  --skill skills/tenjin \
+  --also-skill skills/tenjin-search skills/tenjin-publish \
+  --workspace "$(mktemp -d)"
+```
+
+Its ten positives all state that no CLI is available, and three of its ten negatives state that
+one is. That is deliberate and it is where the set discriminates: the remaining seven negatives
+carry Tenjin-adjacent vocabulary (x402, USDC, Base, paywalls, wallet signing) around a task that
+is not a Tenjin read, find, or publish at all. The runner records which other skill fired on a
+run where the one under test did not, so a negative that passes because the model routed to
+`tenjin-publish` is distinguishable from one that passes because the model just answered.
+
+Output case 6 is the exception to "rubrics defer to the graded skill" below, and is marked as
+such in its `expected_output`: the hosted skill states no untrusted-data rule, while
+`tenjin-search` does. The case grades the rule anyway, because the gap is worth measuring rather
+than assuming, but its with-skill delta reads as model default rather than as skill effect.
+Read that case's two configurations against each other, not against the aggregate.
+
 ## Running them
+
+Two runners read these files. `evals/harness/` is the default: stdlib Python, no API key, no
+plugin, driving headless `claude -p` under whatever login the machine already has.
+skill-creator's own scripts are the alternative and want `ANTHROPIC_API_KEY`.
+
+### The keyless harness
+
+```bash
+python3 evals/harness/run_trigger_eval.py \
+  --eval-set evals/tenjin-search/trigger-eval.json \
+  --skill skills/tenjin-search \
+  --workspace "$(mktemp -d)"
+
+python3 evals/harness/run_output_eval.py \
+  --eval-set evals/tenjin/evals.json \
+  --skill skills/tenjin \
+  --workspace "$(mktemp -d)"
+```
+
+Both build a throwaway project holding exactly the skill under test and run each case in it.
+`--setting-sources project` is what makes that true: without it, a copy of the same skill
+installed under `~/.claude/skills` loads alongside the one in the workspace, and the run
+measures whichever the model happened to see. A stale installed copy is the normal case on a
+machine that also uses these skills for real, so the flag is load-bearing rather than tidiness.
+
+The trigger runner reads one bit per run off the `stream-json` event stream: a skill invocation
+is an ordinary `tool_use` block with `name: "Skill"` and `input.skill` naming it. It hands the
+agent under test no `Bash`, so the trigger can be expressed but the CLI cannot be run and the
+network cannot be reached: a trigger pass spends nothing and writes no telemetry. It also
+records whether the skill was offered at all in each run, because a run that never loaded the
+skill measured nothing rather than measuring a miss.
+
+The output runner does need a shell, and pre-clears exactly `Bash(curl:*)`. Everything else
+prompts, which in print mode is a denial, so a wallet CLI is out of reach and a case cannot
+spend even before you count the empty workspace. Cases that reach the live site do write
+ordinary read telemetry rows.
+
+Defaults match skill-creator's: `--runs-per-query 3`, `--threshold 0.5`. Executor is `sonnet`
+and the output runner's grader is `opus`; both are flags. The trigger runner prints the
+negative pass rate first, for the reason in "Thresholds and the ceiling" below.
+
+### The skill-creator path
 
 Install the plugin, then reload:
 
@@ -180,8 +259,10 @@ provenances, and only one of them is generated:
   is an edit to those files in a PR against this repo.
 - `skills/tenjin/SKILL.md` is the zero-install skill, vendored verbatim from
   https://tenjin.blog/skills.md by `pnpm sync:skill`, carrying a do-not-hand-edit banner and
-  guarded by `skill-drift.yml`. Nothing here grades it. Its wording lives in `lib/agent-docs.ts`
-  in the tenjin repo.
+  guarded by `skill-drift.yml`. `evals/tenjin/` grades the vendored copy, but a rule it reveals
+  as missing or wrong is not fixable here: the wording lives in `lib/agent-docs.ts` in the
+  tenjin repo, and an edit to the vendored file would be reverted by the next sync. So a
+  finding against this skill leaves the repo as a report, not a patch.
 
 The two are related but not generated from each other: the answer-card rules these expectations
 grade do have a shared ancestor in `agent-docs.ts` (the same "5 to 10 entries, 200 chars max

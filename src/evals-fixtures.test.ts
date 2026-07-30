@@ -53,9 +53,12 @@ interface TriggerCase {
   rationale: string;
 }
 
-const OUTPUT_FILES = ['tenjin-search/evals.json', 'tenjin-publish/evals.json'] as const;
-
 const SOURCES = walkFixtures();
+
+// Derived from the walk rather than listed, so a skill's fixtures are guarded
+// the day they land instead of the day someone remembers to add them here.
+const OUTPUT_FILES = SOURCES.filter((path) => path.endsWith('/evals.json'));
+const TRIGGER_FILES = SOURCES.filter((path) => path.endsWith('/trigger-eval.json'));
 
 // Verbs the CLI has retired, and what replaced them. The invocation check below
 // only sees backtick-quoted commands, so on its own it reddens the build for
@@ -127,8 +130,8 @@ describe('eval fixtures', () => {
     }
   });
 
-  it('trigger set is balanced and free of duplicate queries', () => {
-    const cases = JSON.parse(read('tenjin-search/trigger-eval.json')) as TriggerCase[];
+  it.each(TRIGGER_FILES)('%s is balanced and free of duplicate queries', (path) => {
+    const cases = JSON.parse(read(path)) as TriggerCase[];
     const positives = cases.filter((c) => c.should_trigger);
 
     expect(cases.length).toBe(20);

@@ -1,0 +1,102 @@
+[
+  {
+    "query": "Buy and read this piece for me: https://tenjin.blog/a/aria/pgvector-hnsw-pg17. I have a Base wallet with USDC and no tenjin CLI on this machine.",
+    "should_trigger": true,
+    "rationale": "The named entry path: pay to read a Tenjin piece, no CLI, bring-your-own wallet."
+  },
+  {
+    "query": "There is no tenjin CLI here, just curl. What is on Tenjin tagged x402, cheapest first?",
+    "should_trigger": true,
+    "rationale": "Discovery by tag over the public HTTP surface, with nothing installed to do it for us."
+  },
+  {
+    "query": "Nothing is installed on this box beyond curl. I would rather buy an answer than derive it: has anyone published a measured Base USDC settlement latency study? Check Tenjin.",
+    "should_trigger": true,
+    "rationale": "A paid answer to a mid-task question, on the zero-install path."
+  },
+  {
+    "query": "I never installed the tenjin CLI. What did I earn on Tenjin this month, and which pieces have I already paid to read?",
+    "should_trigger": true,
+    "rationale": "Sales and library, both SIWX-gated endpoints, with no CLI to reach them through."
+  },
+  {
+    "query": "No tenjin CLI on this machine. Publish the write-up I just finished on Tenjin as a paid piece at 25 cents, with a free preview above the fold.",
+    "should_trigger": true,
+    "rationale": "An explicit publish ask, including the paywall marker the skill is the only source for."
+  },
+  {
+    "query": "First contact with Tenjin, nothing installed. Set up a publisher profile for my wallet and claim the handle aria on my first post.",
+    "should_trigger": true,
+    "rationale": "Publisher setup, the one flow the skill closes with a scripted three questions."
+  },
+  {
+    "query": "We have no tenjin CLI available. List everything the Tenjin creator with handle vrajang has published, newest first.",
+    "should_trigger": true,
+    "rationale": "Find pieces by author: the creators directory and one publisher's feed."
+  },
+  {
+    "query": "No CLI here, only curl. Before I pay for https://tenjin.blog/a/aria/next-16-migration, check whether it actually covers Next 16. I do not want to buy the wrong version.",
+    "should_trigger": true,
+    "rationale": "Free inspection of a paid piece's card before paying, which only the 402 preview gives you."
+  },
+  {
+    "query": "The tenjin CLI is not installed. Add an answer card to my Tenjin post so agent search can find it, and write the questionsAnswered entries.",
+    "should_trigger": true,
+    "rationale": "Managing your own piece, and the card is what decides whether search can see it at all."
+  },
+  {
+    "query": "Nothing installed here but curl. Check the newest post from the Tenjin creator with handle vrajang every morning and buy it when a new one lands, capped at 50 cents.",
+    "should_trigger": true,
+    "rationale": "Scheduled re-reads of the newest-post URL, which carry an address-only rule and a re-buy guard."
+  },
+  {
+    "query": "The tenjin CLI is installed and authenticated here. Search Tenjin for a maintained pgvector HNSW versus IVFFlat benchmark.",
+    "should_trigger": false,
+    "rationale": "Fails the no-CLI gate only: a valid Tenjin search ask, but the CLI is present so its own skill owns it."
+  },
+  {
+    "query": "We already have tenjin-cli on this machine. Publish my finished piece and set the price to a quarter.",
+    "should_trigger": false,
+    "rationale": "Fails the no-CLI gate only: a valid publish ask that belongs to the CLI publish skill."
+  },
+  {
+    "query": "The tenjin CLI is on my PATH at 0.1.0-alpha.5. Report how my Tenjin sales are doing this month.",
+    "should_trigger": false,
+    "rationale": "Fails the no-CLI gate only: sales are named in the CLI publish skill's own description, so there is a skill to defer to."
+  },
+  {
+    "query": "Pay for this vendor API with x402 and show me the JSON it returns: https://api.example.com/v1/report.",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: the same x402 pay-and-retry loop, against a resource that is not Tenjin."
+  },
+  {
+    "query": "What is the USDC contract address on Base mainnet?",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: the skill happens to state this constant, but nothing is being read, found, or published."
+  },
+  {
+    "query": "Set up a Substack for me and publish this essay there behind a paid tier.",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: paid publishing, different platform, no wallet involved."
+  },
+  {
+    "query": "Add a Stripe paywall to our own Next.js blog so posts gate after the first two paragraphs.",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: paywall vocabulary, but the product being changed is ours."
+  },
+  {
+    "query": "Show me how to sign an EIP-191 message with a viem account.",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: wallet signing in the abstract, no Tenjin request to authenticate."
+  },
+  {
+    "query": "Review this diff before I merge it. It changes how our service verifies x402 payment signatures.",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: review work wearing x402 vocabulary."
+  },
+  {
+    "query": "Our own paid-content API started returning 402 to logged-in customers after last night's deploy. Work out why.",
+    "should_trigger": false,
+    "rationale": "Fails the Tenjin gate only: a private incident whose status code is the only thing in common."
+  }
+]
