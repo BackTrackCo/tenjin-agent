@@ -30,6 +30,8 @@ import { trimSlash } from '../lib/url';
 import { configPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
+import { sanitizeForTerminal } from '../lib/output';
+import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -59,6 +61,20 @@ export interface CheckResult {
 
 /** ~$20 in atomic USDC (6 decimals). Above this, the pocket-money wallet warns. */
 const POCKET_MONEY_CEILING_ATOMIC = 20_000_000n;
+
+/**
+ * `doctor` is an allowlisted verb an unattended agent runs on its own, and its
+ * `fix:` lines reach that agent both on the TTY and in `error.details.checks`.
+ * So they name the CONFIGURED base URL and the operator command that changes it,
+ * never `--base-url`: the flag rides every allowlisted verb (see FLAG_CAVEAT in
+ * lib/permissions), and a fix line telling the agent to pass it would be the CLI
+ * coaching the exact move the skills forbid. `config set` is not allowlisted, so
+ * pointing there routes the change through the operator by construction.
+ */
+const FIX_POINT_AT_TENJIN_API =
+  'Point the configured base URL at a Tenjin API (expected an OpenAPI document): `tenjin config set baseUrl <url>`.';
+const FIX_CHECK_NETWORK_AND_BASE_URL =
+  'Check your network connection and the configured base URL (`tenjin config get baseUrl`).';
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
@@ -140,13 +156,26 @@ export async function runDoctor(
   const { checks, failure } = await collectDoctorChecks(ctx, deps);
   if (failure !== undefined) {
     const r = failure.result;
+    // The allowlist rides on the FAILURE envelope too. An operator whose fresh
+    // install is broken is the likeliest one to be reading doctor output at all,
+    // and the earlier version dropped the block on exactly that path while the
+    // comment below claimed otherwise. The human failure path still renders only
+    // the error and its fix (that is emitFailure's contract, not doctor's), so
+    // the machine payload is where this has to land.
     throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
-      details: { checks },
+      details: { checks, permissions: recommendedPermissions() },
     });
   }
 
-  return { data: { status: 'pass', checks }, humanLines: renderDoctorHuman(ctx.io, checks) };
+  // The discoverability surface for the auto-mode denial problem (#33): an
+  // operator whose agent just got denied runs doctor and gets the exact lines to
+  // paste, without having to already know they exist. It reports nothing about the
+  // local machine, so it is deliberately NOT a check: it can never pass or fail.
+  return {
+    data: { status: 'pass', checks, permissions: recommendedPermissions() },
+    humanLines: [...renderDoctorHuman(ctx.io, checks), '', ...renderPermissionsBlock()],
+  };
 }
 
 function checkNode(): BuiltCheck {
@@ -224,9 +253,7 @@ async function checkApiContract(
         detail: malformed
           ? `OpenAPI document at ${url} was not valid JSON`
           : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix: malformed
-          ? 'Point --base-url at a Tenjin API (expected an OpenAPI document).'
-          : 'Check your network connection and --base-url.',
+        fix: malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
     };
@@ -239,7 +266,7 @@ async function checkApiContract(
         status: 'fail',
         required: true,
         detail: `OpenAPI document at ${url} is missing a string info.version`,
-        fix: 'Point --base-url at a Tenjin API (expected an OpenAPI document).',
+        fix: FIX_POINT_AT_TENJIN_API,
       },
       failCode: 'CONTRACT_MISMATCH',
     };
@@ -278,7 +305,7 @@ async function checkSearchContract(
         status: 'warn',
         required: false,
         detail: `Could not confirm the search endpoint at ${url}`,
-        fix: 'Check --base-url; search/buy need the A2 endpoints deployed.',
+        fix: 'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
       },
     };
   }
@@ -296,7 +323,7 @@ async function checkSearchContract(
           status: 'warn',
           required: false,
           detail: 'This deployment does not advertise POST /api/agent/search (A2 not deployed)',
-          fix: 'search/buy need A2 deployed; point --base-url at a deploy that has it.',
+          fix: 'search/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
         },
   };
 }
@@ -516,7 +543,7 @@ async function checkReadPath(
         status: 'fail',
         required: true,
         detail: `Read path ${url} failed: ${res.message}`,
-        fix: 'Check your network connection and --base-url.',
+        fix: FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: 'API_UNREACHABLE',
     };
@@ -529,7 +556,7 @@ async function checkReadPath(
         status: 'fail',
         required: true,
         detail: `Read path ${url} did not return an items array`,
-        fix: 'Point --base-url at a Tenjin API.',
+        fix: 'Point the configured base URL at a Tenjin API: `tenjin config set baseUrl <url>`.',
       },
       failCode: 'API_UNREACHABLE',
     };
@@ -677,9 +704,18 @@ export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
         : c.status === 'warn'
           ? paint(io, 'yellow', '!')
           : paint(io, 'red', '✗');
-    lines.push(`${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', c.detail)}`);
+    // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
+    // info.version, a provider's error text). doctor now prints them directly
+    // above the allowlist block the operator is told to paste, so a newline or
+    // ANSI in a hostile deployment's version string could forge a second, wider
+    // "allowlist" section in the terminal. Sanitize at the render seam: output.ts
+    // exempts doctor on the assumption it only paints its OWN text, which stopped
+    // being true the moment these lines sat next to a copy-paste block.
+    lines.push(
+      `${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
+    );
     if (c.status !== 'ok' && c.fix !== undefined) {
-      lines.push(`    ${paint(io, 'dim', `fix: ${c.fix}`)}`);
+      lines.push(`    ${paint(io, 'dim', `fix: ${sanitizeForTerminal(c.fix)}`)}`);
     }
   }
   return lines;

@@ -33,6 +33,8 @@ import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
+import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
+import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -267,6 +269,10 @@ export async function runInstall(
     harnesses,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
+    // Shipped with the install rather than left for the operator to discover after
+    // their first auto-mode denial (#33). Static constants, no config key: see
+    // lib/permissions.ts for why this is deliberately not operator-editable state.
+    permissions: recommendedPermissions(),
   };
 
   // Machine path (--json or piped stdout): today's envelope, no wallet step.
@@ -318,8 +324,20 @@ async function buildWalkthrough(
   );
   lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
   lines.push(...doctorSummary(io, s.doctor), '');
+  lines.push(...permissionsWalkthrough(io), '');
   lines.push(`Done. Try: tenjin search "${EXAMPLE_QUESTION}"`);
   return lines;
+}
+
+/**
+ * The recommended harness allowlist, printed at install time so an operator has
+ * the lines BEFORE an auto-mode session denies `tenjin search` (#33). The heading
+ * is painted; the rules themselves stay unpainted so a copy-paste out of the
+ * terminal is exactly the text the settings file wants.
+ */
+function permissionsWalkthrough(io: Io): string[] {
+  const [heading, ...rest] = renderPermissionsBlock();
+  return [paint(io, 'bold', heading ?? ''), ...rest];
 }
 
 function harnessLabel(h: Harness): string {
@@ -493,8 +511,12 @@ function doctorSummary(io: Io, doctor: DoctorChecks): string[] {
   const lines = [paint(io, 'yellow', 'Some checks need attention:')];
   for (const c of problems) {
     const icon = c.status === 'fail' ? paint(io, 'red', '✗') : paint(io, 'yellow', '!');
-    lines.push(`  ${icon} ${c.name}: ${c.detail}`);
-    if (c.fix !== undefined) lines.push(paint(io, 'dim', `    fix: ${c.fix}`));
+    // Same seam as renderDoctorHuman: `detail`/`fix` carry server-sourced
+    // substrings and now sit directly above the pasteable allowlist block.
+    lines.push(`  ${icon} ${c.name}: ${sanitizeForTerminal(c.detail)}`);
+    if (c.fix !== undefined) {
+      lines.push(paint(io, 'dim', `    fix: ${sanitizeForTerminal(c.fix)}`));
+    }
   }
   return lines;
 }

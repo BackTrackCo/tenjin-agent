@@ -1,0 +1,79 @@
+{
+  "skill_name": "tenjin-publish",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Publish this to Tenjin. Raw notes from yesterday: I tested every x402 facilitator I could find against Base mainnet USDC. PayAI settles mainnet, median 1.4s over 40 transfers. Coinbase CDP settles mainnet but rejects a payTo that differs from the advertised recipient, which silently zeroes attribution on x402scan. Two others are testnet only and return a 200 with an empty settlement body on mainnet, which reads as success until you check the chain. Tested 2026-07-26 with @x402/core 2.17.0 on Node 22.",
+      "expected_output": "A drafted piece plus an answer card whose questionsAnswered are dense and varied, an as-of date, and a publish run through the configured consent mode.",
+      "files": [],
+      "expectations": [
+        "The drafted card populates `questionsAnswered` with between 5 and 10 entries",
+        "No `questionsAnswered` or `tasksSupported` entry exceeds 200 characters",
+        "The `questionsAnswered` entries use at least two different registers from the three the skill names: a natural symptom sentence, a terse keyword line or verbatim error string, a why/how question",
+        "No `questionsAnswered` entry is a same-register rephrasing of another entry",
+        "The `scope` names the products and versions tested (x402 facilitators, Base mainnet USDC, @x402/core 2.17.0) and contains no filler adjectives",
+        "`exclusions` states at least one thing the piece does not cover",
+        "`asOf` is an ISO-8601 timestamp with an offset, for example `2026-07-26T00:00:00Z`, carrying the stated test date",
+        "The measured numbers from the source notes (median 1.4s, 40 transfers) appear in the body, not only in the card",
+        "`tenjin publish` is run, and the card it carries is accepted on that first invocation with no card-validation retry"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I want to publish the runbook I just wrote as a Tenjin piece: it is a step-by-step for rotating a facilitator API key without dropping in-flight settlements, with the exact commands, the order of operations, and the two rollback branches. Set it up so agents can find it.",
+      "expected_output": "A card that uses tasksSupported for the operational capability and keeps questions out of that list, with a matching artifact type.",
+      "files": [],
+      "expectations": [
+        "The card populates `tasksSupported`",
+        "No `tasksSupported` entry is phrased as a question or ends with a question mark",
+        "Any `questionsAnswered` entries present are phrased as questions, and no entry appears in both lists",
+        "No `tasksSupported` entry exceeds 200 characters",
+        "The body contains the exact commands rather than a prose description of them"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Publish this finding. Notes: reproduced the collation trap on our internal reporting cluster. Swapping the base image to pgvector/pgvector:pg16 flips text collation from musl to glibc under the same locale name, which changes pg_get_functiondef digests and breaks our schema-drift check. Payouts wallet 0x9f2a4c7bE1d3F08a5C6b9D2e4A7f1B3c8D5e0A21 was unaffected. Our drift check runs 340 times a day and costs us about 90 engineer-minutes a month when it false-positives. Fix is to pin C.UTF-8 and exclude extension-owned functions from the digest.",
+      "expected_output": "A published piece with the method intact, the wallet address and the internal operational metrics stripped, and a card that stands on its own.",
+      "files": [],
+      "expectations": [
+        "The wallet address `0x9f2a4c7bE1d3F08a5C6b9D2e4A7f1B3c8D5e0A21` appears nowhere in the drafted body or card",
+        "The internal figures (340 runs a day, 90 engineer-minutes a month) appear nowhere in the drafted body or card",
+        "The reproducible method survives: the drafted body names the pgvector/pgvector:pg16 image, the musl to glibc collation flip, and the C.UTF-8 pin",
+        "The drafted card populates `questionsAnswered` with between 5 and 10 entries and none exceeds 200 characters",
+        "At least one `questionsAnswered` entry is phrased as the symptom a stranger would actually hit",
+        "`tenjin publish` is run and the `needs_confirmation` payload it returns is rendered to the user, findings list included, rather than summarized as clean"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Here is a long dump from my debugging session, publish the useful part to Tenjin: after four hours I established that Turbopack's persistent cache invalidates on any change to a file matched by a workspace-level pnpm catalog entry, even when the resolved version is identical, and that setting the catalog entry to an exact version instead of a range removes the invalidation. Verified on Next 16.0.3, pnpm 11.11, macOS and Linux, 2026-07-24. Everything else in the session was me going down the wrong path on the module graph.",
+      "expected_output": "A tight card drawn from the verified finding only, published through the review consent sequence with no --yes before the user says yes.",
+      "files": [],
+      "expectations": [
+        "The drafted card populates `questionsAnswered` with between 5 and 10 entries and none exceeds 200 characters",
+        "No card entry is padded to length with restatements of another entry",
+        "The abandoned module-graph investigation is not part of the drafted piece",
+        "`scope` names Next 16.0.3 and pnpm 11.11 and the platforms verified",
+        "In the default review mode, `tenjin publish` is run without `--yes` first, and the returned needs_confirmation payload is rendered to the user before any re-run",
+        "No `tenjin publish --yes` is run before the user gives an explicit yes"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Find out whether Turbopack's persistent cache survives a pnpm catalog entry changing from a range to an exact version, and if nobody has established it, work it out and tell me. Next 16.0.3, pnpm 11.11, today is 2026-07-26.",
+      "expected_output": "A search first, and after a MISS the task is completed directly. The derived finding then routes through publish.mode without the user having asked to publish: in review mode that means a publish run whose needs_confirmation payload is rendered, never a silent publish and never a bare 'publish?' asked before running.",
+      "files": [],
+      "expectations": [
+        "`tenjin search` is run before the work is done, and it includes `--json`",
+        "After a MISS the agent completes the task itself rather than stopping at the MISS",
+        "The publish decision follows the resolved `publish.mode` rather than asking a generic 'should I publish this?' before any publish command is run",
+        "In the default review mode, `tenjin publish` is run without `--yes`, and the `needs_confirmation` payload it returns is rendered to the user with its findings and price",
+        "No `tenjin publish --yes` is run before the user gives an explicit yes",
+        "The drafted card populates `questionsAnswered` with between 5 and 10 entries, none over 200 characters",
+        "The question that was searched appears as one of the `questionsAnswered` entries, in the phrasing it was searched with",
+        "`tenjin outcome` is run once to report how the search ended"
+      ]
+    }
+  ]
+}

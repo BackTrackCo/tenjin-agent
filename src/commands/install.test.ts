@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { runInstall } from './install';
 import type { InstallDeps, PromptFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -881,6 +882,49 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).toContain('Claude Code: 3 skills installed');
     expect(text).toContain('publish mode: review');
     expect(text).toContain('Done. Try: tenjin search');
+  });
+
+  it('prints the recommended auto-mode allowlist, buy separated, send never (#33)', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptMode: async () => '' }),
+    );
+    const text = human(res);
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).toContain(e.rule);
+    // buy appears only under the opt-in heading, never inside the safe block.
+    expect(text).toContain('Opt in separately, only if you want unattended purchases:');
+    expect(text).toContain('Bash(tenjin buy:*)');
+    expect(text).toContain('maxAutoSpend');
+    // No rule is ever offered for a money-moving or state-changing verb.
+    for (const e of NEVER_ALLOWLISTED) {
+      const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
+      expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
+    }
+    expect(text).toContain('tenjin send');
+    expect(text).toContain('.claude/settings.json');
+    // The caveats qualify the rules, so they travel with them or the block lies.
+    expect(text).toContain('--base-url');
+    expect(text).toContain('mcp__tenjin__tenjin_publish');
+    // And the corrected claims, not the ones the first cut shipped.
+    expect(text).toMatch(/authorizes UNATTENDED purchases/);
+    expect(text).not.toMatch(/still puts a human on every purchase/);
+    expect(text).not.toContain('free, read-only verbs');
+  });
+
+  it('--json carries the same three tiers in the machine payload', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({ isInteractive: true }),
+    );
+    const d = asData(res.data) as Data & {
+      permissions: { alwaysSafe: { rule: string }[]; optIn: { rule: string }[] };
+    };
+    expect(d.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
+      ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
+    );
+    expect(d.permissions.optIn.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
   });
 
   it('--json returns the envelope data and never prompts the wallet', async () => {
