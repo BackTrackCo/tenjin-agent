@@ -132,6 +132,19 @@ export type ReadResult =
     }
   | { kind: 'already_purchased'; message: string };
 
+/**
+ * The extra outcome a SESSION-SIGNED read can have: a 401 saying the delegation is
+ * expired, revoked, or bound to a key this server will not accept.
+ *
+ * It is a value rather than a thrown API_UNREACHABLE because the caller has a
+ * defined answer for it — `read` falls to its ordinary exit-3 refusal, never a
+ * retry loop, because re-establishing needs a wallet it cannot reach. And it is
+ * kept OUT of `ReadResult` because an unsigned or SIWX 401 has no such contract:
+ * widening the shared union would make `buy` and `inspect` branch on a state they
+ * can never produce, and a "cannot happen" branch is where wrong handling hides.
+ */
+export type SessionReadResult = ReadResult | { kind: 'session_rejected'; code?: string };
+
 export interface ReadRequestOptions {
   timeoutMs: number;
   fetchImpl?: typeof fetch;
@@ -139,17 +152,35 @@ export interface ReadRequestOptions {
   siwxHeader?: string;
   /** The `PAYMENT-SIGNATURE` header(s) for a paid request. */
   paymentHeaders?: Record<string, string>;
+  /**
+   * RFC 9421 session-key headers (`Tenjin-Session-Delegation`, `Signature-Input`,
+   * `Signature`) proving an entitlement without a wallet and without paying. A
+   * bodyless GET carries no `Content-Digest`, so the covered set is method+URI.
+   */
+  sessionHeaders?: Record<string, string>;
   /** Attribute a following purchase to the search that surfaced it. */
   searchId?: string;
 }
 
-export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<ReadResult> {
+/**
+ * One transport, two result types, selected by whether the caller actually
+ * presented a session key. The `session_rejected` arm is reachable only when
+ * `sessionHeaders` were sent, so the overloads say exactly that instead of
+ * leaving every caller to prove it by inspection.
+ */
+export async function fetchRead(
+  url: string,
+  opts: ReadRequestOptions & { sessionHeaders: Record<string, string> },
+): Promise<SessionReadResult>;
+export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<ReadResult>;
+export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<SessionReadResult> {
   const headers: Record<string, string> = {
     accept: 'application/json',
     'x-tenjin-client': CLIENT_HEADER,
   };
   if (opts.searchId !== undefined) headers['x-tenjin-search-id'] = opts.searchId;
   if (opts.siwxHeader !== undefined) headers[SIWX_HEADER] = opts.siwxHeader;
+  if (opts.sessionHeaders !== undefined) Object.assign(headers, opts.sessionHeaders);
   if (opts.paymentHeaders !== undefined) Object.assign(headers, opts.paymentHeaders);
 
   const res = await httpRequest(url, {
@@ -259,6 +290,14 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     };
   }
 
+  // Narrow on purpose: only a request that actually presented a session key gets
+  // the soft outcome. Widening this to every 401 would quietly turn buy's SIWX
+  // re-check failure into a value the caller has to remember to branch on.
+  if (res.status === 401 && opts.sessionHeaders !== undefined) {
+    const code = readCode(res.json);
+    return { kind: 'session_rejected', ...(code !== undefined ? { code } : {}) };
+  }
+
   if (res.status === 409) {
     // The owned-re-pay gate: a payment for a post this wallet already bought is
     // refused, nothing charged. The caller falls back to a SIWX free re-read.
@@ -304,6 +343,13 @@ function decodeSettlement(header: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The server's machine `code` on an auth failure (`session_expired`, …), if any. */
+function readCode(json: unknown): string | undefined {
+  if (typeof json !== 'object' || json === null) return undefined;
+  const code = (json as Record<string, unknown>).code;
+  return typeof code === 'string' ? code : undefined;
 }
 
 function readMessage(json: unknown): string | undefined {

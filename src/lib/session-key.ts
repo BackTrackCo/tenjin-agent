@@ -1,11 +1,17 @@
-import { createHash, randomBytes, webcrypto } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
-import { z } from 'zod';
-import { CliError } from './errors';
-import { hasCode } from './errno';
+import { webcrypto } from 'node:crypto';
 import { sessionPath } from './paths';
 import { writeFileAtomic } from './atomic-json';
 import { buildSiwxHeader } from './siwx';
+import { originOf } from './url';
+import {
+  isSessionUsable,
+  loadSessionFile,
+  signWithSession,
+  type SessionFile,
+  type SessionKeyDeps,
+  type SessionScope,
+  type SignableRequest,
+} from './session-present';
 import type { TenjinSigner } from './wallet/provider';
 
 /**
@@ -20,57 +26,54 @@ import type { TenjinSigner } from './wallet/provider';
  * popup) until the delegation expires. The delegated key is short-lived (≤24h,
  * server-clamped) and cached 0600, address-bound so a wallet change invalidates it.
  *
- * Never hand-rolls crypto: P-256 keygen/sign is node:crypto webcrypto (subtle),
- * SHA-256 is node:crypto, and the wallet delegation reuses the siwx.ts seam.
+ * This module is the MINT half — everything that needs a wallet signer, i.e.
+ * `establishSession`, the cache writer, and the two `WriteAuth` implementations.
+ * The present-only half (load a file, sign one request with it) lives in
+ * `session-present.ts` and is re-exported below, so `posts-api`/`publish`/`edit`
+ * keep importing one module while `read` can import the present half ALONE and
+ * stay structurally unable to open a keystore. Do not move a signer-touching
+ * function down into `session-present.ts`: read's import-graph pin is what makes
+ * "read cannot mint and cannot pay" a property of the code rather than a promise.
+ *
+ * A minted delegation is a wallet-derived credential, so it is bound to the
+ * ORIGIN it was minted against and every presenter re-checks that binding.
+ *
+ * Never hand-rolls crypto: P-256 keygen is node:crypto webcrypto (subtle) and the
+ * wallet delegation reuses the siwx.ts seam.
  */
 
-/**
- * The delegation scopes the server recognizes. A session is minted at the scope
- * the run needs: a `read`-scoped session cannot write (the server refuses the
- * write with `insufficient_scope`), so an owner-scoped READ never leaves a
- * write-capable delegation on disk that the run did not need.
- */
-export type SessionScope = 'read' | 'read+write';
+export {
+  contentDigest,
+  isSessionPresentable,
+  readSessionFile,
+  isSessionUsable,
+  keyidFor,
+  loadSessionFile,
+  scopeSatisfies,
+  signatureBase,
+  signatureParams,
+  signWithSession,
+  targetUri,
+} from './session-present';
+export type {
+  SessionFile,
+  SessionFileState,
+  SessionKeyDeps,
+  SessionScope,
+  SignableRequest,
+  SignatureParamsInput,
+} from './session-present';
 
 /**
- * Does a cached session's scope cover what this run needs? Wider covers narrower,
- * so a cached `read+write` serves a `read` run with no new wallet signature; the
- * reverse must NOT hold, or a read-scoped session would be used for a write the
- * server then rejects.
+ * The chain a session delegation is signed over. Writes require Base mainnet per
+ * the server's SIWX chain constraint, and a session covers reads and writes
+ * alike, so there is exactly ONE session chain id rather than a per-caller
+ * choice: `session start` and the write path must mint against the same chain or
+ * the file they share would flip between two delegations.
  */
-export function scopeSatisfies(cached: string, required: SessionScope): boolean {
-  if (cached === required) return true;
-  return required === 'read' && cached === 'read+write';
-}
+export const SESSION_CHAIN_ID = 'eip155:8453';
+
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h; the server clamps to ≤24h.
-/** Re-establish this long before `exp` so a signed request cannot expire in flight. */
-const EXP_SKEW_MS = 60_000;
-
-/** The persisted session: the wallet-signed delegation plus the P-256 key material. */
-const SessionFileSchema = z.object({
-  /** Lowercased wallet address this delegation is bound to. */
-  address: z.string(),
-  /** The constant base64 SIWX `Tenjin-Session-Delegation` header value. */
-  delegation: z.string(),
-  /** Delegation expiry (ISO 8601); a request is never signed at/after this. */
-  exp: z.string(),
-  scope: z.string(),
-  /** base64url raw 65-byte uncompressed P-256 point (0x04||X||Y). */
-  publicKeyRaw: z.string(),
-  /** The P-256 private key as a JWK, re-imported to sign each request. */
-  privateKeyJwk: z.record(z.string(), z.unknown()),
-});
-export type SessionFile = z.infer<typeof SessionFileSchema>;
-
-/**
- * A request to sign. The body is part of the METHOD, not an optional extra: a
- * bodied request must carry the exact bytes Content-Digest covers, and a GET has
- * no body to cover at all, so content-digest drops out of the covered set. As a
- * union, "GET with a body" and "PUT without one" are both unrepresentable rather
- * than merely wrong.
- */
-export type SignableRequest =
-  { method: 'GET'; url: string } | { method: 'POST' | 'PUT'; url: string; body: string };
 
 /**
  * The write-auth seam a posts client signs through. `headersFor` attaches the
@@ -81,13 +84,6 @@ export interface WriteAuth {
   headersFor(req: SignableRequest): Promise<Record<string, string>>;
   /** React to a write's 401 `code`; true ⇒ the next headersFor retry may succeed. */
   recover(code: string | undefined): Promise<boolean>;
-}
-
-export interface SessionKeyDeps {
-  /** Clock seam (ms since epoch). */
-  now?: () => number;
-  /** Per-request nonce (≥16-byte CSPRNG hex). */
-  nonce?: () => string;
 }
 
 export interface SessionKeyConfig {
@@ -105,76 +101,6 @@ export interface SessionKeyConfig {
 
 const subtle = webcrypto.subtle;
 
-// ---------------------------------------------------------------------------
-// Byte-exact RFC 9421 primitives (the wire contract; unit-tested against fixtures).
-// ---------------------------------------------------------------------------
-
-/** Standard base64 of raw bytes. */
-function toBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64');
-}
-
-/** base64url (no padding) of raw bytes — the pubkey/keyid encoding. */
-function toBase64Url(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64url');
-}
-
-/** `sha-256=:<base64 SHA-256(body)>:` — RFC 9530 Content-Digest over the body. */
-export function contentDigest(body: string): string {
-  const hash = createHash('sha256').update(body, 'utf8').digest();
-  return `sha-256=:${hash.toString('base64')}:`;
-}
-
-/** The `@target-uri` derivation: scheme://host[:port]path[?query], nothing more. */
-export function targetUri(url: string): string {
-  const u = new URL(url);
-  return `${u.protocol}//${u.host}${u.pathname}${u.search}`;
-}
-
-export interface SignatureParamsInput {
-  method: 'POST' | 'PUT' | 'GET' | 'DELETE';
-  url: string;
-  /** Present ⇒ the request has a body and content-digest joins the covered set. */
-  contentDigest?: string;
-  created: number;
-  nonce: string;
-  keyid: string;
-}
-
-/**
- * The `@signature-params` value (also the `Signature-Input` value after the
- * `tenjin=` label): the ordered covered-component list plus the signature
- * parameters, verbatim per llms-full.txt. `content-digest` is covered ONLY on a
- * bodied request.
- */
-export function signatureParams(input: SignatureParamsInput): string {
-  const covered =
-    input.contentDigest !== undefined
-      ? '"@method" "@target-uri" "content-digest"'
-      : '"@method" "@target-uri"';
-  return `(${covered});created=${input.created};nonce="${input.nonce}";keyid="${input.keyid}";alg="ecdsa-p256-sha256"`;
-}
-
-/**
- * The UTF-8 signing base: the LF-joined canonical block over `@method`,
- * `@target-uri`, `content-digest` (bodied requests only), and
- * `@signature-params`, with NO trailing newline.
- */
-export function signatureBase(input: SignatureParamsInput): string {
-  const params = signatureParams(input);
-  const lines = [
-    `"@method": ${input.method.toUpperCase()}`,
-    `"@target-uri": ${targetUri(input.url)}`,
-    ...(input.contentDigest !== undefined ? [`"content-digest": ${input.contentDigest}`] : []),
-    `"@signature-params": ${params}`,
-  ];
-  return lines.join('\n');
-}
-
-// ---------------------------------------------------------------------------
-// Key material.
-// ---------------------------------------------------------------------------
-
 function generateP256KeyPair(): Promise<webcrypto.CryptoKeyPair> {
   return subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
     'sign',
@@ -182,31 +108,10 @@ function generateP256KeyPair(): Promise<webcrypto.CryptoKeyPair> {
   ]) as Promise<webcrypto.CryptoKeyPair>;
 }
 
-async function importSigningKey(jwk: Record<string, unknown>): Promise<webcrypto.CryptoKey> {
-  return subtle.importKey(
-    'jwk',
-    jwk as webcrypto.JsonWebKey,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign'],
-  );
+/** base64url (no padding) of raw bytes — the pubkey/keyid encoding. */
+function toBase64Url(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('base64url');
 }
-
-/** Sign the base bytes with the P-256 key: P-256/SHA-256, IEEE-P1363 64-byte r||s. */
-async function signBase(jwk: Record<string, unknown>, base: string): Promise<string> {
-  const key = await importSigningKey(jwk);
-  const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, Buffer.from(base, 'utf8'));
-  return toBase64(new Uint8Array(sig));
-}
-
-/** keyid = `p256:<base64url pubkey>`, the delegation-bound identifier. */
-function keyidFor(publicKeyRaw: string): string {
-  return `p256:${publicKeyRaw}`;
-}
-
-// ---------------------------------------------------------------------------
-// Establish + per-request signing.
-// ---------------------------------------------------------------------------
 
 /** The three URNs bound into the delegation's SIWX `resources` array (D35). */
 export function delegationResources(
@@ -235,7 +140,7 @@ export async function establishSession(
   const pair = await generateP256KeyPair();
   const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
   const publicKeyRaw = toBase64Url(rawPub);
-  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as Record<string, unknown>;
+  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as SessionFile['privateKeyJwk'];
 
   const expIso = new Date(now() + SESSION_TTL_MS).toISOString();
   const delegation = await buildSiwxHeader(config.signer, {
@@ -248,6 +153,7 @@ export async function establishSession(
 
   const file: SessionFile = {
     address: config.signer.address.toLowerCase(),
+    origin: originOf(config.baseUrl),
     delegation,
     exp: expIso,
     scope: config.scope,
@@ -258,103 +164,15 @@ export async function establishSession(
   return file;
 }
 
-/** Produce the RFC 9421 write headers for `req`, signed by the session key. */
-export async function signWithSession(
-  file: SessionFile,
-  req: SignableRequest,
-  deps: SessionKeyDeps = {},
-): Promise<Record<string, string>> {
-  const now = deps.now ?? Date.now;
-  const nonce = deps.nonce ?? (() => randomBytes(16).toString('hex'));
-  // A bodiless request carries no Content-Digest, and content-digest leaves the
-  // covered component set with it — signing a digest of "" would cover bytes the
-  // request never sends.
-  const digest = req.method === 'GET' ? undefined : contentDigest(req.body);
-  const created = Math.floor(now() / 1000);
-  const params: SignatureParamsInput = {
-    method: req.method,
-    url: req.url,
-    ...(digest !== undefined ? { contentDigest: digest } : {}),
-    created,
-    nonce: nonce(),
-    keyid: keyidFor(file.publicKeyRaw),
-  };
-  const base = signatureBase(params);
-  const signature = await signBase(file.privateKeyJwk, base);
-  return {
-    'Tenjin-Session-Delegation': file.delegation,
-    'Signature-Input': `tenjin=${signatureParams(params)}`,
-    Signature: `tenjin=:${signature}:`,
-    ...(digest !== undefined ? { 'Content-Digest': digest } : {}),
-  };
-}
-
 // ---------------------------------------------------------------------------
-// Cache I/O (0600, address-bound).
+// Cache writes (0600, address-bound). The reader lives in session-present.
 // ---------------------------------------------------------------------------
-
-export async function loadSessionFile(dir: string): Promise<SessionFile | null> {
-  const path = sessionPath(dir);
-  // Fail closed on a loosened cache (ssh's posture for a private key): the key is
-  // written 0600, so if it is now group- or world-readable it was tampered with
-  // out of band — refuse it and re-establish rather than sign with a key others
-  // can read. No-op on win32, which has no unix mode.
-  if (process.platform !== 'win32') {
-    try {
-      const mode = (await stat(path)).mode & 0o077;
-      if (mode !== 0) return null;
-    } catch (err) {
-      if (hasCode(err, 'ENOENT')) return null;
-      throw sessionReadError(path, err);
-    }
-  }
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch (err) {
-    if (hasCode(err, 'ENOENT')) return null;
-    throw sessionReadError(path, err);
-  }
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    return null; // a corrupt cache is not fatal: re-establish silently.
-  }
-  const parsed = SessionFileSchema.safeParse(json);
-  return parsed.success ? parsed.data : null;
-}
-
-function sessionReadError(path: string, cause: unknown): CliError {
-  return new CliError('INTERNAL', `Could not read the session cache at ${path}`, {
-    fix: `Check file permissions on ${path}, or delete it to re-establish.`,
-    cause,
-  });
-}
 
 export async function saveSessionFile(dir: string, file: SessionFile): Promise<void> {
   await writeFileAtomic(sessionPath(dir), `${JSON.stringify(file, null, 2)}\n`, {
     mode: 0o600,
     dirMode: 0o700,
   });
-}
-
-/**
- * A cached session usable now: bound to this address, wide enough for what the run
- * needs, and not near expiry. A read-scoped cache does NOT serve a write run — it
- * re-establishes instead, because the server would refuse that write.
- */
-export function isSessionUsable(
-  file: SessionFile,
-  address: string,
-  now: number,
-  required: SessionScope,
-): boolean {
-  if (file.address !== address.toLowerCase()) return false;
-  if (!scopeSatisfies(file.scope, required)) return false;
-  const expMs = Date.parse(file.exp);
-  if (!Number.isFinite(expMs)) return false;
-  return now < expMs - EXP_SKEW_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,13 +217,17 @@ export function createSessionKeyAuth(
     if (
       !forceReestablish &&
       cached !== null &&
-      isSessionUsable(cached, config.signer.address, now(), config.scope)
+      isSessionUsable(cached, config.signer.address, now(), config.scope, originOf(config.baseUrl))
     ) {
       return cached;
     }
     if (!forceReestablish) {
       const onDisk = await loadSessionFile(config.dataDir);
-      if (onDisk !== null && isSessionUsable(onDisk, config.signer.address, now(), config.scope)) {
+      const origin = originOf(config.baseUrl);
+      if (
+        onDisk !== null &&
+        isSessionUsable(onDisk, config.signer.address, now(), config.scope, origin)
+      ) {
         cached = onDisk;
         return cached;
       }

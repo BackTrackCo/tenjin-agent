@@ -17,6 +17,8 @@ import {
 } from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
+import { saveSessionFile } from '../lib/session-key';
+import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
@@ -849,7 +851,10 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     expect(data.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
       ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
     );
-    expect(data.permissions.optIn.map((e) => e.rule)).toEqual(['Bash(tenjin buy:*)']);
+    expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
+      'Bash(tenjin buy:*)',
+      'Bash(tenjin session start:*)',
+    ]);
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
   });
 
@@ -878,7 +883,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     const block = renderPermissionsBlock().join('\n');
     expect(block).toContain('--base-url');
     expect(block).toContain('mcp__tenjin__tenjin_publish');
-    expect(block).toContain('Free: no wallet, no signing, no payment');
+    expect(block).toContain('Free: cannot spend and cannot open the keystore');
     expect(block).not.toContain('free, read-only verbs');
   });
 });
@@ -930,5 +935,178 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
     expect(apiLine).toContain('Bash(tenjin:*)');
     expect(apiLine).not.toContain('\x1b[32m');
     expect(lines.filter((l) => l.trimStart().startsWith('Bash(tenjin:*)'))).toEqual([]);
+  });
+});
+
+/**
+ * The session check. `read` presents a cached delegation to recover an owned
+ * piece, so "is there one, at what scope, until when" is a real diagnostic — and
+ * ABSENT is the normal posture rather than a defect, which is why it is `ok` and
+ * not a warn: most machines never need one, and a permanent yellow line teaches
+ * operators to ignore the yellow lines.
+ */
+describe('runDoctor — session key', () => {
+  it('reports ok with no session, naming the verb that would mint one', async () => {
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('ok');
+    expect(check.required).toBe(false);
+    expect(check.detail).toContain('No session key');
+    expect(check.detail).toContain('tenjin session start --scope read');
+    expect(check.data).toBeUndefined();
+  });
+
+  it('reports a live session as ok with address, scope and expiry — never key material', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('ok');
+    expect(check.data).toEqual({
+      address: file.address,
+      origin: file.origin,
+      scope: 'read',
+      exp: file.exp,
+    });
+    const rendered = JSON.stringify(res.data) + (res.humanLines ?? []).join('\n');
+    expect(rendered).not.toContain(file.delegation);
+    expect(rendered).not.toContain(String((file.privateKeyJwk as { d?: string }).d));
+  });
+
+  it('warns (never fails) on an expired session, with the fix that renews it', async () => {
+    const { file } = await testSessionKey({ exp: new Date(Date.now() - 1000).toISOString() });
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    const check = find(data.checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.required).toBe(false);
+    expect(check.fix).toBe('tenjin session start --scope read');
+    // A stale session is never an exit-code event.
+    expect(data.status).toBe('pass');
+  });
+
+  it('uses the injected clock, so expiry is decided rather than observed', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), {
+      env: {},
+      fetchImpl: healthyFetch,
+      now: () => Date.parse(file.exp) + 1,
+    });
+    expect(find((res.data as { checks: CheckResult[] }).checks, 'session').status).toBe('warn');
+  });
+});
+
+/**
+ * The tamper and failure states. `loadSessionFile` collapses all of these to
+ * null, which is the right instruction for a caller that can re-mint and exactly
+ * the wrong report for the verb an operator runs when something looks wrong: a
+ * 0644 file holding a wallet-derived credential was changed out of band, and
+ * "No session key" hides that.
+ */
+describe('runDoctor — session key, the states loadSessionFile flattens', () => {
+  it('warns on a group-readable file rather than calling it absent', async () => {
+    if (process.platform === 'win32') return;
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    await chmod(join(dir, 'session.json'), 0o644);
+    const check = find(
+      (
+        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+          checks: CheckResult[];
+        }
+      ).checks,
+      'session',
+    );
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('0644');
+    expect(check.detail).toMatch(/out of band/i);
+  });
+
+  it('warns on a corrupt file, naming it as unparseable rather than missing', async () => {
+    await writeFile(join(dir, 'session.json'), 'not json {{{', { mode: 0o600 });
+    const check = find(
+      (
+        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+          checks: CheckResult[];
+        }
+      ).checks,
+      'session',
+    );
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/could not be parsed/i);
+  });
+
+  it('warns when the session belongs to another origin than the configured base URL', async () => {
+    const { file } = await testSessionKey({ origin: 'https://other.example' });
+    await saveSessionFile(dir, file);
+    const check = find(
+      (
+        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+          checks: CheckResult[];
+        }
+      ).checks,
+      'session',
+    );
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('https://other.example');
+    expect(check.detail).toMatch(/not presented off its own origin/i);
+  });
+
+  it('never aborts the whole run when the session cache cannot be read', async () => {
+    // doctor is diagnostics. An unreadable session cache (EACCES after a `sudo`
+    // run, EIO) used to throw INTERNAL out of the check array and take down the
+    // one command an operator reaches for when the install is broken.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    await writeFile(join(dir, 'session.json'), '{}', { mode: 0o600 });
+    await chmod(join(dir, 'session.json'), 0o000);
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    // Every other check still ran, and the session one warns with its fix.
+    expect(data.status).toBe('pass');
+    expect(find(data.checks, 'api-contract').status).toBe('ok');
+    const check = find(data.checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.fix).toBe('tenjin session start --scope read');
+  });
+});
+
+/**
+ * The regression this round nearly shipped: `originOf` throws USAGE, and calling
+ * it inline while building the check array took down the whole diagnostic before
+ * a single check existed — on the one command an operator runs when the install
+ * is broken, and one line above the check that had just fixed that same class.
+ * The `--base-url` flag is validated at the CLI boundary; the environment and
+ * config routes are not.
+ */
+describe('runDoctor — a base URL that is not an origin never aborts the run', () => {
+  // TENJIN_BASE_URL is the live route: `--base-url` is URL-validated at the CLI
+  // boundary and a bad config.json value fails the `config` check, but the env
+  // var reaches settings unvalidated. This is vraspar's exact repro.
+  it.each([
+    ['unparseable', 'tenjin.blog'],
+    ['a non-http scheme', 'foo://tenjin.blog'],
+  ])('still produces a check list with %s in TENJIN_BASE_URL', async (_name, baseUrl) => {
+    const res = await runDoctor(ctxFor(), {
+      env: { TENJIN_BASE_URL: baseUrl },
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { checks: CheckResult[] };
+    // The run produced a check list at all, which is the whole point.
+    expect(data.checks.length).toBeGreaterThan(3);
+    expect(find(data.checks, 'session').status).toBe('ok'); // absent, and absent is ok
+  });
+
+  it('warns that a cached session cannot be matched, instead of throwing', async () => {
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const res = await runDoctor(ctxFor(), {
+      env: { TENJIN_BASE_URL: 'foo://tenjin.blog' },
+      fetchImpl: healthyFetch,
+    });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/not an http\(s\) origin/i);
+    expect(check.fix).toMatch(/config set baseUrl/);
   });
 });

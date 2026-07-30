@@ -1,4 +1,4 @@
-import { createSessionKeyAuth, createSiwxAuth } from './session-key';
+import { createSessionKeyAuth, createSiwxAuth, SESSION_CHAIN_ID } from './session-key';
 import type { SessionScope, WriteAuth } from './session-key';
 import type { PublishMode } from './config';
 import { PublishModeSchema } from './config';
@@ -14,8 +14,13 @@ import type { TenjinSigner } from './wallet';
  * publish does — and a second copy of a gate is a gate that drifts.
  */
 
-/** Writes require Base mainnet per the server's SIWX chain constraint. */
-export const WRITE_CHAIN_ID = 'eip155:8453';
+/**
+ * Writes require Base mainnet per the server's SIWX chain constraint. Aliased to
+ * the one session chain id rather than re-declared: `tenjin session start` mints
+ * into the same `session.json` this path reuses, and two constants that drifted
+ * would silently invalidate each other's cached delegation.
+ */
+export const WRITE_CHAIN_ID = SESSION_CHAIN_ID;
 
 export interface WriteAuthOptions {
   signer: TenjinSigner;

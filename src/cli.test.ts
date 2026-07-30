@@ -271,3 +271,40 @@ describe('edit flag forwarding (the dispatcher mapping)', () => {
     expect(JSON.parse(cap.stdout()).error.message).toContain('Invalid post id');
   });
 });
+
+/**
+ * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
+ * so the cases here are the ones that resolve BEFORE it — the group exists, the
+ * leaf exists, and a bad `--scope` is USAGE.
+ */
+describe('session command group', () => {
+  it('registers `session start` as a subcommand, not a bare verb', async () => {
+    const cap = captureIo();
+    expect(await main(['session', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('start [options]');
+  });
+
+  it('a bare `tenjin session` is USAGE, never a silent mint', async () => {
+    const cap = captureIo();
+    expect(await main(['session'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+
+  it('--scope read+write is refused as USAGE, before any wallet work', async () => {
+    const cap = captureIo();
+    const code = await main(['session', 'start', '--scope', 'read+write', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout()) as { error: { code: string; message: string } };
+    expect(parsed.error.code).toBe('USAGE');
+    expect(parsed.error.message).toContain('read+write');
+  });
+
+  it('the leaf takes trailing global flags like every other command', async () => {
+    const cap = captureIo();
+    // A bad --timeout is a dispatcher-level USAGE, which proves the leaf parsed
+    // the global flag rather than passing it through as an unknown option.
+    const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});

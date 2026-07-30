@@ -26,10 +26,11 @@ import type {
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { trimSlash } from '../lib/url';
-import { configPath } from '../lib/paths';
+import { tryOriginOf, trimSlash } from '../lib/url';
+import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
+import { isSessionPresentable, readSessionFile } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
@@ -102,6 +103,8 @@ export interface DoctorDeps {
   /** PATH probe for the `claude`/`codex` binaries, half of harness detection. Defaults
    * to probing `env.PATH`, so a test passing `env: {}` detects neither. */
   which?: (bin: string) => boolean;
+  /** Clock seam (ms since epoch) for the session-expiry check. */
+  now?: () => number;
 }
 
 /**
@@ -135,6 +138,7 @@ export async function collectDoctorChecks(
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
     ),
+    await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -520,6 +524,108 @@ const POSTURE: Record<DirState, string> = {
   shadowed: 'at least one CLI skill present but not model-invocable',
   wired: 'CLI skills wired, take precedence over the hosted mirror',
 };
+
+/**
+ * The delegated session key `tenjin read` presents to recover a piece this wallet
+ * already owns (`tenjin session start --scope read` mints it). Never required and
+ * never a fail — `read` works without one — so ABSENT is `ok`: the normal
+ * posture, not a defect.
+ *
+ * Everything else warns, and the states are kept apart on purpose. A 0600 file
+ * that is now group-readable, or one whose contents no longer parse, is a TAMPER
+ * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
+ * and collapses them to "no session", which is the right instruction for a caller
+ * that can re-mint and exactly the wrong report for the verb an operator runs
+ * when something looks wrong. `readSessionFile` keeps them distinguishable and
+ * this is the one caller that needs them.
+ *
+ * An unreadable file (EACCES after a `sudo` run, EIO) warns rather than throwing:
+ * doctor is diagnostics, and a session cache nobody asked about must never take
+ * down the run that was going to explain the rest of the machine.
+ *
+ * Reports address / origin / scope / expiry and nothing else. The delegation and
+ * the private JWK never reach this output — doctor's payload is the single most
+ * likely thing in this CLI to be pasted into an issue.
+ */
+async function checkSession(
+  dataDir: string,
+  now: () => number,
+  origin: string | null,
+): Promise<BuiltCheck> {
+  const warn = (detail: string, data?: unknown): BuiltCheck => ({
+    result: {
+      name: 'session',
+      status: 'warn',
+      required: false,
+      detail,
+      fix: 'tenjin session start --scope read',
+      ...(data !== undefined ? { data } : {}),
+    },
+  });
+
+  const state = await readSessionFile(dataDir);
+  if (state.kind === 'absent') {
+    return {
+      result: {
+        name: 'session',
+        status: 'ok',
+        required: false,
+        detail:
+          'No session key; `tenjin read` delivers free and locally-cached pieces (`tenjin session start --scope read` adds owned-piece recovery)',
+      },
+    };
+  }
+  if (state.kind === 'loosened') {
+    return warn(
+      `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
+    );
+  }
+  if (state.kind === 'corrupt') {
+    return warn(`Session key at ${sessionPath(dataDir)} could not be parsed (${state.reason})`);
+  }
+  if (state.kind === 'unreadable') {
+    return warn(`Session key at ${sessionPath(dataDir)} could not be read: ${state.message}`);
+  }
+
+  const file = state.file;
+  // A base URL that is not an http(s) origin cannot be compared against, and this
+  // is the diagnostic verb: it reports that and keeps going. The `config` check
+  // above owns the fix for the value itself.
+  if (origin === null) {
+    return {
+      result: {
+        name: 'session',
+        status: 'warn',
+        required: false,
+        detail: `Session key was minted for ${file.origin}, but the configured base URL is not an http(s) origin, so it cannot be matched`,
+        fix: 'Set an absolute http(s) base URL: `tenjin config set baseUrl <url>`.',
+        data: { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp },
+      },
+    };
+  }
+  const data = { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp };
+  if (file.origin !== origin) {
+    return warn(
+      `Session key was minted for ${file.origin}, but the configured base URL is ${origin}; it is not presented off its own origin`,
+      data,
+    );
+  }
+  if (!isSessionPresentable(file, now(), 'read', origin)) {
+    return warn(
+      `Session key for ${file.address} is expired or out of scope (scope ${file.scope}, exp ${file.exp})`,
+      data,
+    );
+  }
+  return {
+    result: {
+      name: 'session',
+      status: 'ok',
+      required: false,
+      detail: `Session key ${file.address}, scope ${file.scope}, for ${file.origin}, expires ${file.exp}`,
+      data,
+    },
+  };
+}
 
 async function checkReadPath(
   baseUrl: string,
