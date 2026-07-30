@@ -338,7 +338,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('edit <postId>'))
     .description(
-      'Show or update one of your own posts: with no change flags it prints the stored post and answer card, with them it merge-updates (omitted field = kept). Use to fix a price, sharpen a card, or ship a revised body; changes need --yes under your publish.mode consent',
+      'Show or update one of your own posts: with no change flags it prints the stored post and answer card, with them it merge-updates (omitted field = kept). Use to fix a price, sharpen a card, or ship a revised body; changes need --yes under your publish.mode consent. Reading is owner-scoped, so even the no-flag show signs with your wallet on first use, minting a read-scoped 24h session',
     )
     .option('--yes', 'apply the update without the confirmation stop')
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')

@@ -1207,3 +1207,214 @@ describe('runEdit — normalization keeps an edit idempotent', () => {
     expect(stub.putBody()).toEqual({ resource: { asOf: '2026-07-20T00:00:00.000Z' } });
   });
 });
+
+describe('runEdit — the scan follows what ships, not what was typed', () => {
+  const SECRET = 'AKIAIOSFODNN7EXAMPLE';
+  /** A post whose STORED, already-public text is secret-shaped. */
+  const POISONED = {
+    ...STORED,
+    resource: { ...STORED.resource, scope: `see ${SECRET} for the key` },
+  };
+
+  it('a pruned value cannot block an unrelated change', async () => {
+    // Restating the stored scope verbatim alongside a real title change: the scope
+    // prunes away, only the title ships, so there is nothing new to refuse. The
+    // secret is already public and no flag here could remove it, and the same flags
+    // WITHOUT --title exit 0, so blocking would be incoherent as well as unhelpful.
+    const stub = stubServer({ get: POISONED });
+    const res = await runEdit(
+      args({ yes: true, scope: `see ${SECRET} for the key`, title: 'A Better Answer' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ title: 'A Better Answer' });
+    expect((res.data as { id: string }).id).toBe(POST_ID);
+  });
+
+  it('the same flags with nothing surviving are a no-op, not a block', async () => {
+    const stub = stubServer({ get: POISONED });
+    const res = await runEdit(
+      args({ yes: true, scope: `see ${SECRET} for the key` }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+  });
+
+  it('a secret in a SURVIVING value still blocks', async () => {
+    const stub = stubServer({ get: POISONED });
+    await expect(
+      runEdit(
+        args({ yes: true, scope: `now also ${SECRET} plus more`, title: 'A Better Answer' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('a body file that prunes to a no-op does not block on its stored secret', async () => {
+    const body = `# The Answer\n\nThe key is ${SECRET}\n`;
+    const stored = { ...STORED, bodyMd: body };
+    const file = await writeDoc(body);
+    const stub = stubServer({ get: stored });
+    const res = await runEdit(
+      args({ yes: true, body: file }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+  });
+
+  it('a body file that DOES change still blocks on a secret it introduces', async () => {
+    const file = await writeDoc(`# The Answer\n\nA new body with ${SECRET} in it.\n`);
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ yes: true, body: file }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+});
+
+describe('runEdit — the delegation on the wire', () => {
+  /** The SIWX resources bound into the delegation header of the first request. */
+  function delegationResourcesOf(call: { headers: Record<string, string> }): string[] {
+    const header = call.headers['tenjin-session-delegation'];
+    expect(header, 'the request carried no session delegation').toBeDefined();
+    const decoded = Buffer.from(header as string, 'base64').toString('utf8');
+    return (JSON.parse(decoded) as { resources?: string[] }).resources ?? [];
+  }
+
+  it('a no-flag show binds scope:read into the signed delegation itself', async () => {
+    // The scope on disk and the scope on the wire come from the same variable, so
+    // pinning session.json alone would survive a hardcoded 'read+write' here.
+    const stub = stubServer();
+    await runEdit(
+      args(),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(delegationResourcesOf(stub.calls[0]!)).toContain('urn:tenjin:session:scope:read');
+  });
+
+  it('a change run binds scope:read+write', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(delegationResourcesOf(stub.calls[0]!)).toContain('urn:tenjin:session:scope:read+write');
+  });
+});
+
+describe('runEdit — the receipt echoes the mode that was actually used', () => {
+  it('carries the resolved mode, so a per-run override is visible', async () => {
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, scope: 'a new scope' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { mode: string }).mode).toBe('auto');
+
+    const override = stubServer();
+    const res2 = await runEdit(
+      args({ yes: true, scope: 'another new scope', mode: 'full-auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: override.fetch, provider: spyProvider().provider, env: {} }),
+    );
+    expect((res2.data as { mode: string }).mode).toBe('full-auto');
+  });
+
+  it('--mode loosens the gate for one run: a warn finding proceeds without --yes', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ provenance: `measured from 0x${'b'.repeat(40)}`, mode: 'full-auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider, env: {} }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('a mistyped --mode is USAGE before any wallet or network work', async () => {
+    const stub = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runEdit(
+        args({ yes: true, scope: 'x', mode: 'Review' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    expect(stub.calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+  });
+});
+
+describe('runEdit — the notes never contradict the summary', () => {
+  it('clearing asOf drops the "asOf is unchanged" note', async () => {
+    const file = await writeDoc('# New\n\nA fresh body.\n');
+    const stub = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, body: file, clear: ['asOf'] }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    const out = stderr();
+    expect(out).toContain('asOf: "2026-07-01T00:00:00.000Z" → (cleared)');
+    expect(out).not.toContain('asOf is unchanged');
+  });
+
+  it('keeps the note when asOf really is staying put', async () => {
+    const file = await writeDoc('# New\n\nA fresh body.\n');
+    const stub = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, body: file }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stderr()).toContain('asOf is unchanged');
+  });
+});
+
+describe('runEdit — a big appliesTo cannot flood one line', () => {
+  it('caps each value and the whole rendering', async () => {
+    const long = 'v'.repeat(120);
+    const stub = stubServer({
+      get: {
+        ...STORED,
+        resource: {
+          ...STORED.resource,
+          appliesTo: Object.fromEntries(
+            Array.from({ length: 8 }, (_, i) => [
+              `key${i}`,
+              Array.from({ length: 20 }, () => long),
+            ]),
+          ),
+        },
+      },
+    });
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runEdit(
+      args({ yes: true, appliesTo: ['products=Base'] }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    const line = stderr()
+      .split('\n')
+      .find((l) => l.startsWith('appliesTo: '));
+    expect(line).toBeDefined();
+    // 19KB of card would otherwise land on this one line.
+    expect((line as string).length).toBeLessThan(500);
+    expect(line).toContain('…');
+  });
+});

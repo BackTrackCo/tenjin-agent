@@ -352,6 +352,43 @@ describe('tenjin_edit', () => {
     expect(server.puts()).toHaveLength(0);
   });
 
+  it('forwards mode, so a per-call full-auto loosens a gate config would have closed', async () => {
+    // env/config resolve to review here, and the finding is warn-level, so this
+    // proceeds ONLY if `mode` reached the core: dropping the forwarding leaves
+    // review in charge and the call comes back NEEDS_CONFIRMATION instead.
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: {
+        postId: POST_ID,
+        provenance: `measured from 0x${'b'.repeat(40)}`,
+        mode: 'full-auto',
+      },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as SuccessEnvelope;
+    // The receipt names the mode that actually governed the run.
+    expect(sc.data.mode).toBe('full-auto');
+    expect(server.puts()).toHaveLength(1);
+  });
+
+  it('without the override the same call stops to confirm', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, provenance: `measured from 0x${'b'.repeat(40)}` },
+    });
+
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as ErrorEnvelope;
+    expect(sc.error.code).toBe('NEEDS_CONFIRMATION');
+    expect((sc.error.details as { mode: string }).mode).toBe('review');
+    expect(server.puts()).toHaveLength(0);
+  });
+
   it('a live secret in the new content hard-blocks even with yes:true', async () => {
     const server = editServer();
     const client = await editClient(server.fetch);

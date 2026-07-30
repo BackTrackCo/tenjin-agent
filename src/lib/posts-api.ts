@@ -128,7 +128,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   return {
     ...(title !== undefined && title.length > 0 ? { title } : {}),
     ...(bodyMd !== undefined ? { bodyMd } : {}),
-    ...(input.excerpt !== undefined ? { excerpt: input.excerpt } : {}),
+    ...(excerpt !== undefined ? { excerpt } : {}),
     ...(input.tags !== undefined && input.tags.length > 0 ? { tags: input.tags } : {}),
     ...(input.priceAtomic !== undefined ? { price: input.priceAtomic } : {}),
     ...(input.handle !== undefined ? { handle: input.handle } : {}),

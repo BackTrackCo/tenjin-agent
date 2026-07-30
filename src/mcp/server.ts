@@ -435,7 +435,9 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'clear:["scope"]. Under the same publish.mode consent as publishing, an update returns ' +
         'NEEDS_CONFIRMATION with the before/after summary for you to show the user before ' +
         're-calling with yes:true, and a live secret in the new content returns PUBLISH_BLOCKED, ' +
-        'which yes never clears.',
+        'which yes never clears. Reading is owner-scoped, so even a show (postId only) signs with ' +
+        'the local wallet on first use, minting a read-scoped 24h session; the key never leaves ' +
+        'this machine.',
       inputSchema: editInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },

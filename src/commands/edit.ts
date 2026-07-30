@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
-import { parsePublishModeFlag } from '../lib/config';
+import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
 import { scan, type ScanFinding } from '../lib/scan';
 import { sanitizeForTerminal } from '../lib/output';
@@ -199,11 +199,16 @@ export async function runEdit(
     'each edit asks you once. Set auto to apply clean edits automatically',
   );
 
-  // The scan covers exactly what this edit would NEWLY publish: the body file
-  // (whole, frontmatter included) plus the text typed on this invocation. A secret
-  // reaching the public page through `edit` blocks exactly as it does through
-  // `publish` — never bypassable by --yes or full-auto.
-  const findings = dedupeFindings([...scan(bodyFile?.raw ?? ''), ...scan(typedScanText(args))]);
+  // The scan covers exactly what this edit SHIPS: the typed text behind the keys
+  // that survived pruning, plus the body file only when the body itself survived.
+  // Scanning the raw flags instead would block on a value that prunes away — a
+  // secret already public in the stored scope, restated verbatim, would refuse an
+  // unrelated title change while the same flags alone exit 0. A secret in a
+  // surviving value still blocks in every mode, never cleared by --yes.
+  const findings = dedupeFindings([
+    ...(input.bodyMd !== undefined ? scan(bodyFile?.raw ?? '') : []),
+    ...scan(shippedTypedText(args, input)),
+  ]);
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
   if (blocking.length > 0) {
@@ -213,7 +218,7 @@ export async function runEdit(
     });
   }
 
-  const notes = editNotes(args, stored, bodyFile);
+  const notes = editNotes(args, stored, bodyFile, clears);
   for (const line of [...notes, ...changes]) ctx.io.stderr.write(`${line}\n`);
 
   if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
@@ -231,7 +236,7 @@ export async function runEdit(
   }
 
   const updated = await updatePost(args.postId, input, auth, client);
-  return updateReceipt(updated, changes, notes);
+  return updateReceipt(updated, changes, notes, settings.mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +264,12 @@ function showReceipt(post: OwnPost): CommandResult {
  * only there is a summary it can never show the user. `changes: []` is the
  * unambiguous machine signal that nothing was written.
  */
-function updateReceipt(post: OwnPost, changes: string[], notes: string[]): CommandResult {
+function updateReceipt(
+  post: OwnPost,
+  changes: string[],
+  notes: string[],
+  mode: PublishMode,
+): CommandResult {
   const card = post.resource;
   const lines = [
     `Updated ${sanitizeForTerminal(post.title)} → ${sanitizeForTerminal(post.url)}`,
@@ -267,7 +277,10 @@ function updateReceipt(post: OwnPost, changes: string[], notes: string[]): Comma
     ...(post.warnings ?? []).map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
-    data: { ...post, changes, ...(notes.length > 0 ? { notes } : {}) },
+    // `mode` is echoed because a per-call --mode (or the MCP `mode` argument) is
+    // otherwise invisible in a transcript: the receipt would look identical
+    // whether the caller loosened the gate for this run or not.
+    data: { ...post, mode, changes, ...(notes.length > 0 ? { notes } : {}) },
     humanLines: lines,
   };
 }
@@ -383,6 +396,53 @@ function diffUpdate(
 }
 
 /**
+ * How each card key is diffed. The Record over `keyof ResourceCardUpdate` is the
+ * point: adding a field to the card type without saying how it diffs is a compile
+ * error here, not a field that silently never reaches the wire. `none` marks a
+ * field no flag and no clear can set today, so it can never appear in `next`;
+ * giving one a flag means moving it to a real pass.
+ */
+type CardPass = 'list' | 'iso' | 'scalar' | 'map' | 'none';
+const CARD_PASS = {
+  questionsAnswered: 'list',
+  tasksSupported: 'list',
+  asOf: 'iso',
+  validUntil: 'iso',
+  scope: 'scalar',
+  exclusions: 'scalar',
+  artifactType: 'scalar',
+  temporalMode: 'scalar',
+  provenanceSummary: 'scalar',
+  methodologySummary: 'scalar',
+  supersedesPostId: 'scalar',
+  appliesTo: 'map',
+  mediaType: 'none',
+  maintenanceCadence: 'none',
+  reproductionMinutes: 'none',
+  estimatedPaidInputCost: 'none',
+} as const satisfies Record<keyof ResourceCardUpdate, CardPass>;
+
+/** The card keys assigned to one pass, as a union of literal keys. */
+type KeysIn<P extends CardPass> = {
+  [K in keyof typeof CARD_PASS]: (typeof CARD_PASS)[K] extends P ? K : never;
+}[keyof typeof CARD_PASS];
+
+function keysIn<P extends CardPass>(pass: P): KeysIn<P>[] {
+  return Object.entries(CARD_PASS)
+    .filter(([, value]) => value === pass)
+    .map(([key]) => key) as KeysIn<P>[];
+}
+
+/** The two card keys whose flag name differs from the field name. */
+const CARD_LABEL: Partial<Record<keyof ResourceCardUpdate, string>> = {
+  provenanceSummary: 'provenance',
+  methodologySummary: 'methodology',
+};
+function cardLabel(key: keyof ResourceCardUpdate): string {
+  return CARD_LABEL[key] ?? key;
+}
+
+/**
  * The card half of the diff. Every comparison treats an ABSENT stored value as
  * already-cleared, which is what makes clearing a field on a cardless post the
  * no-op it should be rather than a card-creating write.
@@ -400,13 +460,10 @@ function diffCard(
   if (next === undefined) return { lines };
 
   // Lists replace wholesale, so order counts; an absent stored list reads as empty.
-  for (const [key, before] of [
-    ['questionsAnswered', stored?.questionsAnswered],
-    ['tasksSupported', stored?.tasksSupported],
-  ] as const) {
+  for (const key of keysIn('list')) {
     const after = next[key];
     if (after === undefined) continue;
-    const old = before ?? [];
+    const old = stored?.[key] ?? [];
     if (sameList(old, after)) continue;
     const added = after.filter((v) => !old.includes(v));
     const detail =
@@ -419,51 +476,36 @@ function diffCard(
   // user typed, so "2026-07-01T00:00:00Z" and "2026-07-01T00:00:00.000Z" are the
   // same moment spelled two ways — comparing the spellings would re-write the
   // field on every single run.
-  for (const [key, before] of [
-    ['asOf', stored?.asOf],
-    ['validUntil', stored?.validUntil],
-  ] as const) {
+  for (const key of keysIn('iso')) {
     const after = next[key];
     if (after === undefined) continue;
-    const from = isoInstant(before);
+    const from = isoInstant(stored?.[key]);
     const to = isoInstant(after);
     if (from === to) continue;
     keep(key, to, `${key}: ${preview(from)} → ${to === null ? '(cleared)' : preview(to)}`);
   }
 
-  for (const [label, key, before] of [
-    ['scope', 'scope', stored?.scope],
-    ['exclusions', 'exclusions', stored?.exclusions],
-    ['artifactType', 'artifactType', stored?.artifactType],
-    ['temporalMode', 'temporalMode', stored?.temporalMode],
-    ['provenance', 'provenanceSummary', stored?.provenanceSummary],
-    ['methodology', 'methodologySummary', stored?.methodologySummary],
-    ['supersedesPostId', 'supersedesPostId', stored?.supersedesPostId],
-  ] as const) {
+  for (const key of keysIn('scalar')) {
     const after = next[key];
     if (after === undefined) continue;
-    const from = before ?? null;
+    const from = stored?.[key] ?? null;
     if (from === after) continue;
     keep(
       key,
       after,
-      `${label}: ${preview(from)} → ${after === null ? '(cleared)' : preview(after)}`,
+      `${cardLabel(key)}: ${preview(from)} → ${after === null ? '(cleared)' : preview(after)}`,
     );
   }
 
   // appliesTo is one value, not a key count: a same-size swap (products=Base →
   // products=Vercel) has identical counts on both sides, so a count compare would
   // call a real change a no-op and a count RENDER would print it as one.
-  const after = next.appliesTo;
-  if (after !== undefined) {
-    const before = stored?.appliesTo ?? {};
-    if (!sameAppliesTo(before, after)) {
-      keep(
-        'appliesTo',
-        after,
-        `appliesTo: ${appliesToPreview(before)} → ${appliesToPreview(after)}`,
-      );
-    }
+  for (const key of keysIn('map')) {
+    const after = next[key];
+    if (after === undefined) continue;
+    const before = stored?.[key] ?? {};
+    if (sameAppliesTo(before, after)) continue;
+    keep(key, after, `${key}: ${appliesToPreview(before)} → ${appliesToPreview(after)}`);
   }
 
   return { ...(Object.keys(card).length > 0 ? { card: card as ResourceCardUpdate } : {}), lines };
@@ -489,7 +531,12 @@ function sameAppliesTo(a: Record<string, string[]>, b: Record<string, string[]>)
 }
 
 /** The advisory notes a --body edit needs, in the order a human reads them. */
-function editNotes(args: EditArgs, stored: OwnPost, bodyFile: BodyFile | undefined): string[] {
+function editNotes(
+  args: EditArgs,
+  stored: OwnPost,
+  bodyFile: BodyFile | undefined,
+  clears: ClearField[],
+): string[] {
   if (bodyFile === undefined) return [];
   const notes: string[] = [];
   if (bodyFile.hadFrontmatter) {
@@ -502,7 +549,10 @@ function editNotes(args: EditArgs, stored: OwnPost, bodyFile: BodyFile | undefin
       `note: the excerpt stays as-is (${preview(stored.excerpt)}) and remains lexically indexed; the server does not re-derive it. Pass --excerpt to change it.`,
     );
   }
-  if (stored.resource?.temporalMode === 'snapshot' && args.asOf === undefined) {
+  // Only when asOf really is staying put: a run that clears it is already saying
+  // so in the summary, and both lines together would contradict each other.
+  const asOfMoves = args.asOf !== undefined || clears.includes('asOf');
+  if (stored.resource?.temporalMode === 'snapshot' && !asOfMoves) {
     notes.push(
       `note: asOf is unchanged (${preview(stored.resource.asOf)}) on this snapshot card, and search freshness gating uses it. Pass --as-of to move it.`,
     );
@@ -725,10 +775,12 @@ function cardFlagsFrom(args: EditArgs): CardFlags {
  * spread of the GET, so a server-owned key (cacheEligible, cacheEligibleMissing,
  * schemaVersion) cannot reach a strictObject body that would reject it.
  *
- * A clear on a post with NO card is dropped here rather than sent: there is
- * nothing to clear, and any `resource` key on a browse-only post mints an
- * all-default card row server-side, quietly turning a plain document into a
- * card-bearing one. The diff prunes the rest (a clear of an already-empty field).
+ * What actually protects the server's D14 invariant (no card row on a browse-only
+ * post) is diffCard: it defaults an absent stored value to already-cleared, so a
+ * clear on a post with no card compares equal and prunes away. Dropping the clears
+ * here as well is a deliberate redundant backstop, one step earlier and local to
+ * the one condition that matters, because the cost of that invariant breaking is a
+ * plain document silently becoming card-bearing.
  */
 function withClears(
   set: ResourceCardInput | undefined,
@@ -784,32 +836,42 @@ function appendUnique(stored: string[], additions: string[]): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * The text this invocation TYPED, and only that: the post and card fields the
- * flags carry, outside the body file. A secret typed into --provenance ships to
- * the public card exactly like one in the body, so it faces the same gate.
+ * The text this invocation actually SHIPS, and only that. Two filters, each
+ * closing a way the gate could fire on text the edit does not publish:
  *
- * The append path contributes only its ADDED strings, never the merged array.
- * Scanning the stored entries would block an edit on text that is already public
- * and cannot be removed from here — trapping the user behind a secret they never
- * typed, with no flag that fixes it.
+ * - the key must have survived pruning. A flag whose value already matches the
+ *   stored one changes nothing, so its text is not "new content" at all; blocking
+ *   on it refuses an edit over a secret that is already public and that no flag
+ *   here can remove.
+ * - the value must be one the user TYPED. The append path contributes its added
+ *   strings, never the merged array it sends, for the same reason.
+ *
+ * Everything that does ship is scanned, so a secret in a surviving value blocks in
+ * every mode, never cleared by --yes.
  */
-function typedScanText(args: EditArgs): string {
+function shippedTypedText(args: EditArgs, input: PostUpdateInput): string {
   const parts: string[] = [];
   const add = (v: string | undefined): void => {
     if (v !== undefined) parts.push(v);
   };
-  add(args.title);
-  add(args.excerpt);
-  add(args.scope);
-  add(args.exclusions);
-  add(args.provenance);
-  add(args.methodology);
-  add(args.asOf);
-  add(args.validUntil);
-  for (const list of [args.question, args.task, args.addQuestion, args.addTask]) {
-    if (list !== undefined) parts.push(...list);
+  if (input.title !== undefined) add(args.title);
+  if (input.excerpt !== undefined) add(args.excerpt);
+
+  const card = input.resource;
+  if (card === undefined) return parts.join('\n');
+  if (card.scope !== undefined) add(args.scope);
+  if (card.exclusions !== undefined) add(args.exclusions);
+  if (card.provenanceSummary !== undefined) add(args.provenance);
+  if (card.methodologySummary !== undefined) add(args.methodology);
+  if (card.asOf !== undefined) add(args.asOf);
+  if (card.validUntil !== undefined) add(args.validUntil);
+  if (card.questionsAnswered !== undefined) {
+    for (const item of args.question ?? args.addQuestion ?? []) add(item);
   }
-  if (args.appliesTo !== undefined && args.appliesTo.length > 0) {
+  if (card.tasksSupported !== undefined) {
+    for (const item of args.task ?? args.addTask ?? []) add(item);
+  }
+  if (card.appliesTo !== undefined && args.appliesTo !== undefined) {
     // The parsed values, matching what actually ships on the card.
     for (const values of Object.values(parseAppliesToFlags(args.appliesTo))) parts.push(...values);
   }
@@ -831,6 +893,14 @@ function confirmMessage(warnCount: number, changeCount: number): string {
 // ---------------------------------------------------------------------------
 
 const PREVIEW_MAX = 60;
+/** A whole rendered line's budget: a max-size card is 8 keys × 20 × 120 chars. */
+const LINE_MAX = 200;
+
+/** Terminal-safe, whitespace-collapsed, and capped: the one place values are cut. */
+function clip(value: string, max = PREVIEW_MAX): string {
+  const clean = sanitizeForTerminal(value).replace(/\s+/g, ' ').trim();
+  return clean.length > max ? `${clean.slice(0, max)}…` : clean;
+}
 
 /** A short, terminal-safe rendering of a stored or new value for the summary. */
 function preview(value: string | null | undefined): string {
@@ -846,15 +916,19 @@ function previewList(values: string[]): string {
   return values.map((v) => preview(v)).join(', ');
 }
 
-/** `products=Base|Vercel, runtimes=node` — the VALUES, so a swap reads as a swap. */
+/**
+ * `products=Base|Vercel, runtimes=node` — the VALUES, so a swap reads as a swap.
+ * Every value takes the same 60-char cap the rest of the summary uses, and the
+ * whole rendering is capped too: a full-size card would otherwise put ~19KB on one
+ * stderr line.
+ */
 function appliesToPreview(appliesTo: Record<string, string[]>): string {
   const entries = Object.entries(appliesTo);
   if (entries.length === 0) return '(unset)';
-  return entries
-    .map(
-      ([key, values]) => `${sanitizeForTerminal(key)}=${values.map(sanitizeForTerminal).join('|')}`,
-    )
+  const rendered = entries
+    .map(([key, values]) => `${clip(key)}=${values.map((v) => clip(v)).join('|')}`)
     .join(', ');
+  return clip(rendered, LINE_MAX);
 }
 
 function sameList(a: string[], b: string[]): boolean {

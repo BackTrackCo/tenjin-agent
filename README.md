@@ -60,7 +60,10 @@ wallet provider layer before any payment.
 replace the stored list while `--add-question` / `--add-task` append to it. The
 append flags read the post and then write it back, with no concurrency guard (the
 API offers no `If-Match`), so a web-panel edit landing between the two calls can
-be overwritten.
+be overwritten. Reading your own post is owner-scoped, so even the no-flag show
+signs with your wallet on first use, minting a read-scoped 24h session; only a run
+that intends to write asks for a write-capable one. An edit sends only what
+actually changes, so re-running the same command writes nothing.
 
 Read output defaults to a heading outline, not the body: `--print-body` includes
 the full body, and `--sections <tokens>` includes the leading sections within a

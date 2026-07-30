@@ -305,7 +305,7 @@ function receipt(
   candidateInfo?: CandidateReceipt,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
-  const missing = missingSentences(result.cacheEligibleMissing);
+  const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
   const cacheEligible = result.cacheEligible ?? false;
   const deskUrl = `${trimSlash(baseUrl)}/desk`;
   const title = sanitizeForTerminal(result.title);

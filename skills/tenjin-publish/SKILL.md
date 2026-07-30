@@ -128,3 +128,7 @@ local files and never upload by themselves.
   revised Markdown, `--as-of <iso>` refreshes the freshness date, `--price <usd>`
   reprices, and the card flags sharpen the answer card. Run it with no flags first
   to see the stored post; changes need `--yes` under your publish.mode consent.
+- The array flags REPLACE, they do not add: `--question` / `--task` overwrite the
+  stored list wholesale, so passing one question drops every other one. To add
+  without losing what is there, use `--add-question` / `--add-task`, which read the
+  stored list first and append to it.
