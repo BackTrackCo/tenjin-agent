@@ -51,7 +51,7 @@ const commitAll = (cwd: string, message: string): void => {
  * which is exactly the regression the fork case below catches. Mutating calls are
  * logged as JSON lines so bodies survive intact.
  */
-const GH_STUB = `import { appendFileSync } from 'node:fs';
+const GH_STUB = `import { appendFileSync, readFileSync } from 'node:fs';
 const argv = process.argv.slice(2);
 const value = (flag) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : '');
 if (argv[0] === 'pr' && argv[1] === 'list') {
@@ -61,8 +61,17 @@ if (argv[0] === 'pr' && argv[1] === 'list') {
     value('--jq').includes('isCrossRepository == false');
   const visible = filtersForks ? prs.filter((pr) => !pr.isCrossRepository) : prs;
   process.stdout.write(visible.length > 0 ? String(visible[0].number) + '\\n' : '');
+} else if (argv[0] === 'pr' && argv[1] === 'view') {
+  process.stdout.write(process.env.GH_STUB_BODY ?? '');
 } else {
-  appendFileSync(process.env.GH_STUB_LOG, JSON.stringify(argv) + '\\n');
+  // Inline --body-file so an assertion sees the body itself; the script's trap
+  // deletes the file before the test could read it.
+  const at = argv.indexOf('--body-file');
+  const logged =
+    at >= 0
+      ? [...argv.slice(0, at), '--body', readFileSync(argv[at + 1], 'utf8'), ...argv.slice(at + 2)]
+      : argv;
+  appendFileSync(process.env.GH_STUB_LOG, JSON.stringify(logged) + '\\n');
 }
 `;
 
@@ -143,7 +152,7 @@ interface Run {
   output: string;
 }
 
-function run(lab: Lab, syncOutput: string, prs: Pr[] = []): Run {
+function run(lab: Lab, syncOutput: string, prs: Pr[] = [], existingBody = ''): Run {
   const options = {
     cwd: lab.work,
     encoding: 'utf8' as const,
@@ -152,6 +161,7 @@ function run(lab: Lab, syncOutput: string, prs: Pr[] = []): Run {
       PATH: `${lab.stubs}:${process.env.PATH ?? ''}`,
       SYNC_OUTPUT: syncOutput,
       GH_STUB_PRS: JSON.stringify(prs),
+      GH_STUB_BODY: existingBody,
       GH_STUB_LOG: lab.ghLog,
       GIT_TERMINAL_PROMPT: '0',
     },
@@ -222,6 +232,9 @@ describe('open-skill-resync-pr.sh', () => {
     expect(body).toContain('Frontmatter: unchanged');
     // The reviewer must not be told the content is vouched for; it isn't.
     expect(body).toContain('No step in this path has read the new wording');
+    // Fenced from the start, so the first update can splice rather than clobber.
+    expect(body).toContain('<!-- skill-resync:start -->');
+    expect(body).toContain('<!-- skill-resync:end -->');
   }, 30_000);
 
   it('flags a frontmatter change in the PR body', async () => {
@@ -242,6 +255,62 @@ describe('open-skill-resync-pr.sh', () => {
     expect(result.output).not.toContain('99');
     expect((await soleGhCall(lab)).slice(0, 2)).toEqual(['pr', 'create']);
     expect(remoteShow(lab, `${BRANCH}:${MIRROR}`)).toBe(mirror('new wording'));
+  }, 30_000);
+
+  it('adopts the same-repo PR even when a fork PR sorts first', async () => {
+    const lab = makeLab(mirror('old wording'));
+    seedBotBranch(lab, 'yesterday');
+    const result = run(lab, mirror('new wording'), [
+      { number: 99, isCrossRepository: true },
+      { number: 7, isCrossRepository: false },
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.output).toContain('updated PR #7');
+    expect((await soleGhCall(lab)).slice(0, 3)).toEqual(['pr', 'edit', '7']);
+  }, 30_000);
+
+  it("refreshes only its own block, leaving a reviewer's notes in the body", async () => {
+    const lab = makeLab(mirror('old wording'));
+    seedBotBranch(lab, 'yesterday');
+    const existing = [
+      '<!-- skill-resync:start -->',
+      'Mirror diff: +99 / -99 lines',
+      '<!-- skill-resync:end -->',
+      '',
+      'Checked paragraphs 1-3, the rest is new. Holding until Tuesday.',
+    ].join('\n');
+    const result = run(
+      lab,
+      mirror('new wording'),
+      [{ number: 7, isCrossRepository: false }],
+      existing,
+    );
+
+    expect(result.status).toBe(0);
+    const body = bodyOf(await soleGhCall(lab));
+    expect(body).toContain('Checked paragraphs 1-3, the rest is new. Holding until Tuesday.');
+    expect(body).toContain('Mirror diff: +1 / -1 lines');
+    expect(body).not.toContain('+99 / -99');
+    // Exactly one block, so a week of runs can't stack them.
+    expect(body.split('<!-- skill-resync:start -->')).toHaveLength(2);
+  }, 30_000);
+
+  it('appends its block rather than overwriting a body whose fence was removed', async () => {
+    const lab = makeLab(mirror('old wording'));
+    seedBotBranch(lab, 'yesterday');
+    const result = run(
+      lab,
+      mirror('new wording'),
+      [{ number: 7, isCrossRepository: false }],
+      'Rewrote this body by hand. Do not lose this.',
+    );
+
+    expect(result.status).toBe(0);
+    const body = bodyOf(await soleGhCall(lab));
+    expect(body).toContain('Rewrote this body by hand. Do not lose this.');
+    expect(body).toContain('Mirror diff: +1 / -1 lines');
+    expect(body).toContain('<!-- skill-resync:start -->');
   }, 30_000);
 
   it('updates the open same-repo PR in place instead of opening another', async () => {

@@ -30,7 +30,7 @@ echo "skill-resync: mirror has drifted from $SOURCE_URL."
 
 # Keep the fresh bytes aside: switching branches below needs a clean tree.
 synced=$(mktemp)
-trap 'rm -f "$synced"' EXIT
+trap 'rm -f "$synced" "$synced.body"' EXIT
 cp "$MIRROR" "$synced"
 git checkout -- skills/
 
@@ -108,8 +108,15 @@ else
   frontmatter_note='CHANGED — check name/description before merging'
 fi
 
-pr_body() {
+# Fenced so a later run can refresh the numbers without touching the rest of the
+# body. A PR about wording is exactly where a reviewer leaves notes, and the bot
+# owns only what it wrote — the same rule the changeset above follows.
+BOT_START='<!-- skill-resync:start -->'
+BOT_END='<!-- skill-resync:end -->'
+
+pr_block() {
   cat <<BODY
+$BOT_START
 Auto-opened by the daily \`skill-drift\` workflow: the vendored \`$MIRROR\` no
 longer matches its canonical source, $SOURCE_URL. The commit is
 \`pnpm sync:skill\` output.
@@ -121,18 +128,35 @@ No step in this path has read the new wording, so that is what the merge is for:
 check the content diff, confirm it is what you want agents to follow, then merge.
 Automation opens and refreshes this PR; it never merges it.
 
-Drifting again on a later day updates this same PR, and these numbers, in place.
+Drifting again on a later day refreshes this block in place. Notes outside it are
+left alone.
+$BOT_END
 BODY
 }
 
 if [ -n "$pr_number" ]; then
-  # Refresh the body so the magnitude above describes what is now on the branch.
-  # The body is bot-owned review scaffolding, unlike the changeset above.
-  gh pr edit "$pr_number" --body "$(pr_body)"
+  # Splice: replace the fenced block, keep everything around it. If a human
+  # removed the fence, append rather than overwrite — worst case the block is
+  # re-appended once and refreshed in place from then on.
+  EXISTING="$(gh pr view "$pr_number" --json body --jq .body)" \
+    BLOCK="$(pr_block)" START="$BOT_START" END="$BOT_END" \
+    node -e '
+      const { EXISTING = "", BLOCK, START, END } = process.env;
+      const from = EXISTING.indexOf(START);
+      const to = EXISTING.indexOf(END);
+      if (from >= 0 && to > from) {
+        process.stdout.write(EXISTING.slice(0, from) + BLOCK + EXISTING.slice(to + END.length));
+      } else if (EXISTING.trim().length > 0) {
+        process.stdout.write(EXISTING.trimEnd() + "\n\n" + BLOCK + "\n");
+      } else {
+        process.stdout.write(BLOCK);
+      }
+    ' >"$synced.body"
+  gh pr edit "$pr_number" --body-file "$synced.body"
   echo "skill-resync: updated PR #$pr_number."
   exit 0
 fi
 
 gh pr create --base main --head "$BRANCH" \
   --title "chore(skills): resync vendored skill mirror" \
-  --body "$(pr_body)"
+  --body "$(pr_block)"
