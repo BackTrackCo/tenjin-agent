@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './cli';
+import { searchCandidateSchema } from './lib/agent-api';
 import type { Io } from './lib/output';
 
 // The eval fixtures under evals/ are graded by a model, on demand, at real cost
@@ -10,6 +11,11 @@ import type { Io } from './lib/output';
 // `tenjin <verb>` an expectation grades is still a verb the CLI registers — so a
 // command rename turns into a red build here rather than an expectation that
 // quietly grades a command nobody will ever run.
+//
+// This file is the home for every "shipped text must follow the code" guard, so
+// the skill docs are checked here too. Prose that describes the wire is the part
+// that rots silently: nothing executes it, and an agent reading a stale field
+// list is misled at exactly the moment it is deciding what to buy.
 
 const EVALS_DIR = fileURLToPath(new URL('../evals/', import.meta.url));
 const SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url));
@@ -167,5 +173,48 @@ describe('eval fixtures', () => {
         ).toBeNull();
       }
     }
+  });
+});
+
+// The candidate field list in the tenjin-search skill, checked against the wire
+// schema it describes. This is the third time in two weeks that skill text has
+// drifted from the wire, and it is the worst place for it: the list is what an
+// agent uses to decide whether it already has enough to buy on, so a stale entry
+// sends it looking for a field the server stopped sending. Cheap to keep honest,
+// so keep it honest per-commit rather than per-review.
+const CANDIDATE_BULLET = /A candidate is a lean hit:([\s\S]*?`)\./;
+
+describe('skill text follows the wire schema', () => {
+  it('the tenjin-search candidate bullet names exactly the candidate schema keys', () => {
+    const skill = readFileSync(`${SKILLS_DIR}tenjin-search/SKILL.md`, 'utf8');
+    const bullet = CANDIDATE_BULLET.exec(skill);
+    expect(
+      bullet?.[1],
+      'tenjin-search/SKILL.md has no "A candidate is a lean hit:" list',
+    ).toBeDefined();
+
+    // The doc names the nested handle as `creator.handle`, which is the useful
+    // thing to tell a reader; the schema key is `creator`. Compare on the key,
+    // so the dotted form stays legal but an invented top-level field does not.
+    const named = [...(bullet?.[1] ?? '').matchAll(/`([^`]+)`/g)].map(
+      (m) => (m[1] ?? '').split('.')[0] ?? '',
+    );
+
+    expect(named.length, 'the bullet lists no fields').toBeGreaterThan(0);
+    expect(new Set(named).size, `the bullet repeats a field: ${named.join(', ')}`).toBe(
+      named.length,
+    );
+
+    // Compared as the symmetric difference rather than as two arrays, so a
+    // failure names the field that moved instead of printing two eleven-item
+    // lists for the reader to eyeball.
+    const declared = Object.keys(searchCandidateSchema.shape);
+    expect(
+      {
+        omittedByTheDoc: declared.filter((key) => !named.includes(key)),
+        notInTheSchema: named.filter((key) => !declared.includes(key)),
+      },
+      'skills/tenjin-search/SKILL.md and searchCandidateSchema disagree; update whichever is stale',
+    ).toEqual({ omittedByTheDoc: [], notInTheSchema: [] });
   });
 });

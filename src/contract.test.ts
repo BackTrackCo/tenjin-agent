@@ -3,7 +3,13 @@ import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
 import { searchBrowseSchema, searchCandidateSchema, searchResponseSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
-import { buildPostCreateBody } from './lib/posts-api';
+import { previewCardSchema } from './lib/read-client';
+import {
+  buildPostCreateBody,
+  buildPostUpdateBody,
+  ownPostSchema,
+  resourceEchoSchema,
+} from './lib/posts-api';
 import { deriveCard } from './lib/card';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
@@ -45,22 +51,47 @@ function requiredKeys(schema: { shape: Record<string, z.ZodType> }): string[] {
 // The contract the CLI relies on, written out long-hand: if either the CLI
 // schema or the fixture drifts from these lists, the drift is the failure.
 const RESPONSE_REQUIRED = ['calibration', 'decision', 'schemaVersion', 'searchId'];
+// The lean candidate of search v2: eleven keys, no card fields. Everything the
+// candidate used to carry about what a piece actually says now lives on the read
+// route's 402 body, one free unpaid GET away (see READ_CARD_REQUIRED below).
 const CANDIDATE_REQUIRED = [
-  'appliesTo',
   'artifactType',
   'asOf',
   'creator',
   'estimatedTokens',
-  'exclusions',
   'matchReasons',
   'price',
-  'questionsAnswered',
   'resourceId',
+  'slug',
+  'title',
+  'url',
+  'validUntil',
+];
+// The card fields that MOVED from the candidate to the 402 preview. Pinned as a
+// negative: a server that puts them back on a candidate has un-done search v2, and
+// the CLI would be re-reading depth from the breadth step.
+const CANDIDATE_MOVED_TO_INSPECT = [
+  'questionsAnswered',
+  'tasksSupported',
+  'appliesTo',
+  'scope',
+  'exclusions',
+  'temporalMode',
+];
+// The answer card on the unpaid 402 body: twelve fields, all required WITHIN the
+// card, with the card itself optional (an uncarded piece omits the key entirely).
+const READ_CARD_REQUIRED = [
+  'appliesTo',
+  'artifactType',
+  'asOf',
+  'exclusions',
+  'maintenanceCadence',
+  'methodologySummary',
+  'provenanceSummary',
+  'questionsAnswered',
   'scope',
   'tasksSupported',
   'temporalMode',
-  'title',
-  'url',
   'validUntil',
 ];
 // The MISS-only browse tail (tenjin#460). Deliberately minimal: if the server
@@ -160,6 +191,87 @@ describe('contract fixture covers every field the CLI requires', () => {
       ).toBeUndefined();
     }
   });
+
+  it('SearchCandidate carries none of the card fields that moved to inspect', () => {
+    const properties = get(fixtureDoc, 'components', 'schemas', 'SearchCandidate', 'properties');
+    for (const moved of CANDIDATE_MOVED_TO_INSPECT) {
+      expect(get(properties, moved), `SearchCandidate must not declare ${moved}`).toBeUndefined();
+    }
+  });
+});
+
+// The 402 preview's answer card (tenjin#500): the depth half of the two-step
+// flow, and the only place the CLI can now read what a piece actually claims
+// before paying. Pinned here rather than trusted, because search v2 removed the
+// fallback: if the card silently vanishes from the preview, `tenjin inspect`
+// renders a price and nothing to judge it against.
+function readCardProps(doc: unknown): unknown {
+  return get(
+    doc,
+    'components',
+    'schemas',
+    'ReadArticlePreview',
+    'properties',
+    'card',
+    'properties',
+  );
+}
+
+function assertReadCard(doc: unknown): void {
+  const preview = get(doc, 'components', 'schemas', 'ReadArticlePreview');
+  expect(preview, 'components.schemas.ReadArticlePreview missing').toBeDefined();
+  // The card is OPTIONAL on the preview: an uncarded piece omits the key rather
+  // than sending null, which is exactly what the CLI branches on.
+  expect(get(preview, 'required'), 'ReadArticlePreview must not require card').not.toContain(
+    'card',
+  );
+  const card = get(preview, 'properties', 'card');
+  expect(card, 'ReadArticlePreview.properties.card missing').toBeDefined();
+  const required = get(card, 'required');
+  for (const field of READ_CARD_REQUIRED) {
+    expect(get(readCardProps(doc), field), `card.properties.${field} missing`).toBeDefined();
+    expect(required, `card.required must list ${field}`).toContain(field);
+  }
+  // The third state (tenjin#500): a piece that HAS a card the server could not
+  // load. Also optional, because it is absent for both an uncarded piece and a
+  // carded one, and the CLI reads it only to keep "attests nothing" from being
+  // confused with "temporarily unreadable".
+  expect(
+    get(preview, 'properties', 'cardUnavailable'),
+    'ReadArticlePreview.properties.cardUnavailable missing',
+  ).toBeDefined();
+  expect(
+    get(preview, 'required'),
+    'ReadArticlePreview must not require cardUnavailable',
+  ).not.toContain('cardUnavailable');
+}
+
+describe('contract fixture pins the 402 answer card', () => {
+  it('the CLI requires exactly the pinned card fields', () => {
+    expect(requiredKeys(previewCardSchema)).toEqual(READ_CARD_REQUIRED);
+  });
+
+  it('ReadArticlePreview declares an optional card with every required field', () => {
+    assertReadCard(fixtureDoc);
+  });
+
+  it('a 402 body shaped like the fixture parses through the CLI preview schema', () => {
+    const parsed = previewCardSchema.parse({
+      artifactType: 'document',
+      temporalMode: 'snapshot',
+      asOf: '2026-07-01T00:00:00.000Z',
+      validUntil: null,
+      questionsAnswered: ['What do Base transactions cost right now?'],
+      tasksSupported: ['estimate gas spend'],
+      appliesTo: { products: ['Base'] },
+      scope: 'L2 execution fees only',
+      exclusions: null,
+      provenanceSummary: 'Measured against mainnet over one week.',
+      methodologySummary: null,
+      maintenanceCadence: null,
+    });
+    expect(parsed.artifactType).toBe('document');
+  });
 });
 
 describe('contract fixture request shapes', () => {
@@ -179,23 +291,18 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
   const candidate = {
     resourceId: '5b3e2b1a-8c4d-4f6e-9a2b-1c3d5e7f9a0b',
     url: 'https://tenjin.blog/api/read/alice/base-fee-snapshot',
+    slug: 'base-fee-snapshot',
     title: 'Base fee snapshot, July 2026',
     artifactType: 'document',
     price: '500000',
     asOf: '2026-07-01T00:00:00.000Z',
     validUntil: null,
-    temporalMode: 'snapshot',
-    appliesTo: { products: ['Base'] },
-    questionsAnswered: ['What do Base transactions cost right now?'],
-    tasksSupported: ['estimate gas spend'],
-    scope: 'L2 execution fees only',
-    exclusions: null,
     matchReasons: ['answer-card: base fees'],
     estimatedTokens: 1200,
     creator: { handle: 'alice' },
   };
   const response = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     searchId: '0f8b2d4c-6a1e-4b3f-8c5d-7e9f1a2b3c4d',
     decision: 'CANDIDATES',
     calibration: 'lexical-v1',
@@ -217,12 +324,17 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
 
   it('searchResponseSchema.parse accepts a MISS with candidates omitted', () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: response.searchId,
       decision: 'MISS',
       calibration: 'lexical-v1',
     };
     expect(searchResponseSchema.parse(miss).candidates).toBeUndefined();
+  });
+
+  it('searchResponseSchema.parse keeps the optional truncated flag', () => {
+    expect(searchResponseSchema.parse({ ...response, truncated: true }).truncated).toBe(true);
+    expect(searchResponseSchema.parse(response).truncated).toBeUndefined();
   });
 });
 
@@ -252,6 +364,7 @@ const CARD_INPUT_FIELDS = [
 
 function assertPostPaths(doc: unknown): void {
   expect(get(doc, 'paths', '/api/posts', 'post', 'operationId')).toBe('createPost');
+  expect(get(doc, 'paths', '/api/posts/{id}', 'get', 'operationId')).toBe('getOwnPost');
   expect(get(doc, 'paths', '/api/posts/{id}', 'put', 'operationId')).toBe('updatePost');
 }
 
@@ -333,6 +446,38 @@ function assertPublishContract(doc: unknown): void {
   ).toBeDefined();
 }
 
+function postUpdateProps(doc: unknown): unknown {
+  return get(doc, 'components', 'schemas', 'PostUpdate', 'properties');
+}
+function cardUpdateProps(doc: unknown): unknown {
+  return get(postUpdateProps(doc), 'resource', 'properties');
+}
+
+/**
+ * PostUpdate is the merge-update twin of PostCreate: strict at both levels, every
+ * field optional, and carrying the same bounds the CLI validates locally. The one
+ * deliberate difference is `handle`, which is create-only.
+ */
+function assertUpdateContract(doc: unknown): void {
+  expect(get(doc, 'components', 'schemas', 'PostUpdate', 'additionalProperties')).toBe(false);
+  expect(get(doc, 'components', 'schemas', 'PostUpdate', 'required')).toBeUndefined();
+  for (const field of ['title', 'bodyMd', 'excerpt', 'tags', 'price', 'status']) {
+    expect(get(postUpdateProps(doc), field), `PostUpdate.${field} missing`).toBeDefined();
+  }
+  expect(get(postUpdateProps(doc), 'resource', 'additionalProperties')).toBe(false);
+  for (const field of CARD_INPUT_FIELDS) {
+    expect(get(cardUpdateProps(doc), field), `PostUpdate resource.${field} missing`).toBeDefined();
+  }
+  const top = postUpdateProps(doc);
+  expect(bound(top, 'title', 'maxLength')).toBe(200);
+  expect(bound(top, 'bodyMd', 'maxLength')).toBe(200000);
+  expect(bound(top, 'excerpt', 'maxLength')).toBe(500);
+  expect(bound(top, 'tags', 'maxItems')).toBe(5);
+  expect(bound(top, 'tags', 'items', 'maxLength')).toBe(50);
+  expect(bound(top, 'price', 'pattern')).toBe('^(0|[1-9]\\d{0,12})$');
+  expect(bound(top, 'status', 'enum')).toEqual(['draft', 'published', 'unlisted']);
+}
+
 describe('contract fixture pins the publish endpoints', () => {
   it('declares POST /api/posts and PUT /api/posts/{id}', () => {
     assertPostPaths(fixtureDoc);
@@ -355,6 +500,86 @@ describe('contract fixture pins the publish endpoints', () => {
     const declared = postCreateProps(fixtureDoc);
     for (const key of Object.keys(body)) {
       expect(get(declared, key), `fixture does not declare PostCreate field ${key}`).toBeDefined();
+    }
+  });
+
+  it('the PostUpdate shape the CLI merge-updates through is fully declared', () => {
+    assertUpdateContract(fixtureDoc);
+  });
+
+  it('every field buildPostUpdateBody emits is a declared PostUpdate field', () => {
+    const body = buildPostUpdateBody({
+      title: 'T',
+      bodyMd: 'B',
+      excerpt: 'e',
+      tags: ['x'],
+      priceAtomic: '100000',
+      status: 'published',
+      resource: { scope: 's' },
+    });
+    const declared = postUpdateProps(fixtureDoc);
+    for (const key of Object.keys(body)) {
+      expect(get(declared, key), `fixture does not declare PostUpdate field ${key}`).toBeDefined();
+    }
+    // handle is create-only; sending it on an update would trip the strict body.
+    expect(get(declared, 'handle')).toBeUndefined();
+  });
+
+  it('every clear the CLI sends is a shape PostUpdate accepts', () => {
+    const card = cardUpdateProps(fixtureDoc);
+    // The nullable scalars: an explicit null is the clear, so each must declare a
+    // null branch or `--clear <field>` would be a validation_failed.
+    for (const field of [
+      'scope',
+      'exclusions',
+      'asOf',
+      'validUntil',
+      'provenanceSummary',
+      'methodologySummary',
+      'supersedesPostId',
+    ]) {
+      const branches = get(get(card, field), 'anyOf');
+      expect(Array.isArray(branches), `resource.${field} must be nullable`).toBe(true);
+      expect(
+        (branches as unknown[]).some((b) => get(b, 'type') === 'null'),
+        `resource.${field} declares no null branch`,
+      ).toBe(true);
+    }
+    // The containers clear with an empty value, so neither may demand a minimum.
+    for (const field of ['questionsAnswered', 'tasksSupported']) {
+      expect(get(card, field, 'type')).toBe('array');
+      expect(get(card, field, 'minItems')).toBeUndefined();
+    }
+    expect(get(card, 'appliesTo', 'type')).toBe('object');
+    expect(get(card, 'appliesTo', 'minProperties')).toBeUndefined();
+  });
+
+  it('every field the CLI DEMANDS back is one the fixture guarantees', () => {
+    // The request side is pinned above; this is the response side. A key the CLI
+    // requires but the server may omit is a CONTRACT_MISMATCH on a good response,
+    // so what we demand must be a subset of what the contract guarantees.
+    const postRequired = get(fixtureDoc, 'components', 'schemas', 'OwnPost', 'required');
+    expect(Array.isArray(postRequired)).toBe(true);
+    for (const key of requiredKeys(ownPostSchema)) {
+      expect(postRequired, `OwnPost.required must guarantee ${key}`).toContain(key);
+    }
+    const cardRequired = get(fixtureDoc, 'components', 'schemas', 'ResourceCard', 'required');
+    expect(Array.isArray(cardRequired)).toBe(true);
+    for (const key of requiredKeys(resourceEchoSchema)) {
+      expect(cardRequired, `ResourceCard.required must guarantee ${key}`).toContain(key);
+    }
+  });
+
+  it('every optional field the CLI READS is a declared response field', () => {
+    // Optional keys never fail parsing, so they fail silently instead: a renamed
+    // `bodyMd` would quietly make every diff look like a body change.
+    const postProps = get(fixtureDoc, 'components', 'schemas', 'OwnPost', 'properties');
+    for (const key of Object.keys(ownPostSchema.shape)) {
+      expect(get(postProps, key), `OwnPost.properties.${key} missing`).toBeDefined();
+    }
+    const cardProps = get(fixtureDoc, 'components', 'schemas', 'ResourceCard', 'properties');
+    for (const key of Object.keys(resourceEchoSchema.shape)) {
+      expect(get(cardProps, key), `ResourceCard.properties.${key} missing`).toBeDefined();
     }
   });
 
@@ -418,6 +643,11 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
     it('declares the publish endpoints and the resource-card shape the CLI sends', () => {
       assertPostPaths(liveDoc);
       assertPublishContract(liveDoc);
+      assertUpdateContract(liveDoc);
+    });
+
+    it('the 402 preview declares the optional answer card', () => {
+      assertReadCard(liveDoc);
     });
   },
 );

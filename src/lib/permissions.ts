@@ -97,6 +97,14 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
     note: 'Free pre-purchase card and preview. Never signs, never pays, never saves.',
   },
   {
+    rule: 'Bash(tenjin read:*)',
+    command: 'tenjin read',
+    note:
+      'Free-only delivery: free pieces and local-library re-reads. No wallet, no ' +
+      'signing, no payment — the wallet and payment modules are absent from its ' +
+      'import graph. Not read-only: a fresh free piece is saved to the library.',
+  },
+  {
     rule: 'Bash(tenjin outcome:*)',
     command: 'tenjin outcome',
     note:
@@ -186,6 +194,13 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason: 'Puts your content on a public marketplace under your identity.',
   },
   {
+    command: 'tenjin edit',
+    reason:
+      'Write-capable despite the no-flag form reading as a pure show: it edits live posts ' +
+      'and answer cards under your identity, and moves prices. A prefix rule pins the verb, ' +
+      'not the flags, so no rule can clear the read half without clearing the write half.',
+  },
+  {
     command: 'tenjin wallet create',
     reason: 'Creates the payment credential; a stray run is a wallet you did not mean to have.',
   },
@@ -234,9 +249,9 @@ export const FLAG_CAVEAT: readonly string[] = [
 export const MCP_CAVEAT: readonly string[] = [
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
-  '`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_wallet` gated, and treat',
-  '`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions. `tenjin_buy` is the',
-  'same opt-in decision as the buy line above.',
+  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
+  '`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_candidate` as gated',
+  'for its add/drop actions. `tenjin_buy` is the same opt-in decision as the buy line above.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */
@@ -272,7 +287,8 @@ export function renderPermissionsBlock(): string[] {
   ];
   for (const e of ALWAYS_SAFE_ALLOWLIST) lines.push(`  ${e.rule}`);
   lines.push('  Free: no wallet, no signing, no payment. Not all read-only, though:');
-  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report).');
+  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report),');
+  lines.push('  and `read` saves a delivered free piece to your local library.');
   lines.push('');
   lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
   lines.push('');

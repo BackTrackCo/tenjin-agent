@@ -31,10 +31,49 @@ export interface FetchJsonSuccess {
  */
 export interface FetchJsonFailure {
   ok: false;
-  kind: 'network' | 'timeout' | 'http' | 'invalid-json';
+  kind: 'network' | 'timeout' | 'http' | 'invalid-json' | 'blocked-redirect';
   status?: number;
   requestId?: string;
   message: string;
+}
+
+/**
+ * Header names that carry wallet-signed material.
+ *
+ * A request bearing any of these must NEVER follow a redirect. `resource-ref`
+ * pins the invariant — "nothing signed may leave for a host the user did not
+ * configure" — but `assertOnBaseOrigin` only checks the URL the caller asked
+ * for, and `fetch`'s default `redirect: 'follow'` re-sends request headers
+ * verbatim to the new host (Node strips only `Authorization`). A 3xx anywhere on
+ * the configured origin would therefore hand a signature BOUND TO THE REAL
+ * DOMAIN to whoever `Location` points at, replayable against it for the
+ * signature's lifetime.
+ *
+ * Detected by header NAME rather than by a caller-supplied "this is signed" flag
+ * so the protection cannot be forgotten at a call site: attaching the credential
+ * is what arms it. Matched case-insensitively. Kept as literals so the base
+ * transport keeps its single dependency; `http.test.ts` pins them against the
+ * real constants in `lib/siwx` and the x402 payment headers.
+ *
+ * All three wallet-signed families this CLI sends are here: the SIWX auth
+ * header, the x402 payment header (`payment-signature` for x402 v2, plus
+ * `x-payment`, the v1 spelling `@x402/core` can emit, as drift insurance even
+ * though `read-client` pins v2), and `tenjin-session-delegation` — a REUSABLE
+ * session-lifetime SIWX signature `session-key` attaches to every session-signed
+ * write, which makes it the most replayable credential of the set. The RFC 9421
+ * `Signature`/`Signature-Input` pair riding alongside it is deliberately absent:
+ * it covers method, URL, and body digest, so it is not usefully replayable at
+ * another host.
+ */
+const CREDENTIAL_HEADERS = new Set([
+  'sign-in-with-x',
+  'payment-signature',
+  'x-payment',
+  'tenjin-session-delegation',
+]);
+
+function carriesSignedMaterial(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some((name) => CREDENTIAL_HEADERS.has(name.toLowerCase()));
 }
 
 export type FetchJsonResult = FetchJsonSuccess | FetchJsonFailure;
@@ -133,12 +172,21 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PUT';
   timeoutMs: number;
   headers?: Record<string, string>;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
   jsonBody?: unknown;
   fetchImpl?: typeof fetch;
+  /**
+   * Refuse redirects even when the request carries no signed header. For a
+   * caller whose response becomes a durable local artifact (`fetchRead`: the
+   * 200 is written to the library as an entitlement record under the
+   * server-chosen id/slug), following a cross-origin redirect would let
+   * another host's bytes be recorded as if the configured origin served them.
+   * Off by default so search/outcome/publish/doctor keep normal transport.
+   */
+  blockRedirects?: boolean;
 }
 
 export interface HttpResponse {
@@ -169,7 +217,15 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
       body = JSON.stringify(opts.jsonBody);
       headers['content-type'] = 'application/json';
     }
-    if (opts.method === 'POST' || body !== undefined) headers['accept'] ??= 'application/json';
+    if (opts.method === 'POST' || opts.method === 'PUT' || body !== undefined) {
+      headers['accept'] ??= 'application/json';
+    }
+
+    // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
+    // A caller can also pin an unsigned request (blockRedirects) when the
+    // response it gets back becomes a durable local record.
+    const signed = carriesSignedMaterial(headers);
+    const pinned = signed || opts.blockRedirects === true;
 
     let res: Response;
     try {
@@ -178,6 +234,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
         headers,
         body,
         signal: controller.signal,
+        ...(pinned ? { redirect: 'manual' as const } : {}),
       });
     } catch (err) {
       return timedOut
@@ -186,6 +243,23 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     }
 
     const requestId = res.headers.get('x-request-id') ?? undefined;
+
+    // Fail CLOSED on a redirect the request was not allowed to follow. This
+    // returns a failure rather than the 3xx response so no caller can mistake an
+    // unfollowed redirect for a normal status and retry it by hand.
+    if (pinned && res.status >= 300 && res.status < 400) {
+      return {
+        ok: false,
+        kind: 'blocked-redirect',
+        status: res.status,
+        ...(requestId !== undefined ? { requestId } : {}),
+        message: signed
+          ? `Request to ${url} was redirected (${res.status}) while carrying a signed header; ` +
+            'refusing to follow it, because the signature is bound to the configured origin.'
+          : `Request to ${url} was redirected (${res.status}); ` +
+            'refusing to follow it, because the response must come from the configured origin.',
+      };
+    }
     // Read the raw text once; parse best-effort. A non-JSON body (empty 202, an
     // HTML error page) yields `undefined` rather than a thrown parse, because a
     // 402/409 caller keys off the STATUS and only some statuses carry JSON.

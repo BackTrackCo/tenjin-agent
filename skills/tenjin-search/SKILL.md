@@ -21,7 +21,8 @@ parse. Without it, at an interactive terminal the CLI is human-first (prose, no
 envelope), so a PTY-allocating harness would otherwise get unparseable output.
 Every command below already includes it. Exit codes: `0` success (an honest MISS
 is success),
-`1` network/runtime, `2` usage, `3` policy refusal, `4` payment failure. On
+`1` network/runtime, `2` usage, `3` refused-on-purpose (a spend-policy refusal, or
+`tenjin read` declining to pay for a paid piece), `4` payment failure. On
 failure the commands self-diagnose; `tenjin doctor` is optional diagnostics,
 never a required first step.
 
@@ -39,6 +40,7 @@ Say which line to add and let the operator add it:
 ```
 Bash(tenjin search:*)
 Bash(tenjin inspect:*)
+Bash(tenjin read:*)
 Bash(tenjin outcome:*)
 Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
@@ -47,9 +49,10 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-Those verbs are free: no wallet, no signing, no payment. Two of them are not
+Those verbs are free: no wallet, no signing, no payment. Three of them are not
 read-only, and say so if asked: `search` POSTs your generalized question
-off-machine, and `outcome` POSTs a report to the marketplace. In Claude Code the
+off-machine, `outcome` POSTs a report to the marketplace, and `read` saves a
+delivered free piece to the local library. In Claude Code the
 lines go in the `permissions.allow` array of `.claude/settings.json`. `tenjin
 doctor` prints the same block, so "run `tenjin doctor`" is a fine pointer.
 
@@ -123,8 +126,20 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   are what the meaning match runs on.
 - The server answers `CANDIDATES` or `MISS`. MISS is a fine answer; move on
   immediately.
+- A candidate is a lean hit: `resourceId`, `url`, `slug`, `title`,
+  `artifactType`, `price`, `asOf`, `validUntil`, `matchReasons`,
+  `estimatedTokens`, `creator.handle`. That is enough to shortlist and to price
+  the decision, and nothing more. Search is the breadth step; depth comes from
+  `tenjin inspect`, which is free.
+- You get up to `--limit` candidates, so ask for the width you want.
 - Version- or parameter-specific questions need an exact match. "Related" is
-  not "reusable"; an uncertain match is a MISS.
+  not "reusable"; an uncertain match is a MISS. Never buy on the strength of a
+  search alone: nothing in a candidate says what the piece actually claims.
+- `truncated: true` means the response dropped candidates for size. The size
+  ceiling grows with the number of candidates returned, so the fix is to retry
+  with a LARGER `--limit` (up to 10); a smaller one returns strictly fewer. At
+  `--limit 10` the tail is unrecoverable, and asking a narrower question is the
+  remedy. The CLI names whichever of the two applies.
 - A MISS may carry a `browse` tail: at most three pointers (`resourceId`, `url`,
   `title`, `price`, `creator.handle`) into the broad corpus, with no match
   reasons and no score. It is a "you might browse this" hint, not a ranked
@@ -137,9 +152,20 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
 tenjin inspect <resource-url-or-id> --json
 ```
 
-Free, never pays. Shows the answer card (what it answers, applies-to,
-exclusions, as-of and valid-until dates), price, and preview. Buy only when ALL
-of these hold:
+Free, never pays, and required before every buy. This is where the answer card
+lives: what it answers, what it applies to, what it excludes, its scope, its
+as-of and valid-until dates, and how it was established. A piece with no card
+shows price and preview only, which is itself a signal; if the CLI reports the
+card could not be LOADED, that is a transient server fault rather than an
+uncarded piece, so retry rather than concluding it attests nothing. Its
+`nextCommand` field names the verb to use next: `tenjin read` when the piece is
+free or already yours, `tenjin buy` when it is paid and unowned.
+
+Free of money is not free of context: a maximal card runs to roughly 25kB, so
+inspect the two or three most promising candidates, not the whole page.
+
+Buy only when ALL of
+these hold:
 
 - the card matches the exact versions/parameters of your question;
 - the price is below your cost to regenerate (tokens + paid data + latency);
@@ -147,6 +173,25 @@ of these hold:
 
 Purchases settle on-chain and are unrefundable, so buy when the two conditions
 above hold rather than on a hunch.
+
+## Read (free), then buy (paid)
+
+Delivery is split across two verbs so a zero-cost read never looks like a
+purchase. Reach for `read` first; it cannot spend.
+
+```bash
+tenjin read <resource-url-or-id> --json
+```
+
+- Delivers **free** pieces and anything already in your local library. A re-read
+  of something you bought costs nothing and needs no approval.
+- `read` cannot pay or sign: it has no wallet code path at all and never
+  consults the spend policy.
+- For a paid piece not in your library, it refuses with **exit 3**, naming the
+  price and the `tenjin buy` command to run — including a piece bought on
+  another machine, which `buy`'s own entitlement re-check then delivers free.
+  Nothing is charged, so `read` is safe to attempt before deciding whether a
+  purchase is worth it.
 
 ## Buy
 
@@ -165,6 +210,7 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 - The CLI re-checks entitlement first, so a returning buyer never pays twice.
 - The body is saved to `~/.tenjin/library/`; stdout gets the path and a heading
   outline, not the body. Use `--sections <budget>` or `--print-body` as needed.
+  `tenjin read` shares the same delivery output and the same two flags.
 
 ## Report the outcome (always)
 

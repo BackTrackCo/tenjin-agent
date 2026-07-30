@@ -17,6 +17,7 @@ export function testSigner(): TenjinSigner {
     address: account.address,
     signMessage: (args) => account.signMessage({ message: args.message }),
     signTypedData: (args) => account.signTypedData(args),
+    signTransaction: (tx) => account.signTransaction(tx),
   };
 }
 
@@ -86,6 +87,26 @@ export function readBody(over: Partial<ReadBodyFixture> = {}): ReadBodyFixture {
   };
 }
 
+/** The public answer card the 402 body carries when the piece has one. Every
+ *  field is present (nullable ones as null), the way the server projects it. */
+export function previewCard(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    artifactType: 'document',
+    temporalMode: 'snapshot',
+    asOf: '2026-07-01T00:00:00.000Z',
+    validUntil: '2026-08-01T00:00:00.000Z',
+    questionsAnswered: ['What does a Base transaction cost?'],
+    tasksSupported: ['estimate gas spend'],
+    appliesTo: { products: ['Base'] },
+    scope: 'L2 execution fees only',
+    exclusions: 'No L1 data costs',
+    provenanceSummary: 'Measured against mainnet over one week',
+    methodologySummary: 'Sampled every block for seven days',
+    maintenanceCadence: 'monthly',
+    ...over,
+  };
+}
+
 function jsonResponse(
   status: number,
   body: unknown,
@@ -148,6 +169,28 @@ export function makeReadServer(config: {
     return handler();
   }) as unknown as typeof fetch;
   return { fetch: fn, calls };
+}
+
+/**
+ * Wrap a read-route mock in the trailing-slash canonicalization the real route
+ * performs: a request whose path ends in `/` gets a 308 to the no-slash form and
+ * is NEVER answered with content. Requests already in canonical form pass through
+ * to `inner` untouched, so the wrapped mock records only the calls that were
+ * actually served.
+ *
+ * This is what makes the trailing-slash tests able to fail. `fetchRead` pins
+ * `blockRedirects`, so a caller that sends the slashed spelling gets a hard
+ * CONTRACT_MISMATCH at the first probe instead of the piece.
+ */
+export function withTrailingSlashRedirect(inner: typeof fetch): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(typeof input === 'object' && 'url' in input ? input.url : input);
+    const path = url.split(/[?#]/)[0] ?? url;
+    if (path.endsWith('/')) {
+      return new Response('', { status: 308, headers: { location: path.slice(0, -1) } });
+    }
+    return await inner(input as Parameters<typeof fetch>[0], init);
+  }) as unknown as typeof fetch;
 }
 
 function normalizeHeaders(headers: RequestInit['headers']): Record<string, string> {

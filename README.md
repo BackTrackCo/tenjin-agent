@@ -43,16 +43,53 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 | `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                               |
 | `tenjin search "<question>"`                            | Ask for payable candidates or an honest MISS; prints the compact JSON verbatim                                    |
 | `tenjin inspect <url-or-id>`                            | Show a candidate's pre-purchase card from the 402 body; never pays                                                |
+| `tenjin read <url-or-id>`                               | Deliver a free piece or re-deliver from the local library (never a payment); refuses with exit 3 if it would cost |
 | `tenjin buy <url-or-id> [--max-price <usd>] [--yes]`    | Entitlement re-check (free re-read if owned), then x402 exact payment                                             |
 | `tenjin outcome --search-id <id> --status <s>`          | Report `used` / `partially_used` / `rejected` / `regenerated` / `purchase_declined`                               |
 | `tenjin publish <file.md> [--price <usd>] [--mode <m>]` | Publish a Markdown piece with an optional answer card, gated by a local scan and your consent mode                |
 | `tenjin publish --candidate <id>`                       | Publish a parked candidate (its `draft.md`); clears it on success                                                 |
+| `tenjin edit <postId> [flags] [--yes]`                  | Show one of your posts and its card, or merge-update it: omitted fields are kept, `--clear <field>` clears one    |
 | `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a search MISS nudges you about parked ones                           |
+| `tenjin send <amount> usdc <to> [--yes]`                | **Escape hatch:** move USDC on Base out of the agent wallet (preview, explicit confirm, then the tx hash)         |
 
-`buy` re-reads an entitled resource for free before ever paying, re-delivers
-already-bought content from the local library without paying again, and refuses to
-sign if the price rose since it first saw the 402. Spend policy is enforced in the
-wallet provider layer before any payment.
+`send` is human-invoked only: it is deliberately absent from the MCP toolset and
+the harness skills, and nothing is signed until the previewed (checksummed)
+recipient, amount, and network fee are confirmed, interactively at a TTY or
+explicitly with `--yes` when headless. It refuses when the active wallet's
+passphrase entry is missing. The `sendMaxAmount` hard per-send cap has no
+default: `tenjin send` refuses until you run `tenjin config set sendMaxAmount
+<usd|0|none>` (`0` disables the verb, `none` opts in to uncapped), and `--yes`
+can never bypass the cap or the unset refusal.
+For routing FUTURE revenue away from the agent wallet entirely, connect the
+agent to your own Tenjin account instead (delegation); `send` exists for funds
+already sitting on the agent key.
+
+`read` and `buy` split delivery by whether money can move, not by how much work is
+involved. `read` is free-only and tries two things in order: the local library,
+then an unauthenticated fetch (which delivers free pieces). A paid piece not
+already on disk hard-refuses (exit 3) with the price and a pointer at `buy` —
+including a piece you own but have not cached on this machine, which `buy`'s own
+entitlement re-check then delivers free.
+
+`read` imports no wallet, signing, or payment module — its import graph is
+test-pinned to stay clear of all three — and never consults the spend policy,
+which is what makes it safe to put in a harness allowlist. It cannot unlock a
+keystore at all.
+
+`buy` is the paying verb: it re-reads an entitled resource for free before ever
+paying, re-delivers already-bought content from the local library without paying
+again, and refuses to sign if the price rose since it first saw the 402. Spend
+policy is enforced in the wallet provider layer before any payment.
+
+`edit` sends only the fields you pass, so an omitted field is kept; `--clear
+<field>` is the one way to empty a card field, and `--question` / `--task`
+replace the stored list while `--add-question` / `--add-task` append to it. The
+append flags read the post and then write it back, with no concurrency guard (the
+API offers no `If-Match`), so a web-panel edit landing between the two calls can
+be overwritten. Reading your own post is owner-scoped, so even the no-flag show
+signs with your wallet on first use, minting a read-scoped 24h session; only a run
+that intends to write asks for a write-capable one. An edit sends only what
+actually changes, so re-running the same command writes nothing.
 
 Read output defaults to a heading outline, not the body: `--print-body` includes
 the full body, and `--sections <tokens>` includes the leading sections within a
@@ -117,6 +154,7 @@ array of `.claude/settings.json`:
 ```
 Bash(tenjin search:*)
 Bash(tenjin inspect:*)
+Bash(tenjin read:*)
 Bash(tenjin outcome:*)
 Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
@@ -125,11 +163,12 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those touches the wallet, signs anything, or moves money. Two are not
+None of those touches the wallet, signs anything, or moves money. Three are not
 read-only, which is worth knowing before you pre-clear them: `tenjin search` POSTs
 your generalized question off-machine, and `tenjin outcome` POSTs a report that
-moves the marketplace's reuse signal. Both are unauthenticated and free; neither
-carries a credential.
+moves the marketplace's reuse signal — both unauthenticated and free, neither
+carrying a credential — while `tenjin read` writes locally, saving a delivered
+free piece to your library.
 
 `tenjin install` prints this block, and `tenjin doctor` reprints it on every run
 (including in `doctor --json` under `permissions`, on the failure envelope as well
@@ -311,16 +350,16 @@ server the CLI ships (see [Local stdio MCP server](#local-stdio-mcp-server)).
 ## Local stdio MCP server
 
 `tenjin mcp` runs a local MCP server over stdio backed by the same command cores
-as the CLI (`search`, `inspect`, `buy`, `outcome`, `publish`, `candidate`, and
-`wallet`), in-process, no shelling out. It exposes seven tools (`tenjin_search`,
-`tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`, `tenjin_publish`,
-`tenjin_candidate`, `tenjin_wallet`), each returning the machine JSON envelope as
-`structuredContent` with a short text summary. The consent gates carry over
-exactly: the spend policy gates `tenjin_buy`, `publish.mode` gates
-`tenjin_publish` (the client renders the `needs_confirmation` payload as its own
-confirm UI, then re-calls with `yes:true`), and a hard content block is never
-bypassable. The wallet stays local: the key never leaves the machine and appears
-in no tool result.
+as the CLI (`search`, `inspect`, `buy`, `outcome`, `publish`, `edit`,
+`candidate`, and `wallet`), in-process, no shelling out. It exposes eight tools
+(`tenjin_search`, `tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`,
+`tenjin_publish`, `tenjin_edit`, `tenjin_candidate`, `tenjin_wallet`), each
+returning the machine JSON envelope as `structuredContent` with a short text
+summary. The consent gates carry over exactly: the spend policy gates
+`tenjin_buy`, `publish.mode` gates `tenjin_publish` and `tenjin_edit` (the client
+renders the `needs_confirmation` payload as its own confirm UI, then re-calls
+with `yes:true`), and a hard content block is never bypassable. The wallet stays
+local: the key never leaves the machine and appears in no tool result.
 
 **Claude Code**
 

@@ -61,7 +61,7 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string; detail
 type SuccessEnvelope = { ok: true; command: string; data: Record<string, unknown> };
 
 describe('buildTenjinMcpServer, tool surface', () => {
-  it('exposes exactly the seven Tenjin tools', async () => {
+  it('exposes exactly the eight Tenjin tools', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -69,6 +69,7 @@ describe('buildTenjinMcpServer, tool surface', () => {
       [
         'tenjin_buy',
         'tenjin_candidate',
+        'tenjin_edit',
         'tenjin_inspect',
         'tenjin_search',
         'tenjin_outcome',
@@ -77,12 +78,26 @@ describe('buildTenjinMcpServer, tool surface', () => {
       ].sort(),
     );
   });
+
+  // `tenjin send` is the human-invoked funds-out escape hatch (issue #34). Doc
+  // 10's narrow-toolset rule keeps it OFF the MCP surface: no send tool, and no
+  // send action on tenjin_wallet. This pin fails if either ever appears.
+  it('never exposes the funds-out send verb (no tool, no wallet action)', async () => {
+    const client = await connect({ dataDir: dir });
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).not.toContain('tenjin_send');
+    const wallet = tools.find((t) => t.name === 'tenjin_wallet');
+    expect(wallet).toBeDefined();
+    const schema = JSON.stringify(wallet?.inputSchema ?? {});
+    expect(schema).toContain('show');
+    expect(schema).not.toContain('send');
+  });
 });
 
 describe('tenjin_search', () => {
   it('returns the exact success envelope as structuredContent with a non-empty text summary', async () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
@@ -221,10 +236,190 @@ describe('tenjin_publish consent', () => {
   });
 });
 
+describe('tenjin_edit', () => {
+  const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const STORED = {
+    id: POST_ID,
+    creatorId: '0197cccc-bbbb-cccc-dddd-eeeeeeeeeeee',
+    slug: 'the-answer',
+    title: 'The Answer',
+    status: 'published',
+    price: '100000',
+    url: `${BASE}/a/iris/the-answer`,
+    excerpt: 'A short stored excerpt.',
+    bodyMd: '# The Answer\n\nThe stored body.\n',
+    tags: [],
+    resource: {
+      temporalMode: 'maintained',
+      questionsAnswered: ['What is it?'],
+      tasksSupported: [],
+      scope: 'L2 fees only',
+      exclusions: null,
+      appliesTo: { products: ['Base'] },
+      cacheEligible: false,
+      cacheEligibleMissing: ['exclusions'],
+      schemaVersion: 1,
+    },
+  };
+
+  /** A GET/PUT stub over the owner-scoped route that records the PUT bodies. */
+  function editServer(): { fetch: typeof fetch; puts: () => Record<string, unknown>[] } {
+    const puts: Record<string, unknown>[] = [];
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method === 'PUT' && typeof init?.body === 'string') {
+        puts.push(JSON.parse(init.body) as Record<string, unknown>);
+      }
+      return new Response(JSON.stringify(STORED), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, puts: () => puts };
+  }
+
+  async function editClient(fetchImpl: typeof fetch): Promise<Client> {
+    return connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { edit: { fetchImpl, provider: testWalletProvider(), cwd: dir, env: {} } },
+    });
+  }
+
+  it('review mode without yes returns NEEDS_CONFIRMATION carrying the change summary', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, title: 'A Better Answer', mode: 'review' },
+    });
+
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as ErrorEnvelope;
+    expect(sc.error.code).toBe('NEEDS_CONFIRMATION');
+    const details = sc.error.details as {
+      mode: string;
+      postId: string;
+      title: string;
+      changes: string[];
+    };
+    expect(details.mode).toBe('review');
+    expect(details.postId).toBe(POST_ID);
+    expect(details.title).toBe('The Answer');
+    // The summary must reach the client through the payload: its stderr is a sink.
+    expect(details.changes).toEqual(['title: "The Answer" → "A Better Answer"']);
+    expect(server.puts()).toHaveLength(0);
+  });
+
+  it('re-calling with yes:true completes the loop and returns the summary in data', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, title: 'A Better Answer', mode: 'review', yes: true },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as SuccessEnvelope;
+    expect(sc.ok).toBe(true);
+    expect(sc.data.id).toBe(POST_ID);
+    expect(sc.data.changes).toEqual(['title: "The Answer" → "A Better Answer"']);
+    expect(server.puts()).toEqual([{ title: 'A Better Answer' }]);
+  });
+
+  it('forwards a question to questionsAnswered, not to some neighbouring field', async () => {
+    // The 19-field mapping is hand-written on both sides; a swapped pair would
+    // otherwise sail through, so follow one value all the way to the wire.
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    await client.callTool({
+      name: 'tenjin_edit',
+      arguments: {
+        postId: POST_ID,
+        question: ['What does it cost?'],
+        scope: 'a new scope',
+        provenance: 'measured on mainnet',
+        yes: true,
+        mode: 'auto',
+      },
+    });
+    expect(server.puts()).toEqual([
+      {
+        resource: {
+          questionsAnswered: ['What does it cost?'],
+          scope: 'a new scope',
+          provenanceSummary: 'measured on mainnet',
+        },
+      },
+    ]);
+  });
+
+  it('with no change flags it reads the post and writes nothing', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID },
+    });
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as SuccessEnvelope).data.title).toBe('The Answer');
+    expect(server.puts()).toHaveLength(0);
+  });
+
+  it('forwards mode, so a per-call full-auto loosens a gate config would have closed', async () => {
+    // env/config resolve to review here, and the finding is warn-level, so this
+    // proceeds ONLY if `mode` reached the core: dropping the forwarding leaves
+    // review in charge and the call comes back NEEDS_CONFIRMATION instead.
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: {
+        postId: POST_ID,
+        provenance: `measured from 0x${'b'.repeat(40)}`,
+        mode: 'full-auto',
+      },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as SuccessEnvelope;
+    // The receipt names the mode that actually governed the run.
+    expect(sc.data.mode).toBe('full-auto');
+    expect(server.puts()).toHaveLength(1);
+  });
+
+  it('without the override the same call stops to confirm', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, provenance: `measured from 0x${'b'.repeat(40)}` },
+    });
+
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as ErrorEnvelope;
+    expect(sc.error.code).toBe('NEEDS_CONFIRMATION');
+    expect((sc.error.details as { mode: string }).mode).toBe('review');
+    expect(server.puts()).toHaveLength(0);
+  });
+
+  it('a live secret in the new content hard-blocks even with yes:true', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, provenance: 'AKIAIOSFODNN7EXAMPLE', yes: true, mode: 'auto' },
+    });
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as ErrorEnvelope).error.code).toBe('PUBLISH_BLOCKED');
+    expect(server.puts()).toHaveLength(0);
+  });
+});
+
 describe('MCP adapter never writes to real stdout', () => {
   it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       decision: 'MISS',
       calibration: 'no match',
@@ -253,6 +448,16 @@ describe('MCP adapter never writes to real stdout', () => {
           authorizer: fakeAuthorizer('confirm', 'confirm_always'),
         },
         publish: { cwd: dir, env: {} },
+        edit: {
+          fetchImpl: (async () =>
+            new Response(JSON.stringify({ error: { code: 'post_not_found' } }), {
+              status: 404,
+              headers: { 'content-type': 'application/json' },
+            })) as unknown as typeof fetch,
+          provider: testWalletProvider(),
+          cwd: dir,
+          env: {},
+        },
       },
     });
     // Cover the free read path plus both write-path tools (buy, publish). Their
@@ -266,6 +471,10 @@ describe('MCP adapter never writes to real stdout', () => {
       });
       await client.callTool({ name: 'tenjin_buy', arguments: { ref: URL_ } });
       await client.callTool({ name: 'tenjin_publish', arguments: { file, mode: 'review' } });
+      await client.callTool({
+        name: 'tenjin_edit',
+        arguments: { postId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee', title: 'x', mode: 'review' },
+      });
     } finally {
       spy.mockRestore();
     }

@@ -203,6 +203,14 @@ local files and never upload by themselves.
 - When new information lands: update the body, refresh the as-of date, add a
   one-line "updated: what changed" note, and reprice if warranted. Buyers
   re-read updates free; staleness is what kills repeat purchases.
+- `tenjin edit <postId>` is how you do all of that: `--body <file>` ships the
+  revised Markdown, `--as-of <iso>` refreshes the freshness date, `--price <usd>`
+  reprices, and the card flags sharpen the answer card. Run it with no flags first
+  to see the stored post; changes need `--yes` under your publish.mode consent.
+- The array flags REPLACE, they do not add: `--question` / `--task` overwrite the
+  stored list wholesale, so passing one question drops every other one. To add
+  without losing what is there, use `--add-question` / `--add-task`, which read the
+  stored list first and append to it.
 - Sales and earnings have no CLI command: they are a hosted surface. Answer
   "how are my sales doing?" with `GET https://tenjin.blog/api/me/stats`
   (this-month earnings + paid-read totals) and `GET

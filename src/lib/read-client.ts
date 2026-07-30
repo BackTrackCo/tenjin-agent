@@ -44,6 +44,34 @@ const readBodySchema = z
 
 export type ReadBody = z.infer<typeof readBodySchema>;
 
+/**
+ * The public half of the piece's answer card, carried on the 402 body when the
+ * piece has one. The key is ABSENT (never null) on an uncarded piece, so callers
+ * branch on presence; the projection emits every field whenever it emits the card
+ * at all, so a present card is never partial. Nullable fields carry null.
+ *
+ * This is the depth half of the search/inspect split: the card left the search
+ * candidate in search v2 and lives here, one free unpaid GET away.
+ */
+export const previewCardSchema = z
+  .object({
+    artifactType: z.string(),
+    temporalMode: z.string(),
+    asOf: z.string().nullable(),
+    validUntil: z.string().nullable(),
+    questionsAnswered: z.array(z.string()),
+    tasksSupported: z.array(z.string()),
+    appliesTo: z.record(z.string(), z.array(z.string())),
+    scope: z.string().nullable(),
+    exclusions: z.string().nullable(),
+    provenanceSummary: z.string().nullable(),
+    methodologySummary: z.string().nullable(),
+    maintenanceCadence: z.string().nullable(),
+  })
+  .passthrough();
+
+export type PreviewCard = z.infer<typeof previewCardSchema>;
+
 /** The leak-safe 402 preview body, never the paid content. */
 const previewSchema = z
   .object({
@@ -51,6 +79,18 @@ const previewSchema = z
     title: z.string().optional(),
     price: z.string().optional(),
     creator: z.record(z.string(), z.unknown()).optional(),
+    // `.catch` keeps a botched card from taking the rest of the preview with it:
+    // every other preview field is optional, so before the card existed a parse
+    // failure here was near-impossible, and a server that half-fills the card
+    // should still not cost the caller the title and the price it came for.
+    // The drop is NOT silent: see `cardError` on the result below.
+    card: previewCardSchema.optional().catch(undefined),
+    // Set by the SERVER when the piece has a card it could not load, so an absent
+    // card is never ambiguous: no flag means uncarded, this flag means temporarily
+    // unreadable. Never false and never sent beside `card` (tenjin#500), and the
+    // same fail-soft as above so a bogus `false` drops the flag rather than the
+    // whole preview.
+    cardUnavailable: z.literal(true).optional().catch(undefined),
   })
   .passthrough();
 
@@ -80,7 +120,16 @@ const paymentRequiredSchema = z
 
 export type ReadResult =
   | { kind: 'entitled'; body: ReadBody; settlementTxHash?: string }
-  | { kind: 'payment_required'; paymentRequired: PaymentRequired; preview: Preview }
+  | {
+      kind: 'payment_required';
+      paymentRequired: PaymentRequired;
+      preview: Preview;
+      /** The 402 carried a `card` this CLI could not parse, so `preview.card` is
+       *  absent for a reason that is NOT "the piece is uncarded". The two must
+       *  stay distinguishable: an uncarded piece is a real signal a buyer acts
+       *  on, and this 402 is the only pre-purchase depth there is. */
+      cardError?: true;
+    }
   | { kind: 'already_purchased'; message: string };
 
 export interface ReadRequestOptions {
@@ -108,8 +157,43 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     timeoutMs: opts.timeoutMs,
     headers,
     fetchImpl: opts.fetchImpl,
+    // Pinned even when UNSIGNED (the first probe): a 200 from this route is
+    // written to the library by `deliverFresh` as an entitlement record under
+    // the server-chosen id/slug, and `findDeliveredByUrl` later matches saved
+    // receipts by handle+slug alone — so a followed cross-origin redirect
+    // would let another host's bytes short-circuit future buys as owned.
+    // `assertOnBaseOrigin` cannot catch this; it checks only the URL asked for.
+    //
+    // Refused for ANY 3xx, same-origin hops included. The transport failing closed
+    // on the whole class is the point: an exemption for "benign" redirects is a
+    // second origin check living in the one place that already proved it cannot see
+    // enough to make one. Keeping a canonical URL is the CALLER's job instead, and
+    // `resolveResourceRef` does it for every verb that gets here.
+    blockRedirects: true,
   });
   if (!res.ok) {
+    // A redirect refused mid-flight is a URL-shape problem, not a flaky network:
+    // retrying a signed request re-sends the same signature into the same
+    // redirect, and retrying the unsigned probe re-fetches bytes the library must
+    // never record as this origin's. The `fix` names the URL, not the route: the
+    // route is allowed to redirect (canonicalizing a path is what a redirect is
+    // FOR), and pointing an agent at the base URL for a hop the base URL did not
+    // cause spends two useless steps and still does not read the piece.
+    // `resolveResourceRef` canonicalizes what it can (the trailing slash); what
+    // reaches here is a spelling it could not.
+    if (res.kind === 'blocked-redirect') {
+      throw new CliError('CONTRACT_MISMATCH', `${url}: ${res.message}`, {
+        // The origin half of this hint deliberately does NOT name the base-URL
+        // flag. `read` is meant to be allowlistable, the skill tells the agent
+        // never to pass that flag on an allowlisted verb, and a `fix:` naming it
+        // would coach exactly the move the skill forbids. `doctor` is the
+        // allowlisted verb that owns the question — its `checkReadPath` probes
+        // this route and its own copy names the config command when it should.
+        fix:
+          'Ask for the URL in the spelling `tenjin search` or `tenjin inspect` ' +
+          'reports. If every read hops, `tenjin doctor` checks the configured origin.',
+      });
+    }
     const code =
       res.kind === 'network' || res.kind === 'timeout' ? 'NETWORK_ERROR' : 'API_UNREACHABLE';
     throw new CliError(code, `${url}: ${res.message}`, {
@@ -165,11 +249,13 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
       );
     }
     const paymentRequired = decoded;
-    const preview = previewSchema.safeParse(res.json);
+    const parsed = previewSchema.safeParse(res.json);
+    const preview = parsed.success ? parsed.data : {};
     return {
       kind: 'payment_required',
       paymentRequired,
-      preview: preview.success ? preview.data : {},
+      preview,
+      ...(sentUnparsableCard(res.json, preview) ? { cardError: true as const } : {}),
     };
   }
 
@@ -199,6 +285,14 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
       details: res.json,
     },
   );
+}
+
+/** The server sent a `card` key but nothing survived the parse. Distinguishes a
+ *  DROPPED card from an absent one, which the `.catch` above otherwise makes
+ *  look identical. */
+function sentUnparsableCard(json: unknown, preview: Preview): boolean {
+  if (typeof json !== 'object' || json === null) return false;
+  return 'card' in json && preview.card === undefined;
 }
 
 function decodeSettlement(header: string | undefined): string | undefined {

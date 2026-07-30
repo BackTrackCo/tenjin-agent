@@ -31,7 +31,7 @@ function json(status: number, body: unknown): Response {
 }
 
 const CANDIDATES: SearchResponse = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   decision: 'CANDIDATES',
   calibration: 'lexical-v1',
@@ -39,17 +39,12 @@ const CANDIDATES: SearchResponse = {
     {
       resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
       url: 'https://tenjin.blog/api/read/iris/slug',
+      slug: 'slug',
       title: 'A resource',
       artifactType: 'document',
       price: '100000',
       asOf: null,
       validUntil: null,
-      temporalMode: 'evergreen',
-      appliesTo: { products: ['Vercel'] },
-      questionsAnswered: ['q'],
-      tasksSupported: [],
-      scope: null,
-      exclusions: null,
       matchReasons: ['answer-card lexical match'],
       estimatedTokens: 420,
       creator: { handle: 'iris' },
@@ -60,7 +55,7 @@ const CANDIDATES: SearchResponse = {
 describe('buildSearchRequest', () => {
   it('builds a minimal request with the default limit', () => {
     expect(buildSearchRequest({ question: 'hi' })).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       question: 'hi',
       limit: 5,
     });
@@ -74,7 +69,7 @@ describe('buildSearchRequest', () => {
       limit: 3,
     });
     expect(r).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       question: 'does it work?',
       freshWithin: 'P30D',
       maxPrice: '100000',
@@ -162,7 +157,7 @@ describe('postSearch', () => {
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       question: 'q',
       limit: 5,
     });
@@ -188,22 +183,16 @@ describe('postSearch', () => {
     expect(bHeaders['x-tenjin-eval-cohort']).toBe('1');
   });
 
-  it('re-applies the server card bounds to an oversized candidate', async () => {
+  it('re-applies the server bounds to an oversized candidate, but never to the slug', async () => {
+    const runawaySlug = 's'.repeat(4000);
     const bloated = {
       ...CANDIDATES,
       candidates: [
         {
           ...(CANDIDATES.candidates?.[0] as object),
           title: 'T'.repeat(1000),
-          scope: 'S'.repeat(1000),
-          questionsAnswered: Array.from({ length: 50 }, () => 'q'.repeat(500)),
+          slug: runawaySlug,
           matchReasons: Array.from({ length: 20 }, () => 'r'.repeat(300)),
-          appliesTo: Object.fromEntries(
-            Array.from({ length: 12 }, (_, i) => [
-              `key_${i}`,
-              Array.from({ length: 15 }, () => 'v'.repeat(200)),
-            ]),
-          ),
         },
       ],
     };
@@ -215,19 +204,37 @@ describe('postSearch', () => {
     });
     const c = res.candidates?.[0];
     expect(c?.title).toHaveLength(200);
-    expect(c?.scope).toHaveLength(240);
-    expect(c?.questionsAnswered).toHaveLength(4);
-    expect(c?.questionsAnswered[0]).toHaveLength(160);
     expect(c?.matchReasons).toHaveLength(3);
     expect(c?.matchReasons[0]).toHaveLength(80);
-    expect(Object.keys(c?.appliesTo ?? {})).toHaveLength(6);
-    expect(Object.values(c?.appliesTo ?? {})[0]).toHaveLength(5);
+    // A clipped slug is not a shorter slug, it is a different one that resolves
+    // to nothing while still reading as usable in --json. The server tolerates an
+    // uncapped slug for the same reason, which is the one case `truncated` exists
+    // for, so capping here would reject a response the server calls valid.
+    expect(c?.slug).toBe(runawaySlug);
+  });
+
+  it('carries the optional truncated flag through, and omits it when unset', async () => {
+    const { fetch } = stubFetch(json(200, { ...CANDIDATES, truncated: true }));
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.truncated).toBe(true);
+
+    const clean = stubFetch(json(200, CANDIDATES));
+    const res2 = await postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: clean.fetch,
+    });
+    expect(res2.truncated).toBeUndefined();
   });
 
   it('parses a MISS with no candidates', async () => {
     const { fetch } = stubFetch(
       json(200, {
-        schemaVersion: 1,
+        schemaVersion: 2,
         searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         decision: 'MISS',
         calibration: 'lexical-v1',
@@ -251,7 +258,7 @@ describe('postSearch', () => {
     ...over,
   });
   const miss = (browse: unknown[], decision = 'MISS'): unknown => ({
-    schemaVersion: 1,
+    schemaVersion: 2,
     searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
     decision,
     calibration: 'hybrid-v1',
@@ -353,7 +360,7 @@ describe('postSearch', () => {
     ).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
   });
   it('flags a contract mismatch when the body is not the expected shape', async () => {
-    const { fetch } = stubFetch(json(200, { schemaVersion: 1, decision: 'MAYBE' }));
+    const { fetch } = stubFetch(json(200, { schemaVersion: 2, decision: 'MAYBE' }));
     await expect(
       postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
@@ -361,6 +368,75 @@ describe('postSearch', () => {
         fetchImpl: fetch,
       }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  it('names the outdated server when a pre-v2 deployment refuses the request', async () => {
+    // The REAL failure mode of the v2 break, and the whole reason this arm
+    // exists. Pre-v2 tenjin declares `schemaVersion: z.literal(1)` inside a
+    // strictObject, so our v2 request dies at the REQUEST gate and never reaches
+    // the handler: the body below is verbatim what old main emits (an ApiError
+    // envelope wrapping `parsed.error.flatten()`), reproduced against its actual
+    // schema. Routed as API_UNREACHABLE it would tell the operator to retry a
+    // request that can never succeed.
+    const { fetch } = stubFetch(
+      json(400, {
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid request body',
+          details: {
+            formErrors: [],
+            fieldErrors: { schemaVersion: ['Invalid input: expected 1'] },
+          },
+        },
+      }),
+    );
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: expect.stringContaining('predates search v2'),
+    });
+  });
+
+  it('leaves an unrelated 400 on the API_UNREACHABLE path', async () => {
+    // The version arm keys on a `schemaVersion` fieldError, so an ordinary
+    // validation failure must not be mistaken for a stale deployment.
+    const { fetch } = stubFetch(
+      json(400, {
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid request body',
+          details: { formErrors: [], fieldErrors: { question: ['Too big: expected <=512'] } },
+        },
+      }),
+    );
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
+  });
+
+  it('names the version when a server answers 200 with a v1 body', async () => {
+    // Unreachable against today's old tenjin (the request gate refuses first),
+    // but correct for any server that accepts the request and replies v1.
+    const { fetch } = stubFetch(json(200, { ...CANDIDATES, schemaVersion: 1 }));
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: expect.stringContaining('schemaVersion 1'),
+    });
   });
   it('keeps unknown future candidate fields (forward-compatible)', async () => {
     const withExtra = structuredClone(CANDIDATES);

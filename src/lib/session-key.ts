@@ -24,7 +24,24 @@ import type { TenjinSigner } from './wallet/provider';
  * SHA-256 is node:crypto, and the wallet delegation reuses the siwx.ts seam.
  */
 
-const SESSION_SCOPE = 'read+write';
+/**
+ * The delegation scopes the server recognizes. A session is minted at the scope
+ * the run needs: a `read`-scoped session cannot write (the server refuses the
+ * write with `insufficient_scope`), so an owner-scoped READ never leaves a
+ * write-capable delegation on disk that the run did not need.
+ */
+export type SessionScope = 'read' | 'read+write';
+
+/**
+ * Does a cached session's scope cover what this run needs? Wider covers narrower,
+ * so a cached `read+write` serves a `read` run with no new wallet signature; the
+ * reverse must NOT hold, or a read-scoped session would be used for a write the
+ * server then rejects.
+ */
+export function scopeSatisfies(cached: string, required: SessionScope): boolean {
+  if (cached === required) return true;
+  return required === 'read' && cached === 'read+write';
+}
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h; the server clamps to ≤24h.
 /** Re-establish this long before `exp` so a signed request cannot expire in flight. */
 const EXP_SKEW_MS = 60_000;
@@ -45,12 +62,15 @@ const SessionFileSchema = z.object({
 });
 export type SessionFile = z.infer<typeof SessionFileSchema>;
 
-export interface SignableRequest {
-  method: 'POST' | 'PUT';
-  url: string;
-  /** The exact request body bytes (JSON string); covered by Content-Digest. */
-  body: string;
-}
+/**
+ * A request to sign. The body is part of the METHOD, not an optional extra: a
+ * bodied request must carry the exact bytes Content-Digest covers, and a GET has
+ * no body to cover at all, so content-digest drops out of the covered set. As a
+ * union, "GET with a body" and "PUT without one" are both unrepresentable rather
+ * than merely wrong.
+ */
+export type SignableRequest =
+  { method: 'GET'; url: string } | { method: 'POST' | 'PUT'; url: string; body: string };
 
 /**
  * The write-auth seam a posts client signs through. `headersFor` attaches the
@@ -75,6 +95,12 @@ export interface SessionKeyConfig {
   baseUrl: string;
   chainId: string;
   dataDir: string;
+  /**
+   * The scope this session is minted at, and the scope a cached session must
+   * cover to be reused. Required, not defaulted: over-granting silently is the
+   * failure mode worth making impossible, so every caller states what it needs.
+   */
+  scope: SessionScope;
 }
 
 const subtle = webcrypto.subtle;
@@ -183,11 +209,15 @@ function keyidFor(publicKeyRaw: string): string {
 // ---------------------------------------------------------------------------
 
 /** The three URNs bound into the delegation's SIWX `resources` array (D35). */
-export function delegationResources(publicKeyRaw: string, expIso: string): string[] {
+export function delegationResources(
+  publicKeyRaw: string,
+  expIso: string,
+  scope: SessionScope,
+): string[] {
   return [
     `urn:tenjin:session:pubkey:p256:${publicKeyRaw}`,
     `urn:tenjin:session:exp:${expIso}`,
-    `urn:tenjin:session:scope:${SESSION_SCOPE}`,
+    `urn:tenjin:session:scope:${scope}`,
   ];
 }
 
@@ -213,14 +243,14 @@ export async function establishSession(
     chainId: config.chainId,
     ttlMs: SESSION_TTL_MS,
     statement: 'Delegate a Tenjin session key.',
-    resources: delegationResources(publicKeyRaw, expIso),
+    resources: delegationResources(publicKeyRaw, expIso, config.scope),
   });
 
   const file: SessionFile = {
     address: config.signer.address.toLowerCase(),
     delegation,
     exp: expIso,
-    scope: SESSION_SCOPE,
+    scope: config.scope,
     publicKeyRaw,
     privateKeyJwk: jwk,
   };
@@ -236,12 +266,15 @@ export async function signWithSession(
 ): Promise<Record<string, string>> {
   const now = deps.now ?? Date.now;
   const nonce = deps.nonce ?? (() => randomBytes(16).toString('hex'));
-  const digest = contentDigest(req.body);
+  // A bodiless request carries no Content-Digest, and content-digest leaves the
+  // covered component set with it — signing a digest of "" would cover bytes the
+  // request never sends.
+  const digest = req.method === 'GET' ? undefined : contentDigest(req.body);
   const created = Math.floor(now() / 1000);
   const params: SignatureParamsInput = {
     method: req.method,
     url: req.url,
-    contentDigest: digest,
+    ...(digest !== undefined ? { contentDigest: digest } : {}),
     created,
     nonce: nonce(),
     keyid: keyidFor(file.publicKeyRaw),
@@ -252,7 +285,7 @@ export async function signWithSession(
     'Tenjin-Session-Delegation': file.delegation,
     'Signature-Input': `tenjin=${signatureParams(params)}`,
     Signature: `tenjin=:${signature}:`,
-    'Content-Digest': digest,
+    ...(digest !== undefined ? { 'Content-Digest': digest } : {}),
   };
 }
 
@@ -306,10 +339,19 @@ export async function saveSessionFile(dir: string, file: SessionFile): Promise<v
   });
 }
 
-/** A cached session usable now: bound to this address and not near expiry. */
-export function isSessionUsable(file: SessionFile, address: string, now: number): boolean {
+/**
+ * A cached session usable now: bound to this address, wide enough for what the run
+ * needs, and not near expiry. A read-scoped cache does NOT serve a write run — it
+ * re-establishes instead, because the server would refuse that write.
+ */
+export function isSessionUsable(
+  file: SessionFile,
+  address: string,
+  now: number,
+  required: SessionScope,
+): boolean {
   if (file.address !== address.toLowerCase()) return false;
-  if (file.scope !== SESSION_SCOPE) return false;
+  if (!scopeSatisfies(file.scope, required)) return false;
   const expMs = Date.parse(file.exp);
   if (!Number.isFinite(expMs)) return false;
   return now < expMs - EXP_SKEW_MS;
@@ -357,13 +399,13 @@ export function createSessionKeyAuth(
     if (
       !forceReestablish &&
       cached !== null &&
-      isSessionUsable(cached, config.signer.address, now())
+      isSessionUsable(cached, config.signer.address, now(), config.scope)
     ) {
       return cached;
     }
     if (!forceReestablish) {
       const onDisk = await loadSessionFile(config.dataDir);
-      if (onDisk !== null && isSessionUsable(onDisk, config.signer.address, now())) {
+      if (onDisk !== null && isSessionUsable(onDisk, config.signer.address, now(), config.scope)) {
         cached = onDisk;
         return cached;
       }

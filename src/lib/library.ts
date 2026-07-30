@@ -123,6 +123,14 @@ export async function findDelivered(
   return { receipt: parsed.data, bodyMd, bodyPath: path };
 }
 
+/**
+ * The read route's path shape. The trailing slash is OPTIONAL here, which is a
+ * deliberate tolerance: a URL a human pasted with one addresses the same piece.
+ * `parseReadPath` and `canonicalReadUrl` share this regex so the shape they
+ * tolerate and the shape one of them removes can never drift apart.
+ */
+const READ_PATH_RE = /\/api\/read\/([^/]+)\/([^/]+)\/?$/;
+
 /** The (handle, slug) a read URL points at, path-only so base-url/trailing-slash
  *  differences never matter. Null when the URL is not a read-route URL. */
 export function parseReadPath(url: string): { handle: string; slug: string } | null {
@@ -132,9 +140,39 @@ export function parseReadPath(url: string): { handle: string; slug: string } | n
   } catch {
     return null;
   }
-  const m = /\/api\/read\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
+  const m = READ_PATH_RE.exec(pathname);
   if (m === null || m[1] === undefined || m[2] === undefined) return null;
   return { handle: decodeURIComponent(m[1]), slug: decodeURIComponent(m[2]) };
+}
+
+/**
+ * A read URL in the spelling the transport should ask for: the same URL with
+ * `parseReadPath`'s optional trailing slash removed.
+ *
+ * This exists because the tolerance above and the transport disagree without it.
+ * `fetchRead` pins `blockRedirects`, so a 3xx anywhere on the read path is a hard
+ * failure rather than a hop — and the read route legitimately canonicalizes
+ * `/api/read/<handle>/<slug>/` to the no-slash form. Left un-normalized, a URL a
+ * user pasted with a trailing slash therefore dies at the FIRST probe of both
+ * `read` and `buy`, on a redirect the pin is not there to catch: it is
+ * same-origin, so no other host's bytes are in play.
+ *
+ * Removing the slash instead of relaxing the pin keeps the two concerns apart.
+ * Canonicalizing a URL is this function's job; refusing to follow a redirect
+ * stays the transport's, unconditionally.
+ *
+ * Path-only and conservative: a non-read URL is returned untouched, the query and
+ * fragment are preserved byte-for-byte, and only the ONE slash the regex tolerates
+ * is removed (so `/api/read/h/s//`, which `parseReadPath` already rejects, is left
+ * exactly as it came in). It cannot change the origin, which is why callers may
+ * origin-check the result rather than the input.
+ */
+export function canonicalReadUrl(url: string): string {
+  if (parseReadPath(url) === null) return url;
+  const mark = url.search(/[?#]/);
+  const path = mark === -1 ? url : url.slice(0, mark);
+  if (!path.endsWith('/')) return url;
+  return path.slice(0, -1) + (mark === -1 ? '' : url.slice(mark));
 }
 
 /**

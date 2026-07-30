@@ -30,6 +30,7 @@ import { runInspect, type InspectArgs, type InspectDeps } from '../commands/insp
 import { runBuy, type BuyArgs, type BuyDeps } from '../commands/buy';
 import { runOutcome, type OutcomeArgs, type OutcomeDeps } from '../commands/outcome';
 import { runPublish, type PublishArgs, type PublishDeps } from '../commands/publish';
+import { runEdit, type EditArgs, type EditDeps } from '../commands/edit';
 import {
   runCandidateAdd,
   runCandidateDrop,
@@ -55,6 +56,7 @@ export interface McpCommandDeps {
   buy?: BuyDeps;
   outcome?: OutcomeDeps;
   publish?: PublishDeps;
+  edit?: EditDeps;
   candidate?: CandidateDeps;
   wallet?: ResolveWalletProviderOptions & WalletCreateOptions;
 }
@@ -159,6 +161,50 @@ const publishInput = {
   methodology: z.string().optional().describe('Methodology summary (card)'),
 } satisfies Record<keyof PublishArgs, z.ZodTypeAny>;
 
+const editInput = {
+  postId: z.string().describe('The uuid of your own post to show or update'),
+  yes: z
+    .boolean()
+    .optional()
+    .describe(
+      'Clear the review confirm and soft findings after user approval (never a hard block)',
+    ),
+  mode: z.string().optional().describe('Consent mode for this run: review | auto | full-auto'),
+  title: z.string().optional().describe('New post title'),
+  price: z.coerce.string().optional().describe('New post price in decimal USD, e.g. "0.25"'),
+  body: z
+    .string()
+    .optional()
+    .describe('Path to a Markdown file whose body replaces the stored body (frontmatter ignored)'),
+  excerpt: z.string().optional().describe('New excerpt'),
+  question: z.array(z.string()).optional().describe('REPLACE the questions this piece answers'),
+  task: z.array(z.string()).optional().describe('REPLACE the tasks this piece supports'),
+  addQuestion: z
+    .array(z.string())
+    .optional()
+    .describe('Append questions, keeping the stored ones (not with question)'),
+  addTask: z
+    .array(z.string())
+    .optional()
+    .describe('Append tasks, keeping the stored ones (not with task)'),
+  scope: z.string().optional().describe('What the piece covers (card scope)'),
+  exclusions: z.string().optional().describe('What the piece does not cover (card exclusions)'),
+  appliesTo: z.array(z.string()).optional().describe('REPLACE applicability with key=value pairs'),
+  asOf: z.string().optional().describe('As-of timestamp, ISO-8601 with offset'),
+  validUntil: z.string().optional().describe('Valid-until timestamp, ISO-8601 with offset'),
+  artifactType: z.string().optional().describe('document | skill | dataset'),
+  temporalMode: z.string().optional().describe('snapshot | maintained | evergreen'),
+  provenance: z.string().optional().describe('Provenance summary (card)'),
+  methodology: z.string().optional().describe('Methodology summary (card)'),
+  clear: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Card fields to clear: scope, exclusions, asOf, validUntil, provenance, methodology, ' +
+        'supersedesPostId, questionsAnswered, tasksSupported, appliesTo',
+    ),
+} satisfies Record<keyof EditArgs, z.ZodTypeAny>;
+
 // candidate is one tool over three actions; guard each action's arg set against
 // its core. add -> CandidateAddArgs, drop -> runCandidateDrop's params, list none.
 const candidateAddInput = {
@@ -181,6 +227,12 @@ const candidateInput = {
 };
 
 // The wallet cores take no args beyond the action discriminator.
+//
+// `tenjin send` (the funds-out escape hatch, src/commands/send.ts) is
+// DELIBERATELY EXCLUDED from this toolset, as an action here and as a tool of
+// its own: the MCP surface stays narrower than the CLI (spec 10's narrow-toolset
+// rule; MCP agents discover and pay under policy, they never export a wallet or
+// move funds out of it). Do not add a send tool or action.
 const walletInput = {
   action: z.enum(['show', 'balance', 'create']).describe('show | balance | create'),
 } satisfies Record<'action', z.ZodTypeAny>;
@@ -240,9 +292,13 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'MISS. Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: strip secrets, ' +
         'private identifiers, and company-internal context, then send what is left as one ' +
         'complete natural-language sentence. Retrieval matches wording and meaning, so ' +
-        'compressing the question to keywords throws away signal. Returns the compact ' +
-        'candidates/MISS envelope; records the searchId locally so tenjin_buy and tenjin_outcome ' +
-        'can refer to it. A MISS may also carry a `browse` array of at most three pointers ' +
+        'compressing the question to keywords throws away signal. Returns up to `limit` LEAN ' +
+        'candidates (identity, price, freshness, why it matched) or a MISS; records the searchId ' +
+        'locally so tenjin_buy and tenjin_outcome can refer to it. A candidate does NOT say what ' +
+        'the piece claims, so always call tenjin_inspect (free) before tenjin_buy. A `truncated: ' +
+        'true` flag means candidates were dropped for size; the ceiling grows with the number ' +
+        'returned, so retry with a LARGER limit (up to 10), and only at 10 is narrowing the ' +
+        'question the remedy. A MISS may also carry a `browse` array of at most three pointers ' +
         '(resourceId, url, title, price, creator.handle) into the broad corpus: unscored ' +
         '"you might browse this" hints with no match reasons, not answer candidates, and never ' +
         'resolvable by tenjin_buy/tenjin_outcome via resourceId.',
@@ -270,9 +326,15 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Inspect a candidate',
       description:
-        "Show a candidate's pre-purchase card / preview from the read route without paying: price, " +
-        'scope, freshness, and the leak-safe preview. Use after tenjin_search and before tenjin_buy. ' +
-        'Never signs, never pays, never saves.',
+        "Show a candidate's answer card and preview from the read route without paying: what it " +
+        'answers, what it applies to, its scope and exclusions, its freshness dates, its ' +
+        'provenance, plus the price and the leak-safe preview. This is the only place that ' +
+        'depth exists before a purchase, so run it after tenjin_search and before every ' +
+        'tenjin_buy. A piece with no `card` shows price and preview only; a `cardUnavailable` ' +
+        'flag instead means the card exists but could not be loaded, so retry rather than ' +
+        'treating the piece as attesting nothing. A maximal card is roughly 25kB, so inspect ' +
+        'the two or three most promising candidates, not a whole page of them. Never signs, ' +
+        'never pays, never saves.',
       inputSchema: inspectInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -374,6 +436,55 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           },
           ctx,
           deps.publish,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    'tenjin_edit',
+    {
+      title: 'Show or update one of your posts',
+      description:
+        'Show one of your own posts and its answer card (call with only postId), or update it: ' +
+        'every field flag you pass is merged, every field you omit is kept, and array fields ' +
+        'REPLACE the stored list unless you use addQuestion/addTask. Clear a card field with ' +
+        'clear:["scope"]. Under the same publish.mode consent as publishing, an update returns ' +
+        'NEEDS_CONFIRMATION with the before/after summary for you to show the user before ' +
+        're-calling with yes:true, and a live secret in the new content returns PUBLISH_BLOCKED, ' +
+        'which yes never clears. Reading is owner-scoped, so even a show (postId only) signs with ' +
+        'the local wallet on first use, minting a read-scoped 24h session; the key never leaves ' +
+        'this machine.',
+      inputSchema: editInput,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async (args) =>
+      runCore('edit', (ctx) =>
+        runEdit(
+          {
+            postId: args.postId,
+            ...(args.yes !== undefined ? { yes: args.yes } : {}),
+            ...(args.mode !== undefined ? { mode: args.mode } : {}),
+            ...(args.title !== undefined ? { title: args.title } : {}),
+            ...(args.price !== undefined ? { price: args.price } : {}),
+            ...(args.body !== undefined ? { body: args.body } : {}),
+            ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
+            ...(args.question !== undefined ? { question: args.question } : {}),
+            ...(args.task !== undefined ? { task: args.task } : {}),
+            ...(args.addQuestion !== undefined ? { addQuestion: args.addQuestion } : {}),
+            ...(args.addTask !== undefined ? { addTask: args.addTask } : {}),
+            ...(args.scope !== undefined ? { scope: args.scope } : {}),
+            ...(args.exclusions !== undefined ? { exclusions: args.exclusions } : {}),
+            ...(args.appliesTo !== undefined ? { appliesTo: args.appliesTo } : {}),
+            ...(args.asOf !== undefined ? { asOf: args.asOf } : {}),
+            ...(args.validUntil !== undefined ? { validUntil: args.validUntil } : {}),
+            ...(args.artifactType !== undefined ? { artifactType: args.artifactType } : {}),
+            ...(args.temporalMode !== undefined ? { temporalMode: args.temporalMode } : {}),
+            ...(args.provenance !== undefined ? { provenance: args.provenance } : {}),
+            ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
+            ...(args.clear !== undefined ? { clear: args.clear } : {}),
+          },
+          ctx,
+          deps.edit,
         ),
       ),
   );

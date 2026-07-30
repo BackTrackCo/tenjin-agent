@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
-import { PublishModeSchema, parsePublishModeFlag } from '../lib/config';
+import { parsePublishModeFlag } from '../lib/config';
 import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
 import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
@@ -27,13 +27,15 @@ import {
   type PublishInput,
   type PublishStatus,
 } from '../lib/posts-api';
-import { createSessionKeyAuth, createSiwxAuth, type WriteAuth } from '../lib/session-key';
 import {
-  describeWallet,
-  resolveWalletProvider,
-  type TenjinSigner,
-  type WalletProvider,
-} from '../lib/wallet';
+  dedupeFindings,
+  describeFindings,
+  needsConfirmation,
+  publicFinding,
+  resolveWriteAuth,
+  writeModeNotices,
+} from '../lib/consent';
+import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -48,9 +50,6 @@ import type { CommandContext, CommandResult } from '../context';
  * needs_confirmation / non-bypassable publish_blocked, 4 a write failure after
  * approval.
  */
-
-/** Writes require Base mainnet per the server's SIWX chain constraint. */
-const WRITE_CHAIN_ID = 'eip155:8453';
 
 export interface PublishArgs {
   /** The Markdown file to publish; mutually exclusive with --candidate. */
@@ -129,29 +128,14 @@ export async function runPublish(
     ...(args.mode !== undefined ? { flag: args.mode } : {}),
     env,
   });
-  for (const warning of settings.warnings) {
-    ctx.io.stderr.write(`${warning}\n`);
-  }
-  // A mistyped TENJIN_PUBLISH_MODE degrades silently otherwise (the resolver
-  // ignores an unrecognized env value); warn on stderr so the discard is visible.
-  const envMode = env.TENJIN_PUBLISH_MODE;
-  if (
-    envMode !== undefined &&
-    envMode.length > 0 &&
-    !PublishModeSchema.safeParse(envMode).success
-  ) {
-    ctx.io.stderr.write(
-      `Ignoring invalid TENJIN_PUBLISH_MODE=${JSON.stringify(envMode)}; using ${settings.mode} (${settings.modeSource}).\n`,
-    );
-  }
-  // When the mode was never configured, say once (on stderr, invisible to JSON
-  // consumers) what the default does and how to change it, so an unconfigured
-  // publish is never a silent auto-publish surprise.
-  if (settings.modeSource === 'default') {
-    ctx.io.stderr.write(
-      `publish.mode: ${settings.mode} (default) - each publish asks you once. Set auto to publish clean scans automatically: tenjin config set publish.mode auto.\n`,
-    );
-  }
+  // The resolver's downgrade warnings, a mistyped env mode, and the one-line
+  // explainer for an unconfigured mode: all stderr, all invisible to --json.
+  writeModeNotices(
+    ctx.io.stderr,
+    settings,
+    env,
+    'each publish asks you once. Set auto to publish clean scans automatically',
+  );
   const priceAtomic = resolvePrice(args, frontmatter, settings.defaultPriceAtomic);
 
   // The scan runs in EVERY mode (D38): it gates the gate, it does not replace it.
@@ -197,11 +181,8 @@ export async function runPublish(
     });
   }
 
-  // needs_confirmation: review always asks; auto asks only on a soft finding;
-  // full-auto proceeds past soft findings. --yes clears the soft findings and the
-  // review confirm alike.
-  const needsConfirm = settings.mode === 'review' || (settings.mode === 'auto' && warns.length > 0);
-  if (needsConfirm && args.yes !== true) {
+  // --yes clears the soft findings and the review confirm alike.
+  if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
     throw new CliError('NEEDS_CONFIRMATION', confirmMessage(warns.length, price.usd), {
       fix: 'Review the findings, then re-run with --yes (or resolve the source and re-run).',
       details: {
@@ -224,7 +205,15 @@ export async function runPublish(
   );
   await describeWallet(provider); // surfaces WALLET_MISSING with its own fix
   const signer = await provider.getSigner();
-  const auth = resolveWriteAuth(signer, runtime.baseUrl, ctx.dataDir, deps, env);
+  const auth = resolveWriteAuth({
+    signer,
+    baseUrl: runtime.baseUrl,
+    dataDir: ctx.dataDir,
+    // A publish always writes.
+    scope: 'read+write',
+    ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
+    env,
+  });
 
   const input: PublishInput = {
     ...(title !== undefined ? { title } : {}),
@@ -335,7 +324,7 @@ function receipt(
   candidateInfo?: CandidateReceipt,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
-  const missing = missingSentences(result.cacheEligibleMissing);
+  const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
   const cacheEligible = result.cacheEligible ?? false;
   const deskUrl = `${trimSlash(baseUrl)}/desk`;
   const title = sanitizeForTerminal(result.title);
@@ -454,18 +443,6 @@ function cardFlagsFrom(args: PublishArgs): CardFlags {
   };
 }
 
-function resolveWriteAuth(
-  signer: TenjinSigner,
-  baseUrl: string,
-  dataDir: string,
-  deps: PublishDeps,
-  env: NodeJS.ProcessEnv,
-): WriteAuth {
-  const config = { signer, baseUrl, chainId: WRITE_CHAIN_ID, dataDir };
-  const useSession = deps.useSession ?? env.TENJIN_NO_SESSION !== '1';
-  return useSession ? createSessionKeyAuth(config) : createSiwxAuth(config);
-}
-
 /**
  * The derived card's free-text values as one newline-joined document, so the scan
  * covers card-flag input (which never touches the file) at the same severity as
@@ -494,35 +471,12 @@ function cardScanText(card: ResourceCardInput | undefined): string {
   return parts.join('\n');
 }
 
-/** Collapse findings that share a check + excerpt (a frontmatter value scanned in
- *  both the file and the derived card) to one, keeping the first (the file-line). */
-function dedupeFindings(findings: ScanFinding[]): ScanFinding[] {
-  const seen = new Set<string>();
-  return findings.filter((f) => {
-    const key = `${f.check}:${f.excerpt}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Finding + message shaping.
 // ---------------------------------------------------------------------------
 
-/** A finding safe to echo: block excerpts are already masked by the scanner. */
-function publicFinding(f: ScanFinding): {
-  check: string;
-  severity: string;
-  line: number;
-  excerpt: string;
-} {
-  return { check: f.check, severity: f.severity, line: f.line, excerpt: f.excerpt };
-}
-
 function blockMessage(blocking: ScanFinding[]): string {
-  const checks = [...new Set(blocking.map((f) => f.check))].join(', ');
-  return `Publish blocked: the file contains ${blocking.length} secret finding(s) (${checks}).`;
+  return `Publish blocked: the file contains ${describeFindings(blocking)}.`;
 }
 
 function confirmMessage(warnCount: number, priceUsd: string): string {
