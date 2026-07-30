@@ -1,10 +1,12 @@
 import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
-import { scan, type ScanFinding } from '../lib/scan';
+import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
+import { deriveProjectMarkers } from '../lib/scan-context';
 import { sanitizeForTerminal } from '../lib/output';
 import {
   deriveCard,
@@ -199,6 +201,12 @@ export async function runEdit(
     'each edit asks you once. Set auto to apply clean edits automatically',
   );
 
+  // Gate parity with publish (#38): the source project's own git remote slugs are
+  // private-by-default, so text quoting them warns. Markers derive from the
+  // CONTENT's project — the body file's own directory when there is one, else the
+  // working directory — never from wherever the shell happens to be.
+  const markerRoot = args.body !== undefined ? dirname(resolve(cwd, args.body)) : cwd;
+  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
   // The scan covers exactly what this edit SHIPS: the typed text behind the keys
   // that survived pruning, plus the body file only when the body itself survived.
   // Scanning the raw flags instead would block on a value that prunes away — a
@@ -206,8 +214,8 @@ export async function runEdit(
   // unrelated title change while the same flags alone exit 0. A secret in a
   // surviving value still blocks in every mode, never cleared by --yes.
   const findings = dedupeFindings([
-    ...(input.bodyMd !== undefined ? scan(bodyFile?.raw ?? '') : []),
-    ...scan(shippedTypedText(args, input)),
+    ...(input.bodyMd !== undefined ? scan(bodyFile?.raw ?? '', scanContext) : []),
+    ...scan(shippedTypedText(args, input), scanContext),
   ]);
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');

@@ -14,6 +14,7 @@ import {
 const FORBIDDEN_VERBS = [
   'tenjin send',
   'tenjin publish',
+  'tenjin edit',
   'tenjin wallet create',
   'tenjin config set',
   'tenjin candidate add',
@@ -96,6 +97,15 @@ describe('money-moving and state-changing verbs are never recommended', () => {
     }
   });
 
+  it('names tenjin edit as write-capable, since its no-flag form reads as a show', () => {
+    const edit = NEVER_ALLOWLISTED.find((e) => e.command === 'tenjin edit');
+    expect(edit?.reason).toMatch(/write-capable/i);
+    expect(edit?.reason).toMatch(/prices/i);
+    // The trap this entry exists for: `tenjin edit <id>` with no flags only reads,
+    // so an operator sizing up the verb by its safest form allowlists a writer.
+    expect(edit?.reason).toMatch(/no-flag form/i);
+  });
+
   it('tenjin send heads the never-allowlisted list with its reason', () => {
     const send = NEVER_ALLOWLISTED[0];
     expect(send?.command).toBe('tenjin send');
@@ -144,6 +154,7 @@ describe('the flag surface inside an allowed verb', () => {
   it('ships the MCP caveat naming the tools to leave gated', () => {
     const mcp = MCP_CAVEAT.join(' ');
     expect(mcp).toContain('mcp__tenjin__tenjin_publish');
+    expect(mcp).toContain('mcp__tenjin__tenjin_edit');
     expect(mcp).toContain('mcp__tenjin__tenjin_wallet');
     expect(mcp).toContain('mcp__tenjin__tenjin_candidate');
   });

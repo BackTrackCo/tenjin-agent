@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
@@ -1416,5 +1416,81 @@ describe('runEdit — a big appliesTo cannot flood one line', () => {
     // 19KB of card would otherwise land on this one line.
     expect((line as string).length).toBeLessThan(500);
     expect(line).toContain('…');
+  });
+});
+
+describe('runEdit — the project-marker scan context (parity with publish)', () => {
+  /** A git checkout whose remote names an org/repo the scan treats as private. */
+  async function gitProject(): Promise<void> {
+    await mkdir(join(dir, '.git'), { recursive: true });
+    await writeFile(
+      join(dir, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:AcmeInternal/secret-service.git\n',
+      'utf8',
+    );
+  }
+
+  it('warns when a card field quotes the source project, so auto mode stops to ask', async () => {
+    // Publish gained this context in #38; an edit ships to the same public card, so
+    // it must derive the same markers or the two gates have quietly diverged.
+    await gitProject();
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ scope: 'internals of AcmeInternal/secret-service' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('is warn-tier, so --yes still applies it', async () => {
+    await gitProject();
+    const stub = stubServer();
+    await runEdit(
+      args({ yes: true, scope: 'internals of AcmeInternal/secret-service' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('says nothing when the text does not name the project', async () => {
+    await gitProject();
+    const stub = stubServer();
+    await runEdit(
+      args({ scope: 'a new scope naming nothing private' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1); // auto mode, clean scan: applied
+  });
+
+  it("a body file draws its markers from the FILE's project, not the cwd", async () => {
+    // The body may come from anywhere; the project that matters is the one the
+    // draft lives in, matching publish's resolution.
+    const other = await mkdtemp(join(tmpdir(), 'tenjin-edit-src-'));
+    try {
+      await mkdir(join(other, '.git'), { recursive: true });
+      await writeFile(
+        join(other, '.git', 'config'),
+        '[remote "origin"]\n\turl = https://github.com/OtherOrg/other-repo.git\n',
+        'utf8',
+      );
+      const file = join(other, 'body.md');
+      await writeFile(file, '# New\n\nNotes on OtherOrg/other-repo internals.\n', 'utf8');
+      const stub = stubServer();
+      await expect(
+        runEdit(
+          args({ body: file }),
+          makeCtx(),
+          hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+      expect(stub.puts()).toHaveLength(0);
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
   });
 });
