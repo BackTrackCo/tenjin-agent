@@ -254,7 +254,7 @@ function refusal(
   const mismatch = check === 'session_origin_mismatch';
   const mintable = check !== 'session' && !mismatch;
   const fix = mismatch
-    ? `Your session key was minted for a different Tenjin deployment, so it was not presented. Read from the origin it belongs to — check with \`tenjin config get baseUrl\` and drop any host override — rather than minting a new session against this one. ${buyFix}`
+    ? `Your session key was minted for a different Tenjin deployment, so it was not presented. Read from the origin it belongs to, rather than minting a new session against this one. Check the configured origin with \`tenjin config get baseUrl\` and drop any host override. ${buyFix}`
     : mintable
       ? `${buyFix} If you already bought it, \`tenjin session start --scope read\` lets this read recover it free.`
       : buyFix;
