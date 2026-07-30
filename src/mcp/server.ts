@@ -240,9 +240,13 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'MISS. Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: strip secrets, ' +
         'private identifiers, and company-internal context, then send what is left as one ' +
         'complete natural-language sentence. Retrieval matches wording and meaning, so ' +
-        'compressing the question to keywords throws away signal. Returns the compact ' +
-        'candidates/MISS envelope; records the searchId locally so tenjin_buy and tenjin_outcome ' +
-        'can refer to it. A MISS may also carry a `browse` array of at most three pointers ' +
+        'compressing the question to keywords throws away signal. Returns up to `limit` LEAN ' +
+        'candidates (identity, price, freshness, why it matched) or a MISS; records the searchId ' +
+        'locally so tenjin_buy and tenjin_outcome can refer to it. A candidate does NOT say what ' +
+        'the piece claims, so always call tenjin_inspect (free) before tenjin_buy. A `truncated: ' +
+        'true` flag means candidates were dropped for size; the ceiling grows with the number ' +
+        'returned, so retry with a LARGER limit (up to 10), and only at 10 is narrowing the ' +
+        'question the remedy. A MISS may also carry a `browse` array of at most three pointers ' +
         '(resourceId, url, title, price, creator.handle) into the broad corpus: unscored ' +
         '"you might browse this" hints with no match reasons, not answer candidates, and never ' +
         'resolvable by tenjin_buy/tenjin_outcome via resourceId.',
@@ -270,9 +274,15 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Inspect a candidate',
       description:
-        "Show a candidate's pre-purchase card / preview from the read route without paying: price, " +
-        'scope, freshness, and the leak-safe preview. Use after tenjin_search and before tenjin_buy. ' +
-        'Never signs, never pays, never saves.',
+        "Show a candidate's answer card and preview from the read route without paying: what it " +
+        'answers, what it applies to, its scope and exclusions, its freshness dates, its ' +
+        'provenance, plus the price and the leak-safe preview. This is the only place that ' +
+        'depth exists before a purchase, so run it after tenjin_search and before every ' +
+        'tenjin_buy. A piece with no `card` shows price and preview only; a `cardUnavailable` ' +
+        'flag instead means the card exists but could not be loaded, so retry rather than ' +
+        'treating the piece as attesting nothing. A maximal card is roughly 25kB, so inspect ' +
+        'the two or three most promising candidates, not a whole page of them. Never signs, ' +
+        'never pays, never saves.',
       inputSchema: inspectInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
