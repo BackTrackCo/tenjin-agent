@@ -9,8 +9,8 @@
       "expectations": [
         "The drafted card populates `questionsAnswered` with between 5 and 10 entries",
         "No `questionsAnswered` or `tasksSupported` entry exceeds 200 characters",
-        "The `questionsAnswered` entries use at least two different registers from the three the skill names: a natural symptom sentence, a terse keyword line or verbatim error string, a why/how question",
-        "No `questionsAnswered` entry is a same-register rephrasing of another entry",
+        "The `questionsAnswered` entries use at least two different registers from the three the skill names: a natural symptom sentence, the verbatim error string or the symptom line someone would type (never a bare topic label), a why/how question",
+        "Every `questionsAnswered` entry asks something no other entry asks",
         "The `scope` names the products and versions tested (x402 facilitators, Base mainnet USDC, @x402/core 2.17.0) and contains no filler adjectives",
         "`exclusions` states at least one thing the piece does not cover",
         "`asOf` is an ISO-8601 timestamp with an offset, for example `2026-07-26T00:00:00Z`, carrying the stated test date",
@@ -52,7 +52,7 @@
       "files": [],
       "expectations": [
         "The drafted card populates `questionsAnswered` with between 5 and 10 entries and none exceeds 200 characters",
-        "No card entry is padded to length with restatements of another entry",
+        "Every `questionsAnswered` entry asks something no other entry asks, rather than restating one to pad the list",
         "The abandoned module-graph investigation is not part of the drafted piece",
         "`scope` names Next 16.0.3 and pnpm 11.11 and the platforms verified",
         "In the default review mode, `tenjin publish` is run without `--yes` first, and the returned needs_confirmation payload is rendered to the user before any re-run",

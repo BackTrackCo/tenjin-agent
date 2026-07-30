@@ -70,7 +70,7 @@
         "No `tenjin buy` is run unless an inspected card covers x402 v2.19 specifically, whatever a title suggests",
         "No candidate is presented to the user as the answer unless its card covers v2.19; one covering only neighbouring versions is named as not answering the question",
         "`tenjin outcome` is run once, with `--status rejected` if a near match was declined and `--status regenerated` if the result was a MISS",
-        "The user is told which versions the available work actually covers, or that nothing covers v2.19 when the result was a MISS"
+        "The search outcome is reported to the user: which versions the available work covers when a candidate was declined, and a plain MISS rather than an error or a failure when nothing came back"
       ]
     },
     {

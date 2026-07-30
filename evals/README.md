@@ -189,6 +189,10 @@ each, and vary the REGISTER" wording), while the CLI-specific guidance the searc
 exists only here. So a card-rule change worth making is usually worth making in both repos, and
 a drift between them is a real finding rather than a formatting difference.
 
+Where an expectation quotes a list the skill states, the register list in publish case 1 above
+all, the two are kept in agreement by hand: no guard compares them, so a skill edit that
+rewords such a list has to reword the expectation in the same wave.
+
 Two grading rules the fixtures depend on. The `--json` expectations grade the literal command
 text, because the CLI already emits JSON when stdout is not a TTY: a run that dropped the flag
 produces identical output, so only the command line shows whether the agent followed the
