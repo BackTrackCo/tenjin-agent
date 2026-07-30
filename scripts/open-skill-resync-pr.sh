@@ -56,7 +56,7 @@ CHANGESET_BODY
 fi
 
 if git diff --quiet HEAD --; then
-  echo "skill-resync: PR #$pr_number already carries this mirror; nothing to push."
+  echo "skill-resync: $BRANCH already carries this mirror; nothing to push."
   exit 0
 fi
 
@@ -65,10 +65,19 @@ git -c user.name='github-actions[bot]' \
   -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
   commit -m "$COMMIT_MESSAGE"
 
-# Force-push is scoped to this one bot-owned branch, and only ever overwrites a
-# branch with no open PR (the reset path above); with a PR open the push is a
-# fast-forward on top of what reviewers already saw.
-git push --force origin "HEAD:refs/heads/$BRANCH"
+if [ -n "$pr_number" ]; then
+  # Fast-forward on top of what reviewers already saw. Deliberately unforced: if
+  # a concurrent run or a human pushed after the fetch above, the rejection
+  # surfaces the race instead of silently overwriting them. (A bare
+  # `--force-with-lease` would be wrong here — CI's checkout carries no
+  # remote-tracking ref for the bot branch, so its implicit lease expects the
+  # branch not to exist and every update push would fail.)
+  git push origin "HEAD:refs/heads/$BRANCH"
+else
+  # Nothing is under review, so the branch is disposable: overwrite whatever an
+  # abandoned run left behind. Scoped to this one bot-owned branch.
+  git push --force origin "HEAD:refs/heads/$BRANCH"
+fi
 
 if [ -n "$pr_number" ]; then
   echo "skill-resync: updated PR #$pr_number."
