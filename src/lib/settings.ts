@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import {
   PublishModeSchema,
+  SEND_MAX_UNSET,
   loadRawConfig,
   resolvePublishDefaultPrice,
   resolvePublishMode,
@@ -27,6 +28,12 @@ export interface ResolvedSettings {
   policy: SpendPolicy;
   /** Search-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
   evalCohort: boolean;
+  /**
+   * Hard per-send cap for `tenjin send`: SEND_MAX_UNSET = never configured
+   * (send refuses until `config set sendMaxAmount`), null = explicit "none"
+   * (uncapped opt-in), 0n = disabled, otherwise the atomic cap.
+   */
+  sendMaxAmountAtomic: bigint | null | typeof SEND_MAX_UNSET;
 }
 
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
@@ -36,6 +43,12 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
     baseUrl: s.baseUrl.value,
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
+    sendMaxAmountAtomic:
+      s.sendMaxAmount.value === SEND_MAX_UNSET
+        ? SEND_MAX_UNSET
+        : s.sendMaxAmount.value === 'none'
+          ? null
+          : BigInt(s.sendMaxAmount.value),
     policy: {
       maxAutoSpendAtomic: BigInt(s.maxAutoSpend.value),
       sessionBudgetAtomic: BigInt(s.sessionBudget.value),

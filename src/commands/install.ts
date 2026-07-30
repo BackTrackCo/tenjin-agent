@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
+import { promptYesNo } from '../lib/prompt';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
@@ -486,23 +487,9 @@ async function defaultCreateWallet(ctx: CommandContext): Promise<string> {
   return (result.data as { address: string }).address;
 }
 
-/** A visible y/n reader defaulting to yes (empty input); label + echo on stderr. */
+/** The shared y/n reader, defaulting to YES on empty input (setup ergonomics). */
 function defaultConfirmYesNo(label: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    let settled = false;
-    const settle = (value: boolean): void => {
-      if (settled) return;
-      settled = true;
-      rl.close();
-      resolve(value);
-    };
-    rl.once('close', () => settle(false));
-    rl.question(label, (answer) => {
-      const a = answer.trim().toLowerCase();
-      settle(a === '' || a === 'y' || a === 'yes');
-    });
-  });
+  return promptYesNo(label, { defaultYes: true });
 }
 
 function doctorSummary(io: Io, doctor: DoctorChecks): string[] {

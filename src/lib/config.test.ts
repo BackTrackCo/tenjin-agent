@@ -52,6 +52,17 @@ describe('loadConfig', () => {
   });
 });
 
+describe('CONFIG_DEFAULTS.sendMaxAmount placeholder', () => {
+  it('is the fail-closed placeholder (send disabled), never the uncapped value', () => {
+    // resolveSendMaxAmount never reads this key (absent resolves to the
+    // SEND_MAX_UNSET sentinel and send refuses), so the placeholder is
+    // unreachable today. This pin exists for the day that stops being true: a
+    // future caller reading the cap through loadConfig/fileOrDefault must get
+    // "send disabled", not silently-uncapped 'none'.
+    expect(CONFIG_DEFAULTS.sendMaxAmount).toBe('0');
+  });
+});
+
 describe('resolveSettings — precedence and provenance', () => {
   it('reports default provenance when nothing is set', async () => {
     const config = await loadRawConfig(dir);

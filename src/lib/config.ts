@@ -57,6 +57,16 @@ export const ConfigSchema = z.object({
   maxAutoSpend: atomicString,
   sessionBudget: atomicString,
   confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
+  /**
+   * Hard per-send cap for `tenjin send`, NOT satisfiable by --yes or a prompt
+   * (the spend-policy posture): an atomic amount caps each send, "0" disables
+   * the verb entirely, and "none" = explicitly uncapped (send exists to drain
+   * the wallet, but uncapped is an opt-in, never a default). The key has NO
+   * usable default: absent from config.json, `tenjin send` refuses until it is
+   * set (see resolveSendMaxAmount). Client-enforced like every spend key (see
+   * the note above).
+   */
+  sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
   rpcUrl: z.url(),
@@ -90,10 +100,25 @@ export const RawConfigSchema = ConfigSchema.partial()
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
 
+/**
+ * The resolved-view sentinel for an absent sendMaxAmount. Never a persistable
+ * value (ConfigSchema rejects it, and `config set` has no way to produce it);
+ * while the resolved value is this sentinel, `tenjin send` refuses —
+ * require-set-before-first-send.
+ */
+export const SEND_MAX_UNSET = 'unset';
+
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',
   confirm: 'always',
+  // A type placeholder only, never honored: Config requires every key (and
+  // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
+  // absent key resolves to SEND_MAX_UNSET and `tenjin send` refuses until the
+  // cap is set. '0' (send disabled) rather than 'none' (uncapped) so that if a
+  // future caller ever DOES read the cap through loadConfig/fileOrDefault, the
+  // leak fails closed instead of silently running uncapped.
+  sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
@@ -200,6 +225,7 @@ export interface EffectiveSettings {
   maxAutoSpend: ResolvedSetting<string>;
   sessionBudget: ResolvedSetting<string>;
   confirm: ResolvedSetting<string>;
+  sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
@@ -234,6 +260,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
     confirm: fileOrDefault('confirm', config),
+    sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
@@ -320,6 +347,18 @@ export async function writeConfig(dir: string, config: Config): Promise<void> {
     mode: 0o644,
     dirMode: 0o700,
   });
+}
+
+/**
+ * sendMaxAmount deliberately bypasses fileOrDefault: it has no usable default
+ * (the operator's require-set-before-first-send posture). Absent from
+ * config.json it resolves to the SEND_MAX_UNSET sentinel with source 'default',
+ * which `tenjin send` refuses outright — the cap must be set to an amount, "0"
+ * (disable), or an explicit "none" (uncapped opt-in) before the first send.
+ */
+function resolveSendMaxAmount(config: PartialConfig): ResolvedSetting<string> {
+  if (config.sendMaxAmount !== undefined) return { value: config.sendMaxAmount, source: 'file' };
+  return { value: SEND_MAX_UNSET, source: 'default' };
 }
 
 function fileOrDefault<K extends keyof Config>(
