@@ -1,9 +1,16 @@
 name: skill-drift
 
 # The vendored skills/tenjin/SKILL.md is a byte-for-byte mirror of the canonical
-# tenjin.blog/skills.md. Re-run the (dep-free) sync and fail if the committed copy
-# has drifted: daily so an upstream edit surfaces on its own, and on any PR that
-# touches the mirror or its generator so a hand-edit never slips through.
+# tenjin.blog/skills.md. Re-run the (dep-free) sync and compare, in two modes:
+#
+#   pull_request  -> pure check, read-only, fails on any diff so a hand-edit
+#                    never slips through.
+#   schedule/     -> an upstream edit is nobody's mistake and can't be fixed by
+#   dispatch        failing, so instead of a red run and an ignored email, the
+#                   run opens (or updates) one standing resync PR. A PR is a
+#                   thing you actually see; a daily red X is alarm fatigue. The
+#                   scheduled run therefore SUCCEEDS once the PR is open, and
+#                   fails only if the sync or the PR itself errored.
 on:
   schedule:
     - cron: '27 6 * * *' # 06:27 UTC daily, off the top-of-hour congestion.
@@ -12,17 +19,23 @@ on:
     paths:
       - 'skills/**'
       - 'scripts/sync-skill.mjs'
+      - 'scripts/open-skill-resync-pr.sh'
 
 concurrency:
   group: skill-drift-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs are disposable; a resync run must not be cancelled
+  # mid-push, so only the check path cancels in progress.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Default-deny; the job opts into only what it needs.
+# Default-deny; each job opts into only what it needs.
 permissions: {}
 
 jobs:
+  # Read-only check. Keep this job's id and name stable: it is the PR-side
+  # signal branch protection points at.
   skill-drift:
     name: skill-drift (mirror is in sync)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -40,3 +53,52 @@ jobs:
       # Any diff means the committed mirror is stale (or hand-edited). Fail loud;
       # the fix is `pnpm sync:skill` locally, then commit.
       - run: git diff --exit-code -- skills/
+
+  # Write path, unreachable from pull_request, so PR CI can never push a branch.
+  resync:
+    name: skill-drift (auto-open resync PR)
+    # workflow_dispatch lets the operator pick any ref; bind to main so a
+    # dispatch off a stale branch can't spend the write token opening resync PRs
+    # against arbitrary refs (same guard as release.yml).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the bot/skill-resync branch
+      pull-requests: write # open/update the resync PR
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      # PRs opened with the default GITHUB_TOKEN don't trigger downstream
+      # workflows (Actions anti-recursion), which would leave the resync PR with
+      # no CI and no mirror check — the two things a reviewer needs. Same
+      # app-token mechanism release.yml uses to open its version PR.
+      - name: Mint release-bot installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # The script pushes via the git CLI, which reads this persisted token.
+          token: ${{ steps.app-token.outputs.token }}
+          # Full history: a shallow clone can't push the bot branch.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+
+      # No install here either; the sync is Node built-ins and the rest is git + gh.
+      - name: Open or update the resync PR
+        run: bash scripts/open-skill-resync-pr.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
