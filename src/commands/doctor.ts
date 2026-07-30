@@ -26,11 +26,11 @@ import type {
 import { fetchJson } from '../lib/http';
 import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { trimSlash } from '../lib/url';
-import { configPath } from '../lib/paths';
+import { originOf, trimSlash } from '../lib/url';
+import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
-import { isSessionPresentable, loadSessionFile } from '../lib/session-present';
+import { isSessionPresentable, readSessionFile } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
@@ -138,7 +138,7 @@ export async function collectDoctorChecks(
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
     ),
-    await checkSession(ctx.dataDir, deps.now ?? Date.now),
+    await checkSession(ctx.dataDir, deps.now ?? Date.now, originOf(baseUrl)),
   ];
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -528,18 +528,43 @@ const POSTURE: Record<DirState, string> = {
 /**
  * The delegated session key `tenjin read` presents to recover a piece this wallet
  * already owns (`tenjin session start --scope read` mints it). Never required and
- * never a fail: `read` works without one, it just cannot recover an owned piece
- * that is not cached locally, so ABSENT is `ok` — the normal posture, not a
- * defect. A session that exists but is expired, out of scope, or unreadable IS
- * worth a warn: you minted one deliberately and it silently stopped working.
+ * never a fail — `read` works without one — so ABSENT is `ok`: the normal
+ * posture, not a defect.
  *
- * Reports address / scope / expiry and nothing else. The delegation and the
- * private JWK never reach this output — doctor's payload is the single most
+ * Everything else warns, and the states are kept apart on purpose. A 0600 file
+ * that is now group-readable, or one whose contents no longer parse, is a TAMPER
+ * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
+ * and collapses them to "no session", which is the right instruction for a caller
+ * that can re-mint and exactly the wrong report for the verb an operator runs
+ * when something looks wrong. `readSessionFile` keeps them distinguishable and
+ * this is the one caller that needs them.
+ *
+ * An unreadable file (EACCES after a `sudo` run, EIO) warns rather than throwing:
+ * doctor is diagnostics, and a session cache nobody asked about must never take
+ * down the run that was going to explain the rest of the machine.
+ *
+ * Reports address / origin / scope / expiry and nothing else. The delegation and
+ * the private JWK never reach this output — doctor's payload is the single most
  * likely thing in this CLI to be pasted into an issue.
  */
-async function checkSession(dataDir: string, now: () => number): Promise<BuiltCheck> {
-  const file = await loadSessionFile(dataDir);
-  if (file === null) {
+async function checkSession(
+  dataDir: string,
+  now: () => number,
+  origin: string,
+): Promise<BuiltCheck> {
+  const warn = (detail: string, data?: unknown): BuiltCheck => ({
+    result: {
+      name: 'session',
+      status: 'warn',
+      required: false,
+      detail,
+      fix: 'tenjin session start --scope read',
+      ...(data !== undefined ? { data } : {}),
+    },
+  });
+
+  const state = await readSessionFile(dataDir);
+  if (state.kind === 'absent') {
     return {
       result: {
         name: 'session',
@@ -550,25 +575,38 @@ async function checkSession(dataDir: string, now: () => number): Promise<BuiltCh
       },
     };
   }
-  const data = { address: file.address, scope: file.scope, exp: file.exp };
-  if (!isSessionPresentable(file, now(), 'read')) {
-    return {
-      result: {
-        name: 'session',
-        status: 'warn',
-        required: false,
-        detail: `Session key for ${file.address} is expired or out of scope (scope ${file.scope}, exp ${file.exp})`,
-        fix: 'tenjin session start --scope read',
-        data,
-      },
-    };
+  if (state.kind === 'loosened') {
+    return warn(
+      `Session key at ${sessionPath(dataDir)} is mode 0${(state.mode | 0o600).toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
+    );
+  }
+  if (state.kind === 'corrupt') {
+    return warn(`Session key at ${sessionPath(dataDir)} could not be parsed (${state.reason})`);
+  }
+  if (state.kind === 'unreadable') {
+    return warn(`Session key at ${sessionPath(dataDir)} could not be read: ${state.message}`);
+  }
+
+  const file = state.file;
+  const data = { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp };
+  if (file.origin !== origin) {
+    return warn(
+      `Session key was minted for ${file.origin}, but the configured base URL is ${origin}; it is not presented off its own origin`,
+      data,
+    );
+  }
+  if (!isSessionPresentable(file, now(), 'read', origin)) {
+    return warn(
+      `Session key for ${file.address} is expired or out of scope (scope ${file.scope}, exp ${file.exp})`,
+      data,
+    );
   }
   return {
     result: {
       name: 'session',
       status: 'ok',
       required: false,
-      detail: `Session key ${file.address}, scope ${file.scope}, expires ${file.exp}`,
+      detail: `Session key ${file.address}, scope ${file.scope}, for ${file.origin}, expires ${file.exp}`,
       data,
     },
   };

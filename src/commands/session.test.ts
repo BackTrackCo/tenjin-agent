@@ -11,6 +11,9 @@ import { testSessionKey, testSigner } from '../lib/read-test-utils';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 import type { CommandContext } from '../context';
 
+/** The configured base URL every test runs against; sessions bind to its origin. */
+const ORIGIN = 'https://tenjin.blog';
+
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-session-cmd-'));
@@ -22,7 +25,7 @@ afterEach(async () => {
 function makeCtx(): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
   return {
-    flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+    flags: { json: true, timeout: 5000, baseUrl: ORIGIN },
     dataDir: dir,
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };

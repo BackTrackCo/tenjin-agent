@@ -312,7 +312,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   );
   addGlobalFlags(session.command('start'))
     .description(
-      'Open the wallet ONCE and mint a read-scoped session key (≤24h) so `tenjin read` can recover pieces you already own without paying. Spends nothing and can never spend: the delegated key is P-256, and the server refuses a read-scoped key on any write. Reuses a live session instead of signing again',
+      'Open the wallet ONCE and mint a read-scoped session key (≤24h) so `tenjin read` can recover pieces you already own without paying. Spends nothing and can never spend: the delegated key is P-256, the wrong curve to authorize a payment. It is still a wallet-derived credential, so it is stored 0600 and only ever presented to the origin it was minted for. Reuses a live session instead of signing again',
     )
     .option('--scope <scope>', 'session scope; this version mints `read` only (default: read)')
     .action(async function (this: Command) {

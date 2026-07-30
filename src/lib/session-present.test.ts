@@ -8,6 +8,7 @@ import {
   isSessionPresentable,
   isSessionUsable,
   loadSessionFile,
+  readSessionFile,
   scopeSatisfies,
   signWithSession,
   signatureBase,
@@ -24,6 +25,19 @@ import { sessionPath } from './paths';
 import { testSessionKey } from './read-test-utils';
 
 const subtle = webcrypto.subtle;
+
+const ORIGIN = 'https://tenjin.blog';
+
+/** A predicate fixture: only address/origin/scope/exp are read by these tests. */
+const FIXTURE: SessionFile = {
+  address: '0xabc',
+  origin: ORIGIN,
+  delegation: 'D',
+  exp: new Date(2_000_000_000_000).toISOString(),
+  scope: 'read',
+  publicKeyRaw: 'P',
+  privateKeyJwk: { kty: 'EC', crv: 'P-256', d: 'd', x: 'x', y: 'y' },
+};
 
 describe('RFC 9421 primitives are byte-exact', () => {
   it('Content-Digest is sha-256=:<base64 SHA-256(body)>: over the exact bytes', () => {
@@ -181,42 +195,35 @@ describe('scopeSatisfies (wider covers narrower, never the reverse)', () => {
 });
 
 describe('isSessionUsable', () => {
-  const base: SessionFile = {
-    address: '0xabc',
-    delegation: 'D',
-    exp: new Date(2_000_000_000_000).toISOString(),
-    scope: 'read+write',
-    publicKeyRaw: 'P',
-    privateKeyJwk: {},
-  };
+  const base: SessionFile = { ...FIXTURE, scope: 'read+write' };
 
   it('accepts a bound, unexpired, read+write session', () => {
-    expect(isSessionUsable(base, '0xABC', 1_000_000_000_000, 'read+write')).toBe(true);
+    expect(isSessionUsable(base, '0xABC', 1_000_000_000_000, 'read+write', ORIGIN)).toBe(true);
   });
   it('rejects a different wallet address', () => {
-    expect(isSessionUsable(base, '0xdef', 1_000_000_000_000, 'read+write')).toBe(false);
+    expect(isSessionUsable(base, '0xdef', 1_000_000_000_000, 'read+write', ORIGIN)).toBe(false);
   });
   it('rejects one at/near expiry (60s skew)', () => {
-    expect(isSessionUsable(base, '0xabc', 2_000_000_000_000, 'read+write')).toBe(false);
-    expect(isSessionUsable(base, '0xabc', 1_999_999_999_000, 'read+write')).toBe(false);
+    expect(isSessionUsable(base, '0xabc', 2_000_000_000_000, 'read+write', ORIGIN)).toBe(false);
+    expect(isSessionUsable(base, '0xabc', 1_999_999_999_000, 'read+write', ORIGIN)).toBe(false);
   });
   it('a read-scoped session does not satisfy a write run', () => {
     expect(
-      isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read+write'),
+      isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read+write', ORIGIN),
     ).toBe(false);
   });
   it('a read+write session satisfies a read run (wider covers narrower)', () => {
-    expect(isSessionUsable(base, '0xabc', 1_000_000_000_000, 'read')).toBe(true);
+    expect(isSessionUsable(base, '0xabc', 1_000_000_000_000, 'read', ORIGIN)).toBe(true);
   });
   it('a read-scoped session satisfies a read run', () => {
-    expect(isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read')).toBe(
-      true,
-    );
+    expect(
+      isSessionUsable({ ...base, scope: 'read' }, '0xabc', 1_000_000_000_000, 'read', ORIGIN),
+    ).toBe(true);
   });
   it('an unrecognized cached scope satisfies nothing', () => {
-    expect(isSessionUsable({ ...base, scope: 'write' }, '0xabc', 1_000_000_000_000, 'read')).toBe(
-      false,
-    );
+    expect(
+      isSessionUsable({ ...base, scope: 'write' }, '0xabc', 1_000_000_000_000, 'read', ORIGIN),
+    ).toBe(false);
   });
 });
 
@@ -226,36 +233,33 @@ describe('isSessionUsable', () => {
  * identical, or the two callers would disagree about what a live session is.
  */
 describe('isSessionPresentable (scope + expiry, no address binding)', () => {
-  const base: SessionFile = {
-    address: '0xabc',
-    delegation: 'D',
-    exp: new Date(2_000_000_000_000).toISOString(),
-    scope: 'read',
-    publicKeyRaw: 'P',
-    privateKeyJwk: {},
-  };
+  const base: SessionFile = FIXTURE;
 
   it('accepts a live read session whatever address it is bound to', () => {
-    expect(isSessionPresentable(base, 1_000_000_000_000, 'read')).toBe(true);
-    expect(isSessionPresentable({ ...base, address: '0xsomeoneelse' }, 1e12, 'read')).toBe(true);
-  });
-  it('accepts a cached read+write session for a read run', () => {
-    expect(isSessionPresentable({ ...base, scope: 'read+write' }, 1_000_000_000_000, 'read')).toBe(
+    expect(isSessionPresentable(base, 1_000_000_000_000, 'read', ORIGIN)).toBe(true);
+    expect(isSessionPresentable({ ...base, address: '0xsomeoneelse' }, 1e12, 'read', ORIGIN)).toBe(
       true,
     );
   });
+  it('accepts a cached read+write session for a read run', () => {
+    expect(
+      isSessionPresentable({ ...base, scope: 'read+write' }, 1_000_000_000_000, 'read', ORIGIN),
+    ).toBe(true);
+  });
   it('applies the same 60s expiry skew as isSessionUsable', () => {
-    expect(isSessionPresentable(base, 1_999_999_999_000, 'read')).toBe(false);
-    expect(isSessionPresentable(base, 2_000_000_000_000, 'read')).toBe(false);
+    expect(isSessionPresentable(base, 1_999_999_999_000, 'read', ORIGIN)).toBe(false);
+    expect(isSessionPresentable(base, 2_000_000_000_000, 'read', ORIGIN)).toBe(false);
   });
   it('rejects an unparseable exp rather than treating it as far future', () => {
-    expect(isSessionPresentable({ ...base, exp: 'soon' }, 1_000_000_000_000, 'read')).toBe(false);
-  });
-  it('rejects a scope that does not cover the run', () => {
-    expect(isSessionPresentable({ ...base, scope: 'write' }, 1_000_000_000_000, 'read')).toBe(
+    expect(isSessionPresentable({ ...base, exp: 'soon' }, 1_000_000_000_000, 'read', ORIGIN)).toBe(
       false,
     );
-    expect(isSessionPresentable(base, 1_000_000_000_000, 'read+write')).toBe(false);
+  });
+  it('rejects a scope that does not cover the run', () => {
+    expect(
+      isSessionPresentable({ ...base, scope: 'write' }, 1_000_000_000_000, 'read', ORIGIN),
+    ).toBe(false);
+    expect(isSessionPresentable(base, 1_000_000_000_000, 'read+write', ORIGIN)).toBe(false);
   });
 });
 
@@ -296,5 +300,114 @@ describe('loadSessionFile degradation branches', () => {
     await saveSessionFile(d, file); // 0600
     await chmod(sessionPath(d), 0o644); // loosened out of band
     expect(await loadSessionFile(d)).toBeNull();
+  });
+});
+
+/**
+ * The origin binding. The delegation is a wallet-derived credential and
+ * `--base-url` rides every leaf command, so "which deployment was this minted
+ * for" is a security property, not bookkeeping — the predicate is where it holds.
+ */
+describe('the origin binding', () => {
+  it('refuses to present a session minted for another origin', () => {
+    expect(isSessionPresentable(FIXTURE, 1_000_000_000_000, 'read', 'https://evil.example')).toBe(
+      false,
+    );
+    expect(
+      isSessionUsable(FIXTURE, '0xabc', 1_000_000_000_000, 'read', 'https://evil.example'),
+    ).toBe(false);
+  });
+
+  it('compares origins exactly: a different port or scheme is a different origin', () => {
+    for (const other of [
+      'http://tenjin.blog',
+      'https://tenjin.blog:8443',
+      'https://tenjin.blog.evil.com',
+    ]) {
+      expect(isSessionPresentable(FIXTURE, 1_000_000_000_000, 'read', other)).toBe(false);
+    }
+  });
+
+  it('accepts the origin it was minted for', () => {
+    expect(isSessionPresentable(FIXTURE, 1_000_000_000_000, 'read', ORIGIN)).toBe(true);
+  });
+});
+
+describe('the session schema rejects a key that could not sign', () => {
+  let d: string;
+  beforeEach(async () => {
+    d = await mkdtemp(join(tmpdir(), 'tenjin-session-jwk-'));
+  });
+  afterEach(async () => {
+    await rm(d, { recursive: true, force: true });
+  });
+
+  // A loose record let these through the load boundary and into subtle.importKey,
+  // which throws a raw DOMException — an exit-1 INTERNAL with no fix, out of a
+  // command whose contract is that a bad cache degrades into a refusal.
+  it.each([
+    ['an empty object', {}],
+    ['a missing private scalar', { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' }],
+    ['the wrong curve', { kty: 'EC', crv: 'P-384', d: 'd', x: 'x', y: 'y' }],
+    ['the wrong key type', { kty: 'RSA', crv: 'P-256', d: 'd', x: 'x', y: 'y' }],
+    ['an empty private scalar', { kty: 'EC', crv: 'P-256', d: '', x: 'x', y: 'y' }],
+  ])('reports %s as a corrupt cache, not a usable session', async (_name, jwk) => {
+    const { file } = await testSessionKey();
+    await writeFile(sessionPath(d), JSON.stringify({ ...file, privateKeyJwk: jwk }), {
+      mode: 0o600,
+    });
+    expect((await readSessionFile(d)).kind).toBe('corrupt');
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+
+  it('a session file missing its origin is corrupt, so it can never be presented blind', async () => {
+    const { file } = await testSessionKey();
+    const withoutOrigin: Record<string, unknown> = { ...file };
+    delete withoutOrigin.origin;
+    await writeFile(sessionPath(d), JSON.stringify(withoutOrigin), { mode: 0o600 });
+    expect((await readSessionFile(d)).kind).toBe('corrupt');
+  });
+});
+
+/** The states `loadSessionFile` flattens, which `doctor` needs kept apart. */
+describe('readSessionFile distinguishes what loadSessionFile collapses', () => {
+  let d: string;
+  beforeEach(async () => {
+    d = await mkdtemp(join(tmpdir(), 'tenjin-session-state-'));
+  });
+  afterEach(async () => {
+    await rm(d, { recursive: true, force: true });
+  });
+
+  it('absent', async () => {
+    expect(await readSessionFile(d)).toEqual({ kind: 'absent' });
+  });
+
+  it('corrupt JSON, with the reason', async () => {
+    await writeFile(sessionPath(d), 'nope {{{', { mode: 0o600 });
+    expect(await readSessionFile(d)).toMatchObject({ kind: 'corrupt', reason: 'not valid JSON' });
+  });
+
+  it('loosened, carrying the offending mode bits', async () => {
+    if (process.platform === 'win32') return;
+    await saveSessionFile(d, (await testSessionKey()).file);
+    await chmod(sessionPath(d), 0o644);
+    expect(await readSessionFile(d)).toMatchObject({ kind: 'loosened', mode: 0o044 });
+  });
+
+  it('unreadable is the ONE state loadSessionFile refuses to flatten to null', async () => {
+    // Silently re-establishing over a file that exists and merely could not be
+    // read would overwrite a session that may be perfectly good.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    await writeFile(sessionPath(d), '{}', { mode: 0o600 });
+    await chmod(sessionPath(d), 0o000);
+    expect((await readSessionFile(d)).kind).toBe('unreadable');
+    await expect(loadSessionFile(d)).rejects.toMatchObject({ code: 'INTERNAL' });
+  });
+
+  it('ok, returning the parsed file', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(d, file);
+    expect(await readSessionFile(d)).toEqual({ kind: 'ok', file });
   });
 });

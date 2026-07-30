@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runSessionStart } from '../commands/session';
+import { CliError } from './errors';
+import type { CommandContext } from '../context';
 import {
   ALWAYS_SAFE_ALLOWLIST,
   FLAG_CAVEAT,
@@ -105,9 +111,24 @@ describe('buy and session start are opt-in, never always-safe', () => {
     expect(note).toMatch(/SPENDS NOTHING/);
     // Why it cannot spend, stated as a property rather than a promise.
     expect(note).toMatch(/curve/i);
-    expect(note).toMatch(/read-scoped/i);
     // The flag interaction that is worse for this verb than for the others.
     expect(note).toContain('--base-url');
+  });
+
+  // The scope is NOT a containment boundary: it is enforced only on the request
+  // shape that carries a session signature alongside the delegation, and the same
+  // delegation replayed as a plain SIGN-IN-WITH-X takes a server path with no
+  // scope logic on it. This note is the reason an operator pastes the rule, so it
+  // must not offer a bound the code does not have. Pinned negatively — the honest
+  // limits (expiry, 0600, origin) are what may be claimed.
+  it('never sells the read scope as a bound on a leaked session file', () => {
+    const note = OPT_IN_ALLOWLIST.find((e) => e.command === 'tenjin session start')?.note ?? '';
+    expect(note).not.toMatch(/server refuses.*on any write/i);
+    expect(note).not.toMatch(/insufficient_scope/i);
+    expect(note).toMatch(/wallet-derived credential/i);
+    expect(note).toMatch(/not its\s*scope/i);
+    expect(note).toMatch(/24h/);
+    expect(note).toMatch(/origin it was minted for/i);
   });
 });
 
@@ -205,8 +226,32 @@ describe('claims made about the recommended set are true of the code', () => {
     const block = renderPermissionsBlock().join('\n');
     expect(block).not.toMatch(/no wallet, no signing, no payment/i);
     // ...and the replacement discloses what read may present, rather than hiding it.
-    expect(block).toMatch(/read-scoped session key/i);
+    expect(block).toMatch(/wallet-derived credential/i);
     expect(block).toMatch(/wrong curve/i);
+    expect(block).toMatch(/origin it/i);
+    // The block must not offer the scope as the reason the file is safe to hold.
+    expect(block).toMatch(/scope is not a bound/i);
+  });
+
+  // `read` is in the ALWAYS-SAFE tier and transmits a wallet-derived credential
+  // once a session exists. An operator reading only the tier list would never
+  // learn that, so the entry has to say it in as many words.
+  it("read's note discloses that it transmits a credential off-machine", () => {
+    const note = ALWAYS_SAFE_ALLOWLIST.find((e) => e.command === 'tenjin read')?.note ?? '';
+    expect(note).toMatch(/TRANSMITS A CREDENTIAL/);
+    expect(note).toMatch(/origin the delegation was minted for/i);
+    // And it must not re-import the claim the opt-in note just dropped.
+    expect(note).not.toMatch(/server refuses.*on any write/i);
+  });
+
+  // FLAG_CAVEAT used to scope signed traffic to `buy`, which was true only while
+  // read carried no credential. An operator weighing `--base-url` against the
+  // safe tier reads exactly this paragraph.
+  it('the flag caveat names read, not only buy, as credential-bearing', () => {
+    const flags = FLAG_CAVEAT.join(' ');
+    expect(flags).toMatch(/session key `read` may present/i);
+    expect(flags).toMatch(/NOT confined to the paying verb/i);
+    expect(flags).toMatch(/bound to the origin it was minted for/i);
   });
 
   it('discloses the non-read-only half in the per-entry notes too', () => {
@@ -262,4 +307,60 @@ describe('machine shape', () => {
     expect(p.optIn.length).toBe(OPT_IN_ALLOWLIST.length);
     expect(p.neverAllowlisted.length).toBe(NEVER_ALLOWLISTED.length);
   });
+});
+
+/**
+ * The claim `OPT_IN_ALLOWLIST` makes for `Bash(tenjin session start:*)` is that
+ * the rule cannot grant more than a read-scoped session. A prefix rule pins the
+ * verb and not the flags, so that holds for exactly one reason: the command
+ * refuses every other `--scope`. `SessionScope` still admits `'read+write'`, so a
+ * v2 that widened the verb would silently turn every already-pasted rule into a
+ * write-capable grant — with the only enforcing test living in another file,
+ * about another module. Co-locate it with the safety claim it backs.
+ */
+describe('the session-start rule is non-escalatable because the verb refuses to escalate', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  async function ctx(): Promise<CommandContext> {
+    const dir = await mkdtemp(join(tmpdir(), 'tenjin-perm-scope-'));
+    dirs.push(dir);
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: true, timeout: 5000, baseUrl: 'https://tenjin.blog' },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  /** A provider that fails the test if the command reaches the wallet at all. */
+  const refuseWallet = {
+    id: 'local' as const,
+    describe: () => Promise.reject(new Error('the wallet must not be reached on a refused scope')),
+    getSigner: () => Promise.reject(new Error('the wallet must not be reached on a refused scope')),
+    diagnostics: () => Promise.resolve({ warnings: [] }),
+  };
+
+  it('the rule exists in the opt-in tier and covers the two-word verb', () => {
+    const entry = OPT_IN_ALLOWLIST.find((e) => e.rule === 'Bash(tenjin session start:*)');
+    expect(entry).toBeDefined();
+    expect(ruleCovers('Bash(tenjin session start:*)', 'tenjin session start')).toBe(true);
+    // The rule pins the verb only: this is the command line the refusal must stop.
+    expect(
+      ruleCovers('Bash(tenjin session start:*)', 'tenjin session start --scope read+write'),
+    ).toBe(true);
+  });
+
+  it.each(['read+write', 'write', 'admin'])(
+    'runSessionStart refuses --scope %s as USAGE, so the rule cannot mint it',
+    async (scope) => {
+      const err = await runSessionStart({ scope }, await ctx(), { provider: refuseWallet }).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      expect((err as CliError).code).toBe('USAGE');
+    },
+  );
 });

@@ -40,8 +40,12 @@ export function testWalletProvider(signer: TenjinSigner = testSigner()): WalletP
 /**
  * A REAL P-256 session file (generated, not canned), plus its public key so a
  * test can verify the signature the CLI produced rather than only its shape.
- * Defaults to a live 1h `read` session bound to the test signer's address.
+ * Defaults to a live 1h `read` session bound to the test signer's address and to
+ * TEST_ORIGIN, the origin the read fixtures are served from.
  */
+/** The origin every read fixture (and so every session fixture) is bound to. */
+export const TEST_ORIGIN = 'https://tenjin.blog';
+
 export async function testSessionKey(
   over: Partial<SessionFile> = {},
 ): Promise<{ file: SessionFile; publicKey: webcrypto.CryptoKey }> {
@@ -51,10 +55,11 @@ export async function testSessionKey(
     'verify',
   ])) as webcrypto.CryptoKeyPair;
   const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
-  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as Record<string, unknown>;
+  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as SessionFile['privateKeyJwk'];
   return {
     file: {
       address: testSigner().address.toLowerCase(),
+      origin: TEST_ORIGIN,
       delegation: 'DELEGATION',
       exp: new Date(Date.now() + 3_600_000).toISOString(),
       scope: 'read',

@@ -2,6 +2,7 @@ import { webcrypto } from 'node:crypto';
 import { sessionPath } from './paths';
 import { writeFileAtomic } from './atomic-json';
 import { buildSiwxHeader } from './siwx';
+import { originOf } from './url';
 import {
   isSessionUsable,
   loadSessionFile,
@@ -32,7 +33,10 @@ import type { TenjinSigner } from './wallet/provider';
  * keep importing one module while `read` can import the present half ALONE and
  * stay structurally unable to open a keystore. Do not move a signer-touching
  * function down into `session-present.ts`: read's import-graph pin is what makes
- * "read cannot pay" a property of the code rather than a promise.
+ * "read cannot mint and cannot pay" a property of the code rather than a promise.
+ *
+ * A minted delegation is a wallet-derived credential, so it is bound to the
+ * ORIGIN it was minted against and every presenter re-checks that binding.
  *
  * Never hand-rolls crypto: P-256 keygen is node:crypto webcrypto (subtle) and the
  * wallet delegation reuses the siwx.ts seam.
@@ -41,6 +45,7 @@ import type { TenjinSigner } from './wallet/provider';
 export {
   contentDigest,
   isSessionPresentable,
+  readSessionFile,
   isSessionUsable,
   keyidFor,
   loadSessionFile,
@@ -52,6 +57,7 @@ export {
 } from './session-present';
 export type {
   SessionFile,
+  SessionFileState,
   SessionKeyDeps,
   SessionScope,
   SignableRequest,
@@ -134,7 +140,7 @@ export async function establishSession(
   const pair = await generateP256KeyPair();
   const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
   const publicKeyRaw = toBase64Url(rawPub);
-  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as Record<string, unknown>;
+  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as SessionFile['privateKeyJwk'];
 
   const expIso = new Date(now() + SESSION_TTL_MS).toISOString();
   const delegation = await buildSiwxHeader(config.signer, {
@@ -147,6 +153,7 @@ export async function establishSession(
 
   const file: SessionFile = {
     address: config.signer.address.toLowerCase(),
+    origin: originOf(config.baseUrl),
     delegation,
     exp: expIso,
     scope: config.scope,
@@ -210,13 +217,17 @@ export function createSessionKeyAuth(
     if (
       !forceReestablish &&
       cached !== null &&
-      isSessionUsable(cached, config.signer.address, now(), config.scope)
+      isSessionUsable(cached, config.signer.address, now(), config.scope, originOf(config.baseUrl))
     ) {
       return cached;
     }
     if (!forceReestablish) {
       const onDisk = await loadSessionFile(config.dataDir);
-      if (onDisk !== null && isSessionUsable(onDisk, config.signer.address, now(), config.scope)) {
+      const origin = originOf(config.baseUrl);
+      if (
+        onDisk !== null &&
+        isSessionUsable(onDisk, config.signer.address, now(), config.scope, origin)
+      ) {
         cached = onDisk;
         return cached;
       }

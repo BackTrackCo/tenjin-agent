@@ -80,8 +80,14 @@ the wallet — `read` imports no wallet, payment, or session-MINTING module, and
 import graph is test-pinned to stay clear of all three. It cannot unlock a
 keystore at all and never consults the spend policy. The key it may present is
 P-256: the wrong curve for the EIP-712/secp256k1 signature an EIP-3009 transfer
-authorization needs, so `read` cannot pay however it is refactored, and the
-delegation is read-scoped, which the server independently refuses on any write.
+authorization needs, so `read` cannot pay however it is refactored.
+
+The session file itself is a **wallet-derived credential** — treat it like one.
+Its scope is not a containment boundary, so do not read "read-scoped" as a limit
+on what a copied file is worth. What actually bounds it: it expires within 24h
+(server-clamped), it is stored 0600, and it records the origin it was minted for
+and is never presented anywhere else. That last one is why a stray `--base-url`
+cannot redirect it to a host an agent picked.
 
 `buy` is the paying verb: it re-reads an entitled resource for free before ever
 paying, re-delivers already-bought content from the local library without paying
@@ -173,8 +179,13 @@ Bash(tenjin candidate list:*)
 None of those can spend, and none can open the keystore. That is the definition of
 this tier, and it is deliberately narrower than "signs nothing": `tenjin read` can
 present a session key that already exists (below), which is a signature — a P-256
-delegation, the wrong curve to authorize a USDC transfer, and one the server
-refuses on any write method. It cannot mint one; that needs the wallet.
+delegation, the wrong curve to authorize a USDC transfer. It cannot mint one; that
+needs the wallet.
+
+Worth knowing before you paste the `read` line: once a session key exists, `read`
+**transmits that wallet-derived credential** to the origin it was minted for. That
+origin binding is what keeps a stray `--base-url` from redirecting it, and it is
+the reason the binding exists rather than a nicety.
 
 Three are not read-only, which is worth knowing before you pre-clear them:
 `tenjin search` POSTs your generalized question off-machine, and `tenjin outcome`
@@ -233,15 +244,20 @@ Bash(tenjin session start:*)
 `tenjin session start --scope read` takes one wallet signature and leaves a ≤24h
 P-256 delegation in `~/.tenjin/session.json` (0600), which `tenjin read` then
 presents to recover pieces you already own. The key is the wrong curve to sign an
-EIP-3009 payment authorization, and the delegation is read-scoped, which the
-server refuses (`insufficient_scope`) on any write — so the line cannot become a
-spend grant or a publish grant. What you are clearing is **unattended keystore
-access**: on an encrypted wallet the passphrase comes from the environment rather
-than from you, and the `--base-url` caveat above bites harder here than anywhere
-else, because a delegation minted against a host an agent chose is a wallet
-signature you did not intend to make (it is domain-bound, so it is useless at the
-real origin, but it was still made). `tenjin doctor` reports whether a session
-exists, at what scope, and when it expires.
+EIP-3009 payment authorization, so the line can never become a spend grant.
+
+Do not read the `read` scope as more than that. The scope is enforced only on the
+request shape that carries a session signature alongside the delegation header; a
+copy of the same delegation presented differently is not scope-checked, so treat
+the file as a credential carrying your wallet's authority. Its real bounds are the
+24h expiry, the 0600 mode, and the origin binding.
+
+What you are clearing is **unattended keystore access**: on an encrypted wallet
+the passphrase comes from the environment rather than from you, and the
+`--base-url` caveat above bites hardest here, because a mint against a host an
+agent chose is a wallet signature you did not intend to make. `tenjin doctor`
+reports whether a session exists, for which origin, at what scope, and when it
+expires.
 
 Deliberately **never** recommended, because each is a human decision: `tenjin send`
 (moves USDC out of the wallet, and is not bounded by the buy spend policy), `tenjin

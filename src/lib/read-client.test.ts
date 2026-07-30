@@ -84,6 +84,23 @@ describe('fetchRead', () => {
     await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
   });
 
+  // The 409 arm is deliberately NOT gated on sessionHeaders the way the 401 arm
+  // is: `already_purchased` is a documented outcome for every caller and `buy`
+  // consumes it. What made it dangerous was that read ignored it and fell to a
+  // price refusal — "you already own this" rendered as "this costs $X, run buy".
+  // read now handles it by name (see read.test.ts); this pins the wire half.
+  it('returns already_purchased on a 409 to a session-signed read, not a silent fallthrough', async () => {
+    const { fetch } = makeReadServer({
+      plain: () => reply.entitled(readBody()),
+      session: () => reply.alreadyPurchased(),
+    });
+    const res = await fetchRead(URL_, {
+      ...opts(fetch),
+      sessionHeaders: { 'Tenjin-Session-Delegation': 'DELEGATION' },
+    });
+    expect(res.kind).toBe('already_purchased');
+  });
+
   it('maps a 404 to RESOURCE_NOT_FOUND', async () => {
     const { fetch } = makeReadServer({ plain: () => new Response('{}', { status: 404 }) });
     await expect(fetchRead(URL_, opts(fetch))).rejects.toMatchObject({

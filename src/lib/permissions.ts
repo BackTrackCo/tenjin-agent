@@ -65,10 +65,21 @@ export interface ExcludedVerb {
  * gained the ability to PRESENT a cached session key. `read` signs, with a P-256
  * delegation loaded from disk; it cannot mint one (that needs the wallet, and its
  * import graph is test-pinned clear of it) and cannot produce the
- * secp256k1/EIP-712 signature a payment authorization needs (wrong curve), and
- * the delegation it presents is read-scoped, which the server independently
- * refuses on any write method. Money and key material stay out of reach; a
- * signature as such no longer does, so the tier says what it means.
+ * secp256k1/EIP-712 signature a payment authorization needs (wrong curve). Money
+ * and key material stay out of reach; a signature as such no longer does, so the
+ * tier says what it means.
+ *
+ * What the tier does NOT claim, because it is not true: that the read scope
+ * limits what a leaked delegation is worth. Scope is enforced only on the request
+ * shape that carries both a session signature and the delegation header; the same
+ * delegation replayed as a plain `SIGN-IN-WITH-X` takes a different server path
+ * where no scope logic runs. So a session file is a wallet-derived credential
+ * with the authority of the wallet behind it, and the mitigations that actually
+ * hold are the ones in this repo: it is 0600, short-lived (≤24h, server-clamped),
+ * bound to the origin it was minted for, and never presented off that origin.
+ * Treat "read is allowlisted" as "read may transmit that credential to the
+ * configured origin", and see FLAG_CAVEAT for why the configured origin is not
+ * automatically the one you configured.
  *
  * Not all of them are read-only, and the difference is disclosed rather than
  * papered over — `search` POSTs the (generalized, anonymous) question off-machine
@@ -115,9 +126,13 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'wallet already owns when a read-scoped session key is cached. Cannot spend ' +
       'and cannot open the keystore — the wallet, payment, and session-MINTING ' +
       'modules are all absent from its import graph, so the key it may present is ' +
-      'a P-256 delegation loaded from disk that cannot sign a payment and that the ' +
-      'server refuses on any write. Not read-only: a freshly delivered piece is ' +
-      'saved to the library.',
+      'a P-256 delegation loaded from disk, which is the wrong curve to authorize ' +
+      'a payment. TRANSMITS A CREDENTIAL: when a session key exists, a cold 402 ' +
+      'sends that wallet-derived delegation to the server. It goes only to the ' +
+      'origin the delegation was minted for, which is what stops a stray ' +
+      '`--base-url` from redirecting it, and no scope on it limits what a holder ' +
+      'could do with it. Not read-only: a freshly delivered piece is saved to the ' +
+      'library.',
   },
   {
     rule: 'Bash(tenjin outcome:*)',
@@ -195,13 +210,15 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
       'OPENS THE KEYSTORE (one wallet signature), but SPENDS NOTHING and cannot: ' +
       'it mints a ≤24h P-256 session key so `tenjin read` can recover pieces you ' +
       'already own without paying. The delegated key is the wrong curve for a ' +
-      'payment authorization and is read-scoped, which the server refuses on any ' +
-      'write. What you are opting into is unattended keystore access: on an ' +
-      'encrypted wallet that means the passphrase prompt is skipped or answered ' +
-      'from the environment, and the `--base-url` caveat below bites harder here ' +
-      'than elsewhere — a delegation minted against an attacker-chosen host is ' +
-      'domain-bound and useless at the real origin, but it is still a wallet ' +
-      'signature you did not intend to make.',
+      'payment authorization, so no session file can ever move money. Do NOT read ' +
+      'the `read` scope as a bound on the rest: the file it leaves is a ' +
+      'wallet-derived credential, and what limits it is that it expires in 24h, ' +
+      'lives 0600, and is refused off the origin it was minted for — not its ' +
+      'scope. What you are opting into is unattended keystore access: on an ' +
+      'encrypted wallet the passphrase prompt is skipped or answered from the ' +
+      'environment, and the `--base-url` caveat below bites hardest here, because ' +
+      'a mint against an attacker-chosen host is a wallet signature you did not ' +
+      'intend to make.',
   },
 ];
 
@@ -264,11 +281,15 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
  */
 export const FLAG_CAVEAT: readonly string[] = [
   'Caveat: a prefix rule pins the VERB, not the flags. Every line above also clears',
-  '`--base-url <url>` on that verb, which re-points where the question, the probe, and',
-  '(for buy) the signature and payment go. Allowlist these verbs only if you are content',
-  'for the agent to choose the destination host, and set the base URL in config instead of',
-  'letting it be an argument. The skills tell agents never to pass --base-url on an',
-  'allowlisted verb, but that is a convention, not an enforced boundary.',
+  '`--base-url <url>` on that verb, which re-points where the question, the probe, the',
+  'session key `read` may present, and (for buy) the signature and payment go. Signed',
+  'and credential-bearing traffic is NOT confined to the paying verb: `read` is in the',
+  'safe tier and still transmits a wallet-derived delegation once one is cached, which is',
+  'why that delegation is bound to the origin it was minted for and refused elsewhere.',
+  'Allowlist these verbs only if you are content for the agent to choose the destination',
+  'host, and set the base URL in config instead of letting it be an argument. The skills',
+  'tell agents never to pass --base-url on an allowlisted verb, but that is a convention,',
+  'not an enforced boundary.',
 ];
 
 /**
@@ -319,8 +340,9 @@ export function renderPermissionsBlock(): string[] {
   lines.push('  Free: cannot spend and cannot open the keystore. Not all read-only, though:');
   lines.push('  `search` and `outcome` POST to the marketplace (a question, a report),');
   lines.push('  and `read` saves a delivered piece to your local library. `read` may also');
-  lines.push('  present a cached read-scoped session key: it cannot mint one, cannot sign a');
-  lines.push('  payment with it (wrong curve), and the server refuses it on any write.');
+  lines.push('  PRESENT a cached session key — a wallet-derived credential — to the origin it');
+  lines.push('  was minted for. It cannot mint one and cannot sign a payment with it (wrong');
+  lines.push('  curve), but treat the file itself as sensitive: its scope is not a bound.');
   lines.push('');
   lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
   lines.push('');

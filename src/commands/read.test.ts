@@ -10,6 +10,7 @@ import {
   makeReadServer,
   readBody,
   reply,
+  TEST_ORIGIN,
   testSessionKey,
   withTrailingSlashRedirect,
 } from '../lib/read-test-utils';
@@ -31,7 +32,9 @@ afterEach(async () => {
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
   return {
-    flags: { json: false, timeout: 5000, ...flags },
+    // The fixtures are served from TEST_ORIGIN, which is also what the session
+    // fixture binds to; a test that overrides it is testing the binding.
+    flags: { json: false, timeout: 5000, baseUrl: TEST_ORIGIN, ...flags },
     dataDir: dir,
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };
@@ -365,10 +368,17 @@ describe('runRead, owned-library recovery on a session key', () => {
     const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
       (e: unknown) => e,
     );
-    // Not API_UNREACHABLE: a rejected delegation is the state the refusal already
-    // describes, and read cannot re-establish (that needs the wallet it lacks).
-    expect((err as CliError).code).toBe('REFUSED');
-    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'session' });
+    // Not API_UNREACHABLE: read cannot re-establish (that needs the wallet it
+    // lacks), so it declines. And NOT `'session'`: the server never answered the
+    // ownership question, so telling the agent to buy would spend money on a
+    // piece it may already own. Re-minting is the move, so `sessionCommand` rides.
+    const cliErr = err as CliError;
+    expect(cliErr.code).toBe('REFUSED');
+    expect(cliErr.details).toMatchObject({
+      entitlementCheck: 'session_rejected',
+      sessionCommand: 'tenjin session start --scope read',
+    });
+    expect(cliErr.fix).toContain('tenjin session start --scope read');
     expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
   });
 
@@ -613,6 +623,15 @@ describe('runRead, module boundary', () => {
     const source = await readFile(join(here, 'read.ts'), 'utf8');
     const signCalls = [...source.matchAll(/\b(sign[A-Za-z]*)\s*\(/g)].map((m) => m[1]);
     expect(signCalls).toEqual(['signWithSession']);
+    // The presentation is actually WIRED, not merely importable. A type-only
+    // import keeps `session-present` in the graph walk above, and an extracted
+    // helper keeps a `signWithSession(` call in the file, so without these the
+    // pins stay green over a read that quietly stopped presenting anything —
+    // which is how a security-relevant path becomes dead code unnoticed.
+    const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+    for (const wired of ['loadSessionFile(', 'isSessionPresentable(', 'originOf(']) {
+      expect(code, `read.ts must still call ${wired}`).toContain(wired);
+    }
     for (const spec of importSpecs(source)) {
       // `session-present` is deliberately NOT matched here: the ban is on the
       // minting module (`session-key`), which is the one that needs a wallet.
@@ -622,5 +641,149 @@ describe('runRead, module boundary', () => {
     // The mint entry point by name, in case it is ever re-exported through an
     // allowed path: the graph walk covers modules, this covers the symbol.
     expect(source).not.toContain('establishSession');
+  });
+});
+
+/**
+ * The origin binding (the fix for the `--base-url` credential leak). A session
+ * file records the origin it was minted against, and `read` presents only there.
+ * Without this, `tenjin read <url> --base-url <attacker>` — one command line an
+ * always-safe rule already clears — hands the delegation to a host the agent
+ * chose, with `assertOnBaseOrigin` satisfied because the same flag set both sides.
+ */
+describe('runRead, the session key is bound to the origin it was minted for', () => {
+  const OTHER = 'https://evil.example';
+
+  it('never presents a session minted elsewhere, even when the flag sets both sides', async () => {
+    const { file } = await testSessionKey(); // minted for https://tenjin.blog
+    await saveSessionFile(dir, file);
+    // The attacker host serves a shape-valid 402, which is all it takes to reach
+    // step 3: paymentRequiredSchema validates shape, never provenance.
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      // Configured: presenting would throw here instead of leaking quietly.
+      session: () => reply.entitled(readBody()),
+    });
+    const err = await runRead({ ref: `${OTHER}/api/read/iris/slug` }, makeCtx({ baseUrl: OTHER }), {
+      fetchImpl: fetch,
+    }).catch((e: unknown) => e);
+
+    expect((err as CliError).code).toBe('REFUSED');
+    // The load-bearing assertion: one call, unsigned. No delegation left the machine.
+    expect(calls.map((c) => c.phase)).toEqual(['plain']);
+    expect(calls[0]?.headers['tenjin-session-delegation']).toBeUndefined();
+    expect(calls[0]?.headers.signature).toBeUndefined();
+    // And the agent is told a session may help, because none was usable here.
+    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'not_performed' });
+  });
+
+  it('presents to the origin it WAS minted for, so the binding is not just a refusal', async () => {
+    const { file } = await testSessionKey({ origin: OTHER });
+    await saveSessionFile(dir, file);
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const result = await runRead(
+      { ref: `${OTHER}/api/read/iris/slug` },
+      makeCtx({ baseUrl: OTHER }),
+      {
+        fetchImpl: fetch,
+      },
+    );
+    expect((result.data as { entitlement: string }).entitlement).toBe('entitled');
+    expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
+  });
+});
+
+describe('runRead, a session file that cannot sign', () => {
+  it('falls through to the refusal instead of escaping as an INTERNAL crash', async () => {
+    // A garbage `d` used to reach subtle.importKey and throw a raw DOMException,
+    // surfacing as exit 1 "Invalid keyData" with no fix — from the command whose
+    // contract is that a bad session file degrades into the ordinary refusal.
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, {
+      ...file,
+      privateKeyJwk: { ...file.privateKeyJwk, d: 'not-a-key' },
+    });
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).code).toBe('REFUSED');
+    expect((err as CliError).exitCode).toBe(3);
+    expect(calls.map((c) => c.phase)).toEqual(['plain']);
+  });
+
+  it('treats a structurally invalid key as no session at all', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, { ...file, privateKeyJwk: {} as typeof file.privateKeyJwk });
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+    });
+    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'not_performed' });
+  });
+});
+
+describe('runRead, the signed GET never loses the price it already knows', () => {
+  it('a 5xx on the retry refuses with the price, not a bare transport error', async () => {
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => new Response('{}', { status: 503 }),
+    });
+    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    );
+    const cliErr = err as CliError;
+    expect(cliErr.code).toBe('REFUSED');
+    expect(cliErr.message).toContain('0.10 USD');
+    // The check did not complete, so buying is not the recommendation.
+    expect(cliErr.details).toMatchObject({
+      entitlementCheck: 'session_inconclusive',
+      sessionCommand: 'tenjin session start --scope read',
+    });
+  });
+
+  it('a 409 on the signed GET never becomes "this costs $X, run buy"', async () => {
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.alreadyPurchased(),
+    });
+    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'session_inconclusive' });
+  });
+
+  it('still fails LOUD on a blocked redirect, which is a credential-exposure signal', async () => {
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () =>
+        new Response('', { status: 302, headers: { location: 'https://evil.example/x' } }),
+    });
+    await expect(runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch })).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+    });
+  });
+});
+
+describe('runRead, the clock seam covers the signature too', () => {
+  it('signs `created` from deps.now, not the wall clock', async () => {
+    await saveSessionFile(dir, (await testSessionKey()).file);
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch, now: () => 1_700_000_000_000 });
+    expect(calls[1]?.headers['signature-input']).toContain('created=1700000000');
   });
 });

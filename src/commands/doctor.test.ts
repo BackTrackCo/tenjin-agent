@@ -962,7 +962,12 @@ describe('runDoctor — session key', () => {
     const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
     const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
     expect(check.status).toBe('ok');
-    expect(check.data).toEqual({ address: file.address, scope: 'read', exp: file.exp });
+    expect(check.data).toEqual({
+      address: file.address,
+      origin: file.origin,
+      scope: 'read',
+      exp: file.exp,
+    });
     const rendered = JSON.stringify(res.data) + (res.humanLines ?? []).join('\n');
     expect(rendered).not.toContain(file.delegation);
     expect(rendered).not.toContain(String((file.privateKeyJwk as { d?: string }).d));
@@ -990,5 +995,79 @@ describe('runDoctor — session key', () => {
       now: () => Date.parse(file.exp) + 1,
     });
     expect(find((res.data as { checks: CheckResult[] }).checks, 'session').status).toBe('warn');
+  });
+});
+
+/**
+ * The tamper and failure states. `loadSessionFile` collapses all of these to
+ * null, which is the right instruction for a caller that can re-mint and exactly
+ * the wrong report for the verb an operator runs when something looks wrong: a
+ * 0644 file holding a wallet-derived credential was changed out of band, and
+ * "No session key" hides that.
+ */
+describe('runDoctor — session key, the states loadSessionFile flattens', () => {
+  it('warns on a group-readable file rather than calling it absent', async () => {
+    if (process.platform === 'win32') return;
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    await chmod(join(dir, 'session.json'), 0o644);
+    const check = find(
+      (
+        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+          checks: CheckResult[];
+        }
+      ).checks,
+      'session',
+    );
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('0644');
+    expect(check.detail).toMatch(/out of band/i);
+  });
+
+  it('warns on a corrupt file, naming it as unparseable rather than missing', async () => {
+    await writeFile(join(dir, 'session.json'), 'not json {{{', { mode: 0o600 });
+    const check = find(
+      (
+        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+          checks: CheckResult[];
+        }
+      ).checks,
+      'session',
+    );
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/could not be parsed/i);
+  });
+
+  it('warns when the session belongs to another origin than the configured base URL', async () => {
+    const { file } = await testSessionKey({ origin: 'https://other.example' });
+    await saveSessionFile(dir, file);
+    const check = find(
+      (
+        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+          checks: CheckResult[];
+        }
+      ).checks,
+      'session',
+    );
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('https://other.example');
+    expect(check.detail).toMatch(/not presented off its own origin/i);
+  });
+
+  it('never aborts the whole run when the session cache cannot be read', async () => {
+    // doctor is diagnostics. An unreadable session cache (EACCES after a `sudo`
+    // run, EIO) used to throw INTERNAL out of the check array and take down the
+    // one command an operator reaches for when the install is broken.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    await writeFile(join(dir, 'session.json'), '{}', { mode: 0o600 });
+    await chmod(join(dir, 'session.json'), 0o000);
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    // Every other check still ran, and the session one warns with its fix.
+    expect(data.status).toBe('pass');
+    expect(find(data.checks, 'api-contract').status).toBe('ok');
+    const check = find(data.checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.fix).toBe('tenjin session start --scope read');
   });
 });

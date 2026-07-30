@@ -2,6 +2,8 @@ import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { establishSession, SESSION_CHAIN_ID } from '../lib/session-key';
 import { isSessionUsable, loadSessionFile, type SessionScope } from '../lib/session-present';
+import { originOf } from '../lib/url';
+import type { SessionFile } from '../lib/session-present';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -10,18 +12,15 @@ import type { CommandContext, CommandResult } from '../context';
  * P-256 session key that `tenjin read` can then present, unattended, to recover a
  * piece this wallet already owns but has not cached on this machine.
  *
- * This is the attended half of a deliberate split. `read` cannot open a keystore
- * — its import graph is test-pinned clear of the wallet — so the one wallet
- * signature a recovery needs has to come from somewhere the operator invokes on
- * purpose. That is this verb, and it is why it sits in the OPT-IN allowlist tier
- * beside `buy` rather than in the always-safe one: it spends no money and can
- * never spend any, but it does open the keystore.
+ * This is the attended half of a deliberate split: `read` cannot open a keystore,
+ * so the one wallet signature a recovery needs comes from a verb the operator
+ * invokes on purpose. It spends nothing and cannot, but it does open the
+ * keystore, which is why it sits in the OPT-IN tier beside `buy`.
  *
- * What it leaves behind is bounded twice over. The delegated key is P-256, so it
- * cannot produce the secp256k1/EIP-712 signature an EIP-3009 transfer needs — no
- * arrangement of the cached file pays for anything. And the delegation is minted
- * at scope `read`, which the server independently refuses (`insufficient_scope`)
- * on any write method, so a leaked file cannot publish or edit either.
+ * What it leaves on disk is a wallet-derived credential. Treat it as one: it is
+ * bound to the origin it was minted against and every presenter re-checks that,
+ * and the receipt below carries no key material. `lib/permissions.ts` states the
+ * exposure an operator is accepting.
  *
  * v1 accepts NO other scope. `--scope read+write` is refused rather than
  * forwarded: a prefix allowlist rule pins the verb and not the flags, so the only
@@ -31,7 +30,7 @@ import type { CommandContext, CommandResult } from '../context';
  * already consenting to a write.
  */
 
-/** The only scope v1 mints. See the docblock: this is what makes the rule safe. */
+/** The only scope v1 mints; see the docblock for why that is load-bearing. */
 const V1_SCOPE: SessionScope = 'read';
 
 export interface SessionStartArgs {
@@ -63,17 +62,17 @@ export async function runSessionStart(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
-  // describeWallet surfaces WALLET_MISSING with its own fix, and gives the address
-  // WITHOUT unlocking the key — which is what makes the reuse path below cost no
-  // wallet interaction at all (no passphrase prompt on a second run).
+  // describe() reports the address WITHOUT unlocking the key, which is what makes
+  // the reuse path below cost no wallet interaction (no passphrase prompt).
   const wallet = await describeWallet(provider);
 
+  // Idempotent: a live session wide enough AND minted for this origin is reused,
+  // so a second run opens no wallet, and a cached `read+write` (publish's) is
+  // never downgraded. A session for another deployment is not reusable.
+  const origin = originOf(settings.baseUrl);
   const cached = await loadSessionFile(ctx.dataDir);
-  if (cached !== null && isSessionUsable(cached, wallet.address, now(), V1_SCOPE)) {
-    // Idempotent: a live session wide enough for this scope is REUSED, so a second
-    // run opens no wallet. A cached `read+write` (publish's, say) satisfies a read
-    // need, so this also refuses to downgrade a wider session that still works.
-    return receipt(cached.address, cached.scope, cached.exp, false);
+  if (cached !== null && isSessionUsable(cached, wallet.address, now(), V1_SCOPE, origin)) {
+    return receipt(cached, false);
   }
 
   const signer = await provider.getSigner();
@@ -84,22 +83,24 @@ export async function runSessionStart(
     dataDir: ctx.dataDir,
     scope: V1_SCOPE,
   });
-  return receipt(file.address, file.scope, file.exp, true);
+  return receipt(file, true);
 }
 
 /**
- * The receipt. Address, scope and expiry ONLY — never the delegation and never
- * the private JWK: this output lands in an agent's transcript, and a session key
- * printed there outlives the 0600 file it was written to.
+ * The receipt. Address, origin, scope and expiry ONLY — never the delegation and
+ * never the private JWK: this output lands in an agent's transcript, and a
+ * session key printed there outlives the 0600 file it was written to.
  */
-function receipt(address: string, scope: string, exp: string, minted: boolean): CommandResult {
+function receipt(file: SessionFile, minted: boolean): CommandResult {
+  const { address, origin, scope, exp } = file;
+  const what = `${address} (scope ${scope}) for ${origin}`;
   return {
-    data: { status: minted ? 'created' : 'reused', address, scope, exp },
+    data: { status: minted ? 'created' : 'reused', address, origin, scope, exp },
     humanLines: [
       minted
-        ? `Session key minted for ${address} (scope ${scope}), expires ${exp}.`
-        : `Session key already active for ${address} (scope ${scope}), expires ${exp}. No wallet signature needed.`,
-      '`tenjin read` can now recover pieces this wallet already owns. It still cannot pay.',
+        ? `Session key minted for ${what}, expires ${exp}.`
+        : `Session key already active for ${what}, expires ${exp}. No wallet signature needed.`,
+      '`tenjin read` can now recover pieces this wallet already owns from that origin. It still cannot pay.',
     ],
   };
 }
