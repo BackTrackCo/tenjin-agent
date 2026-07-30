@@ -244,17 +244,36 @@ approval.
   is never written to disk. The wallet address stays readable, so `show`,
   `balance`, and `doctor` work without a passphrase; only signing decrypts.
   Signing is local and the CLI talks only to the configured base URL.
+- There is exactly **one active wallet**. `wallet create` refuses when one
+  exists; the explicit `wallet create --replace` first verifies the outgoing
+  wallet's passphrase against its keystore, preserves it under the wallet's own
+  address in the OS store, parks the keystore beside the new one
+  (`wallet.<address>.json.bak`), and only then creates the new wallet — a
+  replace can never strand the old wallet's funds. `wallet show` lists archived
+  addresses as a recovery hint. To make an archived wallet active again: move
+  the current `wallet.json` aside (e.g. with another `--replace` later, or
+  manually), then `mv ~/.tenjin/wallet.<address>.json.bak ~/.tenjin/wallet.json`
+  — its passphrase entry is keyed by the wallet's address, so signing resumes
+  transparently.
 - The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE`, then the
   OS credential store, then an interactive prompt. On `wallet create` with no env
   passphrase, a strong random one is generated and saved to the OS store so later
-  signing is transparent. Where it lands per platform:
+  signing is transparent. Every stored entry is **per wallet** — keyed by the
+  wallet's own address — so replacing a wallet never touches the outgoing
+  wallet's passphrase. (Installs from before per-wallet entries used one shared
+  slot; the first signing that proves ownership re-keys that slot under the
+  owning wallet's address — the copy is verified before the old slot is
+  removed.) Where entries land per platform:
   - **macOS**: the login keychain, via the OS `security` tool (the same
-    mechanism the GitHub CLI uses).
-  - **Windows**: a DPAPI-encrypted file (`passphrase.dpapi`), decryptable only by
-    the same user on the same machine, via built-in PowerShell. The file holds
-    ciphertext, not the passphrase.
+    mechanism the GitHub CLI uses): service `tenjin-cli`, account = the wallet
+    address.
+  - **Windows**: a DPAPI-encrypted file per wallet
+    (`passphrase.<address>.dpapi`), decryptable only by the same user on the
+    same machine, via built-in PowerShell. The file holds ciphertext, not the
+    passphrase.
   - **Desktop Linux**: the Secret Service keyring, via `secret-tool` when
-    libsecret-tools is installed.
+    libsecret-tools is installed: service `tenjin-cli`, account = the wallet
+    address.
   - **Headless or CI (any OS)**: no durable OS store, so set
     `TENJIN_WALLET_PASSPHRASE`.
 
