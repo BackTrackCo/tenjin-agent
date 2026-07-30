@@ -18,6 +18,13 @@ import { trimSlash } from './url';
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
+/** The server's `limit` ceiling. Exported because the truncation advice in
+ *  `search` has to name it: past search v2 the response budget scales with the
+ *  candidates returned, so a truncated page is recovered by asking for MORE, and
+ *  this is the value to ask for. One definition, so the cap the CLI enforces and
+ *  the number it tells the operator to retry with cannot drift apart. */
+export const MAX_LIMIT = 10;
+
 /** Client-side search request (mirrors the server lookupRequestSchema bounds
  *  so a malformed flag fails locally as USAGE, before a round trip). */
 export interface SearchInput {
@@ -60,9 +67,9 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     });
   }
   const limit = input.limit ?? 5;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 10) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
     throw new CliError('USAGE', `Invalid --limit: ${JSON.stringify(input.limit)}`, {
-      fix: 'Pass an integer between 1 and 10.',
+      fix: `Pass an integer between 1 and ${MAX_LIMIT}.`,
     });
   }
   if (input.appliesTo !== undefined) {

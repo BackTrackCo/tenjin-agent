@@ -1,7 +1,7 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
-import { buildSearchRequest, postSearch, type SearchInput } from '../lib/agent-api';
+import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
 import { listCandidates } from '../lib/candidate-store';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
@@ -137,12 +137,17 @@ export async function runSearch(
         ]
       : [];
 
-  // `truncated` means the server's size backstop dropped candidates the limit had
-  // room for, and there is no cursor to page to them: a smaller --limit would not
-  // recover the tail, only shorten it further. So the line says what actually
-  // works, which is asking a narrower question. The flag stays in the machine
-  // envelope (--json) untouched, where it is omitted rather than false when it did
-  // not fire.
+  // `truncated` means the server's size backstop dropped candidates, either a
+  // trailing few the limit had room for or a single oversized one. The response
+  // ceiling GROWS with the number of candidates returned (tenjin#501), so the
+  // remedy is counter-intuitive and worth stating outright: a larger --limit
+  // recovers the tail, a smaller one returns strictly fewer. Only at the maximum
+  // is the tail unrecoverable and narrowing the question the answer.
+  //
+  // The CLI knows the limit it sent, so it names the next step instead of
+  // restating the rule and leaving the reader to work out which half applies.
+  // The flag stays in the machine envelope (--json) untouched, where it is
+  // omitted rather than false when it did not fire.
   //
   // Rendering it on a MISS too is DEFENSIVE, not wire behavior: the server only
   // ever sets the flag alongside candidates it dropped. Handling both keeps the
@@ -150,7 +155,9 @@ export async function runSearch(
   const truncatedHint =
     response.truncated === true
       ? [
-          'some candidates were dropped for size; narrow the question, a smaller --limit will not recover them',
+          request.limit < MAX_LIMIT
+            ? `some candidates were dropped for size; retry with --limit ${MAX_LIMIT} (the size ceiling grows with the number of candidates returned)`
+            : `some candidates were dropped for size; at --limit ${MAX_LIMIT} the dropped tail cannot be recovered, so narrow the question`,
         ]
       : [];
 

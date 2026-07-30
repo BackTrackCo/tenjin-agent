@@ -85,6 +85,12 @@ const previewSchema = z
     // should still not cost the caller the title and the price it came for.
     // The drop is NOT silent: see `cardError` on the result below.
     card: previewCardSchema.optional().catch(undefined),
+    // Set by the SERVER when the piece has a card it could not load, so an absent
+    // card is never ambiguous: no flag means uncarded, this flag means temporarily
+    // unreadable. Never false and never sent beside `card` (tenjin#500), and the
+    // same fail-soft as above so a bogus `false` drops the flag rather than the
+    // whole preview.
+    cardUnavailable: z.literal(true).optional().catch(undefined),
   })
   .passthrough();
 

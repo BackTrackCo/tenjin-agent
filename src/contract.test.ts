@@ -227,6 +227,18 @@ function assertReadCard(doc: unknown): void {
     expect(get(readCardProps(doc), field), `card.properties.${field} missing`).toBeDefined();
     expect(required, `card.required must list ${field}`).toContain(field);
   }
+  // The third state (tenjin#500): a piece that HAS a card the server could not
+  // load. Also optional, because it is absent for both an uncarded piece and a
+  // carded one, and the CLI reads it only to keep "attests nothing" from being
+  // confused with "temporarily unreadable".
+  expect(
+    get(preview, 'properties', 'cardUnavailable'),
+    'ReadArticlePreview.properties.cardUnavailable missing',
+  ).toBeDefined();
+  expect(
+    get(preview, 'required'),
+    'ReadArticlePreview must not require cardUnavailable',
+  ).not.toContain('cardUnavailable');
 }
 
 describe('contract fixture pins the 402 answer card', () => {

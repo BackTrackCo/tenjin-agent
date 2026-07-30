@@ -136,6 +136,40 @@ describe('runInspect, the 402 answer card', () => {
     expect(res.data).not.toHaveProperty('cardError');
   });
 
+  // Three states hide behind an absent card and they call for three different
+  // actions, so the CLI has to keep them apart: uncarded (a signal, judge on it),
+  // server could not load it (transient, retry), this CLI could not parse it
+  // (ours). cardUnavailable is the server's, cardError is the client's.
+  it('distinguishes a server-side unloadable card from an uncarded piece', async () => {
+    const res = await inspect402({
+      title: 'The Answer',
+      price: '100000',
+      cardUnavailable: true,
+    });
+    const lines = (res.humanLines ?? []).join('\n');
+    expect(lines).toContain('the server could not load');
+    expect(lines).not.toContain('could not parse');
+    expect(res.data).not.toHaveProperty('cardError');
+  });
+
+  it('says nothing about an unloadable card on an ordinary uncarded piece', async () => {
+    const res = await inspect402({ title: 'The Answer', price: '100000' });
+    expect((res.humanLines ?? []).join('\n')).not.toContain('could not load');
+  });
+
+  // The two flags describe different failures and must not collapse into one
+  // line: a parse failure is not a load failure, whatever else the body carries.
+  it('reports a client parse failure as its own thing, not as unavailability', async () => {
+    const res = await inspect402({
+      title: 'The Answer',
+      price: '100000',
+      card: { artifactType: 'document' },
+    });
+    const lines = (res.humanLines ?? []).join('\n');
+    expect(lines).toContain('could not parse');
+    expect(lines).not.toContain('could not load');
+  });
+
   // The card is the biggest object in the envelope; a second hoisted copy would
   // double every inspect payload to save one key of depth.
   it('emits the card exactly once in the machine envelope', async () => {

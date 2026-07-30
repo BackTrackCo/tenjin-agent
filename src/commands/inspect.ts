@@ -87,6 +87,15 @@ export async function runInspect(
       humanLines: [
         `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
         ...cardLines(card),
+        // Three distinct states behind an absent card, and they call for three
+        // different actions: the piece attests nothing (a signal, judge on that),
+        // the server could not load a card it has (transient, retry), or this CLI
+        // could not parse what arrived (a client-side bug or server drift). Only
+        // the last is ours. `cardUnavailable` is server-sent and never rides
+        // alongside a card, so it is only worth saying when there is no card.
+        ...(card === undefined && result.preview.cardUnavailable === true
+          ? ['The piece has a card the server could not load; retry later.']
+          : []),
         ...(result.cardError === true
           ? [
               'The server sent an answer card this CLI could not parse; judging on price and preview only.',

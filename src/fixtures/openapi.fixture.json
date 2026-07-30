@@ -1352,7 +1352,7 @@
       "post": {
         "operationId": "agentSearch",
         "summary": "Search paid resources for a task question",
-        "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return up to `limit` lean candidates to shortlist, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. This is the breadth step of a two-step flow: search wide, then fetch a candidate `url` unpaid to inspect it in full for free, then buy the one you want. The response size is bounded per requested candidate, so a within-limits page always comes back whole; only a pathological slug can cost a trailing candidate, and when that happens the response carries `truncated: true` and the dropped tail is unrecoverable. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours) — pointers to browse, never scored candidates. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `searchId` as `X-Tenjin-Search-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
+        "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return up to `limit` lean candidates to shortlist, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. This is the breadth step of a two-step flow: search wide, then fetch a candidate `url` unpaid to inspect it for free, then buy the one you want. Unpaid, a PAID piece answers 402 with a `card` object (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode) beside the preview, present only when the card has public content, while a FREE piece answers 200 with the whole piece and no `card`. A maximal card is roughly 25kB, so inspect the 2 or 3 most promising candidates, not all of them. The response size is bounded per candidate RETURNED, so a within-caps page always comes back whole; only a pathological slug can cost a trailing candidate, and when that happens the response carries `truncated: true` and a larger `limit` is what recovers the tail. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours), which are pointers to browse, never scored candidates. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `searchId` as `X-Tenjin-Search-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
         "security": [],
         "requestBody": {
           "required": true,
@@ -1464,7 +1464,7 @@
       "get": {
         "operationId": "listArticles",
         "summary": "Article directory + full-text search",
-        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags — NOT a body search), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned.",
+        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags plus the body text that is already public — a free piece's whole body, a paid piece's pre-paywall preview only, never text below a paywall), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned.",
         "security": [],
         "parameters": [
           {
@@ -1475,7 +1475,7 @@
               "type": "string",
               "maxLength": 256
             },
-            "description": "Full-text search over title + excerpt + tags (also matches a creator handle substring). Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
+            "description": "Full-text search over title + excerpt + tags plus the body text that is already public — a free piece's whole body, a paid piece's pre-paywall preview only, never text below a paywall (also matches a creator handle substring). Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
           },
           {
             "name": "tag",
@@ -2148,7 +2148,7 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-            "description": "Optional. The agent lookup id (uuid) whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it on a draft but not change it."
+            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it while the column is still empty, on a draft or on an already-published piece, but never change a set value."
           }
         },
         "additionalProperties": false
@@ -2354,7 +2354,7 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-            "description": "Optional. The agent lookup id (uuid) whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it on a draft but not change it."
+            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it while the column is still empty, on a draft or on an already-published piece, but never change a set value."
           }
         },
         "additionalProperties": false
@@ -2563,16 +2563,9 @@
         "type": "object",
         "properties": {
           "schemaVersion": {
-            "anyOf": [
-              {
-                "type": "number",
-                "const": 1
-              },
-              {
-                "type": "number",
-                "const": 2
-              }
-            ]
+            "type": "number",
+            "const": 2,
+            "description": "Must be 2. Version 1 is rejected with validation_failed: v2 candidates dropped the per-candidate answer-card fields (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode), which now come from an unpaid GET of the candidate url, so a v1 client is failed loudly instead of handed a shape it would misparse."
           },
           "question": {
             "type": "string",
@@ -3501,6 +3494,10 @@
               "maintenanceCadence"
             ]
           },
+          "cardUnavailable": {
+            "type": "boolean",
+            "description": "Present and `true` only when the piece HAS an answer card the server could not load. Absent `card` with no flag means the piece is uncarded; absent `card` with this flag means the card exists but is temporarily unreadable, so retry later rather than recording the piece as having attested nothing. Never `false`, and never present alongside `card`."
+          },
           "bodyMdPreview": {
             "type": "string",
             "description": "The author's source Markdown before the `<!--paywall-->` split. Public and safe to read before payment; empty when no split exists."
@@ -3840,7 +3837,7 @@
       },
       "SearchCandidate": {
         "type": "object",
-        "description": "One matched resource to shortlist (lib/search-response.ts SearchCandidate). A lean hit: identity, price, freshness, and why it matched. Fetch `url` unpaid to inspect it in full for free; no paid body is ever included in a search response.",
+        "description": "One matched resource to shortlist (lib/search-response.ts SearchCandidate). A lean hit: identity, price, freshness, and why it matched. Fetch `url` unpaid to inspect it for free (a paid piece answers 402 with a `card` object plus preview, a free piece answers 200 with the whole piece); no paid body is ever included in a search response.",
         "properties": {
           "resourceId": {
             "type": "string",
@@ -3850,7 +3847,7 @@
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "The payable GET /api/read/{handle}/{slug} endpoint. Fetch it WITHOUT a payment to inspect the candidate for free: a paid piece answers 402 with the full answer card + preview, a free piece answers 200 with the whole thing. Run the x402 read loop against the same url to buy. Never a browser permalink."
+            "description": "The payable GET /api/read/{handle}/{slug} endpoint. Fetch it WITHOUT a payment to inspect the candidate for free: a paid piece answers 402 whose body carries a `card` object (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode) beside the preview, present only when the card has public content, and a free piece answers 200 with the whole piece and no `card`. Run the x402 read loop against the same url to buy. Never a browser permalink."
           },
           "slug": {
             "type": "string",
@@ -3947,7 +3944,7 @@
       },
       "SearchResponse": {
         "type": "object",
-        "description": "The search decision. The four top-level fields are always present; MISS omits `candidates` entirely (and may carry a `browse` tail). Search is the BREADTH step: it returns up to `limit` lean hits, and you inspect the ones worth inspecting by fetching their `url` unpaid (free) before you buy. `calibration` is `lexical-v1` (lexical retrieval alone) or `hybrid-v1` (lexical fused with dense semantic retrieval) — a retrieval-mode label, NOT a semantic confidence score. Do not branch on it or discount `lexical-v1` candidates.",
+        "description": "The search decision. The four top-level fields are always present; MISS omits `candidates` entirely (and may carry a `browse` tail). Search is the BREADTH step: it returns up to `limit` lean hits, and you inspect the ones worth inspecting by fetching their `url` unpaid (free) before you buy. `calibration` is `lexical-v1` (lexical retrieval alone) or `hybrid-v1` (lexical fused with dense semantic retrieval), a retrieval-mode label and NOT a semantic confidence score. Do not branch on it or discount `lexical-v1` candidates.",
         "properties": {
           "schemaVersion": {
             "type": "integer",
@@ -3976,7 +3973,7 @@
           "truncated": {
             "type": "boolean",
             "const": true,
-            "description": "Present and true only when the size backstop dropped trailing candidates the `limit` had room for, so a short list is never ambiguous. The dropped tail cannot be paged to; narrow the question instead. Omitted entirely otherwise."
+            "description": "Present and true only when the size backstop dropped trailing candidates the `limit` had room for, or kept a single candidate that alone exceeds the ceiling, so a short or oversized response is never ambiguous. The ceiling grows with the number of candidates returned, so retrying with a LARGER `limit` (up to 10) genuinely returns more; a smaller one returns strictly fewer. At `limit` 10 the tail is unrecoverable and narrowing the question is the remedy. Omitted entirely otherwise."
           },
           "browse": {
             "type": "array",

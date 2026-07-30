@@ -171,16 +171,40 @@ describe('runSearch', () => {
   // `truncated` fires when the server dropped candidates the limit had room for,
   // and there is no cursor: the hint has to point at narrowing the question, since
   // a smaller --limit would only shorten the list further.
-  it('adds one line when the response is truncated, and none when it is not', async () => {
-    const truncated = stub({ ...CANDIDATES, truncated: true });
-    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: truncated.fetch });
-    expect(res.humanLines?.at(-1)).toContain('narrow the question');
+  // The remedy is counter-intuitive after tenjin#501: the ceiling grows with the
+  // candidates returned, so a truncated page is recovered by asking for MORE. The
+  // CLI knows the limit it sent, so it names the step that applies rather than
+  // making the reader work out which half of the rule they are in.
+  it('tells a below-maximum search to retry with a larger limit', async () => {
+    const { fetch } = stub({ ...CANDIDATES, truncated: true });
+    const res = await runSearch({ question: 'q', limit: '3' }, makeCtx(), { fetchImpl: fetch });
+    expect(res.humanLines?.at(-1)).toBe(
+      'some candidates were dropped for size; retry with --limit 10 (the size ceiling grows with the number of candidates returned)',
+    );
     expect((res.data as { truncated?: true }).truncated).toBe(true);
+  });
 
-    const clean = stub(CANDIDATES);
-    const res2 = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: clean.fetch });
-    expect(res2.humanLines?.some((l) => l.includes('narrow the question'))).toBe(false);
-    expect((res2.data as { truncated?: true }).truncated).toBeUndefined();
+  it('tells a search already at the maximum to narrow the question instead', async () => {
+    const { fetch } = stub({ ...CANDIDATES, truncated: true });
+    const res = await runSearch({ question: 'q', limit: '10' }, makeCtx(), { fetchImpl: fetch });
+    expect(res.humanLines?.at(-1)).toBe(
+      'some candidates were dropped for size; at --limit 10 the dropped tail cannot be recovered, so narrow the question',
+    );
+  });
+
+  it('says nothing about truncation when the flag did not fire', async () => {
+    const { fetch } = stub(CANDIDATES);
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect(res.humanLines?.some((l) => l.includes('dropped for size'))).toBe(false);
+    expect((res.data as { truncated?: true }).truncated).toBeUndefined();
+  });
+
+  // The default limit is 5, so an unflagged search must still get the larger-limit
+  // advice rather than the terminal one.
+  it('uses the sent limit, not the maximum, to pick the advice', async () => {
+    const { fetch } = stub({ ...CANDIDATES, truncated: true });
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect(res.humanLines?.at(-1)).toContain('retry with --limit 10');
   });
 
   it('rejects a malformed --applies-to', async () => {
