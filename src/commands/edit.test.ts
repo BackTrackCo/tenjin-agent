@@ -92,6 +92,7 @@ function spyProvider(): { provider: WalletProvider; signCount: () => number } {
       return inner.signMessage(a);
     },
     signTypedData: (a) => inner.signTypedData(a),
+    signTransaction: (tx) => inner.signTransaction(tx),
   };
   return {
     signCount: () => n,
