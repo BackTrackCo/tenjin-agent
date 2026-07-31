@@ -41,8 +41,9 @@ lines, with prices in USD):
       "url": "https://tenjin.blog/...", "matchReasons": ["..."], ... }] } }
 ```
 
-A wallet is needed for publishing (it signs the write; no payment involved), and
-funding it is only needed for paid reads. Searching and free pieces cost nothing.
+A wallet is needed for publishing (it signs the write; no payment involved);
+funding it is needed for paid reads and `send`. Searching and free pieces cost
+nothing.
 
 ## Commands
 

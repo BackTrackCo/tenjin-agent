@@ -74,7 +74,7 @@ three. It cannot unlock a keystore and never consults the spend policy.
 ## Getting the rules onto your machine
 
 `tenjin install` offers to write the nine rules into `~/.claude/settings.json` for
-you, as one of its three setup questions:
+you, as one of its up-to-three setup decisions:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
 > `~/.claude/settings.json`. None can spend USDC or open your wallet keystore;

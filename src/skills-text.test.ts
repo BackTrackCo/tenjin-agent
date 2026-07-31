@@ -289,8 +289,13 @@ describe('the published docs do not drift from the allowlist constants', () => {
   // leave ungated". Pinned to MCP_CAVEAT so the page cannot drop a tool (edit
   // went missing once) without failing here.
   it('the permissions doc names every MCP tool MCP_CAVEAT gates', () => {
-    const tools = [...MCP_CAVEAT.join(' ').matchAll(/mcp__tenjin__[a-z_]+/g)].map((m) => m[0]);
-    expect(tools.length).toBeGreaterThan(0);
+    // MCP_CAVEAT spells some tools fully prefixed and some bare (`tenjin_buy`),
+    // so both spellings are captured and normalized to the full tool name; the
+    // doc must carry every one, buy included.
+    const tools = [...MCP_CAVEAT.join(' ').matchAll(/(?:mcp__tenjin__)?tenjin_[a-z_]+/g)].map(
+      (m) => (m[0].startsWith('mcp__') ? m[0] : `mcp__tenjin__${m[0]}`),
+    );
+    expect(tools).toContain('mcp__tenjin__tenjin_buy');
     for (const tool of new Set(tools)) expect(PERMISSIONS_DOC).toContain(tool);
   });
 
@@ -314,20 +319,23 @@ describe('the published docs do not drift from the allowlist constants', () => {
   // A path-substring check cannot see a renamed heading, so every relative
   // markdown link is resolved for real: the target file must exist and a
   // #fragment must match a heading's GitHub slug in that file.
-  it('every relative markdown link resolves, fragment included', () => {
+  it('every relative markdown .md link resolves, fragment included', () => {
     const slug = (h: string): string =>
       h
         .toLowerCase()
         .trim()
         .replace(/[^\w\s-]/g, '')
         .replace(/\s+/g, '-');
-    const headingSlugs = (text: string): Set<string> =>
-      new Set(
-        text
-          .split('\n')
-          .filter((l) => /^#{1,6} /.test(l))
-          .map((l) => slug(l.replace(/^#{1,6} /, ''))),
-      );
+    // Fence-aware: a `# comment` inside a code block is not a heading.
+    const headingSlugs = (text: string): Set<string> => {
+      const out = new Set<string>();
+      let inFence = false;
+      for (const l of text.split('\n')) {
+        if (/^\s*(```|~~~)/.test(l)) inFence = !inFence;
+        else if (!inFence && /^#{1,6} /.test(l)) out.add(slug(l.replace(/^#{1,6} /, '')));
+      }
+      return out;
+    };
     const check = (fromDir: string, text: string): void => {
       for (const m of text.matchAll(/\]\((\.{1,2}\/[^)#\s]+?\.md)(#[^)]+)?\)/g)) {
         const rel = m[1];
