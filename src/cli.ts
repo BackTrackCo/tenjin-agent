@@ -133,7 +133,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option('--no-wallet', 'skip the wallet-setup step of the interactive walkthrough')
     .option('--claude-md', 'append the Tenjin search nudge to ~/.claude/CLAUDE.md')
-    .option('--no-claude-md', 'skip the CLAUDE.md nudge (and its interactive question)')
+    .option('--no-claude-md', 'skip the CLAUDE.md nudge')
+    .option(
+      '--allow-free-verbs',
+      "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",
+    )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
@@ -150,6 +154,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
             ...(claudeMdGiven && typeof o.claudeMd === 'boolean' ? { claudeMd: o.claudeMd } : {}),
+            ...(o.allowFreeVerbs === true ? { allowFreeVerbs: true } : {}),
           },
           ctx,
         );

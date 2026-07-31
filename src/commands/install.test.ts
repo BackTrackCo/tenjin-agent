@@ -4,10 +4,11 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runInstall } from './install';
-import type { InstallDeps, PromptFn } from './install';
+import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './install';
+import type { InstallDeps, PromptPublishModeFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
+import { claudeSettingsPath, FREE_VERB_RULES } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -48,13 +49,15 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     skillsSourceDir: SKILLS_SRC,
     which: () => false,
     collectChecks: async () => okChecks,
-    // Default wallet seams so an interactive test never blocks on a real prompt or
-    // writes a real key; wallet-specific tests override these.
+    // Every prompt seam is answered in-process, so no test renders a prompt or
+    // loads the clack chunk. The defaults are the "changed nothing" answers;
+    // decision-specific tests override them.
     walletExists: async () => false,
     confirmWallet: async () => false,
-    // Default the CLAUDE.md prompt to no so interactive tests don't block on stdin;
-    // CLAUDE.md-specific tests override this or pass the --claude-md flag.
-    confirmClaudeMd: async () => false,
+    promptPublishMode: async () => null,
+    confirmPermissions: async () => false,
+    intro: async () => {},
+    outro: async () => {},
     ...over,
   };
 }
@@ -340,60 +343,32 @@ describe('runInstall: CLAUDE.md nudge', () => {
     expect(existsSync(claudeMdPath())).toBe(false);
   });
 
-  it('--no-claude-md skips without prompting even when interactive', async () => {
-    const confirm = vi.fn(async () => true);
+  it('--no-claude-md skips, interactive or not', async () => {
     const { data: d } = await runInstall(
       { harness: ['claude'], claudeMd: false },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: confirm }),
+      deps({ isInteractive: true }),
     );
-    expect(confirm).not.toHaveBeenCalled();
     expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
     expect(existsSync(claudeMdPath())).toBe(false);
   });
 
-  it('interactive yes writes CLAUDE.md; no skips it', async () => {
-    const yes = await runInstall(
-      { harness: ['claude'] },
+  // The walkthrough is capped at three decisions, so the nudge is never a fourth
+  // question: an interactive run without the flag behaves like a headless one.
+  it('is never asked about interactively; an absent flag skips it', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('skipped');
+    expect(existsSync(claudeMdPath())).toBe(false);
+  });
+
+  it('--claude-md writes it on an interactive run too', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], claudeMd: true },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: async () => true }),
+      deps({ isInteractive: true }),
     );
-    expect(asData(yes.data).harnesses[0]!.claudeMd?.status).toBe('written');
+    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('written');
     expect(existsSync(claudeMdPath())).toBe(true);
-
-    // Fresh home for the "no" case.
-    await rm(claudeMdPath(), { force: true });
-    const no = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: async () => false }),
-    );
-    expect(asData(no.data).harnesses[0]!.claudeMd?.status).toBe('skipped');
-  });
-
-  it('--dry-run does not prompt for CLAUDE.md', async () => {
-    const confirm = vi.fn(async () => true);
-    const { data: d } = await runInstall(
-      { harness: ['claude'], dryRun: true },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: confirm }),
-    );
-    expect(confirm).not.toHaveBeenCalled();
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
-  });
-
-  it('non-interactive skip mentions how to add the nudge later', async () => {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    const ttyCtx: CommandContext = {
-      flags: { json: false, timeout: 10000 },
-      dataDir: data,
-      io: { stdout: sink(), stderr: sink(), isTTY: true },
-    };
-    // TTY output but no stdin (canPrompt false), no flag: skipped, with a hint.
-    const res = await runInstall({ harness: ['claude'] }, ttyCtx, deps());
-    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
-    expect(text).toContain('--claude-md');
-    expect(text).toContain('CLAUDE.md');
   });
 });
 
@@ -402,22 +377,18 @@ describe('runInstall: nudge disclosure + undo hint in the walkthrough', () => {
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
   it('discloses what a freshly written AGENTS.md nudge does + how to undo it', async () => {
-    const res = await runInstall(
-      { harness: ['codex'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
-    );
+    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
     const text = human(res);
     expect(text).toContain('the generalized question text is sent to tenjin.blog');
     expect(text).toContain('Undo anytime: delete the');
     expect(text).toContain(join(home, '.agents', 'AGENTS.md'));
   });
 
-  it('discloses + undo for a CLAUDE.md nudge written on interactive yes', async () => {
+  it('discloses + undo for a CLAUDE.md nudge written by --claude-md', async () => {
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], claudeMd: true },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', confirmClaudeMd: async () => true }),
+      deps({ isInteractive: true }),
     );
     const text = human(res);
     expect(text).toContain('CLAUDE.md nudge');
@@ -427,11 +398,7 @@ describe('runInstall: nudge disclosure + undo hint in the walkthrough', () => {
 
   it('does NOT disclose on an untouched re-run (already-present)', async () => {
     await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const res = await runInstall(
-      { harness: ['codex'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
-    );
+    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
     const text = human(res);
     expect(text).not.toContain('Undo anytime');
     expect(text).not.toContain('the generalized question text is sent to tenjin.blog');
@@ -441,11 +408,7 @@ describe('runInstall: nudge disclosure + undo hint in the walkthrough', () => {
     const OLD = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
     await mkdir(join(home, '.agents'), { recursive: true });
     await writeFile(join(home, '.agents', 'AGENTS.md'), `${OLD}\n`);
-    const res = await runInstall(
-      { harness: ['codex'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
-    );
+    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
     const text = human(res);
     expect(text).toContain('Undo anytime');
     expect(text).toContain('the generalized question text is sent to tenjin.blog');
@@ -716,71 +679,92 @@ describe('runInstall: publish-mode selection', () => {
     return (JSON.parse(raw) as { publish?: { mode?: string } }).publish?.mode;
   }
 
-  function promptSpy(answers: string[]): { fn: PromptFn; calls: () => number } {
+  function promptSpy(answers: (string | null)[]): {
+    fn: PromptPublishModeFn;
+    calls: () => number;
+  } {
     let i = 0;
     let n = 0;
     return {
       calls: () => n,
       fn: async () => {
         n++;
-        return answers[i++] ?? '';
+        return (answers[i++] ?? null) as Awaited<ReturnType<PromptPublishModeFn>>;
       },
     };
   }
 
-  it('an interactive prompt persists an explicit choice (source prompt)', async () => {
-    const spy = promptSpy(['review']);
+  it('offers auto first, as the recommended answer, with one line of consequence', () => {
+    expect(PUBLISH_MODE_CHOICES.map((c) => c.value)).toEqual(['auto', 'review', 'full-auto']);
+    expect(PUBLISH_MODE_CHOICES[0]!.label).toBe('Auto (recommended)');
+    expect(PUBLISH_MODE_CHOICES[0]!.hint).toBe(
+      'your agent publishes clean pieces on its own; your harness still shows each command for approval',
+    );
+    expect(PUBLISH_MODE_CHOICES[1]!.label).toBe('Ask me in chat first');
+    expect(PUBLISH_MODE_CHOICES[2]!.label).toBe('Fully unattended');
+  });
+
+  it('persists the recommended auto when it is chosen (source prompt)', async () => {
+    const spy = promptSpy(['auto']);
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
+      deps({ isInteractive: true, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(1);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'prompt' });
+    expect(await persistedMode()).toBe('auto');
+  });
+
+  it('persists review when it is chosen', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptPublishMode: async () => 'review' }),
+    );
     expect(modeOf(d)).toEqual({ value: 'review', source: 'prompt' });
     expect(await persistedMode()).toBe('review');
   });
 
-  it('a plain enter keeps review WITHOUT writing (provenance stays default)', async () => {
-    const spy = promptSpy(['']); // enter
+  it('persists full-auto when it is chosen', async () => {
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
+      deps({ isInteractive: true, promptPublishMode: async () => 'full-auto' }),
     );
-    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
-    expect(await persistedMode()).toBeUndefined(); // no config write
-  });
-
-  it('re-prompts once on an unrecognized answer, then persists the valid retry', async () => {
-    const spy = promptSpy(['nope', 'full-auto']);
-    const { data: d } = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
-    );
-    expect(spy.calls()).toBe(2);
     expect(modeOf(d)).toEqual({ value: 'full-auto', source: 'prompt' });
     expect(await persistedMode()).toBe('full-auto');
   });
 
-  it('falls back to review (no write) after two unrecognized answers', async () => {
-    const spy = promptSpy(['nope', 'still-nope']);
+  it('a cancelled select keeps review WITHOUT writing (provenance stays default)', async () => {
+    const spy = promptSpy([null]); // ctrl-C / escape
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
+      deps({ isInteractive: true, promptPublishMode: spy.fn }),
     );
-    expect(spy.calls()).toBe(2);
+    expect(spy.calls()).toBe(1);
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
+    expect(await persistedMode()).toBeUndefined(); // no config write
+  });
+
+  it('never writes an answer it cannot parse', async () => {
+    const spy = promptSpy(['someday']);
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptPublishMode: spy.fn }),
+    );
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
 
-  it('does not prompt or write on a non-interactive run', async () => {
-    const spy = promptSpy(['review']);
+  it('does not prompt or write on a non-interactive run: the STORED default stays review', async () => {
+    const spy = promptSpy(['auto']);
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: false, promptMode: spy.fn }),
+      deps({ isInteractive: false, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
@@ -793,7 +777,7 @@ describe('runInstall: publish-mode selection', () => {
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
+      deps({ isInteractive: true, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'review', source: 'existing' });
@@ -805,7 +789,7 @@ describe('runInstall: publish-mode selection', () => {
     const { data: d } = await runInstall(
       { harness: ['claude'], publishMode: 'full-auto' },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
+      deps({ isInteractive: true, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'full-auto', source: 'flag' });
@@ -834,7 +818,7 @@ describe('runInstall: publish-mode selection', () => {
     const { data: d } = await runInstall(
       { harness: ['claude'], dryRun: true },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: spy.fn }),
+      deps({ isInteractive: true, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
@@ -846,7 +830,7 @@ describe('runInstall: publish-mode selection', () => {
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx({ json: true }),
-      deps({ isInteractive: true, promptMode: spy.fn }), // json overrides isInteractive
+      deps({ isInteractive: true, promptPublishMode: spy.fn }), // json overrides isInteractive
     );
     expect(spy.calls()).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
@@ -872,45 +856,77 @@ describe('runInstall: interactive walkthrough', () => {
   const human = (res: { humanLines?: string[] }): string =>
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
-  it('returns the walkthrough as humanLines (no envelope path at a TTY)', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
-    );
-    const text = human(res);
-    expect(text).toContain('Claude Code: 3 skills installed');
-    expect(text).toContain('publish mode: review');
-    expect(text).toContain('Done. Try: tenjin search');
+  it('is a five-line summary on a clean install: skills, publishing, permissions, wallet, next', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const lines = human(res).split('\n');
+    expect(lines).toHaveLength(5);
+    expect(lines[0]).toContain('Claude Code: 3 skills installed');
+    expect(lines[0]).toContain('tenjin-search, tenjin-publish (CLI)');
+    expect(lines[1]).toContain('Publishing: review');
+    expect(lines[2]).toContain('Permissions:');
+    expect(lines[3]).toContain('Wallet:');
+    expect(lines[4]).toContain('Next: tenjin search');
   });
 
-  it('prints the recommended auto-mode allowlist, buy separated, send never (#33)', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
-    );
+  it('no longer prints the allowlist block or the security essays that went with it', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     const text = human(res);
-    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).toContain(e.rule);
-    // buy appears only under the opt-in heading, never inside the safe block.
-    expect(text).toContain('Opt in separately (unattended purchases; unattended keystore access):');
-    expect(text).toContain('Bash(tenjin buy:*)');
-    expect(text).toContain('Bash(tenjin session start:*)');
-    expect(text).toContain('maxAutoSpend');
-    // No rule is ever offered for a money-moving or state-changing verb.
+    // The rules and their caveats are reference material: `doctor` prints them,
+    // the README documents them, and a setup flow does not recite them.
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).not.toContain(e.rule);
+    expect(text).not.toContain('Bash(tenjin buy:*)');
+    expect(text).not.toContain('Bash(tenjin session start:*)');
+    expect(text).not.toContain('mcp__tenjin__tenjin_publish');
+    expect(text).not.toContain('maxAutoSpend');
+    // And no rule for a money-moving or state-changing verb, in any form.
     for (const e of NEVER_ALLOWLISTED) {
       const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
       expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
     }
-    expect(text).toContain('tenjin send');
-    expect(text).toContain('.claude/settings.json');
-    // The caveats qualify the rules, so they travel with them or the block lies.
-    expect(text).toContain('--base-url');
-    expect(text).toContain('mcp__tenjin__tenjin_publish');
-    // And the corrected claims, not the ones the first cut shipped.
-    expect(text).toMatch(/authorizes UNATTENDED purchases/);
-    expect(text).not.toMatch(/still puts a human on every purchase/);
-    expect(text).not.toContain('free, read-only verbs');
+  });
+
+  // The wording pin the old allowlist block carried, kept alive now that the
+  // block itself is gone. lib/permissions.ts refuses to call this tier
+  // read-only, and the consent surface must not claim what the module it draws
+  // from will not: `search` and `outcome` POST off-machine, `read` writes to the
+  // library and can present a wallet-derived delegation, and two of the nine
+  // rules are `wallet show` / `wallet balance`.
+  it('never calls the free tier read-only, and never claims it cannot touch your wallet', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const surfaces = [human(res), PERMISSIONS_QUESTION];
+    for (const text of surfaces) {
+      expect(text).not.toMatch(/read-only/i);
+      expect(text).not.toMatch(/touch your wallet/i);
+      expect(text).not.toMatch(/free, read-only verbs/i);
+    }
+  });
+
+  it('the consent question says what is true of the tier, and points at doctor', async () => {
+    // Cannot spend and cannot open the keystore is the honest whole-tier claim;
+    // the three that send or store data are named rather than papered over.
+    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or open your wallet keystore');
+    expect(PERMISSIONS_QUESTION).toContain('three send or store data (search, outcome, read)');
+    // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
+    // walkthrough prints neither, so the consent moment names the command that
+    // prints both in full.
+    expect(PERMISSIONS_QUESTION).toContain('tenjin doctor');
+  });
+
+  it('the line reporting a write also points at doctor for the caveats', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const line = human(res)
+      .split('\n')
+      .find((l) => l.includes('Permissions:'));
+    expect(line).toContain(`${FREE_VERB_RULES.length} free tenjin commands added to`);
+    expect(line).toContain('Full caveats: tenjin doctor');
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
@@ -952,7 +968,6 @@ describe('runInstall: interactive walkthrough', () => {
       makeCtx(),
       deps({
         isInteractive: true,
-        promptMode: async () => '',
         walletExists: async () => false,
         confirmWallet: async () => true,
         createWallet: create,
@@ -961,8 +976,8 @@ describe('runInstall: interactive walkthrough', () => {
     expect(create).toHaveBeenCalledOnce();
     const text = human(res);
     expect(text).toContain(ADDR);
-    expect(text).toContain('Fund it: send a few dollars of USDC on Base');
-    expect(text).toContain('Check with: tenjin wallet balance');
+    expect(text).toContain('Fund it with a few dollars of USDC on Base');
+    expect(text).toContain('tenjin wallet balance');
   });
 
   it('declining the wallet prompt shows the create-later line, no create', async () => {
@@ -972,7 +987,6 @@ describe('runInstall: interactive walkthrough', () => {
       makeCtx(),
       deps({
         isInteractive: true,
-        promptMode: async () => '',
         walletExists: async () => false,
         confirmWallet: async () => false,
         createWallet: create,
@@ -987,7 +1001,7 @@ describe('runInstall: interactive walkthrough', () => {
     const res = await runInstall(
       { harness: ['claude'], noWallet: true },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', confirmWallet: confirm }),
+      deps({ isInteractive: true, confirmWallet: confirm }),
     );
     expect(confirm).not.toHaveBeenCalled();
     expect(human(res)).toContain('Create one later with: tenjin wallet create');
@@ -1000,7 +1014,6 @@ describe('runInstall: interactive walkthrough', () => {
       makeCtx(),
       deps({
         isInteractive: true,
-        promptMode: async () => '',
         walletExists: async () => true,
         walletAddress: async () => ADDR,
         confirmWallet: confirm,
@@ -1020,26 +1033,34 @@ describe('runInstall: interactive walkthrough', () => {
       dataDir: data,
       io: { stdout: sink(), stderr: sink(), isTTY: true },
     };
-    const prompt = vi.fn(async () => 'review');
+    const prompt = vi.fn(async () => 'review' as const);
     const confirm = vi.fn(async () => true);
+    const permissions = vi.fn(async () => true);
     const res = await runInstall(
       { harness: ['claude'] },
       ttyCtx,
-      deps({ promptMode: prompt, confirmWallet: confirm, walletExists: async () => false }),
+      deps({
+        promptPublishMode: prompt,
+        confirmWallet: confirm,
+        confirmPermissions: permissions,
+        walletExists: async () => false,
+      }),
     );
     expect(prompt).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
-    expect(human(res)).toContain('publish mode: review');
+    expect(permissions).not.toHaveBeenCalled();
+    expect(human(res)).toContain('Publishing: review');
     expect(human(res)).toContain('Create one later with: tenjin wallet create');
   });
 
-  it('a fully-green doctor is one line; a failure surfaces with its fix', async () => {
+  it('a green doctor says nothing; a failure surfaces with its fix', async () => {
     const okRes = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
+      deps({ isInteractive: true }),
     );
-    expect(human(okRes)).toContain('Everything checks out');
+    expect(human(okRes)).not.toContain('need attention');
+    expect(human(okRes).split('\n')).toHaveLength(5);
 
     const failing: DoctorChecks = {
       checks: [
@@ -1059,7 +1080,7 @@ describe('runInstall: interactive walkthrough', () => {
     const failRes = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '', collectChecks: async () => failing }),
+      deps({ isInteractive: true, collectChecks: async () => failing }),
     );
     const text = human(failRes);
     expect(text).toContain('need attention');
@@ -1071,6 +1092,255 @@ describe('runInstall: interactive walkthrough', () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
     expect(JSON.stringify(res.data).toLowerCase()).not.toContain('roadmap');
+  });
+});
+
+// --- Decision 2: the harness permission allowlist ---------------------------------
+
+describe('runInstall: permissions decision', () => {
+  type WiredData = {
+    permissions: {
+      alwaysSafe: { rule: string }[];
+      wired: {
+        harness: string;
+        path?: string;
+        added: string[];
+        alreadyPresent: string[];
+        skipped?: string;
+        warning?: string;
+      };
+    };
+  };
+  const wiredOf = (d: unknown) => (d as WiredData).permissions.wired;
+  const human = (res: { humanLines?: string[] }): string =>
+    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+  async function allowList(): Promise<unknown[] | undefined> {
+    const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    return (JSON.parse(raw) as { permissions?: { allow?: unknown[] } }).permissions?.allow;
+  }
+
+  it('writes the allowlist on an interactive yes and says so in one line', async () => {
+    const confirm = vi.fn(async (_label: string) => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(confirm.mock.calls[0]![0]).toContain('without permission popups');
+    expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
+    expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+    expect(human(res)).toContain(
+      `${FREE_VERB_RULES.length} free tenjin commands added to ${claudeSettingsPath(home)}`,
+    );
+  });
+
+  it('writes nothing on an interactive no and offers the flag instead', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: async () => false }),
+    );
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'declined', added: [] });
+    expect(await allowList()).toBeUndefined();
+    expect(human(res)).toContain('tenjin install --allow-free-verbs');
+  });
+
+  it('--allow-free-verbs wires it headlessly, with no prompt', async () => {
+    const confirm = vi.fn(async () => false);
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
+    expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('--allow-free-verbs works under --json and reports the write in the envelope', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx({ json: true }),
+      deps({ isInteractive: true }),
+    );
+    expect(res.humanLines ?? []).toHaveLength(0);
+    const wired = wiredOf(res.data);
+    expect(wired.harness).toBe('claude');
+    expect(wired.path).toBe(claudeSettingsPath(home));
+    expect(wired.added).toEqual([...FREE_VERB_RULES]);
+    expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('a non-interactive run without the flag changes nothing and notes the flag', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'not-requested', added: [] });
+    expect(await allowList()).toBeUndefined();
+  });
+
+  it('is idempotent: a second run adds nothing and reports already-present', async () => {
+    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(wiredOf(res.data).added).toEqual([]);
+    expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
+    expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+    expect(human(res)).toContain('were already allowed');
+  });
+
+  it('--dry-run neither prompts nor writes', async () => {
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'dry-run' });
+    expect(await allowList()).toBeUndefined();
+  });
+
+  it('skips a codex-only install without asking, and says why', async () => {
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['codex'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ harness: 'codex', skipped: 'harness-not-claude' });
+    expect(await allowList()).toBeUndefined();
+    expect(human(res)).toContain('Claude Code only');
+  });
+
+  it('sanitizes the warning, which quotes bytes out of the file', async () => {
+    // V8's JSON parse errors quote the offending input, so ~20 attacker-chosen
+    // bytes of settings.json reach the terminal at the moment we tell the
+    // operator we left their file alone. Escapes there could overwrite the very
+    // line reporting the skip.
+    await mkdir(join(home, '.claude'), { recursive: true });
+    // The escapes lead, so V8 fails on the FIRST token and takes the
+    // "Unexpected token X, "<excerpt>" is not valid JSON" branch, which is the
+    // one that echoes the file. A payload that fails later gets a positional
+    // message with no excerpt and would test nothing.
+    await writeFile(claudeSettingsPath(home), '\x1b[2K\x1b[1G\x1b[32m OK: safe\x1b[0m{"a":1}');
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const wired = wiredOf(res.data);
+    expect(wired.skipped).toBe('unparsable');
+    // The escapes really do reach the warning: V8 quotes the input it choked on.
+    // eslint-disable-next-line no-control-regex
+    expect(wired.warning).toMatch(/\x1b/);
+    // They survive into the machine envelope, where bytes are data, and are
+    // stripped from the line a human reads.
+    const line = (res.humanLines ?? []).find((l) => l.includes('not valid JSON'));
+    expect(line).toBeDefined();
+    // eslint-disable-next-line no-control-regex
+    expect(line).not.toMatch(/\x1b/);
+  });
+
+  it('warns and writes nothing when settings.json is unparsable', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeSettingsPath(home), '{ not json');
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(wiredOf(res.data).skipped).toBe('unparsable');
+    expect(await readFile(claudeSettingsPath(home), 'utf8')).toBe('{ not json');
+    const text = human(res);
+    expect(text).toContain('not valid JSON');
+    expect(text).toContain('was left untouched');
+  });
+
+  it('preserves an existing settings file while adding the rules', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(git status:*)'] } }, null, 2),
+    );
+    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
+      model: string;
+      permissions: { allow: string[] };
+    };
+    expect(settings.model).toBe('opus');
+    expect(settings.permissions.allow).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
+  });
+
+  it('keeps the three recommendation tiers beside the write outcome', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const d = res.data as WiredData;
+    expect(d.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
+      ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
+    );
+    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+  });
+});
+
+// --- The three decisions, in order, and nothing else ------------------------------
+
+describe('runInstall: at most three questions', () => {
+  it('asks publishing, then permissions, then wallet, and stops there', async () => {
+    const asked: string[] = [];
+    await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        promptPublishMode: async () => {
+          asked.push('publishing');
+          return 'auto';
+        },
+        confirmPermissions: async () => {
+          asked.push('permissions');
+          return true;
+        },
+        walletExists: async () => false,
+        confirmWallet: async () => {
+          asked.push('wallet');
+          return false;
+        },
+      }),
+    );
+    expect(asked).toEqual(['publishing', 'permissions', 'wallet']);
+  });
+
+  it('asks nothing at all on a machine run', async () => {
+    const asked: string[] = [];
+    await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        isInteractive: true, // --json wins
+        promptPublishMode: async () => {
+          asked.push('publishing');
+          return 'auto';
+        },
+        confirmPermissions: async () => {
+          asked.push('permissions');
+          return true;
+        },
+        confirmWallet: async () => {
+          asked.push('wallet');
+          return true;
+        },
+      }),
+    );
+    expect(asked).toEqual([]);
   });
 });
 
@@ -1139,11 +1409,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
   it('tells the human that publish is wired and the hosted skill was superseded', async () => {
     await seedHostedSkill(join(home, '.claude', 'skills'));
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptMode: async () => '' }),
-    );
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
     expect(text).toContain('tenjin-search, tenjin-publish (CLI)');
     expect(text).toContain('zero-install fallback');
