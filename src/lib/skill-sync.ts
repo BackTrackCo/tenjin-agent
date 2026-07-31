@@ -115,6 +115,10 @@ export async function maybeResyncSkills(deps: SkillSyncDeps): Promise<void> {
     const current = deps.currentVersion ?? pkg.version;
     const stamp = await readSkillsStamp(deps.dir);
     if (stamp !== null && stamp.cliVersion === current) return;
+    // A machine that never ran install and has nothing to adopt must not pay a
+    // lock cycle on every command; the scan is a handful of stats, so run it
+    // before the lock and again inside it for the losing racer.
+    if (stamp === null && adoptableSkillDirs(deps.homeDir ?? homedir()).length === 0) return;
 
     // Serialized: otherwise one process can stamp the version current while
     // another is still mid-swap, and the stamp suppresses the loser's retry.
