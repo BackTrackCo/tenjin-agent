@@ -205,7 +205,9 @@ or a pipe it asks nothing at all and emits the envelope.
 It is idempotent: re-run any time, `--dry-run` previews the changes without
 writing, and `--harness claude|codex|shared` (repeatable) targets a specific one,
 which is remembered so `doctor` keeps checking it. `--claude-md` / `--no-claude-md`
-control the one-line search nudge in `~/.claude/CLAUDE.md`.
+control the one-line search nudge in `~/.claude/CLAUDE.md`. After a CLI update the
+next command refreshes the wired skills automatically (and removes any the package
+stopped shipping), so an update never leaves agents on last release's skills.
 
 ## Skills
 

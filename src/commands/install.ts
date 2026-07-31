@@ -28,6 +28,8 @@ import {
 import type { PublishMode } from '../lib/config';
 import { persistInstallHarness, persistPublishMode } from './config';
 import { runWalletCreate } from './wallet';
+import pkg from '../../package.json';
+import { RETIRED_SKILL_NAMES, writeSkillsStamp } from '../lib/skill-sync';
 import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
@@ -179,6 +181,8 @@ interface HarnessResult {
 export interface InstallDeps {
   /** Home directory root for harness detection + skill destinations. Tests inject a temp dir. */
   homeDir?: string;
+  /** Version recorded in the skills stamp; tests pin it. Defaults to the package version. */
+  stampVersion?: string;
   /** The packaged skills source directory. Defaults to resolving it from this module's location. */
   skillsSourceDir?: string;
   /** PATH probe for `claude`/`codex` binaries. Injectable so tests never depend on the real PATH. */
@@ -270,6 +274,12 @@ export async function runInstall(
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
   await assertSkillsLanded(plans, dryRun);
+  // Stamp which CLI version wired these skills, so the post-update self-heal
+  // (lib/skill-sync.ts) knows both THAT install consented to wiring here and
+  // WHEN the wired copies last matched the binary. `--dry-run` stamps nothing.
+  if (!dryRun && plans.length > 0) {
+    await writeSkillsStamp(ctx.dataDir, deps.stampVersion ?? pkg.version);
+  }
   // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
   // own check already honours it. Detection cannot see a harness we do not probe for,
   // so without the record a directory the user named by hand is a target for one run
@@ -957,6 +967,52 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
  * overwritten and reported as `updated` with a warning. On --dry-run nothing is
  * written and the status reads `would-*`.
  */
+/**
+ * The post-update self-heal's worker (called from lib/skill-sync.ts): refresh
+ * every harness directory install ALREADY wired, and remove skills the package
+ * no longer ships. Deliberately narrower than a full install run: it never
+ * creates a directory, never touches CLAUDE.md/AGENTS.md, never asks anything,
+ * and only iterates names Tenjin ships or once shipped, so a user's other
+ * skills are structurally out of reach.
+ */
+export async function resyncWiredSkills(
+  homeDir?: string,
+  skillsSourceDir?: string,
+  retired: readonly string[] = RETIRED_SKILL_NAMES,
+): Promise<{ refreshed: string[]; removed: string[] }> {
+  const home = homeDir ?? homedir();
+  const skillsSource =
+    skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  await assertSkillsSource(skillsSource);
+
+  const refreshed: string[] = [];
+  const removed: string[] = [];
+  const seen = new Set<string>();
+  for (const target of HARNESS_TARGETS) {
+    const dir = harnessTargetDir(home, target);
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    // "Wired" means a real prior copy of at least one shipped skill, the same
+    // SKILL.md bar installSkill uses; a bare or foreign directory is not ours.
+    const wired = SKILL_NAMES.some((name) => existsSync(join(dir, name, 'SKILL.md')));
+    if (!wired) continue;
+    for (const name of SKILL_NAMES) {
+      const { status } = await installSkill(join(skillsSource, name), join(dir, name), false, name);
+      if (status === 'installed' || status === 'updated') refreshed.push(join(dir, name));
+    }
+    for (const name of retired) {
+      const stale = join(dir, name);
+      // The SKILL.md bar again: a bare directory that merely shares a retired
+      // name is not a skill copy and is not ours to delete.
+      if (existsSync(join(stale, 'SKILL.md'))) {
+        await rm(stale, { recursive: true, force: true });
+        removed.push(stale);
+      }
+    }
+  }
+  return { refreshed, removed };
+}
+
 async function installSkill(
   srcDir: string,
   destDir: string,

@@ -51,6 +51,16 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
+ * Which CLI version last wired the harness skills (written by `tenjin install`
+ * and by the post-update self-heal in lib/skill-sync.ts). A marker, not data:
+ * absent or unparsable both read as "install never ran here", which is exactly
+ * the machine the self-heal must leave alone.
+ */
+export function skillsSyncPath(dir: string = dataDir()): string {
+  return join(dir, 'skills-sync.json');
+}
+
+/**
  * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
  * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
  * New writes go to the per-wallet path below; this one is only read as a

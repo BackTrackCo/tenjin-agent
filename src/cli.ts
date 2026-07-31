@@ -6,6 +6,7 @@ import { dataDir } from './lib/paths';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
 import { maybeNudgeUpdate } from './lib/update-check';
+import { maybeResyncSkills } from './lib/skill-sync';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
 /**
@@ -81,10 +82,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     } catch (err) {
       setExit(emitFailure(io, command, err, { json }).exitCode);
     }
-    // AFTER the envelope, for every command and both outcomes: the nudge must
-    // never delay a command's output, touch stdout, or move its exit code. It
-    // resolves the data dir itself because a failed buildContext has no ctx to
-    // read one from, and it never rejects (see maybeNudgeUpdate).
+    // AFTER the envelope, for every command and both outcomes: neither hook may
+    // delay a command's output, touch stdout, or move its exit code. Both
+    // resolve the data dir themselves because a failed buildContext has no ctx
+    // to read one from, and neither ever rejects. Skills first, so a machine
+    // that just updated is healed before it is nudged about anything else.
+    await maybeResyncSkills({ dir: dataDir(process.env), io, json });
     await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
   };
 

@@ -9,6 +9,7 @@ import type { InstallDeps, PromptPublishModeFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
 import { claudeSettingsPath, FREE_VERB_RULES } from '../lib/harness-permissions';
+import { readSkillsStamp } from '../lib/skill-sync';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -131,6 +132,22 @@ describe('runInstall: harness override', () => {
     const err = await caught(() => runInstall({ harness: ['cursor'] }, makeCtx(), deps()));
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
+  });
+});
+
+describe('runInstall: skills stamp', () => {
+  it('stamps the wiring version so the post-update self-heal has a baseline', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps({ stampVersion: '9.9.9' }));
+    expect(await readSkillsStamp(data)).toEqual({ schemaVersion: 1, cliVersion: '9.9.9' });
+  });
+
+  it('stamps nothing under --dry-run', async () => {
+    await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ stampVersion: '9.9.9' }),
+    );
+    expect(await readSkillsStamp(data)).toBeNull();
   });
 });
 
