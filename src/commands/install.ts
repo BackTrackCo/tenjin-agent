@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
 import { readFile, readdir, rm } from 'node:fs/promises';
-import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -8,7 +7,6 @@ import { z } from 'zod';
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
-import { promptYesNo } from '../lib/prompt';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
@@ -34,7 +32,14 @@ import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
-import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
+import { recommendedPermissions } from '../lib/permissions';
+import {
+  FREE_VERB_RULES,
+  permissionsSkipped,
+  wireFreeVerbAllowlist,
+} from '../lib/harness-permissions';
+import type { PermissionsResult } from '../lib/harness-permissions';
+import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -50,19 +55,36 @@ const InstallInputSchema = z.object({
   dryRun: z.boolean().optional(),
   publishMode: z.string().optional(),
   noWallet: z.boolean().optional(),
-  /** Tri-state opt-in for the ~/.claude/CLAUDE.md nudge: true (--claude-md), false
-   * (--no-claude-md), or undefined (ask interactively, else skip). */
+  /** Opt-in for the ~/.claude/CLAUDE.md nudge: true (--claude-md), false
+   * (--no-claude-md), or undefined (skip). Never a question: the walkthrough is
+   * capped at three decisions. */
   claudeMd: z.boolean().optional(),
+  /** Wire the free-verb harness allowlist without asking (`--allow-free-verbs`). */
+  allowFreeVerbs: z.boolean().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
 
-/** A visible text-prompt seam (like passphrase's PromptFn); injected in tests. */
-export type PromptFn = (label: string) => Promise<string>;
+/**
+ * The publish-mode question's seam: returns the chosen mode, or `null` when the
+ * operator cancelled (which changes nothing and writes nothing). The choices
+ * themselves are {@link PUBLISH_MODE_CHOICES}; the seam exists so tests answer
+ * in-process and never render a prompt.
+ */
+export type PromptPublishModeFn = () => Promise<PublishMode | null>;
+
+/** A yes/no seam, same shape as buy's `confirm`. */
+export type ConfirmFn = (label: string) => Promise<boolean>;
 
 type PublishModeSource = 'flag' | 'existing' | 'prompt' | 'default-skipped';
 interface PublishModeSelection {
   value: PublishMode;
   source: PublishModeSource;
+}
+
+/** How the wallet step resolved, so rendering stays separate from prompting. */
+interface WalletOutcome {
+  status: 'existing' | 'created' | 'none';
+  address?: string;
 }
 
 /**
@@ -167,8 +189,15 @@ export interface InstallDeps {
   collectChecks?: (ctx: CommandContext) => Promise<DoctorChecks>;
   /** Deps forwarded to the default doctor collector (e.g. a canned fetch). */
   doctorDeps?: DoctorDeps;
-  /** Interactive text-prompt seam for the publish-mode question; defaults to a stdin reader. */
-  promptMode?: PromptFn;
+  /** Decision 1: the publish-mode select; defaults to the clack list. */
+  promptPublishMode?: PromptPublishModeFn;
+  /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
+  confirmPermissions?: ConfirmFn;
+  /** Decision 3: "Create a wallet now?"; defaults to the clack confirm (default yes). */
+  confirmWallet?: ConfirmFn;
+  /** Prompt-sequence chrome. Seams so tests never load the renderer. */
+  intro?: (message: string) => Promise<void>;
+  outro?: (message: string) => Promise<void>;
   /** Whether the human walkthrough runs (TTY, no --json, stdin is a TTY). Injected in tests. */
   isInteractive?: boolean;
   /** Does a wallet already exist? Defaults to walletFileExists(dataDir). */
@@ -177,23 +206,22 @@ export interface InstallDeps {
   walletAddress?: (ctx: CommandContext) => Promise<string>;
   /** Create a wallet and return its address. Defaults to runWalletCreate. */
   createWallet?: (ctx: CommandContext) => Promise<string>;
-  /** Yes/no confirm for "Create a wallet now?"; defaults to a TTY y/n reader (default yes). */
-  confirmWallet?: (label: string) => Promise<boolean>;
-  /** Yes/no confirm for the CLAUDE.md nudge; defaults to a TTY y/n reader (default yes). */
-  confirmClaudeMd?: (label: string) => Promise<boolean>;
 }
 
 /**
- * `tenjin install`: detect the installed harness(es), copy the packaged skills into
- * each one's skills directory, wire the AGENTS.md pointer, then settle the publish
- * consent mode and (interactively) the wallet, and finish with the doctor checks.
+ * `tenjin install`: detect the installed harness(es), copy the packaged skills
+ * into each one's skills directory, wire the AGENTS.md pointer, run the doctor
+ * checks, then ask AT MOST THREE questions (publishing, harness permissions,
+ * wallet) and print a short summary. Everything that is not one of those three
+ * decisions is display: the security reference material lives in `doctor` and
+ * the README, not in the middle of a setup flow.
  *
  * Like every command it is human-first (the global output contract): at a TTY
- * without `--json` it prompts and returns a plain onboarding walkthrough as
- * humanLines, which the dispatcher prints to stdout with no envelope. With
- * `--json` or piped stdout it returns today's envelope, no prompts, no wallet
- * step. Idempotent: a re-run reports up-to-date and never duplicates the AGENTS.md
- * line. `--dry-run` writes nothing.
+ * without `--json` it prompts and returns the walkthrough as humanLines, which
+ * the dispatcher prints to stdout with no envelope. With `--json` or piped
+ * stdout it returns the envelope, no prompts, no wallet step. Idempotent: a
+ * re-run reports up-to-date, never duplicates the AGENTS.md line, and adds no
+ * permission rule twice. `--dry-run` writes nothing.
  */
 export async function runInstall(
   input: InstallInput,
@@ -210,6 +238,7 @@ export async function runInstall(
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
   const claudeMdFlag = parsed.data.claudeMd;
+  const allowFreeVerbs = parsed.data.allowFreeVerbs === true;
   // Validate --publish-mode UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
@@ -232,11 +261,10 @@ export async function runInstall(
   // Same condition resolvePlans treats as an override, so what gets recorded below is
   // exactly what overrode detection.
   const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
-  // The CLAUDE.md nudge is opt-in and only relevant when a Claude target exists.
-  // Resolve it once (may prompt) so the loop just writes the settled decision.
-  const claudeMdWrite = plans.some((p) => p.harness === 'claude')
-    ? await decideClaudeMd(claudeMdFlag, canPrompt, dryRun, deps)
-    : false;
+  // The CLAUDE.md nudge is flag-only now: `--claude-md` writes it, `--no-claude-md`
+  // and an absent flag skip it. It used to be a fourth interactive question, and
+  // the walkthrough's whole point is that there are three.
+  const claudeMdWrite = claudeMdFlag === true;
   const harnesses: HarnessResult[] = [];
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
@@ -262,7 +290,25 @@ export async function runInstall(
   doctorDeps.which ??= which;
   const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
   const doctor = await collect(ctx);
-  const publishMode = await selectPublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
+
+  // The three decisions, in order. Each one is skipped (with its own recorded
+  // reason) when a flag already settled it or when there is no one to ask.
+  if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
+  const publishMode = await resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
+  const permissions = await resolvePermissions({
+    plans,
+    home,
+    deps,
+    flag: allowFreeVerbs,
+    dryRun,
+    canPrompt,
+  });
+  // The wallet question belongs to the human walkthrough only: a machine run has
+  // never created a key, and that stays true.
+  const wallet = humanOutput
+    ? await resolveWallet(ctx, deps, dryRun || !canPrompt || noWallet)
+    : undefined;
+  if (canPrompt) await (deps.outro ?? clackOutro)('Setup complete.');
 
   const data = {
     dryRun,
@@ -273,21 +319,23 @@ export async function runInstall(
     // Shipped with the install rather than left for the operator to discover after
     // their first auto-mode denial (#33). Static constants, no config key: see
     // lib/permissions.ts for why this is deliberately not operator-editable state.
-    permissions: recommendedPermissions(),
+    // `wired` is the outcome of THIS run's optional settings.json write; the three
+    // recommendation tiers beside it are unchanged, so a machine consumer that
+    // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
+    permissions: { ...recommendedPermissions(), wired: permissions },
   };
 
   // Machine path (--json or piped stdout): today's envelope, no wallet step.
   if (!humanOutput) return { data };
 
-  // Human path: the onboarding walkthrough as humanLines (the global emitSuccess
-  // prints them to stdout at a TTY and never an envelope). A wallet prompt happens
-  // only when we can actually read stdin.
-  const humanLines = await buildWalkthrough(ctx, deps, {
+  // Human path: the walkthrough as humanLines (the global emitSuccess prints them
+  // to stdout at a TTY and never an envelope).
+  const humanLines = buildWalkthrough(ctx.io, {
     dryRun,
-    noWallet,
-    canPrompt,
     harnesses,
     publishMode,
+    permissions,
+    wallet: wallet ?? { status: 'none' },
     doctor,
   });
   return { data, humanLines };
@@ -297,77 +345,41 @@ const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 
 interface WalkthroughState {
   dryRun: boolean;
-  noWallet: boolean;
-  canPrompt: boolean;
   harnesses: HarnessResult[];
   publishMode: PublishModeSelection;
+  permissions: PermissionsResult;
+  wallet: WalletOutcome;
   doctor: DoctorChecks;
 }
 
 /**
- * Build the onboarding walkthrough lines: skills, the resolved consent mode,
- * wallet setup (creating one in-flow only when we can prompt), a one-line doctor
- * verdict, and a next step. Any prompt reads stdin and writes its label to stderr;
- * the returned lines are the human stdout surface.
+ * The human surface: anything that genuinely needs attention (a dry-run banner,
+ * an overwrite warning, a consent disclosure, a failing check) followed by a
+ * summary of at most five lines. On a clean install the summary IS the output.
  */
-async function buildWalkthrough(
-  ctx: CommandContext,
-  deps: InstallDeps,
-  s: WalkthroughState,
-): Promise<string[]> {
-  const io = ctx.io;
+function buildWalkthrough(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
   if (s.dryRun) lines.push(paint(io, 'yellow', 'Dry run: nothing was written.'));
-  lines.push(...skillsWalkthrough(io, s.harnesses, s.dryRun), '');
-  lines.push(
-    `${paint(io, 'bold', `publish mode: ${s.publishMode.value}`)}  ${paint(io, 'dim', modeBlurb(s.publishMode.value))}`,
-    '',
-  );
-  lines.push(...(await walletWalkthrough(ctx, deps, s.dryRun || !s.canPrompt, s.noWallet, io)), '');
-  lines.push(...doctorSummary(io, s.doctor), '');
-  lines.push(...permissionsWalkthrough(io), '');
-  lines.push(`Done. Try: tenjin search "${EXAMPLE_QUESTION}"`);
+  lines.push(...noticeLines(io, s));
+  if (lines.length > 0) lines.push('');
+  lines.push(...summaryLines(io, s));
   return lines;
 }
 
 /**
- * The recommended harness allowlist, printed at install time so an operator has
- * the lines BEFORE an auto-mode session denies `tenjin search` (#33). The heading
- * is painted; the rules themselves stay unpainted so a copy-paste out of the
- * terminal is exactly the text the settings file wants.
+ * Everything above the summary: per-harness warnings, the Codex network rule,
+ * the nudge disclosure and its undo, and any doctor check that is not ok. A
+ * green doctor says nothing at all, so a clean run stays five lines.
  */
-function permissionsWalkthrough(io: Io): string[] {
-  const [heading, ...rest] = renderPermissionsBlock();
-  return [paint(io, 'bold', heading ?? ''), ...rest];
-}
-
-function harnessLabel(h: Harness): string {
-  return h === 'claude' ? 'Claude Code' : h === 'codex' ? 'Codex' : 'Agent Skills';
-}
-
-function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean): string[] {
+function noticeLines(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
-  for (const h of harnesses) {
-    const n = h.skills.length;
-    const changed = h.skills.some((s) => s.status !== 'up-to-date');
-    const verb = dryRun ? 'would install' : changed ? 'installed' : 'up to date';
-    const wired: string[] = [];
-    if (h.agentsMd !== undefined) wired.push('AGENTS.md nudge');
-    if (h.claudeMd !== undefined && h.claudeMd.status !== 'skipped') wired.push('CLAUDE.md nudge');
-    const suffix = wired.length > 0 ? ` + ${wired.join(' + ')}` : '';
-    lines.push(
-      `${paint(io, 'green', '✓')} ${harnessLabel(h.harness)}: ${n} skills ${verb}${suffix}`,
-    );
-    // Name the skills, and say which is which. #35 shipped as "search worked,
-    // publish was simply absent" on a machine that already had the hosted skill;
-    // a bare "3 skills installed" cannot tell you publish is wired.
-    lines.push(paint(io, 'dim', `  ${skillRoster(h)} in ${h.skillsDir}`));
+  for (const h of s.harnesses) {
     if (h.hostedPreexisting) {
       lines.push(
         paint(
           io,
           'dim',
-          `  The hosted ${HOSTED_SKILL_NAME} skill was already here: kept as the zero-install fallback, and the CLI skills now take precedence.`,
+          `The hosted ${HOSTED_SKILL_NAME} skill was already here: kept as the zero-install fallback, and the CLI skills now take precedence.`,
         ),
       );
     }
@@ -380,35 +392,107 @@ function skillsWalkthrough(io: Io, harnesses: HarnessResult[], dryRun: boolean):
         paint(
           io,
           'dim',
-          '  The nudge tells agents to run a free anonymous `tenjin search` before regenerating research; the generalized question text is sent to tenjin.blog.',
+          'The nudge tells agents to run a free anonymous `tenjin search` before regenerating research; the generalized question text is sent to tenjin.blog.',
         ),
       );
       lines.push(
         paint(
           io,
           'dim',
-          `  Undo anytime: delete the ${SKILLS_MARKER} line from ${nudgePaths.join(' and ')}.`,
-        ),
-      );
-    }
-    if (h.claudeMd?.status === 'skipped') {
-      lines.push(
-        paint(
-          io,
-          'dim',
-          '  Add a Tenjin search nudge to ~/.claude/CLAUDE.md later: tenjin install --harness claude --claude-md',
+          `Undo anytime: delete the ${SKILLS_MARKER} line from ${nudgePaths.join(' and ')}.`,
         ),
       );
     }
     if (h.codexNetworkRule !== undefined) {
-      lines.push(
-        paint(io, 'dim', '  Codex blocks network by default; add to ~/.codex/config.toml:'),
-      );
-      for (const rl of h.codexNetworkRule.split('\n')) lines.push(paint(io, 'dim', `    ${rl}`));
+      lines.push(paint(io, 'dim', 'Codex blocks network by default; add to ~/.codex/config.toml:'));
+      for (const rl of h.codexNetworkRule.split('\n')) lines.push(paint(io, 'dim', `  ${rl}`));
     }
-    for (const w of h.warnings) lines.push(paint(io, 'yellow', `  ! ${w}`));
+    for (const w of h.warnings) lines.push(paint(io, 'yellow', `! ${w}`));
   }
+  if (s.permissions.warning !== undefined) {
+    lines.push(paint(io, 'yellow', `! ${s.permissions.warning}`));
+  }
+  lines.push(...doctorNotices(io, s.doctor));
   return lines;
+}
+
+/**
+ * The closing summary, capped at one line per subject: skills, publishing,
+ * permissions, wallet, and the command to run next.
+ */
+function summaryLines(io: Io, s: WalkthroughState): string[] {
+  return [
+    ...s.harnesses.map((h) => skillsLine(io, h, s.dryRun)),
+    publishingLine(io, s.publishMode.value),
+    permissionsLine(io, s.permissions),
+    walletLine(io, s.wallet),
+    `${paint(io, 'bold', 'Next:')} tenjin search "${EXAMPLE_QUESTION}"`,
+  ];
+}
+
+function harnessLabel(h: Harness): string {
+  return h === 'claude' ? 'Claude Code' : h === 'codex' ? 'Codex' : 'Agent Skills';
+}
+
+/**
+ * One line per harness. It names the skills rather than counting them: #35
+ * shipped as "search worked, publish was simply absent" on a machine that
+ * already had the hosted skill, and a bare "3 skills installed" cannot tell you
+ * publish is wired.
+ */
+function skillsLine(io: Io, h: HarnessResult, dryRun: boolean): string {
+  const changed = h.skills.some((s) => s.status !== 'up-to-date');
+  const verb = dryRun ? 'would install' : changed ? 'installed' : 'up to date';
+  const wired: string[] = [];
+  if (h.agentsMd !== undefined) wired.push('AGENTS.md nudge');
+  if (h.claudeMd !== undefined && h.claudeMd.status !== 'skipped') wired.push('CLAUDE.md nudge');
+  const suffix = wired.length > 0 ? ` + ${wired.join(' + ')}` : '';
+  const head = `${harnessLabel(h.harness)}: ${h.skills.length} skills ${verb}${suffix}`;
+  return `${paint(io, 'green', '✓')} ${paint(io, 'bold', head)} in ${h.skillsDir}. ${skillRoster(h)}.`;
+}
+
+/** One line for the settled consent mode, with the same consequence the question showed. */
+function publishingLine(io: Io, mode: PublishMode): string {
+  return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}`;
+}
+
+/**
+ * One line for the harness allowlist: what landed, or what to run to get it. A
+ * skip is never silent, because the operator's next auto-mode session is where
+ * they would otherwise find out (#33).
+ */
+function permissionsLine(io: Io, p: PermissionsResult): string {
+  const label = paint(io, 'bold', 'Permissions:');
+  if (p.added.length > 0) {
+    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} read-only tenjin commands added to ${p.path}`;
+  }
+  if (p.skipped === undefined) {
+    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} read-only tenjin commands were already allowed in ${p.path}`;
+  }
+  if (p.skipped === 'harness-not-claude') {
+    return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). Run \`tenjin doctor\` for the lines your harness needs.`;
+  }
+  if (p.skipped === 'dry-run') {
+    return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
+  }
+  if (p.skipped === 'declined') {
+    return `${paint(io, 'dim', '-')} ${label} unchanged. Add them anytime: tenjin install --allow-free-verbs`;
+  }
+  if (p.skipped === 'not-requested') {
+    return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} read-only tenjin commands with: tenjin install --allow-free-verbs`;
+  }
+  return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched. Fix it, then: tenjin install --allow-free-verbs`;
+}
+
+function walletLine(io: Io, w: WalletOutcome): string {
+  const label = paint(io, 'bold', 'Wallet:');
+  if (w.status === 'existing') {
+    return `${paint(io, 'green', '✓')} ${label} ${w.address} (existing). Check funds with: tenjin wallet balance`;
+  }
+  if (w.status === 'created') {
+    return `${paint(io, 'green', '✓')} ${label} ${w.address}. Fund it with a few dollars of USDC on Base, then: tenjin wallet balance`;
+  }
+  return `${paint(io, 'dim', '-')} ${label} none. Create one later with: tenjin wallet create`;
 }
 
 /** `tenjin-search, tenjin-publish (CLI); tenjin (hosted, zero-install fallback)`. */
@@ -443,39 +527,37 @@ function nudgeFilesTouched(h: HarnessResult): string[] {
   return paths;
 }
 
+/** The single line of consequence attached to a mode, wherever it is shown. */
 function modeBlurb(v: PublishMode): string {
-  return v === 'review'
-    ? 'asks before every publish'
-    : v === 'auto'
-      ? 'publishes clean scans automatically'
-      : 'only detected secrets stop a publish';
+  return v === 'auto'
+    ? 'Your agent publishes clean pieces on its own; your harness still shows each command for approval.'
+    : v === 'review'
+      ? 'Your agent asks you in chat before every publish.'
+      : 'Fully unattended; only hard blocks stop it.';
 }
 
-async function walletWalkthrough(
+/**
+ * Decision 3, unchanged in behavior: ask only when no wallet exists, and never
+ * under `--no-wallet`, `--dry-run`, or a run we cannot prompt in.
+ */
+async function resolveWallet(
   ctx: CommandContext,
   deps: InstallDeps,
   skipCreate: boolean,
-  noWallet: boolean,
-  io: Io,
-): Promise<string[]> {
+): Promise<WalletOutcome> {
   const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
   if (exists) {
-    const address = await (deps.walletAddress ?? existingWalletAddress)(ctx);
-    return [`${paint(io, 'bold', 'Wallet:')} ${address} (existing)`];
+    return {
+      status: 'existing',
+      address: await (deps.walletAddress ?? existingWalletAddress)(ctx),
+    };
   }
-  const later = `${paint(io, 'bold', 'Wallet:')} none. Create one later with: tenjin wallet create`;
-  if (skipCreate || noWallet) return [later];
+  if (skipCreate) return { status: 'none' };
 
-  const confirm = deps.confirmWallet ?? defaultConfirmYesNo;
-  if (!(await confirm('Create a wallet now? [Y/n] '))) return [later];
+  const confirm = deps.confirmWallet ?? defaultConfirm;
+  if (!(await confirm(WALLET_QUESTION))) return { status: 'none' };
 
-  const address = await (deps.createWallet ?? defaultCreateWallet)(ctx);
-  return [
-    paint(io, 'bold', 'Wallet created:'),
-    `  ${address}`,
-    '  Fund it: send a few dollars of USDC on Base to that address (this is a pocket-money wallet; keep it small).',
-    '  Check with: tenjin wallet balance',
-  ];
+  return { status: 'created', address: await (deps.createWallet ?? defaultCreateWallet)(ctx) };
 }
 
 async function existingWalletAddress(ctx: CommandContext): Promise<string> {
@@ -487,19 +569,22 @@ async function defaultCreateWallet(ctx: CommandContext): Promise<string> {
   return (result.data as { address: string }).address;
 }
 
-/** The shared y/n reader, defaulting to YES on empty input (setup ergonomics). */
-function defaultConfirmYesNo(label: string): Promise<boolean> {
-  return promptYesNo(label, { defaultYes: true });
+/** The shared confirm, defaulting to YES (setup ergonomics); cancel reads as no. */
+function defaultConfirm(label: string): Promise<boolean> {
+  return confirmChoice(label, true);
 }
 
-function doctorSummary(io: Io, doctor: DoctorChecks): string[] {
+/**
+ * Doctor problems only. A fully green run prints nothing here: the summary is
+ * the whole output, and "everything checks out" is what an absent warning means.
+ */
+function doctorNotices(io: Io, doctor: DoctorChecks): string[] {
   const problems = doctor.checks.filter((c) => c.status !== 'ok');
-  if (problems.length === 0) return [`${paint(io, 'green', '✓')} Everything checks out`];
+  if (problems.length === 0) return [];
   const lines = [paint(io, 'yellow', 'Some checks need attention:')];
   for (const c of problems) {
     const icon = c.status === 'fail' ? paint(io, 'red', '✗') : paint(io, 'yellow', '!');
-    // Same seam as renderDoctorHuman: `detail`/`fix` carry server-sourced
-    // substrings and now sit directly above the pasteable allowlist block.
+    // Same seam as renderDoctorHuman: `detail`/`fix` carry server-sourced substrings.
     lines.push(`  ${icon} ${c.name}: ${sanitizeForTerminal(c.detail)}`);
     if (c.fix !== undefined) {
       lines.push(paint(io, 'dim', `    fix: ${sanitizeForTerminal(c.fix)}`));
@@ -510,25 +595,36 @@ function doctorSummary(io: Io, doctor: DoctorChecks): string[] {
 
 // --- Publish-mode selection (D38 setup) ------------------------------------------
 
-/** The default consent mode (also what a plain enter keeps, without writing). */
+/**
+ * The STORED default: what a non-interactive run, a cancelled question, or a
+ * `--dry-run` leaves `publish.mode` at, which is to say unset. It is deliberately
+ * NOT the interactively recommended answer below: recommending `auto` is a thing
+ * we do to a human who is looking at the consequence, never a thing that happens
+ * to a machine run that was never asked.
+ */
 const DEFAULT_MODE: PublishMode = CONFIG_DEFAULTS.publish.mode;
 
-const PUBLISH_MODE_PROMPT = [
-  'Publish consent mode?',
-  '  review     - asks a yes/no for every publish',
-  '  auto       - publishes automatically when the secret-scan is clean (including answers your agent derives)',
-  '  full-auto  - publishes even past warnings; only detected secrets stop it',
-  `[${DEFAULT_MODE}]: `,
-].join('\n');
+/** Decision 1's literal copy: one line of consequence per option, `auto` first. */
+export const PUBLISH_MODE_CHOICES = [
+  {
+    value: 'auto',
+    label: 'Auto (recommended)',
+    hint: 'your agent publishes clean pieces on its own; your harness still shows each command for approval',
+  },
+  { value: 'review', label: 'Ask me in chat first' },
+  { value: 'full-auto', label: 'Fully unattended', hint: 'only hard blocks stop it' },
+] as const satisfies readonly { value: PublishMode; label: string; hint?: string }[];
+
+export const PUBLISH_MODE_QUESTION = 'When your agent has something worth publishing:';
 
 /**
  * Resolve (and, for an explicit choice, persist) the publish consent mode at
  * install time. Precedence: `--publish-mode` flag > an already-configured global
- * mode > an interactive prompt > the untouched default. Only an explicit choice
- * writes: a plain enter, a non-interactive run, `--dry-run`, or an unrecognized
- * answer all leave `publish.mode` unset so its provenance stays `default`.
+ * mode > the interactive select > the untouched default. Only an explicit choice
+ * writes: a cancelled select, a non-interactive run, and `--dry-run` all leave
+ * `publish.mode` unset so its provenance stays `default`.
  */
-async function selectPublishMode(
+async function resolvePublishMode(
   flag: PublishMode | undefined,
   ctx: CommandContext,
   deps: InstallDeps,
@@ -551,41 +647,71 @@ async function selectPublishMode(
   // so a machine consumer never sits behind a prompt.
   if (dryRun || !interactive) return { value: DEFAULT_MODE, source: 'default-skipped' };
 
-  const prompt = deps.promptMode ?? defaultPromptMode;
-  // Ask, allow ONE reprompt on an unrecognized answer, then fall back to the default.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const answer = (await prompt(PUBLISH_MODE_PROMPT)).trim();
-    if (answer.length === 0) return { value: DEFAULT_MODE, source: 'default-skipped' }; // enter: no write
-    const parsed = PublishModeSchema.safeParse(answer);
-    if (parsed.success) {
-      await persistPublishMode(ctx.dataDir, parsed.data);
-      return { value: parsed.data, source: 'prompt' };
-    }
-  }
-  ctx.io.stderr.write(
-    `Unrecognized mode; keeping the default (${DEFAULT_MODE}). Change it with \`tenjin config set publish.mode\`.\n`,
-  );
-  return { value: DEFAULT_MODE, source: 'default-skipped' };
+  const answer = await (deps.promptPublishMode ?? defaultPromptPublishMode)();
+  if (answer === null) return { value: DEFAULT_MODE, source: 'default-skipped' }; // cancelled: no write
+  // The seam is injectable, so an answer is validated rather than trusted; an
+  // unparseable one is a cancel, not a write of something unknown.
+  const parsed = PublishModeSchema.safeParse(answer);
+  if (!parsed.success) return { value: DEFAULT_MODE, source: 'default-skipped' };
+  await persistPublishMode(ctx.dataDir, parsed.data);
+  return { value: parsed.data, source: 'prompt' };
+}
+
+function defaultPromptPublishMode(): Promise<PublishMode | null> {
+  return selectOne<PublishMode>({
+    message: PUBLISH_MODE_QUESTION,
+    choices: PUBLISH_MODE_CHOICES.map((c) => ({ ...c })),
+    initialValue: 'auto',
+  });
 }
 
 function parseModeFlag(value: string): PublishMode {
   return parsePublishModeFlag(value, '--publish-mode');
 }
 
-/** A visible line-reader (prompt on stderr so stdout stays a single JSON object). */
-function defaultPromptMode(label: string): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    let settled = false;
-    const settle = (value: string): void => {
-      if (settled) return;
-      settled = true;
-      rl.close();
-      resolve(value);
-    };
-    rl.once('close', () => settle('')); // ctrl-D mid-prompt reads as the default
-    rl.question(label, (answer) => settle(answer));
-  });
+// --- Harness permissions (decision 2) ---------------------------------------------
+
+/** Decision 2's literal copy. Kept to one question and one consequence. */
+export const PERMISSIONS_QUESTION = [
+  'Let your agent search tenjin without permission popups?',
+  `Adds ${FREE_VERB_RULES.length} read-only commands to ~/.claude/settings.json.`,
+  'None can spend money or touch your wallet.',
+].join(' ');
+
+/** Decision 3's literal copy. */
+export const WALLET_QUESTION = 'Create a wallet now?';
+
+/**
+ * Settle the harness allowlist. The write itself is consent-gated and free-verb
+ * only (see lib/harness-permissions.ts); this decides ONLY whether to call it.
+ * `--allow-free-verbs` wires it headlessly, an interactive run asks, and a
+ * non-interactive run without the flag changes nothing and says so.
+ */
+async function resolvePermissions(args: {
+  plans: HarnessPlan[];
+  home: string;
+  deps: InstallDeps;
+  flag: boolean;
+  dryRun: boolean;
+  canPrompt: boolean;
+}): Promise<PermissionsResult> {
+  const { plans, home, deps, flag, dryRun, canPrompt } = args;
+  // Only Claude Code has a settings file with this shape. Codex and the shared
+  // Agent Skills location gate permissions elsewhere, so there is nothing here to
+  // write for them, and guessing at another harness's config would be the kind of
+  // uninvited write this whole module is careful about.
+  if (!plans.some((p) => p.harness === 'claude')) {
+    return permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude');
+  }
+  if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
+  if (flag) return wireFreeVerbAllowlist(home);
+  if (!canPrompt) return permissionsSkipped('claude', home, 'not-requested');
+
+  const confirm = deps.confirmPermissions ?? defaultConfirm;
+  if (!(await confirm(PERMISSIONS_QUESTION))) {
+    return permissionsSkipped('claude', home, 'declined');
+  }
+  return wireFreeVerbAllowlist(home);
 }
 
 // --- Detection + planning --------------------------------------------------------
@@ -712,25 +838,6 @@ async function applyPlan(
     result.claudeMd = await wireClaudeMd(plan, dryRun, claudeMdWrite);
   }
   return result;
-}
-
-/**
- * Decide whether to write the ~/.claude/CLAUDE.md nudge. `--claude-md` forces it on
- * and `--no-claude-md` off; otherwise ask at an interactive TTY (default yes), and
- * on a non-interactive run (or --dry-run without the flag) skip it.
- */
-async function decideClaudeMd(
-  flag: boolean | undefined,
-  canPrompt: boolean,
-  dryRun: boolean,
-  deps: InstallDeps,
-): Promise<boolean> {
-  if (flag !== undefined) return flag;
-  if (dryRun || !canPrompt) return false;
-  const confirm = deps.confirmClaudeMd ?? defaultConfirmYesNo;
-  return confirm(
-    'Add a one-line nudge to ~/.claude/CLAUDE.md telling agents to try a free Tenjin search before regenerating research? It sends only generalized question text to tenjin.blog. [Y/n] ',
-  );
 }
 
 /**

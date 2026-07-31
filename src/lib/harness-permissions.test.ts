@@ -1,0 +1,265 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  claudeSettingsPath,
+  FORBIDDEN_VERB_FRAGMENTS,
+  FREE_VERB_RULES,
+  permissionsSkipped,
+  wireFreeVerbAllowlist,
+} from './harness-permissions';
+import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, OPT_IN_ALLOWLIST } from './permissions';
+
+let home: string;
+beforeEach(async () => {
+  home = await mkdtemp(join(tmpdir(), 'tenjin-perms-home-'));
+});
+afterEach(async () => {
+  await rm(home, { recursive: true, force: true });
+});
+
+const settingsPath = (): string => claudeSettingsPath(home);
+
+async function readSettings(): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
+}
+
+async function seedSettings(value: unknown): Promise<void> {
+  await mkdir(join(home, '.claude'), { recursive: true });
+  await writeFile(
+    settingsPath(),
+    typeof value === 'string' ? value : JSON.stringify(value, null, 2),
+  );
+}
+
+const allowOf = (s: Record<string, unknown>): unknown[] =>
+  (s.permissions as { allow: unknown[] }).allow;
+
+describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
+  it('is exactly the nine free-verb rules, in the README/doctor order', () => {
+    expect([...FREE_VERB_RULES]).toEqual([
+      'Bash(tenjin search:*)',
+      'Bash(tenjin inspect:*)',
+      'Bash(tenjin read:*)',
+      'Bash(tenjin outcome:*)',
+      'Bash(tenjin doctor:*)',
+      'Bash(tenjin wallet show:*)',
+      'Bash(tenjin wallet balance:*)',
+      'Bash(tenjin config get:*)',
+      'Bash(tenjin candidate list:*)',
+    ]);
+  });
+
+  it('matches the always-safe tier doctor prints, so the two never drift', () => {
+    expect([...FREE_VERB_RULES]).toEqual(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule));
+  });
+
+  it('contains no verb that spends, signs, or changes state', () => {
+    for (const rule of FREE_VERB_RULES) {
+      for (const fragment of FORBIDDEN_VERB_FRAGMENTS) {
+        expect(rule).not.toContain(fragment);
+      }
+    }
+  });
+
+  it('never carries an opt-in or excluded verb, whatever those lists grow to', () => {
+    const forbidden = [
+      ...OPT_IN_ALLOWLIST.map((e) => e.command),
+      ...NEVER_ALLOWLISTED.flatMap((e) => e.command.split(' / ')),
+    ];
+    for (const rule of FREE_VERB_RULES) {
+      for (const command of forbidden) expect(rule).not.toContain(command);
+    }
+  });
+
+  it('is never a broad wildcard over the whole CLI', () => {
+    expect(FREE_VERB_RULES).not.toContain('Bash(tenjin:*)');
+    expect(FREE_VERB_RULES.every((r) => r.startsWith('Bash(tenjin '))).toBe(true);
+  });
+});
+
+describe('wireFreeVerbAllowlist: fresh file', () => {
+  it('creates ~/.claude/settings.json with exactly the free-verb allowlist', async () => {
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.harness).toBe('claude');
+    expect(result.path).toBe(settingsPath());
+    expect(result.added).toEqual([...FREE_VERB_RULES]);
+    expect(result.alreadyPresent).toEqual([]);
+    expect(result.skipped).toBeUndefined();
+
+    const settings = await readSettings();
+    expect(Object.keys(settings)).toEqual(['permissions']);
+    expect(allowOf(settings)).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('writes 2-space JSON with a trailing newline', async () => {
+    await wireFreeVerbAllowlist(home);
+    const raw = await readFile(settingsPath(), 'utf8');
+    expect(raw.endsWith('\n')).toBe(true);
+    expect(raw).toContain('\n  "permissions": {');
+    expect(raw).toContain('\n      "Bash(tenjin search:*)"');
+  });
+
+  it('leaves no temp file behind (the write is atomic)', async () => {
+    await wireFreeVerbAllowlist(home);
+    const { readdir } = await import('node:fs/promises');
+    const entries = await readdir(join(home, '.claude'));
+    expect(entries).toEqual(['settings.json']);
+  });
+
+  it('writes a normal-mode file, not one only root can read', async () => {
+    await wireFreeVerbAllowlist(home);
+    if (process.platform === 'win32') return; // fs modes are a no-op there
+    expect((await stat(settingsPath())).mode & 0o777).toBe(0o644);
+  });
+});
+
+describe('wireFreeVerbAllowlist: merging into an existing file', () => {
+  it('preserves every other key and every existing allow entry, verbatim and in order', async () => {
+    await seedSettings({
+      $schema: 'https://json.schemastore.org/claude-code-settings.json',
+      model: 'opus',
+      permissions: {
+        deny: ['Bash(rm:*)'],
+        allow: ['Bash(git status:*)', 'Read(//tmp/**)'],
+      },
+      hooks: { PreToolUse: [] },
+    });
+
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.added).toEqual([...FREE_VERB_RULES]);
+
+    const settings = await readSettings();
+    expect(settings.$schema).toBe('https://json.schemastore.org/claude-code-settings.json');
+    expect(settings.model).toBe('opus');
+    expect(settings.hooks).toEqual({ PreToolUse: [] });
+    expect((settings.permissions as { deny: string[] }).deny).toEqual(['Bash(rm:*)']);
+    // Existing entries keep their positions; ours are appended after them.
+    expect(allowOf(settings)).toEqual(['Bash(git status:*)', 'Read(//tmp/**)', ...FREE_VERB_RULES]);
+    // Key order is preserved too, so a diff shows only the appended rules.
+    expect(Object.keys(settings)).toEqual(['$schema', 'model', 'permissions', 'hooks']);
+  });
+
+  it('adds only the missing rules when some are already there', async () => {
+    await seedSettings({
+      permissions: { allow: ['Bash(tenjin search:*)', 'Bash(tenjin doctor:*)'] },
+    });
+
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.alreadyPresent).toEqual(['Bash(tenjin search:*)', 'Bash(tenjin doctor:*)']);
+    expect(result.added).not.toContain('Bash(tenjin search:*)');
+    expect(result.added).toHaveLength(FREE_VERB_RULES.length - 2);
+
+    const allow = allowOf(await readSettings());
+    expect(allow).toHaveLength(FREE_VERB_RULES.length);
+    for (const rule of FREE_VERB_RULES) {
+      expect(allow.filter((e) => e === rule)).toHaveLength(1);
+    }
+  });
+
+  it('creates permissions.allow when the file exists without it', async () => {
+    await seedSettings({ model: 'opus' });
+    await wireFreeVerbAllowlist(home);
+    const settings = await readSettings();
+    expect(settings.model).toBe('opus');
+    expect(allowOf(settings)).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('creates allow when permissions exists with only a deny list', async () => {
+    await seedSettings({ permissions: { deny: ['Bash(curl:*)'] } });
+    await wireFreeVerbAllowlist(home);
+    const settings = await readSettings();
+    expect((settings.permissions as { deny: string[] }).deny).toEqual(['Bash(curl:*)']);
+    expect(allowOf(settings)).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('keeps non-string allow entries it does not understand', async () => {
+    await seedSettings({ permissions: { allow: [{ tool: 'Bash' }, 'Bash(ls:*)'] } });
+    await wireFreeVerbAllowlist(home);
+    expect(allowOf(await readSettings())).toEqual([
+      { tool: 'Bash' },
+      'Bash(ls:*)',
+      ...FREE_VERB_RULES,
+    ]);
+  });
+});
+
+describe('wireFreeVerbAllowlist: idempotency', () => {
+  it('a re-run adds nothing, reports everything as already present, and does not rewrite the file', async () => {
+    await wireFreeVerbAllowlist(home);
+    const before = await readFile(settingsPath(), 'utf8');
+    const beforeMtime = (await stat(settingsPath())).mtimeMs;
+
+    const second = await wireFreeVerbAllowlist(home);
+    expect(second.added).toEqual([]);
+    expect(second.alreadyPresent).toEqual([...FREE_VERB_RULES]);
+    expect(second.skipped).toBeUndefined();
+    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
+    expect((await stat(settingsPath())).mtimeMs).toBe(beforeMtime);
+  });
+
+  it('never duplicates a rule across three runs', async () => {
+    await wireFreeVerbAllowlist(home);
+    await wireFreeVerbAllowlist(home);
+    await wireFreeVerbAllowlist(home);
+    expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES]);
+  });
+});
+
+describe('wireFreeVerbAllowlist: refuses to touch what it cannot understand', () => {
+  it('skips malformed JSON and leaves the bytes exactly as they were', async () => {
+    const broken = '{ "permissions": { "allow": [ // a comment\n] }\n';
+    await seedSettings(broken);
+
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.skipped).toBe('unparsable');
+    expect(result.added).toEqual([]);
+    expect(result.warning).toContain('not valid JSON');
+    expect(await readFile(settingsPath(), 'utf8')).toBe(broken);
+  });
+
+  it('skips a settings file that is not a JSON object', async () => {
+    await seedSettings('[1, 2, 3]');
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.skipped).toBe('unexpected-shape');
+    expect(await readFile(settingsPath(), 'utf8')).toBe('[1, 2, 3]');
+  });
+
+  it('skips when permissions is not an object', async () => {
+    await seedSettings({ permissions: 'all' });
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.skipped).toBe('unexpected-shape');
+    expect(result.warning).toContain('"permissions"');
+    expect((await readSettings()).permissions).toBe('all');
+  });
+
+  it('skips when permissions.allow is not an array', async () => {
+    await seedSettings({ permissions: { allow: 'everything' } });
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.skipped).toBe('unexpected-shape');
+    expect((await readSettings()).permissions).toEqual({ allow: 'everything' });
+  });
+
+  it('never creates the file on a skip path', async () => {
+    await seedSettings('nonsense');
+    await wireFreeVerbAllowlist(home);
+    expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(true);
+    expect(await readFile(settingsPath(), 'utf8')).toBe('nonsense');
+  });
+});
+
+describe('permissionsSkipped', () => {
+  it('shapes a non-write decision like a write outcome, naming the file it did not touch', () => {
+    const result = permissionsSkipped('claude', home, 'declined');
+    expect(result).toEqual({
+      harness: 'claude',
+      path: settingsPath(),
+      added: [],
+      alreadyPresent: [],
+      skipped: 'declined',
+    });
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+});
