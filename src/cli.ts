@@ -5,6 +5,7 @@ import { CliError } from './lib/errors';
 import { dataDir } from './lib/paths';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
+import { maybeNudgeUpdate } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
 /**
@@ -80,6 +81,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     } catch (err) {
       setExit(emitFailure(io, command, err, { json }).exitCode);
     }
+    // AFTER the envelope, for every command and both outcomes: the nudge must
+    // never delay a command's output, touch stdout, or move its exit code. It
+    // resolves the data dir itself because a failed buildContext has no ctx to
+    // read one from, and it never rejects (see maybeNudgeUpdate).
+    await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
   };
 
   program

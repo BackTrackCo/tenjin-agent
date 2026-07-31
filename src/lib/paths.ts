@@ -42,6 +42,15 @@ export function spendLedgerPath(dir: string = dataDir()): string {
 }
 
 /**
+ * Where the once-a-day "a newer tenjin-cli exists" check caches the registry
+ * answer. A pure cache: nothing here is authoritative, so an unreadable file is
+ * simply re-fetched.
+ */
+export function updateCheckPath(dir: string = dataDir()): string {
+  return join(dir, 'update-check.json');
+}
+
+/**
  * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
  * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
  * New writes go to the per-wallet path below; this one is only read as a

@@ -1,6 +1,20 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { main } from './cli';
 import type { Io } from './lib/output';
+
+// The dispatcher now runs the update check after every command, and the TTY cases
+// below would otherwise let it reach the npm registry and write the real
+// ~/.tenjin. CI is the production skip signal, so setting it keeps this file
+// offline through the same door a build machine uses.
+let prevCI: string | undefined;
+beforeAll(() => {
+  prevCI = process.env.CI;
+  process.env.CI = '1';
+});
+afterAll(() => {
+  if (prevCI === undefined) delete process.env.CI;
+  else process.env.CI = prevCI;
+});
 
 function captureIo(isTTY = false) {
   const out: string[] = [];
