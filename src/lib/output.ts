@@ -103,6 +103,18 @@ export function emitFailure(
 }
 
 /**
+ * One dim advisory line on stderr, human mode only. This is for facts that belong
+ * to NO command's result — an unreadable spend ledger, a newer release on npm —
+ * so they can never join the envelope on stdout or reach a machine consumer at
+ * all. Sanitized here rather than by each caller: what these lines quote (a
+ * registry version string, a parse error) is not the command's own prose.
+ */
+export function emitNotice(io: Io, text: string, opts: EmitOptions = {}): void {
+  if (!humanMode(io, opts)) return;
+  io.stderr.write(`${paint(io, 'dim', sanitizeForTerminal(text))}\n`);
+}
+
+/**
  * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
  * formatting, and invisible tag/BOM characters from a string headed for a
  * terminal. Commands apply this to every SERVER-sourced string (titles,
