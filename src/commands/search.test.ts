@@ -84,6 +84,22 @@ describe('runSearch', () => {
     expect(latest?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
   });
 
+  // The candidate line prices in dollars, like the browse hint below it: a human
+  // reading a price has to be able to compare it to `--max-price 0.10` without
+  // dividing by a million. Two decimals, so a dime is "0.10" and not "0.1".
+  it('renders the candidate line in USD, not atomic units', async () => {
+    const { fetch } = stub(CANDIDATES);
+    const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect(res.humanLines?.[1]).toBe(
+      '  1. A resource, 0.10 USD, https://preview.example/api/read/iris/slug',
+    );
+    expect(res.humanLines?.[1]).not.toContain('atomic');
+    // The machine envelope is unaffected: --json still carries exact atomic.
+    expect((res.data as { candidates?: { price: string }[] }).candidates?.[0]?.price).toBe(
+      '100000',
+    );
+  });
+
   it('returns the MISS verbatim and records it', async () => {
     const miss = {
       schemaVersion: 2,

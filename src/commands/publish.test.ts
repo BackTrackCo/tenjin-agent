@@ -215,6 +215,32 @@ describe('runPublish — receipt + card echo', () => {
     });
   });
 
+  // Every field on the receipt line is server-sent, and it is the line an author
+  // reads to learn where their piece went and in what state. A repaint escape or
+  // a bidi override in `status` or `url` (both bare z.string() on the wire) must
+  // not reach the terminal, the same as the title beside them.
+  it('sanitizes the server status and url on the human receipt line', async () => {
+    const { fetch } = stubServer({
+      ...CREATED,
+      status: 'published\u001b[2K\rdraft',
+      url: 'https://preview.example/a/iris/\u202egpj.exe',
+    });
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    const line = res.humanLines?.[0] ?? '';
+    expect(line).toBe(
+      'Published The Answer (publisheddraft) for 0.1 USD → https://preview.example/a/iris/gpj.exe',
+    );
+    // eslint-disable-next-line no-control-regex
+    expect(/[\u001b\u202a-\u202e]/.test(line)).toBe(false);
+    // The machine envelope is untouched: --json still carries the server's bytes.
+    expect((res.data as { url: string }).url).toBe('https://preview.example/a/iris/\u202egpj.exe');
+  });
+
   it('an ineligible-but-published post still succeeds (browse-only document)', async () => {
     const { fetch } = stubServer(CREATED); // no resource echo
     const { provider } = spyProvider();

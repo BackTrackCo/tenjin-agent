@@ -328,8 +328,11 @@ function receipt(
   const cacheEligible = result.cacheEligible ?? false;
   const deskUrl = `${trimSlash(baseUrl)}/desk`;
   const title = sanitizeForTerminal(result.title);
+  // status and url are server-sent open strings (posts-api declares both as bare
+  // z.string()), so they get the same treatment as the title beside them: this
+  // line is what an author reads to learn where their piece went.
   const human = [
-    `Published ${title} (${result.status}) for ${price.usd} USD → ${result.url}`,
+    `Published ${title} (${sanitizeForTerminal(result.status)}) for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
     cacheEligible
       ? 'Answer card is search-eligible.'
       : missing.length > 0
