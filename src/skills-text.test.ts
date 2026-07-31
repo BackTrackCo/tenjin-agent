@@ -1,10 +1,17 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveSkillsSource } from './lib/skills-source';
 import {
+  PERMISSIONS_QUESTION,
+  PUBLISH_MODE_CHOICES,
+  PUBLISH_MODE_QUESTION,
+  WALLET_QUESTION,
+} from './commands/install';
+import {
   ALWAYS_SAFE_ALLOWLIST,
+  MCP_CAVEAT,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
   recommendedRules,
@@ -207,44 +214,156 @@ describe('the vendored hosted mirror is never hand-edited', () => {
   });
 });
 
-describe('README allowlist block does not drift from the constants', () => {
-  // The rules are hand-copied into the README, so without this the module can
-  // change and the published docs silently keep recommending the old set.
-  const README = readFileSync(
-    join(fileURLToPath(new URL('..', import.meta.url)), 'README.md'),
-    'utf8',
-  );
+describe('the published docs do not drift from the allowlist constants', () => {
+  // The rules are hand-copied into the docs, so without this the module can
+  // change and the published docs silently keep recommending the old set. The
+  // README carries the free-verb paste block and a three-tier summary; the two
+  // opt-in lines and the whole rationale live in docs/agent-permissions.md.
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const README = readFileSync(join(root, 'README.md'), 'utf8');
+  const PERMISSIONS_DOC = readFileSync(join(root, 'docs', 'agent-permissions.md'), 'utf8');
 
-  function readmeFencedLines(): string[] {
+  function fencedRules(text: string): string[] {
     const out: string[] = [];
     let inFence = false;
-    for (const raw of README.split('\n')) {
+    for (const raw of text.split('\n')) {
       if (raw.trimStart().startsWith('```')) {
         inFence = !inFence;
         continue;
       }
-      if (inFence && raw.trim().length > 0) out.push(raw.trim());
+      if (inFence && raw.trim().startsWith('Bash(')) out.push(raw.trim());
     }
     return out;
   }
 
-  it('lists exactly the recommended rules in its fenced blocks, no more', () => {
-    const fenced = readmeFencedLines().filter((l) => l.startsWith('Bash('));
-    expect(fenced.sort()).toEqual([...recommendedRules()].sort());
+  it('the README pastes exactly the free tier, and never an opt-in line', () => {
+    expect(fencedRules(README).sort()).toEqual(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule).sort());
   });
 
-  it('names every excluded verb in prose', () => {
+  it('the permissions doc pastes exactly the recommended rules, no more', () => {
+    expect(fencedRules(PERMISSIONS_DOC).sort()).toEqual([...recommendedRules()].sort());
+  });
+
+  it('the permissions doc names every excluded verb in prose', () => {
     for (const e of NEVER_ALLOWLISTED) {
-      for (const verb of e.command.split(' / ')) expect(README).toContain(verb.trim());
+      for (const verb of e.command.split(' / ')) expect(PERMISSIONS_DOC).toContain(verb.trim());
     }
   });
 
-  it('states the flag caveat and the unattended-spend correction', () => {
-    expect(README).toContain('--base-url');
-    expect(README).toMatch(/A prefix rule pins the verb, not the flags/i);
-    expect(README).toMatch(/that line authorizes\s*unattended spending up to your wallet balance/i);
-    expect(README).toMatch(/`sessionBudget` is `0`, which the policy reads as \*\*no\s*ceiling/i);
-    expect(README).not.toMatch(/a human is still on every purchase/i);
+  it('the permissions doc states the flag caveat and the unattended-spend correction', () => {
+    expect(PERMISSIONS_DOC).toContain('--base-url');
+    expect(PERMISSIONS_DOC).toMatch(/A prefix rule pins the verb, not the flags/i);
+    expect(PERMISSIONS_DOC).toMatch(
+      /that line authorizes\s*unattended spending up to your wallet balance/i,
+    );
+    expect(PERMISSIONS_DOC).toMatch(
+      /`sessionBudget` is `0`, which the policy reads as \*\*no\s*ceiling/i,
+    );
+    expect(PERMISSIONS_DOC).not.toMatch(/a human is still on every purchase/i);
+  });
+
+  it('every free verb is explained by name in the permissions doc', () => {
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(PERMISSIONS_DOC).toContain(e.command);
+  });
+
+  it('the README still points at the doc the detail moved to', () => {
+    expect(README).toContain('docs/agent-permissions.md');
+  });
+
+  // Both pages QUOTE the consent question, and a quote is exactly the thing that
+  // goes stale silently. Compared against the shipped constant with markdown
+  // wrapping normalized away, so a reworded prompt fails here rather than
+  // shipping docs that promise something the CLI no longer says.
+  it('both pages quote the consent question the CLI actually asks', () => {
+    const flatten = (s: string): string =>
+      s
+        .replace(/^\s*>\s?/gm, '')
+        .replace(/[`*]/g, '')
+        .replace(/\s+/g, ' ');
+    const question = flatten(PERMISSIONS_QUESTION);
+    expect(flatten(README)).toContain(question);
+    expect(flatten(PERMISSIONS_DOC)).toContain(question);
+  });
+
+  // The MCP section is a SECURITY list: a tool missing from it reads as "safe to
+  // leave ungated". Pinned to MCP_CAVEAT so the page cannot drop a tool (edit
+  // went missing once) without failing here.
+  it('the permissions doc names every MCP tool MCP_CAVEAT gates', () => {
+    // MCP_CAVEAT spells some tools fully prefixed and some bare (`tenjin_buy`),
+    // so both spellings are captured and normalized to the full tool name; the
+    // doc must carry every one, buy included.
+    const tools = [...MCP_CAVEAT.join(' ').matchAll(/(?:mcp__tenjin__)?tenjin_[a-z_]+/g)].map(
+      (m) => (m[0].startsWith('mcp__') ? m[0] : `mcp__tenjin__${m[0]}`),
+    );
+    expect(tools).toContain('mcp__tenjin__tenjin_buy');
+    for (const tool of new Set(tools)) expect(PERMISSIONS_DOC).toContain(tool);
+  });
+
+  // The README quotes all three walkthrough prompts, not just the permissions
+  // one, so all three are pinned to their shipped constants.
+  it('the README quotes the publish-mode and wallet prompts the CLI actually asks', () => {
+    const flatten = (s: string): string =>
+      s
+        .replace(/^\s*>\s?/gm, '')
+        .replace(/[`*"]/g, '')
+        .replace(/\s+/g, ' ');
+    const readme = flatten(README);
+    expect(readme).toContain(flatten(PUBLISH_MODE_QUESTION));
+    expect(readme).toContain(flatten(WALLET_QUESTION));
+    for (const c of PUBLISH_MODE_CHOICES) {
+      expect(readme).toContain(flatten(c.label));
+      if ('hint' in c && c.hint !== undefined) expect(readme).toContain(flatten(c.hint));
+    }
+  });
+
+  // A path-substring check cannot see a renamed heading, so every relative
+  // .md link is resolved for real: the target file must exist and a
+  // #fragment must match a heading's GitHub slug in that file.
+  it('every relative markdown .md link resolves, fragment included', () => {
+    const slug = (h: string): string =>
+      h
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/\s+/g, '-');
+    // Fence-aware: a `# comment` inside a code block is not a heading.
+    const headingSlugs = (text: string): Set<string> => {
+      const out = new Set<string>();
+      let inFence = false;
+      for (const l of text.split('\n')) {
+        if (/^\s*(```|~~~)/.test(l)) inFence = !inFence;
+        else if (!inFence && /^#{1,6} /.test(l)) out.add(slug(l.replace(/^#{1,6} /, '')));
+      }
+      return out;
+    };
+    const check = (fromDir: string, text: string): void => {
+      for (const m of text.matchAll(/\]\((\.{1,2}\/[^)#\s]+?\.md)(#[^)]+)?\)/g)) {
+        const rel = m[1];
+        if (rel === undefined) continue; // group 1 always captures on a match
+        const target = join(fromDir, rel);
+        expect(existsSync(target), `${rel} does not exist`).toBe(true);
+        if (m[2] !== undefined) {
+          const frag = m[2].slice(1);
+          expect(
+            headingSlugs(readFileSync(target, 'utf8')).has(frag),
+            `${m[1]}${m[2]}: no heading slugs to ${frag}`,
+          ).toBe(true);
+        }
+      }
+    };
+    check(root, README);
+    check(join(root, 'docs'), PERMISSIONS_DOC);
+  });
+
+  it('no page calls the free tier read-only or says it cannot touch your wallet', () => {
+    // The tier claim lib/permissions.ts refuses. "read-only" survives elsewhere
+    // in both files as an honest description of ONE verb (`config get`,
+    // `candidate list`), so this pins the tier-level phrasings only.
+    for (const text of [README, PERMISSIONS_DOC]) {
+      expect(text).not.toMatch(/\d+ read-only commands/i);
+      expect(text).not.toMatch(/free,? read-only verbs/i);
+      expect(text).not.toMatch(/touch your wallet/i);
+    }
   });
 });
 
