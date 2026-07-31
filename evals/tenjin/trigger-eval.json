@@ -62,7 +62,7 @@
   {
     "query": "The tenjin CLI is on my PATH at 0.1.0-alpha.5. Report how my Tenjin sales are doing this month.",
     "should_trigger": false,
-    "rationale": "Fails the no-CLI gate only: sales are named in the CLI publish skill's own description, so there is a skill to defer to."
+    "rationale": "Fails the no-CLI gate only: both descriptions now name sales, the CLI publish skill's own and the hosted skill's CLI-present clause, so the deferral is stated on both sides and this measures whether it is honoured."
   },
   {
     "query": "Pay for this vendor API with x402 and show me the JSON it returns: https://api.example.com/v1/report.",
