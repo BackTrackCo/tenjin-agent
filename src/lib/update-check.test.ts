@@ -43,6 +43,15 @@ const forbiddenFetch: typeof fetch = async () => {
   throw new Error('the update check must not reach the network here');
 };
 
+/** The cache as it sits on disk, for asserting what a run recorded. */
+async function readCache(): Promise<unknown> {
+  return JSON.parse(await readFile(updateCheckPath(dir), 'utf8'));
+}
+
+async function seedCache(cache: Record<string, unknown>): Promise<void> {
+  await writeFile(updateCheckPath(dir), JSON.stringify(cache), { mode: 0o600 });
+}
+
 const NOW = 1_700_000_000_000;
 
 describe('maybeNudgeUpdate', () => {
@@ -84,14 +93,18 @@ describe('maybeNudgeUpdate', () => {
   });
 
   it('says nothing when the registry version is the same or older', async () => {
+    // A day apart per case, so each one is a real fetch rather than the previous
+    // case's cached answer.
+    let at = NOW;
     for (const latest of ['0.1.0-alpha.6', '0.1.0-alpha.5', '0.0.9']) {
+      at += 86_400_001;
       const cap = captureIo(true);
       await maybeNudgeUpdate({
         dir,
         io: cap.io,
         json: false,
         env: {},
-        now: () => NOW,
+        now: () => at,
         fetchImpl: registry({ alpha: latest }).fetchImpl,
         currentVersion: '0.1.0-alpha.6',
       });
@@ -130,14 +143,16 @@ describe('maybeNudgeUpdate', () => {
   // The registry is untrusted input. A version this package could never have
   // published is not compared, not sanitized into something printable, not shown.
   it('refuses a version string it cannot parse, including one carrying escapes', async () => {
+    let at = NOW;
     for (const latest of ['not-a-version', '9.9.9-beta.1', '\u001b[2K9.9.9']) {
+      at += 86_400_001; // a day apart, so each case fetches rather than reads
       const cap = captureIo(true);
       await maybeNudgeUpdate({
         dir,
         io: cap.io,
         json: false,
         env: {},
-        now: () => NOW,
+        now: () => at,
         fetchImpl: registry({ alpha: latest }).fetchImpl,
         currentVersion: '0.1.0-alpha.6',
       });
@@ -145,7 +160,7 @@ describe('maybeNudgeUpdate', () => {
     }
   });
 
-  it('caches the answer 0600 and reuses it for 24h without a second fetch', async () => {
+  it('caches the answer 0600 and asks nobody again for 24h', async () => {
     const first = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.7' });
     const deps = {
@@ -156,14 +171,22 @@ describe('maybeNudgeUpdate', () => {
     };
     await maybeNudgeUpdate({ ...deps, io: first.io, now: () => NOW, fetchImpl: reg.fetchImpl });
     expect(reg.calls()).toBe(1);
+    expect(first.stderr()).toContain('0.1.0-alpha.7 is available');
 
-    const cached: unknown = JSON.parse(await readFile(updateCheckPath(dir), 'utf8'));
-    expect(cached).toEqual({ schemaVersion: 1, checkedAtMs: NOW, latest: '0.1.0-alpha.7' });
+    // The nudge it just printed is recorded, not only the fetch it just made.
+    expect(await readCache()).toEqual({
+      schemaVersion: 1,
+      tag: 'alpha',
+      checkedAtMs: NOW,
+      latest: '0.1.0-alpha.7',
+      notifiedAtMs: NOW,
+    });
     if (process.platform !== 'win32') {
       expect((await stat(updateCheckPath(dir))).mode & 0o777).toBe(0o600);
     }
 
-    // Just under 24h: served from the cache, still nudges, never asks again.
+    // Once a day is once a day: the next command inside the window neither asks
+    // npm again nor repeats the line the human has already read.
     const second = captureIo(true);
     await maybeNudgeUpdate({
       ...deps,
@@ -171,11 +194,120 @@ describe('maybeNudgeUpdate', () => {
       now: () => NOW + 86_399_000,
       fetchImpl: forbiddenFetch,
     });
-    expect(second.stderr()).toContain('0.1.0-alpha.7 is available');
+    expect(second.stderr()).toBe('');
+  });
+
+  // A cache fresh enough to skip the fetch is not a reason to skip the nudge:
+  // this is the first time this entry has been shown to anyone.
+  it('nudges from a never-notified cache without fetching, and records it', async () => {
+    await seedCache({
+      schemaVersion: 1,
+      tag: 'alpha',
+      checkedAtMs: NOW,
+      latest: '0.1.0-alpha.7',
+    });
+    const cap = captureIo(true);
+    const at = NOW + 60_000;
+    await maybeNudgeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => at,
+      fetchImpl: forbiddenFetch,
+      currentVersion: '0.1.0-alpha.6',
+    });
+    expect(cap.stderr()).toContain('0.1.0-alpha.7 is available');
+    // checkedAtMs untouched — nothing was asked — but the nudge is now on record.
+    expect(await readCache()).toEqual({
+      schemaVersion: 1,
+      tag: 'alpha',
+      checkedAtMs: NOW,
+      latest: '0.1.0-alpha.7',
+      notifiedAtMs: at,
+    });
+  });
+
+  it('nudges again once a day has passed since the last one', async () => {
+    await seedCache({
+      schemaVersion: 1,
+      tag: 'alpha',
+      checkedAtMs: NOW,
+      latest: '0.1.0-alpha.7',
+      notifiedAtMs: NOW,
+    });
+    const cap = captureIo(true);
+    const reg = registry({ alpha: '0.1.0-alpha.7' });
+    const at = NOW + 86_400_001;
+    await maybeNudgeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => at,
+      fetchImpl: reg.fetchImpl,
+      currentVersion: '0.1.0-alpha.6',
+    });
+    expect(cap.stderr()).toContain('0.1.0-alpha.7 is available');
+    expect(await readCache()).toMatchObject({ checkedAtMs: at, notifiedAtMs: at });
+  });
+
+  // The nudge clock and the fetch clock are separate: asking npm again does not
+  // buy the right to interrupt the human again.
+  it('does not repeat the nudge just because the cache went stale', async () => {
+    await seedCache({
+      schemaVersion: 1,
+      tag: 'alpha',
+      checkedAtMs: NOW - 86_400_001, // due for a re-fetch
+      latest: '0.1.0-alpha.7',
+      notifiedAtMs: NOW - 1000, // but nudged a second ago
+    });
+    const cap = captureIo(true);
+    const reg = registry({ alpha: '0.1.0-alpha.8' });
+    await maybeNudgeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => NOW,
+      fetchImpl: reg.fetchImpl,
+      currentVersion: '0.1.0-alpha.6',
+    });
+    expect(reg.calls()).toBe(1); // it still refreshed what it knows
+    expect(cap.stderr()).toBe('');
+    // and carried the nudge clock forward rather than restarting it
+    expect(await readCache()).toMatchObject({ checkedAtMs: NOW, notifiedAtMs: NOW - 1000 });
+  });
+
+  // One machine, two binaries, one data dir: the alpha build's answer must not
+  // be handed to the stable build, whose install command cannot reach it.
+  it('ignores a cache entry from the other release channel', async () => {
+    await seedCache({
+      schemaVersion: 1,
+      tag: 'alpha',
+      checkedAtMs: NOW,
+      latest: '0.1.0-alpha.7',
+      notifiedAtMs: NOW,
+    });
+    const cap = captureIo(true);
+    const reg = registry({ latest: '1.1.0', alpha: '0.1.0-alpha.7' });
+    await maybeNudgeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => NOW,
+      fetchImpl: reg.fetchImpl,
+      currentVersion: '1.0.0', // the stable binary
+    });
+    expect(reg.calls()).toBe(1); // the alpha entry bought it nothing
+    expect(cap.stderr()).toContain('tenjin-cli 1.1.0 is available');
+    expect(cap.stderr()).not.toContain('@alpha');
+    expect(await readCache()).toMatchObject({ tag: 'latest', latest: '1.1.0' });
   });
 
   it('re-fetches once the cache is older than 24h', async () => {
-    const stale = { schemaVersion: 1, checkedAtMs: NOW, latest: '0.1.0-alpha.7' };
+    const stale = { schemaVersion: 1, tag: 'alpha', checkedAtMs: NOW, latest: '0.1.0-alpha.7' };
     await writeFile(updateCheckPath(dir), JSON.stringify(stale), { mode: 0o600 });
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.8' });

@@ -28,8 +28,17 @@ const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags
 /** The cache is a pure optimization, so a bad one is re-fetched, never repaired. */
 const CacheSchema = z.object({
   schemaVersion: z.literal(1),
+  /**
+   * The dist-tag this answer came from. Required, because a machine can run both
+   * an alpha and a stable build out of the same data dir: without it the other
+   * channel's binary would read this `latest` as its own and either nudge toward
+   * a version its install command cannot reach, or sit on a stale "up to date".
+   */
+  tag: z.string(),
   checkedAtMs: z.number(),
   latest: z.string(),
+  /** When the nudge was last PRINTED. Absent until one has been. */
+  notifiedAtMs: z.number().optional(),
 });
 type Cache = z.infer<typeof CacheSchema>;
 
@@ -65,13 +74,45 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     const nowMs = (deps.now ?? Date.now)();
     const current = deps.currentVersion ?? pkg.version;
     const path = updateCheckPath(deps.dir);
+    // A prerelease build follows the prerelease tag: telling an alpha user about a
+    // stable release they cannot get from `@alpha` would be noise, not news.
+    const tag = parseVersion(current)?.alpha !== null ? 'alpha' : 'latest';
 
+    // An entry from the OTHER channel answers a different question, so it is no
+    // more usable than no entry at all.
     const cached = await readCache(path);
-    const latest =
-      cached !== null && nowMs - cached.checkedAtMs < CHECK_INTERVAL_MS
-        ? cached.latest
-        : await fetchLatest(deps, path, nowMs, current);
-    if (latest === null || !isNewer(latest, current)) return;
+    const usable = cached !== null && cached.tag === tag ? cached : null;
+    const fresh = usable !== null && nowMs - usable.checkedAtMs < CHECK_INTERVAL_MS;
+
+    const latest = fresh ? usable.latest : await fetchLatest(deps, tag);
+    if (latest === null) return; // asked and learned nothing: cache nothing either
+
+    // Once a day means once a day, not once per FETCH: a fresh cache would
+    // otherwise repeat the same line on every command for 24h. The two clocks are
+    // separate because they answer separate questions — when we last asked npm,
+    // and when we last interrupted the human.
+    const notifiedAtMs = usable?.notifiedAtMs;
+    const due =
+      isNewer(latest, current) &&
+      (notifiedAtMs === undefined || nowMs - notifiedAtMs >= CHECK_INTERVAL_MS);
+
+    // Carried forward when nothing is printed: the day since the last nudge does
+    // not restart just because the registry was asked again.
+    const nudgedAtMs = due ? nowMs : notifiedAtMs;
+
+    // Nothing learned and nothing said means nothing to write. Deliberately NOT
+    // locked: two concurrent CLI processes can both nudge, and one duplicated
+    // line is cheaper than a lock on the exit path of every command.
+    if (!fresh || due) {
+      await writeCache(path, {
+        schemaVersion: 1,
+        tag,
+        checkedAtMs: fresh ? usable.checkedAtMs : nowMs,
+        latest,
+        ...(nudgedAtMs !== undefined ? { notifiedAtMs: nudgedAtMs } : {}),
+      });
+    }
+    if (!due) return;
 
     // `@alpha` only when the newer version IS a prerelease: on the stable channel
     // a bare install is what gets you the version just named. isNewer already
@@ -89,19 +130,13 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
 }
 
 /**
- * Ask the registry which version this channel is on, and remember the answer.
- * Returns null for every failure there is, INCLUDING a response that arrives too
- * late — the AbortSignal is what bounds the delay a finished command can suffer.
+ * Ask the registry which version `tag` is on. Returns null for every failure
+ * there is, INCLUDING a response that arrives too late — the AbortSignal is what
+ * bounds the delay a finished command can suffer. Nothing is written here: a
+ * failed check caches nothing, so the next command retries rather than going
+ * quiet for 24h over one dropped packet.
  */
-async function fetchLatest(
-  deps: UpdateCheckDeps,
-  path: string,
-  nowMs: number,
-  current: string,
-): Promise<string | null> {
-  // A prerelease build follows the prerelease tag: telling an alpha user about a
-  // stable release they cannot get from `@alpha` would be noise, not news.
-  const tag = parseVersion(current)?.alpha !== null ? 'alpha' : 'latest';
+async function fetchLatest(deps: UpdateCheckDeps, tag: string): Promise<string | null> {
   const doFetch = deps.fetchImpl ?? fetch;
   let json: unknown;
   try {
@@ -113,16 +148,14 @@ async function fetchLatest(
   }
   const parsed = DistTagsSchema.safeParse(json);
   if (!parsed.success) return null;
-  const latest = parsed.data[tag];
-  if (latest === undefined) return null;
-  const cache: Cache = { schemaVersion: 1, checkedAtMs: nowMs, latest };
-  // Written only on a real answer: a failed check caches nothing, so the next
-  // command retries rather than going quiet for 24h over one dropped packet.
+  return parsed.data[tag] ?? null;
+}
+
+async function writeCache(path: string, cache: Cache): Promise<void> {
   await writeFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, {
     mode: 0o600,
     dirMode: 0o700,
   });
-  return latest;
 }
 
 async function readCache(path: string): Promise<Cache | null> {
