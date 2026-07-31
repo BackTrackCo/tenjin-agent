@@ -148,6 +148,13 @@ describe('normalizeError', () => {
 // Every codepoint the sanitizer is expected to remove, so a case asserts the set
 // is gone rather than eyeballing an invisible character in an expected string.
 const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const INVISIBLE = /[\u{E0000}-\u{E007F}\u{FEFF}]/u;
+
+// The three RGI subdivision flags, spelled out so a case can assert the exact
+// bytes survive. Each is the waving black flag plus `gb`, the subdivision, and
+// the cancel tag.
+const FLAG_SCOTLAND = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}';
+const FLAG_WALES = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}';
 
 describe('sanitizeForTerminal', () => {
   it('strips CSI cursor-repaint sequences that could spoof a confirm prompt', () => {
@@ -186,5 +193,41 @@ describe('sanitizeForTerminal', () => {
   it('keeps ZWJ so an emoji sequence in a title survives', () => {
     const title = '\u{1f469}\u200d\u{1f680} launch log';
     expect(sanitizeForTerminal(title)).toBe(title);
+  });
+
+  it('strips stray tag characters carrying no flag base', () => {
+    expect(sanitizeForTerminal('re\u{E0041}\u{E0042}port')).toBe('report');
+    expect(INVISIBLE.test(sanitizeForTerminal('re\u{E0041}\u{E0042}port'))).toBe(false);
+  });
+
+  // The smuggling shape: a well-formed tag sequence that is not one of the three
+  // RGI flags draws as a bare black flag with the payload hidden behind it, so
+  // the tags go and the base is left visible rather than the whole thing passing.
+  it('degrades a non-RGI tag sequence to the bare flag base', () => {
+    const smuggled = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0078}\u{E0079}\u{E007A}\u{E007F}';
+    expect(sanitizeForTerminal(smuggled)).toBe('\u{1F3F4}');
+    expect(INVISIBLE.test(sanitizeForTerminal(smuggled))).toBe(false);
+  });
+
+  // The carve-out. These are ordinary title content, and the whitelist is what
+  // keeps the tag strip from mangling them.
+  it('keeps the RGI subdivision flags byte-identical', () => {
+    expect(sanitizeForTerminal(FLAG_SCOTLAND)).toBe(FLAG_SCOTLAND);
+    expect(sanitizeForTerminal(`Postgres on ${FLAG_WALES} tour`)).toBe(
+      `Postgres on ${FLAG_WALES} tour`,
+    );
+  });
+
+  it('strips a BOM/ZWNBSP mid-string', () => {
+    expect(sanitizeForTerminal('re\ufeffport')).toBe('report');
+  });
+
+  // The other half of the not-all-of-Cf line: ZWNJ is orthographically required
+  // in Persian and ZWSP hints line breaks in CJK, so both stay.
+  it('keeps ZWNJ in Persian and ZWSP between CJK characters', () => {
+    const persian = '\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645';
+    expect(sanitizeForTerminal(persian)).toBe(persian);
+    const cjk = '\u65e5\u672c\u8a9e\u200b\u30c6\u30ad\u30b9\u30c8';
+    expect(sanitizeForTerminal(cjk)).toBe(cjk);
   });
 });

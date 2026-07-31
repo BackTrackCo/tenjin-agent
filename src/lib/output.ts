@@ -103,14 +103,16 @@ export function emitFailure(
 }
 
 /**
- * Strip ANSI escape sequences, C0/C1 control characters, and Unicode
- * bidirectional formatting from a string headed for a terminal. Commands apply
- * this to every SERVER-sourced string (titles, handles) they put into human
- * lines or the buy confirm prompt; without it a malicious deployment could use
- * cursor-movement escapes to overwrite the very price a human is being asked to
- * confirm, or a right-to-left override to reorder that same line on screen into
- * one that reads as a different price. It is not applied to whole human lines
- * here because trusted callers (doctor) paint their own ANSI colors. JSON
+ * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
+ * formatting, and invisible tag/BOM characters from a string headed for a
+ * terminal. Commands apply this to every SERVER-sourced string (titles,
+ * handles) they put into human lines or the buy confirm prompt; without it a
+ * malicious deployment could use cursor-movement escapes to overwrite the very
+ * price a human is being asked to confirm, a right-to-left override to reorder
+ * that same line on screen into one that reads as a different price, or tag
+ * characters to carry a payload that draws as nothing at all. It is not
+ * applied to whole human lines here because trusted callers (doctor) paint
+ * their own ANSI colors. JSON
  * stdout is untouched: JSON.stringify escapes C0 controls itself, but the bidi
  * set rides through it raw, and that is deliberate rather than covered — the
  * envelope is machine-read data whose bytes must be what the server said, and
@@ -133,6 +135,25 @@ export function sanitizeForTerminal(text: string): string {
       // Cf: U+200D (ZWJ) joins legitimate emoji sequences, and dropping it
       // would corrupt honest titles to defend against dishonest ones.
       .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+      // The Unicode tag block (U+E0000-U+E007F) and the BOM/ZWNBSP, neither of
+      // which has a legitimate mid-title use. Tag characters render as nothing
+      // at all, so a payload spelled in them is invisible in the line a human
+      // is reading and in the line they would paste back to report it.
+      //
+      // The three RGI subdivision flags are the exception and survive
+      // byte-identical: they are ordinary title content. The whitelist is those
+      // three sequences and NOT "any well-formed tag sequence", because a
+      // non-RGI sequence draws as a bare black flag with the payload hidden
+      // behind it, which is the exact channel this closes.
+      //
+      // Kept for the same reason as ZWJ above: U+200B (ZWSP) hints line breaks
+      // in CJK and U+200C (ZWNJ) is orthographically required in Persian, so
+      // stripping them would corrupt honest titles to defend against dishonest
+      // ones.
+      .replace(
+        /(\u{1F3F4}\u{E0067}\u{E0062}(?:\u{E0065}\u{E006E}\u{E0067}|\u{E0073}\u{E0063}\u{E0074}|\u{E0077}\u{E006C}\u{E0073})\u{E007F})|[\u{E0000}-\u{E007F}\u{FEFF}]/gu,
+        (_match, rgiFlag: string | undefined) => rgiFlag ?? '',
+      )
   );
 }
 
