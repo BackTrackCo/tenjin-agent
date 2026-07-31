@@ -207,44 +207,60 @@ describe('the vendored hosted mirror is never hand-edited', () => {
   });
 });
 
-describe('README allowlist block does not drift from the constants', () => {
-  // The rules are hand-copied into the README, so without this the module can
-  // change and the published docs silently keep recommending the old set.
-  const README = readFileSync(
-    join(fileURLToPath(new URL('..', import.meta.url)), 'README.md'),
-    'utf8',
-  );
+describe('the published docs do not drift from the allowlist constants', () => {
+  // The rules are hand-copied into the docs, so without this the module can
+  // change and the published docs silently keep recommending the old set. The
+  // README carries the free-verb paste block and a three-tier summary; the two
+  // opt-in lines and the whole rationale live in docs/agent-permissions.md.
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const README = readFileSync(join(root, 'README.md'), 'utf8');
+  const PERMISSIONS_DOC = readFileSync(join(root, 'docs', 'agent-permissions.md'), 'utf8');
 
-  function readmeFencedLines(): string[] {
+  function fencedRules(text: string): string[] {
     const out: string[] = [];
     let inFence = false;
-    for (const raw of README.split('\n')) {
+    for (const raw of text.split('\n')) {
       if (raw.trimStart().startsWith('```')) {
         inFence = !inFence;
         continue;
       }
-      if (inFence && raw.trim().length > 0) out.push(raw.trim());
+      if (inFence && raw.trim().startsWith('Bash(')) out.push(raw.trim());
     }
     return out;
   }
 
-  it('lists exactly the recommended rules in its fenced blocks, no more', () => {
-    const fenced = readmeFencedLines().filter((l) => l.startsWith('Bash('));
-    expect(fenced.sort()).toEqual([...recommendedRules()].sort());
+  it('the README pastes exactly the free tier, and never an opt-in line', () => {
+    expect(fencedRules(README).sort()).toEqual(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule).sort());
   });
 
-  it('names every excluded verb in prose', () => {
+  it('the permissions doc pastes exactly the recommended rules, no more', () => {
+    expect(fencedRules(PERMISSIONS_DOC).sort()).toEqual([...recommendedRules()].sort());
+  });
+
+  it('the permissions doc names every excluded verb in prose', () => {
     for (const e of NEVER_ALLOWLISTED) {
-      for (const verb of e.command.split(' / ')) expect(README).toContain(verb.trim());
+      for (const verb of e.command.split(' / ')) expect(PERMISSIONS_DOC).toContain(verb.trim());
     }
   });
 
-  it('states the flag caveat and the unattended-spend correction', () => {
-    expect(README).toContain('--base-url');
-    expect(README).toMatch(/A prefix rule pins the verb, not the flags/i);
-    expect(README).toMatch(/that line authorizes\s*unattended spending up to your wallet balance/i);
-    expect(README).toMatch(/`sessionBudget` is `0`, which the policy reads as \*\*no\s*ceiling/i);
-    expect(README).not.toMatch(/a human is still on every purchase/i);
+  it('the permissions doc states the flag caveat and the unattended-spend correction', () => {
+    expect(PERMISSIONS_DOC).toContain('--base-url');
+    expect(PERMISSIONS_DOC).toMatch(/A prefix rule pins the verb, not the flags/i);
+    expect(PERMISSIONS_DOC).toMatch(
+      /that line authorizes\s*unattended spending up to your wallet balance/i,
+    );
+    expect(PERMISSIONS_DOC).toMatch(
+      /`sessionBudget` is `0`, which the policy reads as \*\*no\s*ceiling/i,
+    );
+    expect(PERMISSIONS_DOC).not.toMatch(/a human is still on every purchase/i);
+  });
+
+  it('every free verb is explained by name in the permissions doc', () => {
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(PERMISSIONS_DOC).toContain(e.command);
+  });
+
+  it('the README still points at the doc the detail moved to', () => {
+    expect(README).toContain('docs/agent-permissions.md');
   });
 });
 

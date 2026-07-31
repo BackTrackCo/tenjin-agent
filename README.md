@@ -27,7 +27,7 @@ and outcome reporting. Every command works against production today.
 
 ```bash
 npm i -g tenjin-cli
-tenjin install              # walks you through the skills, your publish consent mode, and wallet setup, then runs the doctor checks
+tenjin install              # wires the skills and runs the doctor checks, then asks three questions: publishing, permissions, wallet
 tenjin wallet show          # print your wallet address; `tenjin wallet balance` checks the USDC balance
 # fund it: send USDC on Base to that address (a few dollars is plenty; this is a pocket-money wallet)
 tenjin search "what actually changed in <library> v3's public API"   # your first search
@@ -37,7 +37,7 @@ tenjin search "what actually changed in <library> v3's public API"   # your firs
 
 | Command                                                 | Purpose                                                                                                                                                           |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tenjin install`                                        | Walk you through harness skills, your publish consent mode, and wallet setup, then run the doctor checks                                                          |
+| `tenjin install`                                        | Wire the harness skills and run the doctor checks, then ask three setup questions: publishing, harness permissions, wallet                                        |
 | `tenjin doctor`                                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                                                                          |
 | `tenjin config [get\|set]`                              | Spend policy (`maxAutoSpend`, `sessionBudget`, `confirm`, allowlists) and `publish.mode` / `publish.defaultPrice`                                                 |
 | `tenjin wallet [create\|show\|balance]`                 | Local Base wallet; the key never leaves the machine                                                                                                               |
@@ -135,20 +135,20 @@ reusable answer your agent derived after a search both go through it, after a
 deterministic local scan (secrets, keys, PII, wallet addresses) that runs in
 every mode:
 
-- **`review`** (the default) asks a one-click yes/no for every publish, even a
-  clean scan. This is the safe default: nothing leaves your machine unseen.
-- **`auto`** publishes a clean scan immediately, including answers your agent
-  derives; any warning finding stops and asks; a hard block (a live secret or
-  private key) always refuses.
-- **`full-auto`** does not stop for warnings, only for hard blocks. It is honored
-  from config, env, a flag, or a gitignored `.tenjin.json`, but a committed
-  `.tenjin.json` requesting it downgrades to `auto`, so cloning a repo can never
-  enable silent auto-publishing.
+- **`review`** (the stored default) asks a one-click yes/no for every publish.
+- **`auto`** publishes a clean scan immediately, warnings still stop and ask.
+- **`full-auto`** stops only for hard blocks (a live secret or a private key).
+
+A hard block always refuses, in every mode. `full-auto` is honored from config,
+env, a flag, or a gitignored `.tenjin.json`, but a committed `.tenjin.json`
+requesting it downgrades to `auto`, so cloning a repo can never enable silent
+auto-publishing.
 
 `--yes` clears the warning findings and the review confirm; it never clears a hard
 block. Set the mode with `tenjin config set publish.mode <mode>`, or per run with
-`--mode`. `tenjin install` asks once on an interactive setup and otherwise leaves
-the default (review); change it any time with `tenjin config set publish.mode`.
+`--mode`. An interactive `tenjin install` asks once and recommends `auto`;
+`--publish-mode <mode>` sets it non-interactively, and a run that is never asked
+leaves the stored default (`review`).
 
 Pricing: `--price` (or a frontmatter `price:`) wins, otherwise `publish.defaultPrice`
 (default $0.10). A card never auto-prices; the `tenjin-publish` skill's rubric is
@@ -156,13 +156,12 @@ what actually chooses a price before it calls the command.
 
 ## Auto-mode permission allowlist
 
-Coding harnesses running unattended ("auto mode", "full auto", YOLO) classify each
-shell command before running it, and an unknown binary is denied by default. That
-denies the free verbs too, which breaks the whole marketplace loop: the skills
-forbid working around a denial, so a denied `tenjin search` just stops.
+Harnesses running unattended ("auto mode", "full auto", YOLO) deny an unknown
+binary by default, which denies the free verbs too and stops the whole loop: the
+skills forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clear the free verbs once. In Claude Code these go in the `permissions.allow`
-array of `.claude/settings.json`:
+array of `~/.claude/settings.json`:
 
 ```
 Bash(tenjin search:*)
@@ -176,122 +175,51 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those can spend, and none can open the keystore. That is the definition of
-this tier, and it is deliberately narrower than "signs nothing": `tenjin read` can
-present a session key that already exists (below), which is a signature — a P-256
-delegation, the wrong curve to authorize a USDC transfer. It cannot mint one; that
-needs the wallet.
+There are three tiers, and the difference between them is the whole point:
 
-Worth knowing before you paste the `read` line: once a session key exists, `read`
-**transmits that wallet-derived credential** to the origin it was minted for. That
-origin binding is what keeps a stray `--base-url` from redirecting it, and it is
-the reason the binding exists rather than a nicety.
+- **The nine free verbs above** cannot spend and cannot open the keystore.
+- **`Bash(tenjin buy:*)`** is a separate opt-in that, on the default config,
+  authorizes unattended spending up to your wallet balance.
+- **`Bash(tenjin session start:*)`** is a separate opt-in that spends nothing and
+  cannot spend, but does open the keystore.
 
-Three are not read-only, which is worth knowing before you pre-clear them:
-`tenjin search` POSTs your generalized question off-machine, and `tenjin outcome`
-POSTs a report that moves the marketplace's reuse signal — both unauthenticated
-and free, neither carrying a credential — while `tenjin read` writes locally,
-saving a delivered piece to your library.
+`tenjin install` offers to write the free tier into `~/.claude/settings.json` for
+you, as an additive, idempotent merge; `tenjin install --allow-free-verbs` does the
+same headlessly. `tenjin doctor` reprints all three tiers on every run, including
+in `doctor --json` under `permissions`, so an agent that just got denied can point
+you at the exact line.
 
-`tenjin install` prints this block, and `tenjin doctor` reprints it on every run
-(including in `doctor --json` under `permissions`, on the failure envelope as well
-as the success one), so an agent that just got denied can point you at the exact
-line.
-
-**A prefix rule pins the verb, not the flags.** Every line above also clears
-`--base-url <url>` on that verb, because the CLI accepts the global flags on every
-subcommand. `--base-url` is validated as a URL and nothing more, and it wins
-settings precedence, so it moves where the question goes, where `doctor` probes,
-and (with the `buy` line below) where a SIWX signature and an EIP-3009 payment
-authorization are sent. The origin pin only checks that a resource URL shares an
-origin with the _configured_ base, so an attacker-controlled pair satisfies it.
-There is no prefix syntax for "this verb but not that flag", so treat this as a
-disclosed limit: set your base URL in config, and allowlist these verbs only if
-you are content for an agent to be able to choose the destination host. The
-skills tell agents never to pass `--base-url` on an allowlisted verb, but that is
-a convention rather than an enforced boundary.
-
-Purchases are a **separate, explicit opt-in**:
-
-```
-Bash(tenjin buy:*)
-```
-
-Read this before pasting it: **on the default config that line authorizes
-unattended spending up to your wallet balance.** `--yes` is an ordinary flag on
-the same allowlisted verb and it clears the confirm gate outright, so `confirm:
-always` does not put a human on every purchase once the agent can pass `--yes`.
-Walking the defaults: `allowlistCreators` is empty (gate off), `maxAutoSpend` is
-`0` and `confirm` is `always`, which together only ask for a confirmation that
-`--yes` satisfies, and `sessionBudget` is `0`, which the policy reads as **no
-ceiling at all**, not a zero one. Set real values first:
-
-```bash
-tenjin config set maxAutoSpend 0.25
-tenjin config set sessionBudget 2.00
-```
-
-The allowlist line itself never raises a spend cap. That is true, and it is not
-the same as saying the caps stop an allowlisted `buy`.
-
-Minting a session key is the **other** explicit opt-in — it spends nothing and
-cannot spend, but it opens the keystore:
-
-```
-Bash(tenjin session start:*)
-```
-
-`tenjin session start --scope read` takes one wallet signature and leaves a ≤24h
-P-256 delegation in `~/.tenjin/session.json` (0600), which `tenjin read` then
-presents to recover pieces you already own. The key is the wrong curve to sign an
-EIP-3009 payment authorization, so the line can never become a spend grant.
-
-Do not read the `read` scope as more than that. The scope is enforced only on the
-request shape that carries a session signature alongside the delegation header; a
-copy of the same delegation presented differently is not scope-checked, so treat
-the file as a credential carrying your wallet's authority. Its real bounds are the
-24h expiry, the 0600 mode, and the origin binding.
-
-What you are clearing is **unattended keystore access**: on an encrypted wallet
-the passphrase comes from the environment rather than from you, and the
-`--base-url` caveat above bites hardest here, because a mint against a host an
-agent chose is a wallet signature you did not intend to make. `tenjin doctor`
-reports whether a session exists, for which origin, at what scope, and when it
-expires.
-
-Deliberately **never** recommended, because each is a human decision: `tenjin send`
-(moves USDC out of the wallet, and is not bounded by the buy spend policy), `tenjin
-publish`, `tenjin wallet create`, `tenjin config set` (it can widen the agent's own
-spend policy), `tenjin candidate add` / `tenjin candidate drop`, `tenjin install`,
-and `tenjin mcp`
-(it re-exposes every command core, so clearing it clears everything). For the same
-reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`, `Bash(tenjin
-wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
-
-Two gaps worth knowing, both of which fail closed (denied, never wrongly allowed):
-bare `tenjin config` is as read-only as `config get` but no prefix rule reaches it
-without also covering `config set`, so use `tenjin config get <key>`; and group-level
-flag forms like `tenjin wallet --json show` are not covered, so put global flags
-after the leaf verb (`tenjin wallet show --json`).
-
-**Running the local MCP server instead?** That is a different permission surface:
-the harness gates tools there, and these Bash rules do not apply. If you follow
-the [MCP section](#local-stdio-mcp-server) as well, leave
-`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_wallet` gated, treat
-`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions, and treat
-`mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.
-
-This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
-that one gates **who you may pay**, this one gates **which commands may run**.
+Read [docs/agent-permissions.md](./docs/agent-permissions.md) before you paste
+either opt-in line. It covers the per-verb rationale, why a prefix rule pins the
+verb and not the flags (`--base-url`), what a cached session key is really worth,
+the spend-policy defaults an allowlisted `buy` runs under, the verbs that are never
+recommended, and the MCP tool surface these Bash rules do not reach.
 
 ## Skills (installed by `tenjin install`)
 
 `tenjin install` auto-detects your harness, copies the three Tenjin skills into
-place, wires the pointers each harness needs, and runs the `doctor` checks as its
-last step. It is idempotent: re-run any time, `--dry-run` previews the changes
-without writing, and `--harness claude|codex|shared` (repeatable) targets a
-specific one, which is remembered so `doctor` keeps checking it. `--publish-mode
-<mode>` sets your consent mode non-interactively.
+place, wires the pointers each harness needs, and runs the `doctor` checks. Then
+it asks three questions and prints a five-line summary. Nothing else is a
+decision:
+
+1. **Publishing.** "When your agent has something worth publishing:" with three
+   options, `auto` first and recommended ("your agent publishes clean pieces on
+   its own; your harness still shows each command for approval"), then "Ask me in
+   chat first", then "Fully unattended" ("only hard blocks stop it").
+2. **Permissions.** "Let your agent search tenjin without permission popups? Adds
+   9 read-only commands to `~/.claude/settings.json`. None can spend money or
+   touch your wallet." Yes merges the free-verb allowlist into that file. Claude
+   Code only; other harnesses skip it with a note.
+3. **Wallet.** "Create a wallet now?", asked only when you do not already have one.
+
+Every question has a flag, so a headless install never waits on one:
+`--publish-mode <mode>`, `--allow-free-verbs`, and `--no-wallet`. Under `--json`
+or a pipe it asks nothing at all and emits the envelope.
+
+It is idempotent: re-run any time, `--dry-run` previews the changes without
+writing, and `--harness claude|codex|shared` (repeatable) targets a specific one,
+which is remembered so `doctor` keeps checking it. `--claude-md` additionally
+appends the search nudge to `~/.claude/CLAUDE.md`.
 
 Where the skills land:
 
@@ -491,9 +419,9 @@ approval.
 - The recommended auto-mode allowlist covers free verbs only; `tenjin buy` is an
   explicit opt-in that authorizes unattended spending, and money-moving verbs are
   never recommended. See
-  [Auto-mode permission allowlist](#auto-mode-permission-allowlist). A harness
-  permission denial is never worked around: the skills surface the exact allowlist
-  line and stop.
+  [docs/agent-permissions.md](./docs/agent-permissions.md). A harness permission
+  denial is never worked around: the skills surface the exact allowlist line and
+  stop.
 
 ## Contributing and releases
 
