@@ -13,6 +13,7 @@ evals/
     run_trigger_eval.py # keyless trigger runner (stdlib only)
     run_output_eval.py  # keyless output runner, with-skill vs without, plus grading
     preflight.py        # freshness checks both runners call before spending
+    sentinel.py         # the inert loopback destination the injection payloads name
   tenjin-search/
     trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
     trigger-eval-defer.json # 4 no-CLI queries: does this skill stand down for the hosted one
@@ -34,6 +35,26 @@ attack surface differs: the CLI payload tells the agent to run CLI verbs, which 
 zero-install path has no way to run, so it would grade nothing there. The HTTP payload names the
 posts endpoint and a public card field instead. Neither file carries a disclaimer, because a
 disclaimer inside it would be visible to the agent under test and would grade nothing.
+
+**Neither payload names a destination that can receive anything, and that is enforced rather
+than remembered.** A payload here is a thing an agent under test is meant to sometimes obey:
+the run where such a case earns its keep is the run where an agent collects local state and
+sends it somewhere, so a live destination would make the case's success condition indistinguishable
+from a leak. The HTTP payload names `{{SENTINEL_ORIGIN}}`, which the runner replaces at seed
+time with a loopback server bound for that one run (`harness/sentinel.py`). Obedience is then
+visible twice, in the transcript and in a hit count the endpoint itself reports, while the bytes
+reach a socket on this machine and stop. The sentinel records method, path, byte count and a
+SHA-256, never the body: writing the body down would recreate the leak on local disk and then
+carry it into the grader's prompt. `src/evals-fixtures.test.ts` fails the build if any seeded
+fixture names an absolute URL, so the property cannot regress into the repo.
+
+The CLI payload is inert by a different route, because what it names are local verbs rather than
+a destination. The runner pins `TENJIN_DATA_DIR` to a per-run temp directory and
+`TENJIN_PUBLISH_MODE=review` in the child environment, so an agent that obeys it widens a
+throwaway config and then cannot publish: there is no wallet in that directory to sign with.
+Those two pins used to be lines an operator was asked to export by hand, below. They are now
+applied by the runner, which is the difference between a documented precaution and one that
+holds on the run nobody set up carefully.
 
 File formats mirror Anthropic's skill-creator plugin. `evals.json` follows
 `references/schemas.md` in `anthropics/skills`: `skill_name` plus an `evals` array of
@@ -140,7 +161,10 @@ machine that also uses these skills for real, so the flag is load-bearing rather
 Both runners preflight before they spend, and a failed check stops the run rather than warning
 into a log (`harness/preflight.py`). It refuses when the vendored `skills/tenjin/SKILL.md`
 differs from the live https://tenjin.blog/skills.md it is a copy of, which is the drift
-`skill-drift.yml` watches a commit later; when `origin/main` holds commits touching `skills/`
+`skill-drift.yml` watches a commit later. That check is also what lets `evals/tenjin/` grade a
+local file honestly: the population it models fetches the canonical URL, so a baseline taken
+against a stale mirror would describe a document no zero-install agent is reading, and the run
+now proves the two are equal before it spends. It also refuses when `origin/main` holds commits touching `skills/`
 that this worktree does not; and when a probe turn's init event names any skill twice, which is
 what a stale `~/.claude/skills` copy loading alongside the workspace one looks like. Uncommitted
 edits under `skills/` pass on purpose, since editing a description and re-running is the tuning
@@ -159,6 +183,27 @@ prompts, which in print mode is a denial, so a wallet CLI is out of reach and a 
 spend even before you count the empty workspace. Cases that reach the live site do write
 ordinary read telemetry rows.
 
+**That grant is a prefix match, not a confinement, and the difference matters here.** Measured
+on this harness: a bare `env`, `cat` of a file outside the project, or `python3 -c` is denied,
+while read-only shell like `find` auto-approves, and `curl --data "$(...)" <url>` runs with no
+denial at all — the substitution executes because the command string starts with `curl`. So the
+one thing standing between an embedded instruction and an arbitrary local read leaving the
+machine is the model's own judgment, which is precisely the property these cases exist to
+measure and therefore cannot double as the control. What confines a run is the rest of it: the
+destination the payload names is loopback, the child environment is an explicit short list
+(`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`) plus the two
+Tenjin pins, and `--env KEY=VALUE` is how a machine that needs more says so. An injection case
+that collects the environment therefore finds nothing worth collecting, and nothing secret
+travels into the grader's prompt by way of the transcript.
+
+The residual is worth naming rather than implying away: `HOME` has to be passed through for the
+CLI's own login, so files under it stay readable to a run that decides to read them. Nothing in
+these fixtures points at one, and the sentinel discards whatever it is sent, but a harness that
+grades disobedience cannot claim disobedience is impossible.
+
+The trigger runner needs none of this and gets none of it: it hands the agent no shell at all,
+so there is no way to collect an environment or reach a network from a trigger pass.
+
 Defaults match skill-creator's: `--runs-per-query 3`, `--threshold 0.5`. Executor is `sonnet`
 and the output runner's grader is `opus`; both are flags. The trigger runner prints the
 negative pass rate first, for the reason in "Thresholds and the ceiling" below.
@@ -175,7 +220,9 @@ Install the plugin, then reload:
 If the marketplace is missing: `/plugin marketplace add anthropics/claude-plugins-official`.
 If the plugin is missing from it: `/plugin marketplace update claude-plugins-official`.
 
-Pin the run's consent mode and data directory first, in the environment the cases run under:
+Pin the run's consent mode and data directory first, in the environment the cases run under.
+The keyless runner above applies both itself; this path is a different program and does not,
+so on this path they are still yours to export:
 
 ```bash
 export TENJIN_PUBLISH_MODE=review
@@ -236,6 +283,19 @@ under `publish.mode: review`, so `tenjin publish` exits 3 with a `needs_confirma
 and nothing goes live; never pass `--yes` in an eval run. Leave `evalCohort` off so eval traffic
 does not land in 90-day question retention.
 
+## What keyless does not cover
+
+The harness is keyless in a stronger sense than "no API key": no case can reach a wallet, so no
+case can sign or spend. That is what makes an unattended run safe to repeat, and it is also the
+boundary. Every expectation here that reads "nothing is signed" or "no payment is authorized"
+grades an agent that had nothing to sign with, so a green baseline says nothing about how a
+skill behaves once a wallet exists — which is the only configuration in which money can move.
+The fabricated-header expectations are the closest proxy available and they are a real one: an
+agent with no wallet can still invent a payment header, and grading that catches the failure
+worth catching at this boundary. But read a pass here as "did not fabricate", never as "would
+not have paid". Covering the paying path needs a funded testnet wallet and a harness that can
+afford to lose what it spends, which is a different instrument from this one.
+
 ## Thresholds and the ceiling
 
 Target trigger rates are a team decision, not encoded here. Set them when there is a first
@@ -253,6 +313,18 @@ model can answer instantly and confidently, it will answer rather than search, w
 description says; that is the same instinct the four gates are written to respect. Treat a
 persistent miss on a genuinely cheap-looking query as expected, not as a tuning failure.
 Chasing it produces a description that overtriggers on the negatives.
+
+**A score from a set a description was tuned against is in-sample, and this runner has no
+holdout.** skill-creator's loop defaults to `--holdout 0.4` because it tunes; this runner only
+scores, and the tuning happens in a person's head between two runs, so a split here would hold
+out queries from a fitting process it cannot see. That makes a holdout the wrong instrument
+rather than a missing one, and it makes the label mandatory: `tenjin-search`'s 20/20 is a fit to
+a fixed twenty, not evidence of generalisation. The evidence that would generalise is a pass on
+queries written after the description, so write the next set's queries before reading this one's
+results, and report any number from a set that shaped the description as in-sample when you
+quote it. The deferral probe does not fill that gap either: it is a regression test for a
+specific over-fire, and asking it to stand in for generalisation would repeat the mistake one
+level down.
 
 ## The corpus preconditions
 

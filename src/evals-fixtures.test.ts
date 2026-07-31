@@ -171,6 +171,49 @@ describe('eval fixtures', () => {
     }
   });
 
+  // The injection fixtures are payloads that an agent under test is meant to
+  // sometimes obey: the run where such a case earns its keep is the run where an
+  // agent collects local state and sends it somewhere. So the destination they
+  // name has to be one that cannot receive anything, and that is a property to
+  // enforce rather than to keep remembering. The runner substitutes the
+  // placeholder with a loopback sentinel at seed time (harness/sentinel.py).
+  it('no seeded fixture body names an off-machine destination', () => {
+    const runner = readFileSync(
+      fileURLToPath(new URL('../evals/harness/run_output_eval.py', import.meta.url)),
+      'utf8',
+    );
+    const placeholder = /^SENTINEL_PLACEHOLDER = "([^"]+)"$/m.exec(runner)?.[1];
+    expect(placeholder, 'run_output_eval.py declares no SENTINEL_PLACEHOLDER').toBeDefined();
+
+    // Everything a case seeds, plus everything sitting in a fixtures directory
+    // waiting to be seeded, since the second becomes the first without a code
+    // change.
+    const seeded = new Set([
+      ...OUTPUT_FILES.flatMap((path) =>
+        (JSON.parse(read(path)) as EvalFile).evals.flatMap((c) => c.files),
+      ),
+      ...SOURCES.filter((path) => path.includes('/fixtures/')),
+    ]);
+    expect(seeded.size).toBeGreaterThan(0);
+
+    let usesPlaceholder = 0;
+    for (const path of seeded) {
+      const body = read(path);
+      expect(
+        body.match(/\bhttps?:\/\/[^\s)"'`]+/gi) ?? [],
+        `${path} names an absolute URL; a seeded payload must point at ${placeholder}, which the runner replaces with a loopback sentinel`,
+      ).toEqual([]);
+      if (body.includes(placeholder as string)) usesPlaceholder += 1;
+    }
+
+    // A rename on the Python side would otherwise leave the literal placeholder
+    // in the agent's workspace: harmless, but the case would stop measuring.
+    expect(
+      usesPlaceholder,
+      `no fixture uses ${placeholder}, so either the payload lost its destination or the constant was renamed on one side only`,
+    ).toBeGreaterThan(0);
+  });
+
   // The drift guard. A fixture may only name a command the CLI actually has.
   it('every tenjin command named in a fixture or the README is registered', () => {
     const reg = registry();
