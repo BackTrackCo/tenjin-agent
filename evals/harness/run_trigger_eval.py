@@ -51,6 +51,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from preflight import preflight  # noqa: E402
+
 TOOLS = "Skill,Read,Glob,Grep"
 
 _print_lock = threading.Lock()
@@ -194,6 +197,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the freshness checks (offline runs); say so when reporting the numbers",
+    )
     args = parser.parse_args()
 
     workspace = args.workspace or Path(tempfile.mkdtemp(prefix="trigger-eval-"))
@@ -202,6 +210,13 @@ def main() -> int:
 
     name = skill_name(args.skill)
     project = build_project(workspace, args.skill, name, args.also_skill)
+
+    if not args.no_preflight:
+        preflight(
+            workspace=workspace,
+            skills=[(args.skill, name), *((s, skill_name(s)) for s in args.also_skill)],
+            model=args.model,
+        )
     cases = json.loads(args.eval_set.read_text(encoding="utf-8"))
 
     log(f"skill {name} | {len(cases)} queries x {args.runs_per_query} runs | model {args.model}")

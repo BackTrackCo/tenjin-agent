@@ -12,8 +12,10 @@ evals/
   harness/
     run_trigger_eval.py # keyless trigger runner (stdlib only)
     run_output_eval.py  # keyless output runner, with-skill vs without, plus grading
+    preflight.py        # freshness checks both runners call before spending
   tenjin-search/
     trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
+    trigger-eval-defer.json # 4 no-CLI queries: does this skill stand down for the hosted one
     evals.json          # 6 output cases with expectations
     fixtures/           # bodies seeded into a case's workspace via its `files`
   tenjin-publish/
@@ -82,6 +84,32 @@ such in its `expected_output`: the hosted skill states no untrusted-data rule, w
 than assuming, but its with-skill delta reads as model default rather than as skill effect.
 Read that case's two configurations against each other, not against the aggregate.
 
+## `tenjin-search` defers too, and its own set cannot see it
+
+`tenjin-search` requires the CLI and says to use the hosted skill without one, which is the
+mirror image of the gate above and unmeasurable for the same reason: with nothing installed to
+defer to, standing down means stalling. `trigger-eval-defer.json` is that gate, four queries
+that all state no CLI is available, all `should_trigger: false`. Run it with both other skills
+installed, which is the configuration the over-fire was first seen in:
+
+```bash
+python3 evals/harness/run_trigger_eval.py \
+  --eval-set evals/tenjin-search/trigger-eval-defer.json \
+  --skill skills/tenjin-search \
+  --also-skill skills/tenjin skills/tenjin-publish \
+  --workspace "$(mktemp -d)"
+```
+
+The install set is part of the measurement rather than a detail. The same four queries scored
+4/4 with only `skills/tenjin` alongside and 3/4 with `tenjin-publish` added as well: more
+CLI-skill vocabulary in the same context makes this skill more likely to fire on a machine that
+states it has no CLI. Read a number from this file only against the install set it was taken
+under, and prefer the three-skill one.
+
+Being all-negative, it is a probe rather than a benchmark: a description that fires at nothing
+would ace it. It is only meaningful read next to `trigger-eval.json`'s ten positives, which is
+what `src/evals-fixtures.test.ts` enforces by requiring the pair.
+
 ## Running them
 
 Two runners read these files. `evals/harness/` is the default: stdlib Python, no API key, no
@@ -107,6 +135,16 @@ Both build a throwaway project holding exactly the skill under test and run each
 installed under `~/.claude/skills` loads alongside the one in the workspace, and the run
 measures whichever the model happened to see. A stale installed copy is the normal case on a
 machine that also uses these skills for real, so the flag is load-bearing rather than tidiness.
+
+Both runners preflight before they spend, and a failed check stops the run rather than warning
+into a log (`harness/preflight.py`). It refuses when the vendored `skills/tenjin/SKILL.md`
+differs from the live https://tenjin.blog/skills.md it is a copy of, which is the drift
+`skill-drift.yml` watches a commit later; when `origin/main` holds commits touching `skills/`
+that this worktree does not; and when a probe turn's init event names any skill twice, which is
+what a stale `~/.claude/skills` copy loading alongside the workspace one looks like. Uncommitted
+edits under `skills/` pass on purpose, since editing a description and re-running is the tuning
+loop. `--no-preflight` skips all three for an offline run, at the cost of having to say so when
+reporting the numbers.
 
 The trigger runner reads one bit per run off the `stream-json` event stream: a skill invocation
 is an ordinary `tool_use` block with `name: "Skill"` and `input.skill` naming it. It hands the

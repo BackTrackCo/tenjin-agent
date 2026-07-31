@@ -60,6 +60,13 @@ const SOURCES = walkFixtures();
 const OUTPUT_FILES = SOURCES.filter((path) => path.endsWith('/evals.json'));
 const TRIGGER_FILES = SOURCES.filter((path) => path.endsWith('/trigger-eval.json'));
 
+// The deferral probe is a different instrument from the balanced set above, so
+// the balance rule does not apply to it: every query states that no CLI is
+// available, and a pass is the skill standing down rather than firing. What has
+// to hold instead is that it stays all-negative and keeps a balanced set beside
+// it, because on its own a description that never fires at all would ace it.
+const DEFER_FILES = SOURCES.filter((path) => path.endsWith('/trigger-eval-defer.json'));
+
 // Verbs the CLI has retired, and what replaced them. The invocation check below
 // only sees backtick-quoted commands, so on its own it reddens the build for
 // `tenjin lookup` while leaving "the lookup command includes --json" standing.
@@ -138,6 +145,30 @@ describe('eval fixtures', () => {
     expect(positives.length).toBe(cases.length - positives.length);
     expect(new Set(cases.map((c) => c.query)).size).toBe(cases.length);
     for (const c of cases) expect(c.rationale.length, c.query).toBeGreaterThan(0);
+  });
+
+  it('the deferral probe is all-negative and sits beside a balanced trigger set', () => {
+    // Named rather than merely walked: the probe guards a gate the balanced set
+    // cannot reach (this skill standing down when the CLI it needs is absent),
+    // so deleting the file has to redden the build rather than pass vacuously.
+    expect(DEFER_FILES).toContain('tenjin-search/trigger-eval-defer.json');
+
+    for (const path of DEFER_FILES) {
+      const cases = JSON.parse(read(path)) as TriggerCase[];
+      expect(cases.length, `${path} is empty`).toBeGreaterThan(0);
+      expect(
+        cases.filter((c) => c.should_trigger).map((c) => c.query),
+        `${path} holds a positive; a deferral probe grades only standing down`,
+      ).toEqual([]);
+      expect(new Set(cases.map((c) => c.query)).size).toBe(cases.length);
+      for (const c of cases) expect(c.rationale.length, c.query).toBeGreaterThan(0);
+
+      const balanced = path.replace('trigger-eval-defer.json', 'trigger-eval.json');
+      expect(
+        TRIGGER_FILES,
+        `${path} has no ${balanced} beside it, so nothing measures the firing half`,
+      ).toContain(balanced);
+    }
   });
 
   // The drift guard. A fixture may only name a command the CLI actually has.

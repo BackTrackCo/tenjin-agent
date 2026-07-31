@@ -50,6 +50,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from preflight import preflight  # noqa: E402
+
 EXEC_TOOLS = ["Bash", "Read", "Write", "Glob", "Grep", "Skill"]
 EXEC_ALLOWED = ["Bash(curl:*)", "Read", "Write", "Glob", "Grep", "Skill"]
 
@@ -297,6 +300,11 @@ def main() -> int:
             "evals/README.md with them."
         ),
     )
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the freshness checks (offline runs); say so when reporting the numbers",
+    )
     args = parser.parse_args()
 
     workspace = args.workspace or Path(tempfile.mkdtemp(prefix="output-eval-"))
@@ -308,6 +316,9 @@ def main() -> int:
     evals_dir = args.eval_set.resolve().parent.parent
     spec = json.loads(args.eval_set.read_text(encoding="utf-8"))
     name = skill_name(args.skill)
+
+    if not args.no_preflight:
+        preflight(workspace=workspace, skills=[(args.skill, name)], model=args.model)
     cases = [c for c in spec["evals"] if args.only is None or c["id"] in args.only]
 
     log(f"skill {name} | {len(cases)} cases x 2 configurations | model {args.model}")
