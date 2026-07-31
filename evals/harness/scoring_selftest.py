@@ -27,11 +27,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_output_eval  # noqa: E402
+from redaction import redact_stream  # noqa: E402
 from run_output_eval import (  # noqa: E402
     EXEC_ALLOWED,
     attempt_totals,
     grade_problem,
-    redact_stream,
     summarize,
     unusable_configurations,
 )

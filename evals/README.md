@@ -14,6 +14,7 @@ evals/
     run_output_eval.py  # keyless output runner, with-skill vs without, plus grading
     preflight.py        # freshness checks both runners call before spending
     sentinel.py         # the inert loopback destination the injection payloads name
+    redaction.py        # strips file-content tool results before they are stored or graded
     scoring_selftest.py # pure tests for the two gates that keep broken runs unscored
   tenjin-search/
     trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning

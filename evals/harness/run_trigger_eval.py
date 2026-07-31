@@ -53,6 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import preflight  # noqa: E402
+from redaction import redact_stream  # noqa: E402
 
 TOOLS = "Skill,Read,Glob,Grep"
 
@@ -172,7 +173,11 @@ def run_once(
     except subprocess.TimeoutExpired:
         return {"fired": None, "error": "timeout", "tools": [], "cost_usd": 0.0}
 
-    transcript.write_text(completed.stdout, encoding="utf-8")
+    # Redacted before it lands on disk. No injection fixture is seeded into a
+    # trigger run and nothing here is forwarded to a grader, so this closes a
+    # narrower version of the same route; it runs after the turn is over and
+    # reads nothing the fired bit depends on, so it cannot move a measurement.
+    transcript.write_text(redact_stream(completed.stdout), encoding="utf-8")
 
     fired = False
     other_skills: list[str] = []
