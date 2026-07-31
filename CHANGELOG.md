@@ -1,5 +1,141 @@
 # tenjin-cli
 
+## 0.1.0-alpha.7
+
+### Minor Changes
+
+- c829d36: Restore owned-library recovery to `tenjin read`, on a session key that cannot pay.
+
+  New verb: `tenjin session start --scope read` opens the wallet ONCE and mints a
+  ≤24h P-256 session key (cached 0600, address-bound, origin-bound, server-clamped). It is
+  idempotent — a live session wide enough for the scope is reused and the wallet is
+  never opened again, so a cached `read+write` session left by `publish`/`edit`
+  serves a read run rather than being downgraded. v1 mints `read` and nothing else:
+  any other `--scope` is refused as a usage error, which is what makes the
+  allowlist rule for it non-escalatable. Output is address, scope, and expiry only,
+  never the delegation or the key.
+
+  `tenjin read` now uses it. On a cold 402 for a piece that is not in the local
+  library, if a read-scoped session key is already cached, `read` presents it on
+  exactly ONE bodyless signed GET (RFC 9421, no `Content-Digest`, so nothing claims
+  to cover bytes the request never sends). A 200 means this wallet already owns the
+  piece and it is delivered free. There is no second attempt and no recovery: an
+  unusable file, a second 402, or a rejected delegation all fall to the ordinary
+  exit-3 refusal. Its `details.entitlementCheck` reports what the server actually
+  said: `'session'` (a live delegation was presented and the server answered "you do
+  not own this" — the only state where buying is the answer), `'not_performed'` (no
+  usable key), `'session_rejected'` (the delegation was declined), or
+  `'session_inconclusive'` (the check never completed). The last three keep
+  `sessionCommand` in the payload so an agent re-mints instead of spending on a
+  piece it may already own. `read` still cannot pay and cannot open a keystore.
+
+  That last claim is structural, not a promise. `lib/session-key` was split: the
+  present-only half (`lib/session-present` — load a file, sign one request) is what
+  `read` imports, while minting a delegation stays in `lib/session-key`, which
+  `read`'s test-pinned import graph still bans along with `lib/wallet` and
+  `lib/x402-pay`. So the key `read` can hold is P-256 — the wrong curve for the
+  EIP-712/secp256k1 signature an EIP-3009 transfer authorization needs.
+
+  The session file is a wallet-derived credential and is treated as one. It records
+  the ORIGIN it was minted against and is never presented anywhere else, which is
+  what stops `tenjin read <url> --base-url <host>` — one command line the always-safe
+  `Bash(tenjin read:*)` rule already clears — from handing the delegation to a host
+  an agent picked; the same binding makes a stale file survive a base-URL switch by
+  failing closed instead of presenting something unverifiable. Its documented bounds
+  are that origin, the 24h expiry, and the 0600 mode. The `read` scope is NOT
+  offered as one of them anywhere in the shipped copy: scope is enforced only on the
+  request shape that carries a session signature alongside the delegation header, so
+  it does not bound what a copied file is worth.
+
+  Permission tiers: `Bash(tenjin session start:*)` joins `Bash(tenjin buy:*)` as an
+  explicit opt-in (it spends nothing and cannot, but it does open the keystore). The
+  `read` entry and `FLAG_CAVEAT` now disclose that `read` transmits a wallet-derived
+  credential off-machine once a session exists, rather than scoping signed traffic to
+  the paying verb.
+  The always-safe tier's definition is sharpened everywhere it is stated — skill,
+  README, `doctor`/`install` block, module docs — from "no wallet, no signing, no
+  payment" to **cannot spend and cannot open the keystore**, because `read` now
+  signs and the old wording had become false. `tenjin doctor` gains a `session`
+  check reporting whether a key exists, for which origin, at what scope, and when it
+  expires. Absent is `ok`, not a warning; expired, origin-drifted, corrupt, loosened
+  past 0600, or unreadable all warn and none of them fail the run — including the
+  unreadable case, which previously threw out of the check list and took down the
+  whole diagnostic.
+
+- 323e42c: Add `tenjin read <ref>`, a free-only delivery verb.
+
+  `buy` used to be the only verb that delivered a body, so a zero-cost read — a free
+  piece, or a re-read of something already in your library — was indistinguishable
+  from a purchase, both to a human reading a transcript and to a harness permission
+  classifier that matches on the command prefix.
+
+  `tenjin read` is the half of `buy` that cannot spend. It tries two things in
+  order — the local library, then an unauthenticated fetch — and refuses as soon as
+  payment would be required:
+
+  - delivers free pieces and anything already in the local library, with the same
+    output shape and the same `--print-body` / `--sections` flags as `buy`;
+  - hard-refuses with exit 3 (`REFUSED`) on a paid piece that is not already on
+    disk, naming the price and the `tenjin buy` command to run instead. That
+    includes a piece you already own but have not cached on this machine: `buy`'s
+    own entitlement re-check delivers it without charging;
+  - signs nothing at all. It reaches no wallet, signing, or payment module —
+    `lib/wallet`, `lib/session-key`, and `lib/x402-pay` are all absent from its
+    transitive import graph, pinned by an import-graph test plus a source-usage
+    test — and never consults the spend policy. `read` cannot open a keystore, so
+    its inability to spend is structural rather than a matter of control flow.
+
+  The delivery and rendering internals are now shared between the two verbs in
+  `lib/delivery.ts`; `buy`'s paying path is unchanged.
+
+  Hardening that applies to `buy` and `inspect` too: a request on the read route
+  never follows a redirect, because a 3xx would re-send a wallet-signed header to
+  whatever host `Location` names, and because the response becomes a durable local
+  entitlement record. So that the strictness costs nothing at the keyboard, a read
+  URL is canonicalized when it is resolved — a trailing slash, which the route
+  itself redirects away, is removed before the request goes out.
+
+  `tenjin inspect` copy follows the split: free and already-owned pieces point at
+  `tenjin read`, paid unowned pieces keep pointing at `tenjin buy`, and both now
+  emit a machine-readable `nextCommand` field.
+
+  `Bash(tenjin read:*)` joins the always-safe allowlist that `tenjin doctor` and
+  `tenjin install` print, on that list's existing terms — free verbs: no wallet, no
+  signing, no payment. Like `search` and `outcome`, it is disclosed as not
+  read-only: those two POST to the marketplace, and `read` saves a delivered free
+  piece to your local library.
+
+### Patch Changes
+
+- aa39517: Four wording fixes to the shipped skills, from the first eval baseline. The
+  search skill now says what to do when the lookup gates fail (do the task itself)
+  and to say what the available work does cover when declining a near match. The
+  publish skill sharpens the terse `questionsAnswered` register to a verbatim error
+  string or symptom line rather than a bare topic label, and makes the
+  no-rephrasings rule imperative: every entry must ask something no other entry
+  asks.
+- f869f85: Resync the vendored zero-install skill from live skills.md: `schemaVersion` is
+  now optional on the agent search request (omitting it means latest).
+- 9cc6c4e: Move the spend ledger to its own file, and tell you when an update is out.
+
+  The client-side rolling spend ledger was written to `~/.tenjin/session.json` —
+  the same file the P-256 session key is cached in. Two incompatible schemas in one
+  path, and each reader treats a parse failure as "no file", so the two silently
+  destroyed each other: minting a session key zeroed the 24h spending window, and
+  the next purchase deleted the session key it had just been asked to keep. The
+  ledger now lives in `~/.tenjin/spend.json` and the two never meet.
+
+  An unreadable ledger still fails open — a local cache must not block a spend —
+  but it no longer does so in silence. When the file exists and cannot be parsed,
+  one dim stderr line at a human terminal names the path, the reason, and the
+  consequence: the spending window restarted.
+
+  New: at most once every 24 hours, at a human terminal, the CLI checks npm for a
+  newer `tenjin-cli` and prints one dim line saying so. It is skipped entirely off
+  a TTY, under `--json`, and when `CI` is set, so no agent or build ever sees it;
+  it runs after the command's own output, times out at 1.5s, and swallows every
+  failure, so it cannot change what a command prints or what it exits with.
+
 ## 0.1.0-alpha.6
 
 ### Minor Changes
