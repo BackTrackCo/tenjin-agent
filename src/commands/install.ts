@@ -410,7 +410,11 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `! ${w}`));
   }
   if (s.permissions.warning !== undefined) {
-    lines.push(paint(io, 'yellow', `! ${s.permissions.warning}`));
+    // Sanitized for the same reason doctorNotices sanitizes `detail`/`fix`: this
+    // string embeds a V8 JSON parse error, and V8 quotes the offending input, so
+    // ~20 bytes of whatever is in settings.json (escapes included) reach the
+    // terminal at the moment we tell the operator we left their file alone.
+    lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.permissions.warning)}`));
   }
   lines.push(...doctorNotices(io, s.doctor));
   return lines;
@@ -460,14 +464,19 @@ function publishingLine(io: Io, mode: PublishMode): string {
  * One line for the harness allowlist: what landed, or what to run to get it. A
  * skip is never silent, because the operator's next auto-mode session is where
  * they would otherwise find out (#33).
+ *
+ * "free", never "read-only": see PERMISSIONS_QUESTION for why this tier cannot
+ * honestly be called the latter. The line that reports a WRITE carries the
+ * `doctor` pointer too, since that is the other moment an operator learns rules
+ * landed without seeing them or the flag caveat that qualifies them.
  */
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
   if (p.added.length > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} read-only tenjin commands added to ${p.path}`;
+    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} free tenjin commands added to ${p.path}. Full caveats: tenjin doctor`;
   }
   if (p.skipped === undefined) {
-    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} read-only tenjin commands were already allowed in ${p.path}`;
+    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}`;
   }
   if (p.skipped === 'harness-not-claude') {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). Run \`tenjin doctor\` for the lines your harness needs.`;
@@ -479,7 +488,7 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
     return `${paint(io, 'dim', '-')} ${label} unchanged. Add them anytime: tenjin install --allow-free-verbs`;
   }
   if (p.skipped === 'not-requested') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} read-only tenjin commands with: tenjin install --allow-free-verbs`;
+    return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
   }
   return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched. Fix it, then: tenjin install --allow-free-verbs`;
 }
@@ -671,11 +680,26 @@ function parseModeFlag(value: string): PublishMode {
 
 // --- Harness permissions (decision 2) ---------------------------------------------
 
-/** Decision 2's literal copy. Kept to one question and one consequence. */
+/**
+ * Decision 2's literal copy: one question, and a consequence that lib/permissions.ts
+ * would agree with. NOT "read-only" and NOT "never touches your wallet" — that
+ * module refuses both claims in as many words (`search` and `outcome` POST
+ * off-machine, `read` saves to the library and can present a cached
+ * wallet-derived delegation, and two of the nine rules are `wallet show` /
+ * `wallet balance`). What is actually true of the whole tier is that it cannot
+ * spend and cannot open the keystore, so that is what the question says.
+ *
+ * The pointer at `tenjin doctor` is how FLAG_CAVEAT's "printed with the rules
+ * everywhere they are printed" contract is met at the consent moment. The
+ * walkthrough no longer prints the rules or the flag caveat, so the yes/no that
+ * replaced them names the one command that prints both, in full, unchanged.
+ */
 export const PERMISSIONS_QUESTION = [
   'Let your agent search tenjin without permission popups?',
-  `Adds ${FREE_VERB_RULES.length} read-only commands to ~/.claude/settings.json.`,
-  'None can spend money or touch your wallet.',
+  `Adds ${FREE_VERB_RULES.length} free commands to ~/.claude/settings.json.`,
+  'None can spend USDC or open your wallet keystore;',
+  'three send or store data (search, outcome, read).',
+  'Full caveats: tenjin doctor.',
 ].join(' ');
 
 /** Decision 3's literal copy. */

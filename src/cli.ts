@@ -136,7 +136,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--no-claude-md', 'skip the CLAUDE.md nudge')
     .option(
       '--allow-free-verbs',
-      "add the read-only Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking",
+      "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",
     )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {

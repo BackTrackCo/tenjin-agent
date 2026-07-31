@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runInstall, PUBLISH_MODE_CHOICES } from './install';
+import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
@@ -876,7 +876,6 @@ describe('runInstall: interactive walkthrough', () => {
     for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).not.toContain(e.rule);
     expect(text).not.toContain('Bash(tenjin buy:*)');
     expect(text).not.toContain('Bash(tenjin session start:*)');
-    expect(text).not.toContain('--base-url');
     expect(text).not.toContain('mcp__tenjin__tenjin_publish');
     expect(text).not.toContain('maxAutoSpend');
     // And no rule for a money-moving or state-changing verb, in any form.
@@ -884,6 +883,50 @@ describe('runInstall: interactive walkthrough', () => {
       const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
       expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
     }
+  });
+
+  // The wording pin the old allowlist block carried, kept alive now that the
+  // block itself is gone. lib/permissions.ts refuses to call this tier
+  // read-only, and the consent surface must not claim what the module it draws
+  // from will not: `search` and `outcome` POST off-machine, `read` writes to the
+  // library and can present a wallet-derived delegation, and two of the nine
+  // rules are `wallet show` / `wallet balance`.
+  it('never calls the free tier read-only, and never claims it cannot touch your wallet', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const surfaces = [human(res), PERMISSIONS_QUESTION];
+    for (const text of surfaces) {
+      expect(text).not.toMatch(/read-only/i);
+      expect(text).not.toMatch(/touch your wallet/i);
+      expect(text).not.toMatch(/free, read-only verbs/i);
+    }
+  });
+
+  it('the consent question says what is true of the tier, and points at doctor', async () => {
+    // Cannot spend and cannot open the keystore is the honest whole-tier claim;
+    // the three that send or store data are named rather than papered over.
+    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or open your wallet keystore');
+    expect(PERMISSIONS_QUESTION).toContain('three send or store data (search, outcome, read)');
+    // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
+    // walkthrough prints neither, so the consent moment names the command that
+    // prints both in full.
+    expect(PERMISSIONS_QUESTION).toContain('tenjin doctor');
+  });
+
+  it('the line reporting a write also points at doctor for the caveats', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const line = human(res)
+      .split('\n')
+      .find((l) => l.includes('Permissions:'));
+    expect(line).toContain(`${FREE_VERB_RULES.length} free tenjin commands added to`);
+    expect(line).toContain('Full caveats: tenjin doctor');
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
@@ -1060,10 +1103,11 @@ describe('runInstall: permissions decision', () => {
       alwaysSafe: { rule: string }[];
       wired: {
         harness: string;
-        path: string;
+        path?: string;
         added: string[];
         alreadyPresent: string[];
         skipped?: string;
+        warning?: string;
       };
     };
   };
@@ -1089,7 +1133,7 @@ describe('runInstall: permissions decision', () => {
     expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     expect(human(res)).toContain(
-      `${FREE_VERB_RULES.length} read-only tenjin commands added to ${claudeSettingsPath(home)}`,
+      `${FREE_VERB_RULES.length} free tenjin commands added to ${claudeSettingsPath(home)}`,
     );
   });
 
@@ -1172,6 +1216,35 @@ describe('runInstall: permissions decision', () => {
     expect(wiredOf(res.data)).toMatchObject({ harness: 'codex', skipped: 'harness-not-claude' });
     expect(await allowList()).toBeUndefined();
     expect(human(res)).toContain('Claude Code only');
+  });
+
+  it('sanitizes the warning, which quotes bytes out of the file', async () => {
+    // V8's JSON parse errors quote the offending input, so ~20 attacker-chosen
+    // bytes of settings.json reach the terminal at the moment we tell the
+    // operator we left their file alone. Escapes there could overwrite the very
+    // line reporting the skip.
+    await mkdir(join(home, '.claude'), { recursive: true });
+    // The escapes lead, so V8 fails on the FIRST token and takes the
+    // "Unexpected token X, "<excerpt>" is not valid JSON" branch, which is the
+    // one that echoes the file. A payload that fails later gets a positional
+    // message with no excerpt and would test nothing.
+    await writeFile(claudeSettingsPath(home), '\x1b[2K\x1b[1G\x1b[32m OK: safe\x1b[0m{"a":1}');
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const wired = wiredOf(res.data);
+    expect(wired.skipped).toBe('unparsable');
+    // The escapes really do reach the warning: V8 quotes the input it choked on.
+    // eslint-disable-next-line no-control-regex
+    expect(wired.warning).toMatch(/\x1b/);
+    // They survive into the machine envelope, where bytes are data, and are
+    // stripped from the line a human reads.
+    const line = (res.humanLines ?? []).find((l) => l.includes('not valid JSON'));
+    expect(line).toBeDefined();
+    // eslint-disable-next-line no-control-regex
+    expect(line).not.toMatch(/\x1b/);
   });
 
   it('warns and writes nothing when settings.json is unparsable', async () => {

@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  readFile,
+  symlink,
+  writeFile,
+  stat,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -242,11 +253,65 @@ describe('wireFreeVerbAllowlist: refuses to touch what it cannot understand', ()
     expect((await readSettings()).permissions).toEqual({ allow: 'everything' });
   });
 
-  it('never creates the file on a skip path', async () => {
+  it('leaves an unparsable file byte-identical', async () => {
     await seedSettings('nonsense');
     await wireFreeVerbAllowlist(home);
-    expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(true);
     expect(await readFile(settingsPath(), 'utf8')).toBe('nonsense');
+  });
+
+  it('skips an unreadable file rather than replacing it', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return; // mode 0 is not a barrier
+    await seedSettings({ permissions: { allow: [] } });
+    await chmod(settingsPath(), 0o000);
+    try {
+      const result = await wireFreeVerbAllowlist(home);
+      expect(result.skipped).toBe('unreadable');
+      expect(result.added).toEqual([]);
+      expect(result.warning).toContain('could not be read');
+    } finally {
+      await chmod(settingsPath(), 0o600);
+    }
+  });
+});
+
+describe('wireFreeVerbAllowlist: a symlinked settings file', () => {
+  it('edits the link target and leaves the link in place', async () => {
+    // The dotfiles shape: ~/.claude/settings.json is a symlink into a repo the
+    // operator maintains. writeFileAtomic commits with a rename, which would
+    // replace the link with a regular file and strand the dotfiles copy.
+    const dotfiles = await mkdtemp(join(tmpdir(), 'tenjin-dotfiles-'));
+    const target = join(dotfiles, 'claude-settings.json');
+    try {
+      await writeFile(target, JSON.stringify({ model: 'opus' }, null, 2));
+      await mkdir(join(home, '.claude'), { recursive: true });
+      await symlink(target, settingsPath());
+
+      const result = await wireFreeVerbAllowlist(home);
+      expect(result.added).toEqual([...FREE_VERB_RULES]);
+      // Reported at the file that was actually written.
+      expect(result.path).toBe(await realpath(target));
+
+      // The link survives, and the operator's own file is what changed.
+      expect((await lstat(settingsPath())).isSymbolicLink()).toBe(true);
+      const written = JSON.parse(await readFile(target, 'utf8')) as {
+        model: string;
+        permissions: { allow: string[] };
+      };
+      expect(written.model).toBe('opus');
+      expect(written.permissions.allow).toEqual([...FREE_VERB_RULES]);
+    } finally {
+      await rm(dotfiles, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a broken symlink instead of writing a regular file over it', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await symlink(join(home, 'nowhere', 'settings.json'), settingsPath());
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.skipped).toBe('unresolvable');
+    expect(result.added).toEqual([]);
+    expect(result.path).toBe(settingsPath());
+    expect((await lstat(settingsPath())).isSymbolicLink()).toBe(true);
   });
 });
 
@@ -261,5 +326,16 @@ describe('permissionsSkipped', () => {
       skipped: 'declined',
     });
     expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  it('names no path for a harness that has no such file', () => {
+    // A Codex-only install has no ~/.claude/settings.json in play, so the
+    // envelope must not point its reader at one.
+    for (const harness of ['codex', 'shared']) {
+      const result = permissionsSkipped(harness, home, 'harness-not-claude');
+      expect(result.harness).toBe(harness);
+      expect(result.path).toBeUndefined();
+      expect(result).not.toHaveProperty('path');
+    }
   });
 });
