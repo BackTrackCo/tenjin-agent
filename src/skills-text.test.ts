@@ -317,7 +317,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
   });
 
   // A path-substring check cannot see a renamed heading, so every relative
-  // markdown link is resolved for real: the target file must exist and a
+  // .md link is resolved for real: the target file must exist and a
   // #fragment must match a heading's GitHub slug in that file.
   it('every relative markdown .md link resolves, fragment included', () => {
     const slug = (h: string): string =>

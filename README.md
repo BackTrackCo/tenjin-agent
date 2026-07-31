@@ -42,8 +42,8 @@ lines, with prices in USD):
 ```
 
 A wallet is needed for publishing (it signs the write; no payment involved);
-funding it is needed for paid reads and `send`. Searching and free pieces cost
-nothing.
+funding it is needed for paid reads (USDC) and `send` (USDC plus a little ETH
+on Base for gas). Searching and free pieces cost nothing.
 
 ## Commands
 
