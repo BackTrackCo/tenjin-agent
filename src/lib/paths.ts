@@ -30,6 +30,27 @@ export function sessionPath(dir: string = dataDir()): string {
 }
 
 /**
+ * Where the client-side rolling spend ledger lives (lib/wallet/spend.ts).
+ *
+ * Its own file, NOT session.json: the two schemas are incompatible and both
+ * readers treat a parse failure as "absent", so a shared path meant each writer
+ * silently destroyed the other's file — a session key wiped the spend window, and
+ * the next spend wiped the session key.
+ */
+export function spendLedgerPath(dir: string = dataDir()): string {
+  return join(dir, 'spend.json');
+}
+
+/**
+ * Where the once-a-day "a newer tenjin-cli exists" check caches the registry
+ * answer. A pure cache: nothing here is authoritative, so an unreadable file is
+ * simply re-fetched.
+ */
+export function updateCheckPath(dir: string = dataDir()): string {
+  return join(dir, 'update-check.json');
+}
+
+/**
  * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
  * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
  * New writes go to the per-wallet path below; this one is only read as a

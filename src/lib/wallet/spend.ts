@@ -1,9 +1,10 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic } from '../atomic-json';
+import { hasCode } from '../errno';
 import { withFileLock } from '../lock';
+import { spendLedgerPath } from '../paths';
 import {
   evaluateSpendPolicy,
   type PolicyReason,
@@ -95,13 +96,23 @@ export interface LocalSpendAuthorizerDeps {
   windowMs?: number;
   /** Clock seam for deterministic window tests. */
   now?: () => number;
+  /**
+   * Called at most ONCE per authorizer when the ledger file exists but cannot be
+   * read back. The reset below is fail-open by design, and a silent one hands back
+   * budget the operator believes is already spent — so the caller gets to say so.
+   */
+  onCorrupt?: (reason: string) => void;
 }
 
 export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): SpendAuthorizer {
   const windowMs = deps.windowMs ?? DEFAULT_WINDOW_MS;
   const now = deps.now ?? Date.now;
-  const path = join(deps.dir, 'session.json');
+  const path = spendLedgerPath(deps.dir);
   const lockPath = `${path}.lock`;
+  // One notice per authorizer: authorize and commit each read the file, and the
+  // reset is not persisted until something is written, so an unlatched warning
+  // would fire twice for the same broken file within one command.
+  let warnedCorrupt = false;
 
   // Roll the window and drop expired reservations; returns the live ledger.
   const freshen = (ledger: Ledger | null, nowMs: number): Ledger => {
@@ -129,7 +140,12 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     await mkdir(deps.dir, { recursive: true, mode: 0o700 });
     return withFileLock(lockPath, async () => {
       const nowMs = now();
-      const ledger = freshen(await readLedger(path), nowMs);
+      const read = await readLedger(path);
+      if (read.corrupt !== undefined && !warnedCorrupt) {
+        warnedCorrupt = true;
+        deps.onCorrupt?.(read.corrupt);
+      }
+      const ledger = freshen(read.ledger, nowMs);
       return fn(ledger, nowMs);
     });
   }
@@ -198,17 +214,43 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
   };
 }
 
-async function readLedger(path: string): Promise<Ledger | null> {
+/**
+ * ABSENT and CORRUPT both reset the window, but they are not the same fact: the
+ * first is a first run, the second is spend that existed and is now gone. Only
+ * the second is worth telling anyone about, so the two stay distinguishable here
+ * rather than collapsing into one null.
+ */
+interface LedgerRead {
+  ledger: Ledger | null;
+  /** Set only when the file EXISTS and could not be turned back into a ledger. */
+  corrupt?: string;
+}
+
+async function readLedger(path: string): Promise<LedgerRead> {
   let raw: string;
   try {
     raw = await readFile(path, 'utf8');
-  } catch {
-    return null;
+  } catch (err) {
+    // A missing file is the ordinary first run. Any other read failure means a
+    // file is there and unusable, which is the corrupt case by another name.
+    if (hasCode(err, 'ENOENT')) return { ledger: null };
+    return { ledger: null, corrupt: err instanceof Error ? err.message : String(err) };
   }
+  let json: unknown;
   try {
-    const parsed = LedgerSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : null;
+    json = JSON.parse(raw);
   } catch {
-    return null;
+    return { ledger: null, corrupt: 'not valid JSON' };
   }
+  const parsed = LedgerSchema.safeParse(json);
+  if (parsed.success) return { ledger: parsed.data };
+  const issue = parsed.error.issues[0];
+  const field = issue?.path.join('.');
+  const message = issue?.message ?? 'schema mismatch';
+  // Field-qualified: "expected number, received undefined" names nothing on its
+  // own. zod never echoes the received VALUE, so no spend figure rides along.
+  return {
+    ledger: null,
+    corrupt: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,
+  };
 }

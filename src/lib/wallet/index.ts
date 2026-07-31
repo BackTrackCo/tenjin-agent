@@ -1,4 +1,6 @@
 import { CliError } from '../errors';
+import { emitNotice } from '../output';
+import { spendLedgerPath } from '../paths';
 import { createLocalProvider } from './local';
 import { createLocalSpendAuthorizer, type SpendAuthorizer } from './spend';
 import type { SpendPolicy } from '../policy';
@@ -69,6 +71,11 @@ export interface ResolveSpendAuthorizerOptions {
  * (client-only) authorizer bound to the context's data dir and the resolved
  * policy; a future hosted provider returns its own provider-enforced authorizer
  * here, and every spend path already routes through it.
+ *
+ * The corrupt-ledger notice is attached here because this is the only place the
+ * local authorizer meets a context: the authorizer fails open on an unreadable
+ * ledger (a spend must not be blocked by a local cache), and this line is what
+ * keeps that reset from being invisible to the human whose budget just reset.
  */
 export function resolveSpendAuthorizer(
   ctx: CommandContext,
@@ -76,7 +83,16 @@ export function resolveSpendAuthorizer(
   opts: ResolveSpendAuthorizerOptions = {},
 ): SpendAuthorizer {
   if (opts.authorizer !== undefined) return opts.authorizer;
-  return createLocalSpendAuthorizer({ dir: ctx.dataDir, policy });
+  return createLocalSpendAuthorizer({
+    dir: ctx.dataDir,
+    policy,
+    onCorrupt: (reason) =>
+      emitNotice(
+        ctx.io,
+        `spend ledger at ${spendLedgerPath(ctx.dataDir)} was unreadable (${reason}); spending window restarted`,
+        { json: ctx.flags.json },
+      ),
+  });
 }
 
 /**
