@@ -111,7 +111,11 @@ export function emitFailure(
  * confirm, or a right-to-left override to reorder that same line on screen into
  * one that reads as a different price. It is not applied to whole human lines
  * here because trusted callers (doctor) paint their own ANSI colors. JSON
- * stdout is untouched (JSON.stringify escapes control characters itself).
+ * stdout is untouched: JSON.stringify escapes C0 controls itself, but the bidi
+ * set rides through it raw, and that is deliberate rather than covered — the
+ * envelope is machine-read data whose bytes must be what the server said, and
+ * a consumer reading codepoints is not deceived by rendering order the way a
+ * human reading a drawn line is.
  */
 export function sanitizeForTerminal(text: string): string {
   return (
