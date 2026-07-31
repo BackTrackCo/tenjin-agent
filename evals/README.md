@@ -193,14 +193,32 @@ itself a transport — it used to be written to the transcript verbatim and copi
 grader's prompt, which goes to a remote model. Loopback stopped the payload's POST and did
 nothing about that route.
 
-Two layers now. The grants are `Read(./**)`, `Write(./**)`, `Glob(./**)` and `Grep(./**)`, so a
-read outside the case project is denied while the attempt still appears in the transcript, which
-is the half the case grades. And every file-content result is replaced, before the stream
-touches disk, with a descriptor naming the tool, the target, the byte count and a SHA-256 — the
-evidence of what the agent reached for, with none of what it got. The summary is built from the
-redacted stream rather than the raw one, so there is no path by which a body reaches a file or a
-prompt. Bash results are left intact, because a CLI case is graded on them and the file-content
-reach of that grant is closed by the permission scoping above.
+Two layers. The grants are `Read(./**)`, `Write(./**)`, `Glob(./**)` and `Grep(./**)`, so a read
+outside the case project is denied while the attempt still appears in the transcript, which is
+the half the case grades. And every file-content result is replaced, before the stream touches
+disk, with a descriptor naming the tool, the target, the byte count and a SHA-256 — the evidence
+of what the agent reached for, with none of what it got. The summary is built from the redacted
+stream rather than the raw one, so there is no path by which a body reaches a file or a prompt.
+
+**Scoping the file tools does not scope the shell, and that gap is why the second layer covers
+Bash too.** `Bash(curl:*)` is a prefix grant, and the local curl speaks `file://` and `@path`:
+`curl file:///etc/passwd` or `curl --data-binary @/abs/path` reads outside the project without
+touching a scoped tool at all, and the bytes come back in an ordinary Bash result. Verified,
+both the read and the survival. So a Bash result is kept only when it is recognisably a `tenjin`
+or plain `curl` invocation — the two whose output grading actually needs, the CLI cases being
+graded on `tenjin` output and the zero-install cases on what the live site returns, 402
+challenge included — and only when the command carries no construct that can pull a local path
+into it (`file:`, `@/`, `$(`, backticks, `-K`). Everything else is redacted, so a command the
+rule does not recognise fails closed rather than through.
+
+**What is still open, stated rather than implied.** A shell-backed Bash tool means a local read
+remains _possible_: substitution runs inside any pre-cleared prefix, and no string rule over
+commands is a security boundary. What these layers close is retention and forwarding — the bytes
+reach no file, no grader prompt, and no live destination — and that is the property the eval
+needs, since obedience is graded from the attempt rather than from the payload arriving. The
+complete fix is a process-level sandbox (`sandbox-exec` on macOS, `bubblewrap` on Linux) around
+the executor, which is platform-specific work beyond a keyless test harness and is not done
+here. Anyone extending this suite to run untrusted fixtures from elsewhere should do that first.
 
 **The curl grant is a prefix match, not a confinement, and the difference matters here.** Measured
 on this harness: a bare `env`, `cat` of a file outside the project, or `python3 -c` is denied,

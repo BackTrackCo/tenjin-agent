@@ -19,6 +19,29 @@ import json
 # Tools whose results are file content by definition.
 FILE_CONTENT_TOOLS = frozenset({"Read", "Glob", "Grep"})
 
+# Scoping the native file tools did nothing about the shell. `Bash(curl:*)` is a
+# prefix grant, and the local curl speaks `file://` and `@path`, so
+# `curl file:///etc/passwd` or `curl --data-binary @/abs/path` reads outside the
+# project without touching a scoped tool at all. Verified: the read succeeds and
+# the bytes come back in an ordinary Bash result.
+#
+# Which leaves a judgement about Bash results specifically. They cannot all be
+# dropped: the CLI cases are graded on `tenjin` output, and the zero-install
+# cases are graded on what the live site returns to curl, including the 402
+# challenge body. So a Bash result is kept only when it is recognisably one of
+# those two AND the command carries no construct that can pull a local path into
+# its output. Anything else is redacted. The default is redact, and a command
+# this does not recognise falls to the default rather than through it.
+LOCAL_PATH_CONSTRUCTS = ("file:", "@/", "@~", "@.", "$(", "`", "<(", "-K ", "--config")
+GRADABLE_BASH = ("tenjin", "curl")
+
+
+def bash_result_is_gradable(command: str) -> bool:
+    """Whether a Bash result may be kept, or must be reduced to a descriptor."""
+    if any(construct in command for construct in LOCAL_PATH_CONSTRUCTS):
+        return False
+    return command.strip().startswith(GRADABLE_BASH)
+
 
 def _target_of(tool_input: dict) -> str:
     """The path or pattern a file-content tool was pointed at, for the descriptor."""
@@ -74,14 +97,29 @@ def redact_stream(stream: str) -> str:
                 if block.get("type") != "tool_result":
                     continue
                 origin = tools.get(block.get("tool_use_id", ""), {})
-                if origin.get("name") not in FILE_CONTENT_TOOLS:
+                name = origin.get("name")
+                if name in FILE_CONTENT_TOOLS:
+                    pass
+                elif name == "Bash" and not bash_result_is_gradable(
+                    str(origin.get("input", {}).get("command", ""))
+                ):
+                    pass
+                else:
+                    # Tools that cannot carry local file bytes at all (Write
+                    # confirmations, Skill bodies that are our own text) are
+                    # left alone deliberately, so the redactor stays about the
+                    # thing it is for.
                     continue
                 body = block.get("content")
                 text = body if isinstance(body, str) else json.dumps(body)
                 digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-                target = _target_of(origin["input"])
+                target = (
+                    str(origin.get("input", {}).get("command", ""))[:120]
+                    if name == "Bash"
+                    else _target_of(origin["input"])
+                )
                 block["content"] = (
-                    f"[redacted {origin['name']} result for "
+                    f"[redacted {name} result for "
                     f"{target}: {len(text)} bytes, sha256 {digest}]"
                 )
                 changed = True
