@@ -13,7 +13,7 @@ the three-tier summary.
 
 ## The free tier
 
-In Claude Code these go in the `permissions.allow` array of
+The free tier is nine rules for the `permissions.allow` array of Claude Code's
 `~/.claude/settings.json`. `tenjin install` can write them for you; see
 [Getting the rules onto your machine](#getting-the-rules-onto-your-machine).
 
@@ -52,7 +52,7 @@ needs the wallet.
 `tenjin doctor --json` emits the same per-verb notes under `permissions`, so an
 agent can read them without this page.
 
-### Three of them are not read-only
+### Three free verbs are not read-only
 
 Worth knowing before you pre-clear them: `tenjin search` POSTs your generalized
 question off-machine, and `tenjin outcome` POSTs a report that moves the
@@ -66,6 +66,10 @@ Worth knowing before you paste the `read` line: once a session key exists, `read
 **transmits that wallet-derived credential** to the origin it was minted for. That
 origin binding is what keeps a stray `--base-url` from redirecting it, and it is
 the reason the binding exists rather than a nicety.
+
+`read` itself can never mint one: it imports no wallet, payment, or
+session-minting module, and its import graph is test-pinned to stay clear of all
+three. It cannot unlock a keystore and never consults the spend policy.
 
 ## Getting the rules onto your machine
 
@@ -172,19 +176,59 @@ which origin, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                                             | Why it stays a human decision                                               |
-| ------------------------------------------------ | --------------------------------------------------------------------------- |
-| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy.   |
-| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.              |
-| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only. |
-| `tenjin wallet create`                           | Creates the payment credential.                                             |
-| `tenjin config set`                              | It can widen the agent's own spend policy.                                  |
-| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.    |
-| `tenjin install`                                 | Writes into harness config and skills directories.                          |
-| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.         |
+| Verb                                             | Why it stays a human decision                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
+| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                       |
+| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
+| `tenjin wallet create`                           | Creates the payment credential.                                                      |
+| `tenjin config set`                              | It can widen the agent's own spend policy.                                           |
+| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.             |
+| `tenjin install`                                 | Writes into harness config and skills directories.                                   |
+| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                  |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+### `tenjin send`, the escape hatch
+
+`send` is human-invoked only: it is deliberately absent from the MCP toolset and
+the harness skills, and nothing is signed until the previewed (checksummed)
+recipient, amount, and network fee are confirmed, interactively at a TTY or
+explicitly with `--yes` when headless. It refuses when the active wallet's
+passphrase entry is missing. The `sendMaxAmount` hard per-send cap has no
+default: `tenjin send` refuses until you run `tenjin config set sendMaxAmount
+<usd|0|none>` (`0` disables the verb, `none` opts in to uncapped), and `--yes`
+can never bypass the cap or the unset refusal. For routing FUTURE revenue away
+from the agent wallet entirely, connect the agent to your own Tenjin account
+instead (delegation); `send` exists for funds already sitting on the agent key.
+
+## Wallet passphrase storage
+
+The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE`, then the
+OS credential store, then an interactive prompt. On `wallet create` with no env
+passphrase, a strong random one is generated and saved to the OS store so later
+signing is transparent. Every stored entry is **per wallet**, keyed by the
+wallet's own address, so replacing a wallet never touches the outgoing wallet's
+passphrase. Installs from before per-wallet entries used one shared slot; the
+first signing that proves ownership re-keys that slot under the owning wallet's
+address, and the copy is verified before the old slot is removed.
+
+Where entries land per platform:
+
+- **macOS**: the login keychain, via the OS `security` tool (the same mechanism
+  the GitHub CLI uses): service `tenjin-cli`, account = the wallet address.
+- **Windows**: a DPAPI-encrypted file per wallet (`passphrase.<address>.dpapi`),
+  decryptable only by the same user on the same machine, via built-in
+  PowerShell. The file holds ciphertext, not the passphrase.
+- **Desktop Linux**: the Secret Service keyring, via `secret-tool` when
+  libsecret-tools is installed: service `tenjin-cli`, account = the wallet
+  address.
+- **Headless or CI (any OS)**: no durable OS store, so set
+  `TENJIN_WALLET_PASSPHRASE`.
+
+The passphrase reaches these tools over stdin, never on a command line, and the
+key never leaves the machine.
 
 ## Two gaps, both fail-closed
 
