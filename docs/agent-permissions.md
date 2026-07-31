@@ -72,9 +72,9 @@ the reason the binding exists rather than a nicety.
 `tenjin install` offers to write the nine rules into `~/.claude/settings.json` for
 you, as one of its three setup questions:
 
-> Let your agent search tenjin without permission popups? Adds 9 read-only
-> commands to `~/.claude/settings.json`. None can spend money or touch your
-> wallet.
+> Let your agent search tenjin without permission popups? Adds 9 free commands to
+> `~/.claude/settings.json`. None can spend USDC or open your wallet keystore;
+> three send or store data (search, outcome, read). Full caveats: tenjin doctor.
 
 Answer yes and it merges them in. The write is additive only: it appends the rules
 that are missing and never removes, reorders, or rewrites an existing entry or any

@@ -3,6 +3,7 @@ import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveSkillsSource } from './lib/skills-source';
+import { PERMISSIONS_QUESTION } from './commands/install';
 import {
   ALWAYS_SAFE_ALLOWLIST,
   NEVER_ALLOWLISTED,
@@ -261,6 +262,32 @@ describe('the published docs do not drift from the allowlist constants', () => {
 
   it('the README still points at the doc the detail moved to', () => {
     expect(README).toContain('docs/agent-permissions.md');
+  });
+
+  // Both pages QUOTE the consent question, and a quote is exactly the thing that
+  // goes stale silently. Compared against the shipped constant with markdown
+  // wrapping normalized away, so a reworded prompt fails here rather than
+  // shipping docs that promise something the CLI no longer says.
+  it('both pages quote the consent question the CLI actually asks', () => {
+    const flatten = (s: string): string =>
+      s
+        .replace(/^\s*>\s?/gm, '')
+        .replace(/[`*]/g, '')
+        .replace(/\s+/g, ' ');
+    const question = flatten(PERMISSIONS_QUESTION);
+    expect(flatten(README)).toContain(question);
+    expect(flatten(PERMISSIONS_DOC)).toContain(question);
+  });
+
+  it('no page calls the free tier read-only or says it cannot touch your wallet', () => {
+    // The tier claim lib/permissions.ts refuses. "read-only" survives elsewhere
+    // in both files as an honest description of ONE verb (`config get`,
+    // `candidate list`), so this pins the tier-level phrasings only.
+    for (const text of [README, PERMISSIONS_DOC]) {
+      expect(text).not.toMatch(/\d+ read-only commands/i);
+      expect(text).not.toMatch(/free,? read-only verbs/i);
+      expect(text).not.toMatch(/touch your wallet/i);
+    }
   });
 });
 

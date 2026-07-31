@@ -207,9 +207,10 @@ decision:
    its own; your harness still shows each command for approval"), then "Ask me in
    chat first", then "Fully unattended" ("only hard blocks stop it").
 2. **Permissions.** "Let your agent search tenjin without permission popups? Adds
-   9 read-only commands to `~/.claude/settings.json`. None can spend money or
-   touch your wallet." Yes merges the free-verb allowlist into that file. Claude
-   Code only; other harnesses skip it with a note.
+   9 free commands to `~/.claude/settings.json`. None can spend USDC or open your
+   wallet keystore; three send or store data (search, outcome, read). Full
+   caveats: tenjin doctor." Yes merges the free-verb allowlist into that file.
+   Claude Code only; other harnesses skip it with a note.
 3. **Wallet.** "Create a wallet now?", asked only when you do not already have one.
 
 Every question has a flag, so a headless install never waits on one:
