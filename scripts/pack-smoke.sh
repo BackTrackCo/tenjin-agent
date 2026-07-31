@@ -130,4 +130,79 @@ printf '%s' "$BOGUS_OUT" | node -e '
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 
+# 4) The post-update skills self-heal, through the SHIPPED artifact. Unit tests
+# inject a resync seam, so they cannot catch a missing split chunk, a broken
+# dynamic import, packaged-skill resolution failing outside the source tree, or a
+# dropped dispatcher call. This seeds a machine that installed on an older
+# version and asserts the packaged bytes land, without disturbing the triggering
+# command's envelope or exit code.
+SYNC_HOME="$(mktemp -d)"
+SYNC_DATA="$(mktemp -d)"
+trap 'cleanup; rm -rf "$SYNC_HOME" "$SYNC_DATA"' EXIT
+
+WIRED_DIR="$SYNC_HOME/.claude/skills"
+mkdir -p "$WIRED_DIR/tenjin-search"
+printf 'stale copy from an older release\n' > "$WIRED_DIR/tenjin-search/SKILL.md"
+# An old version, and this directory recorded as the one install consented to.
+node -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], JSON.stringify({
+    schemaVersion: 1,
+    cliVersion: "0.0.0-old",
+    dirs: [process.argv[2]],
+  }, null, 2) + "\n");
+' "$SYNC_DATA/skills-sync.json" "$WIRED_DIR"
+
+set +e
+SYNC_OUT="$(HOME="$SYNC_HOME" TENJIN_DATA_DIR="$SYNC_DATA" "$BIN" candidate list --json 2>/dev/null)"
+SYNC_CODE=$?
+set -e
+if [ "$SYNC_CODE" -ne 0 ]; then
+  echo "pack-smoke: FAIL — 'candidate list' exited $SYNC_CODE during self-heal, expected 0" >&2
+  echo "$SYNC_OUT" >&2
+  exit 1
+fi
+printf '%s' "$SYNC_OUT" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    let o;
+    try {
+      o = JSON.parse(s);
+    } catch (e) {
+      console.error("self-heal: stdout is not JSON: " + e.message);
+      process.exit(1);
+    }
+    if (o.schemaVersion === undefined || o.command !== "candidate.list" || o.ok !== true) {
+      console.error("self-heal: unexpected envelope: " + s);
+      process.exit(1);
+    }
+  });
+' || {
+  echo "pack-smoke: FAIL — the self-heal disturbed the triggering command's envelope" >&2
+  exit 1
+}
+
+# The packaged skill is inside the installed package, so compare against it.
+PACKED_SKILL="$CONSUMER_DIR/node_modules/tenjin-cli/skills/tenjin-search/SKILL.md"
+[ -f "$PACKED_SKILL" ] || {
+  echo "pack-smoke: FAIL — installed package ships no tenjin-search skill" >&2
+  exit 1
+}
+if ! cmp -s "$PACKED_SKILL" "$WIRED_DIR/tenjin-search/SKILL.md"; then
+  echo "pack-smoke: FAIL — self-heal did not refresh the wired skill to the packaged copy" >&2
+  diff "$PACKED_SKILL" "$WIRED_DIR/tenjin-search/SKILL.md" | head -20 >&2
+  exit 1
+fi
+# The other shipped skills land too, and the stamp moves to the running version.
+[ -f "$WIRED_DIR/tenjin-publish/SKILL.md" ] || {
+  echo "pack-smoke: FAIL — self-heal left tenjin-publish unwired" >&2
+  exit 1
+}
+STAMPED="$(node -e 'console.log(require(process.argv[1]).cliVersion)' "$SYNC_DATA/skills-sync.json")"
+if [ "$STAMPED" != "$EXPECTED_VERSION" ]; then
+  echo "pack-smoke: FAIL — stamp says '$STAMPED', expected '$EXPECTED_VERSION'" >&2
+  exit 1
+fi
+echo "pack-smoke: skills self-heal -> packaged bytes landed, stamp -> $STAMPED (ok)"
+
 echo "pack-smoke: PASS (tenjin-cli@$EXPECTED_VERSION packed, installed, and exercised)"

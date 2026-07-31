@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
-import { readFile, readdir, rm } from 'node:fs/promises';
+import { readFile, readdir, rename, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { styleText } from 'node:util';
@@ -274,11 +274,17 @@ export async function runInstall(
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
   await assertSkillsLanded(plans, dryRun);
-  // Stamp which CLI version wired these skills, so the post-update self-heal
-  // (lib/skill-sync.ts) knows both THAT install consented to wiring here and
-  // WHEN the wired copies last matched the binary. `--dry-run` stamps nothing.
+  // Stamp which CLI version wired these skills AND which directories it wired,
+  // so the post-update self-heal (lib/skill-sync.ts) knows when the wired copies
+  // last matched the binary and, just as importantly, which paths this operator
+  // consented to. A `--harness claude` machine records only the Claude directory,
+  // so no later update can reach into a shared one. `--dry-run` stamps nothing.
   if (!dryRun && plans.length > 0) {
-    await writeSkillsStamp(ctx.dataDir, deps.stampVersion ?? pkg.version);
+    await writeSkillsStamp(
+      ctx.dataDir,
+      deps.stampVersion ?? pkg.version,
+      plans.map((p) => p.skillsDir),
+    );
   }
   // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
   // own check already honours it. Detection cannot see a harness we do not probe for,
@@ -967,52 +973,6 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
  * overwritten and reported as `updated` with a warning. On --dry-run nothing is
  * written and the status reads `would-*`.
  */
-/**
- * The post-update self-heal's worker (called from lib/skill-sync.ts): refresh
- * every harness directory install ALREADY wired, and remove skills the package
- * no longer ships. Deliberately narrower than a full install run: it never
- * creates a directory, never touches CLAUDE.md/AGENTS.md, never asks anything,
- * and only iterates names Tenjin ships or once shipped, so a user's other
- * skills are structurally out of reach.
- */
-export async function resyncWiredSkills(
-  homeDir?: string,
-  skillsSourceDir?: string,
-  retired: readonly string[] = RETIRED_SKILL_NAMES,
-): Promise<{ refreshed: string[]; removed: string[] }> {
-  const home = homeDir ?? homedir();
-  const skillsSource =
-    skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
-  await assertSkillsSource(skillsSource);
-
-  const refreshed: string[] = [];
-  const removed: string[] = [];
-  const seen = new Set<string>();
-  for (const target of HARNESS_TARGETS) {
-    const dir = harnessTargetDir(home, target);
-    if (seen.has(dir)) continue;
-    seen.add(dir);
-    // "Wired" means a real prior copy of at least one shipped skill, the same
-    // SKILL.md bar installSkill uses; a bare or foreign directory is not ours.
-    const wired = SKILL_NAMES.some((name) => existsSync(join(dir, name, 'SKILL.md')));
-    if (!wired) continue;
-    for (const name of SKILL_NAMES) {
-      const { status } = await installSkill(join(skillsSource, name), join(dir, name), false, name);
-      if (status === 'installed' || status === 'updated') refreshed.push(join(dir, name));
-    }
-    for (const name of retired) {
-      const stale = join(dir, name);
-      // The SKILL.md bar again: a bare directory that merely shares a retired
-      // name is not a skill copy and is not ours to delete.
-      if (existsSync(join(stale, 'SKILL.md'))) {
-        await rm(stale, { recursive: true, force: true });
-        removed.push(stale);
-      }
-    }
-  }
-  return { refreshed, removed };
-}
-
 async function installSkill(
   srcDir: string,
   destDir: string,
@@ -1090,6 +1050,104 @@ function treesEqual(a: Map<string, Buffer>, b: Map<string, Buffer> | null): bool
     if (other === undefined || !v.equals(other)) return false;
   }
   return true;
+}
+
+// --- The post-update self-heal (called from lib/skill-sync.ts) --------------------
+
+/**
+ * Refresh the skills in `dirs`, and remove skills the package no longer ships.
+ * `dirs` is the consent record from the sync stamp: the caller decides which
+ * directories are in scope and this never widens that set. Deliberately narrower
+ * than an install run beyond that too: it never creates a directory, never
+ * touches CLAUDE.md/AGENTS.md, never asks anything, and only iterates names
+ * Tenjin ships or once shipped, so a user's other skills are structurally out of
+ * reach.
+ */
+export async function resyncWiredSkills(
+  dirs: readonly string[],
+  skillsSourceDir?: string,
+  retired: readonly string[] = RETIRED_SKILL_NAMES,
+): Promise<{ refreshed: string[]; removed: string[] }> {
+  const skillsSource =
+    skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  await assertSkillsSource(skillsSource);
+
+  const refreshed: string[] = [];
+  const removed: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    // A recorded directory the operator has since emptied is not re-created.
+    // "Wired" means a real prior copy of at least one shipped skill, the same
+    // SKILL.md bar installSkill uses; a bare or foreign directory is not ours.
+    const wired = SKILL_NAMES.some((name) => existsSync(join(dir, name, 'SKILL.md')));
+    if (!wired) continue;
+    for (const name of SKILL_NAMES) {
+      const status = await swapSkillDir(join(skillsSource, name), join(dir, name));
+      if (status === 'changed') refreshed.push(join(dir, name));
+    }
+    for (const name of retired) {
+      const stale = join(dir, name);
+      // The SKILL.md bar again: a bare directory that merely shares a retired
+      // name is not a skill copy and is not ours to delete.
+      if (existsSync(join(stale, 'SKILL.md'))) {
+        await rm(stale, { recursive: true, force: true });
+        removed.push(stale);
+      }
+    }
+  }
+  return { refreshed, removed };
+}
+
+/**
+ * Replace one skill directory ATOMICALLY, which is what separates this from
+ * `installSkill`'s rm-then-write. This path runs unattended on someone's first
+ * command after an update, so a crash mid-write must not leave a half-written
+ * skill a harness would load: the new tree is built in a sibling temp directory
+ * and swapped in by rename, so the live directory is only ever the whole old
+ * copy or the whole new one. Any failure removes the temp and leaves the live
+ * directory exactly as it was.
+ *
+ * Siblings, not a system temp dir, because rename is only atomic within a
+ * filesystem; pid-suffixed so two processes cannot collide on the scratch names.
+ */
+async function swapSkillDir(srcDir: string, destDir: string): Promise<'changed' | 'up-to-date'> {
+  const src = await readTree(srcDir);
+  if (src === null) throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
+  if (treesEqual(src, await readTree(destDir))) return 'up-to-date';
+
+  const parent = dirname(destDir);
+  const name = basename(destDir);
+  const tmpDir = join(parent, `.tenjin-sync-${name}-${process.pid}`);
+  const oldDir = join(parent, `${name}.old-${process.pid}`);
+  const discard = (p: string): Promise<void> =>
+    rm(p, { recursive: true, force: true }).catch(() => undefined);
+
+  await discard(tmpDir); // a previous crash's scratch, same pid reused
+  try {
+    for (const [rel, content] of src) await writeFileAtomic(join(tmpDir, rel), content);
+  } catch (err) {
+    await discard(tmpDir);
+    throw err;
+  }
+
+  let parked = false;
+  try {
+    if (existsSync(destDir)) {
+      await rename(destDir, oldDir);
+      parked = true;
+    }
+    await rename(tmpDir, destDir);
+  } catch (err) {
+    // Put the old copy back before giving up, so a failed swap is a no-op rather
+    // than a deletion.
+    if (parked && !existsSync(destDir)) await rename(oldDir, destDir).catch(() => undefined);
+    await discard(tmpDir);
+    throw err;
+  }
+  await discard(oldDir);
+  return 'changed';
 }
 
 /**

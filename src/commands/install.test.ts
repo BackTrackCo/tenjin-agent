@@ -138,7 +138,32 @@ describe('runInstall: harness override', () => {
 describe('runInstall: skills stamp', () => {
   it('stamps the wiring version so the post-update self-heal has a baseline', async () => {
     await runInstall({ harness: ['claude'] }, makeCtx(), deps({ stampVersion: '9.9.9' }));
-    expect(await readSkillsStamp(data)).toEqual({ schemaVersion: 1, cliVersion: '9.9.9' });
+    expect(await readSkillsStamp(data)).toEqual({
+      schemaVersion: 1,
+      cliVersion: '9.9.9',
+      dirs: [join(home, '.claude', 'skills')],
+    });
+  });
+
+  // The stamp is the self-heal's consent record, so it must name what install
+  // actually wired: a Claude-only run can never authorize a later update to
+  // write into the shared Agent Skills directory.
+  it('records only the directories this run wired', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps({ stampVersion: '9.9.9' }));
+    expect((await readSkillsStamp(data))?.dirs).toEqual([join(home, '.claude', 'skills')]);
+  });
+
+  it('records every wired directory on a multi-harness run, de-duped', async () => {
+    await runInstall(
+      { harness: ['claude', 'codex', 'shared'] },
+      makeCtx(),
+      deps({ stampVersion: '9.9.9' }),
+    );
+    // codex and shared are one directory, so the stamp carries two, not three.
+    expect((await readSkillsStamp(data))?.dirs).toEqual([
+      join(home, '.claude', 'skills'),
+      join(home, '.agents', 'skills'),
+    ]);
   });
 
   it('stamps nothing under --dry-run', async () => {

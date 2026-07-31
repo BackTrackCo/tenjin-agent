@@ -51,13 +51,21 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
- * Which CLI version last wired the harness skills (written by `tenjin install`
- * and by the post-update self-heal in lib/skill-sync.ts). A marker, not data:
- * absent or unparsable both read as "install never ran here", which is exactly
- * the machine the self-heal must leave alone.
+ * Which CLI version last wired the harness skills, and WHICH directories it
+ * wired (written by `tenjin install` and by the post-update self-heal in
+ * lib/skill-sync.ts). The directory list is the consent record: the self-heal
+ * writes to those paths and no others.
  */
 export function skillsSyncPath(dir: string = dataDir()): string {
   return join(dir, 'skills-sync.json');
+}
+
+/**
+ * Serializes the self-heal's read-resync-stamp pass, so two first commands after
+ * an update cannot interleave one's directory swap with the other's stamp.
+ */
+export function skillsSyncLockPath(dir: string = dataDir()): string {
+  return join(dir, 'skills-sync.lock');
 }
 
 /**

@@ -1,47 +1,51 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { z } from 'zod';
 import pkg from '../../package.json';
 import { writeFileAtomic } from './atomic-json';
-import { skillsSyncPath } from './paths';
+import { withFileLock } from './lock';
+import { skillsSyncLockPath, skillsSyncPath } from './paths';
+import { CLI_SKILL_NAMES, HARNESS_TARGETS, harnessTargetDir } from './skill-wiring';
 import type { Io } from './output';
 
 /**
  * Self-healing skills: `npm i -g tenjin-cli` updates the binary but not the
- * copies `tenjin install` wired into `~/.claude/skills` / `~/.agents/skills`, so
- * without this every update silently leaves agents running last release's
- * skills. Nobody re-runs install after an update (doctor-style rituals are
- * break-glass, not maintenance), so the CLI heals itself the way Homebrew or
- * corepack do: on the first command after a version change, re-wire and say so
- * in one line.
+ * copies `tenjin install` wired into a harness, so without this every update
+ * leaves agents running last release's skills.
  *
  * Consent and blast radius:
- *  - Runs ONLY when a stamp exists, and install is the only writer of the first
- *    stamp — a machine whose operator never ran install is never touched.
- *  - Re-wires ONLY directories that are already wired (a Tenjin skill is
- *    present); it never creates a new harness directory.
+ *  - Writes ONLY to the directories recorded in the stamp's `dirs`. That list is
+ *    what install actually wired, so a `--harness claude` machine can never have
+ *    its shared `~/.agents/skills` written by a later update.
+ *  - Re-wires ONLY directories still wired (a Tenjin SKILL.md is present); it
+ *    never creates a harness directory.
  *  - Touches ONLY directory names Tenjin ships or once shipped
  *    ({@link RETIRED_SKILL_NAMES}); a user's other skills are structurally out
  *    of reach because nothing iterates them.
- *  - Never affects the command that triggered it: every failure is swallowed,
- *    like the update nudge beside it in cli.ts.
+ *  - Never affects the command that triggered it: every failure is swallowed.
  */
 
 /**
- * Skill directory names Tenjin PREVIOUSLY shipped and no longer does. A rename
- * or retirement adds the old name here, and the next sync removes the stale
- * copy instead of stacking a second skill beside it. Empty today; the mechanism
- * and its tests exist so the first rename cannot forget the cleanup.
+ * Names Tenjin once shipped and no longer does; a rename adds the old name here
+ * so the next sync removes the stale copy instead of stacking a second skill.
  */
 export const RETIRED_SKILL_NAMES: readonly string[] = [];
 
-/** The stamp is a pure marker: which CLI version last wired the skills. */
+/** `dirs` is the consent record: the only paths the self-heal may write to. */
 const StampSchema = z.object({
   schemaVersion: z.literal(1),
   cliVersion: z.string(),
+  dirs: z.array(z.string()),
 });
 export type SkillsStamp = z.infer<typeof StampSchema>;
 
-/** Null for absent or unparsable: both mean "install has not stamped here". */
+/**
+ * Null for absent or unparsable, which deliberately includes the pre-`dirs`
+ * shape: an unknown shape carries no consent record, so it authorizes no write
+ * and the machine goes through adoption instead.
+ */
 export async function readSkillsStamp(dir: string): Promise<SkillsStamp | null> {
   let raw: string;
   try {
@@ -57,12 +61,34 @@ export async function readSkillsStamp(dir: string): Promise<SkillsStamp | null> 
   }
 }
 
-export async function writeSkillsStamp(dir: string, cliVersion: string): Promise<void> {
-  const stamp: SkillsStamp = { schemaVersion: 1, cliVersion };
+export async function writeSkillsStamp(
+  dir: string,
+  cliVersion: string,
+  dirs: readonly string[],
+): Promise<void> {
+  const stamp: SkillsStamp = { schemaVersion: 1, cliVersion, dirs: [...dirs] };
   await writeFileAtomic(skillsSyncPath(dir), `${JSON.stringify(stamp, null, 2)}\n`, {
     mode: 0o600,
     dirMode: 0o700,
   });
+}
+
+/**
+ * The directories a pre-feature install left behind, for machines with no usable
+ * stamp. A CLI ADAPTER skill is the evidence, because only `tenjin install`
+ * places one. A hosted-only `tenjin` copy is not: anyone can fetch that mirror
+ * from tenjin.blog, and adopting it would let an update overwrite a file install
+ * never placed.
+ */
+export function adoptableSkillDirs(home: string): string[] {
+  const dirs: string[] = [];
+  for (const target of HARNESS_TARGETS) {
+    const dir = harnessTargetDir(home, target);
+    if (dirs.includes(dir)) continue; // codex and shared are one directory
+    const managed = CLI_SKILL_NAMES.some((name) => existsSync(join(dir, name, 'SKILL.md')));
+    if (managed) dirs.push(dir);
+  }
+  return dirs;
 }
 
 export interface SkillSyncDeps {
@@ -71,41 +97,53 @@ export interface SkillSyncDeps {
   io: Io;
   /** The global --json flag; suppresses the human notice, never the sync. */
   json: boolean;
-  /** Version seam for tests; defaults to the package version. */
   currentVersion?: string;
   /** Resync seam for tests; defaults to install's resyncWiredSkills. */
-  resync?: (homeDir?: string) => Promise<{ refreshed: string[]; removed: string[] }>;
-  /** Home seam for tests, forwarded to the default resync. */
+  resync?: (dirs: readonly string[]) => Promise<{ refreshed: string[]; removed: string[] }>;
+  /** Home seam for tests, used by the adoption scan. */
   homeDir?: string;
 }
 
 /**
  * The post-command hook. Cheap when there is nothing to do: one small file read
- * and a string compare. The sync itself runs in EVERY output mode — an agent's
- * `--json` run is exactly the caller whose skills must not go stale — but the
- * notice is human-mode only.
+ * and a string compare, before any lock. The sync runs in every output mode (an
+ * agent's `--json` run is exactly the caller whose skills must not go stale);
+ * only the notice is human-mode.
  */
 export async function maybeResyncSkills(deps: SkillSyncDeps): Promise<void> {
   try {
     const current = deps.currentVersion ?? pkg.version;
     const stamp = await readSkillsStamp(deps.dir);
-    if (stamp === null || stamp.cliVersion === current) return;
+    if (stamp !== null && stamp.cliVersion === current) return;
 
-    const resync =
-      deps.resync ??
-      (async (home?: string) => {
-        const { resyncWiredSkills } = await import('../commands/install');
-        return resyncWiredSkills(home);
-      });
-    const { refreshed, removed } = await resync(deps.homeDir);
-    // Stamp AFTER a successful pass, so a failed sync retries on the next
-    // command instead of going quiet until the next release.
-    await writeSkillsStamp(deps.dir, current);
+    // Serialized: otherwise one process can stamp the version current while
+    // another is still mid-swap, and the stamp suppresses the loser's retry.
+    await withFileLock(skillsSyncLockPath(deps.dir), async () => {
+      const fresh = await readSkillsStamp(deps.dir); // the holder we queued behind may have done it
+      if (fresh !== null && fresh.cliVersion === current) return;
 
-    if (deps.io.isTTY && !deps.json && (refreshed.length > 0 || removed.length > 0)) {
-      const removedNote = removed.length > 0 ? `; removed ${removed.join(', ')}` : '';
-      deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}\n`);
-    }
+      // No usable stamp is either a pre-feature install or a fresh machine, and
+      // only the first is adopted; the second stays unstamped so `tenjin install`
+      // remains the first thing that ever consents here.
+      const dirs = fresh?.dirs ?? adoptableSkillDirs(deps.homeDir ?? homedir());
+      if (dirs.length === 0) return;
+
+      const resync =
+        deps.resync ??
+        (async (targets: readonly string[]) => {
+          const { resyncWiredSkills } = await import('../commands/install');
+          return resyncWiredSkills(targets);
+        });
+      const { refreshed, removed } = await resync(dirs);
+      // Stamp AFTER a successful pass, so a failed sync retries on the next
+      // command instead of going quiet until the next release.
+      await writeSkillsStamp(deps.dir, current, dirs);
+
+      if (deps.io.isTTY && !deps.json && (refreshed.length > 0 || removed.length > 0)) {
+        const removedNote = removed.length > 0 ? `; removed ${removed.join(', ')}` : '';
+        deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}\n`);
+      }
+    });
   } catch {
     // Best-effort by contract: the triggering command's output and exit code
     // are never this hook's to change.
