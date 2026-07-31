@@ -48,10 +48,11 @@ fixtures should not. Point the tooling at these paths explicitly.
 
 ## No trigger eval for tenjin-publish
 
-`tenjin-publish` is `disable-model-invocation: true`. It never self-triggers, so there is no
-trigger rate to measure and no description to tune. Its only entry paths are an explicit user
-publish ask, covered by cases 1 to 4, and the after-a-MISS flow in `tenjin-search`, covered by
-case 5. The second one matters more than its case count suggests: it is the only path on which
+`tenjin-publish` self-triggers (the `disable-model-invocation` flag came off in #39), but no
+trigger set has been authored for it yet: its entry paths are an explicit user publish ask,
+covered by cases 1 to 4, and the after-a-MISS flow in `tenjin-search`, covered by case 5, and
+the hosted skill's CLI-present negatives already pin it as the expected target for sales and
+drafts questions. The second one matters more than its case count suggests: it is the only path on which
 the CLI can publish without the user having asked, so it is where consent is decided by the
 resolved `publish.mode` rather than by a request.
 
