@@ -23,6 +23,10 @@ What install asks now, in order, rendered as proper terminal prompts:
 2. Permissions, a yes/no defaulting to yes: "Let your agent search tenjin without
    permission popups?" On yes, install writes the nine free-verb rules into
    `permissions.allow` in `~/.claude/settings.json` instead of printing them.
+   The question says what is true of the whole tier, that none of the nine can
+   spend USDC or open the wallet keystore, names the three that send or store
+   data (`search`, `outcome`, `read`), and points at `tenjin doctor` for the full
+   rules and the flag caveat that qualifies them.
 3. Wallet, unchanged: asked only when no wallet exists, skipped by `--no-wallet`.
 
 The `~/.claude/CLAUDE.md` nudge is no longer a fourth question. `--claude-md` and
@@ -32,8 +36,10 @@ The settings writer is additive only and consent-gated. It appends only rules th
 are missing, never removes, reorders, or rewrites an existing entry or any other
 key, preserves key order and 2-space formatting, writes atomically, creates the
 file and the `permissions.allow` path when absent, and is idempotent (a re-run
-reports everything already present and does not touch the file). A settings file
-it cannot parse, or whose `permissions` / `permissions.allow` is not the expected
+reports everything already present and does not touch the file). A symlinked
+settings file (the dotfiles shape) is resolved first, so the link survives and the
+file the operator actually maintains is the one edited. A settings file it cannot
+parse or resolve, or whose `permissions` / `permissions.allow` is not the expected
 shape, is reported and left exactly as it is; it is never repaired or clobbered.
 The rules it may write are a hardcoded constant and the writer takes no rule
 argument, so no call path can make it grant `buy`, `publish`, `session start`,
@@ -50,4 +56,6 @@ Prompts are rendered with `@clack/prompts`, bundled into the shipped output as a
 devDependency in its own split chunk: published `dependencies` stays `{}`, and a
 `search` or `doctor` run never parses it. Every prompt sits behind an injectable
 seam, so the machine contract is untouched: under `--json` or a pipe, install asks
-nothing and emits the same envelope it did before.
+nothing and emits the same envelope it did before. Ctrl-D at a prompt, or any
+stdin that reaches EOF, settles it as "changed nothing" and restores the cursor,
+the way the readline prompts it replaces always did.

@@ -1,5 +1,4 @@
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 
@@ -82,6 +81,7 @@ export type PermissionsSkipReason =
   | 'not-requested'
   | 'declined'
   | 'dry-run'
+  | 'unresolvable'
   | 'unreadable'
   | 'unparsable'
   | 'unexpected-shape';
@@ -89,8 +89,13 @@ export type PermissionsSkipReason =
 export interface PermissionsResult {
   /** The harness this outcome is about; only `claude` has a settings file we write. */
   harness: string;
-  /** The settings file, reported even when nothing was written so a human can go look. */
-  path: string;
+  /**
+   * The settings file, reported even when nothing was written so a human can go
+   * look. ABSENT when the harness has no such file: naming a Claude path on a
+   * Codex-only install would point the envelope's reader at a file that has
+   * nothing to do with their harness.
+   */
+  path?: string;
   added: string[];
   alreadyPresent: string[];
   skipped?: PermissionsSkipReason;
@@ -100,13 +105,13 @@ export interface PermissionsResult {
 
 function skip(
   harness: string,
-  path: string,
+  path: string | undefined,
   reason: PermissionsSkipReason,
   warning?: string,
 ): PermissionsResult {
   return {
     harness,
-    path,
+    ...(path !== undefined ? { path } : {}),
     added: [],
     alreadyPresent: [],
     skipped: reason,
@@ -120,7 +125,8 @@ export function permissionsSkipped(
   homeDir: string,
   reason: PermissionsSkipReason,
 ): PermissionsResult {
-  return skip(harness, claudeSettingsPath(homeDir), reason);
+  const path = harness === 'claude' ? claudeSettingsPath(homeDir) : undefined;
+  return skip(harness, path, reason);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -135,11 +141,39 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * touch the file at all.
  */
 export async function wireFreeVerbAllowlist(homeDir: string): Promise<PermissionsResult> {
-  const path = claudeSettingsPath(homeDir);
+  const declaredPath = claudeSettingsPath(homeDir);
   const harness = 'claude';
 
+  // `lstat`, not `existsSync`: existsSync FOLLOWS a symlink, so a link pointing at
+  // a file that is not there reads as "absent" and the create path below would
+  // rename a regular file over the link. We need to know whether an ENTRY is
+  // there, whatever it points at.
+  const entry = await lstat(declaredPath).catch(() => null);
+
+  // Resolve symlinks BEFORE writing. `writeFileAtomic` commits with a rename,
+  // which replaces a symlink with a regular file: a settings.json linked into a
+  // dotfiles repo would be severed, its target left stale, and future edits there
+  // would stop reaching Claude Code. Renaming over the RESOLVED path edits the
+  // file the operator actually maintains and leaves the link intact, which is
+  // what this module's additive-only, never-clobber invariants promise. A link we
+  // cannot resolve is left alone rather than overwritten; for a genuinely absent
+  // file there is nothing to follow and we create it at the declared path.
+  let path = declaredPath;
+  if (entry !== null) {
+    try {
+      path = await realpath(declaredPath);
+    } catch (err) {
+      return skip(
+        harness,
+        declaredPath,
+        'unresolvable',
+        `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
+      );
+    }
+  }
+
   let settings: Record<string, unknown> = {};
-  if (existsSync(path)) {
+  if (entry !== null) {
     let raw: string;
     try {
       raw = await readFile(path, 'utf8');
