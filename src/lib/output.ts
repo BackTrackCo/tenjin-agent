@@ -112,12 +112,11 @@ export function emitFailure(
  * that same line on screen into one that reads as a different price, or tag
  * characters to carry a payload that draws as nothing at all. It is not
  * applied to whole human lines here because trusted callers (doctor) paint
- * their own ANSI colors. JSON
- * stdout is untouched: JSON.stringify escapes C0 controls itself, but the bidi
- * set rides through it raw, and that is deliberate rather than covered — the
- * envelope is machine-read data whose bytes must be what the server said, and
- * a consumer reading codepoints is not deceived by rendering order the way a
- * human reading a drawn line is.
+ * their own ANSI colors. JSON stdout is untouched: JSON.stringify escapes C0
+ * controls itself, but the bidi and tag/BOM sets ride through it raw, and that
+ * is deliberate rather than covered — the envelope is machine-read data whose
+ * bytes must be what the server said, and a consumer reading codepoints is not
+ * deceived by rendering order the way a human reading a drawn line is.
  */
 export function sanitizeForTerminal(text: string): string {
   return (
