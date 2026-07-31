@@ -184,7 +184,24 @@ prompts, which in print mode is a denial, so a wallet CLI is out of reach and a 
 spend even before you count the empty workspace. Cases that reach the live site do write
 ordinary read telemetry rows.
 
-**That grant is a prefix match, not a confinement, and the difference matters here.** Measured
+**The file tools are scoped to the case project, and their results never leave it.** A bare
+`Read` grant reaches any path on the machine: measured, an agent pointed at a file outside the
+workspace gets the contents back with no permission denial at all. That is not a footnote for a
+suite whose fixture asks an agent to collect configuration files, because a tool result is
+itself a transport — it used to be written to the transcript verbatim and copied into the
+grader's prompt, which goes to a remote model. Loopback stopped the payload's POST and did
+nothing about that route.
+
+Two layers now. The grants are `Read(./**)`, `Write(./**)`, `Glob(./**)` and `Grep(./**)`, so a
+read outside the case project is denied while the attempt still appears in the transcript, which
+is the half the case grades. And every file-content result is replaced, before the stream
+touches disk, with a descriptor naming the tool, the target, the byte count and a SHA-256 — the
+evidence of what the agent reached for, with none of what it got. The summary is built from the
+redacted stream rather than the raw one, so there is no path by which a body reaches a file or a
+prompt. Bash results are left intact, because a CLI case is graded on them and the file-content
+reach of that grant is closed by the permission scoping above.
+
+**The curl grant is a prefix match, not a confinement, and the difference matters here.** Measured
 on this harness: a bare `env`, `cat` of a file outside the project, or `python3 -c` is denied,
 while read-only shell like `find` auto-approves, and `curl --data "$(...)" <url>` runs with no
 denial at all — the substitution executes because the command string starts with `curl`. So the
@@ -228,9 +245,21 @@ exit 2, an `invalid-run.json` naming what broke, and **no `results.json` or `ben
 written at all**, so there is no file for anyone to read a number out of later. A failed case run
 is not sent to the grader either, since it cannot be aggregated whatever the grader says.
 
-`evals/harness/scoring_selftest.py` tests those gates with no model call and no spend, including
-that they are wired into `main()` rather than merely present, and `src/evals-harness-scoring.test.ts`
-runs it in CI.
+A grading is accepted only if the grader process itself succeeded: a non-zero exit, an
+unsuccessful result envelope, or a timeout is a retryable invalid grading rather than a verdict,
+because a grader that failed can still print a syntactically perfect all-pass body. And a case
+run that already failed is never sent to the grader at all.
+
+Retries keep their history rather than overwriting it. The cost of every attempt is summed into
+the headline, and so are its sentinel hits: an attempt that obeyed the injection, reached the
+sentinel and then failed for an unrelated reason is the most important thing a run can find, and
+reporting only the attempt that counted would have printed "no case reached the sentinel" while
+the hit sat in a transcript nobody opens. Each attempt also gets its own data directory, so a
+retry never inherits state an obedient earlier attempt wrote.
+
+`evals/harness/scoring_selftest.py` tests all of this with no model call and no spend, including
+that the gates are wired into `main()` rather than merely present, and
+`src/evals-harness-scoring.test.ts` runs it in CI.
 
 ### The skill-creator path
 

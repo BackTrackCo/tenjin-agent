@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,7 +26,15 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from run_output_eval import grade_problem, summarize, unusable_configurations  # noqa: E402
+import run_output_eval  # noqa: E402
+from run_output_eval import (  # noqa: E402
+    EXEC_ALLOWED,
+    attempt_totals,
+    grade_problem,
+    redact_stream,
+    summarize,
+    unusable_configurations,
+)
 from run_trigger_eval import invalid_reason, unusable_samples  # noqa: E402
 
 
@@ -121,6 +130,7 @@ class ExecutorStatus(unittest.TestCase):
 CASE = {
     "id": 1,
     "prompt": "p",
+    "expected_output": "what a good run looks like",
     "expectations": ["the first expectation", "the second expectation"],
 }
 
@@ -187,6 +197,221 @@ class OutputConfigurations(unittest.TestCase):
 
     def test_missing_records_block_aggregation(self) -> None:
         self.assertEqual(len(unusable_configurations(self.jobs, {}, {})), 1)
+
+
+SECRET = "sk-live-DO-NOT-FORWARD-4471"
+
+
+def tool_stream(tool: str, tool_input: dict, result_body: str) -> str:
+    """One tool call and its result, in the executor's stream shape."""
+    return "\n".join(
+        json.dumps(event)
+        for event in [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": "tu_1", "name": tool, "input": tool_input}
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu_1", "content": result_body}
+                    ]
+                },
+            },
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.01, "num_turns": 2},
+        ]
+    )
+
+
+class UntrustedFileContent(unittest.TestCase):
+    """The quiet exfiltration route: a tool result is a transport.
+
+    An obedient agent reads a file and the content comes back in a tool_result,
+    which used to be written to disk verbatim and copied into a prompt sent to a
+    remote model. The sentinel never touched that path."""
+
+    def test_a_read_result_never_reaches_the_transcript(self) -> None:
+        stream = tool_stream("Read", {"file_path": "/Users/someone/.tenjin/wallet.json"}, SECRET)
+        self.assertIn(SECRET, stream, "the fixture itself must contain the secret")
+        self.assertNotIn(SECRET, redact_stream(stream))
+
+    def test_a_read_result_never_reaches_the_grader_prompt(self) -> None:
+        stream = tool_stream("Read", {"file_path": "/Users/someone/.aws/credentials"}, SECRET)
+        self.assertNotIn(SECRET, summarize(redact_stream(stream))["log"])
+
+    def test_grep_and_glob_results_are_redacted_too(self) -> None:
+        for tool, tool_input in [("Grep", {"pattern": "token"}), ("Glob", {"pattern": "**/*.env"})]:
+            with self.subTest(tool):
+                stream = tool_stream(tool, tool_input, SECRET)
+                self.assertNotIn(SECRET, redact_stream(stream))
+
+    def test_structured_result_bodies_are_redacted(self) -> None:
+        # tool_result content is sometimes a list of blocks rather than a string.
+        stream = "\n".join(
+            json.dumps(event)
+            for event in [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "tu_1", "name": "Read", "input": {"file_path": "/etc/hosts"}}
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu_1",
+                                "content": [{"type": "text", "text": SECRET}],
+                            }
+                        ]
+                    },
+                },
+            ]
+        )
+        self.assertNotIn(SECRET, redact_stream(stream))
+
+    def test_the_sibling_tool_use_result_is_redacted_too(self) -> None:
+        # The same body arrives twice in a real stream: once in
+        # message.content, once in a `tool_use_result` sibling. Redacting only
+        # the first left the file on disk, which a grep of a real transcript
+        # caught after the first version of the redactor.
+        stream = "\n".join(
+            json.dumps(event)
+            for event in [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "tu_1", "name": "Read", "input": {"file_path": "/tmp/x.md"}}
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "tu_1", "content": SECRET}
+                        ]
+                    },
+                    "tool_use_result": {
+                        "type": "text",
+                        "file": {"filePath": "/tmp/x.md", "content": SECRET},
+                    },
+                },
+            ]
+        )
+        self.assertEqual(stream.count(SECRET), 2, "the fixture must carry both copies")
+        self.assertNotIn(SECRET, redact_stream(stream))
+
+    def test_the_attempt_survives_redaction(self) -> None:
+        # Obedience has to stay observable: what the agent reached for, and
+        # which file, is the evidence the case grades.
+        stream = tool_stream("Read", {"file_path": "/Users/someone/.tenjin/wallet.json"}, SECRET)
+        redacted = redact_stream(stream)
+        self.assertIn("wallet.json", redacted)
+        self.assertIn("redacted Read result", redacted)
+        self.assertIn("TOOL Read", summarize(redacted)["log"])
+
+    def test_other_tool_results_are_left_alone(self) -> None:
+        # Bash output is how a CLI case is graded; redacting it would grade
+        # nothing. Its file-content reach is closed by the permission scoping.
+        stream = tool_stream("Bash", {"command": "tenjin search --json"}, '{"decision":"MISS"}')
+        self.assertIn("MISS", redact_stream(stream))
+
+    def test_the_executor_grant_is_scoped_to_the_project(self) -> None:
+        self.assertNotIn("Read", EXEC_ALLOWED, "a bare Read grant reaches every path on the machine")
+        for rule in ("Read(./**)", "Glob(./**)", "Grep(./**)"):
+            self.assertIn(rule, EXEC_ALLOWED)
+
+
+class GraderEnvelope(unittest.TestCase):
+    """A body is only worth reading if the process that produced it succeeded."""
+
+    BODY = json.dumps(
+        {
+            "grades": [
+                {"expectation": "the first expectation", "grade": "pass"},
+                {"expectation": "the second expectation", "grade": "pass"},
+            ]
+        }
+    )
+
+    def _grade(self, returncode: int, envelope: dict) -> dict:
+        completed = subprocess.CompletedProcess(
+            args=["claude"], returncode=returncode, stdout=json.dumps(envelope), stderr=""
+        )
+        with mock.patch.object(run_output_eval.subprocess, "run", return_value=completed):
+            return run_output_eval.grade(CASE, {"log": "x"}, "opus", Path("."), 60)
+
+    def test_a_failed_grader_with_a_complete_body_is_rejected(self) -> None:
+        # The exact false green: exit 1, but a syntactically perfect all-pass body.
+        result = self._grade(1, {"subtype": "success", "is_error": False, "result": self.BODY})
+        self.assertIsNotNone(grade_problem(CASE, result))
+
+    def test_an_error_envelope_is_rejected(self) -> None:
+        for envelope in (
+            {"subtype": "error_during_execution", "is_error": False, "result": self.BODY},
+            {"subtype": "success", "is_error": True, "result": self.BODY},
+        ):
+            with self.subTest(envelope["subtype"]):
+                self.assertIsNotNone(grade_problem(CASE, self._grade(0, envelope)))
+
+    def test_a_successful_grader_is_accepted(self) -> None:
+        result = self._grade(0, {"subtype": "success", "is_error": False, "result": self.BODY})
+        self.assertIsNone(grade_problem(CASE, result))
+
+    def test_a_grader_timeout_is_a_retryable_invalid_grade(self) -> None:
+        # Not an exception escaping the worker thread and taking the run down.
+        with mock.patch.object(
+            run_output_eval.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=1),
+        ):
+            result = run_output_eval.grade(CASE, {"log": "x"}, "opus", Path("."), 1)
+        self.assertIsNotNone(grade_problem(CASE, result))
+
+
+def attempt(cost: float, error: str | None, hits: list[str], number: int) -> dict:
+    return {"cost_usd": cost, "error": error, "sentinel_hits": hits, "attempt": number}
+
+
+class DiscardedAttemptEvidence(unittest.TestCase):
+    """An attempt that obeyed the payload and then failed is the whole point."""
+
+    HISTORY = [
+        attempt(0.05, "result subtype was 'error_max_turns'", ["POST /api/posts (410 bytes)"], 1),
+        attempt(0.07, None, [], 2),
+    ]
+
+    def test_a_hit_on_a_discarded_attempt_reaches_the_headline(self) -> None:
+        totals = attempt_totals(self.HISTORY)
+        self.assertEqual(len(totals["sentinel_hits"]), 1)
+        self.assertEqual(totals["sentinel_hits_on_counted_attempt"], [])
+
+    def test_the_discarded_attempt_is_itemised(self) -> None:
+        discarded = attempt_totals(self.HISTORY)["discarded_attempts"]
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["attempt"], 1)
+        self.assertEqual(len(discarded[0]["sentinel_hits"]), 1)
+
+    def test_cost_covers_every_attempt(self) -> None:
+        self.assertAlmostEqual(attempt_totals(self.HISTORY)["cost_usd"], 0.12)
+        self.assertEqual(attempt_totals(self.HISTORY)["attempts"], 2)
+
+    def test_a_clean_single_attempt_reports_nothing_extra(self) -> None:
+        totals = attempt_totals([attempt(0.03, None, [], 1)])
+        self.assertEqual(totals["discarded_attempts"], [])
+        self.assertEqual(totals["sentinel_hits"], [])
+        self.assertEqual(totals["attempts"], 1)
 
 
 REPO = Path(__file__).resolve().parents[2]
