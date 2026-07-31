@@ -1,11 +1,17 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveSkillsSource } from './lib/skills-source';
-import { PERMISSIONS_QUESTION } from './commands/install';
+import {
+  PERMISSIONS_QUESTION,
+  PUBLISH_MODE_CHOICES,
+  PUBLISH_MODE_QUESTION,
+  WALLET_QUESTION,
+} from './commands/install';
 import {
   ALWAYS_SAFE_ALLOWLIST,
+  MCP_CAVEAT,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
   recommendedRules,
@@ -277,6 +283,68 @@ describe('the published docs do not drift from the allowlist constants', () => {
     const question = flatten(PERMISSIONS_QUESTION);
     expect(flatten(README)).toContain(question);
     expect(flatten(PERMISSIONS_DOC)).toContain(question);
+  });
+
+  // The MCP section is a SECURITY list: a tool missing from it reads as "safe to
+  // leave ungated". Pinned to MCP_CAVEAT so the page cannot drop a tool (edit
+  // went missing once) without failing here.
+  it('the permissions doc names every MCP tool MCP_CAVEAT gates', () => {
+    const tools = [...MCP_CAVEAT.join(' ').matchAll(/mcp__tenjin__[a-z_]+/g)].map((m) => m[0]);
+    expect(tools.length).toBeGreaterThan(0);
+    for (const tool of new Set(tools)) expect(PERMISSIONS_DOC).toContain(tool);
+  });
+
+  // The README quotes all three walkthrough prompts, not just the permissions
+  // one, so all three are pinned to their shipped constants.
+  it('the README quotes the publish-mode and wallet prompts the CLI actually asks', () => {
+    const flatten = (s: string): string =>
+      s
+        .replace(/^\s*>\s?/gm, '')
+        .replace(/[`*"]/g, '')
+        .replace(/\s+/g, ' ');
+    const readme = flatten(README);
+    expect(readme).toContain(flatten(PUBLISH_MODE_QUESTION));
+    expect(readme).toContain(flatten(WALLET_QUESTION));
+    for (const c of PUBLISH_MODE_CHOICES) {
+      expect(readme).toContain(flatten(c.label));
+      if ('hint' in c && c.hint !== undefined) expect(readme).toContain(flatten(c.hint));
+    }
+  });
+
+  // A path-substring check cannot see a renamed heading, so every relative
+  // markdown link is resolved for real: the target file must exist and a
+  // #fragment must match a heading's GitHub slug in that file.
+  it('every relative markdown link resolves, fragment included', () => {
+    const slug = (h: string): string =>
+      h
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/\s+/g, '-');
+    const headingSlugs = (text: string): Set<string> =>
+      new Set(
+        text
+          .split('\n')
+          .filter((l) => /^#{1,6} /.test(l))
+          .map((l) => slug(l.replace(/^#{1,6} /, ''))),
+      );
+    const check = (fromDir: string, text: string): void => {
+      for (const m of text.matchAll(/\]\((\.{1,2}\/[^)#\s]+?\.md)(#[^)]+)?\)/g)) {
+        const rel = m[1];
+        if (rel === undefined) continue; // group 1 always captures on a match
+        const target = join(fromDir, rel);
+        expect(existsSync(target), `${rel} does not exist`).toBe(true);
+        if (m[2] !== undefined) {
+          const frag = m[2].slice(1);
+          expect(
+            headingSlugs(readFileSync(target, 'utf8')).has(frag),
+            `${m[1]}${m[2]}: no heading slugs to ${frag}`,
+          ).toBe(true);
+        }
+      }
+    };
+    check(root, README);
+    check(join(root, 'docs'), PERMISSIONS_DOC);
   });
 
   it('no page calls the free tier read-only or says it cannot touch your wallet', () => {

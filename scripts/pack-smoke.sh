@@ -52,6 +52,13 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
+# The README links docs/agent-permissions.md package-locally, so dropping `docs`
+# from the files array must fail here, not leave a dead link while CI stays green.
+[ -f "./node_modules/tenjin-cli/docs/agent-permissions.md" ] || {
+  echo "pack-smoke: FAIL — docs/agent-permissions.md missing from the installed package" >&2
+  exit 1
+}
+
 # 1) --version prints exactly the package.json version.
 GOT_VERSION="$("$BIN" --version)"
 if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then

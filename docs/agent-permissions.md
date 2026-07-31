@@ -244,9 +244,10 @@ Both are denied, never wrongly allowed:
 That is a different permission surface: the harness gates tools there, and these
 Bash rules do not apply. If you follow the
 [MCP section](../README.md#local-stdio-mcp-server) as well, leave
-`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_wallet` gated, treat
-`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions, and treat
-`mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.
+`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and
+`mcp__tenjin__tenjin_wallet` gated, treat `mcp__tenjin__tenjin_candidate` as
+gated for its add/drop actions, and treat `mcp__tenjin__tenjin_buy` as the same
+opt-in decision as the `buy` line above.
 
 ## Not the same as `allowlistCreators`
 
