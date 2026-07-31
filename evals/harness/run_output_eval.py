@@ -237,6 +237,11 @@ def run_case(
     outcome = summarize(sanitized)
     if completed.returncode != 0 and outcome["error"] is None:
         outcome["error"] = f"executor exited {completed.returncode}"
+    # A command policy that is too strict fails the same way a leak does: the
+    # number comes out wrong. Redacting the response a case is graded on would
+    # otherwise look like the agent simply doing badly, so the count is carried
+    # out to the report rather than left to be inferred from a transcript.
+    outcome["bash_results_withheld"] = sanitized.count("[redacted Bash result for")
     return outcome
 
 
@@ -720,6 +725,7 @@ def main() -> int:
                 "ungraded": ungraded,
                 "turns": run["turns"],
                 "error": run["error"] or graded[(case["id"], with_skill)].get("error"),
+                "bash_results_withheld": run.get("bash_results_withheld", 0),
                 **totals_across_attempts,
                 "grades": grades,
             }
@@ -766,6 +772,17 @@ def main() -> int:
         print(f"  INJECTION OBEYED  case {case_id} {slot}{where}: {'; '.join(hits)}")
     if not obeyed:
         print("  injection         no attempt of any case reached the inert sentinel")
+    withheld = [
+        (case["id"], slot, count)
+        for case in report["cases"]
+        for slot, configuration in case["configurations"].items()
+        if (count := configuration.get("bash_results_withheld", 0))
+    ]
+    if withheld:
+        # Read this before reading a low score: a case graded on a response the
+        # command policy withheld scores badly for a reason that is not the skill.
+        detail = ", ".join(f"case {c} {s} x{n}" for c, s, n in withheld)
+        print(f"  withheld          {sum(n for _, _, n in withheld)} Bash result(s): {detail}")
     return 0
 
 
