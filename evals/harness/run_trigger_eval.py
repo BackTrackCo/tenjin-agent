@@ -59,6 +59,46 @@ TOOLS = "Skill,Read,Glob,Grep"
 _print_lock = threading.Lock()
 
 
+def invalid_reason(outcome: dict) -> str | None:
+    """Why this sample cannot be counted, or None if it can.
+
+    The fired bit is only meaningful when the run that produced it actually
+    happened: a timeout has no bit at all, a run whose init never listed the
+    skill was never offered the thing we are asking whether it reaches for, and
+    a turn that ended in `error_max_turns` stopped for its own reasons rather
+    than because the model decided not to fire. Scoring any of those as a
+    non-fire makes a broken executor look like a well-behaved skill, and it
+    fails in the flattering direction: every one of them lands on the side that
+    passes a negative."""
+    if outcome.get("error"):
+        return f"run errored: {outcome['error']}"
+    if outcome.get("fired") is None:
+        return "run produced no fired bit"
+    if not outcome.get("skill_offered"):
+        return "the skill was never offered: the init event did not list it"
+    if outcome.get("result") != "success":
+        return f"result subtype was {outcome.get('result')!r}, not 'success'"
+    return None
+
+
+def unusable_samples(
+    cases: list[dict], results: dict[tuple[int, int], dict], runs_per_query: int
+) -> list[dict]:
+    """Every sample that must not reach the scorer, with the reason.
+
+    Separate from main() so the gate can be tested without spending anything:
+    the property worth proving is that a timed-out, failed, unoffered or
+    incomplete run cannot be counted, and that is a property of this function."""
+    unusable = []
+    for index, case in enumerate(cases):
+        for run in range(runs_per_query):
+            outcome = results.get((index, run))
+            reason = "no sample was recorded" if outcome is None else invalid_reason(outcome)
+            if reason is not None:
+                unusable.append({"query": case["query"], "run": run, "reason": reason})
+    return unusable
+
+
 def log(message: str) -> None:
     with _print_lock:
         print(message, file=sys.stderr, flush=True)
@@ -192,6 +232,12 @@ def main() -> int:
     )
     parser.add_argument("--runs-per-query", type=int, default=3)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="attempts per sample before the whole run is abandoned unscored",
+    )
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=300)
@@ -229,18 +275,52 @@ def main() -> int:
     ]
     results: dict[tuple[int, int], dict] = {}
 
+    discarded: list[dict] = []
+
     def work(job: tuple[int, dict, int]) -> None:
         index, case, run = job
-        transcript = workspace / "transcripts" / f"q{index:02d}-r{run}.jsonl"
-        outcome = run_once(
-            case["query"], project, name, args.model, args.timeout, transcript
-        )
+        outcome: dict = {}
+        for attempt in range(1, args.max_attempts + 1):
+            suffix = "" if attempt == 1 else f"-a{attempt}"
+            transcript = workspace / "transcripts" / f"q{index:02d}-r{run}{suffix}.jsonl"
+            outcome = run_once(
+                case["query"], project, name, args.model, args.timeout, transcript
+            )
+            outcome["attempt"] = attempt
+            outcome["invalid_reason"] = invalid_reason(outcome)
+            if outcome["invalid_reason"] is None:
+                break
+            with _print_lock:
+                discarded.append({"query_index": index, "run": run, **outcome})
+            log(
+                f"  q{index:02d} r{run} INVALID attempt {attempt}/{args.max_attempts}: "
+                f"{outcome['invalid_reason']}"
+            )
         results[(index, run)] = outcome
         mark = "FIRE" if outcome["fired"] else "----"
         log(f"  q{index:02d} r{run} {mark} {case['query'][:60]}")
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         list(pool.map(work, jobs))
+
+    # Before anything is scored, because the whole point is that a number never
+    # gets printed for a run that did not happen.
+    unusable = unusable_samples(cases, results, args.runs_per_query)
+    if unusable:
+        report = workspace / "invalid-run.json"
+        report.write_text(
+            json.dumps({"unusable": unusable, "discarded": discarded}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"\nRUN INVALID, nothing scored. {len(unusable)} sample(s) never succeeded.")
+        print("Scoring these would count a broken executor as a well-behaved skill:")
+        for entry in unusable[:10]:
+            print(f"  - {entry['reason']}  ({entry['query'][:60]})")
+        if len(unusable) > 10:
+            print(f"  ... and {len(unusable) - 10} more")
+        print(f"  detail    {report}")
+        print(f"  wasted    ${round(sum(d['cost_usd'] for d in discarded), 4)}")
+        return 2
 
     per_query = []
     total_cost = 0.0
@@ -278,6 +358,10 @@ def main() -> int:
         "positive_pass_rate": _rate(positives),
         "overall_pass_rate": _rate(per_query),
         "total_cost_usd": round(total_cost, 4),
+        # Every counted sample is offered, error-free and successful by
+        # construction here; these say what it took to get there.
+        "discarded_attempts": len(discarded),
+        "discarded_cost_usd": round(sum(d["cost_usd"] for d in discarded), 4),
         "queries": per_query,
     }
 
@@ -291,6 +375,11 @@ def main() -> int:
     print(f"  positives {_fmt(positives)}")
     print(f"  overall   {_fmt(per_query)}")
     print(f"  cost      ${summary['total_cost_usd']}")
+    if discarded:
+        print(
+            f"  retried   {len(discarded)} invalid sample(s), "
+            f"${summary['discarded_cost_usd']} wasted, none counted"
+        )
     print(f"  results   {out}")
     for query in per_query:
         if query["passed"]:

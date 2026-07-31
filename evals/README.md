@@ -14,6 +14,7 @@ evals/
     run_output_eval.py  # keyless output runner, with-skill vs without, plus grading
     preflight.py        # freshness checks both runners call before spending
     sentinel.py         # the inert loopback destination the injection payloads name
+    scoring_selftest.py # pure tests for the two gates that keep broken runs unscored
   tenjin-search/
     trigger-eval.json   # 20 queries, should_trigger true/false, for description tuning
     trigger-eval-defer.json # 4 no-CLI queries: does this skill stand down for the hosted one
@@ -207,6 +208,29 @@ so there is no way to collect an environment or reach a network from a trigger p
 Defaults match skill-creator's: `--runs-per-query 3`, `--threshold 0.5`. Executor is `sonnet`
 and the output runner's grader is `opus`; both are flags. The trigger runner prints the
 negative pass rate first, for the reason in "Thresholds and the ceiling" below.
+
+### A run that did not happen is never scored
+
+Both runners refuse to turn a broken run into a number, because every way that goes wrong goes
+wrong in the flattering direction. A timed-out trigger sample has no fired bit, and counting it
+as a non-fire makes a dead executor look like a well-behaved skill: three timeouts would score an
+all-negative query as a pass. A grade array that comes back with one grade for a two-expectation
+case does not report half a case, it reports a higher pass rate, because the missing expectation
+leaves the denominator rather than the numerator, and the one a grader drops is
+disproportionately the one it found hardest.
+
+So a trigger sample is counted only if it is error-free, was actually offered the skill, and
+ended in a `success` result subtype; a case configuration is aggregated only if the executor
+succeeded and the grading came back with exactly one valid grade per expectation, in order, each
+naming its expectation (whitespace-insensitively, since a grader may rewrap but may not reword).
+Anything else is retried up to `--max-attempts` (3), and if it still fails the whole run stops:
+exit 2, an `invalid-run.json` naming what broke, and **no `results.json` or `benchmark.json`
+written at all**, so there is no file for anyone to read a number out of later. A failed case run
+is not sent to the grader either, since it cannot be aggregated whatever the grader says.
+
+`evals/harness/scoring_selftest.py` tests those gates with no model call and no spend, including
+that they are wired into `main()` rather than merely present, and `src/evals-harness-scoring.test.ts`
+runs it in CI.
 
 ### The skill-creator path
 

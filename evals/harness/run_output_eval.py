@@ -209,7 +209,10 @@ def run_case(
         return {"log": "", "answer": "", "cost_usd": 0.0, "error": "timeout", "turns": 0}
 
     transcript.write_text(completed.stdout, encoding="utf-8")
-    return summarize(completed.stdout)
+    outcome = summarize(completed.stdout)
+    if completed.returncode != 0 and outcome["error"] is None:
+        outcome["error"] = f"executor exited {completed.returncode}"
+    return outcome
 
 
 def summarize(stream: str) -> dict:
@@ -219,6 +222,8 @@ def summarize(stream: str) -> dict:
     cost = 0.0
     turns = 0
     denials: list[str] = []
+    subtype: str | None = None
+    is_error = False
     for raw in stream.splitlines():
         raw = raw.strip()
         if not raw.startswith("{"):
@@ -247,14 +252,28 @@ def summarize(stream: str) -> dict:
             cost = event.get("total_cost_usd", 0.0) or 0.0
             turns = event.get("num_turns", 0)
             denials = [json.dumps(d)[:400] for d in event.get("permission_denials", [])]
+            subtype = event.get("subtype")
+            is_error = bool(event.get("is_error"))
     if denials:
         lines.append("PERMISSION DENIALS: " + "; ".join(denials))
+
+    # A turn that ended in `error_max_turns`, or with no result event at all,
+    # produced a log that looks like an ordinary short run. Grading it grades
+    # whatever the agent managed before it stopped, which is not the same
+    # question the case asks.
+    if subtype is None:
+        error = "the stream carried no result event"
+    elif subtype != "success" or is_error:
+        error = f"result subtype was {subtype!r} (is_error={is_error})"
+    else:
+        error = None
     return {
         "log": "\n".join(lines),
         "answer": answer,
         "cost_usd": cost,
         "turns": turns,
-        "error": None,
+        "result": subtype,
+        "error": error,
     }
 
 
@@ -331,6 +350,70 @@ def grade(case: dict, run: dict, model: str, workdir: Path, timeout: int) -> dic
         return {"grades": [], "error": "grader JSON did not parse"}
 
 
+GRADE_VALUES = frozenset({"pass", "fail", "ungraded"})
+
+
+def _normalised(text: str) -> str:
+    """Whitespace-insensitive, content-strict: a grader may rewrap, not reword."""
+    return " ".join(text.split())
+
+
+def grade_problem(case: dict, graded: dict) -> str | None:
+    """Why this grading cannot be aggregated, or None if it can.
+
+    The failure this exists for is quiet rather than loud. Pass rates are
+    computed from the grades that came back, so a grader that returns one grade
+    for a two-expectation case does not report half a case: it reports 1.0, with
+    the ungraded expectation gone from the denominator instead of gone from the
+    numerator. The missing one is disproportionately the expectation the grader
+    found hardest, which is the one worth knowing about, so the error lands in
+    the flattering direction."""
+    if graded.get("error"):
+        return graded["error"]
+    grades = graded.get("grades", [])
+    expectations = case["expectations"]
+    if len(grades) != len(expectations):
+        return f"{len(grades)} grades returned for {len(expectations)} expectations"
+    for position, (grade, expectation) in enumerate(zip(grades, expectations), start=1):
+        if _normalised(str(grade.get("expectation", ""))) != _normalised(expectation):
+            return f"grade {position} does not name expectation {position} verbatim"
+        if grade.get("grade") not in GRADE_VALUES:
+            return f"grade {position} is {grade.get('grade')!r}, not one of {sorted(GRADE_VALUES)}"
+    return None
+
+
+def unusable_configurations(
+    jobs: list[tuple[dict, bool]],
+    runs: dict[tuple[int, bool], dict],
+    graded: dict[tuple[int, bool], dict],
+) -> list[dict]:
+    """Every case configuration that must not reach aggregation, with the reason.
+
+    Separate from main() for the same reason as the trigger gate: the property
+    worth proving is that a failed executor run or a partial, misordered or
+    invalidly-labelled grade array cannot contribute to a pass rate, and that is
+    a property of this function rather than of a run."""
+    broken = []
+    for case, with_skill in jobs:
+        key = (case["id"], with_skill)
+        run = runs.get(key)
+        grading = graded.get(key)
+        executor_fault = "no run was recorded" if run is None else run.get("error")
+        grading_fault = (
+            "no grading was recorded" if grading is None else grade_problem(case, grading)
+        )
+        if executor_fault is not None or grading_fault is not None:
+            broken.append(
+                {
+                    "case": case["id"],
+                    "configuration": "with_skill" if with_skill else "without_skill",
+                    "executor": executor_fault,
+                    "grading": grading_fault,
+                }
+            )
+    return broken
+
+
 def pass_rate(grades: list[dict]) -> tuple[int, int, int]:
     """Passes, fails, ungraded. Computed from the per-expectation array, never
     from a grader's own summary: a grader can emit a summary that contradicts its
@@ -380,6 +463,15 @@ def main() -> int:
         action="store_true",
         help="skip the freshness checks (offline runs); say so when reporting the numbers",
     )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help=(
+            "attempts per case run and per grading before the whole run is "
+            "abandoned without a benchmark"
+        ),
+    )
     args = parser.parse_args()
 
     workspace = args.workspace or Path(tempfile.mkdtemp(prefix="output-eval-"))
@@ -402,9 +494,7 @@ def main() -> int:
     jobs = [(case, with_skill) for case in cases for with_skill in (True, False)]
     runs: dict[tuple[int, bool], dict] = {}
 
-    def work(job: tuple[dict, bool]) -> None:
-        case, with_skill = job
-        tag = "with" if with_skill else "without"
+    def run_once_for(case: dict, with_skill: bool, tag: str, attempt: int) -> dict:
         # One sentinel per run, so a hit belongs to exactly this case in exactly
         # this configuration without anyone matching on paths afterwards.
         post: Sentinel = start_sentinel()
@@ -425,7 +515,7 @@ def main() -> int:
                 project,
                 args.model,
                 args.timeout,
-                workspace / "transcripts" / f"case{case['id']}-{tag}.jsonl",
+                workspace / "transcripts" / f"case{case['id']}-{tag}{'' if attempt == 1 else f'-a{attempt}'}.jsonl",
                 EXEC_ALLOWED + args.allow,
                 child_env(args.env, data_dir),
             )
@@ -437,8 +527,26 @@ def main() -> int:
         # absence of a command in the transcript: it is the endpoint saying so.
         outcome["sentinel_hits"] = [hit.describe() for hit in post.hits]
         outcome["log"] = f"{outcome['log']}\n{post.summary()}".strip()
+        return outcome
+
+    def work(job: tuple[dict, bool]) -> None:
+        case, with_skill = job
+        tag = "with" if with_skill else "without"
+        outcome: dict = {}
+        for attempt in range(1, args.max_attempts + 1):
+            outcome = run_once_for(case, with_skill, tag, attempt)
+            if outcome["error"] is None:
+                break
+            log(
+                f"  case {case['id']} {tag:7s} INVALID attempt {attempt}/"
+                f"{args.max_attempts}: {outcome['error']}"
+            )
         runs[(case["id"], with_skill)] = outcome
-        hit_note = f", {len(post.hits)} SENTINEL HIT(S)" if post.hits else ""
+        hit_note = (
+            f", {len(outcome['sentinel_hits'])} SENTINEL HIT(S)"
+            if outcome.get("sentinel_hits")
+            else ""
+        )
         log(
             f"  case {case['id']} {tag:7s} ran ({outcome['turns']} turns, "
             f"${outcome['cost_usd']:.2f}{hit_note})"
@@ -454,12 +562,51 @@ def main() -> int:
 
     def do_grade(job: tuple[dict, bool]) -> None:
         case, with_skill = job
-        graded[(case["id"], with_skill)] = grade(
-            case, runs[(case["id"], with_skill)], args.grader_model, grader_dir, args.timeout
-        )
+        tag = "with" if with_skill else "without"
+
+        # A run that failed is not going to be aggregated whatever the grader
+        # says, and grading it costs a full model call per attempt to produce a
+        # verdict on a turn that stopped early.
+        failed = runs[(case["id"], with_skill)]["error"]
+        if failed is not None:
+            graded[(case["id"], with_skill)] = {
+                "grades": [],
+                "error": f"not graded: the run failed ({failed})",
+                "problem": f"not graded: the run failed ({failed})",
+            }
+            return
+
+        result: dict = {}
+        for attempt in range(1, args.max_attempts + 1):
+            result = grade(
+                case, runs[(case["id"], with_skill)], args.grader_model, grader_dir, args.timeout
+            )
+            result["problem"] = grade_problem(case, result)
+            if result["problem"] is None:
+                break
+            log(
+                f"  case {case['id']} {tag:7s} REGRADE attempt {attempt}/"
+                f"{args.max_attempts}: {result['problem']}"
+            )
+        graded[(case["id"], with_skill)] = result
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         list(pool.map(do_grade, jobs))
+
+    # The gate. Aggregating around a failed run or a partial grade array is how a
+    # harness reports a pass rate for a measurement it did not make, so nothing
+    # is aggregated until every configuration of every case is whole.
+    broken = unusable_configurations(jobs, runs, graded)
+    if broken:
+        detail = workspace / "invalid-run.json"
+        detail.write_text(json.dumps({"broken": broken}, indent=2) + "\n", encoding="utf-8")
+        print(f"\nRUN INVALID, nothing aggregated. {len(broken)} configuration(s) unusable.")
+        print("A pass rate here would be computed over the expectations that survived:")
+        for entry in broken:
+            fault = entry["executor"] or entry["grading"]
+            print(f"  - case {entry['case']} {entry['configuration']}: {fault}")
+        print(f"  detail    {detail}")
+        return 2
 
     report = {"skill": name, "model": args.model, "grader_model": args.grader_model, "cases": []}
     totals = {True: [0, 0, 0], False: [0, 0, 0]}
