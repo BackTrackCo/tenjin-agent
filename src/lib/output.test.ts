@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { emitSuccess, emitFailure, normalizeError } from './output';
+import { emitFailure, emitNotice, emitSuccess, normalizeError } from './output';
 import { sanitizeForTerminal } from './output';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
@@ -132,6 +132,30 @@ describe('emitFailure', () => {
     emitFailure(cap.io, 'x', err);
     expect(cap.stdout()).not.toContain('0.05');
     expect(cap.stdout()).not.toContain('price');
+  });
+});
+
+describe('emitNotice', () => {
+  it('writes one line to STDERR at a TTY, leaving stdout for the envelope', () => {
+    const cap = captureIo(true);
+    emitNotice(cap.io, 'spending window restarted');
+    expect(cap.stderr()).toBe('spending window restarted\n');
+    expect(cap.stdout()).toBe('');
+  });
+
+  it('is silent off a TTY and under --json (a machine consumer sees nothing)', () => {
+    const piped = captureIo(false);
+    emitNotice(piped.io, 'noise');
+    expect(piped.stderr()).toBe('');
+    const json = captureIo(true);
+    emitNotice(json.io, 'noise', { json: true });
+    expect(json.stderr()).toBe('');
+  });
+
+  it('sanitizes what it is given: these lines quote untrusted text', () => {
+    const cap = captureIo(true);
+    emitNotice(cap.io, 'version \u001b[2K1.0.0\u202e is available');
+    expect(cap.stderr()).toBe('version 1.0.0 is available\n');
   });
 });
 
