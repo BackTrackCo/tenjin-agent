@@ -25,20 +25,25 @@ const CHECK_INTERVAL_MS = 86_400_000; // 24h
 const FETCH_TIMEOUT_MS = 1500;
 const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags';
 
-/** The cache is a pure optimization, so a bad one is re-fetched, never repaired. */
-const CacheSchema = z.object({
-  schemaVersion: z.literal(1),
-  /**
-   * The dist-tag this answer came from. Required, because a machine can run both
-   * an alpha and a stable build out of the same data dir: without it the other
-   * channel's binary would read this `latest` as its own and either nudge toward
-   * a version its install command cannot reach, or sit on a stale "up to date".
-   */
-  tag: z.string(),
+/** What is known about ONE dist-tag: when it was asked, and what it said. */
+const TagEntrySchema = z.object({
   checkedAtMs: z.number(),
   latest: z.string(),
-  /** When the nudge was last PRINTED. Absent until one has been. */
+  /** When the nudge was last PRINTED for this tag. Absent until one has been. */
   notifiedAtMs: z.number().optional(),
+});
+
+/**
+ * The cache is a pure optimization, so a bad one is re-fetched, never repaired.
+ *
+ * One entry PER TAG rather than one entry total, because a machine can run an
+ * alpha and a stable build out of the same data dir. A single record would make
+ * every channel switch evict the other channel's answer, and the returning binary
+ * would re-fetch and re-print a notice it had already shown seconds earlier.
+ */
+const CacheSchema = z.object({
+  schemaVersion: z.literal(1),
+  tags: z.record(z.string(), TagEntrySchema),
 });
 type Cache = z.infer<typeof CacheSchema>;
 
@@ -78,20 +83,20 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // stable release they cannot get from `@alpha` would be noise, not news.
     const tag = parseVersion(current)?.alpha !== null ? 'alpha' : 'latest';
 
-    // An entry from the OTHER channel answers a different question, so it is no
-    // more usable than no entry at all.
+    // Only this tag's entry answers this binary's question; the other channel's
+    // is neither used nor disturbed.
     const cached = await readCache(path);
-    const usable = cached !== null && cached.tag === tag ? cached : null;
-    const fresh = usable !== null && nowMs - usable.checkedAtMs < CHECK_INTERVAL_MS;
+    const entry = cached?.tags[tag];
+    const fresh = entry !== undefined && nowMs - entry.checkedAtMs < CHECK_INTERVAL_MS;
 
-    const latest = fresh ? usable.latest : await fetchLatest(deps, tag);
+    const latest = fresh ? entry.latest : await fetchLatest(deps, tag);
     if (latest === null) return; // asked and learned nothing: cache nothing either
 
     // Once a day means once a day, not once per FETCH: a fresh cache would
     // otherwise repeat the same line on every command for 24h. The two clocks are
     // separate because they answer separate questions — when we last asked npm,
     // and when we last interrupted the human.
-    const notifiedAtMs = usable?.notifiedAtMs;
+    const notifiedAtMs = entry?.notifiedAtMs;
     const due =
       isNewer(latest, current) &&
       (notifiedAtMs === undefined || nowMs - notifiedAtMs >= CHECK_INTERVAL_MS);
@@ -106,10 +111,16 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     if (!fresh || due) {
       await writeCache(path, {
         schemaVersion: 1,
-        tag,
-        checkedAtMs: fresh ? usable.checkedAtMs : nowMs,
-        latest,
-        ...(nudgedAtMs !== undefined ? { notifiedAtMs: nudgedAtMs } : {}),
+        // Read-modify-write: the tag this run did not ask about keeps whatever it
+        // knew, including its own nudge clock.
+        tags: {
+          ...cached?.tags,
+          [tag]: {
+            checkedAtMs: fresh ? entry.checkedAtMs : nowMs,
+            latest,
+            ...(nudgedAtMs !== undefined ? { notifiedAtMs: nudgedAtMs } : {}),
+          },
+        },
       });
     }
     if (!due) return;
