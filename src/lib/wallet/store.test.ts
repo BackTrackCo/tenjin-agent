@@ -3,7 +3,13 @@ import { mkdtemp, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CliError } from '../errors';
-import { readWalletRecord, walletFileExists, walletFileMode, writeWalletRecord } from './store';
+import {
+  WALLET_SCHEMA_VERSION,
+  readWalletRecord,
+  walletFileExists,
+  walletFileMode,
+  writeWalletRecord,
+} from './store';
 import { fakeRecord } from './test-support';
 
 const isWindows = process.platform === 'win32';
@@ -92,6 +98,45 @@ describe('readWalletRecord', () => {
     expect(err.code).toBe('WALLET_INVALID_KEY');
     expect(err.message).toContain('predates encrypted storage');
     expect(err.fix).toContain('sweep any funds');
+  });
+
+  it('reports a newer-schema record as a downgrade, never as an invalid key', async () => {
+    await writeWalletRecord(dataDir, fakeRecord());
+    await writeFile(
+      walletFile(),
+      JSON.stringify({
+        schemaVersion: WALLET_SCHEMA_VERSION + 1,
+        provider: 'local',
+        address: '0x' + 'a'.repeat(40),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const err = (await readWalletRecord(dataDir).catch((e) => e)) as CliError;
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    expect(err.message).toContain('newer tenjin-cli');
+  });
+
+  // The whole point of the branch above: the generic parse failure's fix text
+  // walks a downgraded operator into abandoning a funded wallet.
+  it('never suggests recreating the wallet on a newer-schema record', async () => {
+    await writeWalletRecord(dataDir, fakeRecord());
+    await writeFile(
+      walletFile(),
+      JSON.stringify({ schemaVersion: WALLET_SCHEMA_VERSION + 1, provider: 'local' }),
+    );
+    const err = (await readWalletRecord(dataDir).catch((e) => e)) as CliError;
+    expect(err.fix).not.toContain('wallet create');
+    expect(err.fix).toContain('npm i -g tenjin-cli');
+  });
+
+  it('still rejects an unknown-shape record at the current schema version', async () => {
+    await writeWalletRecord(dataDir, fakeRecord());
+    await writeFile(
+      walletFile(),
+      JSON.stringify({ schemaVersion: WALLET_SCHEMA_VERSION, provider: 'local', nonsense: true }),
+    );
+    const err = (await readWalletRecord(dataDir).catch((e) => e)) as CliError;
+    expect(err.code).toBe('WALLET_INVALID_KEY');
   });
 });
 

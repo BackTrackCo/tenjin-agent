@@ -41,8 +41,12 @@ const KeystoreV3Schema = z.object({
  * keystore. Validated on read (a corrupt file is WALLET_INVALID_KEY, never a
  * silent partial parse).
  */
+/** The wallet-record schema this build writes and reads. Anything higher on disk
+ *  was written by a newer CLI; see `readWalletRecord`. */
+export const WALLET_SCHEMA_VERSION = 2;
+
 export const WalletRecordSchema = z.object({
-  schemaVersion: z.literal(2),
+  schemaVersion: z.literal(WALLET_SCHEMA_VERSION),
   provider: z.literal('local'),
   address: z.string().regex(ADDRESS_RE, 'expected a 0x-prefixed 20-byte address'),
   keystore: KeystoreV3Schema,
@@ -99,6 +103,23 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
       },
     );
   }
+  // A record from a NEWER CLI, which is a downgrade and not a corruption: the
+  // keystore is intact and the binary that wrote it still reads it. This has to
+  // be caught before the generic parse failure below, because that failure tells
+  // the operator to move the file aside and run `wallet create` — advice that on
+  // a downgrade abandons a funded wallet. CONTRACT_MISMATCH is the code the API
+  // layer already uses for a version skew between two sides of a schema, and it
+  // is not a code an agent recreates a wallet on.
+  const newer = newerSchemaVersion(json);
+  if (newer !== null) {
+    throw new CliError(
+      'CONTRACT_MISMATCH',
+      `The wallet file at ${path} was written by a newer tenjin-cli (wallet schema v${newer}; this build reads v${WALLET_SCHEMA_VERSION}).`,
+      {
+        fix: 'Upgrade with `npm i -g tenjin-cli`. Do not delete or recreate the wallet: the newer CLI still reads this one, and the funds are on the address it holds.',
+      },
+    );
+  }
   const parsed = WalletRecordSchema.safeParse(json);
   if (!parsed.success) {
     throw new CliError(
@@ -144,6 +165,13 @@ export async function writeWalletRecord(dir: string, record: WalletRecord): Prom
     if (hasCode(err, 'EEXIST')) throw walletExistsError(dir, err);
     throw err;
   }
+}
+
+/** The schema version of a record from a future CLI, or null when this build reads it. */
+function newerSchemaVersion(json: unknown): number | null {
+  if (typeof json !== 'object' || json === null) return null;
+  const v = (json as Record<string, unknown>).schemaVersion;
+  return typeof v === 'number' && v > WALLET_SCHEMA_VERSION ? v : null;
 }
 
 /** A cleartext-key record from before encrypted storage: schema v1 or a bare `privateKey`. */
