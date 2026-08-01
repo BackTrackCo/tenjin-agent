@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, mkdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -84,6 +84,7 @@ type Harnesses = Array<{
     modelInvocable: boolean;
   }>;
   hostedPreexisting: boolean;
+  hostedArrivedFirst: boolean;
   agentsMd?: { path: string; status: string };
   claudeMd?: { path: string; status: string };
   codexNetworkRule?: string;
@@ -1467,6 +1468,29 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(text).toContain('take precedence');
   });
 
+  // The notice is about arriving through the hosted skill. After run 1 the mirror on
+  // disk is one the CLI wrote, so claiming it "was already here" reports our own
+  // footprint back to the user as something they did.
+  it('does not claim a pre-existing hosted skill on a re-run of its own install', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const h = asData(res.data).harnesses[0]!;
+    // The raw fact stays true (a SKILL.md was on disk); only the notice gate narrows.
+    expect(h.hostedPreexisting).toBe(true);
+    expect(h.hostedArrivedFirst).toBe(false);
+    expect(h.notes.join('\n')).not.toContain('was already here');
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).not.toContain('kept as the zero-install fallback');
+  });
+
+  it('still notices the genuine hosted-first funnel', async () => {
+    await seedHostedSkill(join(home, '.claude', 'skills'));
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const h = asData(res.data).harnesses[0]!;
+    expect(h.hostedArrivedFirst).toBe(true);
+    expect(h.notes.join('\n')).toContain('was already here');
+  });
+
   // The hosted-skill-first funnel puts the mirror in BOTH targets, and the notice
   // is emitted once per harness. Without the directory the two lines are byte
   // identical and read as the CLI stuttering.
@@ -1512,6 +1536,77 @@ describe('runInstall: hosted skill already present (#35)', () => {
       SKILL_NAMES.map((n) => readFile(join(claudeSkills, n, 'SKILL.md'), 'utf8')),
     );
     expect(after).toEqual(before);
+  });
+
+  // The wipe is deliberate (the packaged copy is exactly what lands), but it takes
+  // whatever else lives in the directory, and `references/` is a normal skill layout.
+  // Silence there is data loss the user finds out about later, if ever.
+  it('names local files the wipe removes, and does not call an identical copy "differed"', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    const packaged = join(SKILLS_SRC, 'tenjin-search', 'SKILL.md');
+    await writeFile(join(dir, 'SKILL.md'), await readFile(packaged)); // byte-identical
+    await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('references/notes.md');
+    expect(warning).toContain('was also removed');
+    // The shared file was identical, so the old "local skill copy differed" was a lie.
+    expect(warning).not.toContain('differed');
+    expect(existsSync(join(dir, 'references', 'notes.md'))).toBe(false);
+  });
+
+  it('reports nothing extra when the wipe takes only packaged files', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
+    expect(warning).toContain('differed'); // the shared file really did differ
+    expect(warning).not.toContain('also removed');
+  });
+
+  // `rm` on a symlink removes the LINK. The old path replaced a dotfiles-managed
+  // directory with a real one and silently stopped the user's repo edits from
+  // reaching the harness.
+  it('writes through a symlinked skill directory and leaves the link intact', async () => {
+    if (process.platform === 'win32') return;
+    const real = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(real, { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(real, link);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    const packaged = await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'));
+    expect(await readFile(join(real, 'SKILL.md'))).toEqual(packaged);
+  });
+
+  // An unwritable HOME is an environment problem. It reached the envelope as a raw
+  // `EACCES: permission denied, mkdir ...` under INTERNAL with no fix, which reads
+  // as a CLI bug and leaves the operator nothing to do.
+  it('turns an unwritable skills directory into a typed error with a fix', async () => {
+    // root ignores mode bits, so the chmod would not deny anything.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const skills = join(home, '.claude', 'skills');
+    await mkdir(skills, { recursive: true });
+    await chmod(skills, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.fix).toContain('tenjin install');
+      expect(err.message).not.toContain('EACCES'); // the raw errno is the cause, not the message
+    } finally {
+      await chmod(skills, 0o700);
+    }
   });
 
   it('a stale disable-model-invocation publish skill is overwritten and re-wired', async () => {

@@ -1,12 +1,13 @@
 import { existsSync } from 'node:fs';
-import { readFile, readdir, rm } from 'node:fs/promises';
+import { readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
+import { hasCode } from '../lib/errno';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
@@ -170,6 +171,12 @@ interface HarnessResult {
    * which is exactly the state #35 was invisible in.
    */
   hostedPreexisting: boolean;
+  /**
+   * Narrower than {@link HarnessResult.hostedPreexisting}: the hosted skill was here
+   * AND the CLI adapters were not, which is the hosted-zero-install-first funnel
+   * rather than a second run finding our own mirror. This is what gates the notice.
+   */
+  hostedArrivedFirst: boolean;
   agentsMd?: AgentsMdResult;
   claudeMd?: ClaudeMdResult;
   codexNetworkRule?: string;
@@ -377,7 +384,7 @@ function buildWalkthrough(io: Io, s: WalkthroughState): string[] {
 function noticeLines(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
   for (const h of s.harnesses) {
-    if (h.hostedPreexisting) {
+    if (h.hostedArrivedFirst) {
       // Named by DIRECTORY, because this loop emits one line per harness: a user
       // who came in through the hosted skill has it in both, and "already here"
       // twice in a row reads as the CLI stuttering rather than as two facts.
@@ -859,6 +866,12 @@ async function applyPlan(
   }
 
   const hostedPreexisting = skills.some((s) => s.name === HOSTED_SKILL_NAME && s.preexisting);
+  // The NOTICE is about having arrived through the hosted zero-install skill, which
+  // is only news when the CLI adapters were NOT already wired. After any earlier
+  // install the hosted mirror on disk is one we wrote ourselves, so gating on
+  // `hostedPreexisting` alone made every re-run (and every resumed interrupted run)
+  // report the CLI's own footprint back to the user as something they had done.
+  const hostedArrivedFirst = hostedPreexisting && !skills.some((s) => s.cli && s.preexisting);
   const result: HarnessResult = {
     harness: plan.harness,
     detected: plan.detected,
@@ -866,7 +879,8 @@ async function applyPlan(
     skillsDir: plan.skillsDir,
     skills,
     hostedPreexisting,
-    notes: notesFor(plan, hostedPreexisting),
+    hostedArrivedFirst,
+    notes: notesFor(plan, hostedArrivedFirst),
     warnings,
   };
 
@@ -900,7 +914,7 @@ async function wireClaudeMd(
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
-function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
+function notesFor(plan: HarnessPlan, hostedArrivedFirst: boolean): string[] {
   const notes =
     plan.harness === 'claude'
       ? [
@@ -909,9 +923,13 @@ function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
       : [
           'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
         ];
-  if (hostedPreexisting) {
+  if (hostedArrivedFirst) {
+    // Says "the skill stays", never "your copy is untouched": the FILE is replaced
+    // by this package's mirror (see installSkill's hosted-skill warning), and a note
+    // that reads as preservation next to a warning that says replacement is worse
+    // than either alone.
     notes.push(
-      `The hosted ${HOSTED_SKILL_NAME} skill was already here; it stays as the zero-install fallback and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
+      `The hosted ${HOSTED_SKILL_NAME} skill was already here; the skill stays as the zero-install fallback (its file is replaced by this package's mirror) and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
     );
   }
   return notes;
@@ -997,12 +1015,39 @@ async function installSkill(
   const change =
     dest === null || dest.size === 0 ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
 
+  // Files in the destination that the package does not ship. The wipe below takes
+  // them, so they have to be NAMED: "overwritten" reads as "your edits to the skill
+  // were replaced", and a user who kept notes or a references/ folder beside the
+  // SKILL.md loses them with no idea it happened.
+  const removed = dest === null ? [] : [...dest.keys()].filter((rel) => !src.has(rel)).sort();
+  // Only true of the files BOTH sides have. A byte-identical SKILL.md sitting next
+  // to one extra local file is not a skill copy that "differed".
+  const shared =
+    dest !== null && [...src.keys()].some((rel) => !bufEquals(src.get(rel), dest.get(rel)));
+
   if (!dryRun && change !== 'none') {
-    // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
-    // local files left behind. rm is a no-op when the dir is absent.
-    await rm(destDir, { recursive: true, force: true });
-    for (const [rel, content] of src) {
-      await writeFileAtomic(join(destDir, rel), content);
+    // Resolve a symlinked skill directory and write at its TARGET. `rm` on a link
+    // removes the LINK, so the old path replaced a dotfiles-managed directory with
+    // a real one, orphaned the target, and silently stopped the user's repo edits
+    // from reaching the harness. Same reasoning as the settings.json writer.
+    const target = await realpath(destDir).catch(() => destDir);
+    try {
+      // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
+      // local files left behind. rm is a no-op when the dir is absent.
+      await rm(target, { recursive: true, force: true });
+      for (const [rel, content] of src) {
+        await writeFileAtomic(join(target, rel), content);
+      }
+    } catch (err) {
+      // An unwritable HOME is an environment problem, and it reached the envelope as
+      // a raw `EACCES: permission denied, mkdir ...` under code INTERNAL with no
+      // `fix` — which reads as a CLI bug and leaves the operator nothing to do.
+      // Every other error path in this CLI carries a fix; this one now does too.
+      if (!hasCode(err, 'EACCES') && !hasCode(err, 'EPERM')) throw err;
+      throw new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
+        fix: `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`,
+        cause: err,
+      });
     }
   }
 
@@ -1017,9 +1062,31 @@ async function installSkill(
     // direction: the local file may well be a newer fetch than this package's copy.
     warning:
       name === HOSTED_SKILL_NAME
-        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.`
-        : `${destDir}: local skill copy differed and ${dryRun ? 'would be' : 'was'} overwritten (the packaged copy is canonical).`,
+        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.${removedNote(removed, dryRun)}`
+        : `${destDir}: ${
+            shared
+              ? `local skill copy differed and ${dryRun ? 'would be' : 'was'} overwritten (the packaged copy is canonical).`
+              : `the packaged copy is canonical and ${dryRun ? 'would be' : 'was'} written over this directory.`
+          }${removedNote(removed, dryRun)}`,
   };
+}
+
+/**
+ * The clause naming local files the wipe takes. Named rather than counted: a user
+ * cannot decide whether losing them matters from a number, and this is the only
+ * notice they get before the files are gone.
+ */
+function removedNote(removed: readonly string[], dryRun: boolean): string {
+  if (removed.length === 0) return '';
+  const one = removed.length === 1;
+  const noun = one ? '1 local file' : `${removed.length} local files`;
+  const verb = dryRun ? 'would also be removed' : one ? 'was also removed' : 'were also removed';
+  return ` ${noun} not shipped with the skill ${verb}: ${removed.join(', ')}.`;
+}
+
+/** Buffer equality that treats "absent on one side" as unequal. */
+function bufEquals(a: Buffer | undefined, b: Buffer | undefined): boolean {
+  return a !== undefined && b !== undefined && a.equals(b);
 }
 
 /**
