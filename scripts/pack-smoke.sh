@@ -141,7 +141,14 @@ mkdir -p "$LOCK_DATA/skills-sync.lock"
 HOME="$LOCK_HOME" TENJIN_DATA_DIR="$LOCK_DATA" "$BIN" install --harness claude \
   --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
 WAITER_PID=$!
-sleep 1
+# Poll for readiness instead of a fixed sleep: on a loaded runner a fixed wait can
+# signal before the handler is registered, which fails for the wrong reason.
+for _ in $(seq 1 100); do
+  kill -0 "$WAITER_PID" 2>/dev/null || break
+  # The lock is pre-held, so the waiter produces no output; wait for node to be up.
+  if ps -o command= -p "$WAITER_PID" 2>/dev/null | grep -q tenjin; then sleep 0.5; break; fi
+  sleep 0.1
+done
 kill -INT "$WAITER_PID" 2>/dev/null || true
 wait "$WAITER_PID" 2>/dev/null || true
 if [ ! -d "$LOCK_DATA/skills-sync.lock" ]; then

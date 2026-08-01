@@ -1,5 +1,32 @@
+import { rmSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+/**
+ * Locks this process currently holds. Ownership starts the instant `mkdir`
+ * succeeds and ends in the release, so there is no window where a lock is on disk
+ * and unaccounted for.
+ *
+ * It exists because the default signal action terminates WITHOUT running
+ * `finally`: without this, one Ctrl-C leaves a lock nothing will ever clean and
+ * every later run of the same command times out on it.
+ */
+const owned = new Set<string>();
+
+/** Does this process hold any lock right now? */
+export function ownsAnyLock(): boolean {
+  return owned.size > 0;
+}
+
+/**
+ * Synchronously release every lock this process holds. Safe to call from a signal
+ * handler, and a no-op when this process holds none, so a run that was merely
+ * QUEUED behind another cannot remove that other run's lock.
+ */
+export function releaseOwnedLocks(): void {
+  for (const path of owned) rmSync(path, { recursive: true, force: true });
+  owned.clear();
+}
 
 export interface FileLockOptions {
   /** Give up acquiring after this long (ms). */
@@ -43,6 +70,7 @@ export async function withFileLock<T>(
   for (;;) {
     try {
       await mkdir(lockPath);
+      owned.add(lockPath); // owned from here, released only in the finally below
       break; // acquired
     } catch (err) {
       if (!isEexist(err)) throw err;

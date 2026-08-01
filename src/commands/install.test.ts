@@ -1,5 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { chmod, lstat, mkdtemp, mkdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readdir,
+  rm,
+  readFile,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -437,15 +447,17 @@ describe('runInstall: canonical overwrite', () => {
     expect(written).toBe(source);
   });
 
-  it('removes stray local files so the packaged copy is exactly what lands', async () => {
+  // install owns the files it ships, not the directory they live in. Anything else
+  // there is the operator's and is never read, listed, or removed.
+  it('writes the packaged files and leaves everything else in the directory alone', async () => {
     const dest = join(home, '.claude', 'skills', 'tenjin');
     await mkdir(dest, { recursive: true });
     await writeFile(join(dest, 'SKILL.md'), 'stale\n');
     await writeFile(join(dest, 'stray.txt'), 'orphan\n');
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(existsSync(join(dest, 'stray.txt'))).toBe(false);
-    expect(existsSync(join(dest, 'SKILL.md'))).toBe(true);
+    expect(await readFile(join(dest, 'stray.txt'), 'utf8')).toBe('orphan\n');
+    expect(await readFile(join(dest, 'SKILL.md'), 'utf8')).not.toBe('stale\n');
   });
 
   it('dry-run over a drifted copy reports would-update and warns, writing nothing', async () => {
@@ -1568,106 +1580,35 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(after).toEqual(before);
   });
 
-  // The wipe is deliberate (the packaged copy is exactly what lands), but it takes
-  // whatever else lives in the directory, and `references/` is a normal skill layout.
-  // Silence there is data loss the user finds out about later, if ever.
-  it('names local files the wipe removes, and does not call an identical copy "differed"', async () => {
+  // A user's own files beside the SKILL.md are not ours. The old wipe took them and
+  // called it "overwritten"; nothing removes them now.
+  it("leaves a user's files beside the skill untouched", async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(dir, 'references'), { recursive: true });
-    const packaged = join(SKILLS_SRC, 'tenjin-search', 'SKILL.md');
-    await writeFile(join(dir, 'SKILL.md'), await readFile(packaged)); // byte-identical
+    await writeFile(
+      join(dir, 'SKILL.md'),
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
-    expect(warning).toBeDefined();
-    expect(warning).toContain('references/notes.md');
-    expect(warning).toContain('was also removed');
-    // The shared file was identical, so the old "local skill copy differed" was a lie.
-    expect(warning).not.toContain('differed');
-    expect(existsSync(join(dir, 'references', 'notes.md'))).toBe(false);
+    const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+    // The packaged file was already identical, so nothing changed at all.
+    expect(skill.status).toBe('up-to-date');
+    expect(asData(data).harnesses[0]!.warnings.filter((w) => w.includes('tenjin-search'))).toEqual(
+      [],
+    );
+    expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
 
-  // A filename is operator data. One carrying ANSI or newlines could forge status
-  // lines beside the warning it appears in.
-  it('sanitizes a removed filename carrying control bytes', async () => {
+  it('still warns when it overwrites local edits to a SKILL.md it owns', async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
-    await writeFile(join(dir, 'a\u001b[31mb\u0007.md'), 'x');
-
-    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'))!;
-    expect(warning).toContain('also removed');
-    expect(warning).not.toContain('\u001b');
-    expect(warning).not.toContain('\u0007');
-  });
-
-  it('reports nothing extra when the wipe takes only packaged files', async () => {
-    const dir = join(home, '.claude', 'skills', 'tenjin-search');
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nmy edits\n');
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
-    expect(warning).toContain('differed'); // the shared file really did differ
-    expect(warning).not.toContain('also removed');
-  });
-
-  // Neither option is ours to pick silently: following the link wipes whatever the
-  // operator manages at the target, and `rm` on the link detaches the path they set
-  // up. So the write is refused and nothing is touched on either side.
-  it('refuses a symlinked skill directory and leaves the link and its target alone', async () => {
-    if (process.platform === 'win32') return;
-    const real = join(home, 'dotfiles', 'tenjin-search');
-    await mkdir(join(real, 'references'), { recursive: true });
-    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nmine\n');
-    await writeFile(join(real, 'references', 'notes.md'), 'my private notes');
-    const link = join(home, '.claude', 'skills', 'tenjin-search');
-    await mkdir(dirname(link), { recursive: true });
-    await symlink(real, link);
-
-    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
-      (e) => e,
-    )) as CliError;
-    expect(err).toBeInstanceOf(CliError);
-    expect(err.code).toBe('REFUSED');
-    expect(err.message).toContain('is a symlink');
-    // Both sides untouched: the link still a link, the target's files still theirs.
-    expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    expect(await readFile(join(real, 'SKILL.md'), 'utf8')).toContain('mine');
-    expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
-  });
-
-  // A DANGLING link read as "absent" through existsSync, so the write replaced it
-  // with a real directory and permanently detached the managed path.
-  it('refuses a dangling symlink instead of replacing it with a real directory', async () => {
-    if (process.platform === 'win32') return;
-    const link = join(home, '.claude', 'skills', 'tenjin-search');
-    await mkdir(dirname(link), { recursive: true });
-    await symlink(join(home, 'nowhere', 'tenjin-search'), link);
-
-    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
-      (e) => e,
-    )) as CliError;
-    expect(err.code).toBe('REFUSED');
-    expect((await lstat(link)).isSymbolicLink()).toBe(true);
-  });
-
-  // readTree only records isFile(), so a symlinked note was invisible to both tree
-  // equality and the removal list, and the wipe took it without naming it.
-  it('names a nested symlink the wipe removes', async () => {
-    if (process.platform === 'win32') return;
-    const dir = join(home, '.claude', 'skills', 'tenjin-search');
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
-    await writeFile(join(home, 'real-notes.md'), 'my private notes');
-    await symlink(join(home, 'real-notes.md'), join(dir, 'notes.md'));
-
-    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
-    expect(warning).toContain('notes.md');
-    expect(existsSync(join(dir, 'notes.md'))).toBe(false);
+    expect(warning).toContain('overwritten');
   });
 
   // An unwritable HOME is an environment problem. It reached the envelope as a raw
@@ -1690,6 +1631,55 @@ describe('runInstall: hosted skill already present (#35)', () => {
     } finally {
       await chmod(skills, 0o700);
     }
+  });
+
+  // Writing through the link is what the operator asked for by making it. Nothing
+  // is removed, so the dotfiles tree keeps both its link and its own files.
+  it('writes through a symlinked skill directory, keeping the link and their files', async () => {
+    if (process.platform === 'win32') return;
+    const real = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(join(real, 'references'), { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await writeFile(join(real, 'references', 'notes.md'), 'my private notes');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(real, link);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(real, 'SKILL.md'))).toEqual(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
+    expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
+  });
+
+  // A broken link cannot be written through. It must fail saying so, and must not
+  // quietly become a real directory.
+  it('fails a dangling symlink with a fix naming it, and leaves it a link', async () => {
+    if (process.platform === 'win32') return;
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(join(home, 'nowhere', 'tenjin-search'), link);
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.fix).toContain('symlink');
+    expect(err.message).not.toContain('ENOENT');
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  });
+
+  it('leaves a nested symlink in the skill directory alone', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(home, 'real-notes.md'), 'my private notes');
+    await symlink(join(home, 'real-notes.md'), join(dir, 'notes.md'));
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(join(dir, 'notes.md'))).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(dir, 'notes.md'), 'utf8')).toBe('my private notes');
   });
 
   it('a stale disable-model-invocation publish skill is overwritten and re-wired', async () => {
@@ -1832,19 +1822,17 @@ describe('runInstall: preexisting means a real prior copy', () => {
     const h = asData(d).harnesses[0]!;
     expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
     expect(h.hostedPreexisting).toBe(false);
-    // The stray file is cleared by the wholesale overwrite.
-    expect(existsSync(join(home, '.claude', 'skills', 'tenjin', 'asset.bin'))).toBe(false);
-    // ...and because bytes were destroyed, the destruction is still reported:
-    // `preexisting` answers "was a real copy here", `status`/`warnings` answer
-    // "did this run delete anything", and they are different questions.
-    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('updated');
-    expect(h.warnings.join('\n')).toContain(dir);
+    // The stray file is the operator's; nothing removes it, so this is a plain
+    // install of a skill that was not here, with nothing to warn about.
+    expect(await readFile(join(dir, 'asset.bin'), 'utf8')).toBe('partial');
+    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('installed');
+    expect(h.warnings.filter((w) => w.includes(dir))).toEqual([]);
   });
 
-  it('a destination holding the user OWN files keeps the overwrite warning', async () => {
+  it('installs alongside the user OWN files without touching any of them', async () => {
     // ~/.claude/skills/tenjin/skills.md is what `curl tenjin.blog/skills.md -o`
-    // leaves behind, and NOTES.md is the user's. rm(recursive) deletes both, so a
-    // silent `installed` with no warning was the only notice they ever got.
+    // leaves behind, and NOTES.md is the user's. The old rm(recursive) deleted
+    // both; the skill is now written beside them.
     const searchDir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(searchDir, 'references'), { recursive: true });
     await writeFile(join(searchDir, 'NOTES.md'), 'mine');
@@ -1855,14 +1843,17 @@ describe('runInstall: preexisting means a real prior copy', () => {
 
     const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const h = asData(d).harnesses[0]!;
-    const warnings = h.warnings.join('\n');
-    expect(warnings).toContain(searchDir);
-    expect(warnings).toContain(hostedDir);
-    expect(h.skills.find((s) => s.name === 'tenjin-search')?.status).toBe('updated');
-    // The `preexisting` semantics are unchanged: neither held a SKILL.md.
+    expect(await readFile(join(searchDir, 'NOTES.md'), 'utf8')).toBe('mine');
+    expect(await readFile(join(searchDir, 'references', 'mine.md'), 'utf8')).toBe('also mine');
+    expect(await readFile(join(hostedDir, 'skills.md'), 'utf8')).toBe(
+      '# a hand-saved hosted skill',
+    );
+    // Neither directory held a SKILL.md, so both are installs and neither is a
+    // copy that "was already here".
+    expect(h.skills.find((s) => s.name === 'tenjin-search')?.status).toBe('installed');
     expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
     expect(h.hostedPreexisting).toBe(false);
-    expect(existsSync(join(searchDir, 'NOTES.md'))).toBe(false);
+    expect(h.warnings).toEqual([]);
   });
 
   it('the mirror-replacement warning claims no direction about which copy is newer', async () => {
@@ -1877,6 +1868,22 @@ describe('runInstall: preexisting means a real prior copy', () => {
 });
 
 /** Writing the skill tree: locking, interrupts and destructive-write reporting. */
+/**
+ * The safety net under write-in-place. `installSkill` writes the files it ships and
+ * removes nothing, which cannot orphan anything while each skill is a single file.
+ * The day a skill ships a second file and a later release drops it, that file would
+ * linger in every install forever, and the fix is a manifest of what the previous
+ * version wrote. This fails first and says so.
+ */
+describe('the packaged skills are single-file, which is what makes write-in-place safe', () => {
+  it('ships exactly one SKILL.md per skill and nothing else', async () => {
+    for (const name of SKILL_NAMES) {
+      const entries = await readdir(join(SKILLS_SRC, name), { recursive: true });
+      expect(entries).toEqual(['SKILL.md']);
+    }
+  });
+});
+
 describe('runInstall: the skill-directory write', () => {
   // 5 concurrent runs used to fail 7 of 15 times on raw ENOENT/ENOTEMPTY renames,
   // because each skill is replaced by rm-then-write with nothing serializing them.
@@ -1918,39 +1925,5 @@ describe('runInstall: the skill-directory write', () => {
     expect(res).toBeDefined();
     expect(existsSync(join(data, 'skills-sync.lock'))).toBe(true); // still the holder's
     expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search'))).toBe(false);
-  });
-
-  // A directory holding only non-regular entries reads as `create`, because
-  // readTree keeps regular files only. The rm still takes its contents.
-  it('names removed entries even when no regular file was there to compare', async () => {
-    if (process.platform === 'win32') return;
-    const dir = join(home, '.claude', 'skills', 'tenjin-search');
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(home, 'target.md'), 'mine');
-    await symlink(join(home, 'target.md'), join(dir, 'my-notes.md'));
-
-    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    const skill = asData(d).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
-    expect(skill.status).toBe('installed');
-    const warning = asData(d).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
-    expect(warning).toContain('my-notes.md');
-    expect(existsSync(join(dir, 'my-notes.md'))).toBe(false);
-  });
-
-  // A dry run must not promise an overwrite the real run refuses.
-  it('refuses a symlinked skill directory on --dry-run too', async () => {
-    if (process.platform === 'win32') return;
-    const real = join(home, 'dotfiles', 'tenjin-search');
-    await mkdir(real, { recursive: true });
-    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nmine\n');
-    const link = join(home, '.claude', 'skills', 'tenjin-search');
-    await mkdir(dirname(link), { recursive: true });
-    await symlink(real, link);
-
-    const err = (await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps()).catch(
-      (e) => e,
-    )) as CliError;
-    expect(err).toBeInstanceOf(CliError);
-    expect(err.code).toBe('REFUSED');
   });
 });

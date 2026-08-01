@@ -1126,13 +1126,21 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       fetchImpl: healthyFetch,
     });
     const data = res.data as { status: string; checks: CheckResult[] };
+    // Every check still reported, and "cannot verify" is a warning rather than a
+    // green tick: an unreadable package is exactly what doctor should describe.
     expect(data.checks.length).toBeGreaterThan(3);
-    expect(find(data.checks, 'skills').status).toBe('ok'); // no evidence of drift
+    const check = find(data.checks, 'skills');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('could not be read');
+    expect(check.fix).toContain('npm i -g tenjin-cli');
   });
 
   // `install` refuses to write a symlinked skill directory, so calling it an old
   // build would advertise a fix that can never clear.
-  it('does not call a symlinked skill directory stale', async () => {
+  // `install` writes through a symlinked directory, so a stale one is reportable
+  // and the fix genuinely resolves it. (It used to be skipped, because install
+  // refused to touch it and the fix could never clear.)
+  it('reports a stale symlinked skill directory, whose fix now works', async () => {
     if (process.platform === 'win32') return;
     const src = await mkdtemp(join(tmpdir(), 'tenjin-pkg-'));
     for (const name of ['tenjin-search', 'tenjin-publish']) {
@@ -1140,7 +1148,6 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       await writeFile(join(src, name, 'SKILL.md'), 'current\n');
     }
     await wire('current\n');
-    // Replace one wired copy with a symlink to a differing tree.
     const real = join(skillHome, 'dotfiles', 'tenjin-search');
     await mkdir(real, { recursive: true });
     await writeFile(join(real, 'SKILL.md'), 'what an older CLI shipped\n');
@@ -1154,9 +1161,9 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       env: {},
       fetchImpl: healthyFetch,
     });
-    expect(find((res.data as { checks: CheckResult[] }).checks, 'skills').detail).not.toContain(
-      'not from this CLI build',
-    );
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('not from this CLI build');
     await rm(src, { recursive: true, force: true });
   });
 

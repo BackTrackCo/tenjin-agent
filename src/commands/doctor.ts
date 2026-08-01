@@ -1,7 +1,7 @@
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
-import { lstat, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
@@ -436,10 +436,22 @@ async function checkSkills(
   // Wired is not the same as CURRENT. `npm i -g tenjin-cli` updates the binary and
   // nothing else, so the copies install wrote stay at whatever version wrote them
   // until someone re-runs install, and every check above passes the whole time.
-  const stale = await staleSkillDirs(
+  const { stale, verifiable } = await compareWiredSkills(
     wiring.filter((w) => harnessInPlay(home, w.dir, present, requested)).map((w) => w.dir),
     skillsSourceDir,
   );
+  if (!verifiable) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read, so whether they are current is unknown`,
+        fix: 'Reinstall the CLI: `npm i -g tenjin-cli`, then `tenjin install`.',
+        data,
+      },
+    };
+  }
   if (stale.length > 0) {
     return {
       result: {
@@ -471,22 +483,25 @@ async function checkSkills(
 }
 
 /**
- * Directories whose wired CLI adapter skills differ from the packaged ones.
+ * How the wired CLI adapter skills compare to the packaged ones.
  *
- * Only the ADAPTERS: the hosted mirror is a copy of tenjin.blog/skills.md that an
- * operator may legitimately have re-fetched newer than this package ships. A
- * symlinked skill directory is skipped rather than called stale, because `install`
- * refuses to write one and reporting it as an old build would offer a fix that can
- * never clear. Unreadable on either side is not evidence of drift.
+ * `verifiable` is false when this build cannot read its own packaged copies, which
+ * is a broken package rather than evidence of no drift; reporting that as current
+ * would make the check quietly green on exactly the install doctor should describe.
+ *
+ * Only the ADAPTERS are compared: the hosted mirror is a copy of
+ * tenjin.blog/skills.md that an operator may legitimately have re-fetched newer
+ * than this package ships.
  */
-async function staleSkillDirs(dirs: readonly string[], sourceDir?: string): Promise<string[]> {
+async function compareWiredSkills(
+  dirs: readonly string[],
+  sourceDir?: string,
+): Promise<{ stale: string[]; verifiable: boolean }> {
   let source: string;
   try {
     source = sourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
   } catch {
-    // A package without its skills/ is exactly the broken install doctor exists to
-    // describe, so this check declines rather than taking the whole command down.
-    return [];
+    return { stale: [], verifiable: false };
   }
   // Read once, not once per directory.
   const packaged = new Map<string, Buffer>();
@@ -494,23 +509,21 @@ async function staleSkillDirs(dirs: readonly string[], sourceDir?: string): Prom
     const bytes = await readFile(join(source, name, 'SKILL.md')).catch(() => null);
     if (bytes !== null) packaged.set(name, bytes);
   }
+  if (packaged.size !== CLI_SKILL_NAMES.length) return { stale: [], verifiable: false };
 
   const stale: string[] = [];
   for (const dir of dirs) {
     for (const name of CLI_SKILL_NAMES) {
-      const want = packaged.get(name);
-      if (want === undefined) continue;
-      const entry = await lstat(join(dir, name)).catch(() => null);
-      if (entry === null || entry.isSymbolicLink()) continue;
       const onDisk = await readFile(join(dir, name, 'SKILL.md')).catch(() => null);
+      // Unreadable on disk is the wiring check's business, not this one's.
       if (onDisk === null) continue;
-      if (!want.equals(onDisk)) {
+      if (!packaged.get(name)!.equals(onDisk)) {
         stale.push(dir);
         break;
       }
     }
   }
-  return stale;
+  return { stale, verifiable: true };
 }
 
 /** What is wrong in ONE directory, naming the directory and the skills. */

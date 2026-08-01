@@ -384,7 +384,12 @@ describe('the session schema rejects a key that could not sign', () => {
     delete jwk.d;
     broken.privateKeyJwk = jwk;
     await writeFile(sessionPath(d), JSON.stringify(broken), { mode: 0o600 });
-    expect((await readSessionFile(d)).kind).toBe('corrupt');
+    const state = await readSessionFile(d);
+    expect(state.kind).toBe('corrupt');
+    // Pinned: the reason must name the BROKEN key, not the benign legacy omission,
+    // or the operator is pointed at the wrong field.
+    expect((state as { reason: string }).reason).toContain('privateKeyJwk');
+    expect((state as { reason: string }).reason).not.toContain('origin');
     expect(await loadSessionFile(d)).toBeNull();
   });
 

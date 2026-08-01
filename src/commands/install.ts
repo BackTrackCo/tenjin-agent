@@ -1,5 +1,5 @@
-import { existsSync, rmSync } from 'node:fs';
-import { lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -9,7 +9,7 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { LockTimeoutError, withFileLock } from '../lib/lock';
+import { LockTimeoutError, ownsAnyLock, releaseOwnedLocks, withFileLock } from '../lib/lock';
 import { skillsSyncLockPath } from '../lib/paths';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
@@ -998,12 +998,6 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
   });
 }
 
-/**
- * Copy one skill directory. The packaged copy is canonical: an absent target is
- * `installed`, an identical target is `up-to-date`, and any local drift is
- * overwritten and reported as `updated` with a warning. On --dry-run nothing is
- * written and the status reads `would-*`.
- */
 async function installSkill(
   srcDir: string,
   destDir: string,
@@ -1011,75 +1005,48 @@ async function installSkill(
   name: string,
 ): Promise<{ status: SkillResult['status']; warning?: string; preexisting: boolean }> {
   const src = await readTree(srcDir);
-  const dest = await readTree(destDir);
   if (src === null) {
     // assertSkillsSource already guards SKILL.md; this is defensive for an empty dir.
     throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
   }
-  // A real prior copy means a SKILL.md, not merely the directory: readTree returns
-  // an empty Map for a bare `mkdir`, and an interrupted write leaves a stray file
-  // with no SKILL.md. Neither is a skill that "was already here".
-  const preexisting = dest?.has('SKILL.md') === true;
 
-  // `change` is keyed off BYTES, not off `preexisting`: the rm below deletes whatever
-  // is in the destination, so anything with content in it is an overwrite and must
-  // carry the warning, even with no SKILL.md — a hand-saved `skills.md` and a
-  // directory of the user's own notes both live here. Only a bare `mkdir` (or a dir
-  // that does not exist) is a create, which is what `preexisting` reporting is for.
-  const change =
-    dest === null || dest.size === 0 ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
-
-  // Entries the wipe takes that the package does not ship, NAMED so a local
-  // references/ folder is not lost silently. Includes non-regular entries, which
-  // readTree does not carry but the rm still removes.
-  const removed = [
-    ...(dest === null ? [] : [...dest.keys()].filter((rel) => !src.has(rel))),
-    ...(await nonFileEntries(destDir)),
-  ].sort();
-  // Only the files BOTH sides have: one extra local file is not a copy that
-  // "differed".
-  const shared =
-    dest !== null && [...src.keys()].some((rel) => !bufEquals(src.get(rel), dest.get(rel)));
-
-  // Outside the !dryRun guard on purpose: a dry run must not promise an overwrite
-  // the real run refuses.
-  if (change !== 'none') await refuseSymlinkedSkillDir(destDir, name);
+  // Only the files this package SHIPS are read back, and only those are written.
+  // Everything else in the directory belongs to the operator: it is never
+  // inspected, listed, or removed. That is what package managers do (npm, dpkg,
+  // Homebrew all own their files, not the directory), and wholesale replacement
+  // was the single cause behind a run of data-loss, symlink and enumeration bugs.
+  let differs = false;
+  let preexisting = false;
+  for (const [rel, content] of src) {
+    const current = await readFile(join(destDir, rel)).catch(() => null);
+    if (rel === 'SKILL.md') preexisting = current !== null;
+    if (current === null || !current.equals(content)) differs = true;
+  }
+  const change = !preexisting ? 'create' : differs ? 'update' : 'none';
 
   if (!dryRun && change !== 'none') {
     try {
-      // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
-      // local files left behind. rm is a no-op when the dir is absent.
-      await rm(destDir, { recursive: true, force: true });
       for (const [rel, content] of src) {
         await writeFileAtomic(join(destDir, rel), content);
       }
     } catch (err) {
-      // A raw errno under INTERNAL reads as a CLI bug and carries no fix, which is
-      // how an unwritable HOME and a lost directory race both surfaced. Both get a
-      // fix naming what to check.
+      // A raw errno under INTERNAL reads as a CLI bug and carries no fix. ENOENT is
+      // here because a destination that is a BROKEN SYMLINK reports as that, and
+      // "no such file or directory, mkdir" tells the operator nothing about the
+      // link they need to repair.
       const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
-      const raced = hasCode(err, 'ENOENT') || hasCode(err, 'ENOTEMPTY') || hasCode(err, 'EEXIST');
-      if (!denied && !raced) throw err;
+      const missing = hasCode(err, 'ENOENT');
+      if (!denied && !missing) throw err;
       throw new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
         fix: denied
           ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
-          : `${destDir} changed underneath this run. Make sure nothing else is writing it, then re-run \`tenjin install\`.`,
+          : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`,
         cause: err,
       });
     }
   }
 
-  if (change === 'create') {
-    // `create` means no regular files were here, NOT that the directory was empty:
-    // readTree keeps regular files only, so a directory of symlinks lands here with
-    // its contents already taken by the rm. Warn whenever something was removed.
-    const note = removedNote(removed, dryRun);
-    return {
-      status: dryRun ? 'would-install' : 'installed',
-      preexisting,
-      ...(note === '' ? {} : { warning: `${destDir}:${note}` }),
-    };
-  }
+  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed', preexisting };
   if (change === 'none') return { status: 'up-to-date', preexisting };
   return {
     status: dryRun ? 'would-update' : 'updated',
@@ -1090,26 +1057,9 @@ async function installSkill(
     // direction: the local file may well be a newer fetch than this package's copy.
     warning:
       name === HOSTED_SKILL_NAME
-        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.${removedNote(removed, dryRun)}`
-        : `${destDir}: ${
-            shared
-              ? `local skill copy differed and ${dryRun ? 'would be' : 'was'} overwritten (the packaged copy is canonical).`
-              : `the packaged copy is canonical and ${dryRun ? 'would be' : 'was'} written over this directory.`
-          }${removedNote(removed, dryRun)}`,
+        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.`
+        : `${destDir}: local edits to ${name}'s SKILL.md ${dryRun ? 'would be' : 'were'} overwritten (the packaged copy is canonical).`,
   };
-}
-
-/** The clause naming local files the wipe takes. Named, not counted: a count does
- *  not tell anyone whether losing them matters. */
-function removedNote(removed: readonly string[], dryRun: boolean): string {
-  if (removed.length === 0) return '';
-  const one = removed.length === 1;
-  const noun = one ? '1 local file' : `${removed.length} local files`;
-  const verb = dryRun ? 'would also be removed' : one ? 'was also removed' : 'were also removed';
-  // A filename is operator data: one carrying newlines or ANSI bytes could forge
-  // status lines beside this warning.
-  const names = removed.map((r) => sanitizeForTerminal(r)).join(', ');
-  return ` ${noun} not shipped with the skill ${verb}: ${names}.`;
 }
 
 /**
@@ -1128,40 +1078,25 @@ async function underSyncLock(
   if (dryRun) return fn();
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const lockPath = skillsSyncLockPath(dataDir);
-  // Node's default signal action terminates WITHOUT running `finally`, so an
-  // interrupt here would strand the lock and make every later install time out on
-  // it. Release it and say what state the machine is in: exiting 130 with no
-  // output at all left people unable to tell what had been written.
-  //
-  // `held` is what keeps this from being worse than the problem it solves. It is
-  // true only INSIDE the critical section, so a run that is merely queued behind
-  // another install cannot delete that install's lock on its way out. Removing a
-  // lock we never acquired would leave the real holder writing while a third run
-  // acquires, which is the race the lock exists to prevent.
-  let held = false;
+  // The default signal action terminates WITHOUT running `finally`, so an interrupt
+  // would otherwise strand the lock and make every later install time out on it.
+  // Ownership is tracked by the lock itself, from the instant it is acquired to the
+  // instant it is released, so this releases exactly what this process holds and a
+  // run still QUEUED behind another cannot touch that other run's lock.
   const onSignal = (signal: NodeJS.Signals): void => {
-    if (held) {
-      rmSync(lockPath, { recursive: true, force: true });
-      process.stderr.write(
-        `\nInterrupted while writing skills. Some may be half-written and permissions were not changed; re-run \`tenjin install\` to finish.\n`,
-      );
-    } else {
-      process.stderr.write('\nInterrupted before any skill was written; nothing changed.\n');
-    }
+    const wasWriting = ownsAnyLock();
+    releaseOwnedLocks();
+    process.stderr.write(
+      wasWriting
+        ? `\nInterrupted while writing skills. Some may be half-written and permissions were not changed; re-run \`tenjin install\` to finish.\n`
+        : '\nInterrupted before any skill was written; nothing changed.\n',
+    );
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
-  const guarded = async (): Promise<void> => {
-    held = true;
-    try {
-      await fn();
-    } finally {
-      held = false;
-    }
-  };
   try {
-    await withFileLock(lockPath, guarded, timeoutMs !== undefined ? { timeoutMs } : {});
+    await withFileLock(lockPath, fn, timeoutMs !== undefined ? { timeoutMs } : {});
   } catch (err) {
     if (err instanceof LockTimeoutError) {
       throw new CliError('REFUSED', 'Another `tenjin install` is writing the skills.', {
@@ -1184,43 +1119,6 @@ async function underSyncLock(
 }
 
 /**
- * Refuse a symlinked skill directory rather than choosing which data to destroy.
- * Following the link and wiping the TARGET takes whatever the operator manages
- * there; removing the link instead detaches the path they set up. Neither is ours
- * to pick silently, so nothing is written and the operator is told what to change.
- *
- * Not the same call as the settings.json writer, which does resolve its link: that
- * write is additive and never clobbers, and this one is a recursive delete.
- */
-async function refuseSymlinkedSkillDir(destDir: string, name: string): Promise<void> {
-  // lstat, not existsSync: existsSync follows the link, so a DANGLING link reads
-  // as absent and the write below would replace it with a real directory.
-  const entry = await lstat(destDir).catch(() => null);
-  if (entry === null || !entry.isSymbolicLink()) return;
-  throw new CliError('REFUSED', `${destDir} is a symlink, so the ${name} skill was not written.`, {
-    fix: `Installing would replace it wholesale, which would either delete whatever the link points at or detach the link. Replace ${destDir} with a real directory (or move it aside), then re-run \`tenjin install\`.`,
-  });
-}
-
-/**
- * Relative paths of entries readTree does not carry (symlinks, sockets, fifos).
- * They are invisible to tree equality but the wipe still takes them, so the
- * warning has to name them or the "every file it removes" promise is false.
- */
-async function nonFileEntries(dir: string): Promise<string[]> {
-  if (!existsSync(dir)) return [];
-  const entries = await readdir(dir, { recursive: true, withFileTypes: true }).catch(() => []);
-  return entries
-    .filter((e) => !e.isFile() && !e.isDirectory())
-    .map((e) => relative(dir, join(e.parentPath, e.name)));
-}
-
-/** Buffer equality that treats "absent on one side" as unequal. */
-function bufEquals(a: Buffer | undefined, b: Buffer | undefined): boolean {
-  return a !== undefined && b !== undefined && a.equals(b);
-}
-
-/**
  * Read a directory tree into a rel-path -> content map, or null when it does not
  * exist. Reads as raw `Buffer`, not `utf8`: today's skills are markdown-only, but
  * this is a general recursive dir-copy, and decoding to a string here would
@@ -1237,16 +1135,6 @@ async function readTree(dir: string): Promise<Map<string, Buffer> | null> {
     files.set(relative(dir, full), await readFile(full));
   }
   return files;
-}
-
-function treesEqual(a: Map<string, Buffer>, b: Map<string, Buffer> | null): boolean {
-  if (b === null) return false;
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a) {
-    const other = b.get(k);
-    if (other === undefined || !v.equals(other)) return false;
-  }
-  return true;
 }
 
 /**

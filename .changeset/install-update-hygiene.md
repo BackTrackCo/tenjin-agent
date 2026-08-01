@@ -27,14 +27,17 @@ fields added after the shape shipped, ANDed with the key genuinely being absent,
 so a missing private scalar and a field that is present and wrong both stay in
 the tamper bucket.
 
-`tenjin install` also stopped taking local files silently. It replaces a skill
-directory wholesale so the packaged copy is exactly what lands, but the warning
-said "local skill copy differed and was overwritten" while a `references/`
-folder beside the SKILL.md was deleted without being mentioned, and "differed"
-was false whenever the shared files were byte-identical. The warning now names
-every entry the wipe removes and only claims a difference when there is one. An
-unwritable skills directory raises a typed error with a fix rather than a bare
-`EACCES ... mkdir` under INTERNAL with none.
+`tenjin install` no longer removes anything. It replaced each skill directory
+wholesale, so a `references/` folder or a note beside the SKILL.md was deleted,
+and the directory being replaced meant a symlinked one was severed and a
+dangling one silently became a real directory. It now writes the files the
+package ships and touches nothing else, which is what npm, dpkg and Homebrew
+do: own your files, not the directory. That is also why a byte-identical
+SKILL.md beside a user's own file now reports `up-to-date` instead of
+`updated`. A symlinked skill directory is written through, keeping the link, and
+a broken one fails with a fix naming it rather than a raw ENOENT. This is safe
+to do without a manifest only because each skill is a single file; a test pins
+that, so the day one grows a second file the build says so.
 
 The "hosted skill was already here" notice now fires only for the
 hosted-zero-install-first funnel. It gated on a SKILL.md being on disk, which is
