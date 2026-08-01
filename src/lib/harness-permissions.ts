@@ -141,8 +141,60 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * touch the file at all.
  */
 export async function wireFreeVerbAllowlist(homeDir: string): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir);
+  if ('result' in found) return found.result;
+  const { path, settings, permissions, allow, added, alreadyPresent } = found;
+  if (added.length === 0) return { harness: 'claude', path, added: [], alreadyPresent };
+
+  // Object spreads keep the original key order and land the rebuilt `permissions`
+  // in the slot it already occupied, so a diff of the file is the appended rules
+  // and nothing else.
+  const next = {
+    ...settings,
+    permissions: { ...permissions, allow: [...allow, ...added] },
+  };
+  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+  return { harness: 'claude', path, added, alreadyPresent };
+}
+
+/**
+ * Which free-verb rules are NOT yet allowed, without writing anything. Null when
+ * that cannot be determined (an unreadable, unparsable, or foreign-shaped
+ * settings file), which the caller must treat as "unknown", never as "none".
+ *
+ * This exists so the install walkthrough can skip a consent question it already
+ * has the answer to. Asking an operator to re-authorize a write that will not
+ * happen, and then reporting "already allowed", teaches them the question is
+ * decoration.
+ */
+export async function pendingFreeVerbRules(homeDir: string): Promise<string[] | null> {
+  const found = await inspectAllowlist(homeDir);
+  return 'result' in found ? null : found.added;
+}
+
+interface AllowlistInspection {
+  path: string;
+  settings: Record<string, unknown>;
+  permissions: Record<string, unknown>;
+  allow: unknown[];
+  added: string[];
+  alreadyPresent: string[];
+}
+
+/**
+ * Resolve and read the settings file, and work out which rules are missing.
+ * Every refusal this module can reach is decided here, so the probe and the
+ * write agree by construction about what is untouchable.
+ */
+async function inspectAllowlist(
+  homeDir: string,
+): Promise<AllowlistInspection | { result: PermissionsResult }> {
   const declaredPath = claudeSettingsPath(homeDir);
-  const harness = 'claude';
+  const refuse = (
+    p: string,
+    reason: PermissionsSkipReason,
+    warning: string,
+  ): { result: PermissionsResult } => ({ result: skip('claude', p, reason, warning) });
 
   // `lstat`, not `existsSync`: existsSync FOLLOWS a symlink, so a link pointing at
   // a file that is not there reads as "absent" and the create path below would
@@ -163,8 +215,7 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
     try {
       path = await realpath(declaredPath);
     } catch (err) {
-      return skip(
-        harness,
+      return refuse(
         declaredPath,
         'unresolvable',
         `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
@@ -178,8 +229,7 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
     try {
       raw = await readFile(path, 'utf8');
     } catch (err) {
-      return skip(
-        harness,
+      return refuse(
         path,
         'unreadable',
         `${path} could not be read (${(err as Error).message}); no permissions were written.`,
@@ -189,16 +239,14 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      return skip(
-        harness,
+      return refuse(
         path,
         'unparsable',
         `${path} is not valid JSON (${(err as Error).message}); it was left exactly as it is.`,
       );
     }
     if (!isPlainObject(parsed)) {
-      return skip(
-        harness,
+      return refuse(
         path,
         'unexpected-shape',
         `${path} is not a JSON object; it was left exactly as it is.`,
@@ -213,8 +261,7 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
   // through verbatim; they simply never match a rule.
   const permissionsValue = settings.permissions;
   if (permissionsValue !== undefined && !isPlainObject(permissionsValue)) {
-    return skip(
-      harness,
+    return refuse(
       path,
       'unexpected-shape',
       `${path} has a "permissions" key that is not an object; it was left exactly as it is.`,
@@ -223,8 +270,7 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
   const permissions: Record<string, unknown> = permissionsValue ?? {};
   const allowValue = permissions.allow;
   if (allowValue !== undefined && !Array.isArray(allowValue)) {
-    return skip(
-      harness,
+    return refuse(
       path,
       'unexpected-shape',
       `${path} has a "permissions.allow" key that is not an array; it was left exactly as it is.`,
@@ -235,15 +281,5 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
   const present = new Set(allow.filter((e): e is string => typeof e === 'string'));
   const added = FREE_VERB_RULES.filter((rule) => !present.has(rule));
   const alreadyPresent = FREE_VERB_RULES.filter((rule) => present.has(rule));
-  if (added.length === 0) return { harness, path, added: [], alreadyPresent: [...alreadyPresent] };
-
-  // Object spreads keep the original key order and land the rebuilt `permissions`
-  // in the slot it already occupied, so a diff of the file is the appended rules
-  // and nothing else.
-  const next = {
-    ...settings,
-    permissions: { ...permissions, allow: [...allow, ...added] },
-  };
-  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness, path, added, alreadyPresent: [...alreadyPresent] };
+  return { path, settings, permissions, allow, added, alreadyPresent: [...alreadyPresent] };
 }

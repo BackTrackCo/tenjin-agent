@@ -250,8 +250,26 @@ export type SessionFileState =
    *  report that prints a mode the file does not have is worse than no number. */
   | { kind: 'loosened'; mode: number }
   | { kind: 'corrupt'; reason: string }
+  /**
+   * A file an OLDER CLI wrote, whose shape has since grown a required field. Not
+   * a tamper signal and not a corruption: the cache is simply unusable and
+   * re-mintable, exactly like an absent one. It gets its own kind so the
+   * diagnostic does not send someone hunting for tampering over a version bump.
+   */
+  | { kind: 'outdated'; field: string }
   | { kind: 'unreadable'; message: string; cause: unknown }
   | { kind: 'ok'; file: SessionFile };
+
+/**
+ * Fields a session file written by an OLDER CLI can legitimately lack, so their
+ * absence reports as {@link SessionFileState} `outdated` rather than `corrupt`.
+ *
+ * Deliberately an allowlist and not "any missing key": a file with no
+ * `privateKeyJwk.d` cannot sign and is broken whoever wrote it, and collapsing
+ * that into a friendly version notice would retire a real signal. Add a name here
+ * when the schema grows a required field, never to quiet a failing test.
+ */
+const LATER_ADDED_FIELDS: readonly string[] = ['origin'];
 
 export async function readSessionFile(dir: string): Promise<SessionFileState> {
   const path = sessionPath(dir);
@@ -285,15 +303,38 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
     const issue = parsed.error.issues[0];
     const field = issue?.path.join('.');
     const message = issue?.message ?? 'schema mismatch';
+    // A NAMED field that a older CLI's file can legitimately lack, and that the
+    // file genuinely does not carry, is a version fact rather than a corruption.
+    // Both halves matter: the allowlist keeps a missing private scalar in the
+    // tamper bucket where it belongs, and the absence check keeps a field that is
+    // present and wrong there too.
+    if (
+      issue !== undefined &&
+      field !== undefined &&
+      LATER_ADDED_FIELDS.includes(field) &&
+      !hasPath(json, issue.path)
+    )
+      return { kind: 'outdated', field };
     // Field-qualified, because "expected string, received undefined" names no
-    // field and the migration case (a pre-origin file) is exactly that message.
-    // zod never echoes the received VALUE, so no key material reaches this string.
+    // field on its own. zod never echoes the received VALUE, so no key material
+    // reaches this string.
     return {
       kind: 'corrupt',
       reason: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,
     };
   }
   return { kind: 'ok', file: parsed.data };
+}
+
+/** Does `value` actually carry the key at `path`, whatever it holds there? */
+function hasPath(value: unknown, path: readonly PropertyKey[]): boolean {
+  let cur: unknown = value;
+  for (const key of path) {
+    if (typeof cur !== 'object' || cur === null) return false;
+    if (!Object.hasOwn(cur, key)) return false;
+    cur = (cur as Record<PropertyKey, unknown>)[key];
+  }
+  return true;
 }
 
 /** The session to present, or null for every reason there is not one. */

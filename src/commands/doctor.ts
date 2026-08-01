@@ -580,6 +580,20 @@ async function checkSession(
       `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
     );
   }
+  // Same standing as `absent`, deliberately: a cache an older CLI wrote is one
+  // this CLI cannot use, which is what absent means. Reporting it as a failing
+  // check made every run after an update carry a permanent warning about a file
+  // that is re-minted by one command and is often already expired anyway.
+  if (state.kind === 'outdated') {
+    return {
+      result: {
+        name: 'session',
+        status: 'ok',
+        required: false,
+        detail: `Cached session key at ${sessionPath(dataDir)} predates this CLI version (no \`${state.field}\`) and is not used; \`tenjin session start --scope read\` mints a current one`,
+      },
+    };
+  }
   if (state.kind === 'corrupt') {
     return warn(`Session key at ${sessionPath(dataDir)} could not be parsed (${state.reason})`);
   }

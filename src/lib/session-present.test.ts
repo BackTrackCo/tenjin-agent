@@ -361,12 +361,26 @@ describe('the session schema rejects a key that could not sign', () => {
     expect(await loadSessionFile(d)).toBeNull();
   });
 
-  it('a session file missing its origin is corrupt, so it can never be presented blind', async () => {
+  // The SAFETY property is that it is never presentable; the classification is a
+  // separate question. A pre-origin file is one an older CLI wrote, so it reports
+  // as `outdated` (a version fact) rather than `corrupt` (a tamper signal), and it
+  // is still refused for presentation.
+  it('a session file missing its origin is outdated, and can never be presented blind', async () => {
     const { file } = await testSessionKey();
     const withoutOrigin: Record<string, unknown> = { ...file };
     delete withoutOrigin.origin;
     await writeFile(sessionPath(d), JSON.stringify(withoutOrigin), { mode: 0o600 });
+    expect(await readSessionFile(d)).toMatchObject({ kind: 'outdated', field: 'origin' });
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+
+  // The discriminator is the key's ABSENCE, not zod's message, so a field that is
+  // present and wrong stays in the tamper bucket where it belongs.
+  it('a session file whose origin is present but the wrong type is still corrupt', async () => {
+    const { file } = await testSessionKey();
+    await writeFile(sessionPath(d), JSON.stringify({ ...file, origin: 42 }), { mode: 0o600 });
     expect((await readSessionFile(d)).kind).toBe('corrupt');
+    expect(await loadSessionFile(d)).toBeNull();
   });
 });
 

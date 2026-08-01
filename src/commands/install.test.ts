@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
@@ -1121,6 +1121,16 @@ describe('runInstall: permissions decision', () => {
     return (JSON.parse(raw) as { permissions?: { allow?: unknown[] } }).permissions?.allow;
   }
 
+  /** Seed ~/.claude/settings.json; a string is written verbatim (malformed cases). */
+  async function writeSettings(contents: unknown): Promise<void> {
+    const path = claudeSettingsPath(home);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      typeof contents === 'string' ? contents : JSON.stringify(contents, null, 2),
+    );
+  }
+
   it('writes the allowlist on an interactive yes and says so in one line', async () => {
     const confirm = vi.fn(async (_label: string) => true);
     const res = await runInstall(
@@ -1191,6 +1201,47 @@ describe('runInstall: permissions decision', () => {
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     expect(human(res)).toContain('were already allowed');
+  });
+
+  // Re-running install is the advice for refreshing a stale setup, so this is the
+  // ordinary second-run path, not an edge case.
+  it('does not re-ask once every rule is already allowed', async () => {
+    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ added: [], alreadyPresent: [...FREE_VERB_RULES] });
+    expect(human(res)).toContain('were already allowed');
+  });
+
+  it('still asks when only SOME of the rules are allowed', async () => {
+    await writeSettings({ permissions: { allow: [FREE_VERB_RULES[0]] } });
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(wiredOf(res.data).added).toEqual(FREE_VERB_RULES.slice(1));
+  });
+
+  // A file we cannot read is not "already allowed": the probe returns null and the
+  // question is still asked, so the writer gets to report why nothing was written.
+  it('still asks when the settings file cannot be parsed', async () => {
+    await writeSettings('not json at all');
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
   });
 
   it('--dry-run neither prompts nor writes', async () => {
@@ -1414,6 +1465,31 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(text).toContain('tenjin-search, tenjin-publish (CLI)');
     expect(text).toContain('zero-install fallback');
     expect(text).toContain('take precedence');
+  });
+
+  // The hosted-skill-first funnel puts the mirror in BOTH targets, and the notice
+  // is emitted once per harness. Without the directory the two lines are byte
+  // identical and read as the CLI stuttering.
+  it('names the directory, so a two-harness machine gets two distinguishable lines', async () => {
+    const claudeSkills = join(home, '.claude', 'skills');
+    const sharedSkills = join(home, '.agents', 'skills');
+    await seedHostedSkill(claudeSkills);
+    await seedHostedSkill(sharedSkills);
+
+    const res = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const lines = (res.humanLines ?? [])
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')) // eslint-disable-line no-control-regex
+      // The notice's own phrase: the per-harness warning says "stays as", and the
+      // summary's skill list says "(hosted, zero-install fallback)".
+      .filter((l) => l.includes('kept as the zero-install fallback'));
+    expect(lines).toHaveLength(2);
+    expect(new Set(lines).size).toBe(2);
+    expect(lines.some((l) => l.includes(claudeSkills))).toBe(true);
+    expect(lines.some((l) => l.includes(sharedSkills))).toBe(true);
   });
 
   it('re-running on top of a hosted-skill machine is idempotent', async () => {

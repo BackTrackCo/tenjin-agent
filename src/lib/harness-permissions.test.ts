@@ -18,6 +18,7 @@ import {
   claudeSettingsPath,
   FORBIDDEN_VERB_FRAGMENTS,
   FREE_VERB_RULES,
+  pendingFreeVerbRules,
   permissionsSkipped,
   wireFreeVerbAllowlist,
 } from './harness-permissions';
@@ -216,6 +217,40 @@ describe('wireFreeVerbAllowlist: idempotency', () => {
     await wireFreeVerbAllowlist(home);
     await wireFreeVerbAllowlist(home);
     expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES]);
+  });
+});
+
+describe('pendingFreeVerbRules: a probe that cannot write', () => {
+  it('reports every rule on a machine with no settings file, and creates nothing', async () => {
+    expect(await pendingFreeVerbRules(home)).toEqual([...FREE_VERB_RULES]);
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  it('reports none once the rules are wired, without rewriting the file', async () => {
+    await wireFreeVerbAllowlist(home);
+    const before = await readFile(settingsPath(), 'utf8');
+    const beforeMtime = (await stat(settingsPath())).mtimeMs;
+
+    expect(await pendingFreeVerbRules(home)).toEqual([]);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
+    expect((await stat(settingsPath())).mtimeMs).toBe(beforeMtime);
+  });
+
+  it('reports only the missing subset', async () => {
+    await seedSettings({ permissions: { allow: [FREE_VERB_RULES[0], 'Bash(ls:*)'] } });
+    expect(await pendingFreeVerbRules(home)).toEqual(FREE_VERB_RULES.slice(1));
+  });
+
+  // Null is "unknown", which the caller must not read as "nothing to do": a file
+  // we cannot understand is exactly when the consent question still has to be asked.
+  it.each([
+    ['malformed JSON', '{ nope'],
+    ['a non-object document', '[1, 2, 3]'],
+    ['a foreign permissions shape', JSON.stringify({ permissions: 'yes' })],
+    ['a foreign allow shape', JSON.stringify({ permissions: { allow: 'everything' } })],
+  ])('returns null for %s', async (_name, contents) => {
+    await seedSettings(contents);
+    expect(await pendingFreeVerbRules(home)).toBeNull();
   });
 });
 

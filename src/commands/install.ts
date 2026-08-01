@@ -35,6 +35,7 @@ import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
+  pendingFreeVerbRules,
   permissionsSkipped,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
@@ -193,6 +194,8 @@ export interface InstallDeps {
   promptPublishMode?: PromptPublishModeFn;
   /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
   confirmPermissions?: ConfirmFn;
+  /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
+  pendingPermissions?: (home: string) => Promise<string[] | null>;
   /** Decision 3: "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. Seams so tests never load the renderer. */
@@ -375,11 +378,14 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
   for (const h of s.harnesses) {
     if (h.hostedPreexisting) {
+      // Named by DIRECTORY, because this loop emits one line per harness: a user
+      // who came in through the hosted skill has it in both, and "already here"
+      // twice in a row reads as the CLI stuttering rather than as two facts.
       lines.push(
         paint(
           io,
           'dim',
-          `The hosted ${HOSTED_SKILL_NAME} skill was already here: kept as the zero-install fallback, and the CLI skills now take precedence.`,
+          `The hosted ${HOSTED_SKILL_NAME} skill was already in ${h.skillsDir}: kept as the zero-install fallback, and the CLI skills now take precedence.`,
         ),
       );
     }
@@ -730,6 +736,15 @@ async function resolvePermissions(args: {
   if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
   if (flag) return wireFreeVerbAllowlist(home);
   if (!canPrompt) return permissionsSkipped('claude', home, 'not-requested');
+
+  // Nothing left to grant is not a question. Every rule already being present is
+  // the ordinary state of a RE-run, and install is what we tell people to re-run;
+  // asking them to re-authorize a write that will not happen and then reporting
+  // "already allowed" is the walkthrough spending one of its three questions on
+  // nothing. A null probe means the file could not be read, which is not the same
+  // as "already allowed", so that still asks and lets the writer report why.
+  const pending = await (deps.pendingPermissions ?? pendingFreeVerbRules)(home);
+  if (pending !== null && pending.length === 0) return wireFreeVerbAllowlist(home);
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(PERMISSIONS_QUESTION))) {

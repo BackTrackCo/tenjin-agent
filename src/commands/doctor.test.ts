@@ -18,6 +18,7 @@ import {
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import { saveSessionFile } from '../lib/session-key';
+import { sessionPath } from '../lib/paths';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 
@@ -984,6 +985,39 @@ describe('runDoctor — session key', () => {
     expect(check.fix).toBe('tenjin session start --scope read');
     // A stale session is never an exit-code event.
     expect(data.status).toBe('pass');
+  });
+
+  // The cache an older CLI left behind. Reported as a fact about the file, not as
+  // a failing check: it is unusable for the same reason an absent one is, and a
+  // machine that updated should not carry a permanent warning about it.
+  it('reports a pre-origin cache as ok, naming the field and the verb that re-mints', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    const stale: Record<string, unknown> = { ...file };
+    delete stale.origin;
+    await writeFile(sessionPath(dir), JSON.stringify(stale), { mode: 0o600 });
+
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    const check = find(data.checks, 'session');
+    expect(check.status).toBe('ok');
+    expect(check.detail).toContain('predates this CLI version');
+    expect(check.detail).toContain('origin');
+    expect(check.detail).toContain('tenjin session start --scope read');
+    expect(check.detail).not.toContain('could not be parsed');
+    expect(data.status).toBe('pass');
+  });
+
+  // A tamper signal must not be laundered through the friendly branch above.
+  it('still warns when a session field is present but the wrong type', async () => {
+    const { file } = await testSessionKey();
+    await saveSessionFile(dir, file);
+    await writeFile(sessionPath(dir), JSON.stringify({ ...file, origin: 42 }), { mode: 0o600 });
+
+    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('could not be parsed');
   });
 
   it('uses the injected clock, so expiry is decided rather than observed', async () => {
