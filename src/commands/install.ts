@@ -1119,17 +1119,36 @@ async function underSyncLock(
   // interrupt here would strand the lock and make every later install time out on
   // it. Release it and say what state the machine is in: exiting 130 with no
   // output at all left people unable to tell what had been written.
+  //
+  // `held` is what keeps this from being worse than the problem it solves. It is
+  // true only INSIDE the critical section, so a run that is merely queued behind
+  // another install cannot delete that install's lock on its way out. Removing a
+  // lock we never acquired would leave the real holder writing while a third run
+  // acquires, which is the race the lock exists to prevent.
+  let held = false;
   const onSignal = (signal: NodeJS.Signals): void => {
-    rmSync(lockPath, { recursive: true, force: true });
-    process.stderr.write(
-      `\nInterrupted while writing skills. Some may be half-written and permissions were not changed; re-run \`tenjin install\` to finish.\n`,
-    );
+    if (held) {
+      rmSync(lockPath, { recursive: true, force: true });
+      process.stderr.write(
+        `\nInterrupted while writing skills. Some may be half-written and permissions were not changed; re-run \`tenjin install\` to finish.\n`,
+      );
+    } else {
+      process.stderr.write('\nInterrupted before any skill was written; nothing changed.\n');
+    }
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+  const guarded = async (): Promise<void> => {
+    held = true;
+    try {
+      await fn();
+    } finally {
+      held = false;
+    }
+  };
   try {
-    await withFileLock(lockPath, fn, timeoutMs !== undefined ? { timeoutMs } : {});
+    await withFileLock(lockPath, guarded, timeoutMs !== undefined ? { timeoutMs } : {});
   } catch (err) {
     if (!(err instanceof LockTimeoutError)) throw err;
     throw new CliError('REFUSED', 'Another `tenjin install` is writing the skills.', {

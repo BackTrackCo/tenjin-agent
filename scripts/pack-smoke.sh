@@ -130,4 +130,32 @@ printf '%s' "$BOGUS_OUT" | node -e '
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 
+# A run QUEUED behind another install must never remove that install's lock on its
+# way out. Interrupting a waiting run used to delete the holder's lock, leaving the
+# holder writing while a third run could acquire the same directories, which is the
+# race the lock exists to prevent. Needs a real process and a real signal, so it
+# lives here rather than in the unit tests.
+LOCK_HOME="$(mktemp -d)"
+LOCK_DATA="$(mktemp -d)"
+mkdir -p "$LOCK_DATA/skills-sync.lock"
+HOME="$LOCK_HOME" TENJIN_DATA_DIR="$LOCK_DATA" "$BIN" install --harness claude \
+  --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
+WAITER_PID=$!
+sleep 1
+kill -INT "$WAITER_PID" 2>/dev/null || true
+wait "$WAITER_PID" 2>/dev/null || true
+if [ ! -d "$LOCK_DATA/skills-sync.lock" ]; then
+  echo "pack-smoke: FAIL — an interrupted WAITING install removed the holder's lock" >&2
+  rm -rf "$LOCK_HOME" "$LOCK_DATA"
+  exit 1
+fi
+if ! grep -q "nothing changed" "$LOCK_HOME/err"; then
+  echo "pack-smoke: FAIL — interrupted waiting install did not report that nothing changed" >&2
+  cat "$LOCK_HOME/err" >&2
+  rm -rf "$LOCK_HOME" "$LOCK_DATA"
+  exit 1
+fi
+rm -rf "$LOCK_HOME" "$LOCK_DATA"
+echo "pack-smoke: interrupted waiting install leaves the holder's lock intact (ok)"
+
 echo "pack-smoke: PASS (tenjin-cli@$EXPECTED_VERSION packed, installed, and exercised)"
