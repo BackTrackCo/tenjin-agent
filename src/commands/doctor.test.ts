@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import { runDoctor } from './doctor';
@@ -45,10 +46,15 @@ let dir: string;
 // check reads a controlled tree, never the developer's real ~/.claude/skills,
 // which would pass locally and warn in CI.
 let skillHome: string;
+// The packaged skills the freshness check compares against. `writeSkillIn`
+// mirrors every fixture into it, so a test about WIRING never trips the
+// stale-copy branch; the staleness tests point this at their own source instead.
+let pkgSrc: string;
 let prevWalletKey: string | undefined;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-doctor-'));
   skillHome = await mkdtemp(join(tmpdir(), 'tenjin-doctor-home-'));
+  pkgSrc = await mkdtemp(join(tmpdir(), 'tenjin-doctor-pkg-'));
   balanceMock.mockReset();
   // The wallet provider resolves against process.env, so keep it hermetic: a
   // stray TENJIN_WALLET_KEY would shadow the file-based tests below.
@@ -58,6 +64,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
   await rm(skillHome, { recursive: true, force: true });
+  await rm(pkgSrc, { recursive: true, force: true });
   if (prevWalletKey === undefined) delete process.env.TENJIN_WALLET_KEY;
   else process.env.TENJIN_WALLET_KEY = prevWalletKey;
 });
@@ -116,7 +123,12 @@ async function writeWallet(mode: number): Promise<void> {
 
 describe('runDoctor — passing outcomes', () => {
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
@@ -141,7 +153,12 @@ describe('runDoctor — passing outcomes', () => {
       '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
       '/api/articles': { body: ARTICLES_OK },
     });
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: noSearch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: noSearch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass'); // still passes: search-contract is not required
     expect(find(data.checks, 'search-contract').status).toBe('warn');
@@ -150,7 +167,12 @@ describe('runDoctor — passing outcomes', () => {
   it('wallet present but not 0600: warns on perms, still passes', async () => {
     await writeWallet(0o644);
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     // Perms surface via the provider's diagnostics as a wallet-custody warn,
@@ -175,6 +197,7 @@ describe('runDoctor — passing outcomes', () => {
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
       homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
       env: { TENJIN_WALLET_KEY: envKey },
       fetchImpl: healthyFetch,
     });
@@ -191,7 +214,12 @@ describe('runDoctor — passing outcomes', () => {
   it('zero balance warns with the funding fix', async () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(0n);
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('warn');
     expect(balance.fix).toContain('Send USDC on Base');
@@ -200,7 +228,12 @@ describe('runDoctor — passing outcomes', () => {
   it('a positive balance is an ok check with dual-form amount', async () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('ok');
     expect(balance.detail).toContain('5');
@@ -210,7 +243,12 @@ describe('runDoctor — passing outcomes', () => {
   it('an RPC failure warns, never fails doctor', async () => {
     await writeWallet(0o600);
     balanceMock.mockRejectedValue(new Error('rpc down'));
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'balance').status).toBe('warn');
@@ -218,7 +256,12 @@ describe('runDoctor — passing outcomes', () => {
 
   it('a corrupt wallet file warns, never fails doctor', async () => {
     await writeFile(join(dir, 'wallet.json'), '{ not json');
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     const wallet = find(data.checks, 'wallet');
@@ -238,7 +281,12 @@ describe('runDoctor — passing outcomes', () => {
       const body = url.includes('/openapi.json') ? OPENAPI_OK : ARTICLES_OK;
       return new Response(JSON.stringify(body), { status: 200 });
     }) as typeof fetch;
-    await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: capturing });
+    await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: capturing,
+    });
     expect(readPathUrl).toBeDefined();
     expect(new URL(readPathUrl as string).searchParams.has('q')).toBe(false);
   });
@@ -246,9 +294,12 @@ describe('runDoctor — passing outcomes', () => {
 
 describe('runDoctor — required failures throw the mapped CliError', () => {
   async function catchDoctor(fetchImpl: typeof fetch): Promise<CliError> {
-    const err = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl }).catch(
-      (e: unknown) => e,
-    );
+    const err = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl,
+    }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CliError);
     return err as CliError;
   }
@@ -329,6 +380,7 @@ describe('runDoctor — injected remote provider', () => {
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
       homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
       env: {},
       fetchImpl: healthyFetch,
       provider: remoteProvider(address),
@@ -350,6 +402,7 @@ describe('runDoctor — injected remote provider', () => {
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
       homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
       env: { TENJIN_WALLET_KEY: process.env.TENJIN_WALLET_KEY },
       fetchImpl: healthyFetch,
       provider: remoteProvider(address),
@@ -374,12 +427,17 @@ const sharedSkills = (): string => join(skillHome, '.agents', 'skills');
 
 /** Write a SKILL.md into a skills directory, with optional frontmatter extras. */
 async function writeSkillIn(dir: string, name: string, extraFrontmatter = ''): Promise<void> {
+  const body = `---\nname: ${name}\ndescription: test\n${extraFrontmatter}---\n\n# ${name}\n`;
   const skillDir = join(dir, name);
   await mkdir(skillDir, { recursive: true });
-  await writeFile(
-    join(skillDir, 'SKILL.md'),
-    `---\nname: ${name}\ndescription: test\n${extraFrontmatter}---\n\n# ${name}\n`,
-  );
+  await writeFile(join(skillDir, 'SKILL.md'), body);
+  // Mirror into the packaged source so this fixture reads as CURRENT. FIRST write
+  // wins: a name deliberately written with different content in two directories
+  // must not rewrite what "packaged" means for the other one.
+  await mkdir(join(pkgSrc, name), { recursive: true });
+  if (!existsSync(join(pkgSrc, name, 'SKILL.md'))) {
+    await writeFile(join(pkgSrc, name, 'SKILL.md'), body);
+  }
 }
 
 const writeSkill = (name: string, extraFrontmatter = ''): Promise<void> =>
@@ -398,7 +456,12 @@ const installCodex = (): Promise<string | undefined> =>
 
 describe('runDoctor — skill wiring', () => {
   it('no skills anywhere: warns and points at tenjin install', async () => {
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass'); // never required: a server machine has no harness
     const skills = find(data.checks, 'skills');
@@ -410,7 +473,12 @@ describe('runDoctor — skill wiring', () => {
 
   it('hosted skill only: warns that both CLI skills are missing', async () => {
     await writeSkill('tenjin');
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
     expect(skills.detail).toContain(
@@ -423,7 +491,12 @@ describe('runDoctor — skill wiring', () => {
   it('hosted + search but no publish: names the directory and only the missing skill', async () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
     expect(skills.detail).toContain(`${claudeSkills()}: tenjin-publish missing`);
@@ -435,7 +508,12 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish', 'disable-model-invocation: true\n');
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
     expect(skills.detail).toContain(
@@ -449,7 +527,12 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
     expect(skills.detail).toContain('tenjin-search + tenjin-publish wired');
@@ -460,7 +543,12 @@ describe('runDoctor — skill wiring', () => {
     for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
       await writeSkillIn(sharedSkills(), name);
     }
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
     expect(skills.detail).toContain(sharedSkills());
@@ -473,6 +561,7 @@ describe('runDoctor — skill wiring', () => {
     try {
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -492,6 +581,7 @@ describe('runDoctor — skill wiring', () => {
     try {
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -512,7 +602,12 @@ describe('runDoctor — skill wiring', () => {
   it('a wired directory with no mirror does not claim precedence over one', async () => {
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
     expect(skills.detail).toContain(
@@ -533,6 +628,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -557,6 +653,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -577,6 +674,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -597,6 +695,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -618,6 +717,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -636,6 +736,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
       });
@@ -664,6 +765,7 @@ describe('runDoctor — skill wiring', () => {
 
         const res = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -688,6 +790,7 @@ describe('runDoctor — skill wiring', () => {
 
         const res = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -703,6 +806,7 @@ describe('runDoctor — skill wiring', () => {
 
         const res = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -724,6 +828,7 @@ describe('runDoctor — skill wiring', () => {
 
         const res = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -741,6 +846,7 @@ describe('runDoctor — skill wiring', () => {
 
         const res = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -755,6 +861,7 @@ describe('runDoctor — skill wiring', () => {
         }
         const after = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -776,6 +883,7 @@ describe('runDoctor — skill wiring', () => {
 
         const res = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -790,6 +898,7 @@ describe('runDoctor — skill wiring', () => {
         }
         const after = await runDoctor(ctxFor(), {
           homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
           env: {},
           fetchImpl: healthyFetch,
         });
@@ -806,6 +915,7 @@ describe('runDoctor — skill wiring', () => {
 
       const res = await runDoctor(ctxFor(), {
         homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
         env: {},
         fetchImpl: healthyFetch,
         which: (bin) => bin === 'codex',
@@ -820,7 +930,12 @@ describe('runDoctor — skill wiring', () => {
     for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
       await writeSkillIn(claudeSkills(), name);
     }
-    const res = await runDoctor(ctxFor(), { homeDir: skillHome, env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     const data = skills.data as {
       directories: Array<{
@@ -946,6 +1061,59 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
  * not a warn: most machines never need one, and a permanent yellow line teaches
  * operators to ignore the yellow lines.
  */
+describe('runDoctor — skills go stale after a CLI update', () => {
+  // `npm i -g tenjin-cli` updates the binary and nothing else, so the wired copies
+  // stay at whatever version wrote them while every other skills check passes.
+  async function wire(bytes: string): Promise<string> {
+    const skills = join(skillHome, '.claude', 'skills');
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(skills, name), { recursive: true });
+      await writeFile(join(skills, name, 'SKILL.md'), bytes);
+    }
+    return skills;
+  }
+
+  it('is ok when the wired copies match the packaged ones', async () => {
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-pkg-'));
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), 'current\n');
+    }
+    await wire('current\n');
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: src,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    expect(find((res.data as { checks: CheckResult[] }).checks, 'skills').status).toBe('ok');
+    await rm(src, { recursive: true, force: true });
+  });
+
+  it('warns when the wired copies are from an older build, naming the fix', async () => {
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-pkg-'));
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), 'current\n');
+    }
+    const skills = await wire('what an older CLI shipped\n');
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: src,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    const check = find(data.checks, 'skills');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('not from this CLI build');
+    expect(check.detail).toContain(skills);
+    expect(check.fix).toBe('tenjin install');
+    expect(data.status).toBe('pass'); // never an exit-code event
+    await rm(src, { recursive: true, force: true });
+  });
+});
+
 describe('runDoctor — session key', () => {
   it('reports ok with no session, naming the verb that would mint one', async () => {
     const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });

@@ -51,6 +51,15 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
+ * Serializes everything that rewrites the wired skill directories, so two runs
+ * cannot interleave one's directory replacement with the other's. `install` takes
+ * it around its wiring; the post-update self-heal takes the same one.
+ */
+export function skillsSyncLockPath(dir: string = dataDir()): string {
+  return join(dir, 'skills-sync.lock');
+}
+
+/**
  * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
  * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
  * New writes go to the per-wallet path below; this one is only read as a

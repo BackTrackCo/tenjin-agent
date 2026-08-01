@@ -1,6 +1,10 @@
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveSkillsSource } from '../lib/skills-source';
 import { CliError } from '../lib/errors';
 import {
   CLI_SKILL_NAMES,
@@ -105,6 +109,8 @@ export interface DoctorDeps {
   which?: (bin: string) => boolean;
   /** Clock seam (ms since epoch) for the session-expiry check. */
   now?: () => number;
+  /** Packaged skills to compare the wired copies against; defaults to this build's. */
+  skillsSourceDir?: string;
 }
 
 /**
@@ -137,6 +143,7 @@ export async function collectDoctorChecks(
       deps.homeDir ?? homedir(),
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
+      deps.skillsSourceDir,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
@@ -370,6 +377,7 @@ async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
+  skillsSourceDir?: string,
 ): Promise<BuiltCheck> {
   const present = detectHarnesses(home, which);
   const wiring = await readAllWiring(home);
@@ -425,6 +433,26 @@ async function checkSkills(
     };
   }
 
+  // Wired is not the same as CURRENT. `npm i -g tenjin-cli` updates the binary and
+  // nothing else, so the copies install wrote stay at whatever version wrote them
+  // until someone re-runs install, and every check above passes the whole time.
+  const stale = await staleSkillDirs(
+    wiring.filter((w) => harnessInPlay(home, w.dir, present, requested)).map((w) => w.dir),
+    skillsSourceDir,
+  );
+  if (stale.length > 0) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `${CLI_SKILL_NAMES.join(' + ')} wired but not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
+        fix: 'tenjin install',
+        data,
+      },
+    };
+  }
+
   return {
     result: {
       name: 'skills',
@@ -434,6 +462,31 @@ async function checkSkills(
       data,
     },
   };
+}
+
+/**
+ * Directories whose wired CLI adapter skills differ from the packaged ones.
+ *
+ * Only the ADAPTERS: the hosted mirror is a copy of tenjin.blog/skills.md that an
+ * operator may legitimately have re-fetched newer than this package ships, so a
+ * difference there is not staleness. Unreadable on either side is not evidence of
+ * drift, so it is skipped rather than reported.
+ */
+async function staleSkillDirs(dirs: readonly string[], sourceDir?: string): Promise<string[]> {
+  const source = sourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  const stale: string[] = [];
+  for (const dir of dirs) {
+    for (const name of CLI_SKILL_NAMES) {
+      const packaged = await readFile(join(source, name, 'SKILL.md')).catch(() => null);
+      const onDisk = await readFile(join(dir, name, 'SKILL.md')).catch(() => null);
+      if (packaged === null || onDisk === null) continue;
+      if (!packaged.equals(onDisk)) {
+        stale.push(dir);
+        break;
+      }
+    }
+  }
+  return stale;
 }
 
 /** What is wrong in ONE directory, naming the directory and the skills. */

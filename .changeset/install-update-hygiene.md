@@ -53,3 +53,20 @@ dangling link is refused too, instead of reading as absent and being replaced by
 a real directory. The removal list also covers non-regular entries, which the
 tree reader does not carry but the wipe still takes, and filenames are sanitized
 before they reach a message.
+
+Concurrent `tenjin install` runs no longer race. Each skill directory is replaced
+by rm-then-write with nothing serializing them, so five simultaneous runs failed
+7 times out of 15 on raw `ENOENT`/`ENOTEMPTY` renames, and one of the failures
+told the operator to check directory permissions for what was purely a race. The
+wiring now takes the skills lock (0 of 15 failures), a contended lock reports as
+REFUSED naming the lock file rather than escaping as an untyped timeout, and the
+remaining errno paths carry a fix. An interrupt during the write releases the
+lock and says what state the machine is in, instead of exiting 130 with no output
+and stranding the lock for every later run.
+
+`tenjin doctor` now reports skills that are wired but not from this build.
+Updating the CLI does not update the copies install wrote, and every existing
+check passed the whole time an agent was reading an older version's instructions.
+Only the CLI adapters are compared, and only in directories a harness on this
+machine actually reads: the hosted mirror may legitimately be a newer fetch from
+tenjin.blog, and a leftover directory nobody reads is nobody's problem.

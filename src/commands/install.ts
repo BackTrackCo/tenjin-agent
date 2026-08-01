@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs';
-import { lstat, readFile, readdir, rm } from 'node:fs/promises';
+import { existsSync, rmSync } from 'node:fs';
+import { lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -9,6 +9,8 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { LockTimeoutError, withFileLock } from '../lib/lock';
+import { skillsSyncLockPath } from '../lib/paths';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
   CLI_SKILL_NAMES,
@@ -201,6 +203,8 @@ export interface InstallDeps {
   promptPublishMode?: PromptPublishModeFn;
   /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
   confirmPermissions?: ConfirmFn;
+  /** How long to wait on a held skills lock. Shortened in tests. */
+  lockTimeoutMs?: number;
   /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
   inspectPermissions?: (
     home: string,
@@ -278,10 +282,21 @@ export async function runInstall(
   // the walkthrough's whole point is that there are three.
   const claudeMdWrite = claudeMdFlag === true;
   const harnesses: HarnessResult[] = [];
-  for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
-  }
-  await assertSkillsLanded(plans, dryRun);
+  // Wiring takes a lock. Each skill is replaced by rm-then-write, so two runs
+  // racing the same directory saw each other's half-built trees and died on raw
+  // ENOENT/ENOTEMPTY renames: 7 of 15 concurrent runs failed. A dry run writes
+  // nothing, so it needs no lock.
+  await underSyncLock(
+    ctx.dataDir,
+    dryRun,
+    async () => {
+      for (const plan of plans) {
+        harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
+      }
+      await assertSkillsLanded(plans, dryRun);
+    },
+    deps.lockTimeoutMs,
+  );
   // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
   // own check already honours it. Detection cannot see a harness we do not probe for,
   // so without the record a directory the user named by hand is a target for one run
@@ -977,7 +992,9 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
   }
   if (missing.length === 0) return;
   throw new CliError('INTERNAL', `Skills were not written: ${missing.join(', ')}`, {
-    fix: 'Check permissions on the skills directory and re-run `tenjin install`.',
+    // Says "permissions" only now that the wiring holds a lock. Before that, this
+    // fired on a lost race and sent people to chmod a directory that was fine.
+    fix: `Check that you can write to the skills directory (\`ls -ld ${dirname(missing[0] ?? '')}\`), then re-run \`tenjin install\`.`,
   });
 }
 
@@ -1034,11 +1051,16 @@ async function installSkill(
         await writeFileAtomic(join(destDir, rel), content);
       }
     } catch (err) {
-      // An unwritable HOME is an environment problem, so it carries a fix like every
-      // other error path here, rather than a raw errno that reads as a CLI bug.
-      if (!hasCode(err, 'EACCES') && !hasCode(err, 'EPERM')) throw err;
+      // A raw errno under INTERNAL reads as a CLI bug and carries no fix, which is
+      // how an unwritable HOME and a lost directory race both surfaced. Both get a
+      // fix naming what to check.
+      const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
+      const raced = hasCode(err, 'ENOENT') || hasCode(err, 'ENOTEMPTY') || hasCode(err, 'EEXIST');
+      if (!denied && !raced) throw err;
       throw new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
-        fix: `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`,
+        fix: denied
+          ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
+          : `${destDir} changed underneath this run. Make sure nothing else is writing it, then re-run \`tenjin install\`.`,
         cause: err,
       });
     }
@@ -1075,6 +1097,49 @@ function removedNote(removed: readonly string[], dryRun: boolean): string {
   // status lines beside this warning.
   const names = removed.map((r) => sanitizeForTerminal(r)).join(', ');
   return ` ${noun} not shipped with the skill ${verb}: ${names}.`;
+}
+
+/**
+ * Run `fn` holding the skills lock, or directly when nothing is written.
+ *
+ * A contended lock is a normal outcome (another `tenjin install` is mid-write),
+ * so the timeout is translated rather than escaping as an untyped
+ * LockTimeoutError under INTERNAL.
+ */
+async function underSyncLock(
+  dataDir: string,
+  dryRun: boolean,
+  fn: () => Promise<void>,
+  timeoutMs?: number,
+): Promise<void> {
+  if (dryRun) return fn();
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  const lockPath = skillsSyncLockPath(dataDir);
+  // Node's default signal action terminates WITHOUT running `finally`, so an
+  // interrupt here would strand the lock and make every later install time out on
+  // it. Release it and say what state the machine is in: exiting 130 with no
+  // output at all left people unable to tell what had been written.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    rmSync(lockPath, { recursive: true, force: true });
+    process.stderr.write(
+      `\nInterrupted while writing skills. Some may be half-written and permissions were not changed; re-run \`tenjin install\` to finish.\n`,
+    );
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    await withFileLock(lockPath, fn, timeoutMs !== undefined ? { timeoutMs } : {});
+  } catch (err) {
+    if (!(err instanceof LockTimeoutError)) throw err;
+    throw new CliError('REFUSED', 'Another `tenjin install` is writing the skills.', {
+      fix: `Wait for it to finish and re-run. If nothing else is running, remove ${err.lockPath} and retry.`,
+      cause: err,
+    });
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
 }
 
 /**
