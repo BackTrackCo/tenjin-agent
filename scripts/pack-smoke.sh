@@ -18,7 +18,8 @@ PKG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACK_DIR="$(mktemp -d)"
 CONSUMER_DIR="$(mktemp -d)"
 DATA_DIR="$(mktemp -d)"
-cleanup() { rm -rf "$PACK_DIR" "$CONSUMER_DIR" "$DATA_DIR"; }
+HOME_DIR="$(mktemp -d)"
+cleanup() { rm -rf "$PACK_DIR" "$CONSUMER_DIR" "$DATA_DIR" "$HOME_DIR"; }
 trap cleanup EXIT
 
 export TENJIN_DATA_DIR="$DATA_DIR"
@@ -51,6 +52,12 @@ BIN="./node_modules/.bin/tenjin"
   echo "pack-smoke: FAIL — installed package exposes no tenjin bin" >&2
   exit 1
 }
+
+# From here on every invocation is a CLI invocation, and the post-command skills
+# hook writes into harness directories under HOME. Isolate it for ALL of them,
+# not just the self-heal leg, or this script rewrites the runner's own
+# ~/.claude/skills. Set after npm, which needs the real HOME for its own config.
+export HOME="$HOME_DIR"
 
 # The README links docs/agent-permissions.md package-locally, so dropping `docs`
 # from the files array must fail here, not leave a dead link while CI stays green.

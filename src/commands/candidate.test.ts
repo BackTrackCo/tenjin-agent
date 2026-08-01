@@ -6,6 +6,7 @@ import { runCandidateAdd, runCandidateDrop, runCandidateList } from './candidate
 import { createCandidate, listCandidates } from '../lib/candidate-store';
 import { main } from '../cli';
 import type { CommandContext } from '../context';
+import { isolateHomeAndData } from '../lib/test-env';
 import type { Io } from '../lib/output';
 
 let dir: string;
@@ -200,14 +201,13 @@ describe('candidate via main (one JSON object per invocation)', () => {
     return { io: { stdout: mk(), stderr: mk(), isTTY: false }, stdout: () => out.join('') };
   }
 
-  let prevDataDir: string | undefined;
+  // HOME as well as the data dir: `main` runs the post-command hooks for real,
+  // and the skills self-heal writes into harness directories under HOME.
+  // isolateHomeAndData points both at fresh temp dirs; this suite's own `dir`
+  // then overrides the data dir so its fixtures are the ones the command reads.
+  isolateHomeAndData();
   beforeEach(() => {
-    prevDataDir = process.env.TENJIN_DATA_DIR;
     process.env.TENJIN_DATA_DIR = dir;
-  });
-  afterEach(() => {
-    if (prevDataDir === undefined) delete process.env.TENJIN_DATA_DIR;
-    else process.env.TENJIN_DATA_DIR = prevDataDir;
   });
 
   it('add emits exactly one success envelope, exits 0, and parks the draft', async () => {

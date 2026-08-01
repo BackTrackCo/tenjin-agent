@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { main } from './cli';
+import { isolateHomeAndData } from './lib/test-env';
+import { resolveSkillsSource } from './lib/skills-source';
 import type { Io } from './lib/output';
 
 // The dispatcher now runs the update check after every command, and the TTY cases
@@ -15,6 +20,12 @@ afterAll(() => {
   if (prevCI === undefined) delete process.env.CI;
   else process.env.CI = prevCI;
 });
+
+// EVERY test in this file dispatches for real, so the post-command hooks run for
+// real too. The skills self-heal writes into harness directories under HOME, so
+// isolating only the data dir is not enough: an unisolated run rewrites the
+// developer's own ~/.claude/skills.
+const env = isolateHomeAndData();
 
 function captureIo(isTTY = false) {
   const out: string[] = [];
@@ -320,5 +331,47 @@ describe('session command group', () => {
     const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
     expect(code).toBe(2);
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});
+
+// The canary for the isolation above. The self-heal is the one post-command hook
+// that writes outside the data dir, so pin that its writes land under the temp
+// HOME and that the paths it records are all inside it. If a future change makes
+// the hook consult the real home again, this fails instead of silently rewriting
+// a developer's skills.
+describe('the post-command self-heal stays inside the isolated HOME', () => {
+  const PACKAGED = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+
+  it('refreshes only skills under the temp HOME, and records only those paths', async () => {
+    const wired = join(env.home(), '.claude', 'skills');
+    mkdirSync(join(wired, 'tenjin-search'), { recursive: true });
+    writeFileSync(join(wired, 'tenjin-search', 'SKILL.md'), 'stale copy');
+    // A stamp from an older version naming that directory: the shape that makes
+    // the hook actually do work.
+    writeFileSync(
+      join(env.data(), 'skills-sync.json'),
+      JSON.stringify({ schemaVersion: 1, cliVersion: '0.0.0-old', dirs: [wired] }),
+    );
+
+    const cap = captureIo();
+    expect(await main(['candidate', 'list', '--json'], cap.io)).toBe(0);
+
+    // The stale bytes were replaced with the packaged copy...
+    expect(readFileSync(join(wired, 'tenjin-search', 'SKILL.md'), 'utf8')).toBe(
+      readFileSync(join(PACKAGED, 'tenjin-search', 'SKILL.md'), 'utf8'),
+    );
+    // ...and every path the stamp now records lives under the temp HOME.
+    const stamp = JSON.parse(readFileSync(join(env.data(), 'skills-sync.json'), 'utf8')) as {
+      dirs: string[];
+    };
+    expect(stamp.dirs.length).toBeGreaterThan(0);
+    for (const dir of stamp.dirs) expect(dir.startsWith(env.home())).toBe(true);
+  });
+
+  it('writes nothing at all when the temp HOME has no wired skills', async () => {
+    const cap = captureIo();
+    expect(await main(['candidate', 'list', '--json'], cap.io)).toBe(0);
+    expect(existsSync(join(env.home(), '.claude'))).toBe(false);
+    expect(existsSync(join(env.home(), '.agents'))).toBe(false);
   });
 });

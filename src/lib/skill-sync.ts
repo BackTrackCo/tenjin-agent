@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
@@ -12,40 +12,36 @@ import type { Io } from './output';
 
 /**
  * Self-healing skills: `npm i -g tenjin-cli` updates the binary but not the
- * copies `tenjin install` wired into a harness, so without this every update
- * leaves agents running last release's skills.
+ * copies `tenjin install` wired into a harness.
  *
- * Consent and blast radius:
- *  - Writes ONLY to the directories recorded in the stamp's `dirs`. That list is
- *    what install actually wired, so a `--harness claude` machine can never have
- *    its shared `~/.agents/skills` written by a later update.
- *  - Re-wires ONLY directories still wired (a Tenjin SKILL.md is present); it
- *    never creates a harness directory.
- *  - Touches ONLY directory names Tenjin ships or once shipped
- *    ({@link RETIRED_SKILL_NAMES}); a user's other skills are structurally out
- *    of reach because nothing iterates them.
- *  - Never affects the command that triggered it: every failure is swallowed.
+ * Two invariants hold the consent boundary:
+ *  - `tenjin install` is the ONLY thing that grants ownership of a directory. It
+ *    records what it wired in the stamp's `dirs`, and the self-heal writes there
+ *    and nowhere else.
+ *  - A stamp whose `dirs` is empty authorizes NO writes. That is the shape used
+ *    for a machine we have only noticed, never adopted.
  */
 
-/**
- * Names Tenjin once shipped and no longer does; a rename adds the old name here
- * so the next sync removes the stale copy instead of stacking a second skill.
- */
+/** Names Tenjin once shipped; the next sync removes a stale copy left under one. */
 export const RETIRED_SKILL_NAMES: readonly string[] = [];
 
-/** `dirs` is the consent record: the only paths the self-heal may write to. */
+/** A lock holder that has not touched it in this long has crashed. */
+export const SYNC_LOCK_STALE_MS = 10 * 60_000;
+
 const StampSchema = z.object({
   schemaVersion: z.literal(1),
   cliVersion: z.string(),
+  /** The directories install wired: the only paths the self-heal may write to. */
   dirs: z.array(z.string()),
+  /** The CLI version whose "run install" notice has already been shown. */
+  noticedVersion: z.string().optional(),
 });
 export type SkillsStamp = z.infer<typeof StampSchema>;
 
-/**
- * Null for absent or unparsable, which deliberately includes the pre-`dirs`
- * shape: an unknown shape carries no consent record, so it authorizes no write
- * and the machine goes through adoption instead.
- */
+export const REINSTALL_NOTICE =
+  'tenjin skills from an earlier install found; run `tenjin install` once to enable automatic skill updates.';
+
+/** Null for absent or unparsable, which includes any shape carrying no `dirs`. */
 export async function readSkillsStamp(dir: string): Promise<SkillsStamp | null> {
   let raw: string;
   try {
@@ -65,8 +61,14 @@ export async function writeSkillsStamp(
   dir: string,
   cliVersion: string,
   dirs: readonly string[],
+  noticedVersion?: string,
 ): Promise<void> {
-  const stamp: SkillsStamp = { schemaVersion: 1, cliVersion, dirs: [...dirs] };
+  const stamp: SkillsStamp = {
+    schemaVersion: 1,
+    cliVersion,
+    dirs: [...dirs],
+    ...(noticedVersion !== undefined ? { noticedVersion } : {}),
+  };
   await writeFileAtomic(skillsSyncPath(dir), `${JSON.stringify(stamp, null, 2)}\n`, {
     mode: 0o600,
     dirMode: 0o700,
@@ -74,82 +76,115 @@ export async function writeSkillsStamp(
 }
 
 /**
- * The directories a pre-feature install left behind, for machines with no usable
- * stamp. A CLI ADAPTER skill is the evidence, because only `tenjin install`
- * places one. A hosted-only `tenjin` copy is not: anyone can fetch that mirror
- * from tenjin.blog, and adopting it would let an update overwrite a file install
- * never placed.
+ * Directories holding Tenjin CLI adapter skills. This is a DETECTION, not a
+ * claim of ownership: `npx skills add BackTrackCo/tenjin-agent` plants the same
+ * adapters, so their presence cannot distinguish a `tenjin install` from another
+ * installer's. It is only ever used to decide whether to suggest running
+ * install; nothing here authorizes a write.
  */
-export function adoptableSkillDirs(home: string): string[] {
+export function legacySkillDirs(home: string): string[] {
   const dirs: string[] = [];
   for (const target of HARNESS_TARGETS) {
     const dir = harnessTargetDir(home, target);
-    if (dirs.includes(dir)) continue; // codex and shared are one directory
-    const managed = CLI_SKILL_NAMES.some((name) => existsSync(join(dir, name, 'SKILL.md')));
-    if (managed) dirs.push(dir);
+    if (dirs.includes(dir)) continue;
+    if (CLI_SKILL_NAMES.some((name) => existsSync(join(dir, name, 'SKILL.md')))) dirs.push(dir);
   }
   return dirs;
 }
 
 export interface SkillSyncDeps {
-  /** The Tenjin data dir (stamp location). */
   dir: string;
   io: Io;
-  /** The global --json flag; suppresses the human notice, never the sync. */
   json: boolean;
   currentVersion?: string;
-  /** Resync seam for tests; defaults to install's resyncWiredSkills. */
   resync?: (dirs: readonly string[]) => Promise<{ refreshed: string[]; removed: string[] }>;
-  /** Home seam for tests, used by the adoption scan. */
   homeDir?: string;
+  /** How long to wait on a live holder. Shortened in tests; the lock default otherwise. */
+  lockTimeoutMs?: number;
 }
 
 /**
  * The post-command hook. Cheap when there is nothing to do: one small file read
  * and a string compare, before any lock. The sync runs in every output mode (an
  * agent's `--json` run is exactly the caller whose skills must not go stale);
- * only the notice is human-mode.
+ * the notices are TTY-only.
  */
 export async function maybeResyncSkills(deps: SkillSyncDeps): Promise<void> {
   try {
     const current = deps.currentVersion ?? pkg.version;
     const stamp = await readSkillsStamp(deps.dir);
-    if (stamp !== null && stamp.cliVersion === current) return;
-    // A machine that never ran install and has nothing to adopt must not pay a
-    // lock cycle on every command; the scan is a handful of stats, so run it
-    // before the lock and again inside it for the losing racer.
-    if (stamp === null && adoptableSkillDirs(deps.homeDir ?? homedir()).length === 0) return;
-
-    // Serialized: otherwise one process can stamp the version current while
-    // another is still mid-swap, and the stamp suppresses the loser's retry.
-    await withFileLock(skillsSyncLockPath(deps.dir), async () => {
-      const fresh = await readSkillsStamp(deps.dir); // the holder we queued behind may have done it
-      if (fresh !== null && fresh.cliVersion === current) return;
-
-      // No usable stamp is either a pre-feature install or a fresh machine, and
-      // only the first is adopted; the second stays unstamped so `tenjin install`
-      // remains the first thing that ever consents here.
-      const dirs = fresh?.dirs ?? adoptableSkillDirs(deps.homeDir ?? homedir());
-      if (dirs.length === 0) return;
-
-      const resync =
-        deps.resync ??
-        (async (targets: readonly string[]) => {
-          const { resyncWiredSkills } = await import('../commands/install');
-          return resyncWiredSkills(targets);
-        });
-      const { refreshed, removed } = await resync(dirs);
-      // Stamp AFTER a successful pass, so a failed sync retries on the next
-      // command instead of going quiet until the next release.
-      await writeSkillsStamp(deps.dir, current, dirs);
-
-      if (deps.io.isTTY && !deps.json && (refreshed.length > 0 || removed.length > 0)) {
-        const removedNote = removed.length > 0 ? `; removed ${removed.join(', ')}` : '';
-        deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}\n`);
-      }
-    });
+    if ((stamp?.dirs.length ?? 0) > 0) {
+      if (stamp!.cliVersion === current) return;
+      await syncPass(deps, current, stamp!.dirs);
+      return;
+    }
+    await maybeNoticeLegacy(deps, current, stamp);
   } catch {
-    // Best-effort by contract: the triggering command's output and exit code
-    // are never this hook's to change.
+    // Best-effort by contract: the triggering command's output and exit code are
+    // never this hook's to change.
   }
+}
+
+/** Refresh the consented directories, then restamp. */
+async function syncPass(
+  deps: SkillSyncDeps,
+  current: string,
+  dirs: readonly string[],
+): Promise<void> {
+  await underLock(deps, async () => {
+    const fresh = await readSkillsStamp(deps.dir);
+    if (fresh !== null && fresh.cliVersion === current) return; // a queued twin did it
+    const targets = fresh !== null && fresh.dirs.length > 0 ? fresh.dirs : dirs;
+
+    const resync =
+      deps.resync ??
+      (async (t: readonly string[]) => {
+        const { resyncWiredSkills } = await import('../commands/install');
+        return resyncWiredSkills(t);
+      });
+    const { refreshed, removed } = await resync(targets);
+    // AFTER a successful pass, so a failure retries on the next command rather
+    // than going quiet until the next release.
+    await writeSkillsStamp(deps.dir, current, targets);
+
+    if (deps.io.isTTY && !deps.json && (refreshed.length > 0 || removed.length > 0)) {
+      const removedNote = removed.length > 0 ? `; removed ${removed.join(', ')}` : '';
+      deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}\n`);
+    }
+  });
+}
+
+/**
+ * A machine with wired skills but no consent record. Adapter files are not
+ * provenance, so nothing is written to them: the operator is told once per CLI
+ * version to run install, which is the one ceremony that grants ownership.
+ */
+async function maybeNoticeLegacy(
+  deps: SkillSyncDeps,
+  current: string,
+  stamp: SkillsStamp | null,
+): Promise<void> {
+  if (stamp?.noticedVersion === current) return;
+  if (!deps.io.isTTY || deps.json) return;
+  if (legacySkillDirs(deps.homeDir ?? homedir()).length === 0) return;
+
+  await underLock(deps, async () => {
+    const fresh = await readSkillsStamp(deps.dir);
+    if (fresh?.noticedVersion === current || (fresh?.dirs.length ?? 0) > 0) return;
+    await writeSkillsStamp(deps.dir, current, [], current);
+    deps.io.stderr.write(`${REINSTALL_NOTICE}\n`);
+  });
+}
+
+/**
+ * The data dir may not exist yet (a pre-feature headless install never created
+ * it), and the lock's own mkdir is non-recursive, so create it first or every
+ * pass dies on ENOENT and is swallowed.
+ */
+async function underLock(deps: SkillSyncDeps, fn: () => Promise<void>): Promise<void> {
+  await mkdir(deps.dir, { recursive: true, mode: 0o700 });
+  await withFileLock(skillsSyncLockPath(deps.dir), fn, {
+    staleMs: SYNC_LOCK_STALE_MS,
+    ...(deps.lockTimeoutMs !== undefined ? { timeoutMs: deps.lockTimeoutMs } : {}),
+  });
 }

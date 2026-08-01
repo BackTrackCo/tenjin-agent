@@ -1663,3 +1663,60 @@ describe('runInstall: preexisting means a real prior copy', () => {
     expect(warnings).not.toContain('was would be');
   });
 });
+
+// install and the post-command self-heal write the same trees and the same
+// stamp, so they take the same lock. Without it a hook that read the old stamp
+// before install ran can write its stale directory list back afterwards.
+describe('runInstall: serialized against the self-heal', () => {
+  const lockPath = () => join(data, 'skills-sync.lock');
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('waits for a held lock, then wires and stamps correctly', async () => {
+    await mkdir(lockPath(), { recursive: true }); // a concurrent holder
+
+    let finished = false;
+    const run = runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ stampVersion: '9.9.9' }),
+    ).then((r) => {
+      finished = true;
+      return r;
+    });
+
+    // Blocked: nothing wired while someone else holds the lock.
+    await settle(120);
+    expect(finished).toBe(false);
+    expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(false);
+
+    await rm(lockPath(), { recursive: true, force: true });
+    await run;
+
+    expect(finished).toBe(true);
+    expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
+    expect(await readSkillsStamp(data)).toEqual({
+      schemaVersion: 1,
+      cliVersion: '9.9.9',
+      dirs: [join(home, '.claude', 'skills')],
+    });
+  });
+
+  it('releases the lock when it is done', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps({ stampVersion: '9.9.9' }));
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it('takes no lock on a --dry-run, which writes nothing', async () => {
+    await mkdir(lockPath(), { recursive: true });
+    // Would block for the full timeout if dry runs queued; they do not.
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ stampVersion: '9.9.9' }),
+    );
+    expect(asData(res.data).harnesses[0]!.skills.every((s) => s.status === 'would-install')).toBe(
+      true,
+    );
+    await rm(lockPath(), { recursive: true, force: true });
+  });
+});
