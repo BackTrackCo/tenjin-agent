@@ -1076,7 +1076,12 @@ export async function resyncWiredSkills(
   dirs: readonly string[],
   skillsSourceDir?: string,
   retired: readonly string[] = RETIRED_SKILL_NAMES,
-): Promise<{ refreshed: string[]; removed: string[]; skippedSymlinks: string[] }> {
+): Promise<{
+  refreshed: string[];
+  removed: string[];
+  skippedSymlinks: string[];
+  skippedLocalAdditions: string[];
+}> {
   const skillsSource =
     skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
   await assertSkillsSource(skillsSource);
@@ -1084,6 +1089,7 @@ export async function resyncWiredSkills(
   const refreshed: string[] = [];
   const removed: string[] = [];
   const skippedSymlinks: string[] = [];
+  const skippedLocalAdditions: string[] = [];
   const seen = new Set<string>();
   for (const dir of dirs) {
     if (seen.has(dir)) continue;
@@ -1111,6 +1117,7 @@ export async function resyncWiredSkills(
       }
       const status = await swapSkillDir(join(skillsSource, name), dest);
       if (status === 'changed') refreshed.push(dest);
+      if (status === 'has-local-additions') skippedLocalAdditions.push(dest);
     }
     for (const name of retired) {
       const stale = join(dir, name);
@@ -1122,7 +1129,7 @@ export async function resyncWiredSkills(
       }
     }
   }
-  return { refreshed, removed, skippedSymlinks };
+  return { refreshed, removed, skippedSymlinks, skippedLocalAdditions };
 }
 
 function isSymlink(path: string): boolean {
@@ -1168,7 +1175,10 @@ async function underSyncLock(
  * puts the parked copy back before deciding anything, so the window costs a
  * retry rather than a missing skill.
  */
-async function swapSkillDir(srcDir: string, destDir: string): Promise<'changed' | 'up-to-date'> {
+async function swapSkillDir(
+  srcDir: string,
+  destDir: string,
+): Promise<'changed' | 'up-to-date' | 'has-local-additions'> {
   const parent = dirname(destDir);
   const name = basename(destDir);
   const parked = parkPath(parent, name);
@@ -1181,9 +1191,17 @@ async function swapSkillDir(srcDir: string, destDir: string): Promise<'changed' 
 
   const src = await readTree(srcDir);
   if (src === null) throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
-  if (treesEqual(src, await readTree(destDir))) {
+  const dest = await readTree(destDir);
+  if (dest !== null && treesEqual(src, dest)) {
     await discard(parked); // a redundant park from a crash after the second rename
     return 'up-to-date';
+  }
+  // Files beside the shipped set (a references/ folder, notes) are definitively
+  // user-created, and this path runs unattended: deleting them here is data
+  // loss nobody consented to. Refuse; the interactive `tenjin install` names
+  // what it overwrites and is where that decision belongs.
+  if (dest !== null && [...dest.keys()].some((rel) => !src.has(rel))) {
+    return 'has-local-additions';
   }
 
   await discard(tmpDir); // a previous crash's scratch, same pid reused

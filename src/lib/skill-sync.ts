@@ -97,9 +97,12 @@ export interface SkillSyncDeps {
   io: Io;
   json: boolean;
   currentVersion?: string;
-  resync?: (
-    dirs: readonly string[],
-  ) => Promise<{ refreshed: string[]; removed: string[]; skippedSymlinks?: string[] }>;
+  resync?: (dirs: readonly string[]) => Promise<{
+    refreshed: string[];
+    removed: string[];
+    skippedSymlinks?: string[];
+    skippedLocalAdditions?: string[];
+  }>;
   homeDir?: string;
   /** How long to wait on a live holder. Shortened in tests; the lock default otherwise. */
   lockTimeoutMs?: number;
@@ -144,16 +147,22 @@ async function syncPass(
         const { resyncWiredSkills } = await import('../commands/install');
         return resyncWiredSkills(t);
       });
-    const { refreshed, removed, skippedSymlinks = [] } = await resync(targets);
+    const {
+      refreshed,
+      removed,
+      skippedSymlinks = [],
+      skippedLocalAdditions = [],
+    } = await resync(targets);
     // AFTER a successful pass, so a failure retries on the next command rather
     // than going quiet until the next release.
     await writeSkillsStamp(deps.dir, current, targets);
 
     if (deps.io.isTTY && !deps.json && (refreshed.length > 0 || removed.length > 0)) {
       const removedNote = removed.length > 0 ? `; removed ${removed.join(', ')}` : '';
+      const untouched = [...skippedSymlinks, ...skippedLocalAdditions];
       const linkNote =
-        skippedSymlinks.length > 0
-          ? `; left symlinked (update manually): ${skippedSymlinks.join(', ')}`
+        untouched.length > 0
+          ? `; left alone (symlinked or has your own files; run tenjin install to update): ${untouched.join(', ')}`
           : '';
       deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}${linkNote}\n`);
     }

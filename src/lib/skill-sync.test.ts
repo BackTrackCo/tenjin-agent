@@ -451,6 +451,24 @@ describe('resyncWiredSkills', () => {
     expect(refreshed).toContain(join(claude, 'tenjin-publish'));
   });
 
+  it('fails closed on user-created files the package never shipped', async () => {
+    const home = tempDir();
+    const claude = claudeDir(home);
+    wireAdapter(claude); // stale tenjin-search
+    mkdirSync(join(claude, 'tenjin-search', 'references'), { recursive: true });
+    writeFileSync(join(claude, 'tenjin-search', 'references', 'notes.md'), 'my notes');
+    wireAdapter(claude, 'tenjin-publish'); // stale sibling with no additions
+
+    const { refreshed, skippedLocalAdditions } = await resyncWiredSkills([claude], PACKAGED);
+
+    // The dir with the user's own files is untouched, stale SKILL.md included.
+    expect(readFileSync(join(claude, 'tenjin-search', 'references', 'notes.md'), 'utf8')).toBe(
+      'my notes',
+    );
+    expect(skippedLocalAdditions).toEqual([join(claude, 'tenjin-search')]);
+    expect(refreshed).toContain(join(claude, 'tenjin-publish'));
+  });
+
   it('refreshes only the dirs it is given and never touches foreign skills', async () => {
     const home = tempDir();
     const claude = claudeDir(home);
@@ -545,20 +563,6 @@ describe('resyncWiredSkills: the directory swap is transactional', () => {
     expect(entries.some((p) => p.includes('.tenjin-sync-'))).toBe(false);
     expect(entries.some((p) => p.includes('.old-'))).toBe(false);
   });
-
-  it('replaces the tree wholesale, dropping files the package no longer ships', async () => {
-    const home = tempDir();
-    const claude = claudeDir(home);
-    wireAdapter(claude);
-    writeFileSync(join(claude, 'tenjin-search', 'stray.md'), 'gone after the swap');
-
-    await resyncWiredSkills([claude], PACKAGED);
-
-    expect(existsSync(join(claude, 'tenjin-search', 'stray.md'))).toBe(false);
-    expect(readFileSync(join(claude, 'tenjin-search', 'SKILL.md'), 'utf8')).toBe(
-      readFileSync(join(PACKAGED, 'tenjin-search', 'SKILL.md'), 'utf8'),
-    );
-  });
 });
 
 // The one window the two-rename swap leaves open: the live directory is parked
@@ -566,10 +570,10 @@ describe('resyncWiredSkills: the directory swap is transactional', () => {
 // a missing skill, which is why the park name is deterministic.
 describe('resyncWiredSkills: recovery from a crash mid-swap', () => {
   /** The state a SIGKILL between the two renames leaves on disk. */
-  function crashMidSwap(dir: string, name: string): void {
+  function crashMidSwap(dir: string, name: string, extra = false): void {
     mkdirSync(join(dir, `.tenjin-old-${name}`), { recursive: true });
     writeFileSync(join(dir, `.tenjin-old-${name}`, 'SKILL.md'), 'the parked old copy');
-    writeFileSync(join(dir, `.tenjin-old-${name}`, 'extra.md'), 'parked too');
+    if (extra) writeFileSync(join(dir, `.tenjin-old-${name}`, 'extra.md'), 'parked too');
   }
 
   it('restores the parked copy and completes the update', async () => {
@@ -581,13 +585,28 @@ describe('resyncWiredSkills: recovery from a crash mid-swap', () => {
 
     await resyncWiredSkills([claude], PACKAGED);
 
-    // A complete live directory, matching the package...
+    // A complete live directory, matching the package, and the park is gone.
     expect(readFileSync(join(claude, 'tenjin-search', 'SKILL.md'), 'utf8')).toBe(
       readFileSync(join(PACKAGED, 'tenjin-search', 'SKILL.md'), 'utf8'),
     );
-    // ...the park is gone, and the parked-only file did not survive the swap.
     expect(existsSync(join(claude, '.tenjin-old-tenjin-search'))).toBe(false);
-    expect(existsSync(join(claude, 'tenjin-search', 'extra.md'))).toBe(false);
+  });
+
+  it('a crashed dir with user files is restored but not updated', async () => {
+    const home = tempDir();
+    const claude = claudeDir(home);
+    mkdirSync(claude, { recursive: true });
+    crashMidSwap(claude, 'tenjin-search', true); // parked copy carries extra.md
+
+    const { skippedLocalAdditions } = await resyncWiredSkills([claude], PACKAGED);
+
+    // Crash healed: the live dir is back, user file intact, update deferred to
+    // an interactive `tenjin install`.
+    expect(readFileSync(join(claude, 'tenjin-search', 'SKILL.md'), 'utf8')).toBe(
+      'the parked old copy',
+    );
+    expect(readFileSync(join(claude, 'tenjin-search', 'extra.md'), 'utf8')).toBe('parked too');
+    expect(skippedLocalAdditions).toEqual([join(claude, 'tenjin-search')]);
   });
 
   // Without this the crashed directory fails the "is anything wired here" bar

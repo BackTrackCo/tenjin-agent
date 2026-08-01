@@ -33,3 +33,8 @@ lock file that `tenjin install` takes as well, so wiring and healing cannot
 interleave and the recorded directory list can never be overwritten with a stale
 one. A lock left behind by a crashed process is reclaimed after ten minutes
 rather than blocking every later command forever.
+
+The unattended path never deletes anything a user created: a symlinked skill
+directory or one carrying files the package never shipped is left alone and
+named in the notice; `tenjin install` remains the only place such a directory
+is replaced, with its overwrite warning.
