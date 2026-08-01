@@ -168,9 +168,11 @@ export async function writeWalletRecord(dir: string, record: WalletRecord): Prom
 function newerSchemaVersion(json: unknown): number | null {
   if (typeof json !== 'object' || json === null) return null;
   const v = (json as Record<string, unknown>).schemaVersion;
-  // A safe INTEGER only: `2.5` is not a schema we will ship, and calling it "from
-  // the future" would send the operator into an upgrade loop.
-  return typeof v === 'number' && Number.isSafeInteger(v) && v > WALLET_SCHEMA_VERSION ? v : null;
+  // Integral only: `2.5` is not a schema we will ship, and calling it "from the
+  // future" would send the operator into an upgrade loop. Integrality rather than
+  // SAFE integrality, because an absurd-but-whole version is still a version, and
+  // the alternative branch tells them to move the wallet aside and recreate it.
+  return typeof v === 'number' && Number.isInteger(v) && v > WALLET_SCHEMA_VERSION ? v : null;
 }
 
 /** A cleartext-key record from before encrypted storage: schema v1 or a bare `privateKey`. */

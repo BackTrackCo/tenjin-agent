@@ -1692,40 +1692,6 @@ describe('runInstall: hosted skill already present (#35)', () => {
     }
   });
 
-  // 5 concurrent runs used to fail 7 of 15 times on raw ENOENT/ENOTEMPTY renames,
-  // because each skill is replaced by rm-then-write with nothing serializing them.
-  it('serializes concurrent installs instead of racing the same directory', async () => {
-    const runs = await Promise.allSettled(
-      Array.from({ length: 5 }, () =>
-        runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps()),
-      ),
-    );
-    expect(runs.filter((r) => r.status === 'rejected')).toEqual([]);
-    for (const name of SKILL_NAMES) {
-      expect(existsSync(join(home, '.claude', 'skills', name, 'SKILL.md'))).toBe(true);
-    }
-  });
-
-  // A contended lock is a normal outcome, not an internal error: it used to escape
-  // as an untyped LockTimeoutError under INTERNAL.
-  it('reports a held lock as REFUSED, naming the lock to remove', async () => {
-    await mkdir(join(data, 'skills-sync.lock'), { recursive: true });
-    const err = (await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ lockTimeoutMs: 50 }),
-    ).catch((e) => e)) as CliError;
-    expect(err).toBeInstanceOf(CliError);
-    expect(err.code).toBe('REFUSED');
-    expect(err.fix).toContain('skills-sync.lock');
-  });
-
-  it('takes no lock on a dry run, which writes nothing', async () => {
-    const res = await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps());
-    expect(res).toBeDefined();
-    expect(existsSync(join(data, 'skills-sync.lock'))).toBe(false);
-  });
-
   it('a stale disable-model-invocation publish skill is overwritten and re-wired', async () => {
     // What an older CLI left behind: the file is there, the harness ignores it.
     const claudeSkills = join(home, '.claude', 'skills');
@@ -1907,5 +1873,84 @@ describe('runInstall: preexisting means a real prior copy', () => {
     const warnings = asData(d).harnesses[0]!.warnings.join('\n');
     expect(warnings).toContain('may be older');
     expect(warnings).not.toContain('was would be');
+  });
+});
+
+/** Writing the skill tree: locking, interrupts and destructive-write reporting. */
+describe('runInstall: the skill-directory write', () => {
+  // 5 concurrent runs used to fail 7 of 15 times on raw ENOENT/ENOTEMPTY renames,
+  // because each skill is replaced by rm-then-write with nothing serializing them.
+  it('serializes concurrent installs instead of racing the same directory', async () => {
+    const runs = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps()),
+      ),
+    );
+    expect(runs.filter((r) => r.status === 'rejected')).toEqual([]);
+    for (const name of SKILL_NAMES) {
+      expect(existsSync(join(home, '.claude', 'skills', name, 'SKILL.md'))).toBe(true);
+    }
+  });
+
+  // A contended lock is a normal outcome, not an internal error: it used to escape
+  // as an untyped LockTimeoutError under INTERNAL.
+  it('reports a held lock as REFUSED, naming the lock to remove', async () => {
+    await mkdir(join(data, 'skills-sync.lock'), { recursive: true });
+    const err = (await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ lockTimeoutMs: 50 }),
+    ).catch((e) => e)) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('REFUSED');
+    expect(err.fix).toContain('skills-sync.lock');
+  });
+
+  // Pre-held, because asserting the lock is absent AFTER the run is true whether or
+  // not the dry run took and released it. A dry run that took it would block here.
+  it('takes no lock on a dry run, which writes nothing', async () => {
+    await mkdir(join(data, 'skills-sync.lock'), { recursive: true });
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ lockTimeoutMs: 50 }),
+    );
+    expect(res).toBeDefined();
+    expect(existsSync(join(data, 'skills-sync.lock'))).toBe(true); // still the holder's
+    expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search'))).toBe(false);
+  });
+
+  // A directory holding only non-regular entries reads as `create`, because
+  // readTree keeps regular files only. The rm still takes its contents.
+  it('names removed entries even when no regular file was there to compare', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(home, 'target.md'), 'mine');
+    await symlink(join(home, 'target.md'), join(dir, 'my-notes.md'));
+
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const skill = asData(d).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+    expect(skill.status).toBe('installed');
+    const warning = asData(d).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
+    expect(warning).toContain('my-notes.md');
+    expect(existsSync(join(dir, 'my-notes.md'))).toBe(false);
+  });
+
+  // A dry run must not promise an overwrite the real run refuses.
+  it('refuses a symlinked skill directory on --dry-run too', async () => {
+    if (process.platform === 'win32') return;
+    const real = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(real, { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nmine\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(real, link);
+
+    const err = (await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('REFUSED');
   });
 });

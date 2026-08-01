@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -1108,8 +1108,87 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('not from this CLI build');
     expect(check.detail).toContain(skills);
-    expect(check.fix).toBe('tenjin install');
+    // fixFor names the harness, so the fix actually targets the stale directory.
+    expect(check.fix).toBe('tenjin install --harness claude');
     expect(data.status).toBe('pass'); // never an exit-code event
+    await rm(src, { recursive: true, force: true });
+  });
+
+  // Diagnosing a broken install is doctor's job, so a package missing its skills/
+  // must not be the one breakage it refuses to describe.
+  it('still reports every check when the packaged skills cannot be resolved', async () => {
+    const gone = join(tmpdir(), 'tenjin-nonexistent-skills-source');
+    await wire('anything\n');
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: gone,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    expect(data.checks.length).toBeGreaterThan(3);
+    expect(find(data.checks, 'skills').status).toBe('ok'); // no evidence of drift
+  });
+
+  // `install` refuses to write a symlinked skill directory, so calling it an old
+  // build would advertise a fix that can never clear.
+  it('does not call a symlinked skill directory stale', async () => {
+    if (process.platform === 'win32') return;
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-pkg-'));
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), 'current\n');
+    }
+    await wire('current\n');
+    // Replace one wired copy with a symlink to a differing tree.
+    const real = join(skillHome, 'dotfiles', 'tenjin-search');
+    await mkdir(real, { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), 'what an older CLI shipped\n');
+    const link = join(skillHome, '.claude', 'skills', 'tenjin-search');
+    await rm(link, { recursive: true, force: true });
+    await symlink(real, link);
+
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: src,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    expect(find((res.data as { checks: CheckResult[] }).checks, 'skills').detail).not.toContain(
+      'not from this CLI build',
+    );
+    await rm(src, { recursive: true, force: true });
+  });
+
+  // A plain `tenjin install` targets DETECTED harnesses only, so for a directory
+  // that exists because someone passed --harness it would never clear the warning.
+  it('offers a harness-specific fix for a stale directory only --harness targets', async () => {
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-pkg-'));
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), 'current\n');
+    }
+    const shared = join(skillHome, '.agents', 'skills');
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(shared, name), { recursive: true });
+      await writeFile(join(shared, name, 'SKILL.md'), 'what an older CLI shipped\n');
+    }
+    // Requested but NOT detected, which is exactly what a bare `tenjin install`
+    // misses: the harness record is what put this directory in play.
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: ['codex'] } }));
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: src,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('not from this CLI build');
+    // Whatever fixFor names it, the point is that it is NOT the bare command,
+    // which targets detected harnesses only and would never clear this warning.
+    expect(check.fix).not.toBe('tenjin install');
+    expect(check.fix).toContain('--harness');
     await rm(src, { recursive: true, force: true });
   });
 });

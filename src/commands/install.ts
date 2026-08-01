@@ -1041,8 +1041,11 @@ async function installSkill(
   const shared =
     dest !== null && [...src.keys()].some((rel) => !bufEquals(src.get(rel), dest.get(rel)));
 
+  // Outside the !dryRun guard on purpose: a dry run must not promise an overwrite
+  // the real run refuses.
+  if (change !== 'none') await refuseSymlinkedSkillDir(destDir, name);
+
   if (!dryRun && change !== 'none') {
-    await refuseSymlinkedSkillDir(destDir, name);
     try {
       // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
       // local files left behind. rm is a no-op when the dir is absent.
@@ -1066,7 +1069,17 @@ async function installSkill(
     }
   }
 
-  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed', preexisting };
+  if (change === 'create') {
+    // `create` means no regular files were here, NOT that the directory was empty:
+    // readTree keeps regular files only, so a directory of symlinks lands here with
+    // its contents already taken by the rm. Warn whenever something was removed.
+    const note = removedNote(removed, dryRun);
+    return {
+      status: dryRun ? 'would-install' : 'installed',
+      preexisting,
+      ...(note === '' ? {} : { warning: `${destDir}:${note}` }),
+    };
+  }
   if (change === 'none') return { status: 'up-to-date', preexisting };
   return {
     status: dryRun ? 'would-update' : 'updated',
@@ -1150,9 +1163,18 @@ async function underSyncLock(
   try {
     await withFileLock(lockPath, guarded, timeoutMs !== undefined ? { timeoutMs } : {});
   } catch (err) {
-    if (!(err instanceof LockTimeoutError)) throw err;
-    throw new CliError('REFUSED', 'Another `tenjin install` is writing the skills.', {
-      fix: `Wait for it to finish and re-run. If nothing else is running, remove ${err.lockPath} and retry.`,
+    if (err instanceof LockTimeoutError) {
+      throw new CliError('REFUSED', 'Another `tenjin install` is writing the skills.', {
+        fix: `Wait for it to finish and re-run. If nothing else is running, remove ${err.lockPath} and retry.`,
+        cause: err,
+      });
+    }
+    // Taking the lock is the first thing install writes to the data dir, so an
+    // unwritable one now fails a command that used to succeed. It gets a fix, like
+    // the skills-directory case.
+    if (!hasCode(err, 'EACCES') && !hasCode(err, 'EPERM')) throw err;
+    throw new CliError('INTERNAL', `Could not use the Tenjin data directory ${dataDir}.`, {
+      fix: `Permission denied. Check that you can write to it (\`ls -ld ${dataDir}\`), then re-run \`tenjin install\`.`,
       cause: err,
     });
   } finally {

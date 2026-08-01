@@ -1,7 +1,7 @@
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
@@ -447,7 +447,13 @@ async function checkSkills(
         status: 'warn',
         required: false,
         detail: `${CLI_SKILL_NAMES.join(' + ')} wired but not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
-        fix: 'tenjin install',
+        // fixFor, like every neighbouring branch: a plain `tenjin install` targets
+        // DETECTED harnesses only, so for a directory that exists because someone
+        // passed --harness it would be a fix that never clears the warning.
+        fix: fixFor(
+          home,
+          wiring.filter((w) => stale.includes(w.dir)),
+        ),
         data,
       },
     };
@@ -468,19 +474,37 @@ async function checkSkills(
  * Directories whose wired CLI adapter skills differ from the packaged ones.
  *
  * Only the ADAPTERS: the hosted mirror is a copy of tenjin.blog/skills.md that an
- * operator may legitimately have re-fetched newer than this package ships, so a
- * difference there is not staleness. Unreadable on either side is not evidence of
- * drift, so it is skipped rather than reported.
+ * operator may legitimately have re-fetched newer than this package ships. A
+ * symlinked skill directory is skipped rather than called stale, because `install`
+ * refuses to write one and reporting it as an old build would offer a fix that can
+ * never clear. Unreadable on either side is not evidence of drift.
  */
 async function staleSkillDirs(dirs: readonly string[], sourceDir?: string): Promise<string[]> {
-  const source = sourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  let source: string;
+  try {
+    source = sourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  } catch {
+    // A package without its skills/ is exactly the broken install doctor exists to
+    // describe, so this check declines rather than taking the whole command down.
+    return [];
+  }
+  // Read once, not once per directory.
+  const packaged = new Map<string, Buffer>();
+  for (const name of CLI_SKILL_NAMES) {
+    const bytes = await readFile(join(source, name, 'SKILL.md')).catch(() => null);
+    if (bytes !== null) packaged.set(name, bytes);
+  }
+
   const stale: string[] = [];
   for (const dir of dirs) {
     for (const name of CLI_SKILL_NAMES) {
-      const packaged = await readFile(join(source, name, 'SKILL.md')).catch(() => null);
+      const want = packaged.get(name);
+      if (want === undefined) continue;
+      const entry = await lstat(join(dir, name)).catch(() => null);
+      if (entry === null || entry.isSymbolicLink()) continue;
       const onDisk = await readFile(join(dir, name, 'SKILL.md')).catch(() => null);
-      if (packaged === null || onDisk === null) continue;
-      if (!packaged.equals(onDisk)) {
+      if (onDisk === null) continue;
+      if (!want.equals(onDisk)) {
         stale.push(dir);
         break;
       }

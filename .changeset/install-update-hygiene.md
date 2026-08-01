@@ -8,7 +8,7 @@ Three things that made an ordinary update or re-install read as breakage.
 question fired unconditionally and the "already allowed" outcome was only
 discovered by attempting the write, so every re-run interrupted the operator to
 re-authorize a write that would not happen and then told them nothing changed.
-A new read-only `pendingFreeVerbRules` probe answers the question first; a
+A new read-only `inspectFreeVerbRules` probe answers the question first; a
 settings file that cannot be read is "unknown" rather than "already allowed", so
 that case still asks and the writer still reports why.
 
@@ -32,11 +32,9 @@ directory wholesale so the packaged copy is exactly what lands, but the warning
 said "local skill copy differed and was overwritten" while a `references/`
 folder beside the SKILL.md was deleted without being mentioned, and "differed"
 was false whenever the shared files were byte-identical. The warning now names
-every file the wipe removes and only claims a difference when there is one. A
-symlinked skill directory is resolved before the wipe, so a dotfiles-managed
-directory keeps its link instead of being replaced by a real one with an
-orphaned target. An unwritable skills directory raises a typed error with a fix
-rather than a bare `EACCES ... mkdir` under INTERNAL with none.
+every entry the wipe removes and only claims a difference when there is one. An
+unwritable skills directory raises a typed error with a fix rather than a bare
+`EACCES ... mkdir` under INTERNAL with none.
 
 The "hosted skill was already here" notice now fires only for the
 hosted-zero-install-first funnel. It gated on a SKILL.md being on disk, which is

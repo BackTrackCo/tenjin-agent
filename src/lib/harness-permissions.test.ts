@@ -18,7 +18,7 @@ import {
   claudeSettingsPath,
   FORBIDDEN_VERB_FRAGMENTS,
   FREE_VERB_RULES,
-  pendingFreeVerbRules,
+  inspectFreeVerbRules,
   permissionsSkipped,
   wireFreeVerbAllowlist,
 } from './harness-permissions';
@@ -220,9 +220,9 @@ describe('wireFreeVerbAllowlist: idempotency', () => {
   });
 });
 
-describe('pendingFreeVerbRules: a probe that cannot write', () => {
+describe('inspectFreeVerbRules: a probe that cannot write', () => {
   it('reports every rule on a machine with no settings file, and creates nothing', async () => {
-    expect(await pendingFreeVerbRules(home)).toEqual([...FREE_VERB_RULES]);
+    expect((await inspectFreeVerbRules(home)).pending).toEqual([...FREE_VERB_RULES]);
     expect(existsSync(settingsPath())).toBe(false);
   });
 
@@ -231,14 +231,14 @@ describe('pendingFreeVerbRules: a probe that cannot write', () => {
     const before = await readFile(settingsPath(), 'utf8');
     const beforeMtime = (await stat(settingsPath())).mtimeMs;
 
-    expect(await pendingFreeVerbRules(home)).toEqual([]);
+    expect((await inspectFreeVerbRules(home)).pending).toEqual([]);
     expect(await readFile(settingsPath(), 'utf8')).toBe(before);
     expect((await stat(settingsPath())).mtimeMs).toBe(beforeMtime);
   });
 
   it('reports only the missing subset', async () => {
     await seedSettings({ permissions: { allow: [FREE_VERB_RULES[0], 'Bash(ls:*)'] } });
-    expect(await pendingFreeVerbRules(home)).toEqual(FREE_VERB_RULES.slice(1));
+    expect((await inspectFreeVerbRules(home)).pending).toEqual(FREE_VERB_RULES.slice(1));
   });
 
   // Null is "unknown", which the caller must not read as "nothing to do": a file
@@ -250,7 +250,7 @@ describe('pendingFreeVerbRules: a probe that cannot write', () => {
     ['a foreign allow shape', JSON.stringify({ permissions: { allow: 'everything' } })],
   ])('returns null for %s', async (_name, contents) => {
     await seedSettings(contents);
-    expect(await pendingFreeVerbRules(home)).toBeNull();
+    expect((await inspectFreeVerbRules(home)).pending).toBeNull();
   });
 });
 

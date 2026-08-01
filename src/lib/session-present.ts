@@ -293,15 +293,18 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
   const parsed = SessionFileSchema.safeParse(json);
   if (!parsed.success) {
     const issues = parsed.error.issues;
-    const issue = issues[0];
+    const legacy = (i: (typeof issues)[number]): boolean =>
+      LATER_ADDED_FIELDS.includes(i.path.join('.')) && !hasPath(json, i.path);
+    // Report the first NON-legacy issue when there is one: a file missing both
+    // `origin` and its private scalar is corrupt because of the scalar, and naming
+    // the benign field points the operator at the wrong thing.
+    const issue = issues.find((i) => !legacy(i)) ?? issues[0];
     const field = issue?.path.join('.');
     const message = issue?.message ?? 'schema mismatch';
     // EVERY failure must be an allowlisted later field the file genuinely lacks.
     // One legacy omission cannot vouch for the rest of the file, and zod reports in
     // schema order, so the first issue alone would let a broken key ride in.
-    const legacyOnly =
-      issues.length > 0 &&
-      issues.every((i) => LATER_ADDED_FIELDS.includes(i.path.join('.')) && !hasPath(json, i.path));
+    const legacyOnly = issues.length > 0 && issues.every(legacy);
     if (legacyOnly && field !== undefined) return { kind: 'outdated', field };
     // Field-qualified: the message alone names none. zod never echoes the received
     // VALUE, so no key material reaches this string.

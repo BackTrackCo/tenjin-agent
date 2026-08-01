@@ -158,20 +158,6 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
 }
 
 /**
- * Which free-verb rules are NOT yet allowed, without writing anything. Null when
- * that cannot be determined (an unreadable, unparsable, or foreign-shaped
- * settings file), which the caller must treat as "unknown", never as "none".
- *
- * This exists so the install walkthrough can skip a consent question it already
- * has the answer to. Asking an operator to re-authorize a write that will not
- * happen, and then reporting "already allowed", teaches them the question is
- * decoration.
- */
-export async function pendingFreeVerbRules(homeDir: string): Promise<string[] | null> {
-  return (await inspectFreeVerbRules(homeDir)).pending;
-}
-
-/**
  * The probe the install walkthrough uses: what is still missing, plus the outcome
  * to report when nothing is. Returning the SNAPSHOT's own result matters. Calling
  * the writer again after a zero-pending probe re-reads the file, so a rule revoked
