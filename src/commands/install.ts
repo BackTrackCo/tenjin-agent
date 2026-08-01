@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, relative } from 'node:path';
@@ -1076,13 +1076,14 @@ export async function resyncWiredSkills(
   dirs: readonly string[],
   skillsSourceDir?: string,
   retired: readonly string[] = RETIRED_SKILL_NAMES,
-): Promise<{ refreshed: string[]; removed: string[] }> {
+): Promise<{ refreshed: string[]; removed: string[]; skippedSymlinks: string[] }> {
   const skillsSource =
     skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
   await assertSkillsSource(skillsSource);
 
   const refreshed: string[] = [];
   const removed: string[] = [];
+  const skippedSymlinks: string[] = [];
   const seen = new Set<string>();
   for (const dir of dirs) {
     if (seen.has(dir)) continue;
@@ -1100,8 +1101,16 @@ export async function resyncWiredSkills(
     );
     if (!wired) continue;
     for (const name of SKILL_NAMES) {
-      const status = await swapSkillDir(join(skillsSource, name), join(dir, name));
-      if (status === 'changed') refreshed.push(join(dir, name));
+      const dest = join(dir, name);
+      // Fail closed on a symlinked destination: the swap's rename would replace
+      // the operator's link (a dotfiles-managed tree, say) with a real
+      // directory, silently severing their management. Their link, their move.
+      if (isSymlink(dest)) {
+        skippedSymlinks.push(dest);
+        continue;
+      }
+      const status = await swapSkillDir(join(skillsSource, name), dest);
+      if (status === 'changed') refreshed.push(dest);
     }
     for (const name of retired) {
       const stale = join(dir, name);
@@ -1113,7 +1122,15 @@ export async function resyncWiredSkills(
       }
     }
   }
-  return { refreshed, removed };
+  return { refreshed, removed, skippedSymlinks };
+}
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /**

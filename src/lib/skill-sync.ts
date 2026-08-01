@@ -97,7 +97,9 @@ export interface SkillSyncDeps {
   io: Io;
   json: boolean;
   currentVersion?: string;
-  resync?: (dirs: readonly string[]) => Promise<{ refreshed: string[]; removed: string[] }>;
+  resync?: (
+    dirs: readonly string[],
+  ) => Promise<{ refreshed: string[]; removed: string[]; skippedSymlinks?: string[] }>;
   homeDir?: string;
   /** How long to wait on a live holder. Shortened in tests; the lock default otherwise. */
   lockTimeoutMs?: number;
@@ -142,14 +144,18 @@ async function syncPass(
         const { resyncWiredSkills } = await import('../commands/install');
         return resyncWiredSkills(t);
       });
-    const { refreshed, removed } = await resync(targets);
+    const { refreshed, removed, skippedSymlinks = [] } = await resync(targets);
     // AFTER a successful pass, so a failure retries on the next command rather
     // than going quiet until the next release.
     await writeSkillsStamp(deps.dir, current, targets);
 
     if (deps.io.isTTY && !deps.json && (refreshed.length > 0 || removed.length > 0)) {
       const removedNote = removed.length > 0 ? `; removed ${removed.join(', ')}` : '';
-      deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}\n`);
+      const linkNote =
+        skippedSymlinks.length > 0
+          ? `; left symlinked (update manually): ${skippedSymlinks.join(', ')}`
+          : '';
+      deps.io.stderr.write(`tenjin skills refreshed for ${current}${removedNote}${linkNote}\n`);
     }
   });
 }

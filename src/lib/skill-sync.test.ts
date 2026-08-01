@@ -1,10 +1,12 @@
 import {
   chmodSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   existsSync,
   readdirSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
   rmSync,
   utimesSync,
@@ -427,6 +429,28 @@ describe('maybeResyncSkills: a legacy machine is noticed, never adopted', () => 
 });
 
 describe('resyncWiredSkills', () => {
+  it('fails closed on a symlinked skill directory: the link and its target survive', async () => {
+    const home = tempDir();
+    const claude = claudeDir(home);
+    // A dotfiles-managed skill: the harness path is a symlink into an external tree.
+    const managed = join(home, 'dotfiles', 'tenjin-search');
+    mkdirSync(managed, { recursive: true });
+    writeFileSync(join(managed, 'SKILL.md'), 'dotfiles-managed copy');
+    mkdirSync(claude, { recursive: true });
+    symlinkSync(managed, join(claude, 'tenjin-search'));
+    // A second, ordinary wired copy so the dir passes the wiring bar regardless.
+    mkdirSync(join(claude, 'tenjin-publish'), { recursive: true });
+    writeFileSync(join(claude, 'tenjin-publish', 'SKILL.md'), 'stale');
+
+    const { refreshed, skippedSymlinks } = await resyncWiredSkills([claude], PACKAGED);
+
+    expect(lstatSync(join(claude, 'tenjin-search')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(managed, 'SKILL.md'), 'utf8')).toBe('dotfiles-managed copy');
+    expect(skippedSymlinks).toEqual([join(claude, 'tenjin-search')]);
+    // The ordinary sibling still heals.
+    expect(refreshed).toContain(join(claude, 'tenjin-publish'));
+  });
+
   it('refreshes only the dirs it is given and never touches foreign skills', async () => {
     const home = tempDir();
     const claude = claudeDir(home);
