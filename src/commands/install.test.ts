@@ -8,7 +8,11 @@ import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './instal
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
-import { claudeSettingsPath, FREE_VERB_RULES } from '../lib/harness-permissions';
+import {
+  claudeSettingsPath,
+  FREE_VERB_RULES,
+  inspectFreeVerbRules,
+} from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -1219,6 +1223,32 @@ describe('runInstall: permissions decision', () => {
     expect(human(res)).toContain('were already allowed');
   });
 
+  // The no-prompt path must not perform a SECOND read. Re-reading meant a rule
+  // revoked between probe and write was silently re-added without a prompt, which
+  // is the one thing a consent gate cannot do.
+  it('reports the probe snapshot and writes nothing if a rule is revoked mid-run', async () => {
+    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        confirmPermissions: confirm,
+        // Probe says satisfied; the file loses a rule immediately afterwards.
+        inspectPermissions: async (h) => {
+          const out = await inspectFreeVerbRules(h);
+          await writeSettings({ permissions: { allow: [...FREE_VERB_RULES.slice(1)] } });
+          return out;
+        },
+      }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data).added).toEqual([]);
+    // The revoked rule stays revoked: no unprompted re-grant.
+    expect(await allowList()).toEqual([...FREE_VERB_RULES.slice(1)]);
+  });
+
   it('still asks when only SOME of the rules are allowed', async () => {
     await writeSettings({ permissions: { allow: [FREE_VERB_RULES[0]] } });
     const confirm = vi.fn(async () => true);
@@ -1558,6 +1588,21 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(existsSync(join(dir, 'references', 'notes.md'))).toBe(false);
   });
 
+  // A filename is operator data. One carrying ANSI or newlines could forge status
+  // lines beside the warning it appears in.
+  it('sanitizes a removed filename carrying control bytes', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await writeFile(join(dir, 'a\u001b[31mb\u0007.md'), 'x');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'))!;
+    expect(warning).toContain('also removed');
+    expect(warning).not.toContain('\u001b');
+    expect(warning).not.toContain('\u0007');
+  });
+
   it('reports nothing extra when the wipe takes only packaged files', async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(dir, { recursive: true });
@@ -1569,22 +1614,60 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(warning).not.toContain('also removed');
   });
 
-  // `rm` on a symlink removes the LINK. The old path replaced a dotfiles-managed
-  // directory with a real one and silently stopped the user's repo edits from
-  // reaching the harness.
-  it('writes through a symlinked skill directory and leaves the link intact', async () => {
+  // Neither option is ours to pick silently: following the link wipes whatever the
+  // operator manages at the target, and `rm` on the link detaches the path they set
+  // up. So the write is refused and nothing is touched on either side.
+  it('refuses a symlinked skill directory and leaves the link and its target alone', async () => {
     if (process.platform === 'win32') return;
     const real = join(home, 'dotfiles', 'tenjin-search');
-    await mkdir(real, { recursive: true });
-    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await mkdir(join(real, 'references'), { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nmine\n');
+    await writeFile(join(real, 'references', 'notes.md'), 'my private notes');
     const link = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(dirname(link), { recursive: true });
     await symlink(real, link);
 
-    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('REFUSED');
+    expect(err.message).toContain('is a symlink');
+    // Both sides untouched: the link still a link, the target's files still theirs.
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    const packaged = await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'));
-    expect(await readFile(join(real, 'SKILL.md'))).toEqual(packaged);
+    expect(await readFile(join(real, 'SKILL.md'), 'utf8')).toContain('mine');
+    expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
+  });
+
+  // A DANGLING link read as "absent" through existsSync, so the write replaced it
+  // with a real directory and permanently detached the managed path.
+  it('refuses a dangling symlink instead of replacing it with a real directory', async () => {
+    if (process.platform === 'win32') return;
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(join(home, 'nowhere', 'tenjin-search'), link);
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err.code).toBe('REFUSED');
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  });
+
+  // readTree only records isFile(), so a symlinked note was invisible to both tree
+  // equality and the removal list, and the wipe took it without naming it.
+  it('names a nested symlink the wipe removes', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await writeFile(join(home, 'real-notes.md'), 'my private notes');
+    await symlink(join(home, 'real-notes.md'), join(dir, 'notes.md'));
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
+    expect(warning).toContain('notes.md');
+    expect(existsSync(join(dir, 'notes.md'))).toBe(false);
   });
 
   // An unwritable HOME is an environment problem. It reached the envelope as a raw

@@ -250,24 +250,16 @@ export type SessionFileState =
    *  report that prints a mode the file does not have is worse than no number. */
   | { kind: 'loosened'; mode: number }
   | { kind: 'corrupt'; reason: string }
-  /**
-   * A file an OLDER CLI wrote, whose shape has since grown a required field. Not
-   * a tamper signal and not a corruption: the cache is simply unusable and
-   * re-mintable, exactly like an absent one. It gets its own kind so the
-   * diagnostic does not send someone hunting for tampering over a version bump.
-   */
+  /** An OLDER CLI's file, missing a field the shape has since required. Unusable
+   *  and re-mintable like an absent one, so NOT the tamper signal `corrupt` is. */
   | { kind: 'outdated'; field: string }
   | { kind: 'unreadable'; message: string; cause: unknown }
   | { kind: 'ok'; file: SessionFile };
 
 /**
- * Fields a session file written by an OLDER CLI can legitimately lack, so their
- * absence reports as {@link SessionFileState} `outdated` rather than `corrupt`.
- *
- * Deliberately an allowlist and not "any missing key": a file with no
- * `privateKeyJwk.d` cannot sign and is broken whoever wrote it, and collapsing
- * that into a friendly version notice would retire a real signal. Add a name here
- * when the schema grows a required field, never to quiet a failing test.
+ * Fields an OLDER CLI's file can legitimately lack. An allowlist, not "any missing
+ * key": a file with no `privateKeyJwk.d` cannot sign and is broken whoever wrote
+ * it. Add a name when the schema grows a required field, never to quiet a test.
  */
 const LATER_ADDED_FIELDS: readonly string[] = ['origin'];
 
@@ -300,24 +292,19 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
   }
   const parsed = SessionFileSchema.safeParse(json);
   if (!parsed.success) {
-    const issue = parsed.error.issues[0];
+    const issues = parsed.error.issues;
+    const issue = issues[0];
     const field = issue?.path.join('.');
     const message = issue?.message ?? 'schema mismatch';
-    // A NAMED field that a older CLI's file can legitimately lack, and that the
-    // file genuinely does not carry, is a version fact rather than a corruption.
-    // Both halves matter: the allowlist keeps a missing private scalar in the
-    // tamper bucket where it belongs, and the absence check keeps a field that is
-    // present and wrong there too.
-    if (
-      issue !== undefined &&
-      field !== undefined &&
-      LATER_ADDED_FIELDS.includes(field) &&
-      !hasPath(json, issue.path)
-    )
-      return { kind: 'outdated', field };
-    // Field-qualified, because "expected string, received undefined" names no
-    // field on its own. zod never echoes the received VALUE, so no key material
-    // reaches this string.
+    // EVERY failure must be an allowlisted later field the file genuinely lacks.
+    // One legacy omission cannot vouch for the rest of the file, and zod reports in
+    // schema order, so the first issue alone would let a broken key ride in.
+    const legacyOnly =
+      issues.length > 0 &&
+      issues.every((i) => LATER_ADDED_FIELDS.includes(i.path.join('.')) && !hasPath(json, i.path));
+    if (legacyOnly && field !== undefined) return { kind: 'outdated', field };
+    // Field-qualified: the message alone names none. zod never echoes the received
+    // VALUE, so no key material reaches this string.
     return {
       kind: 'corrupt',
       reason: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,

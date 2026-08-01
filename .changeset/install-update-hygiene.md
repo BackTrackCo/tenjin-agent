@@ -44,3 +44,12 @@ trivially true on any re-run, so the CLI reported its own mirror back to the
 user as something they had installed. `hostedArrivedFirst` is the narrowed
 signal; `hostedPreexisting` keeps its meaning in the envelope. The note also no
 longer reads as though the local hosted file was preserved when it was replaced.
+
+A symlinked skill directory is now REFUSED rather than replaced. Following the
+link and wiping the target destroys whatever the operator manages there, and
+removing the link detaches the path they set up; neither is the CLI's to pick
+silently, so nothing is written and the operator is told what to change. A
+dangling link is refused too, instead of reading as absent and being replaced by
+a real directory. The removal list also covers non-regular entries, which the
+tree reader does not carry but the wipe still takes, and filenames are sanitized
+before they reach a message.

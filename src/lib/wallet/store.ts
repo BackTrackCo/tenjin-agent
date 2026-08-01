@@ -31,6 +31,10 @@ const KeystoreV3Schema = z.object({
   version: z.literal(3),
 });
 
+/** The wallet-record schema this build writes and reads. Anything higher on disk
+ *  was written by a newer CLI; see `readWalletRecord`. */
+export const WALLET_SCHEMA_VERSION = 2;
+
 /**
  * The persisted wallet record (schema v2). The private key is NEVER stored in
  * cleartext: `keystore` is a Keystore v3 document (scrypt + AES-128-CTR) and the
@@ -41,10 +45,6 @@ const KeystoreV3Schema = z.object({
  * keystore. Validated on read (a corrupt file is WALLET_INVALID_KEY, never a
  * silent partial parse).
  */
-/** The wallet-record schema this build writes and reads. Anything higher on disk
- *  was written by a newer CLI; see `readWalletRecord`. */
-export const WALLET_SCHEMA_VERSION = 2;
-
 export const WalletRecordSchema = z.object({
   schemaVersion: z.literal(WALLET_SCHEMA_VERSION),
   provider: z.literal('local'),
@@ -103,13 +103,10 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
       },
     );
   }
-  // A record from a NEWER CLI, which is a downgrade and not a corruption: the
-  // keystore is intact and the binary that wrote it still reads it. This has to
-  // be caught before the generic parse failure below, because that failure tells
-  // the operator to move the file aside and run `wallet create` — advice that on
-  // a downgrade abandons a funded wallet. CONTRACT_MISMATCH is the code the API
-  // layer already uses for a version skew between two sides of a schema, and it
-  // is not a code an agent recreates a wallet on.
+  // A NEWER CLI's record is a downgrade, not a corruption, and must be caught
+  // BEFORE the generic parse failure below: that failure says to move the file
+  // aside and run `wallet create`, which on a downgrade abandons a funded wallet.
+  // CONTRACT_MISMATCH is the API layer's code for a schema version skew.
   const newer = newerSchemaVersion(json);
   if (newer !== null) {
     throw new CliError(
@@ -171,7 +168,9 @@ export async function writeWalletRecord(dir: string, record: WalletRecord): Prom
 function newerSchemaVersion(json: unknown): number | null {
   if (typeof json !== 'object' || json === null) return null;
   const v = (json as Record<string, unknown>).schemaVersion;
-  return typeof v === 'number' && v > WALLET_SCHEMA_VERSION ? v : null;
+  // A safe INTEGER only: `2.5` is not a schema we will ship, and calling it "from
+  // the future" would send the operator into an upgrade loop.
+  return typeof v === 'number' && Number.isSafeInteger(v) && v > WALLET_SCHEMA_VERSION ? v : null;
 }
 
 /** A cleartext-key record from before encrypted storage: schema v1 or a bare `privateKey`. */

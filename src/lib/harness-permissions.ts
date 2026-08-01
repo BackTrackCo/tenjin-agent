@@ -168,8 +168,34 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
  * decoration.
  */
 export async function pendingFreeVerbRules(homeDir: string): Promise<string[] | null> {
+  return (await inspectFreeVerbRules(homeDir)).pending;
+}
+
+/**
+ * The probe the install walkthrough uses: what is still missing, plus the outcome
+ * to report when nothing is. Returning the SNAPSHOT's own result matters. Calling
+ * the writer again after a zero-pending probe re-reads the file, so a rule revoked
+ * between the two reads was silently re-added with no prompt, which is the one
+ * thing a consent gate must not do.
+ *
+ * `pending` is null when the file cannot be understood; that is "unknown", never
+ * "already allowed", and the caller must still ask.
+ */
+export async function inspectFreeVerbRules(
+  homeDir: string,
+): Promise<{ pending: string[] | null; satisfied?: PermissionsResult }> {
   const found = await inspectAllowlist(homeDir);
-  return 'result' in found ? null : found.added;
+  if ('result' in found) return { pending: null };
+  if (found.added.length > 0) return { pending: found.added };
+  return {
+    pending: [],
+    satisfied: {
+      harness: 'claude',
+      path: found.path,
+      added: [],
+      alreadyPresent: found.alreadyPresent,
+    },
+  };
 }
 
 interface AllowlistInspection {

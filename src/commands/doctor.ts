@@ -580,10 +580,8 @@ async function checkSession(
       `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
     );
   }
-  // Same standing as `absent`, deliberately: a cache an older CLI wrote is one
-  // this CLI cannot use, which is what absent means. Reporting it as a failing
-  // check made every run after an update carry a permanent warning about a file
-  // that is re-minted by one command and is often already expired anyway.
+  // Same standing as `absent`: a cache this CLI cannot use, re-minted by one
+  // command. A failing check here meant a permanent post-update warning.
   if (state.kind === 'outdated') {
     return {
       result: {

@@ -129,6 +129,15 @@ describe('readWalletRecord', () => {
     expect(err.fix).toContain('npm i -g tenjin-cli');
   });
 
+  // A version we would never ship is a malformed record, not the future: calling it
+  // a downgrade sends the operator into an upgrade loop that can never resolve.
+  it('treats a non-integer schema version as corrupt, not as a newer CLI', async () => {
+    await writeWalletRecord(dataDir, fakeRecord());
+    await writeFile(walletFile(), JSON.stringify({ schemaVersion: 2.5, provider: 'local' }));
+    const err = (await readWalletRecord(dataDir).catch((e) => e)) as CliError;
+    expect(err.code).toBe('WALLET_INVALID_KEY');
+  });
+
   it('still rejects an unknown-shape record at the current schema version', async () => {
     await writeWalletRecord(dataDir, fakeRecord());
     await writeFile(

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { lstat, readFile, readdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -36,7 +36,7 @@ import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
-  pendingFreeVerbRules,
+  inspectFreeVerbRules,
   permissionsSkipped,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
@@ -202,7 +202,9 @@ export interface InstallDeps {
   /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
   confirmPermissions?: ConfirmFn;
   /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
-  pendingPermissions?: (home: string) => Promise<string[] | null>;
+  inspectPermissions?: (
+    home: string,
+  ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
   /** Decision 3: "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. Seams so tests never load the renderer. */
@@ -385,9 +387,8 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
   for (const h of s.harnesses) {
     if (h.hostedArrivedFirst) {
-      // Named by DIRECTORY, because this loop emits one line per harness: a user
-      // who came in through the hosted skill has it in both, and "already here"
-      // twice in a row reads as the CLI stuttering rather than as two facts.
+      // Named by DIRECTORY: one line per harness, and the funnel puts the mirror
+      // in both, so an unqualified line appears twice and reads as a stutter.
       lines.push(
         paint(
           io,
@@ -744,14 +745,13 @@ async function resolvePermissions(args: {
   if (flag) return wireFreeVerbAllowlist(home);
   if (!canPrompt) return permissionsSkipped('claude', home, 'not-requested');
 
-  // Nothing left to grant is not a question. Every rule already being present is
-  // the ordinary state of a RE-run, and install is what we tell people to re-run;
-  // asking them to re-authorize a write that will not happen and then reporting
-  // "already allowed" is the walkthrough spending one of its three questions on
-  // nothing. A null probe means the file could not be read, which is not the same
-  // as "already allowed", so that still asks and lets the writer report why.
-  const pending = await (deps.pendingPermissions ?? pendingFreeVerbRules)(home);
-  if (pending !== null && pending.length === 0) return wireFreeVerbAllowlist(home);
+  // Nothing left to grant is not a question: every rule already present is the
+  // ordinary state of a re-run. The SNAPSHOT's result is returned rather than
+  // calling the writer again, because a second read would re-add a rule revoked in
+  // between with no prompt. An unreadable file is "unknown", not "already
+  // allowed", so it falls through and still asks.
+  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home);
+  if (probe.satisfied !== undefined) return probe.satisfied;
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(PERMISSIONS_QUESTION))) {
@@ -866,11 +866,9 @@ async function applyPlan(
   }
 
   const hostedPreexisting = skills.some((s) => s.name === HOSTED_SKILL_NAME && s.preexisting);
-  // The NOTICE is about having arrived through the hosted zero-install skill, which
-  // is only news when the CLI adapters were NOT already wired. After any earlier
-  // install the hosted mirror on disk is one we wrote ourselves, so gating on
-  // `hostedPreexisting` alone made every re-run (and every resumed interrupted run)
-  // report the CLI's own footprint back to the user as something they had done.
+  // The notice is about arriving through the hosted skill, which is only news when
+  // the CLI adapters were NOT already wired: after an earlier install the mirror on
+  // disk is one we wrote, and announcing it is the CLI reporting its own footprint.
   const hostedArrivedFirst = hostedPreexisting && !skills.some((s) => s.cli && s.preexisting);
   const result: HarnessResult = {
     harness: plan.harness,
@@ -924,10 +922,9 @@ function notesFor(plan: HarnessPlan, hostedArrivedFirst: boolean): string[] {
           'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
         ];
   if (hostedArrivedFirst) {
-    // Says "the skill stays", never "your copy is untouched": the FILE is replaced
-    // by this package's mirror (see installSkill's hosted-skill warning), and a note
-    // that reads as preservation next to a warning that says replacement is worse
-    // than either alone.
+    // "The skill stays", never "your copy is untouched": the FILE is replaced by
+    // this package's mirror, and a note reading as preservation beside a warning
+    // saying replacement is worse than either alone.
     notes.push(
       `The hosted ${HOSTED_SKILL_NAME} skill was already here; the skill stays as the zero-install fallback (its file is replaced by this package's mirror) and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
     );
@@ -1015,34 +1012,30 @@ async function installSkill(
   const change =
     dest === null || dest.size === 0 ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
 
-  // Files in the destination that the package does not ship. The wipe below takes
-  // them, so they have to be NAMED: "overwritten" reads as "your edits to the skill
-  // were replaced", and a user who kept notes or a references/ folder beside the
-  // SKILL.md loses them with no idea it happened.
-  const removed = dest === null ? [] : [...dest.keys()].filter((rel) => !src.has(rel)).sort();
-  // Only true of the files BOTH sides have. A byte-identical SKILL.md sitting next
-  // to one extra local file is not a skill copy that "differed".
+  // Entries the wipe takes that the package does not ship, NAMED so a local
+  // references/ folder is not lost silently. Includes non-regular entries, which
+  // readTree does not carry but the rm still removes.
+  const removed = [
+    ...(dest === null ? [] : [...dest.keys()].filter((rel) => !src.has(rel))),
+    ...(await nonFileEntries(destDir)),
+  ].sort();
+  // Only the files BOTH sides have: one extra local file is not a copy that
+  // "differed".
   const shared =
     dest !== null && [...src.keys()].some((rel) => !bufEquals(src.get(rel), dest.get(rel)));
 
   if (!dryRun && change !== 'none') {
-    // Resolve a symlinked skill directory and write at its TARGET. `rm` on a link
-    // removes the LINK, so the old path replaced a dotfiles-managed directory with
-    // a real one, orphaned the target, and silently stopped the user's repo edits
-    // from reaching the harness. Same reasoning as the settings.json writer.
-    const target = await realpath(destDir).catch(() => destDir);
+    await refuseSymlinkedSkillDir(destDir, name);
     try {
       // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
       // local files left behind. rm is a no-op when the dir is absent.
-      await rm(target, { recursive: true, force: true });
+      await rm(destDir, { recursive: true, force: true });
       for (const [rel, content] of src) {
-        await writeFileAtomic(join(target, rel), content);
+        await writeFileAtomic(join(destDir, rel), content);
       }
     } catch (err) {
-      // An unwritable HOME is an environment problem, and it reached the envelope as
-      // a raw `EACCES: permission denied, mkdir ...` under code INTERNAL with no
-      // `fix` — which reads as a CLI bug and leaves the operator nothing to do.
-      // Every other error path in this CLI carries a fix; this one now does too.
+      // An unwritable HOME is an environment problem, so it carries a fix like every
+      // other error path here, rather than a raw errno that reads as a CLI bug.
       if (!hasCode(err, 'EACCES') && !hasCode(err, 'EPERM')) throw err;
       throw new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
         fix: `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`,
@@ -1071,17 +1064,49 @@ async function installSkill(
   };
 }
 
-/**
- * The clause naming local files the wipe takes. Named rather than counted: a user
- * cannot decide whether losing them matters from a number, and this is the only
- * notice they get before the files are gone.
- */
+/** The clause naming local files the wipe takes. Named, not counted: a count does
+ *  not tell anyone whether losing them matters. */
 function removedNote(removed: readonly string[], dryRun: boolean): string {
   if (removed.length === 0) return '';
   const one = removed.length === 1;
   const noun = one ? '1 local file' : `${removed.length} local files`;
   const verb = dryRun ? 'would also be removed' : one ? 'was also removed' : 'were also removed';
-  return ` ${noun} not shipped with the skill ${verb}: ${removed.join(', ')}.`;
+  // A filename is operator data: one carrying newlines or ANSI bytes could forge
+  // status lines beside this warning.
+  const names = removed.map((r) => sanitizeForTerminal(r)).join(', ');
+  return ` ${noun} not shipped with the skill ${verb}: ${names}.`;
+}
+
+/**
+ * Refuse a symlinked skill directory rather than choosing which data to destroy.
+ * Following the link and wiping the TARGET takes whatever the operator manages
+ * there; removing the link instead detaches the path they set up. Neither is ours
+ * to pick silently, so nothing is written and the operator is told what to change.
+ *
+ * Not the same call as the settings.json writer, which does resolve its link: that
+ * write is additive and never clobbers, and this one is a recursive delete.
+ */
+async function refuseSymlinkedSkillDir(destDir: string, name: string): Promise<void> {
+  // lstat, not existsSync: existsSync follows the link, so a DANGLING link reads
+  // as absent and the write below would replace it with a real directory.
+  const entry = await lstat(destDir).catch(() => null);
+  if (entry === null || !entry.isSymbolicLink()) return;
+  throw new CliError('REFUSED', `${destDir} is a symlink, so the ${name} skill was not written.`, {
+    fix: `Installing would replace it wholesale, which would either delete whatever the link points at or detach the link. Replace ${destDir} with a real directory (or move it aside), then re-run \`tenjin install\`.`,
+  });
+}
+
+/**
+ * Relative paths of entries readTree does not carry (symlinks, sockets, fifos).
+ * They are invisible to tree equality but the wipe still takes them, so the
+ * warning has to name them or the "every file it removes" promise is false.
+ */
+async function nonFileEntries(dir: string): Promise<string[]> {
+  if (!existsSync(dir)) return [];
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((e) => !e.isFile() && !e.isDirectory())
+    .map((e) => relative(dir, join(e.parentPath, e.name)));
 }
 
 /** Buffer equality that treats "absent on one side" as unequal. */

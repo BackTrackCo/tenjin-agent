@@ -374,6 +374,20 @@ describe('the session schema rejects a key that could not sign', () => {
     expect(await loadSessionFile(d)).toBeNull();
   });
 
+  // zod reports in schema order and `origin` sits early, so judging by the FIRST
+  // issue let a file missing its private scalar ride in on the legacy exemption.
+  it('a pre-origin file that ALSO lost its private scalar is corrupt, not outdated', async () => {
+    const { file } = await testSessionKey();
+    const broken: Record<string, unknown> = { ...file };
+    delete broken.origin;
+    const jwk = { ...(file.privateKeyJwk as Record<string, unknown>) };
+    delete jwk.d;
+    broken.privateKeyJwk = jwk;
+    await writeFile(sessionPath(d), JSON.stringify(broken), { mode: 0o600 });
+    expect((await readSessionFile(d)).kind).toBe('corrupt');
+    expect(await loadSessionFile(d)).toBeNull();
+  });
+
   // The discriminator is the key's ABSENCE, not zod's message, so a field that is
   // present and wrong stays in the tamper bucket where it belongs.
   it('a session file whose origin is present but the wrong type is still corrupt', async () => {
