@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -1010,15 +1010,30 @@ async function installSkill(
     throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
   }
 
-  // Only the files this package SHIPS are read back, and only those are written.
-  // Everything else in the directory belongs to the operator: it is never
-  // inspected, listed, or removed. That is what package managers do (npm, dpkg,
-  // Homebrew all own their files, not the directory), and wholesale replacement
-  // was the single cause behind a run of data-loss, symlink and enumeration bugs.
+  // Only the files this package SHIPS are read and written. Everything else in the
+  // directory belongs to the operator: never inspected, listed, or removed. That is
+  // what package managers do (npm, dpkg, Homebrew all own their files, not the
+  // directory), and wholesale replacement was the single cause behind a run of
+  // data-loss, symlink and enumeration bugs.
+  //
+  // Resolved on BOTH paths, dry run included, so a dry run cannot promise a write
+  // the real run refuses.
+  const writeTo = new Map<string, string>();
+  await assertReachable(destDir, name);
+  for (const rel of src.keys())
+    writeTo.set(rel, await resolveThroughLink(join(destDir, rel), name));
+
   let differs = false;
   let preexisting = false;
   for (const [rel, content] of src) {
-    const current = await readFile(join(destDir, rel)).catch(() => null);
+    const path = writeTo.get(rel)!;
+    // ENOENT only. Collapsing EACCES/EIO into "absent" classified an unreadable
+    // skill as a fresh install and then replaced it, because the atomic rename
+    // needs directory permission, not file permission.
+    const current = await readFile(path).catch((err: unknown) => {
+      if (hasCode(err, 'ENOENT')) return null;
+      throw wrapWriteError(err, destDir, name);
+    });
     if (rel === 'SKILL.md') preexisting = current !== null;
     if (current === null || !current.equals(content)) differs = true;
   }
@@ -1026,23 +1041,9 @@ async function installSkill(
 
   if (!dryRun && change !== 'none') {
     try {
-      for (const [rel, content] of src) {
-        await writeFileAtomic(join(destDir, rel), content);
-      }
+      for (const [rel, content] of src) await writeFileAtomic(writeTo.get(rel)!, content);
     } catch (err) {
-      // A raw errno under INTERNAL reads as a CLI bug and carries no fix. ENOENT is
-      // here because a destination that is a BROKEN SYMLINK reports as that, and
-      // "no such file or directory, mkdir" tells the operator nothing about the
-      // link they need to repair.
-      const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
-      const missing = hasCode(err, 'ENOENT');
-      if (!denied && !missing) throw err;
-      throw new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
-        fix: denied
-          ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
-          : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`,
-        cause: err,
-      });
+      throw wrapWriteError(err, destDir, name);
     }
   }
 
@@ -1116,6 +1117,45 @@ async function underSyncLock(
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
+}
+
+/**
+ * A destination the operator manages through a symlink is written THROUGH it, so
+ * their link survives and their target is what actually changes. Same call the
+ * settings.json writer makes, and the same reason: committing with `rename` over a
+ * link would replace it with a regular file and strand the target.
+ */
+async function resolveThroughLink(path: string, name: string): Promise<string> {
+  const entry = await lstat(path).catch(() => null);
+  if (entry === null || !entry.isSymbolicLink()) return path;
+  const target = await realpath(path).catch(() => null);
+  if (target !== null) return target;
+  throw new CliError('INTERNAL', `${path} is a broken symlink, so ${name} was not written.`, {
+    fix: `Point it at a path that exists, or remove it (\`ls -ld ${path}\`), then re-run \`tenjin install\`.`,
+  });
+}
+
+/** Fail a destination directory that cannot be written, on dry runs too. */
+async function assertReachable(destDir: string, name: string): Promise<void> {
+  const entry = await lstat(destDir).catch(() => null);
+  if (entry?.isSymbolicLink() !== true) return;
+  if ((await realpath(destDir).catch(() => null)) !== null) return;
+  throw new CliError('INTERNAL', `${destDir} is a broken symlink, so ${name} was not written.`, {
+    fix: `Point it at a directory that exists, or remove it (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`,
+  });
+}
+
+/** A raw errno under INTERNAL reads as a CLI bug and carries no fix. */
+function wrapWriteError(err: unknown, destDir: string, name: string): unknown {
+  const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
+  const missing = hasCode(err, 'ENOENT');
+  if (!denied && !missing) return err;
+  return new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
+    fix: denied
+      ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
+      : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`,
+    cause: err,
+  });
 }
 
 /**

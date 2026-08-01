@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { withFileLock, LockTimeoutError } from './lock';
+import { existsSync } from 'node:fs';
+import { LockTimeoutError, ownsAnyLock, releaseOwnedLocks, withFileLock } from './lock';
 
 let dir: string;
 beforeEach(async () => {
@@ -68,5 +69,48 @@ describe('withFileLock', () => {
     expect((err as LockTimeoutError).lockPath).toBe(lock);
     expect((err as Error).message).toContain(lock);
     expect((err as Error).message).toMatch(/remove that directory/);
+  });
+});
+
+/**
+ * The in-memory ownership registry. It exists so a signal handler can release
+ * exactly the locks this process holds, and its whole value depends on ownership
+ * ending when the lock does.
+ */
+describe('lock ownership tracking', () => {
+  it('claims the lock while the callback runs and lets it go afterwards', async () => {
+    const p = join(dir, 'own.lock');
+    expect(ownsAnyLock()).toBe(false);
+    await withFileLock(p, async () => {
+      expect(ownsAnyLock()).toBe(true);
+    });
+    expect(ownsAnyLock()).toBe(false);
+  });
+
+  it('lets go even when the callback throws', async () => {
+    const p = join(dir, 'throw.lock');
+    await expect(
+      withFileLock(p, async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(ownsAnyLock()).toBe(false);
+  });
+
+  // The bug this guards: ownership outliving the release meant a later signal in
+  // this process deleted whatever SUCCESSOR had since taken the same path.
+  it("never deletes a successor's lock at a path it has already released", async () => {
+    const p = join(dir, 'successor.lock');
+    await withFileLock(p, async () => undefined);
+    await mkdir(p, { recursive: true }); // stands in for another process acquiring
+    releaseOwnedLocks();
+    expect(existsSync(p)).toBe(true);
+  });
+
+  it('releasing while holding nothing removes nothing', async () => {
+    const p = join(dir, 'held-by-other.lock');
+    await mkdir(p, { recursive: true });
+    releaseOwnedLocks();
+    expect(existsSync(p)).toBe(true);
   });
 });

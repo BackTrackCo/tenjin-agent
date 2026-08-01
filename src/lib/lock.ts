@@ -84,6 +84,11 @@ export async function withFileLock<T>(
   try {
     return await fn();
   } finally {
+    // Drop ownership BEFORE the removal. Between these two the lock is still on
+    // disk and no longer claimed, which only costs a signal-time no-op; the other
+    // order leaves the path claimed after release, so a later signal in this
+    // process would delete whatever SUCCESSOR had since acquired it.
+    owned.delete(lockPath);
     // With no stealing, nothing else ever removes or replaces this directory, so
     // the lock here is provably the one we created — the unconditional rm is sound.
     await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);

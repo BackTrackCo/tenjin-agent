@@ -1665,9 +1665,70 @@ describe('runInstall: hosted skill already present (#35)', () => {
       (e) => e,
     )) as CliError;
     expect(err).toBeInstanceOf(CliError);
-    expect(err.fix).toContain('symlink');
+    expect(err.message).toContain('broken symlink');
     expect(err.message).not.toContain('ENOENT');
+    expect(err.fix).toContain('ls -ld');
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  });
+
+  // The write commits with `rename`, which replaces a symlink at the destination
+  // PATH with a regular file. A file the operator manages through a link has to be
+  // written through it, like the directory case and like settings.json.
+  it('writes through a symlinked SKILL.md, keeping the link and updating its target', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'search.md');
+    await mkdir(dirname(managed), { recursive: true });
+    await writeFile(managed, 'my managed copy\n');
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await symlink(managed, join(dir, 'SKILL.md'));
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
+    expect(await readFile(managed)).toEqual(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
+  });
+
+  // Treating every read failure as "absent" classified an unreadable skill as a
+  // fresh install and then replaced it, because the atomic rename needs DIRECTORY
+  // permission, not file permission.
+  it('refuses an unreadable SKILL.md instead of replacing it', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, 'SKILL.md');
+    await writeFile(file, 'secret');
+    await chmod(file, 0o000);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      await chmod(file, 0o644);
+      expect(await readFile(file, 'utf8')).toBe('secret');
+    } finally {
+      await chmod(file, 0o644).catch(() => undefined);
+    }
+  });
+
+  // A dry run must reach the same verdict as the real run.
+  it('fails a broken destination link on --dry-run too, matching the real run', async () => {
+    if (process.platform === 'win32') return;
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(join(home, 'nowhere', 'tenjin-search'), link);
+
+    const dry = (await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    const real = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(dry).toBeInstanceOf(CliError);
+    expect(real).toBeInstanceOf(CliError);
+    expect(dry.fix).toBe(real.fix);
   });
 
   it('leaves a nested symlink in the skill directory alone', async () => {
