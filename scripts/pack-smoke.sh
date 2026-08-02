@@ -153,4 +153,42 @@ fi
 rm -rf "$LOCK_HOME" "$LOCK_DATA"
 echo "pack-smoke: interrupted waiting install leaves the holder's lock intact (ok)"
 
+# The other half of the signal contract, and the one three bugs have hidden in: an
+# interrupt while this process HOLDS the lock must release it and say the machine
+# may be half-written. The real critical section is milliseconds, so the packaged
+# skill tree is padded to widen it enough for a signal to land inside; without that
+# the interrupt lands before or after and the test proves nothing.
+HOLD_HOME="$(mktemp -d)"
+HOLD_DATA="$(mktemp -d)"
+PAD="$CONSUMER_DIR/node_modules/tenjin-cli/skills/tenjin-search/pad"
+mkdir -p "$PAD"
+i=0
+while [ "$i" -lt 4000 ]; do printf 'x%.0s' $(seq 1 200) > "$PAD/f$i.md"; i=$((i + 1)); done
+HOME="$HOLD_HOME" TENJIN_DATA_DIR="$HOLD_DATA" "$BIN" install --harness claude \
+  --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$HOLD_HOME/err" &
+HOLDER_PID=$!
+# Wait for the lock to actually exist, then let the write get under way.
+for _ in $(seq 1 400); do
+  [ -d "$HOLD_DATA/skills-sync.lock" ] && break
+  sleep 0.01
+done
+sleep 0.2
+kill -INT "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+rm -rf "$PAD"
+HOLD_FAIL=""
+[ -d "$HOLD_DATA/skills-sync.lock" ] && HOLD_FAIL="the lock it held was left behind"
+if grep -q "half-written" "$HOLD_HOME/err"; then :; else
+  # Landing outside the window is possible on a fast machine; only a STRANDED lock
+  # is a failure, since the message is asserted by the unit tests.
+  echo "pack-smoke: note — interrupt landed outside the write window, lock check still applies"
+fi
+if [ -n "$HOLD_FAIL" ]; then
+  echo "pack-smoke: FAIL — interrupted holding install: $HOLD_FAIL" >&2
+  rm -rf "$HOLD_HOME" "$HOLD_DATA"
+  exit 1
+fi
+rm -rf "$HOLD_HOME" "$HOLD_DATA"
+echo "pack-smoke: interrupted holding install releases its own lock (ok)"
+
 echo "pack-smoke: PASS (tenjin-cli@$EXPECTED_VERSION packed, installed, and exercised)"

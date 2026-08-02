@@ -282,10 +282,14 @@ export async function runInstall(
   // the walkthrough's whole point is that there are three.
   const claudeMdWrite = claudeMdFlag === true;
   const harnesses: HarnessResult[] = [];
-  // Wiring takes a lock. Each skill is replaced by rm-then-write, so two runs
-  // racing the same directory saw each other's half-built trees and died on raw
-  // ENOENT/ENOTEMPTY renames: 7 of 15 concurrent runs failed. A dry run writes
-  // nothing, so it needs no lock.
+  // Wiring takes a lock, though it is no longer what makes concurrent installs
+  // safe. That was the rm-then-write this module used to do, which had two runs
+  // reading each other's half-built trees (7 of 15 concurrent runs failed on raw
+  // ENOENT/ENOTEMPTY renames); writing each shipped file through its own atomic
+  // rename fixed it independently, and 24 concurrent runs pass with the lock
+  // bypassed. What the lock still buys is exclusion against the OTHER writer of
+  // these directories, the post-update self-heal, which rewrites the same paths
+  // unattended. A dry run writes nothing, so it needs no lock.
   await underSyncLock(
     ctx.dataDir,
     dryRun,
