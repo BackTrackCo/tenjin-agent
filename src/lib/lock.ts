@@ -1,5 +1,5 @@
-import { rmSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdirSync, rmSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
@@ -69,7 +69,12 @@ export async function withFileLock<T>(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
-      await mkdir(lockPath);
+      // SYNCHRONOUS, for the same reason the release is: `await mkdir` finishes the
+      // syscall before the continuation records ownership, so between the two the
+      // directory is on disk and unclaimed. A signal there exits without removing
+      // it and, with no stale recovery, nothing ever will. mkdirSync and the add
+      // are one uninterruptible step.
+      mkdirSync(lockPath);
       owned.add(lockPath); // owned from here, released only in the finally below
       break; // acquired
     } catch (err) {
