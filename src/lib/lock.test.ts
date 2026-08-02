@@ -107,6 +107,28 @@ describe('lock ownership tracking', () => {
     expect(existsSync(p)).toBe(true);
   });
 
+  // A signal handler runs between macrotasks, so a macrotask probe observes exactly
+  // what one would. The release must never be observable as "on disk but unowned":
+  // a handler there exits without removing the lock, and with no stale recovery
+  // nothing ever will. An `await` inside the release reopens that window.
+  it('is never observable on disk while unowned', async () => {
+    const p = join(dir, 'window.lock');
+    let sawWindow = false;
+    const probe = setInterval(() => {
+      if (existsSync(p) && !ownsAnyLock()) sawWindow = true;
+    }, 0);
+    try {
+      await withFileLock(p, async () => {
+        // Give the removal something to do, so a yielding release would be caught.
+        for (let i = 0; i < 400; i++) await writeFile(join(p, `f${i}`), 'x');
+      });
+    } finally {
+      clearInterval(probe);
+    }
+    expect(sawWindow).toBe(false);
+    expect(existsSync(p)).toBe(false);
+  });
+
   it('releasing while holding nothing removes nothing', async () => {
     const p = join(dir, 'held-by-other.lock');
     await mkdir(p, { recursive: true });

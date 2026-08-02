@@ -1149,11 +1149,18 @@ async function assertReachable(destDir: string, name: string): Promise<void> {
 function wrapWriteError(err: unknown, destDir: string, name: string): unknown {
   const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
   const missing = hasCode(err, 'ENOENT');
-  if (!denied && !missing) return err;
+  // A skills directory that resolves to a regular file, or a SKILL.md that resolves
+  // to a directory. Pathological, but a raw ENOTDIR/EISDIR says nothing about which
+  // path is the wrong kind of thing.
+  const wrongKind = hasCode(err, 'ENOTDIR') || hasCode(err, 'EISDIR');
+  if (!denied && !missing && !wrongKind) return err;
+  const fix = denied
+    ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
+    : wrongKind
+      ? `${destDir} (or a file inside it) is not the kind of thing it needs to be: a skill is a directory holding SKILL.md. Check it (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`
+      : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`;
   return new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
-    fix: denied
-      ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
-      : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`,
+    fix,
     cause: err,
   });
 }

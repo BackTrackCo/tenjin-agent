@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
@@ -84,14 +84,24 @@ export async function withFileLock<T>(
   try {
     return await fn();
   } finally {
-    // Drop ownership BEFORE the removal. Between these two the lock is still on
-    // disk and no longer claimed, which only costs a signal-time no-op; the other
-    // order leaves the path claimed after release, so a later signal in this
-    // process would delete whatever SUCCESSOR had since acquired it.
-    owned.delete(lockPath);
+    // SYNCHRONOUS, and in this order, because both are load-bearing. A signal
+    // handler cannot run between two synchronous statements, so there is no instant
+    // where the lock is on disk but unclaimed (a signal would exit without removing
+    // it, and with no stale recovery nothing ever would) nor one where it is
+    // claimed after release (a signal would remove whatever SUCCESSOR had since
+    // acquired the path). An `await` here reopens the first window: `rm` yields, the
+    // handler runs, sees no ownership, and leaves the directory behind.
+    //
     // With no stealing, nothing else ever removes or replaces this directory, so
     // the lock here is provably the one we created — the unconditional rm is sound.
-    await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      rmSync(lockPath, { recursive: true, force: true });
+    } catch {
+      // Best effort, as the async removal was. Ownership is dropped either way:
+      // a directory we failed to remove is recoverable by hand, while staying
+      // claimed risks deleting a successor's live lock.
+    }
+    owned.delete(lockPath);
   }
 }
 
