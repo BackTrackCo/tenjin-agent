@@ -1027,6 +1027,7 @@ async function installSkill(
   let preexisting = false;
   for (const [rel, content] of src) {
     const path = writeTo.get(rel)!;
+    await assertRegularFile(path, name);
     // ENOENT only. Collapsing EACCES/EIO into "absent" classified an unreadable
     // skill as a fresh install and then replaced it, because the atomic rename
     // needs directory permission, not file permission.
@@ -1117,6 +1118,23 @@ async function underSyncLock(
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
+}
+
+/**
+ * A shipped path must be a regular file (or absent) before it is read.
+ *
+ * `readFile` on a FIFO blocks until a writer appears, so a pipe left at a
+ * SKILL.md path hung install indefinitely, past SIGTERM, until it was SIGKILLed;
+ * a character device would instead stream unbounded bytes into memory. An errno
+ * mapping cannot help, because neither call fails: they just never finish.
+ */
+async function assertRegularFile(path: string, name: string): Promise<void> {
+  // The path is already resolved through any symlink, so lstat and stat agree.
+  const entry = await lstat(path).catch(() => null);
+  if (entry === null || entry.isFile()) return;
+  throw new CliError('INTERNAL', `${path} is not a regular file, so ${name} was not written.`, {
+    fix: `A skill file must be a regular file. Check what is there (\`ls -l ${path}\`) and remove or replace it, then re-run \`tenjin install\`.`,
+  });
 }
 
 /**

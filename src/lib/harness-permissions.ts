@@ -84,7 +84,8 @@ export type PermissionsSkipReason =
   | 'unresolvable'
   | 'unreadable'
   | 'unparsable'
-  | 'unexpected-shape';
+  | 'unexpected-shape'
+  | 'changed-since-read';
 
 export interface PermissionsResult {
   /** The harness this outcome is about; only `claude` has a settings file we write. */
@@ -143,7 +144,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export async function wireFreeVerbAllowlist(homeDir: string): Promise<PermissionsResult> {
   const found = await inspectAllowlist(homeDir);
   if ('result' in found) return found.result;
-  const { path, settings, permissions, allow, added, alreadyPresent } = found;
+  const { path, raw, settings, permissions, allow, added, alreadyPresent } = found;
   if (added.length === 0) return { harness: 'claude', path, added: [], alreadyPresent };
 
   // Object spreads keep the original key order and land the rebuilt `permissions`
@@ -153,6 +154,21 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
     ...settings,
     permissions: { ...permissions, allow: [...allow, ...added] },
   };
+  // This is a whole-file read-modify-write, so a change landing between the read
+  // and the rename would be erased in full, including keys that have nothing to do
+  // with permissions. Claude Code writes this file too, so the other writer is not
+  // hypothetical. Compare the bytes we based the edit on and refuse rather than
+  // clobber; the operator re-runs and the merge is recomputed against what is
+  // actually there.
+  const current = await readFile(path, 'utf8').catch(() => null);
+  if (current !== raw) {
+    return skip(
+      'claude',
+      path,
+      'changed-since-read',
+      `${path} changed while it was being updated, so nothing was written. Re-run \`tenjin install\`.`,
+    );
+  }
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
   return { harness: 'claude', path, added, alreadyPresent };
 }
@@ -186,6 +202,8 @@ export async function inspectFreeVerbRules(
 
 interface AllowlistInspection {
   path: string;
+  /** The exact bytes read, so the commit can prove nothing changed underneath it. */
+  raw: string | null;
   settings: Record<string, unknown>;
   permissions: Record<string, unknown>;
   allow: unknown[];
@@ -236,8 +254,8 @@ async function inspectAllowlist(
   }
 
   let settings: Record<string, unknown> = {};
+  let raw: string | null = null;
   if (entry !== null) {
-    let raw: string;
     try {
       raw = await readFile(path, 'utf8');
     } catch (err) {
@@ -293,5 +311,5 @@ async function inspectAllowlist(
   const present = new Set(allow.filter((e): e is string => typeof e === 'string'));
   const added = FREE_VERB_RULES.filter((rule) => !present.has(rule));
   const alreadyPresent = FREE_VERB_RULES.filter((rule) => present.has(rule));
-  return { path, settings, permissions, allow, added, alreadyPresent: [...alreadyPresent] };
+  return { path, raw, settings, permissions, allow, added, alreadyPresent: [...alreadyPresent] };
 }

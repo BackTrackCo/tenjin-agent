@@ -101,12 +101,14 @@ export async function withFileLock<T>(
     // the lock here is provably the one we created — the unconditional rm is sound.
     try {
       rmSync(lockPath, { recursive: true, force: true });
+      owned.delete(lockPath);
     } catch {
-      // Best effort, as the async removal was. Ownership is dropped either way:
-      // a directory we failed to remove is recoverable by hand, while staying
-      // claimed risks deleting a successor's live lock.
+      // KEEP ownership when the removal fails. The successor-steal risk only
+      // exists once the directory is gone and someone else can take the path; a
+      // removal that failed leaves it on disk and still ours, so no other process
+      // can acquire it, and a signal-time release gets another attempt at it
+      // rather than the run walking away from a lock it is still holding.
     }
-    owned.delete(lockPath);
   }
 }
 

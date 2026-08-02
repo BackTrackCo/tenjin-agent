@@ -1731,6 +1731,24 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(dry.fix).toBe(real.fix);
   });
 
+  // `readFile` on a FIFO blocks until a writer appears, so a pipe left at a
+  // SKILL.md path hung install past SIGTERM until it was SIGKILLed. An errno
+  // mapping cannot help: the call does not fail, it never returns.
+  it('refuses a non-regular file at a shipped path instead of reading it', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('mkfifo', [join(dir, 'SKILL.md')]);
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('not a regular file');
+    expect(err.fix).toContain('ls -l');
+  }, 10000);
+
   it('leaves a nested symlink in the skill directory alone', async () => {
     if (process.platform === 'win32') return;
     const dir = join(home, '.claude', 'skills', 'tenjin-search');

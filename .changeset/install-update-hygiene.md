@@ -71,3 +71,16 @@ check passed the whole time an agent was reading an older version's instructions
 Only the CLI adapters are compared, and only in directories a harness on this
 machine actually reads: the hosted mirror may legitimately be a newer fetch from
 tenjin.blog, and a leftover directory nobody reads is nobody's problem.
+
+The permissions writer refuses rather than clobbers. It is a whole-file
+read-modify-write, so a change landing between the read and the rename was erased
+in full, including keys with nothing to do with permissions. Claude Code writes
+that file too, so the competing writer is not hypothetical. The bytes the edit was
+based on are compared immediately before the commit, and a file that moved
+underneath is left alone with a warning to re-run.
+
+A non-regular file at a shipped skill path is refused instead of read. `readFile`
+on a FIFO blocks until a writer appears, so a pipe left at a SKILL.md path hung
+`tenjin install` past SIGTERM until it was killed outright, and a character device
+would have streamed unbounded bytes into memory. Neither call fails, so no errno
+mapping could have caught it.

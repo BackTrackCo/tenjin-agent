@@ -1,4 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/**
+ * A seam for the one property that only exists BETWEEN two reads: the writer
+ * re-reads the file it based its edit on, immediately before committing. Inert
+ * unless a test arms it, so every other test here runs against the real fs.
+ */
+const fsHooks = vi.hoisted(() => ({ afterRead: null as null | ((path: string) => Promise<void>) }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      const out = await actual.readFile(...args);
+      if (fsHooks.afterRead !== null) await fsHooks.afterRead(String(args[0]));
+      return out;
+    },
+  };
+});
 import {
   chmod,
   lstat,
@@ -372,5 +390,45 @@ describe('permissionsSkipped', () => {
       expect(result.path).toBeUndefined();
       expect(result).not.toHaveProperty('path');
     }
+  });
+});
+
+describe('wireFreeVerbAllowlist: refuses to clobber a concurrent write', () => {
+  // Whole-file read-modify-write, so a change landing in the read-to-rename window
+  // would be erased entirely, including keys with nothing to do with permissions.
+  // Claude Code writes this file too, so the competing writer is not hypothetical.
+  // The interleave is real: the file is rewritten from inside the first read, which
+  // is exactly where a competing writer would land.
+  it('writes nothing when the file changed since the snapshot it edited', async () => {
+    await seedSettings({ model: 'opus', permissions: { allow: [] } });
+    const theirs = `${JSON.stringify({ model: 'opus', theirKey: 1, permissions: { allow: [] } }, null, 2)}\n`;
+
+    // A competing writer lands the instant our first read returns, which is the
+    // top of the read-to-rename window.
+    let armed = true;
+    fsHooks.afterRead = async (path) => {
+      // Matched by basename: the writer reads the REALPATH, which on macOS differs
+      // from the declared path (/var vs /private/var).
+      if (!armed || !path.endsWith('settings.json')) return;
+      armed = false;
+      await writeFile(settingsPath(), theirs);
+    };
+    try {
+      const result = await wireFreeVerbAllowlist(home);
+      expect(result.skipped).toBe('changed-since-read');
+      expect(result.added).toEqual([]);
+      expect(result.warning).toContain('changed while it was being updated');
+    } finally {
+      fsHooks.afterRead = null;
+    }
+    // Their write survives in full, including the key we would have erased.
+    expect(await readFile(settingsPath(), 'utf8')).toBe(theirs);
+  });
+
+  it('writes normally when nothing else touches the file', async () => {
+    await seedSettings({ model: 'opus', permissions: { allow: [] } });
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.skipped).toBeUndefined();
+    expect(result.added).toEqual([...FREE_VERB_RULES]);
   });
 });
