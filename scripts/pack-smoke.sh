@@ -199,7 +199,15 @@ for attempt in 1 2 3 4 5; do
     sleep 0.01
   done
   sleep 0.25
-  kill -INT "$HOLDER_PID" 2>/dev/null
+  # Guarded: under `set -e` an unguarded kill aborts the whole script when the
+  # padded install happened to finish first, which is a missed attempt rather than
+  # a failure. Retry those; only exhausting every attempt fails.
+  if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+    wait "$HOLDER_PID" 2>/dev/null || true
+    rm -rf "$HOLD_HOME" "$HOLD_DATA"
+    continue
+  fi
+  kill -INT "$HOLDER_PID" 2>/dev/null || true
   set +e
   wait "$HOLDER_PID"
   HOLDER_CODE=$?

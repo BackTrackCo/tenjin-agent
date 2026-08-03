@@ -177,6 +177,29 @@ describe('a lock that cannot be removed is reported, not swallowed', () => {
     expect(existsSync(p)).toBe(false);
   });
 
+  // releaseOwnedLocks runs inside a signal handler, where a throw is an uncaught
+  // exception: the process would die with code 1 and a stack trace instead of the
+  // handler's diagnostic and exit 130.
+  it('never throws, even when every removal fails', async () => {
+    const a = join(dir, 'a.lock');
+    const b = join(dir, 'b.lock');
+    fsHooks.failRmSync = true;
+    try {
+      // Each acquires normally; only the release fails, so both stay claimed.
+      await withFileLock(a, async () => undefined);
+      await withFileLock(b, async () => undefined);
+      expect(ownsAnyLock()).toBe(true);
+
+      expect(() => releaseOwnedLocks()).not.toThrow();
+      // Ownership is cleared regardless, so a second signal is a no-op.
+      expect(ownsAnyLock()).toBe(false);
+    } finally {
+      fsHooks.failRmSync = false;
+      await rm(a, { recursive: true, force: true });
+      await rm(b, { recursive: true, force: true });
+    }
+  });
+
   it('says nothing when the removal succeeds', async () => {
     const seen: string[] = [];
     await withFileLock(join(dir, 'fine.lock'), async () => undefined, {

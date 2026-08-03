@@ -24,7 +24,17 @@ export function ownsAnyLock(): boolean {
  * QUEUED behind another cannot remove that other run's lock.
  */
 export function releaseOwnedLocks(): void {
-  for (const path of owned) rmSync(path, { recursive: true, force: true });
+  for (const path of owned) {
+    // NEVER throws. This runs inside a signal handler, and a throw there is an
+    // uncaught exception: the process dies with code 1 and a stack trace instead
+    // of the diagnostic and exit 130 the handler promises. One lock we could not
+    // remove must not cost the report, or the exit code, or the other locks.
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      // Left behind; the next run's timeout names the path.
+    }
+  }
   owned.clear();
 }
 
