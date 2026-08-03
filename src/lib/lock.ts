@@ -5,9 +5,12 @@ import { join } from 'node:path';
 /**
  * Locks this process currently holds. Ownership starts the instant `mkdir`
  * succeeds and ends when the release has removed the directory, so there is no
- * window where a lock is on disk and unaccounted for. A removal that FAILS is the
- * one exception: the directory stays and ownership is dropped anyway, because
- * holding a claim on a path we could not clear risks deleting a successor's lock.
+ * window where a lock is on disk and unaccounted for. A removal that FAILS keeps
+ * the lock owned: the directory is still on disk, no successor can claim the path
+ * while it exists, and a signal-time release gets another attempt. The one place
+ * ownership is dropped without a successful removal is `releaseOwnedLocks`, which
+ * runs only as the process exits, where a claim held by a dying process helps
+ * nobody.
  *
  * It exists because the default signal action terminates WITHOUT running
  * `finally`: without this, one Ctrl-C leaves a lock nothing will ever clean and

@@ -65,6 +65,7 @@ import {
   mkdtemp,
   mkdir,
   readdir,
+  realpath,
   rm,
   readFile,
   symlink,
@@ -1715,10 +1716,64 @@ describe('runInstall: hosted skill already present (#35)', () => {
       )) as CliError;
       expect(err).toBeInstanceOf(CliError);
       expect(err.fix).toContain('Permission denied');
+      // The child could not be created, so the culprit is the ancestor that
+      // refused: the skills root, the deepest directory that exists.
+      expect(err.fix).toContain(`ls -ld ${skills}`);
       expect(err.fix).toContain('tenjin install');
       expect(err.message).not.toContain('EACCES'); // the raw errno is the cause, not the message
     } finally {
       await chmod(skills, 0o700);
+    }
+  });
+
+  // The inverse of the missing-child case: the skill directory EXISTS and is
+  // itself what refuses the temp-file write. Its parent is writable and innocent,
+  // so a fix pointing one directory up sends the operator to chmod the wrong thing.
+  it('names the skill directory itself when it exists and refuses the write', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await chmod(dir, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.fix).toContain(`ls -ld ${dir}`);
+    } finally {
+      await chmod(dir, 0o700);
+    }
+  });
+
+  // A symlinked SKILL.md is written through to its target, so a denied write
+  // happens in the link's TARGET directory, which no path under the skills tree
+  // names. The fix must name that directory or the operator has nothing to check.
+  it('names the link target directory when a symlinked SKILL.md cannot be written', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dotfiles = join(home, 'dotfiles');
+    const managed = join(dotfiles, 'search.md');
+    await mkdir(dotfiles, { recursive: true });
+    await writeFile(managed, 'my managed copy\n');
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await symlink(managed, join(dir, 'SKILL.md'));
+    await chmod(dotfiles, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      // realpath, because the write goes through the link: on macOS the tmpdir is
+      // itself behind a symlink (/var -> /private/var), and the resolved directory
+      // is the one whose mode actually decides.
+      expect(err.fix).toContain(`ls -ld ${await realpath(dotfiles)}`);
+      expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
+      expect(await readFile(managed, 'utf8')).toBe('my managed copy\n');
+    } finally {
+      await chmod(dotfiles, 0o700);
     }
   });
 

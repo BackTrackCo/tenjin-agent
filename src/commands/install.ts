@@ -1066,10 +1066,17 @@ async function installSkill(
   const change = !preexisting ? 'create' : differs ? 'update' : 'none';
 
   if (!dryRun && change !== 'none') {
-    try {
-      for (const [rel, content] of src) await writeFileAtomic(writeTo.get(rel)!, content);
-    } catch (err) {
-      throw wrapWriteError(err, destDir, name);
+    for (const [rel, content] of src) {
+      const target = writeTo.get(rel)!;
+      try {
+        await writeFileAtomic(target, content);
+      } catch (err) {
+        // Culprit is derived from the file that FAILED, not assumed to be the
+        // skills root: an existing skill directory that refuses the temp file is
+        // itself the thing to chmod, and a symlinked SKILL.md fails in the link's
+        // TARGET directory, which no path under destDir names.
+        throw wrapWriteError(err, destDir, name, deepestExisting(dirname(target)));
+      }
     }
   }
 
@@ -1205,6 +1212,19 @@ async function assertReachable(destDir: string, name: string): Promise<void> {
   });
 }
 
+/**
+ * The directory a denied WRITE should point the operator at: the deepest existing
+ * ancestor of the failed target's directory. An existing skill directory that
+ * refuses the temp file names itself; a directory that could not be created names
+ * the ancestor that refused to create it, because `ls -ld` on a path that is not
+ * there says nothing.
+ */
+function deepestExisting(dir: string): string {
+  for (let cur = dir; ; cur = dirname(cur)) {
+    if (existsSync(cur) || dirname(cur) === cur) return cur;
+  }
+}
+
 /** A raw errno under INTERNAL reads as a CLI bug and carries no fix. */
 function wrapWriteError(
   err: unknown,
@@ -1212,10 +1232,10 @@ function wrapWriteError(
   name: string,
   /**
    * The path to point the operator at. A READ failure names the file itself, which
-   * is the thing whose mode is wrong. A WRITE failure names the parent, because the
-   * child may not exist yet and `ls -ld` on it would say nothing.
+   * is the thing whose mode is wrong. A WRITE failure names the deepest directory
+   * that exists on the failed target's path.
    */
-  culprit = dirname(destDir),
+  culprit: string,
 ): unknown {
   const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
   const missing = hasCode(err, 'ENOENT');

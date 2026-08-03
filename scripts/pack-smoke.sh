@@ -165,11 +165,16 @@ for attempt in 1 2 3 4 5; do
     fi
     WAITER_OK="yes"
   fi
+  # Kept across the rm below so exhausting every attempt can still show WHY: exit
+  # code plus stderr distinguish a pre-handler exit (130, empty) from a wrong
+  # diagnostic (130, other text) from a crash (non-130).
+  WAITER_LAST="exit $WAITER_CODE, stderr: $(cat "$LOCK_HOME/err" 2>/dev/null || echo '<unreadable>')"
   rm -rf "$LOCK_HOME" "$LOCK_DATA"
   [ -n "$WAITER_OK" ] && break
 done
 if [ -z "$WAITER_OK" ]; then
   echo "pack-smoke: FAIL — queued install never reported an interrupted-before-writing run" >&2
+  echo "pack-smoke: last attempt: $WAITER_LAST" >&2
   exit 1
 fi
 echo "pack-smoke: interrupted queued install leaves the holder's lock intact (ok)"
@@ -200,6 +205,7 @@ for attempt in 1 2 3 4 5; do
   # a failure. Retry those; only exhausting every attempt fails.
   if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
     wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_LAST="install finished before the signal landed (window missed)"
     rm -rf "$HOLD_HOME" "$HOLD_DATA"
     continue
   fi
@@ -216,12 +222,15 @@ for attempt in 1 2 3 4 5; do
     fi
     HELD_OK="yes"
   fi
+  # Same as the waiter lane: keep the evidence the rm below would destroy.
+  HOLDER_LAST="exit $HOLDER_CODE, stderr: $(cat "$HOLD_HOME/err" 2>/dev/null || echo '<unreadable>')"
   rm -rf "$HOLD_HOME" "$HOLD_DATA"
   [ -n "$HELD_OK" ] && break
 done
 rm -rf "$PAD"
 if [ -z "$HELD_OK" ]; then
   echo "pack-smoke: FAIL — never landed an interrupt inside the write; handler unproven" >&2
+  echo "pack-smoke: last attempt: ${HOLDER_LAST:-no attempt ran}" >&2
   exit 1
 fi
 echo "pack-smoke: interrupted holding install releases its own lock (ok)"
