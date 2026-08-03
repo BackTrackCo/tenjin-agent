@@ -130,12 +130,26 @@ printf '%s' "$BOGUS_OUT" | node -e '
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 
-# A run QUEUED behind another install must never remove that install's lock. The
-# ORDERING (was the signal delivered before or after the handler was installed?) is
-# not asserted here on purpose: a readiness probe on a process that produces no
-# output is just a disguised sleep, and the invariant holds either way. Whether the
-# handler releases the right lock is pinned deterministically in lock.test.ts; this
-# checks only that a real signal to a real queued process cannot take the lock.
+# The signal contract, both lanes. Every step is asserted: the process must still
+# be alive when signalled, the signal must be delivered, the exit must be the
+# interrupted one, and the handler's own diagnostic must appear. Without those the
+# lane can pass while exercising no handler at all, which is what an earlier
+# version of this check did.
+assert_interrupted() { # $1=label $2=err-file $3=exit-code $4=expected-message
+  if [ "$3" != "130" ]; then
+    echo "pack-smoke: FAIL — $1: exit $3, expected 130 (handler did not run)" >&2
+    cat "$2" >&2
+    return 1
+  fi
+  if ! grep -q "$4" "$2"; then
+    echo "pack-smoke: FAIL — $1: no '$4' diagnostic; the handler did not produce it" >&2
+    cat "$2" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Lane 1: a run QUEUED behind another install must never remove that install's lock.
 LOCK_HOME="$(mktemp -d)"
 LOCK_DATA="$(mktemp -d)"
 mkdir -p "$LOCK_DATA/skills-sync.lock"
@@ -143,52 +157,69 @@ HOME="$LOCK_HOME" TENJIN_DATA_DIR="$LOCK_DATA" "$BIN" install --harness claude \
   --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
 WAITER_PID=$!
 sleep 1
-kill -INT "$WAITER_PID" 2>/dev/null || true
-wait "$WAITER_PID" 2>/dev/null || true
+if ! kill -0 "$WAITER_PID" 2>/dev/null; then
+  echo "pack-smoke: FAIL — queued install exited before it could be signalled" >&2
+  cat "$LOCK_HOME/err" >&2
+  exit 1
+fi
+kill -INT "$WAITER_PID" || {
+  echo "pack-smoke: FAIL — could not signal the queued install" >&2
+  exit 1
+}
+set +e
+wait "$WAITER_PID"
+WAITER_CODE=$?
+set -e
+assert_interrupted "queued install" "$LOCK_HOME/err" "$WAITER_CODE" "nothing changed" || exit 1
 if [ ! -d "$LOCK_DATA/skills-sync.lock" ]; then
   echo "pack-smoke: FAIL — an interrupted WAITING install removed the holder's lock" >&2
-  rm -rf "$LOCK_HOME" "$LOCK_DATA"
   exit 1
 fi
 rm -rf "$LOCK_HOME" "$LOCK_DATA"
-echo "pack-smoke: interrupted waiting install leaves the holder's lock intact (ok)"
+echo "pack-smoke: interrupted queued install leaves the holder's lock intact (ok)"
 
-# The other half of the signal contract, and the one three bugs have hidden in: an
-# interrupt while this process HOLDS the lock must release it and say the machine
-# may be half-written. The real critical section is milliseconds, so the packaged
-# skill tree is padded to widen it enough for a signal to land inside; without that
-# the interrupt lands before or after and the test proves nothing.
-HOLD_HOME="$(mktemp -d)"
-HOLD_DATA="$(mktemp -d)"
+# Lane 2: an interrupt while this process HOLDS the lock must release it and say the
+# machine may be half-written. The real critical section is milliseconds, so the
+# packaged skill tree is padded to widen it; landing outside the window is still
+# possible, so the scenario is retried and only a run where the handler provably
+# fired counts. Never firing across every attempt is a failure, not a pass.
 PAD="$CONSUMER_DIR/node_modules/tenjin-cli/skills/tenjin-search/pad"
 mkdir -p "$PAD"
 i=0
-while [ "$i" -lt 4000 ]; do printf 'x%.0s' $(seq 1 200) > "$PAD/f$i.md"; i=$((i + 1)); done
-HOME="$HOLD_HOME" TENJIN_DATA_DIR="$HOLD_DATA" "$BIN" install --harness claude \
-  --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$HOLD_HOME/err" &
-HOLDER_PID=$!
-# Wait for the lock to actually exist, then let the write get under way.
-for _ in $(seq 1 400); do
-  [ -d "$HOLD_DATA/skills-sync.lock" ] && break
-  sleep 0.01
-done
-sleep 0.2
-kill -INT "$HOLDER_PID" 2>/dev/null || true
-wait "$HOLDER_PID" 2>/dev/null || true
-rm -rf "$PAD"
-HOLD_FAIL=""
-[ -d "$HOLD_DATA/skills-sync.lock" ] && HOLD_FAIL="the lock it held was left behind"
-if grep -q "half-written" "$HOLD_HOME/err"; then :; else
-  # Landing outside the window is possible on a fast machine; only a STRANDED lock
-  # is a failure, since the message is asserted by the unit tests.
-  echo "pack-smoke: note — interrupt landed outside the write window, lock check still applies"
-fi
-if [ -n "$HOLD_FAIL" ]; then
-  echo "pack-smoke: FAIL — interrupted holding install: $HOLD_FAIL" >&2
+while [ "$i" -lt 6000 ]; do printf 'x%.0s' $(seq 1 200) > "$PAD/f$i.md"; i=$((i + 1)); done
+HELD_OK=""
+for attempt in 1 2 3 4 5; do
+  HOLD_HOME="$(mktemp -d)"
+  HOLD_DATA="$(mktemp -d)"
+  HOME="$HOLD_HOME" TENJIN_DATA_DIR="$HOLD_DATA" "$BIN" install --harness claude \
+    --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$HOLD_HOME/err" &
+  HOLDER_PID=$!
+  for _ in $(seq 1 600); do
+    [ -d "$HOLD_DATA/skills-sync.lock" ] && break
+    sleep 0.01
+  done
+  sleep 0.25
+  kill -INT "$HOLDER_PID" 2>/dev/null
+  set +e
+  wait "$HOLDER_PID"
+  HOLDER_CODE=$?
+  set -e
+  if [ "$HOLDER_CODE" = "130" ] && grep -q "half-written" "$HOLD_HOME/err"; then
+    if [ -d "$HOLD_DATA/skills-sync.lock" ]; then
+      echo "pack-smoke: FAIL — interrupted holding install left its own lock behind" >&2
+      rm -rf "$HOLD_HOME" "$HOLD_DATA" "$PAD"
+      exit 1
+    fi
+    HELD_OK="yes"
+  fi
   rm -rf "$HOLD_HOME" "$HOLD_DATA"
+  [ -n "$HELD_OK" ] && break
+done
+rm -rf "$PAD"
+if [ -z "$HELD_OK" ]; then
+  echo "pack-smoke: FAIL — never landed an interrupt inside the write; handler unproven" >&2
   exit 1
 fi
-rm -rf "$HOLD_HOME" "$HOLD_DATA"
 echo "pack-smoke: interrupted holding install releases its own lock (ok)"
 
 echo "pack-smoke: PASS (tenjin-cli@$EXPECTED_VERSION packed, installed, and exercised)"

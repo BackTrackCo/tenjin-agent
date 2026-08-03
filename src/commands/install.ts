@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, readdir, realpath } from 'node:fs/promises';
+import { constants, lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -290,6 +291,7 @@ export async function runInstall(
   // bypassed. What the lock still buys is exclusion against the OTHER writer of
   // these directories, the post-update self-heal, which rewrites the same paths
   // unattended. A dry run writes nothing, so it needs no lock.
+  let lockLeftBehind: string | undefined;
   await underSyncLock(
     ctx.dataDir,
     dryRun,
@@ -300,6 +302,9 @@ export async function runInstall(
       await assertSkillsLanded(plans, dryRun);
     },
     deps.lockTimeoutMs,
+    (lockPath) => {
+      lockLeftBehind = lockPath;
+    },
   );
   // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
   // own check already honours it. Detection cannot see a harness we do not probe for,
@@ -345,6 +350,9 @@ export async function runInstall(
     dryRun,
     skillsSource,
     harnesses,
+    // Present only when the skills lock survived its own removal: the install
+    // succeeded, but the leftover will make later runs wait on it.
+    ...(lockLeftBehind !== undefined ? { lockLeftBehind } : {}),
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
     // Shipped with the install rather than left for the operator to discover after
@@ -364,6 +372,7 @@ export async function runInstall(
   const humanLines = buildWalkthrough(ctx.io, {
     dryRun,
     harnesses,
+    ...(lockLeftBehind !== undefined ? { lockLeftBehind } : {}),
     publishMode,
     permissions,
     wallet: wallet ?? { status: 'none' },
@@ -377,6 +386,8 @@ const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 interface WalkthroughState {
   dryRun: boolean;
   harnesses: HarnessResult[];
+  /** Set when the skills lock could not be removed; it will block later runs. */
+  lockLeftBehind?: string;
   publishMode: PublishModeSelection;
   permissions: PermissionsResult;
   wallet: WalletOutcome;
@@ -404,6 +415,17 @@ function buildWalkthrough(io: Io, s: WalkthroughState): string[] {
  */
 function noticeLines(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
+  if (s.lockLeftBehind !== undefined) {
+    // The install itself succeeded; this is a leftover that will make the NEXT run
+    // time out, and the operator is the only one who can clear it.
+    lines.push(
+      paint(
+        io,
+        'yellow',
+        `! ${s.lockLeftBehind} could not be removed. Installing worked, but later runs will wait on it: remove that directory if \`tenjin install\` starts timing out.`,
+      ),
+    );
+  }
   for (const h of s.harnesses) {
     if (h.hostedArrivedFirst) {
       // Named by DIRECTORY: one line per harness, and the funnel puts the mirror
@@ -1030,15 +1052,7 @@ async function installSkill(
   let differs = false;
   let preexisting = false;
   for (const [rel, content] of src) {
-    const path = writeTo.get(rel)!;
-    await assertRegularFile(path, name);
-    // ENOENT only. Collapsing EACCES/EIO into "absent" classified an unreadable
-    // skill as a fresh install and then replaced it, because the atomic rename
-    // needs directory permission, not file permission.
-    const current = await readFile(path).catch((err: unknown) => {
-      if (hasCode(err, 'ENOENT')) return null;
-      throw wrapWriteError(err, destDir, name);
-    });
+    const current = await readShippedFile(writeTo.get(rel)!, name, destDir);
     if (rel === 'SKILL.md') preexisting = current !== null;
     if (current === null || !current.equals(content)) differs = true;
   }
@@ -1080,6 +1094,7 @@ async function underSyncLock(
   dryRun: boolean,
   fn: () => Promise<void>,
   timeoutMs?: number,
+  onReleaseError?: (lockPath: string) => void,
 ): Promise<void> {
   if (dryRun) return fn();
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -1102,7 +1117,10 @@ async function underSyncLock(
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   try {
-    await withFileLock(lockPath, fn, timeoutMs !== undefined ? { timeoutMs } : {});
+    await withFileLock(lockPath, fn, {
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      onReleaseError: (p) => onReleaseError?.(p),
+    });
   } catch (err) {
     if (err instanceof LockTimeoutError) {
       throw new CliError('REFUSED', 'Another `tenjin install` is writing the skills.', {
@@ -1125,20 +1143,49 @@ async function underSyncLock(
 }
 
 /**
- * A shipped path must be a regular file (or absent) before it is read.
+ * Read a shipped file, or null when it is not there.
  *
- * `readFile` on a FIFO blocks until a writer appears, so a pipe left at a
- * SKILL.md path hung install indefinitely, past SIGTERM, until it was SIGKILLed;
- * a character device would instead stream unbounded bytes into memory. An errno
- * mapping cannot help, because neither call fails: they just never finish.
+ * ONE descriptor does both the check and the read. `readFile` on a FIFO blocks
+ * until a writer appears (a pipe at a SKILL.md path hung install past SIGTERM
+ * until it was killed outright) and a character device streams unbounded bytes
+ * into memory; neither call fails, so no errno mapping reaches them. Opening
+ * non-blocking returns immediately whatever the node type is, `fstat` on the
+ * descriptor then answers what it actually is, and only a regular file is read.
+ *
+ * Checking the pathname and then reading the pathname would leave the two
+ * answering about different files if the destination were swapped in between.
+ * O_NONBLOCK does not exist on Windows, where it degrades to 0; FIFOs are not a
+ * meaningful case there.
  */
-async function assertRegularFile(path: string, name: string): Promise<void> {
-  // The path is already resolved through any symlink, so lstat and stat agree.
-  const entry = await lstat(path).catch(() => null);
-  if (entry === null || entry.isFile()) return;
-  throw new CliError('INTERNAL', `${path} is not a regular file, so ${name} was not written.`, {
-    fix: `A skill file must be a regular file. Check what is there (\`ls -l ${path}\`) and remove or replace it, then re-run \`tenjin install\`.`,
-  });
+async function readShippedFile(
+  path: string,
+  name: string,
+  destDir: string,
+): Promise<Buffer | null> {
+  const nonBlock = constants.O_NONBLOCK ?? 0;
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | nonBlock);
+  } catch (err) {
+    // ENOENT only. Collapsing EACCES/EIO into "absent" classified an unreadable
+    // skill as a fresh install and then replaced it, because the atomic rename
+    // needs directory permission, not file permission.
+    if (hasCode(err, 'ENOENT')) return null;
+    throw wrapWriteError(err, destDir, name);
+  }
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw new CliError('INTERNAL', `${path} is not a regular file, so ${name} was not written.`, {
+        fix: `A skill file must be a regular file. Check what is there (\`ls -l ${path}\`) and remove or replace it, then re-run \`tenjin install\`.`,
+      });
+    }
+    return await handle.readFile();
+  } catch (err) {
+    if (err instanceof CliError) throw err;
+    throw wrapWriteError(err, destDir, name);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 /**

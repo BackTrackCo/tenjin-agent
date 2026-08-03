@@ -1,8 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
+
+/**
+ * A seam for the one branch that only exists when the filesystem refuses: the
+ * release cannot remove the lock. Inert unless a test arms it.
+ */
+const fsHooks = vi.hoisted(() => ({ failRmSync: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (fsHooks.failRmSync) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      return actual.rmSync(...args);
+    },
+  };
+});
 import { LockTimeoutError, ownsAnyLock, releaseOwnedLocks, withFileLock } from './lock';
 
 let dir: string;
@@ -134,5 +150,38 @@ describe('lock ownership tracking', () => {
     await mkdir(p, { recursive: true });
     releaseOwnedLocks();
     expect(existsSync(p)).toBe(true);
+  });
+});
+
+describe('a lock that cannot be removed is reported, not swallowed', () => {
+  // The protected work succeeded, so this is not a failure of the command. It is a
+  // leftover that will make every later run wait on it, and retaining the in-memory
+  // ownership bit does nothing once this process exits normally.
+  it('calls onReleaseError with the path, and still returns the result', async () => {
+    const p = join(dir, 'stuck.lock');
+    const seen: string[] = [];
+    fsHooks.failRmSync = true;
+    try {
+      const out = await withFileLock(p, async () => 'done', {
+        onReleaseError: (path) => seen.push(path),
+      });
+      expect(out).toBe('done');
+      expect(seen).toEqual([p]);
+      // Still on disk, and still claimed: no successor can take the path.
+      expect(existsSync(p)).toBe(true);
+      expect(ownsAnyLock()).toBe(true);
+    } finally {
+      fsHooks.failRmSync = false;
+      releaseOwnedLocks();
+    }
+    expect(existsSync(p)).toBe(false);
+  });
+
+  it('says nothing when the removal succeeds', async () => {
+    const seen: string[] = [];
+    await withFileLock(join(dir, 'fine.lock'), async () => undefined, {
+      onReleaseError: (path) => seen.push(path),
+    });
+    expect(seen).toEqual([]);
   });
 });

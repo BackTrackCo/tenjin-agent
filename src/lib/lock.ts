@@ -33,6 +33,12 @@ export interface FileLockOptions {
   timeoutMs?: number;
   /** Poll interval between acquisition attempts (ms). */
   retryMs?: number;
+  /**
+   * Called when the lock could not be removed on release. The protected work
+   * succeeded, so this is not a failure of the command; it is a leftover that will
+   * block later runs, and the caller is the only one able to say so.
+   */
+  onReleaseError?: (lockPath: string, err: unknown) => void;
 }
 
 const DEFAULTS = { timeoutMs: 5000, retryMs: 25 };
@@ -102,12 +108,14 @@ export async function withFileLock<T>(
     try {
       rmSync(lockPath, { recursive: true, force: true });
       owned.delete(lockPath);
-    } catch {
-      // KEEP ownership when the removal fails. The successor-steal risk only
-      // exists once the directory is gone and someone else can take the path; a
-      // removal that failed leaves it on disk and still ours, so no other process
-      // can acquire it, and a signal-time release gets another attempt at it
-      // rather than the run walking away from a lock it is still holding.
+    } catch (err) {
+      // KEEP ownership when the removal fails: the successor-steal risk only
+      // exists once the directory is gone and someone else can take the path, so a
+      // removal that failed leaves it on disk and still ours, and a signal-time
+      // release gets another attempt. That only helps while THIS process lives,
+      // though; once it exits normally the leftover blocks every later run, so the
+      // caller is told rather than left to discover it as a timeout.
+      opts.onReleaseError?.(lockPath, err);
     }
   }
 }
