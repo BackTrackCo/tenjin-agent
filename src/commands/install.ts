@@ -994,13 +994,12 @@ async function landedInvocable(
   name: string,
   dryRun: boolean,
 ): Promise<boolean> {
-  const path = join(dryRun ? skillsSource : skillsDir, name, 'SKILL.md');
-  if (!existsSync(path)) return false;
-  try {
-    return !isModelInvocationDisabled(await readFile(path, 'utf8'));
-  } catch {
-    return false;
-  }
+  // Guarded like every other read of this path. It is read back AFTER the write, so
+  // an external writer can have swapped it for a pipe or a device in between, and a
+  // raw read there would hang the command that just finished its work.
+  const read = await readSkillFile(join(dryRun ? skillsSource : skillsDir, name, 'SKILL.md'));
+  if (read.kind !== 'ok') return false;
+  return !isModelInvocationDisabled(read.bytes.toString('utf8'));
 }
 
 /**
@@ -1211,8 +1210,12 @@ function wrapWriteError(
   err: unknown,
   destDir: string,
   name: string,
-  /** The exact path that failed, when it is not the destination directory itself. */
-  culprit = destDir,
+  /**
+   * The path to point the operator at. A READ failure names the file itself, which
+   * is the thing whose mode is wrong. A WRITE failure names the parent, because the
+   * child may not exist yet and `ls -ld` on it would say nothing.
+   */
+  culprit = dirname(destDir),
 ): unknown {
   const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
   const missing = hasCode(err, 'ENOENT');

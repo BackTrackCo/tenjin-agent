@@ -8,13 +8,19 @@ import { existsSync } from 'node:fs';
  * A seam for the one branch that only exists when the filesystem refuses: the
  * release cannot remove the lock. Inert unless a test arms it.
  */
-const fsHooks = vi.hoisted(() => ({ failRmSync: false }));
+const fsHooks = vi.hoisted(() => ({ failRmSync: false, failRmSyncFor: '' }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
-      if (fsHooks.failRmSync) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      const target = String(args[0]);
+      if (
+        fsHooks.failRmSync ||
+        (fsHooks.failRmSyncFor !== '' && target === fsHooks.failRmSyncFor)
+      ) {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
       return actual.rmSync(...args);
     },
   };
@@ -186,21 +192,30 @@ describe('a lock that cannot be removed is reported, not swallowed', () => {
   // releaseOwnedLocks runs inside a signal handler, where a throw is an uncaught
   // exception: the process would die with code 1 and a stack trace instead of the
   // handler's diagnostic and exit 130.
-  it('never throws, even when every removal fails', async () => {
+  it('never throws, and keeps going past a path it could not remove', async () => {
     const a = join(dir, 'a.lock');
     const b = join(dir, 'b.lock');
+    // Phase 1: BOTH releases fail, so both stay owned and the registry actually has
+    // two entries when the signal-time release runs. (Letting b's own release
+    // succeed would leave one entry and never exercise the loop at all.)
     fsHooks.failRmSync = true;
     try {
-      // Each acquires normally; only the release fails, so both stay claimed.
       await withFileLock(a, async () => undefined);
       await withFileLock(b, async () => undefined);
-      expect(ownsAnyLock()).toBe(true);
+      expect(existsSync(a)).toBe(true);
+      expect(existsSync(b)).toBe(true);
 
+      // Phase 2: only `a` refuses. A loop that bails on the first failure would
+      // leave b behind, which is the per-path continuation this pins.
+      fsHooks.failRmSync = false;
+      fsHooks.failRmSyncFor = a;
       expect(() => releaseOwnedLocks()).not.toThrow();
-      // Ownership is cleared regardless, so a second signal is a no-op.
       expect(ownsAnyLock()).toBe(false);
+      expect(existsSync(a)).toBe(true); // the one that refused
+      expect(existsSync(b)).toBe(false); // reached anyway
     } finally {
       fsHooks.failRmSync = false;
+      fsHooks.failRmSyncFor = '';
       await rm(a, { recursive: true, force: true });
       await rm(b, { recursive: true, force: true });
     }

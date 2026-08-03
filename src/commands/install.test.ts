@@ -11,11 +11,26 @@ const fsHooks = vi.hoisted(() => ({
   /** Which settings.json read to land the interleave after (1-based). */
   settingsInterleaveOnRead: 1,
   settingsReads: 0,
+  /** Swap this path for a FIFO the moment it is renamed into place. */
+  fifoAfterRename: '',
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      const out = await actual.rename(...args);
+      // An external writer swapping the just-landed file for a pipe, which is the
+      // window between the guarded write and the invocability readback.
+      if (fsHooks.fifoAfterRename !== '' && String(args[1]) === fsHooks.fifoAfterRename) {
+        const target = fsHooks.fifoAfterRename;
+        fsHooks.fifoAfterRename = '';
+        await actual.rm(target, { force: true });
+        const { execFileSync } = await import('node:child_process');
+        execFileSync('mkfifo', [target]);
+      }
+      return out;
+    },
     readFile: async (...args: Parameters<typeof actual.readFile>) => {
       const out = await actual.readFile(...args);
       // A competing writer lands the instant the permissions read returns, which
@@ -1896,6 +1911,22 @@ describe('runInstall: hosted skill already present (#35)', () => {
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
     expect(text).toContain('could not be removed');
   });
+
+  // The invocability readback happens AFTER the write, so the path can have been
+  // swapped for a pipe in between. A raw read there hangs the command that has
+  // already done its work.
+  it('does not hang when a landed SKILL.md is swapped for a pipe before the readback', async () => {
+    if (process.platform === 'win32') return;
+    fsHooks.fifoAfterRename = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    try {
+      const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+      // Reaching here at all is the assertion; a pipe is not model-invocable.
+      expect(skill.modelInvocable).toBe(false);
+    } finally {
+      fsHooks.fifoAfterRename = '';
+    }
+  }, 15000);
 
   it('leaves a nested symlink in the skill directory alone', async () => {
     if (process.platform === 'win32') return;

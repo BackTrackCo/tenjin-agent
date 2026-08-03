@@ -4,8 +4,10 @@ import { join } from 'node:path';
 
 /**
  * Locks this process currently holds. Ownership starts the instant `mkdir`
- * succeeds and ends in the release, so there is no window where a lock is on disk
- * and unaccounted for.
+ * succeeds and ends when the release has removed the directory, so there is no
+ * window where a lock is on disk and unaccounted for. A removal that FAILS is the
+ * one exception: the directory stays and ownership is dropped anyway, because
+ * holding a claim on a path we could not clear risks deleting a successor's lock.
  *
  * It exists because the default signal action terminates WITHOUT running
  * `finally`: without this, one Ctrl-C leaves a lock nothing will ever clean and
@@ -19,9 +21,10 @@ export function ownsAnyLock(): boolean {
 }
 
 /**
- * Synchronously release every lock this process holds. Safe to call from a signal
- * handler, and a no-op when this process holds none, so a run that was merely
- * QUEUED behind another cannot remove that other run's lock.
+ * Synchronously attempt to release every lock this process holds. BEST EFFORT: a
+ * path that refuses to be removed is left on disk and the next run's timeout names
+ * it. Safe to call from a signal handler, and a no-op when this process holds
+ * none, so a run merely QUEUED behind another cannot remove that other run's lock.
  */
 export function releaseOwnedLocks(): void {
   for (const path of owned) {
