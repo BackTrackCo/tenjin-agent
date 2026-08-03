@@ -545,6 +545,12 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
   if (p.skipped === 'not-requested') {
     return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
   }
+  if (p.skipped === 'changed-since-read') {
+    // Nothing is wrong with the file and the flag is not the remedy: another
+    // writer touched it mid-run, so the merge has to be recomputed against what
+    // is there now. The catch-all below says "fix it", which is wrong here.
+    return `${paint(io, 'yellow', '!')} ${label} ${p.path} changed while it was being updated, so nothing was written. Re-run: tenjin install`;
+  }
   return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched. Fix it, then: tenjin install --allow-free-verbs`;
 }
 
@@ -1018,8 +1024,10 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
   }
   if (missing.length === 0) return;
   throw new CliError('INTERNAL', `Skills were not written: ${missing.join(', ')}`, {
-    // Says "permissions" only now that the wiring holds a lock. Before that, this
-    // fired on a lost race and sent people to chmod a directory that was fine.
+    // Safe to point at permissions because nothing removes a landed file any more:
+    // each shipped file arrives by its own atomic rename. When this was a
+    // rm-then-write it also fired on a lost race, and sent people to chmod a
+    // directory that was fine.
     fix: `Check that you can write to the skills directory (\`ls -ld ${dirname(missing[0] ?? '')}\`), then re-run \`tenjin install\`.`,
   });
 }

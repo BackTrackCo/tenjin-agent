@@ -5,7 +5,33 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  * directory refusing to be removed. Inert unless a test sets it, so production
  * carries no test-only branch.
  */
-const fsHooks = vi.hoisted(() => ({ failLockRelease: false }));
+const fsHooks = vi.hoisted(() => ({
+  failLockRelease: false,
+  settingsInterleave: '',
+  /** Which settings.json read to land the interleave after (1-based). */
+  settingsInterleaveOnRead: 1,
+  settingsReads: 0,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      const out = await actual.readFile(...args);
+      // A competing writer lands the instant the permissions read returns, which
+      // is the top of that writer's read-to-rename window.
+      if (fsHooks.settingsInterleave !== '' && String(args[0]).endsWith('settings.json')) {
+        fsHooks.settingsReads += 1;
+        if (fsHooks.settingsReads === fsHooks.settingsInterleaveOnRead) {
+          const bytes = fsHooks.settingsInterleave;
+          fsHooks.settingsInterleave = '';
+          await actual.writeFile(String(args[0]), bytes);
+        }
+      }
+      return out;
+    },
+  };
+});
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
@@ -1280,6 +1306,35 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toEqual([...FREE_VERB_RULES.slice(1)]);
   });
 
+  // The summary must not tell the operator to fix a healthy file, or to re-run with
+  // a flag that is not the remedy. The warning beside it already says the right
+  // thing, so the two lines used to disagree.
+  it('says what to do when the settings file moved under the write', async () => {
+    await writeSettings({ model: 'opus', permissions: { allow: [] } });
+    // Read 1 is the consent probe; read 2 is the writer's own snapshot, and only a
+    // change after THAT one is the window the guard exists for.
+    fsHooks.settingsInterleave = `${JSON.stringify({ model: 'opus', theirs: 1 }, null, 2)}\n`;
+    fsHooks.settingsInterleaveOnRead = 2;
+    fsHooks.settingsReads = 0;
+    let res;
+    try {
+      res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: async () => true }),
+      );
+    } finally {
+      fsHooks.settingsInterleave = '';
+      fsHooks.settingsReads = 0;
+      fsHooks.settingsInterleaveOnRead = 1;
+    }
+    expect(wiredOf(res.data).skipped).toBe('changed-since-read');
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('changed while it was being updated');
+    expect(text).toContain('Re-run: tenjin install');
+    expect(text).not.toContain('Fix it, then');
+  });
+
   it('still asks when only SOME of the rules are allowed', async () => {
     await writeSettings({ permissions: { allow: [FREE_VERB_RULES[0]] } });
     const confirm = vi.fn(async () => true);
@@ -2058,8 +2113,10 @@ describe('the packaged skills are single-file, which is what makes write-in-plac
 
 describe('runInstall: the skill-directory write', () => {
   // 5 concurrent runs used to fail 7 of 15 times on raw ENOENT/ENOTEMPTY renames,
-  // because each skill is replaced by rm-then-write with nothing serializing them.
-  it('serializes concurrent installs instead of racing the same directory', async () => {
+  // when each skill was replaced by rm-then-write. Named for what these assertions
+  // can actually see: the lock is NOT what this proves, and the tree surviving is
+  // delivered by the per-file atomic renames (install.ts says the same).
+  it('leaves concurrent installs neither failing nor corrupting the tree', async () => {
     const runs = await Promise.allSettled(
       Array.from({ length: 5 }, () =>
         runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps()),

@@ -130,8 +130,13 @@ describe('lock ownership tracking', () => {
   it('is never observable on disk while unowned', async () => {
     const p = join(dir, 'window.lock');
     let sawWindow = false;
+    let sawReverse = false;
     const probe = setInterval(() => {
+      // Both directions. On disk but unclaimed means a signal exits without
+      // removing it. Claimed but already gone means a signal would remove
+      // whatever SUCCESSOR had since taken the path. Neither may ever be seen.
       if (existsSync(p) && !ownsAnyLock()) sawWindow = true;
+      if (!existsSync(p) && ownsAnyLock()) sawReverse = true;
     }, 0);
     try {
       await withFileLock(p, async () => {
@@ -142,6 +147,7 @@ describe('lock ownership tracking', () => {
       clearInterval(probe);
     }
     expect(sawWindow).toBe(false);
+    expect(sawReverse).toBe(false);
     expect(existsSync(p)).toBe(false);
   });
 
