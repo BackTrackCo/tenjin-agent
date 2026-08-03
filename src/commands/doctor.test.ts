@@ -1135,8 +1135,6 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     expect(check.fix).toContain('npm i -g tenjin-cli');
   });
 
-  // `install` refuses to write a symlinked skill directory, so calling it an old
-  // build would advertise a fix that can never clear.
   // `install` writes through a symlinked directory, so a stale one is reportable
   // and the fix genuinely resolves it. (It used to be skipped, because install
   // refused to touch it and the fix could never clear.)
@@ -1198,6 +1196,31 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     expect(check.fix).toContain('--harness');
     await rm(src, { recursive: true, force: true });
   });
+});
+
+describe('runDoctor — a pipe at a skill path cannot hang the diagnostic', () => {
+  // `readFile` on a FIFO blocks until a writer appears, so a pipe at a wired
+  // SKILL.md hung `tenjin doctor` past SIGTERM. Every read of an operator
+  // controlled skill path goes through one non-blocking, fstat-checked descriptor.
+  it('completes, and treats the pipe as an unusable skill rather than reading it', async () => {
+    if (process.platform === 'win32') return;
+    const skills = join(skillHome, '.claude', 'skills');
+    await mkdir(join(skills, 'tenjin-publish'), { recursive: true });
+    await writeFile(join(skills, 'tenjin-publish', 'SKILL.md'), '---\nname: tenjin-publish\n---\n');
+    await mkdir(join(skills, 'tenjin-search'), { recursive: true });
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('mkfifo', [join(skills, 'tenjin-search', 'SKILL.md')]);
+
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    // Reaching this line at all is the assertion: before the guard it never returned.
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(check.status).toBe('warn');
+  }, 15000);
 });
 
 describe('runDoctor — session key', () => {

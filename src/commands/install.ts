@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
-import { constants, lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -21,6 +20,7 @@ import {
   harnessTargetDir,
   isModelInvocationDisabled,
   onPath,
+  readSkillFile,
 } from '../lib/skill-wiring';
 import type { HarnessTarget } from '../lib/skill-wiring';
 import {
@@ -1145,47 +1145,26 @@ async function underSyncLock(
 /**
  * Read a shipped file, or null when it is not there.
  *
- * ONE descriptor does both the check and the read. `readFile` on a FIFO blocks
- * until a writer appears (a pipe at a SKILL.md path hung install past SIGTERM
- * until it was killed outright) and a character device streams unbounded bytes
- * into memory; neither call fails, so no errno mapping reaches them. Opening
- * non-blocking returns immediately whatever the node type is, `fstat` on the
- * descriptor then answers what it actually is, and only a regular file is read.
- *
- * Checking the pathname and then reading the pathname would leave the two
- * answering about different files if the destination were swapped in between.
- * O_NONBLOCK does not exist on Windows, where it degrades to 0; FIFOs are not a
- * meaningful case there.
+ * The node-type guard lives in `readSkillFile`, shared with the wiring check and
+ * the staleness check, because all three read the same operator-controlled paths
+ * and a pipe at one of them used to hang whichever command got there first.
  */
 async function readShippedFile(
   path: string,
   name: string,
   destDir: string,
 ): Promise<Buffer | null> {
-  const nonBlock = constants.O_NONBLOCK ?? 0;
-  let handle: FileHandle;
-  try {
-    handle = await open(path, constants.O_RDONLY | nonBlock);
-  } catch (err) {
-    // ENOENT only. Collapsing EACCES/EIO into "absent" classified an unreadable
-    // skill as a fresh install and then replaced it, because the atomic rename
-    // needs directory permission, not file permission.
-    if (hasCode(err, 'ENOENT')) return null;
-    throw wrapWriteError(err, destDir, name);
+  const read = await readSkillFile(path);
+  if (read.kind === 'absent') return null;
+  if (read.kind === 'ok') return read.bytes;
+  if (read.kind === 'not-regular') {
+    throw new CliError('INTERNAL', `${path} is not a regular file, so ${name} was not written.`, {
+      fix: `A skill file must be a regular file. Check what is there (\`ls -l ${path}\`) and remove or replace it, then re-run \`tenjin install\`.`,
+    });
   }
-  try {
-    if (!(await handle.stat()).isFile()) {
-      throw new CliError('INTERNAL', `${path} is not a regular file, so ${name} was not written.`, {
-        fix: `A skill file must be a regular file. Check what is there (\`ls -l ${path}\`) and remove or replace it, then re-run \`tenjin install\`.`,
-      });
-    }
-    return await handle.readFile();
-  } catch (err) {
-    if (err instanceof CliError) throw err;
-    throw wrapWriteError(err, destDir, name);
-  } finally {
-    await handle.close().catch(() => undefined);
-  }
+  // Names the FILE, not its directory: this is a read failure, and pointing at a
+  // perfectly writable parent is what sent operators to chmod the wrong thing.
+  throw wrapWriteError(read.err, destDir, name, path);
 }
 
 /**
@@ -1204,7 +1183,12 @@ async function resolveThroughLink(path: string, name: string): Promise<string> {
   });
 }
 
-/** Fail a destination directory that cannot be written, on dry runs too. */
+/**
+ * Fail a destination directory that is a BROKEN SYMLINK, on dry runs too, so a dry
+ * run cannot report `would-install` where the real run cannot write. It checks only
+ * that: an unwritable but real directory passes here and fails at the write, with
+ * the permission-denied error.
+ */
 async function assertReachable(destDir: string, name: string): Promise<void> {
   const entry = await lstat(destDir).catch(() => null);
   if (entry?.isSymbolicLink() !== true) return;
@@ -1215,7 +1199,13 @@ async function assertReachable(destDir: string, name: string): Promise<void> {
 }
 
 /** A raw errno under INTERNAL reads as a CLI bug and carries no fix. */
-function wrapWriteError(err: unknown, destDir: string, name: string): unknown {
+function wrapWriteError(
+  err: unknown,
+  destDir: string,
+  name: string,
+  /** The exact path that failed, when it is not the destination directory itself. */
+  culprit = destDir,
+): unknown {
   const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
   const missing = hasCode(err, 'ENOENT');
   // A skills directory that resolves to a regular file, or a SKILL.md that resolves
@@ -1224,7 +1214,7 @@ function wrapWriteError(err: unknown, destDir: string, name: string): unknown {
   const wrongKind = hasCode(err, 'ENOTDIR') || hasCode(err, 'EISDIR');
   if (!denied && !missing && !wrongKind) return err;
   const fix = denied
-    ? `Permission denied. Check that you can write to ${dirname(destDir)} (\`ls -ld ${dirname(destDir)}\`), then re-run \`tenjin install\`.`
+    ? `Permission denied on ${culprit}. Check it (\`ls -ld ${culprit}\`), then re-run \`tenjin install\`.`
     : wrongKind
       ? `${destDir} (or a file inside it) is not the kind of thing it needs to be: a skill is a directory holding SKILL.md. Check it (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`
       : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`;

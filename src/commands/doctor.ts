@@ -1,7 +1,6 @@
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
@@ -19,6 +18,7 @@ import {
   missingCliSkills,
   onPath,
   readAllWiring,
+  readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
 import type {
@@ -506,18 +506,20 @@ async function compareWiredSkills(
   // Read once, not once per directory.
   const packaged = new Map<string, Buffer>();
   for (const name of CLI_SKILL_NAMES) {
-    const bytes = await readFile(join(source, name, 'SKILL.md')).catch(() => null);
-    if (bytes !== null) packaged.set(name, bytes);
+    const read = await readSkillFile(join(source, name, 'SKILL.md'));
+    if (read.kind === 'ok') packaged.set(name, read.bytes);
   }
   if (packaged.size !== CLI_SKILL_NAMES.length) return { stale: [], verifiable: false };
 
   const stale: string[] = [];
   for (const dir of dirs) {
     for (const name of CLI_SKILL_NAMES) {
-      const onDisk = await readFile(join(dir, name, 'SKILL.md')).catch(() => null);
-      // Unreadable on disk is the wiring check's business, not this one's.
-      if (onDisk === null) continue;
-      if (!packaged.get(name)!.equals(onDisk)) {
+      // Guarded: a pipe or device at this path would otherwise block the whole
+      // diagnostic. Anything but a readable regular file is the wiring check's
+      // business, not this one's.
+      const onDisk = await readSkillFile(join(dir, name, 'SKILL.md'));
+      if (onDisk.kind !== 'ok') continue;
+      if (!packaged.get(name)!.equals(onDisk.bytes)) {
         stale.push(dir);
         break;
       }

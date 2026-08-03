@@ -1,4 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/**
+ * Arms the one failure the filesystem will not produce on demand: the lock
+ * directory refusing to be removed. Inert unless a test sets it, so production
+ * carries no test-only branch.
+ */
+const fsHooks = vi.hoisted(() => ({ failLockRelease: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (fsHooks.failLockRelease && String(args[0]).endsWith('skills-sync.lock')) {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return actual.rmSync(...args);
+    },
+  };
+});
 import {
   chmod,
   lstat,
@@ -1748,6 +1767,80 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(err.message).toContain('not a regular file');
     expect(err.fix).toContain('ls -l');
   }, 10000);
+
+  // A SKILL.md that is itself a dangling link: resolveThroughLink's throw, which
+  // is a different path from a dangling skill DIRECTORY (that one is assertReachable).
+  it('fails a SKILL.md that is itself a broken symlink', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await symlink(join(home, 'nowhere.md'), join(dir, 'SKILL.md'));
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('broken symlink');
+    expect(err.fix).toContain('ls -ld');
+  });
+
+  // The permission error must name the FILE. Naming its parent sent operators to
+  // chmod a directory that was fine, which is the same defect this PR removed from
+  // the skills-not-written error.
+  it('names the unreadable file, not its writable parent directory', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, 'SKILL.md');
+    await writeFile(file, 'secret');
+    await chmod(file, 0o000);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err.fix).toContain(file);
+      expect(err.fix).not.toContain(`ls -ld ${dirname(dir)}\``);
+    } finally {
+      await chmod(file, 0o644).catch(() => undefined);
+    }
+  });
+
+  // An unwritable data dir fails at lock acquisition, before any skill is touched.
+  it('gives an unwritable data directory a typed error with a fix', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    await mkdir(data, { recursive: true });
+    await chmod(data, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.message).not.toContain('EACCES');
+    } finally {
+      await chmod(data, 0o700).catch(() => undefined);
+    }
+  });
+
+  // The whole point of the release-failure callback: the operator is told, on both
+  // surfaces, while the command still reports the success it actually had.
+  it('reports a lock it could not remove, without failing the run', async () => {
+    fsHooks.failLockRelease = true;
+    let res;
+    try {
+      res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+    } finally {
+      fsHooks.failLockRelease = false;
+    }
+    const d = res.data as { lockLeftBehind?: string };
+    expect(d.lockLeftBehind).toBe(join(data, 'skills-sync.lock'));
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('could not be removed');
+  });
 
   it('leaves a nested symlink in the skill directory alone', async () => {
     if (process.platform === 'win32') return;

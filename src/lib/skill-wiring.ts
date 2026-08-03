@@ -1,5 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { constants, open } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
+import { hasCode } from './errno';
 import { delimiter, join } from 'node:path';
 import { SKILL_NAMES } from './skills-source';
 import type { SkillName } from './skills-source';
@@ -192,15 +194,56 @@ function classify(skills: SkillWiring[]): DirState {
   return cli.length === CLI_SKILL_NAMES.length ? 'wired' : 'partial';
 }
 
-async function readSkillWiring(dir: string, name: string): Promise<SkillWiring> {
-  const path = join(dir, name, 'SKILL.md');
-  if (!existsSync(path)) return { name, present: false };
-  let text: string;
+/**
+ * What reading a SKILL.md found. A skill path is operator-controlled, so it is not
+ * necessarily a file at all.
+ */
+export type SkillFileRead =
+  | { kind: 'ok'; bytes: Buffer }
+  | { kind: 'absent' }
+  | { kind: 'not-regular' }
+  | { kind: 'unreadable'; err: unknown };
+
+/**
+ * Read a SKILL.md through ONE descriptor, and only when it is a regular file.
+ *
+ * `readFile` on a FIFO blocks until a writer appears, and on a character device it
+ * streams without end; neither call fails, so no error handling reaches them. A
+ * pipe at a wired SKILL.md path hung `tenjin doctor` and `tenjin install` past
+ * SIGTERM. Opening non-blocking returns immediately whatever the node type is,
+ * `fstat` on that descriptor says what it actually is, and only a regular file is
+ * read. Checking the pathname and then reading the pathname would let the two
+ * answer about different files.
+ *
+ * O_NONBLOCK does not exist on Windows, where it degrades to 0; FIFOs are not a
+ * meaningful case there.
+ */
+export async function readSkillFile(path: string): Promise<SkillFileRead> {
+  let handle: FileHandle;
   try {
-    text = await readFile(path, 'utf8');
-  } catch {
-    return { name, present: true, modelInvocable: false, reason: 'unreadable' };
+    handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch (err) {
+    if (hasCode(err, 'ENOENT')) return { kind: 'absent' };
+    return { kind: 'unreadable', err };
   }
+  try {
+    if (!(await handle.stat()).isFile()) return { kind: 'not-regular' };
+    return { kind: 'ok', bytes: await handle.readFile() };
+  } catch (err) {
+    return { kind: 'unreadable', err };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+async function readSkillWiring(dir: string, name: string): Promise<SkillWiring> {
+  const read = await readSkillFile(join(dir, name, 'SKILL.md'));
+  if (read.kind === 'absent') return { name, present: false };
+  // A pipe or a device is there, but it is not a skill and must never be read as
+  // one; `unreadable` is the state that already describes "present, unusable".
+  if (read.kind !== 'ok')
+    return { name, present: true, modelInvocable: false, reason: 'unreadable' };
+  const text = read.bytes.toString('utf8');
   if (isModelInvocationDisabled(text)) {
     return { name, present: true, modelInvocable: false, reason: 'disabled' };
   }

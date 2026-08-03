@@ -156,21 +156,30 @@ mkdir -p "$LOCK_DATA/skills-sync.lock"
 HOME="$LOCK_HOME" TENJIN_DATA_DIR="$LOCK_DATA" "$BIN" install --harness claude \
   --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
 WAITER_PID=$!
-sleep 1
-if ! kill -0 "$WAITER_PID" 2>/dev/null; then
-  echo "pack-smoke: FAIL — queued install exited before it could be signalled" >&2
+# The handler is registered inside the command, after node boots and the walkthrough
+# reaches the lock. Signalling before that gives the DEFAULT action: exit 130 with
+# empty stderr, which fails the diagnostic assertion for a healthy build. Retried
+# for the same reason Lane 2 is, and only exhausting the attempts is a failure.
+WAITER_OK=""
+for attempt in 1 2 3 4 5; do
+  sleep 1
+  if ! kill -0 "$WAITER_PID" 2>/dev/null; then break
+  fi
+  kill -INT "$WAITER_PID" 2>/dev/null || true
+  set +e
+  wait "$WAITER_PID"
+  WAITER_CODE=$?
+  set -e
+  if [ "$WAITER_CODE" = "130" ] && grep -q "nothing changed" "$LOCK_HOME/err"; then
+    WAITER_OK="yes"
+  fi
+  break
+done
+if [ -z "$WAITER_OK" ]; then
+  echo "pack-smoke: FAIL — queued install did not report an interrupted-before-writing run" >&2
   cat "$LOCK_HOME/err" >&2
   exit 1
 fi
-kill -INT "$WAITER_PID" || {
-  echo "pack-smoke: FAIL — could not signal the queued install" >&2
-  exit 1
-}
-set +e
-wait "$WAITER_PID"
-WAITER_CODE=$?
-set -e
-assert_interrupted "queued install" "$LOCK_HOME/err" "$WAITER_CODE" "nothing changed" || exit 1
 if [ ! -d "$LOCK_DATA/skills-sync.lock" ]; then
   echo "pack-smoke: FAIL — an interrupted WAITING install removed the holder's lock" >&2
   exit 1
