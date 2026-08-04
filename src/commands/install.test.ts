@@ -331,16 +331,19 @@ describe('runInstall: idempotency', () => {
   });
 
   // A directory (or any non-regular file) at the AGENTS.md path is a typed error
-  // naming the path, not a raw EISDIR under INTERNAL.
+  // naming the path, not a raw EISDIR under INTERNAL. On the dry run too, so a
+  // dry run cannot promise would-append where the real run refuses.
   it('fails a non-regular AGENTS.md with a typed error instead of a raw errno', async () => {
     await mkdir(join(home, '.agents', 'AGENTS.md'), { recursive: true });
-    const err = (await runInstall({ harness: ['codex'] }, makeCtx(), deps()).catch(
-      (e) => e,
-    )) as CliError;
-    expect(err).toBeInstanceOf(CliError);
-    expect(err.message).toContain('not a regular file');
-    expect(err.message).not.toContain('EISDIR');
-    expect(err.fix).toContain('ls -l');
+    for (const dryRun of [true, false]) {
+      const err = (await runInstall({ harness: ['codex'], dryRun }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('not a regular file');
+      expect(err.message).not.toContain('EISDIR');
+      expect(err.fix).toContain('ls -l');
+    }
   });
 
   // The probe is lazy: once ~/.agents/AGENTS.md owns the marker (the steady state
@@ -446,6 +449,23 @@ describe('runInstall: CLAUDE.md nudge', () => {
     const text = await readFile(managed, 'utf8');
     expect(text.startsWith('# Mine\n')).toBe(true);
     expect(text.split(MARKER).length - 1).toBe(1);
+  });
+
+  // The CLAUDE.md twin of the dangling AGENTS.md pin: dry run and real run must
+  // fail identically, never would-write on a link the real run refuses.
+  it('fails a dangling CLAUDE.md link on --dry-run too, matching the real run', async () => {
+    if (process.platform === 'win32') return;
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await symlink(join(home, 'nowhere', 'CLAUDE.md'), claudeMdPath());
+    for (const dryRun of [true, false]) {
+      const err = (await runInstall(
+        { harness: ['claude'], claudeMd: true, dryRun },
+        makeCtx(),
+        deps(),
+      ).catch((e) => e)) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('broken symlink');
+    }
   });
   const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
@@ -1817,13 +1837,15 @@ describe('runInstall: hosted skill already present (#35)', () => {
   // An empty HOME (sudo/docker env_reset) makes every target relative, so the old
   // behavior installed into the CURRENT DIRECTORY and reported success while no
   // harness read a thing.
-  it('refuses an empty home directory instead of installing into the cwd', async () => {
-    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps({ homeDir: '' })).catch(
-      (e) => e,
-    )) as CliError;
-    expect(err).toBeInstanceOf(CliError);
-    expect(err.message).toContain('home directory resolved empty');
-    expect(err.fix).toContain('HOME');
+  it('refuses an empty or relative home directory instead of installing into the cwd', async () => {
+    for (const homeDir of ['', 'relative/home']) {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps({ homeDir })).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('did not resolve to an absolute path');
+      expect(err.fix).toContain('HOME');
+    }
     expect(existsSync(join(process.cwd(), '.claude'))).toBe(false);
   });
 

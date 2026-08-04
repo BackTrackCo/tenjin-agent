@@ -320,9 +320,13 @@ async function installBody(
   // every target below relative, silently installing into the current working
   // directory and reporting success while no harness reads a thing.
   if (!isAbsolute(home)) {
-    throw new CliError('INTERNAL', 'The home directory resolved empty, so nothing was installed.', {
-      fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
-    });
+    throw new CliError(
+      'INTERNAL',
+      'The home directory did not resolve to an absolute path, so nothing was installed.',
+      {
+        fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
+      },
+    );
   }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
 
@@ -1017,11 +1021,9 @@ async function wireClaudeMd(
   if (!write) return { path, status: 'skipped' };
 
   const probe = await probeMarkerText(path);
-  assertRegularMarker(path, probe);
   const { content, change } = upsertMarkerLine(probe.text, nudgeLine(plan.skillsDir));
   if (change === 'none') return { path, status: 'up-to-date' };
-  // Dry-run parity, like upsertAgentsMd: a dangling link fails the dry run too.
-  const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
+  const writeTo = await prepareMarkerWrite(path, probe);
   if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
   if (change === 'append') return { path, status: dryRun ? 'would-write' : 'written' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
@@ -1401,12 +1403,8 @@ async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsM
   }
 
   const chosen = chooseAgentsMdPath(plan.home);
-  return upsertAgentsMd(
-    chosen,
-    probes.get(chosen) ?? { text: null, notRegular: false },
-    line,
-    dryRun,
-  );
+  // Non-null: chooseAgentsMdPath only ever returns shared or codex, both probed.
+  return upsertAgentsMd(chosen, probes.get(chosen)!, line, dryRun);
 }
 
 async function upsertAgentsMd(
@@ -1415,16 +1413,25 @@ async function upsertAgentsMd(
   line: string,
   dryRun: boolean,
 ): Promise<AgentsMdResult> {
-  assertRegularMarker(path, probe);
   const { content, change } = upsertMarkerLine(probe.text, line);
   if (change === 'none') return { path, status: 'already-present' };
-  // Resolved on BOTH paths, dry run included, like the skill writers'
-  // assertReachable: a dry run must not report would-append where the real run
-  // fails on a dangling link.
-  const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
+  const writeTo = await prepareMarkerWrite(path, probe);
   if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
   if (change === 'append') return { path, status: dryRun ? 'would-append' : 'appended' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
+}
+
+/**
+ * The write-side contract both nudge writers share, in ONE place so a refactor
+ * cannot half-drop it: refuse a non-regular chosen path and resolve through a
+ * link, BOTH unconditionally (dry runs included), so a dry run can never report
+ * would-append where the real run refuses. Returns the resolved target for the
+ * real write. Safe after the change-none early return: a not-regular probe has
+ * null text, which can never produce `none`.
+ */
+async function prepareMarkerWrite(declared: string, probe: MarkerProbe): Promise<string> {
+  assertRegularMarker(declared, probe);
+  return resolveThroughLink(declared, 'the Tenjin pointer');
 }
 
 /**
@@ -1447,7 +1454,10 @@ async function probeMarkerText(declared: string): Promise<MarkerProbe> {
   // file we cannot read could own the marker (skipping it appends a duplicate into
   // the other file) or hold the operator's notes (writing over it clobbers them).
   if (read.kind === 'not-regular') return { text: null, notRegular: true };
-  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared, { verb: 'read' });
+  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared, {
+    verb: 'read',
+    expected: ': the pointer lands in a regular markdown file',
+  });
 }
 
 interface MarkerProbe {
