@@ -250,8 +250,18 @@ export type SessionFileState =
    *  report that prints a mode the file does not have is worse than no number. */
   | { kind: 'loosened'; mode: number }
   | { kind: 'corrupt'; reason: string }
+  /** An OLDER CLI's file, missing a field the shape has since required. Unusable
+   *  and re-mintable like an absent one, so NOT the tamper signal `corrupt` is. */
+  | { kind: 'outdated'; field: string }
   | { kind: 'unreadable'; message: string; cause: unknown }
   | { kind: 'ok'; file: SessionFile };
+
+/**
+ * Fields an OLDER CLI's file can legitimately lack. An allowlist, not "any missing
+ * key": a file with no `privateKeyJwk.d` cannot sign and is broken whoever wrote
+ * it. Add a name when the schema grows a required field, never to quiet a test.
+ */
+const LATER_ADDED_FIELDS: readonly string[] = ['origin'];
 
 export async function readSessionFile(dir: string): Promise<SessionFileState> {
   const path = sessionPath(dir);
@@ -282,18 +292,39 @@ export async function readSessionFile(dir: string): Promise<SessionFileState> {
   }
   const parsed = SessionFileSchema.safeParse(json);
   if (!parsed.success) {
-    const issue = parsed.error.issues[0];
+    const issues = parsed.error.issues;
+    const legacy = (i: (typeof issues)[number]): boolean =>
+      LATER_ADDED_FIELDS.includes(i.path.join('.')) && !hasPath(json, i.path);
+    // Report the first NON-legacy issue when there is one: a file missing both
+    // `origin` and its private scalar is corrupt because of the scalar, and naming
+    // the benign field points the operator at the wrong thing.
+    const issue = issues.find((i) => !legacy(i)) ?? issues[0];
     const field = issue?.path.join('.');
     const message = issue?.message ?? 'schema mismatch';
-    // Field-qualified, because "expected string, received undefined" names no
-    // field and the migration case (a pre-origin file) is exactly that message.
-    // zod never echoes the received VALUE, so no key material reaches this string.
+    // EVERY failure must be an allowlisted later field the file genuinely lacks.
+    // One legacy omission cannot vouch for the rest of the file, and zod reports in
+    // schema order, so the first issue alone would let a broken key ride in.
+    const legacyOnly = issues.length > 0 && issues.every(legacy);
+    if (legacyOnly && field !== undefined) return { kind: 'outdated', field };
+    // Field-qualified: the message alone names none. zod never echoes the received
+    // VALUE, so no key material reaches this string.
     return {
       kind: 'corrupt',
       reason: field !== undefined && field.length > 0 ? `${field}: ${message}` : message,
     };
   }
   return { kind: 'ok', file: parsed.data };
+}
+
+/** Does `value` actually carry the key at `path`, whatever it holds there? */
+function hasPath(value: unknown, path: readonly PropertyKey[]): boolean {
+  let cur: unknown = value;
+  for (const key of path) {
+    if (typeof cur !== 'object' || cur === null) return false;
+    if (!Object.hasOwn(cur, key)) return false;
+    cur = (cur as Record<PropertyKey, unknown>)[key];
+  }
+  return true;
 }
 
 /** The session to present, or null for every reason there is not one. */
