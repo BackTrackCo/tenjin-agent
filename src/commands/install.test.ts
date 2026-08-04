@@ -1814,6 +1814,42 @@ describe('runInstall: hosted skill already present (#35)', () => {
     }
   });
 
+  // An empty HOME (sudo/docker env_reset) makes every target relative, so the old
+  // behavior installed into the CURRENT DIRECTORY and reported success while no
+  // harness read a thing.
+  it('refuses an empty home directory instead of installing into the cwd', async () => {
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps({ homeDir: '' })).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('home directory resolved empty');
+    expect(err.fix).toContain('HOME');
+    expect(existsSync(join(process.cwd(), '.claude'))).toBe(false);
+  });
+
+  // On a case-insensitive filesystem the user's own TENJIN directory IS the tenjin
+  // skill's path, and the old behavior replaced their SKILL.md under a warning
+  // naming a lowercase path that is not on disk.
+  it('refuses a case-variant skill directory instead of overwriting it', async () => {
+    const skills = join(home, '.claude', 'skills');
+    await mkdir(skills, { recursive: true });
+    // Only meaningful where the filesystem aliases case; probe it.
+    await writeFile(join(skills, 'Aa'), '');
+    const caseInsensitive = existsSync(join(skills, 'aa'));
+    await rm(join(skills, 'Aa'));
+    if (!caseInsensitive) return;
+    const dir = join(skills, 'TENJIN');
+    await mkdir(dir);
+    await writeFile(join(dir, 'SKILL.md'), 'my own unrelated skill');
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('TENJIN');
+    expect(err.message).toContain('case variant');
+    expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toBe('my own unrelated skill');
+  });
+
   // The inverse of the missing-child case: the skill directory EXISTS and is
   // itself what refuses the temp-file write. Its parent is writable and innocent,
   // so a fix pointing one directory up sends the operator to chmod the wrong thing.

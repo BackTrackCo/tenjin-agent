@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { styleText } from 'node:util';
@@ -316,6 +316,14 @@ async function installBody(
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
+  // An empty or relative HOME (sudo/docker env_reset, systemd units) would make
+  // every target below relative, silently installing into the current working
+  // directory and reporting success while no harness reads a thing.
+  if (!isAbsolute(home)) {
+    throw new CliError('INTERNAL', 'The home directory resolved empty, so nothing was installed.', {
+      fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
+    });
+  }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
 
   // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
@@ -1113,6 +1121,7 @@ async function installSkill(
   // the real run refuses.
   const writeTo = new Map<string, string>();
   await assertReachable(destDir, name);
+  await assertNoCaseCollision(destDir, name);
   for (const rel of src.keys())
     writeTo.set(rel, await resolveThroughLink(join(destDir, rel), name));
 
@@ -1243,6 +1252,30 @@ async function resolveThroughLink(path: string, name: string): Promise<string> {
   throw new CliError('INTERNAL', `${path} is a broken symlink, so ${name} was not written.`, {
     fix: `Point it at a path that exists, or remove it (\`ls -ld ${path}\`), then re-run \`tenjin install\`.`,
   });
+}
+
+/**
+ * On a case-insensitive filesystem (the macOS default), a user directory named a
+ * case variant of a shipped skill ALIASES the skill's path, so the write would
+ * replace the user's own SKILL.md under a warning naming a path that is not on
+ * disk. Detected by the alias itself: the destination resolves but the parent
+ * lists only a differently-cased entry, which also means a case-SENSITIVE
+ * filesystem (where both names can coexist) never trips this. Dry runs too.
+ */
+async function assertNoCaseCollision(destDir: string, name: string): Promise<void> {
+  if (!existsSync(destDir)) return;
+  const entries = await readdir(dirname(destDir)).catch(() => null);
+  if (entries === null || entries.includes(name)) return;
+  const variant = entries.find((e) => e.toLowerCase() === name.toLowerCase());
+  if (variant === undefined) return;
+  const actual = join(dirname(destDir), variant);
+  throw new CliError(
+    'INTERNAL',
+    `${actual} is a case variant of the ${name} skill and this filesystem treats them as the same directory, so ${name} was not written.`,
+    {
+      fix: `Rename or remove ${actual}, then re-run \`tenjin install\`.`,
+    },
+  );
 }
 
 /**

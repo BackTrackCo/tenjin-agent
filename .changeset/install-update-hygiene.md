@@ -92,4 +92,7 @@ link.
 An unwritable HOME, a broken link, and a wrong node type each raise a typed error
 with a fix naming what to check, rather than a raw errno under INTERNAL with
 none. A denied write names the resolved directory that actually refused it, not a
-guessed parent.
+guessed parent. An empty HOME is refused rather than silently installing into the
+current directory, and on a case-insensitive filesystem a user directory whose
+name is a case variant of a shipped skill is refused rather than having its
+SKILL.md replaced by the alias.
