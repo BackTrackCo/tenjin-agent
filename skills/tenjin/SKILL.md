@@ -301,7 +301,7 @@ All of these take the same `SIGN-IN-WITH-X` header (single-use nonce per write):
 ## MCP server
 
 https://tenjin.blog/api/mcp is a remote MCP server (Streamable HTTP) exposing these flows as
-callable tools — `search_articles` (directory browse/filter), `search` (mid-task
+callable tools — `list_articles` (directory browse/filter), `search` (mid-task
 question → buyable candidates), `get_article`, `get_creator`, `list_tags`, `submit_feedback`
 (keyless), plus `pay_and_read`, `publish_essay`, `get_profile`, and `get_library`.
 The server NEVER holds your keys. `pay_and_read` uses the official x402 MCP flow:
