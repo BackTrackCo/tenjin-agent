@@ -352,6 +352,35 @@ describe('runInstall: idempotency', () => {
     const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
   });
+
+  // A directory cannot carry the marker, so it only fails the run when it is the
+  // path selected for the write; here the shared file is chosen and the broken
+  // codex candidate is irrelevant even with no owner yet.
+  it('appends to the shared file despite a non-regular ~/.codex/AGENTS.md', async () => {
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), '# My notes\n');
+    await mkdir(join(home, '.codex', 'AGENTS.md'), { recursive: true });
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('appended');
+    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    expect(agents.split(MARKER).length - 1).toBe(1);
+  });
+
+  // Dry-run parity, same contract the skill path pins for its broken links: a
+  // dangling AGENTS.md link fails the dry run too, never reporting would-append
+  // where the real run refuses.
+  it('fails a dangling AGENTS.md link on --dry-run too, matching the real run', async () => {
+    if (process.platform === 'win32') return;
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await symlink(join(home, 'nowhere', 'AGENTS.md'), join(home, '.agents', 'AGENTS.md'));
+    for (const dryRun of [true, false]) {
+      const err = (await runInstall({ harness: ['codex'], dryRun }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('broken symlink');
+    }
+  });
 });
 
 describe('runInstall: AGENTS.md instinct nudge', () => {

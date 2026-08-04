@@ -268,6 +268,11 @@ async function withInterruptGuard(
   const onSignal = (signal: NodeJS.Signals): void => {
     const wasWriting = ownsAnyLock();
     releaseOwnedLocks();
+    // An external SIGINT/SIGTERM can land while a clack prompt has the terminal
+    // in raw mode with the cursor hidden; process.exit skips clack's teardown.
+    // (Ctrl-C at a prompt is unaffected: raw mode delivers it as a keypress.)
+    if (process.stdin.isTTY) process.stdin.setRawMode?.(false);
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?25h');
     process.stderr.write(
       wasWriting
         ? `\nInterrupted mid-write. Some files may be half-written; re-run \`tenjin install\` to finish.\n`
@@ -1003,10 +1008,13 @@ async function wireClaudeMd(
   const path = join(plan.home, '.claude', 'CLAUDE.md');
   if (!write) return { path, status: 'skipped' };
 
-  const existing = await probeMarkerText(path);
-  const { content, change } = upsertMarkerLine(existing, nudgeLine(plan.skillsDir));
+  const probe = await probeMarkerText(path);
+  assertRegularMarker(path, probe);
+  const { content, change } = upsertMarkerLine(probe.text, nudgeLine(plan.skillsDir));
   if (change === 'none') return { path, status: 'up-to-date' };
-  if (!dryRun && content !== null) await writeMarkerFile(path, content);
+  // Dry-run parity, like upsertAgentsMd: a dangling link fails the dry run too.
+  const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
+  if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
   if (change === 'append') return { path, status: dryRun ? 'would-write' : 'written' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
@@ -1132,6 +1140,7 @@ async function installSkill(
           destDir,
           `the ${name} skill`,
           await deepestExisting(dirname(target)),
+          { expected: ': a skill is a directory holding SKILL.md' },
         );
       }
     }
@@ -1217,7 +1226,7 @@ async function readShippedFile(
   }
   // Names the FILE, not its directory: this is a read failure, and pointing at a
   // perfectly writable parent is what sent operators to chmod the wrong thing.
-  throw wrapWriteError(read.err, destDir, `the ${name} skill`, path);
+  throw wrapWriteError(read.err, destDir, `the ${name} skill`, path, { verb: 'read' });
 }
 
 /**
@@ -1280,7 +1289,14 @@ function wrapWriteError(
    * directory on the failed target's resolved path.
    */
   culprit: string,
+  opts: {
+    /** Which side failed; a read error reported as "could not write" misleads. */
+    verb?: 'read' | 'write';
+    /** Sentence tail for the wrong-kind fix, telling the operator the expected shape. */
+    expected?: string;
+  } = {},
 ): unknown {
+  const verb = opts.verb ?? 'write';
   const denied = hasCode(err, 'EACCES') || hasCode(err, 'EPERM');
   const missing = hasCode(err, 'ENOENT');
   // A skills directory that resolves to a regular file, or a SKILL.md that resolves
@@ -1291,12 +1307,13 @@ function wrapWriteError(
   const fix = denied
     ? `Permission denied on ${culprit}. Check it (\`ls -ld ${culprit}\`), then re-run \`tenjin install\`.`
     : wrongKind
-      ? `${dest} (or a path inside it) is not the kind of thing it needs to be. Check it (\`ls -ld ${dest}\`), then re-run \`tenjin install\`.`
+      ? `${dest} (or a path inside it) is not the kind of thing it needs to be${opts.expected ?? ''}. Check it (\`ls -ld ${dest}\`), then re-run \`tenjin install\`.`
       : `${dest} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${dest}\`), then re-run \`tenjin install\`.`;
-  return new CliError('INTERNAL', `Could not write ${subject} to ${dest}.`, {
-    fix,
-    cause: err,
-  });
+  return new CliError(
+    'INTERNAL',
+    `Could not ${verb} ${subject} ${verb === 'read' ? 'at' : 'to'} ${dest}.`,
+    { fix, cause: err },
+  );
 }
 
 /**
@@ -1338,29 +1355,41 @@ async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsM
   // keeps append-once global while still upgrading a stale line. Probed LAZILY,
   // returning as soon as an owner is found: with the marker already in
   // ~/.agents/AGENTS.md (the steady state of a re-run), a broken ~/.codex/AGENTS.md
-  // this run would never write must not fail the install. Only when ownership is
-  // still undecided does an unreadable candidate fail the run, because skipping it
-  // could append the marker a second time into the other file.
-  const texts = new Map<string, string | null>();
+  // this run would never write must not fail the install. A probe can only fail the
+  // run outright on an UNREADABLE candidate (see probeMarkerText for why); a
+  // not-regular one fails only if it ends up the chosen path.
+  const probes = new Map<string, MarkerProbe>();
   for (const path of [shared, codex]) {
-    const text = await probeMarkerText(path);
-    texts.set(path, text);
-    if (text?.includes(SKILLS_MARKER) === true) return upsertAgentsMd(path, text, line, dryRun);
+    const probe = await probeMarkerText(path);
+    probes.set(path, probe);
+    if (probe.text?.includes(SKILLS_MARKER) === true) {
+      return upsertAgentsMd(path, probe, line, dryRun);
+    }
   }
 
   const chosen = chooseAgentsMdPath(plan.home);
-  return upsertAgentsMd(chosen, texts.get(chosen) ?? null, line, dryRun);
+  return upsertAgentsMd(
+    chosen,
+    probes.get(chosen) ?? { text: null, notRegular: false },
+    line,
+    dryRun,
+  );
 }
 
 async function upsertAgentsMd(
   path: string,
-  existing: string | null,
+  probe: MarkerProbe,
   line: string,
   dryRun: boolean,
 ): Promise<AgentsMdResult> {
-  const { content, change } = upsertMarkerLine(existing, line);
+  assertRegularMarker(path, probe);
+  const { content, change } = upsertMarkerLine(probe.text, line);
   if (change === 'none') return { path, status: 'already-present' };
-  if (!dryRun && content !== null) await writeMarkerFile(path, content);
+  // Resolved on BOTH paths, dry run included, like the skill writers'
+  // assertReachable: a dry run must not report would-append where the real run
+  // fails on a dangling link.
+  const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
+  if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
   if (change === 'append') return { path, status: dryRun ? 'would-append' : 'appended' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
@@ -1373,27 +1402,43 @@ async function upsertAgentsMd(
  * symlink (committing with `rename` over a dotfiles-managed link would replace
  * the link with a regular file and strand its target).
  */
-async function probeMarkerText(declared: string): Promise<string | null> {
-  // `open` follows symlinks, so a dangling link reads as absent here; only a write
-  // aimed at it fails, in `writeMarkerFile`, naming the link.
+async function probeMarkerText(declared: string): Promise<MarkerProbe> {
+  // `open` follows symlinks, so a dangling link reads as absent here; the
+  // reachability check in the upserts fails it, on dry runs too, naming the link.
   const read = await readSkillFile(declared);
-  if (read.kind === 'absent') return null;
-  if (read.kind === 'ok') return read.bytes.toString('utf8');
-  if (read.kind === 'not-regular') {
-    throw new CliError(
-      'INTERNAL',
-      `${declared} is not a regular file, so the Tenjin pointer was not written.`,
-      {
-        fix: `Check what is there (\`ls -l ${declared}\`) and remove or replace it, then re-run \`tenjin install\`.`,
-      },
-    );
-  }
-  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared);
+  if (read.kind === 'absent') return { text: null, notRegular: false };
+  if (read.kind === 'ok') return { text: read.bytes.toString('utf8'), notRegular: false };
+  // Not-regular is recorded, not thrown: a directory or FIFO cannot carry the
+  // marker, so it only fails a path this run selects to write (assertRegularMarker,
+  // in the upserts). Unreadable stays a hard failure even for a mere candidate: a
+  // file we cannot read could own the marker (skipping it appends a duplicate into
+  // the other file) or hold the operator's notes (writing over it clobbers them).
+  if (read.kind === 'not-regular') return { text: null, notRegular: true };
+  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared, { verb: 'read' });
 }
 
-/** See {@link probeMarkerText}; the write half of the same contract. */
-async function writeMarkerFile(declared: string, content: string): Promise<void> {
-  const writeTo = await resolveThroughLink(declared, 'the Tenjin pointer');
+interface MarkerProbe {
+  text: string | null;
+  notRegular: boolean;
+}
+
+/** The write-path half of {@link probeMarkerText}'s not-regular rule: fails the
+ * path this run selects, dry runs included, so a dry run cannot promise a write
+ * the real run refuses. */
+function assertRegularMarker(declared: string, probe: MarkerProbe): void {
+  if (!probe.notRegular) return;
+  throw new CliError(
+    'INTERNAL',
+    `${declared} is not a regular file, so the Tenjin pointer was not written.`,
+    {
+      fix: `Check what is there (\`ls -l ${declared}\`) and remove or replace it, then re-run \`tenjin install\`.`,
+    },
+  );
+}
+
+/** See {@link probeMarkerText}; the write half of the same contract. `writeTo` is
+ * the link-resolved target the caller obtained from `resolveThroughLink`. */
+async function writeMarkerFile(declared: string, writeTo: string, content: string): Promise<void> {
   try {
     await writeFileAtomic(writeTo, content);
   } catch (err) {
@@ -1402,6 +1447,7 @@ async function writeMarkerFile(declared: string, content: string): Promise<void>
       declared,
       'the Tenjin pointer',
       await deepestExisting(dirname(writeTo)),
+      { expected: ': the pointer lands in a regular markdown file' },
     );
   }
 }
