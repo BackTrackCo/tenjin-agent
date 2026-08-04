@@ -272,7 +272,7 @@ async function withInterruptGuard(
       wasWriting
         ? `\nInterrupted mid-write. Some files may be half-written; re-run \`tenjin install\` to finish.\n`
         : wired
-          ? `\nInterrupted after the skills were written; permissions or wallet steps may not have finished. Re-run \`tenjin install\` to finish.\n`
+          ? `\nInterrupted after the skills were written; later setup steps may not have finished. Re-run \`tenjin install\` to finish.\n`
           : '\nInterrupted before anything was written; nothing changed.\n',
     );
     process.exit(signal === 'SIGINT' ? 130 : 143);
@@ -1335,14 +1335,17 @@ async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsM
 
   // If either file Codex reads already carries the marker, that file owns the line:
   // refresh it in place when an older install's text drifted, else leave it. This
-  // keeps append-once global while still upgrading a stale line. Probed once; the
-  // upsert reuses the text rather than reading again.
+  // keeps append-once global while still upgrading a stale line. Probed LAZILY,
+  // returning as soon as an owner is found: with the marker already in
+  // ~/.agents/AGENTS.md (the steady state of a re-run), a broken ~/.codex/AGENTS.md
+  // this run would never write must not fail the install. Only when ownership is
+  // still undecided does an unreadable candidate fail the run, because skipping it
+  // could append the marker a second time into the other file.
   const texts = new Map<string, string | null>();
-  for (const path of [shared, codex]) texts.set(path, await probeMarkerText(path));
   for (const path of [shared, codex]) {
-    if (texts.get(path)?.includes(SKILLS_MARKER) === true) {
-      return upsertAgentsMd(path, texts.get(path)!, line, dryRun);
-    }
+    const text = await probeMarkerText(path);
+    texts.set(path, text);
+    if (text?.includes(SKILLS_MARKER) === true) return upsertAgentsMd(path, text, line, dryRun);
   }
 
   const chosen = chooseAgentsMdPath(plan.home);
@@ -1372,8 +1375,7 @@ async function upsertAgentsMd(
  */
 async function probeMarkerText(declared: string): Promise<string | null> {
   // `open` follows symlinks, so a dangling link reads as absent here; only a write
-  // aimed at it fails, in `writeMarkerFile`, naming the link. A file this run
-  // never writes must not be able to fail the install.
+  // aimed at it fails, in `writeMarkerFile`, naming the link.
   const read = await readSkillFile(declared);
   if (read.kind === 'absent') return null;
   if (read.kind === 'ok') return read.bytes.toString('utf8');

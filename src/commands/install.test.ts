@@ -342,6 +342,16 @@ describe('runInstall: idempotency', () => {
     expect(err.message).not.toContain('EISDIR');
     expect(err.fix).toContain('ls -l');
   });
+
+  // The probe is lazy: once ~/.agents/AGENTS.md owns the marker (the steady state
+  // of a re-run), a broken ~/.codex/AGENTS.md this run would never write must not
+  // fail the install.
+  it('ignores a broken ~/.codex/AGENTS.md when the shared file already owns the marker', async () => {
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    await mkdir(join(home, '.codex', 'AGENTS.md'), { recursive: true });
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
+  });
 });
 
 describe('runInstall: AGENTS.md instinct nudge', () => {
