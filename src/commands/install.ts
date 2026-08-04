@@ -245,6 +245,56 @@ export async function runInstall(
   ctx: CommandContext,
   deps: InstallDeps = {},
 ): Promise<CommandResult> {
+  return withInterruptGuard((markWired) => installBody(input, ctx, deps, markWired));
+}
+
+/**
+ * Run `fn` with SIGINT/SIGTERM answered for the WHOLE command, not just the
+ * skills-wiring block. The default signal action terminates without running
+ * `finally`, stranding whichever lock the command holds so every later run times
+ * out on it; install takes three (the skills lock, the config lock behind
+ * decision 1, and the wallet-create lock behind decision 3, whose scrypt work is
+ * the longest interruptible window this command has). Ownership is tracked by the
+ * lock itself, so the handler releases exactly what this process holds and a run
+ * still QUEUED behind another cannot touch that other run's lock.
+ *
+ * `markWired` flips the not-holding-a-lock diagnostic from "nothing changed"
+ * (true until the skills land) to naming what a re-run still has to finish.
+ */
+async function withInterruptGuard(
+  fn: (markWired: () => void) => Promise<CommandResult>,
+): Promise<CommandResult> {
+  let wired = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    const wasWriting = ownsAnyLock();
+    releaseOwnedLocks();
+    process.stderr.write(
+      wasWriting
+        ? `\nInterrupted mid-write. Some files may be half-written; re-run \`tenjin install\` to finish.\n`
+        : wired
+          ? `\nInterrupted after the skills were written; permissions or wallet steps may not have finished. Re-run \`tenjin install\` to finish.\n`
+          : '\nInterrupted before anything was written; nothing changed.\n',
+    );
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    return await fn(() => {
+      wired = true;
+    });
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
+}
+
+async function installBody(
+  input: InstallInput,
+  ctx: CommandContext,
+  deps: InstallDeps,
+  markWired: () => void,
+): Promise<CommandResult> {
   const parsed = InstallInputSchema.safeParse(input);
   if (!parsed.success) {
     throw new CliError('USAGE', 'Invalid install options', {
@@ -288,9 +338,10 @@ export async function runInstall(
   // reading each other's half-built trees (7 of 15 concurrent runs failed on raw
   // ENOENT/ENOTEMPTY renames); writing each shipped file through its own atomic
   // rename fixed it independently, and 24 concurrent runs pass with the lock
-  // bypassed. What the lock still buys is exclusion against the OTHER writer of
-  // these directories, the post-update self-heal, which rewrites the same paths
-  // unattended. A dry run writes nothing, so it needs no lock.
+  // bypassed. What the lock still buys is a serialized wiring block against
+  // another concurrent `tenjin install`, and it reserves the seam for the
+  // post-update self-heal (#76), the unattended rewriter of these same
+  // directories. A dry run writes nothing, so it needs no lock.
   let lockLeftBehind: string | undefined;
   await underSyncLock(
     ctx.dataDir,
@@ -306,6 +357,7 @@ export async function runInstall(
       lockLeftBehind = lockPath;
     },
   );
+  if (!dryRun) markWired();
   // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
   // own check already honours it. Detection cannot see a harness we do not probe for,
   // so without the record a directory the user named by hand is a target for one run
@@ -951,10 +1003,10 @@ async function wireClaudeMd(
   const path = join(plan.home, '.claude', 'CLAUDE.md');
   if (!write) return { path, status: 'skipped' };
 
-  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
+  const existing = await probeMarkerText(path);
   const { content, change } = upsertMarkerLine(existing, nudgeLine(plan.skillsDir));
   if (change === 'none') return { path, status: 'up-to-date' };
-  if (!dryRun && content !== null) await writeFileAtomic(path, content);
+  if (!dryRun && content !== null) await writeMarkerFile(path, content);
   if (change === 'append') return { path, status: dryRun ? 'would-write' : 'written' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
@@ -1075,7 +1127,12 @@ async function installSkill(
         // skills root: an existing skill directory that refuses the temp file is
         // itself the thing to chmod, and a symlinked SKILL.md fails in the link's
         // TARGET directory, which no path under destDir names.
-        throw wrapWriteError(err, destDir, name, deepestExisting(dirname(target)));
+        throw wrapWriteError(
+          err,
+          destDir,
+          `the ${name} skill`,
+          await deepestExisting(dirname(target)),
+        );
       }
     }
   }
@@ -1113,23 +1170,8 @@ async function underSyncLock(
   if (dryRun) return fn();
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const lockPath = skillsSyncLockPath(dataDir);
-  // The default signal action terminates WITHOUT running `finally`, so an interrupt
-  // would otherwise strand the lock and make every later install time out on it.
-  // Ownership is tracked by the lock itself, from the instant it is acquired to the
-  // instant it is released, so this releases exactly what this process holds and a
-  // run still QUEUED behind another cannot touch that other run's lock.
-  const onSignal = (signal: NodeJS.Signals): void => {
-    const wasWriting = ownsAnyLock();
-    releaseOwnedLocks();
-    process.stderr.write(
-      wasWriting
-        ? `\nInterrupted while writing skills. Some may be half-written and permissions were not changed; re-run \`tenjin install\` to finish.\n`
-        : '\nInterrupted before any skill was written; nothing changed.\n',
-    );
-    process.exit(signal === 'SIGINT' ? 130 : 143);
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  // Interrupts are answered by `withInterruptGuard`, which wraps the whole
+  // command; this function only takes and translates the lock.
   try {
     await withFileLock(lockPath, fn, {
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
@@ -1150,9 +1192,6 @@ async function underSyncLock(
       fix: `Permission denied. Check that you can write to it (\`ls -ld ${dataDir}\`), then re-run \`tenjin install\`.`,
       cause: err,
     });
-  } finally {
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
   }
 }
 
@@ -1178,7 +1217,7 @@ async function readShippedFile(
   }
   // Names the FILE, not its directory: this is a read failure, and pointing at a
   // perfectly writable parent is what sent operators to chmod the wrong thing.
-  throw wrapWriteError(read.err, destDir, name, path);
+  throw wrapWriteError(read.err, destDir, `the ${name} skill`, path);
 }
 
 /**
@@ -1214,26 +1253,31 @@ async function assertReachable(destDir: string, name: string): Promise<void> {
 
 /**
  * The directory a denied WRITE should point the operator at: the deepest existing
- * ancestor of the failed target's directory. An existing skill directory that
- * refuses the temp file names itself; a directory that could not be created names
- * the ancestor that refused to create it, because `ls -ld` on a path that is not
- * there says nothing.
+ * ancestor of the failed target's directory, RESOLVED. An existing skill directory
+ * that refuses the temp file names itself; a directory that could not be created
+ * names the ancestor that refused to create it, because `ls -ld` on a path that is
+ * not there says nothing. Resolved because a destination managed through a symlink
+ * denies the write in the link's TARGET, and telling the operator to chmod the
+ * link's path leaves them staring at a healthy link.
  */
-function deepestExisting(dir: string): string {
+async function deepestExisting(dir: string): Promise<string> {
   for (let cur = dir; ; cur = dirname(cur)) {
-    if (existsSync(cur) || dirname(cur) === cur) return cur;
+    if (existsSync(cur)) return realpath(cur).catch(() => cur);
+    if (dirname(cur) === cur) return cur;
   }
 }
 
 /** A raw errno under INTERNAL reads as a CLI bug and carries no fix. */
 function wrapWriteError(
   err: unknown,
-  destDir: string,
-  name: string,
+  /** The destination as the operator knows it (the declared path, pre-resolution). */
+  dest: string,
+  /** What could not be written, e.g. `the tenjin-search skill` or `the Tenjin pointer`. */
+  subject: string,
   /**
    * The path to point the operator at. A READ failure names the file itself, which
-   * is the thing whose mode is wrong. A WRITE failure names the deepest directory
-   * that exists on the failed target's path.
+   * is the thing whose mode is wrong. A WRITE failure names the deepest existing
+   * directory on the failed target's resolved path.
    */
   culprit: string,
 ): unknown {
@@ -1247,9 +1291,9 @@ function wrapWriteError(
   const fix = denied
     ? `Permission denied on ${culprit}. Check it (\`ls -ld ${culprit}\`), then re-run \`tenjin install\`.`
     : wrongKind
-      ? `${destDir} (or a file inside it) is not the kind of thing it needs to be: a skill is a directory holding SKILL.md. Check it (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`
-      : `${destDir} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${destDir}\`), then re-run \`tenjin install\`.`;
-  return new CliError('INTERNAL', `Could not write the ${name} skill to ${destDir}.`, {
+      ? `${dest} (or a path inside it) is not the kind of thing it needs to be. Check it (\`ls -ld ${dest}\`), then re-run \`tenjin install\`.`
+      : `${dest} could not be created; if it is a symlink, check that its target exists (\`ls -ld ${dest}\`), then re-run \`tenjin install\`.`;
+  return new CliError('INTERNAL', `Could not write ${subject} to ${dest}.`, {
     fix,
     cause: err,
   });
@@ -1291,27 +1335,73 @@ async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsM
 
   // If either file Codex reads already carries the marker, that file owns the line:
   // refresh it in place when an older install's text drifted, else leave it. This
-  // keeps append-once global while still upgrading a stale line.
+  // keeps append-once global while still upgrading a stale line. Probed once; the
+  // upsert reuses the text rather than reading again.
+  const texts = new Map<string, string | null>();
+  for (const path of [shared, codex]) texts.set(path, await probeMarkerText(path));
   for (const path of [shared, codex]) {
-    if (existsSync(path) && (await readFile(path, 'utf8')).includes(SKILLS_MARKER)) {
-      return upsertAgentsMd(path, line, dryRun);
+    if (texts.get(path)?.includes(SKILLS_MARKER) === true) {
+      return upsertAgentsMd(path, texts.get(path)!, line, dryRun);
     }
   }
 
-  return upsertAgentsMd(chooseAgentsMdPath(plan.home), line, dryRun);
+  const chosen = chooseAgentsMdPath(plan.home);
+  return upsertAgentsMd(chosen, texts.get(chosen) ?? null, line, dryRun);
 }
 
 async function upsertAgentsMd(
   path: string,
+  existing: string | null,
   line: string,
   dryRun: boolean,
 ): Promise<AgentsMdResult> {
-  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
   const { content, change } = upsertMarkerLine(existing, line);
   if (change === 'none') return { path, status: 'already-present' };
-  if (!dryRun && content !== null) await writeFileAtomic(path, content);
+  if (!dryRun && content !== null) await writeMarkerFile(path, content);
   if (change === 'append') return { path, status: dryRun ? 'would-append' : 'appended' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
+}
+
+/**
+ * The nudge files (AGENTS.md, CLAUDE.md) are the other two files install writes
+ * into the operator's home, so the skill files' rules apply for the same reasons:
+ * read through the guarded descriptor (a FIFO at the path must not hang install,
+ * and an unreadable file is a typed error, not a raw errno), and write through a
+ * symlink (committing with `rename` over a dotfiles-managed link would replace
+ * the link with a regular file and strand its target).
+ */
+async function probeMarkerText(declared: string): Promise<string | null> {
+  // `open` follows symlinks, so a dangling link reads as absent here; only a write
+  // aimed at it fails, in `writeMarkerFile`, naming the link. A file this run
+  // never writes must not be able to fail the install.
+  const read = await readSkillFile(declared);
+  if (read.kind === 'absent') return null;
+  if (read.kind === 'ok') return read.bytes.toString('utf8');
+  if (read.kind === 'not-regular') {
+    throw new CliError(
+      'INTERNAL',
+      `${declared} is not a regular file, so the Tenjin pointer was not written.`,
+      {
+        fix: `Check what is there (\`ls -l ${declared}\`) and remove or replace it, then re-run \`tenjin install\`.`,
+      },
+    );
+  }
+  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared);
+}
+
+/** See {@link probeMarkerText}; the write half of the same contract. */
+async function writeMarkerFile(declared: string, content: string): Promise<void> {
+  const writeTo = await resolveThroughLink(declared, 'the Tenjin pointer');
+  try {
+    await writeFileAtomic(writeTo, content);
+  } catch (err) {
+    throw wrapWriteError(
+      err,
+      declared,
+      'the Tenjin pointer',
+      await deepestExisting(dirname(writeTo)),
+    );
+  }
 }
 
 function chooseAgentsMdPath(home: string): string {

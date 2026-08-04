@@ -310,6 +310,38 @@ describe('runInstall: idempotency', () => {
     expect(agents.startsWith('# My notes\n')).toBe(true);
     expect(agents.split(MARKER).length - 1).toBe(1);
   });
+
+  // The nudge writers follow the same rule as the skill files: a dotfiles-managed
+  // AGENTS.md is written THROUGH its link. Committing with `rename` on the link's
+  // path would replace the link with a regular file and strand its target.
+  it('writes through a symlinked AGENTS.md, keeping the link and updating its target', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'AGENTS.md');
+    await mkdir(dirname(managed), { recursive: true });
+    await writeFile(managed, '# My notes\n');
+    await mkdir(join(home, '.agents'), { recursive: true });
+    const link = join(home, '.agents', 'AGENTS.md');
+    await symlink(managed, link);
+
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    const text = await readFile(managed, 'utf8');
+    expect(text.startsWith('# My notes\n')).toBe(true);
+    expect(text.split(MARKER).length - 1).toBe(1);
+  });
+
+  // A directory (or any non-regular file) at the AGENTS.md path is a typed error
+  // naming the path, not a raw EISDIR under INTERNAL.
+  it('fails a non-regular AGENTS.md with a typed error instead of a raw errno', async () => {
+    await mkdir(join(home, '.agents', 'AGENTS.md'), { recursive: true });
+    const err = (await runInstall({ harness: ['codex'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('not a regular file');
+    expect(err.message).not.toContain('EISDIR');
+    expect(err.fix).toContain('ls -l');
+  });
 });
 
 describe('runInstall: AGENTS.md instinct nudge', () => {
@@ -360,6 +392,22 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
 
 describe('runInstall: CLAUDE.md nudge', () => {
   const claudeMdPath = () => join(home, '.claude', 'CLAUDE.md');
+
+  // Same contract as the symlinked AGENTS.md: written through the link.
+  it('writes through a symlinked CLAUDE.md, keeping the link and updating its target', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'CLAUDE.md');
+    await mkdir(dirname(managed), { recursive: true });
+    await writeFile(managed, '# Mine\n');
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await symlink(managed, claudeMdPath());
+
+    await runInstall({ harness: ['claude'], claudeMd: true }, makeCtx(), deps());
+    expect((await lstat(claudeMdPath())).isSymbolicLink()).toBe(true);
+    const text = await readFile(managed, 'utf8');
+    expect(text.startsWith('# Mine\n')).toBe(true);
+    expect(text.split(MARKER).length - 1).toBe(1);
+  });
   const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
   it('skips CLAUDE.md by default on a non-interactive run (no flag, no file)', async () => {
@@ -1717,8 +1765,9 @@ describe('runInstall: hosted skill already present (#35)', () => {
       expect(err).toBeInstanceOf(CliError);
       expect(err.fix).toContain('Permission denied');
       // The child could not be created, so the culprit is the ancestor that
-      // refused: the skills root, the deepest directory that exists.
-      expect(err.fix).toContain(`ls -ld ${skills}`);
+      // refused: the skills root, the deepest directory that exists (resolved,
+      // hence realpath: the macOS tmpdir lives behind /var -> /private/var).
+      expect(err.fix).toContain(`ls -ld ${await realpath(skills)}`);
       expect(err.fix).toContain('tenjin install');
       expect(err.message).not.toContain('EACCES'); // the raw errno is the cause, not the message
     } finally {
@@ -1741,7 +1790,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
       )) as CliError;
       expect(err).toBeInstanceOf(CliError);
       expect(err.fix).toContain('Permission denied');
-      expect(err.fix).toContain(`ls -ld ${dir}`);
+      expect(err.fix).toContain(`ls -ld ${await realpath(dir)}`);
     } finally {
       await chmod(dir, 0o700);
     }
@@ -1774,6 +1823,31 @@ describe('runInstall: hosted skill already present (#35)', () => {
       expect(await readFile(managed, 'utf8')).toBe('my managed copy\n');
     } finally {
       await chmod(dotfiles, 0o700);
+    }
+  });
+
+  // The directory variant of the case above: the skill directory is itself a
+  // symlink, and the mode that denied the write lives on its TARGET. Naming the
+  // link's path tells the operator to chmod a healthy link.
+  it('names the resolved directory when a symlinked skill directory refuses the write', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const real = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(real, { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(real, link);
+    await chmod(real, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.fix).toContain(`ls -ld ${await realpath(real)}`);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    } finally {
+      await chmod(real, 0o700);
     }
   });
 

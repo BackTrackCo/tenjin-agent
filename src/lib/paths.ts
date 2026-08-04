@@ -51,9 +51,9 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
- * Serializes everything that rewrites the wired skill directories, so two runs
- * cannot interleave one's directory replacement with the other's. `install` takes
- * it around its wiring; the post-update self-heal takes the same one.
+ * Serializes everything that rewrites the wired skill directories. Today the only
+ * taker is `install`, around its wiring block; the post-update self-heal (#76)
+ * will take the same one when it lands, so the two writers cannot interleave.
  */
 export function skillsSyncLockPath(dir: string = dataDir()): string {
   return join(dir, 'skills-sync.lock');
