@@ -11,11 +11,15 @@
 #
 # brace-expansion: GHSA-rgw5-rvv9-x895 (via eslint/minimatch, dev-only). Drop
 # once minimatch's floor clears 5.0.9.
+#
+# ip-address: GHSA-mwp4-54f8-5fhr (via @modelcontextprotocol/sdk >
+# express-rate-limit). Drop once express-rate-limit's floor clears 10.3.1.
 overrides:
   'ws@>=8.0.0 <8.21.0': '8.21.0'
   'fast-uri@>=3.0.0 <3.1.5': '3.1.5'
   'esbuild@>=0.27.3 <0.28.1': '0.28.1'
   'brace-expansion@>=4.0.0 <5.0.9': '5.0.9'
+  'ip-address@<=10.3.0': '10.3.1'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
