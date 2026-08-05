@@ -1,18 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 /**
- * Arms the one failure the filesystem will not produce on demand: the lock
- * directory refusing to be removed. Inert unless a test sets it, so production
- * carries no test-only branch.
+ * Arms failures the filesystem will not produce on demand. Inert unless a test
+ * sets one, so production carries no test-only branch.
  */
 const fsHooks = vi.hoisted(() => ({
-  failLockRelease: false,
   settingsInterleave: '',
   /** Which settings.json read to land the interleave after (1-based). */
   settingsInterleaveOnRead: 1,
   settingsReads: 0,
   /** Swap this path for a FIFO the moment it is renamed into place. */
   fifoAfterRename: '',
+  /** Deliver a SIGINT the moment this path is renamed into place. */
+  signalAfterRename: '',
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -29,6 +29,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         const { execFileSync } = await import('node:child_process');
         execFileSync('mkfifo', [target]);
       }
+      // Ctrl-C landing inside the skills write, which is the one interruptible
+      // stretch of this command that holds no lock at all.
+      if (fsHooks.signalAfterRename !== '' && String(args[1]) === fsHooks.signalAfterRename) {
+        fsHooks.signalAfterRename = '';
+        process.emit('SIGINT', 'SIGINT');
+      }
       return out;
     },
     readFile: async (...args: Parameters<typeof actual.readFile>) => {
@@ -44,18 +50,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         }
       }
       return out;
-    },
-  };
-});
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
-      if (fsHooks.failLockRelease && String(args[0]).endsWith('skills-sync.lock')) {
-        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
-      }
-      return actual.rmSync(...args);
     },
   };
 });
@@ -1893,6 +1887,28 @@ describe('runInstall: hosted skill already present (#35)', () => {
     }
   });
 
+  // The typed command follows a link the operator placed, one directory up as
+  // well as at the file. This is the half of the contract the unattended self-heal
+  // deliberately does NOT share (it skips both and leaves them here), so it is
+  // worth its own case: `install` has to remain the way a dotfiles-managed skill
+  // directory gets updated.
+  it('writes through a symlinked skill directory, keeping the link', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, 'SKILL.md'), 'what an older CLI shipped\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(managed, link);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+    );
+  });
+
   // A symlinked SKILL.md is written through to its target, so a denied write
   // happens in the link's TARGET directory, which no path under the skills tree
   // names. The fix must name that directory or the operator has nothing to check.
@@ -2101,41 +2117,21 @@ describe('runInstall: hosted skill already present (#35)', () => {
     }
   });
 
-  // An unwritable data dir fails at lock acquisition, before any skill is touched.
+  // The skills land first and are unaffected; what fails is recording the harness
+  // in the data dir, and a raw EACCES there reads as a CLI bug and carries no fix.
   it('gives an unwritable data directory a typed error with a fix', async () => {
     if (process.platform === 'win32' || process.getuid?.() === 0) return;
     await mkdir(data, { recursive: true });
     await chmod(data, 0o500);
     try {
-      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
-        (e) => e,
-      )) as CliError;
+      const err = await caught(() => runInstall({ harness: ['claude'] }, makeCtx(), deps()));
       expect(err).toBeInstanceOf(CliError);
       expect(err.fix).toContain('Permission denied');
       expect(err.message).not.toContain('EACCES');
+      expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
     } finally {
       await chmod(data, 0o700).catch(() => undefined);
     }
-  });
-
-  // The whole point of the release-failure callback: the operator is told, on both
-  // surfaces, while the command still reports the success it actually had.
-  it('reports a lock it could not remove, without failing the run', async () => {
-    fsHooks.failLockRelease = true;
-    let res;
-    try {
-      res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true },
-        makeCtx(),
-        deps({ isInteractive: true }),
-      );
-    } finally {
-      fsHooks.failLockRelease = false;
-    }
-    const d = res.data as { lockLeftBehind?: string };
-    expect(d.lockLeftBehind).toBe(join(data, 'skills-sync.lock'));
-    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
-    expect(text).toContain('could not be removed');
   });
 
   // The invocability readback happens AFTER the write, so the path can have been
@@ -2385,31 +2381,35 @@ describe('runInstall: the skill-directory write', () => {
     }
   });
 
-  // A contended lock is a normal outcome, not an internal error: it used to escape
-  // as an untyped LockTimeoutError under INTERNAL.
-  it('reports a held lock as REFUSED, naming the lock to remove', async () => {
-    await mkdir(join(data, 'skills-sync.lock'), { recursive: true });
-    const err = (await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ lockTimeoutMs: 50 }),
-    ).catch((e) => e)) as CliError;
-    expect(err).toBeInstanceOf(CliError);
-    expect(err.code).toBe('REFUSED');
-    expect(err.fix).toContain('skills-sync.lock');
+  // No lock at all, so nothing serializes these: what keeps a run that arrives
+  // mid-write from reading a half-built tree is the per-file atomic rename.
+  it('writes the skills without leaving any lock in the data dir', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await readdir(data)).filter((e) => e.endsWith('.lock'))).toEqual([]);
   });
 
-  // Pre-held, because asserting the lock is absent AFTER the run is true whether or
-  // not the dry run took and released it. A dry run that took it would block here.
-  it('takes no lock on a dry run, which writes nothing', async () => {
-    await mkdir(join(data, 'skills-sync.lock'), { recursive: true });
-    const res = await runInstall(
-      { harness: ['claude'], dryRun: true },
-      makeCtx(),
-      deps({ lockTimeoutMs: 50 }),
-    );
-    expect(res).toBeDefined();
-    expect(existsSync(join(data, 'skills-sync.lock'))).toBe(true); // still the holder's
-    expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search'))).toBe(false);
+  // The skills write holds no lock, so `ownsAnyLock` cannot see it and the phase
+  // marker is the ONLY thing standing between an interrupt mid-copy and a report
+  // that nothing changed, on a machine where files have already landed.
+  it('an interrupt during the skills write reports a possibly half-written machine', async () => {
+    const written: string[] = [];
+    const exits: unknown[] = [];
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code: number) => {
+      exits.push(code);
+    }) as never);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    fsHooks.signalAfterRename = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    try {
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    } finally {
+      fsHooks.signalAfterRename = '';
+      exit.mockRestore();
+      stderr.mockRestore();
+    }
+    expect(written.join('')).toContain('half-written');
+    expect(exits).toEqual([130]);
   });
 });
