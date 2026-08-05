@@ -24,11 +24,25 @@ export interface SkillInstallResult {
   preexisting: boolean;
 }
 
+export interface SkillWriteOptions {
+  /**
+   * Write THROUGH a symlinked destination (default), or replace it. `install`
+   * follows the link, because the operator pointed it somewhere on purpose. The
+   * unattended self-heal does not, and passes false: it has already refused every
+   * link it could see, and this closes the gap between that look and this write,
+   * where a link appearing in between would otherwise be followed. `rename` never
+   * follows its final component, so the worst a race can now do is leave our
+   * regular file where the new link was.
+   */
+  followSymlinks?: boolean;
+}
+
 export async function installSkill(
   srcDir: string,
   destDir: string,
   dryRun: boolean,
   name: string,
+  opts: SkillWriteOptions = {},
 ): Promise<SkillInstallResult> {
   const src = await readTree(srcDir);
   if (src === null) {
@@ -47,8 +61,13 @@ export async function installSkill(
   const writeTo = new Map<string, string>();
   await assertReachable(destDir, name);
   await assertNoCaseCollision(destDir, name);
-  for (const rel of src.keys())
-    writeTo.set(rel, await resolveThroughLink(join(destDir, rel), name));
+  for (const rel of src.keys()) {
+    const declared = join(destDir, rel);
+    writeTo.set(
+      rel,
+      opts.followSymlinks === false ? declared : await resolveThroughLink(declared, name),
+    );
+  }
 
   let differs = false;
   let preexisting = false;

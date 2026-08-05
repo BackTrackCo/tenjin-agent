@@ -23,11 +23,14 @@ mirrors [tenjin.blog/skills.md](https://tenjin.blog/skills.md) and may well be a
 newer fetch than this package ships. An updated file keeps the mode it had.
 
 Every rewrite is announced: one dim stderr line naming the files it wrote. It is
-not TTY-gated, because a piped or
-agent-driven run is exactly the case that must not have files change in silence,
-and stdout is untouched, so a `--json` run still emits exactly one envelope. The
-heal runs after the command's own output and can neither fail a command nor
-change its exit code; a skill it cannot write is skipped and named.
+not TTY-gated, because a piped or agent-driven run is exactly the case that must
+not have files change in silence, and stdout is untouched, so a `--json` run
+still emits exactly one envelope. The heal runs after the command's own output
+and can neither fail a command nor change its exit code. A skill it cannot write
+is skipped in silence rather than reported on every command forever, since the
+usual cause (an unwritable skills directory) is not something the next command
+can clear either; `tenjin doctor` is where a skill that is wired but not from
+this build gets named.
 
 It stays out of the way when it should: skipped when `CI` is set, skipped when
 `TENJIN_NO_SKILL_HEAL=1`, and skipped entirely when the CLI is running from a

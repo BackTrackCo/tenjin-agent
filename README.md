@@ -275,8 +275,10 @@ your copy may be a newer fetch from
 [tenjin.blog/skills.md](https://tenjin.blog/skills.md) than this package ships. A
 rewritten file keeps its mode, and every rewrite prints one dim stderr line
 naming the files (stdout is untouched, so `--json` still emits exactly one
-envelope). The check runs after the command's own output, and anything it cannot
-write is skipped and named rather than failing the command you ran.
+envelope). The check runs after the command's own output and never fails the
+command you ran. A skill it cannot write is skipped quietly rather than warned
+about on every command; `tenjin doctor` is where a skill that is wired but not
+from this build gets reported.
 
 It is skipped entirely when `CI` is set, when `TENJIN_NO_SKILL_HEAL=1`, and when
 the CLI is running from a source checkout rather than an installed package.

@@ -115,21 +115,24 @@ function healable(home: string): Target[] {
 
 async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {
   const updated: string[] = [];
-  const failed: string[] = [];
   for (const { dir, name, path } of targets) {
     try {
       if (!(await isOurs(path, name))) continue;
-      const { status } = await installSkill(join(source, name), join(dir, name), false, name);
+      const { status } = await installSkill(join(source, name), join(dir, name), false, name, {
+        followSymlinks: false,
+      });
       if (status === 'up-to-date') continue;
       updated.push(path);
     } catch {
-      // A denied write, a case collision, a file swapped under us: that skill
-      // keeps what it has, and the others are still healed.
-      failed.push(path);
+      // A denied write, a case collision, a file swapped under us: that skill keeps
+      // what it has and the others are still healed, and NOTHING is said about it.
+      // A cause the next command cannot clear either (a directory at 0500) would
+      // otherwise print the same line forever, on every command, with no state to
+      // suppress it and no way to dismiss it. `tenjin doctor` is where a skill that
+      // is wired but not from this build gets reported, which is exactly this.
     }
   }
-  const notice = noticeFor(updated, failed);
-  if (notice !== null) emitWriteNotice(io, notice);
+  if (updated.length > 0) emitWriteNotice(io, noticeFor(updated));
 }
 
 /** Does this file claim to BE the skill we would write over it? Somebody else's
@@ -139,19 +142,13 @@ async function isOurs(path: string, name: string): Promise<boolean> {
   return read.kind === 'ok' && skillFrontmatterName(read.bytes.toString('utf8')) === name;
 }
 
-/** One line, or null when every skill was already current. */
-function noticeFor(updated: string[], failed: string[]): string | null {
-  const parts: string[] = [];
-  if (updated.length > 0) {
-    // Files, not directories: this line is the only notice that content in the
-    // operator's home changed unasked, so it has to say which content. It claims
-    // nothing about edits being lost, because it cannot know. Every routine
-    // upgrade rewrites these same files, and telling someone their edits are gone
-    // when they made none is worse than saying nothing.
-    parts.push(`Updated ${updated.join(' and ')} to match this CLI`);
-  }
-  if (failed.length > 0) {
-    parts.push(`could not update ${failed.join(' and ')} (run \`tenjin install\` for the reason)`);
-  }
-  return parts.length > 0 ? `${parts.join('; ')}.` : null;
+/**
+ * Files, not directories: this line is the only notice that content in the
+ * operator's home changed unasked, so it has to say which content. It claims
+ * nothing about edits being lost, because it cannot know. Every routine upgrade
+ * rewrites these same files, and telling someone their edits are gone when they
+ * made none is worse than saying nothing.
+ */
+function noticeFor(updated: readonly string[]): string {
+  return `Updated ${updated.join(' and ')} to match this CLI.`;
 }

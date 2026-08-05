@@ -1,7 +1,40 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/**
+ * Turns the gate's destination into a symlink the moment the heal has finished
+ * reading it, which is precisely the window between the lstat that judged it a
+ * regular file and the write. Inert unless a test arms it.
+ */
+const race = vi.hoisted(() => ({ swapAfterRead: '', target: '' }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      if (race.swapAfterRead !== '' && String(args[0]) === race.swapAfterRead) {
+        const path = race.swapAfterRead;
+        race.swapAfterRead = '';
+        await actual.rm(path);
+        await actual.symlink(race.target, path);
+      }
+      return handle;
+    },
+  };
+});
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,8 +192,48 @@ describe('healWiredSkills', () => {
     }
     expect(await readFile(search, 'utf8')).toBe(await packaged('tenjin-search'));
     expect(await readFile(shared, 'utf8')).toBe(await packaged('tenjin-publish'));
-    expect(stderr()).toContain('could not update');
-    expect(stderr()).toContain(denied);
+    expect(stderr()).not.toContain(denied);
+  });
+
+  // A cause the next command cannot clear either would otherwise print the same
+  // line on every command forever, with no state to suppress it and nothing to
+  // dismiss it with. Silence here is what makes `tenjin doctor` the place a
+  // permanently un-healable skill is reported.
+  it('says nothing at all, on any run, about a skill it cannot write', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const denied = await seedSkill(claudeDir(), 'tenjin-search');
+    await chmod(dirname(denied), 0o500);
+    try {
+      for (let run = 0; run < 3; run += 1) {
+        const { io, stderr } = captureIo();
+        await heal(io);
+        expect(stderr()).toBe('');
+      }
+    } finally {
+      await chmod(dirname(denied), 0o700).catch(() => undefined);
+    }
+    expect(await readFile(denied, 'utf8')).toBe(stale('tenjin-search'));
+  });
+
+  // The gate looks, then the writer writes, and a link can appear in between. It
+  // is REPLACED by our regular file, never followed, because the heal tells the
+  // writer not to resolve links and `rename` does not follow its final component.
+  it('replaces a link that appears after the gate rather than following it', async () => {
+    if (process.platform === 'win32') return;
+    const elsewhere = join(home, 'dotfiles-tenjin-search.md');
+    await writeFile(elsewhere, stale('tenjin-search'));
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    race.swapAfterRead = path;
+    race.target = elsewhere;
+    const { io } = captureIo();
+    try {
+      await heal(io);
+    } finally {
+      race.swapAfterRead = '';
+    }
+    expect(await readFile(elsewhere, 'utf8')).toBe(stale('tenjin-search'));
+    expect((await lstat(path)).isSymbolicLink()).toBe(false);
+    expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
   });
 
   // The mirror of tenjin.blog/skills.md may legitimately be NEWER on disk than the
@@ -244,7 +317,7 @@ describe('healWiredSkills', () => {
   });
 
   it('never rejects when the packaged source is gone', async () => {
-    await seedSkill(claudeDir(), 'tenjin-search');
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
     await expect(
       healWiredSkills({
@@ -254,6 +327,7 @@ describe('healWiredSkills', () => {
         skillsSourceDir: join(home, 'not-a-skills-dir'),
       }),
     ).resolves.toBeUndefined();
-    expect(stderr()).toContain('could not update');
+    expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
+    expect(stderr()).toBe('');
   });
 });

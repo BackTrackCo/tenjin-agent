@@ -492,6 +492,12 @@ async function checkSkills(
  * Only the ADAPTERS are compared: the hosted mirror is a copy of
  * tenjin.blog/skills.md that an operator may legitimately have re-fetched newer
  * than this package ships.
+ *
+ * This is also where a skill the post-command self-heal could NOT rewrite
+ * surfaces. That writer stays silent about its failures on purpose: a cause it
+ * cannot clear (an unwritable skills directory) would otherwise print the same
+ * line on every command forever. Stale here means exactly that, and the fix names
+ * the harness.
  */
 async function compareWiredSkills(
   dirs: readonly string[],

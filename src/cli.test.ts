@@ -1,8 +1,26 @@
-import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * Where the self-heal resolves its packaged skills from. Empty means the real
+ * resolution, which from a source checkout is a working tree the heal refuses;
+ * the heal case below points it at a packaged LAYOUT instead, because that
+ * refusal is by directory shape and nothing else here can produce one.
+ */
+const skillsSrc = vi.hoisted(() => ({ dir: '' }));
+vi.mock('./lib/skills-source', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/skills-source')>();
+  return {
+    ...actual,
+    resolveSkillsSource: (startDir: string) =>
+      skillsSrc.dir === '' ? actual.resolveSkillsSource(startDir) : skillsSrc.dir,
+  };
+});
 import { main } from './cli';
+import { resolveSkillsSource } from './lib/skills-source';
 import type { Io } from './lib/output';
 
 // The dispatcher runs the update check and the skills self-heal after every
@@ -357,17 +375,38 @@ describe('skills self-heal', () => {
   });
   afterEach(async () => {
     process.env.CI = '1';
+    skillsSrc.dir = '';
     await rm(join(process.env.HOME!, '.claude'), { recursive: true, force: true });
   });
 
-  it('leaves a command emitting exactly one JSON object and exit 0', async () => {
+  /**
+   * The packaged shape the heal insists on: a `skills/` whose parent holds no
+   * `src/`. Copied out of the real one, so what lands is the bytes this build
+   * ships.
+   */
+  async function packagedLayout(): Promise<string> {
+    const real = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    const dir = join(sandbox, 'pkg', 'skills');
+    await cp(real, dir, { recursive: true });
+    return dir;
+  }
+
+  // A heal that RAN: the packaged-layout copy below passes the source-checkout
+  // discriminator, so the file is genuinely rewritten while this asserts stdout.
+  // Without it the case would pass on a heal that never happened.
+  it('heals a stale skill and still emits exactly one JSON object, exit 0', async () => {
+    skillsSrc.dir = await packagedLayout();
     const cap = captureIo();
     expect(await main(['config', '--json'], cap.io)).toBe(0);
     const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
     expect(parsed.ok).toBe(true);
+    expect(await readFile(wiredPath(), 'utf8')).toBe(
+      await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+    );
+    expect(cap.stderr()).toContain('Updated');
   });
 
-  // These tests run from the source tree, which is exactly the case the heal
+  // This suite runs from the source tree, which is exactly the case the heal
   // declines: a checkout's skills/ can be half-edited, and nobody installed it.
   it('does not heal from a source checkout', async () => {
     const cap = captureIo();
