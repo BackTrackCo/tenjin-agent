@@ -22,8 +22,8 @@ of our paths is left alone. It never touches the hosted `tenjin` skill, which
 mirrors [tenjin.blog/skills.md](https://tenjin.blog/skills.md) and may well be a
 newer fetch than this package ships. An updated file keeps the mode it had.
 
-Every rewrite is announced: one dim stderr line naming the files and saying that
-local edits to them are gone. It is not TTY-gated, because a piped or
+Every rewrite is announced: one dim stderr line naming the files it wrote. It is
+not TTY-gated, because a piped or
 agent-driven run is exactly the case that must not have files change in silence,
 and stdout is untouched, so a `--json` run still emits exactly one envelope. The
 heal runs after the command's own output and can neither fail a command nor

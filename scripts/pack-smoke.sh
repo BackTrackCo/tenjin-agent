@@ -149,8 +149,11 @@ mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/te
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
   > "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
 printf 'a newer fetch\n' > "$HEAL_HOME/.claude/skills/tenjin/SKILL.md"
-printf 'not a skill\n' > "$HEAL_HOME/elsewhere.md"
-ln -s "$HEAL_HOME/elsewhere.md" "$HEAL_HOME/.claude/skills/tenjin-publish/SKILL.md"
+# A VALID, stale tenjin-publish skill behind the link, which is the dotfiles setup
+# this guards: anything else would be refused by the frontmatter gate instead, and
+# the lstat gate would go untested.
+printf -- '---\nname: tenjin-publish\n---\n\nstale\n' > "$HEAL_HOME/dotfiles-skill.md"
+ln -s "$HEAL_HOME/dotfiles-skill.md" "$HEAL_HOME/.claude/skills/tenjin-publish/SKILL.md"
 printf -- '---\nname: acme-search\n---\n' > "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md"
 
 heal_fail() {
@@ -187,7 +190,7 @@ cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL" ||
   heal_fail "a stale wired skill was not healed by an ordinary command"
 [ "$(cat "$HEAL_HOME/.claude/skills/tenjin/SKILL.md")" = "a newer fetch" ] ||
   heal_fail "the heal overwrote the hosted tenjin mirror"
-[ "$(cat "$HEAL_HOME/elsewhere.md")" = "not a skill" ] ||
+[ "$(cat "$HEAL_HOME/dotfiles-skill.md")" = "$(printf -- '---\nname: tenjin-publish\n---\n\nstale')" ] ||
   heal_fail "the heal wrote through a symlinked SKILL.md"
 grep -q 'acme-search' "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md" ||
   heal_fail "the heal replaced a third-party skill sitting at one of our paths"

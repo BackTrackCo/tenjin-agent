@@ -116,26 +116,19 @@ function healable(home: string): Target[] {
 async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {
   const updated: string[] = [];
   const failed: string[] = [];
-  let overwrote = false;
   for (const { dir, name, path } of targets) {
     try {
       if (!(await isOurs(path, name))) continue;
-      const { status, warning } = await installSkill(
-        join(source, name),
-        join(dir, name),
-        false,
-        name,
-      );
+      const { status } = await installSkill(join(source, name), join(dir, name), false, name);
       if (status === 'up-to-date') continue;
       updated.push(path);
-      if (warning !== undefined) overwrote = true;
     } catch {
       // A denied write, a case collision, a file swapped under us: that skill
       // keeps what it has, and the others are still healed.
       failed.push(path);
     }
   }
-  const notice = noticeFor(updated, failed, overwrote);
+  const notice = noticeFor(updated, failed);
   if (notice !== null) emitWriteNotice(io, notice);
 }
 
@@ -147,13 +140,15 @@ async function isOurs(path: string, name: string): Promise<boolean> {
 }
 
 /** One line, or null when every skill was already current. */
-function noticeFor(updated: string[], failed: string[], overwrote: boolean): string | null {
+function noticeFor(updated: string[], failed: string[]): string | null {
   const parts: string[] = [];
   if (updated.length > 0) {
-    // Files, not directories, and carrying install's overwrite warning: this line
-    // is the only notice that content in the operator's home changed unasked.
-    const lost = overwrote ? ', so any local edits to them are gone' : '';
-    parts.push(`Updated ${updated.join(' and ')} to match this CLI${lost}`);
+    // Files, not directories: this line is the only notice that content in the
+    // operator's home changed unasked, so it has to say which content. It claims
+    // nothing about edits being lost, because it cannot know. Every routine
+    // upgrade rewrites these same files, and telling someone their edits are gone
+    // when they made none is worse than saying nothing.
+    parts.push(`Updated ${updated.join(' and ')} to match this CLI`);
   }
   if (failed.length > 0) {
     parts.push(`could not update ${failed.join(' and ')} (run \`tenjin install\` for the reason)`);

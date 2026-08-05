@@ -59,13 +59,12 @@ async function packaged(name: string): Promise<string> {
 }
 
 describe('healWiredSkills', () => {
-  it('rewrites a stale skill, naming the file and the edits it cost', async () => {
+  it('rewrites a stale skill and names the file it wrote', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
     await heal(io);
     expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
     expect(stderr()).toContain(path);
-    expect(stderr()).toContain('local edits');
     expect(stderr().trimEnd().split('\n')).toHaveLength(1);
   });
 
@@ -89,15 +88,18 @@ describe('healWiredSkills', () => {
   // `install` writes THROUGH a symlink because the operator pointed it somewhere
   // on purpose. Unattended, that same behavior turns any link at this path into a
   // write to wherever it points, so the heal declines and leaves it to `install`.
+  // The link target is a VALID, stale tenjin-search skill: the dotfiles setup this
+  // is about, and the only fixture that isolates the lstat gate. Point it at
+  // anything else and the frontmatter gate passes the case on its own.
   it('skips a symlinked SKILL.md rather than writing through it', async () => {
     if (process.platform === 'win32') return;
-    const elsewhere = join(home, 'elsewhere.md');
-    await writeFile(elsewhere, 'not a skill\n');
+    const elsewhere = join(home, 'dotfiles-tenjin-search.md');
+    await writeFile(elsewhere, stale('tenjin-search'));
     await mkdir(join(claudeDir(), 'tenjin-search'), { recursive: true });
     await symlink(elsewhere, join(claudeDir(), 'tenjin-search', 'SKILL.md'));
     const { io, stderr } = captureIo();
     await heal(io);
-    expect(await readFile(elsewhere, 'utf8')).toBe('not a skill\n');
+    expect(await readFile(elsewhere, 'utf8')).toBe(stale('tenjin-search'));
     expect(stderr()).toBe('');
   });
 
