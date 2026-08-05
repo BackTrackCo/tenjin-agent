@@ -236,8 +236,10 @@ def run_case(
         return {"log": "", "answer": "", "cost_usd": 0.0, "error": "timeout", "turns": 0}
 
     # Redacted before it touches the disk, and summarized from the redacted form
-    # rather than the raw one, so there is no path by which an unredacted body
-    # reaches a file or a prompt.
+    # rather than the raw one, so a tool result's body reaches neither the
+    # transcript nor the prompt. What the model does with a body after reading it
+    # is outside this: prose and later tool inputs are copied through as they
+    # are. See the retention section of evals/README.md.
     sanitized = redact_stream(completed.stdout)
     transcript.write_text(sanitized, encoding="utf-8")
     outcome = summarize(sanitized)
