@@ -132,7 +132,11 @@ def start_sentinel() -> Sentinel:
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = _record  # noqa: N815
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # One sentinel per attempt means `stop()` is on the hot path, and
+    # `shutdown()` waits out a whole poll interval before it returns. The default
+    # half-second, times two configurations times every attempt, is dead time in
+    # every run and most of the runtime of the self-tests.
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02), daemon=True)
     thread.start()
     host, port = server.server_address[:2]
     return Sentinel(

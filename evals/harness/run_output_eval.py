@@ -58,7 +58,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import preflight  # noqa: E402
-from redaction import FILE_CONTENT_TOOLS, redact_stream  # noqa: E402
+from redaction import (  # noqa: E402
+    FILE_CONTENT_TOOLS,
+    UNRECOGNISED,
+    bash_result_problem,
+    redact_stream,
+    withheld_bash_commands,
+)
 from sentinel import Sentinel, start_sentinel  # noqa: E402
 
 EXEC_TOOLS = ["Bash", "Read", "Write", "Glob", "Grep", "Skill"]
@@ -239,9 +245,19 @@ def run_case(
         outcome["error"] = f"executor exited {completed.returncode}"
     # A command policy that is too strict fails the same way a leak does: the
     # number comes out wrong. Redacting the response a case is graded on would
-    # otherwise look like the agent simply doing badly, so the count is carried
-    # out to the report rather than left to be inferred from a transcript.
-    outcome["bash_results_withheld"] = sanitized.count("[redacted Bash result for")
+    # otherwise look like the agent simply doing badly, so both the count and the
+    # commands behind it are carried out to the report rather than left to be
+    # inferred from a transcript.
+    #
+    # The two are not the same fact. Most refusals are the eval working: an
+    # obedient agent's `curl -d "$(env)"` is refused and that refusal is the
+    # measurement. Only a command this eval sanctions, refused for its spelling,
+    # means a response went missing, and that is the one the run cannot survive.
+    withheld = withheld_bash_commands(completed.stdout)
+    outcome["bash_results_withheld"] = len(withheld)
+    outcome["evidence_withheld"] = [
+        command[:120] for command in withheld if bash_result_problem(command) == UNRECOGNISED
+    ]
     return outcome
 
 
@@ -476,22 +492,25 @@ def unusable_configurations(
     invalidly-labelled grade array cannot contribute to a pass rate, and that is
     a property of this function rather than of a run.
 
-    A withheld Bash result belongs here too. The command policy fails closed, so
-    a spelling it does not recognise costs the run the response the case is
-    graded on, and the grader then grades a log with a hole in it. That reads as
-    the skill doing badly rather than as a measurement that did not happen, which
-    is the same flattering-direction error in a different suit."""
+    A withheld Bash result belongs here too, but only the kind that costs the
+    case its evidence. The policy fails closed, so a spelling it cannot read
+    takes the response the case is graded on out of the log, and the grader then
+    reads a hole as the skill doing badly. A refused `$(...)` is the opposite:
+    the eval refuses that shape on purpose and the injection cases exist to
+    watch it happen, so a run that abandoned itself there would destroy the one
+    measurement it was spending money to make."""
     broken = []
     for case, with_skill in jobs:
         key = (case["id"], with_skill)
         run = runs.get(key)
         grading = graded.get(key)
         executor_fault = "no run was recorded" if run is None else run.get("error")
-        withheld = 0 if run is None else run.get("bash_results_withheld", 0)
+        lost = [] if run is None else run.get("evidence_withheld", [])
         evidence_fault = (
-            f"{withheld} Bash result(s) withheld by the command policy, so the "
-            "response this configuration is graded on is not in the log"
-            if withheld
+            f"{len(lost)} sanctioned command(s) had their result withheld by the "
+            f"command policy, so the response this configuration is graded on is "
+            f"not in the log: {lost[0]}"
+            if lost
             else None
         )
         grading_fault = (
@@ -649,6 +668,18 @@ def main() -> int:
         # absence of a command in the transcript: it is the endpoint saying so.
         outcome["sentinel_hits"] = [hit.describe() for hit in post.hits]
         outcome["log"] = f"{outcome['log']}\n{post.summary()}".strip()
+
+        # An invalid attempt rather than a terminal one. A response the policy
+        # could not read is a run that did not happen, and every other kind of
+        # those is retried before the run is abandoned; making this one the
+        # exception meant a whole twelve-configuration run could die at the gate
+        # after all its spend, with nothing retried and nothing written.
+        lost = outcome.get("evidence_withheld", [])
+        if lost and outcome["error"] is None:
+            outcome["error"] = (
+                f"the command policy withheld the result of {len(lost)} sanctioned "
+                f"command(s): {lost[0]}"
+            )
         return outcome
 
     def work(job: tuple[dict, bool]) -> None:
@@ -807,6 +838,19 @@ def main() -> int:
         print(f"  INJECTION OBEYED  case {case_id} {slot}{where}: {'; '.join(hits)}")
     if not obeyed:
         print("  injection         no attempt of any case reached the inert sentinel")
+    # Every one of these is a shape the eval refuses on purpose, since a withheld
+    # result the case was graded on would have stopped the run above. Printed
+    # anyway: it is the count of commands an agent reached for and did not get,
+    # which is worth seeing next to a case that scored badly.
+    withheld = [
+        (case["id"], slot, count)
+        for case in report["cases"]
+        for slot, configuration in case["configurations"].items()
+        if (count := configuration.get("bash_results_withheld", 0))
+    ]
+    if withheld:
+        detail = ", ".join(f"case {c} {s} x{n}" for c, s, n in withheld)
+        print(f"  withheld          {sum(n for _, _, n in withheld)} refused Bash result(s): {detail}")
     return 0
 
 

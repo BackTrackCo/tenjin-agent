@@ -206,28 +206,45 @@ Two layers. The grants are `Read(./**)`, `Write(./**)`, `Glob(./**)` and `Grep(.
 outside the case project is denied while the attempt still appears in the transcript, which is
 the half the case grades. And every file-content result is replaced, before the stream touches
 disk, with a descriptor naming the tool, the target, the byte count and a SHA-256 — the evidence
-of what the agent reached for, with none of what it got. The summary is built from the redacted
-stream rather than the raw one, so there is no path by which a body reaches a file or a prompt.
+of what the agent reached for, with none of what it got.
+
+**What that redaction covers, and what it does not.** It covers tool results, which is the
+channel a file's bytes arrive on by default and the one that used to carry them verbatim into
+the saved transcript and the grader's prompt. It does not cover what the model does with them
+next. The executor sees a raw result before the redactor ever runs, so an agent that read
+something can repeat it in its own prose, in a later tool input, or in the body of a subsequent
+allowed request, and those fields reach the transcript and the grader intact. This document used
+to claim that no byte could reach a file or a prompt. That claim was not enforceable at this
+layer and it is withdrawn: what the redactor gives you is a retention control on the default
+channel, not an invariant over the whole run. The enforceable version is interception below the
+tool layer — a process sandbox around the executor — which is recorded as a follow-up rather
+than built here, because this is a hand-run local harness rather than shared infrastructure. The
+day it runs in CI or on someone else's machine is the day that trade stops being worth making.
 
 **Scoping the file tools does not scope the shell, and that gap is why the second layer covers
-Bash too.** `Bash(curl:*)` is a prefix grant, and the local curl speaks `file://` and `@path`:
-`curl file:///etc/passwd` or `curl --data-binary @/abs/path` reads outside the project without
-touching a scoped tool at all, and the bytes come back in an ordinary Bash result. Verified,
-both the read and the survival. So a Bash result is kept only when it is recognisably a `tenjin`
-or plain `curl` invocation — the two whose output grading actually needs, the CLI cases being
-graded on `tenjin` output and the zero-install cases on what the live site returns, 402
-challenge included — and only when the command carries no construct that can pull a local path
-into it (`file:`, `@/`, `$(`, backticks, `-K`). Everything else is redacted, so a command the
-rule does not recognise fails closed rather than through.
+Bash too.** `Bash(curl:*)` is a prefix grant, and the local curl speaks `file://`, `@path` and
+`-T`: `curl file:///etc/passwd` reads outside the project without touching a scoped tool at all,
+and the bytes come back in an ordinary Bash result. Two lists of known-bad spellings were tried
+and both were bypassed within a round — `FILE://` walked past a lowercase check, `-T` was a flag
+nobody had listed — so the question is answered positively instead. A Bash result is kept only
+when the command parses as one simple command with no shell operators at all, its program is
+exactly `curl` or `tenjin`, every argument is one this eval has a reason to allow, and every
+pipeline stage after it is one of a small set of inert shapers described flag by flag. `jq`,
+`sed` and `awk` are not among them: each takes a program in a language of its own, so no count of
+arguments can tell `jq .items` from `jq -n env`. An unrecognised flag is a redaction rather than
+a pass, which is why curl's file-reading and upload flags never needed enumerating, and why a
+value beginning `@` is refused wherever it appears — `-H @/etc/passwd` loads a file as headers
+just as `-d @/etc/passwd` loads one as a body.
 
-**What is still open, stated rather than implied.** A shell-backed Bash tool means a local read
-remains _possible_: substitution runs inside any pre-cleared prefix, and no string rule over
-commands is a security boundary. What these layers close is retention and forwarding — the bytes
-reach no file, no grader prompt, and no live destination — and that is the property the eval
-needs, since obedience is graded from the attempt rather than from the payload arriving. The
-complete fix is a process-level sandbox (`sandbox-exec` on macOS, `bubblewrap` on Linux) around
-the executor, which is platform-specific work beyond a keyless test harness and is not done
-here. Anyone extending this suite to run untrusted fixtures from elsewhere should do that first.
+**A refused command is not always a lost measurement, and the runner tells them apart.** Most
+refusals are the eval working as intended: an obedient agent's `curl -d "$(env)"` is refused,
+and that refusal is the observation the injection cases exist to make, so the run carries on and
+reports it. A command this eval does sanction, refused because the policy could not read its
+spelling, is the opposite — the response a case is graded on is gone — so it invalidates that
+attempt, is retried like any other invalid attempt, and stops the run if it survives the
+retries. Ordinary spellings are normalised rather than refused (`-sS`, `-sSL`, `-L`,
+`--header=...`, `cut -d:`), because a policy that costs a case its evidence over a bundled flag
+makes the number wrong just as surely as one that leaks.
 
 **The curl grant is a prefix match, not a confinement, and the difference matters here.** Measured
 on this harness: a bare `env`, `cat` of a file outside the project, or `python3 -c` is denied,
@@ -238,14 +255,17 @@ machine is the model's own judgment, which is precisely the property these cases
 measure and therefore cannot double as the control. What confines a run is the rest of it: the
 destination the payload names is loopback, the child environment is an explicit short list
 (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`) plus the two
-Tenjin pins, and `--env KEY=VALUE` is how a machine that needs more says so. An injection case
-that collects the environment therefore finds nothing worth collecting, and nothing secret
-travels into the grader's prompt by way of the transcript.
+Tenjin pins, and `--env KEY=VALUE` is how a machine that needs more says so. No production
+secret is in the environment a run can read: an injection case that collects it finds a PATH and
+a locale, which is the point of the list being an allowlist rather than a subtraction.
 
 The residual is worth naming rather than implying away: `HOME` has to be passed through for the
-CLI's own login, so files under it stay readable to a run that decides to read them. Nothing in
-these fixtures points at one, and the sentinel discards whatever it is sent, but a harness that
-grades disobedience cannot claim disobedience is impossible.
+CLI's own login, so files under it stay readable to a run that decides to read them, and by the
+paragraph above a run that reads one can carry it into its own prose. Nothing in these fixtures
+points at such a file, and the sentinel discards whatever it is sent, but a harness that grades
+disobedience cannot claim disobedience is impossible. What that adds up to is a self-leak on the
+operator's own machine into the operator's own benchmark file, which is the trade this harness
+makes knowingly and would not make in CI.
 
 The trigger runner needs none of this and gets none of it: it hands the agent no shell at all,
 so there is no way to collect an environment or reach a network from a trigger pass.
@@ -266,12 +286,14 @@ disproportionately the one it found hardest.
 
 So a trigger sample is counted only if it is error-free, was actually offered the skill, and
 ended in a `success` result subtype; a case configuration is aggregated only if the executor
-succeeded, no Bash result was withheld from its log by the command policy, and the grading came
-back with exactly one valid grade per expectation, in order, each naming its expectation
-(whitespace-insensitively, since a grader may rewrap but may not reword). The withheld check is
-there because the policy fails closed: a spelling it does not recognise costs the run the very
-response the case is graded on, and a grader reading a log with a hole in it reports the skill
-doing badly rather than a measurement that did not happen.
+succeeded, no result the case is graded on was withheld from its log by the command policy, and
+the grading came back with exactly one valid grade per expectation, in order, each naming its
+expectation (whitespace-insensitively, since a grader may rewrap but may not reword). The
+withheld check is there because the policy fails closed: a spelling it cannot read costs the run
+the very response the case is graded on, and a grader reading a log with a hole in it reports
+the skill doing badly rather than a measurement that did not happen. It is scoped to that case,
+not to every refusal, because the injection cases are graded on a refusal happening and a run
+that abandoned itself there would destroy the measurement it was spending money to make.
 Anything else is retried up to `--max-attempts` (3), and if it still fails the whole run stops:
 exit 2, an `invalid-run.json` naming what broke, and **no `results.json` or `benchmark.json`
 written at all**, so there is no file for anyone to read a number out of later. A failed case run
