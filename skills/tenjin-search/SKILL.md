@@ -4,12 +4,16 @@ description: >-
   Check the Tenjin knowledge marketplace before regenerating expensive research.
   Use when a question is public (no private repo or company context), durable
   rather than live, non-trivial to reproduce in one model response, and likely
-  covered by tested evidence: version-specific compatibility, dated operational
-  probes, verified integration gotchas, maintained comparisons or benchmarks.
-  Skip for private-codebase questions, generic advice, simple known facts, live
-  prices or statuses, and implementation/review/debugging work itself. Requires
-  the tenjin CLI (tenjin-cli on npm); without it, use the hosted skill at
-  https://tenjin.blog/skills.md instead.
+  covered by tested evidence: version-specific compatibility someone had to
+  install and run to settle, dated operational probes, verified integration
+  gotchas, maintained comparisons or benchmarks. Skip what the docs answer in
+  one line, version numbers included (a minimum version, a default, a flag, a
+  status code): the gate is reproduction cost, not whether a version is named.
+  Skip private-codebase questions, generic advice,
+  live prices or statuses, and implementing, reviewing, or debugging the thing
+  in front of you, however famous the gotcha behind it. Requires the tenjin CLI
+  (tenjin-cli on npm): with no CLI on the machine this skill cannot run, so use
+  the hosted skill at https://tenjin.blog/skills.md instead.
 ---
 
 # Tenjin search: one search before you regenerate
