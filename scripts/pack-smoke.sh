@@ -130,13 +130,40 @@ printf '%s' "$BOGUS_OUT" | node -e '
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 
+# 4) The self-heal, from the PACKED skills: a wired skill whose bytes are stale is
+# rewritten by an ordinary command, and a skill that is not wired is not created.
+# Only the published tarball can prove this: the heal reads skills/ out of the
+# installed package, which is exactly what the `files` allowlist governs.
+HEAL_HOME="$(mktemp -d)"
+HEAL_DATA="$(mktemp -d)"
+PACKED_SKILL="./node_modules/tenjin-cli/skills/tenjin-search/SKILL.md"
+mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search"
+printf 'stale\n' > "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
+HOME="$HEAL_HOME" TENJIN_DATA_DIR="$HEAL_DATA" "$BIN" config >/dev/null
+if ! cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL"; then
+  echo "pack-smoke: FAIL — a stale wired skill was not healed by an ordinary command" >&2
+  rm -rf "$HEAL_HOME" "$HEAL_DATA"
+  exit 1
+fi
+if [ -e "$HEAL_HOME/.claude/skills/tenjin-publish" ] || [ -e "$HEAL_HOME/.agents" ]; then
+  echo "pack-smoke: FAIL — the heal created a skill the operator never installed" >&2
+  rm -rf "$HEAL_HOME" "$HEAL_DATA"
+  exit 1
+fi
+rm -rf "$HEAL_HOME" "$HEAL_DATA"
+echo "pack-smoke: stale wired skill healed, absent skills left absent (ok)"
+
 # The signal contract, both lanes. Every step is asserted: the process must still
 # be alive when signalled, the signal must be delivered, the exit must be the
 # interrupted one, and the handler's own diagnostic must appear. Without those the
 # lane can pass while exercising no handler at all, which is what an earlier
 # version of this check did.
 
-# Lane 1: a run QUEUED behind another install must never remove that install's lock.
+# The lock both lanes use is the CONFIG lock: the skills write takes none (each
+# shipped file lands by its own atomic rename), so what install still holds while
+# it can be interrupted is the config lock behind `--publish-mode`.
+
+# Lane 1: a run QUEUED behind another writer must never remove that writer's lock.
 # A fresh waiter per attempt, because the handler is registered inside the command
 # after node boots and the walkthrough reaches the lock: signalling before that gives
 # the DEFAULT action (exit 130, empty stderr), which is a missed attempt and not a
@@ -145,7 +172,7 @@ WAITER_OK=""
 for attempt in 1 2 3 4 5; do
   LOCK_HOME="$(mktemp -d)"
   LOCK_DATA="$(mktemp -d)"
-  mkdir -p "$LOCK_DATA/skills-sync.lock"
+  mkdir -p "$LOCK_DATA/config.json.lock"
   HOME="$LOCK_HOME" TENJIN_DATA_DIR="$LOCK_DATA" "$BIN" install --harness claude \
     --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
   WAITER_PID=$!
@@ -157,8 +184,10 @@ for attempt in 1 2 3 4 5; do
   wait "$WAITER_PID"
   WAITER_CODE=$?
   set -e
-  if [ "$WAITER_CODE" = "130" ] && grep -q "nothing changed" "$LOCK_HOME/err"; then
-    if [ ! -d "$LOCK_DATA/skills-sync.lock" ]; then
+  # The skills are written before the config lock is asked for, so the honest
+  # diagnostic for a waiter is the one naming what a re-run still has to finish.
+  if [ "$WAITER_CODE" = "130" ] && grep -q "after the skills were written" "$LOCK_HOME/err"; then
+    if [ ! -d "$LOCK_DATA/config.json.lock" ]; then
       echo "pack-smoke: FAIL — an interrupted WAITING install removed the holder's lock" >&2
       rm -rf "$LOCK_HOME" "$LOCK_DATA"
       exit 1
@@ -180,23 +209,27 @@ fi
 echo "pack-smoke: interrupted queued install leaves the holder's lock intact (ok)"
 
 # Lane 2: an interrupt while this process HOLDS the lock must release it and say the
-# machine may be half-written. The real critical section is milliseconds, so the
-# packaged skill tree is padded to widen it; landing outside the window is still
-# possible, so the scenario is retried and only a run where the handler provably
-# fired counts. Never firing across every attempt is a failure, not a pass.
-PAD="$CONSUMER_DIR/node_modules/tenjin-cli/skills/tenjin-search/pad"
-mkdir -p "$PAD"
-i=0
-while [ "$i" -lt 6000 ]; do printf 'x%.0s' $(seq 1 200) > "$PAD/f$i.md"; i=$((i + 1)); done
+# machine may be half-written. The critical section is a read-merge-write of
+# config.json, so a padded config widens it: the padding is unknown keys, which the
+# config schema passes through untouched, and every byte is read, validated and
+# written back inside the lock. Landing outside the window is still possible, so the
+# scenario is retried and only a run where the handler provably fired counts. Never
+# firing across every attempt is a failure, not a pass.
 HELD_OK=""
 for attempt in 1 2 3 4 5; do
   HOLD_HOME="$(mktemp -d)"
   HOLD_DATA="$(mktemp -d)"
+  node -e '
+    const fs = require("fs");
+    const pad = {};
+    for (let i = 0; i < 300000; i += 1) pad["pad" + i] = "x".repeat(20);
+    fs.writeFileSync(process.argv[1] + "/config.json", JSON.stringify(pad));
+  ' "$HOLD_DATA"
   HOME="$HOLD_HOME" TENJIN_DATA_DIR="$HOLD_DATA" "$BIN" install --harness claude \
     --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$HOLD_HOME/err" &
   HOLDER_PID=$!
   for _ in $(seq 1 600); do
-    [ -d "$HOLD_DATA/skills-sync.lock" ] && break
+    [ -d "$HOLD_DATA/config.json.lock" ] && break
     sleep 0.01
   done
   sleep 0.25
@@ -215,9 +248,9 @@ for attempt in 1 2 3 4 5; do
   HOLDER_CODE=$?
   set -e
   if [ "$HOLDER_CODE" = "130" ] && grep -q "half-written" "$HOLD_HOME/err"; then
-    if [ -d "$HOLD_DATA/skills-sync.lock" ]; then
+    if [ -d "$HOLD_DATA/config.json.lock" ]; then
       echo "pack-smoke: FAIL — interrupted holding install left its own lock behind" >&2
-      rm -rf "$HOLD_HOME" "$HOLD_DATA" "$PAD"
+      rm -rf "$HOLD_HOME" "$HOLD_DATA"
       exit 1
     fi
     HELD_OK="yes"
@@ -227,7 +260,6 @@ for attempt in 1 2 3 4 5; do
   rm -rf "$HOLD_HOME" "$HOLD_DATA"
   [ -n "$HELD_OK" ] && break
 done
-rm -rf "$PAD"
 if [ -z "$HELD_OK" ]; then
   echo "pack-smoke: FAIL — never landed an interrupt inside the write; handler unproven" >&2
   echo "pack-smoke: last attempt: ${HOLDER_LAST:-no attempt ran}" >&2

@@ -81,11 +81,19 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     } catch (err) {
       setExit(emitFailure(io, command, err, { json }).exitCode);
     }
-    // AFTER the envelope, for every command and both outcomes: the nudge must
-    // never delay a command's output, touch stdout, or move its exit code. It
-    // resolves the data dir itself because a failed buildContext has no ctx to
-    // read one from, and it never rejects (see maybeNudgeUpdate).
-    await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
+    // AFTER the envelope, for every command and both outcomes: neither of these
+    // may delay a command's output, touch stdout, or move its exit code. They
+    // resolve the data dir themselves because a failed buildContext has no ctx to
+    // read one from, and neither ever rejects.
+    const dir = dataDir(process.env);
+    await maybeNudgeUpdate({ dir, io, json });
+    // Every command but `install` is a chance to catch up a skill left stale by
+    // an upgrade; `install` has just written the same bytes from the same source.
+    // Lazily imported, like the command bodies, to keep it off the boot path.
+    if (command !== 'install') {
+      const { healWiredSkills } = await import('./lib/skill-heal');
+      await healWiredSkills({ dir, io, json });
+    }
   };
 
   program

@@ -51,12 +51,12 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
- * Serializes everything that rewrites the wired skill directories. Today the only
- * taker is `install`, around its wiring block; the post-update self-heal (#76)
- * will take the same one when it lands, so the two writers cannot interleave.
+ * Dedupes the post-command skills self-heal. Taken with no wait at all: a heal
+ * that finds it held has nothing to do, because the run holding it is writing the
+ * same packaged bytes to the same paths.
  */
-export function skillsSyncLockPath(dir: string = dataDir()): string {
-  return join(dir, 'skills-sync.lock');
+export function skillsHealLockPath(dir: string = dataDir()): string {
+  return join(dir, 'skills-heal.lock');
 }
 
 /**

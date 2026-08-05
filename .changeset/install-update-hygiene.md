@@ -66,15 +66,11 @@ Concurrent `tenjin install` runs no longer fail. Five simultaneous runs failed 7
 times out of 15 on raw `ENOENT`/`ENOTEMPTY` renames, and one of the failures told
 the operator to check directory permissions for what was purely a race. Removing
 the wholesale directory replacement is what fixed it: each shipped file is
-written through its own atomic rename, and 24 concurrent runs pass with the lock
-bypassed. The wiring still takes a lock, serializing it against another install
-and reserving the seam for the post-update self-heal (#76). A contended lock
-reports as REFUSED naming the lock file rather than escaping as an untyped
-timeout, an interrupt anywhere in the command releases whatever lock it holds
-(including the wallet-create lock, whose slow key derivation is the widest
-interrupt window install has) and says what state the machine is in, and a lock
-that cannot be removed is reported rather than left for the next run to discover
-as a timeout.
+written through its own atomic rename, and 24 concurrent runs pass. The wiring
+takes no lock at all. An interrupt anywhere in the command still releases
+whatever lock it does hold (the config lock behind the publishing question, and
+the wallet-create lock, whose slow key derivation is the widest interrupt window
+install has) and says what state the machine is in.
 
 `tenjin doctor` now reports skills that are wired but not from this build.
 Updating the CLI does not update the copies install wrote, and every existing

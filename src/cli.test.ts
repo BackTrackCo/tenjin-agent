@@ -1,19 +1,33 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { main } from './cli';
+import { resolveSkillsSource } from './lib/skills-source';
 import type { Io } from './lib/output';
 
-// The dispatcher now runs the update check after every command, and the TTY cases
-// below would otherwise let it reach the npm registry and write the real
-// ~/.tenjin. CI is the production skip signal, so setting it keeps this file
-// offline through the same door a build machine uses.
-let prevCI: string | undefined;
-beforeAll(() => {
-  prevCI = process.env.CI;
+// The dispatcher runs the update check and the skills self-heal after every
+// command, and the cases below would otherwise let one reach the npm registry and
+// the other rewrite the developer's own ~/.claude/skills. CI is the production
+// skip signal for the check, so setting it keeps this file offline through the
+// same door a build machine uses; the heal is bounded by pointing HOME and the
+// data dir at a sandbox for the whole file.
+let sandbox: string;
+const prevEnv: Record<string, string | undefined> = {};
+beforeAll(async () => {
+  sandbox = await mkdtemp(join(tmpdir(), 'tenjin-cli-sandbox-'));
+  for (const key of ['CI', 'HOME', 'TENJIN_DATA_DIR']) prevEnv[key] = process.env[key];
   process.env.CI = '1';
+  process.env.HOME = join(sandbox, 'home');
+  process.env.TENJIN_DATA_DIR = join(sandbox, 'data');
 });
-afterAll(() => {
-  if (prevCI === undefined) delete process.env.CI;
-  else process.env.CI = prevCI;
+afterAll(async () => {
+  for (const [key, value] of Object.entries(prevEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  await rm(sandbox, { recursive: true, force: true });
 });
 
 function captureIo(isTTY = false) {
@@ -320,5 +334,60 @@ describe('session command group', () => {
     const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
     expect(code).toBe(2);
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});
+
+/**
+ * The post-command skills self-heal. Wired in the dispatcher, so these run a real
+ * (offline) command and assert on what it left on disk; the heal itself is
+ * covered in lib/skill-heal.test.ts.
+ */
+describe('skills self-heal', () => {
+  let home: string;
+  let data: string;
+  let prev: { home?: string; data?: string };
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'tenjin-cli-home-'));
+    data = await mkdtemp(join(tmpdir(), 'tenjin-cli-data-'));
+    prev = { home: process.env.HOME, data: process.env.TENJIN_DATA_DIR };
+    process.env.HOME = home;
+    process.env.TENJIN_DATA_DIR = data;
+    await mkdir(join(home, '.claude', 'skills', 'tenjin-search'), { recursive: true });
+    await writeFile(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'), 'stale\n');
+  });
+  afterEach(async () => {
+    if (prev.home === undefined) delete process.env.HOME;
+    else process.env.HOME = prev.home;
+    if (prev.data === undefined) delete process.env.TENJIN_DATA_DIR;
+    else process.env.TENJIN_DATA_DIR = prev.data;
+    await rm(home, { recursive: true, force: true });
+    await rm(data, { recursive: true, force: true });
+  });
+
+  const wired = (): Promise<string> =>
+    readFile(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'), 'utf8');
+
+  it('an ordinary command refreshes a stale wired skill', async () => {
+    const cap = captureIo(true);
+    expect(await main(['config'], cap.io)).toBe(0);
+    const packaged = await readFile(
+      join(
+        resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url))),
+        'tenjin-search',
+        'SKILL.md',
+      ),
+      'utf8',
+    );
+    expect(await wired()).toBe(packaged);
+    expect(cap.stderr()).toContain('Updated the Tenjin skills');
+  });
+
+  // `install` writes the skills itself, from the same source; a second pass over
+  // the same paths on the way out is work nobody asked for.
+  it('install does not heal', async () => {
+    const cap = captureIo(true);
+    expect(await main(['install', '--publish-mode', 'bogus'], cap.io)).toBe(2);
+    expect(await wired()).toBe('stale\n');
   });
 });

@@ -258,6 +258,14 @@ directory a harness it detected here reads, plus any directory you named with
 harness Tenjin does not probe for. A leftover directory that is neither is
 described, not warned about.
 
+Updating the CLI updates the skills it wrote. Every command except `install`
+compares the skills already in those directories against the packaged ones and
+rewrites the files whose bytes differ, so an upgrade never leaves your agent
+reading an older version's instructions. It only ever refreshes what is already
+there: a skill you have not installed is never created, the check runs after the
+command's own output, and anything it cannot write is skipped and named rather
+than failing the command you ran.
+
 ## No CLI? Zero-install fallback
 
 An agent with no CLI reaches the same surface directly over HTTP and MCP. The
