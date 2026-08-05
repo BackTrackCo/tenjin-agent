@@ -2,9 +2,7 @@ import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach } from
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { main } from './cli';
-import { resolveSkillsSource } from './lib/skills-source';
 import type { Io } from './lib/output';
 
 // The dispatcher runs the update check and the skills self-heal after every
@@ -338,56 +336,42 @@ describe('session command group', () => {
 });
 
 /**
- * The post-command skills self-heal. Wired in the dispatcher, so these run a real
- * (offline) command and assert on what it left on disk; the heal itself is
- * covered in lib/skill-heal.test.ts.
+ * The post-command skills self-heal, at the dispatcher. It runs after the
+ * envelope, so what matters here is that a command's contract is untouched by it;
+ * the heal's own behavior is covered in lib/skill-heal.test.ts, and the packed
+ * binary actually healing a stale skill is covered in scripts/pack-smoke.sh.
  */
 describe('skills self-heal', () => {
-  let home: string;
-  let data: string;
-  let prev: { home?: string; data?: string };
+  const wiredPath = (): string =>
+    join(process.env.HOME!, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+  const STALE = '---\nname: tenjin-search\n---\n\nstale\n';
 
+  // The file-level CI=1 would skip the heal outright and make both cases below
+  // pass for the wrong reason, so this block clears it. Every case here stays off
+  // a TTY, which is what keeps the update nudge (TTY-gated, unlike the heal) from
+  // reaching the network once CI is out of the way.
   beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), 'tenjin-cli-home-'));
-    data = await mkdtemp(join(tmpdir(), 'tenjin-cli-data-'));
-    prev = { home: process.env.HOME, data: process.env.TENJIN_DATA_DIR };
-    process.env.HOME = home;
-    process.env.TENJIN_DATA_DIR = data;
-    await mkdir(join(home, '.claude', 'skills', 'tenjin-search'), { recursive: true });
-    await writeFile(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'), 'stale\n');
+    process.env.CI = '';
+    await mkdir(join(process.env.HOME!, '.claude', 'skills', 'tenjin-search'), { recursive: true });
+    await writeFile(wiredPath(), STALE);
   });
   afterEach(async () => {
-    if (prev.home === undefined) delete process.env.HOME;
-    else process.env.HOME = prev.home;
-    if (prev.data === undefined) delete process.env.TENJIN_DATA_DIR;
-    else process.env.TENJIN_DATA_DIR = prev.data;
-    await rm(home, { recursive: true, force: true });
-    await rm(data, { recursive: true, force: true });
+    process.env.CI = '1';
+    await rm(join(process.env.HOME!, '.claude'), { recursive: true, force: true });
   });
 
-  const wired = (): Promise<string> =>
-    readFile(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'), 'utf8');
+  it('leaves a command emitting exactly one JSON object and exit 0', async () => {
+    const cap = captureIo();
+    expect(await main(['config', '--json'], cap.io)).toBe(0);
+    const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
+    expect(parsed.ok).toBe(true);
+  });
 
-  it('an ordinary command refreshes a stale wired skill', async () => {
-    const cap = captureIo(true);
+  // These tests run from the source tree, which is exactly the case the heal
+  // declines: a checkout's skills/ can be half-edited, and nobody installed it.
+  it('does not heal from a source checkout', async () => {
+    const cap = captureIo();
     expect(await main(['config'], cap.io)).toBe(0);
-    const packaged = await readFile(
-      join(
-        resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url))),
-        'tenjin-search',
-        'SKILL.md',
-      ),
-      'utf8',
-    );
-    expect(await wired()).toBe(packaged);
-    expect(cap.stderr()).toContain('Updated the Tenjin skills');
-  });
-
-  // `install` writes the skills itself, from the same source; a second pass over
-  // the same paths on the way out is work nobody asked for.
-  it('install does not heal', async () => {
-    const cap = captureIo(true);
-    expect(await main(['install', '--publish-mode', 'bogus'], cap.io)).toBe(2);
-    expect(await wired()).toBe('stale\n');
+    expect(await readFile(wiredPath(), 'utf8')).toBe(STALE);
   });
 });

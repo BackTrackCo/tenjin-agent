@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { hasCode } from './errno';
@@ -63,7 +63,15 @@ export async function installSkill(
     for (const [rel, content] of src) {
       const target = writeTo.get(rel)!;
       try {
-        await writeFileAtomic(target, content);
+        // An existing file keeps the mode it has. A skill an operator (or their
+        // dotfiles) made group-readable or read-only is theirs to have set that
+        // way, and an update is no reason to hand it back at the default 0644.
+        const current = await stat(target).catch(() => null);
+        await writeFileAtomic(
+          target,
+          content,
+          current === null ? {} : { mode: current.mode & 0o777 },
+        );
       } catch (err) {
         // Culprit is derived from the file that FAILED, not assumed to be the
         // skills root: an existing skill directory that refuses the temp file is

@@ -258,15 +258,26 @@ directory a harness it detected here reads, plus any directory you named with
 harness Tenjin does not probe for. A leftover directory that is neither is
 described, not warned about.
 
-Updating the CLI updates the adapters it wrote. Every command except `install`
-compares the `tenjin-search` and `tenjin-publish` copies already in those
-directories against the packaged ones and rewrites the files whose bytes differ,
-so an upgrade never leaves your agent reading an older version's instructions. It
-only ever refreshes what is already there: a skill you have not installed is
-never created, the hosted `tenjin` mirror is left alone because your copy may be
-a newer fetch from tenjin.blog/skills.md than this package ships, the check runs
-after the command's own output, and anything it cannot write is skipped and named
-rather than failing the command you ran.
+Updating the CLI updates the adapters it wrote. Every `tenjin` command except
+`install` compares the `tenjin-search` and `tenjin-publish` copies already in
+those directories against the packaged ones and rewrites the files whose bytes
+differ, so an upgrade never leaves your agent reading an older version's
+instructions.
+
+Because that write is unattended, it is narrower than the `install` you ran
+yourself. It creates nothing you have not installed, and it rewrites only a
+regular file whose frontmatter `name:` says it is that skill, so a symlinked
+SKILL.md and a third-party skill sitting at one of those paths are both left
+alone. The hosted `tenjin` mirror is never touched, because your copy may be a
+newer fetch from [tenjin.blog/skills.md](https://tenjin.blog/skills.md) than this
+package ships. A rewritten file keeps its mode, and every rewrite prints one dim
+stderr line naming the files (stdout is untouched, so `--json` still emits
+exactly one envelope). The check runs after the command's own output, and
+anything it cannot write is skipped and named rather than failing the command you
+ran.
+
+It is skipped entirely when `CI` is set, when `TENJIN_NO_SKILL_HEAL=1`, and when
+the CLI is running from a source checkout rather than an installed package.
 
 ## No CLI? Zero-install fallback
 

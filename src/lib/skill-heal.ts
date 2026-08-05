@@ -1,22 +1,33 @@
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emitNotice } from './output';
+import { emitWriteNotice } from './output';
 import type { Io } from './output';
 import { installSkill } from './skill-writer';
-import { CLI_SKILL_NAMES, skillsDirsFor } from './skill-wiring';
+import {
+  CLI_SKILL_NAMES,
+  readSkillFile,
+  skillFrontmatterName,
+  skillsDirsFor,
+} from './skill-wiring';
 import { resolveSkillsSource } from './skills-source';
 
 export interface HealDeps {
   io: Io;
-  /** The global --json flag; the notice is human-mode only. */
-  json: boolean;
+  /** Environment for the CI and opt-out checks. Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
   /** Home whose skills directories are healed. Tests inject a temp dir. */
   homeDir?: string;
-  /** The packaged skills source. Defaults to resolving it from this module's location. */
+  /**
+   * The packaged skills source. Defaults to this build's own, and only that
+   * default is checked for being a working tree: passing one is a deliberate act.
+   */
   skillsSourceDir?: string;
 }
+
+/** The opt-out, in the shape the CLI's other `TENJIN_NO_*` switches take. */
+const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
 
 /**
  * Refresh the CLI adapter skills ALREADY in a harness skills directory, so
@@ -24,13 +35,13 @@ export interface HealDeps {
  * on an older version's instructions. Subordinate to the command that ran, like
  * the update nudge: after the envelope, never on stdout, never a failure.
  *
- * Two things it never touches. A skill that is not there is never created:
- * presence is the operator's consent to a directory, and a `tenjin` in
- * ~/.agents/skills is not permission to start writing into ~/.claude/skills. And
- * the hosted `tenjin` mirror is left exactly as found: it mirrors
- * tenjin.blog/skills.md, so an operator may hold a NEWER copy than this package
- * ships, and healing it would undo that and make install's "re-fetch it from
- * tenjin.blog/skills.md" false. Same domain `doctor`'s staleness check compares.
+ * It is an UNATTENDED writer into the operator's home, so it is strictly more
+ * conservative than `install`, which a human ran on purpose. What it declines to
+ * touch is listed on {@link healable}, and it heals only the two CLI adapters:
+ * the hosted `tenjin` skill mirrors tenjin.blog/skills.md, so the copy on disk
+ * may be a NEWER fetch than this package ships, and rewriting it would undo that
+ * and make install's "re-fetch it from tenjin.blog/skills.md" false. Same domain
+ * `doctor`'s staleness check compares.
  *
  * Unlocked, on purpose. Concurrent healers write byte-identical content to the
  * same paths through per-file atomic renames, so there is nothing to serialize;
@@ -39,58 +50,110 @@ export interface HealDeps {
  */
 export async function healWiredSkills(deps: HealDeps): Promise<void> {
   try {
+    const env = deps.env ?? process.env;
+    // The same two doors the update nudge uses: a build log cannot act on this,
+    // and an operator who wants their skills left alone says so once.
+    if (env.CI !== undefined && env.CI.length > 0) return;
+    if (env[OPT_OUT] === '1') return;
+
     const home = deps.homeDir ?? homedir();
     // An empty or relative HOME (sudo/docker env_reset, systemd units) would make
     // every target below relative, healing paths under the working directory.
     if (!isAbsolute(home)) return;
 
-    const present = wiredSkills(home);
-    if (present.length === 0) return;
-    const source =
-      deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
-    await heal(present, source, deps);
+    const source = deps.skillsSourceDir ?? packagedSource();
+    if (source === null) return;
+    const targets = healable(home);
+    if (targets.length === 0) return;
+    await heal(targets, source, deps.io);
   } catch {
     // Whatever it was, it is the next command's to retry; this one is finished.
   }
 }
 
-function wiredSkills(home: string): { dir: string; name: string }[] {
-  const found: { dir: string; name: string }[] = [];
+/**
+ * This build's packaged skills, or null when they are a working tree's. The
+ * published package ships `dist/` and `skills/` with no `src/` beside them, so a
+ * `src/` sibling means a checkout, whose skills may be half-edited and are not
+ * what anyone agreed to install.
+ */
+function packagedSource(): string | null {
+  const dir = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  return existsSync(join(dirname(dir), 'src')) ? null : dir;
+}
+
+interface Target {
+  dir: string;
+  name: string;
+  /** The SKILL.md itself: what the gates judged, and what the notice names. */
+  path: string;
+}
+
+/**
+ * The (directory, skill) pairs this may rewrite, which is a deliberately narrow
+ * set. A skill that is not there is never created, because presence is the
+ * operator's consent to a directory. A destination that is not a REGULAR FILE is
+ * left alone: `install` writes through a symlink on purpose, since the operator
+ * pointed it somewhere, but doing that unattended turns any link at these paths
+ * into a write to wherever it points.
+ *
+ * Gating SKILL.md gates the whole write, because it is the only file these skills
+ * ship. The other gate, that the file is ours at all, needs its content and so
+ * lives at the write itself.
+ */
+function healable(home: string): Target[] {
+  const found: Target[] = [];
   for (const dir of skillsDirsFor(home)) {
     for (const name of CLI_SKILL_NAMES) {
-      if (existsSync(join(dir, name, 'SKILL.md'))) found.push({ dir, name });
+      const path = join(dir, name, 'SKILL.md');
+      if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
+      found.push({ dir, name, path });
     }
   }
   return found;
 }
 
-async function heal(
-  present: readonly { dir: string; name: string }[],
-  source: string,
-  deps: HealDeps,
-): Promise<void> {
+async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {
   const updated: string[] = [];
   const failed: string[] = [];
-  for (const { dir, name } of present) {
+  let overwrote = false;
+  for (const { dir, name, path } of targets) {
     try {
-      const { status } = await installSkill(join(source, name), join(dir, name), false, name);
+      if (!(await isOurs(path, name))) continue;
+      const { status, warning } = await installSkill(
+        join(source, name),
+        join(dir, name),
+        false,
+        name,
+      );
       if (status === 'up-to-date') continue;
-      if (!updated.includes(dir)) updated.push(dir);
+      updated.push(path);
+      if (warning !== undefined) overwrote = true;
     } catch {
-      // A FIFO at the path, a denied write, a case collision: that skill keeps
-      // what it has, and the others are still healed.
-      failed.push(join(dir, name));
+      // A denied write, a case collision, a file swapped under us: that skill
+      // keeps what it has, and the others are still healed.
+      failed.push(path);
     }
   }
-  const notice = noticeFor(updated, failed);
-  if (notice !== null) emitNotice(deps.io, notice, { json: deps.json });
+  const notice = noticeFor(updated, failed, overwrote);
+  if (notice !== null) emitWriteNotice(io, notice);
+}
+
+/** Does this file claim to BE the skill we would write over it? Somebody else's
+ *  skill is not ours to replace just for sitting at one of our paths. */
+async function isOurs(path: string, name: string): Promise<boolean> {
+  const read = await readSkillFile(path);
+  return read.kind === 'ok' && skillFrontmatterName(read.bytes.toString('utf8')) === name;
 }
 
 /** One line, or null when every skill was already current. */
-function noticeFor(updated: string[], failed: string[]): string | null {
+function noticeFor(updated: string[], failed: string[], overwrote: boolean): string | null {
   const parts: string[] = [];
   if (updated.length > 0) {
-    parts.push(`Updated the Tenjin skills in ${updated.join(' and ')} to match this CLI`);
+    // Files, not directories, and carrying install's overwrite warning: this line
+    // is the only notice that content in the operator's home changed unasked.
+    const lost = overwrote ? ', so any local edits to them are gone' : '';
+    parts.push(`Updated ${updated.join(' and ')} to match this CLI${lost}`);
   }
   if (failed.length > 0) {
     parts.push(`could not update ${failed.join(' and ')} (run \`tenjin install\` for the reason)`);

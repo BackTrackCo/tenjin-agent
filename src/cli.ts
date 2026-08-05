@@ -88,10 +88,17 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
     // Every command but `install` is a chance to catch up a skill left stale by
     // an upgrade; `install` has just written the same bytes from the same source.
-    // Lazily imported, like the command bodies, to keep it off the boot path.
+    // Lazily imported, like the command bodies, to keep it off the boot path, and
+    // the import is INSIDE the guard: a chunk that is missing or corrupt (a
+    // half-unpacked upgrade) would otherwise reject here, after the envelope, and
+    // turn a finished command into a second envelope and a nonzero exit.
     if (command !== 'install') {
-      const { healWiredSkills } = await import('./lib/skill-heal');
-      await healWiredSkills({ io, json });
+      try {
+        const { healWiredSkills } = await import('./lib/skill-heal');
+        await healWiredSkills({ io });
+      } catch {
+        // Nothing here is the command's business.
+      }
     }
   };
 

@@ -130,33 +130,115 @@ printf '%s' "$BOGUS_OUT" | node -e '
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 
-# 4) The self-heal, from the PACKED skills: a wired CLI adapter whose bytes are
-# stale is rewritten by an ordinary command, a skill that is not wired is not
-# created, and the hosted `tenjin` mirror is left alone (the copy on disk may be a
-# newer fetch from tenjin.blog than this package ships). Only the published
-# tarball can prove the first: the heal reads skills/ out of the installed
-# package, which is exactly what the `files` allowlist governs.
+# 4) The self-heal, from the PACKED skills. Only the published tarball can prove
+# this: the heal reads skills/ out of the installed package, which is exactly what
+# the `files` allowlist governs, and it refuses to run at all from a source
+# checkout. `CI` is cleared for these runs because the heal skips a build machine,
+# like the update nudge does.
+#
+# One run, four verdicts: a stale wired adapter is rewritten, and the three things
+# an unattended writer must not touch are not — the hosted `tenjin` mirror (the
+# copy on disk may be a newer fetch from tenjin.blog than this package ships), a
+# SYMLINKED destination (following it would write wherever it points), and a
+# same-named skill that is somebody else's by its frontmatter.
 HEAL_HOME="$(mktemp -d)"
 HEAL_DATA="$(mktemp -d)"
 PACKED_SKILL="./node_modules/tenjin-cli/skills/tenjin-search/SKILL.md"
-mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/tenjin"
-printf 'stale\n' > "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
+mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/tenjin" \
+  "$HEAL_HOME/.claude/skills/tenjin-publish" "$HEAL_HOME/.agents/skills/tenjin-search"
+printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
+  > "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
 printf 'a newer fetch\n' > "$HEAL_HOME/.claude/skills/tenjin/SKILL.md"
-HOME="$HEAL_HOME" TENJIN_DATA_DIR="$HEAL_DATA" "$BIN" config >/dev/null
+printf 'not a skill\n' > "$HEAL_HOME/elsewhere.md"
+ln -s "$HEAL_HOME/elsewhere.md" "$HEAL_HOME/.claude/skills/tenjin-publish/SKILL.md"
+printf -- '---\nname: acme-search\n---\n' > "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md"
+
 heal_fail() {
   echo "pack-smoke: FAIL — $1" >&2
   rm -rf "$HEAL_HOME" "$HEAL_DATA"
   exit 1
 }
+
+set +e
+HEAL_OUT="$(HOME="$HEAL_HOME" TENJIN_DATA_DIR="$HEAL_DATA" CI= "$BIN" config --json 2>/dev/null)"
+HEAL_CODE=$?
+set -e
+[ "$HEAL_CODE" -eq 0 ] || heal_fail "'tenjin config --json' exited $HEAL_CODE with the heal wired in"
+# JSON.parse rejects a second object, so this is the exactly-one-envelope contract:
+# the heal runs after it and must never add to stdout.
+printf '%s' "$HEAL_OUT" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    let o;
+    try {
+      o = JSON.parse(s);
+    } catch (e) {
+      console.error("heal: stdout is not exactly one JSON object: " + e.message);
+      process.exit(1);
+    }
+    if (o.ok !== true || o.command !== "config") {
+      console.error("heal: unexpected envelope: " + s);
+      process.exit(1);
+    }
+  });
+' || heal_fail "the heal disturbed the one-JSON-object contract on stdout"
+
 cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL" ||
   heal_fail "a stale wired skill was not healed by an ordinary command"
 [ "$(cat "$HEAL_HOME/.claude/skills/tenjin/SKILL.md")" = "a newer fetch" ] ||
   heal_fail "the heal overwrote the hosted tenjin mirror"
-if [ -e "$HEAL_HOME/.claude/skills/tenjin-publish" ] || [ -e "$HEAL_HOME/.agents" ]; then
-  heal_fail "the heal created a skill the operator never installed"
-fi
+[ "$(cat "$HEAL_HOME/elsewhere.md")" = "not a skill" ] ||
+  heal_fail "the heal wrote through a symlinked SKILL.md"
+grep -q 'acme-search' "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md" ||
+  heal_fail "the heal replaced a third-party skill sitting at one of our paths"
 rm -rf "$HEAL_HOME" "$HEAL_DATA"
-echo "pack-smoke: stale adapter healed, hosted mirror and absent skills untouched (ok)"
+echo "pack-smoke: stale adapter healed; mirror, symlink and third-party skill untouched (ok)"
+
+# 5) The heal's chunk is lazily imported, so a half-unpacked or corrupt install can
+# make that import fail. It must stay invisible: the command has already emitted
+# its envelope by then, and a rejection there would add a second one and a nonzero
+# exit to a command that succeeded.
+CHUNK_HOME="$(mktemp -d)"
+CHUNK_DATA="$(mktemp -d)"
+CHUNK_BACKUP="$(mktemp -d)"
+mkdir -p "$CHUNK_HOME/.claude/skills/tenjin-search"
+printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
+  > "$CHUNK_HOME/.claude/skills/tenjin-search/SKILL.md"
+# Emitted as its own chunk by the dynamic import; the name is tsup's, from the
+# module's own basename.
+cp ./node_modules/tenjin-cli/dist/skill-heal-*.js "$CHUNK_BACKUP/" 2>/dev/null || {
+  echo "pack-smoke: FAIL — no skill-heal chunk in the packed dist; did the lazy import go away?" >&2
+  rm -rf "$CHUNK_HOME" "$CHUNK_DATA" "$CHUNK_BACKUP"
+  exit 1
+}
+rm -f ./node_modules/tenjin-cli/dist/skill-heal-*.js
+set +e
+CHUNK_OUT="$(HOME="$CHUNK_HOME" TENJIN_DATA_DIR="$CHUNK_DATA" CI= "$BIN" config --json 2>/dev/null)"
+CHUNK_CODE=$?
+set -e
+cp "$CHUNK_BACKUP"/skill-heal-*.js ./node_modules/tenjin-cli/dist/
+if [ "$CHUNK_CODE" -ne 0 ]; then
+  echo "pack-smoke: FAIL — a missing heal chunk changed the exit code to $CHUNK_CODE" >&2
+  rm -rf "$CHUNK_HOME" "$CHUNK_DATA" "$CHUNK_BACKUP"
+  exit 1
+fi
+printf '%s' "$CHUNK_OUT" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    try {
+      if (JSON.parse(s).ok !== true) throw new Error("envelope is not ok:true");
+    } catch (e) {
+      console.error("chunk: stdout is not exactly one successful envelope: " + e.message);
+      process.exit(1);
+    }
+  });
+' || {
+  echo "pack-smoke: FAIL — a missing heal chunk broke the stdout envelope" >&2
+  rm -rf "$CHUNK_HOME" "$CHUNK_DATA" "$CHUNK_BACKUP"
+  exit 1
+}
+rm -rf "$CHUNK_HOME" "$CHUNK_DATA" "$CHUNK_BACKUP"
+echo "pack-smoke: a missing heal chunk leaves the command's contract intact (ok)"
 
 # The signal contract, both lanes. Every step is asserted: the process must still
 # be alive when signalled, the signal must be delivered, the exit must be the

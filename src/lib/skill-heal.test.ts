@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,15 +36,18 @@ function captureIo(isTTY = true) {
   return { io, stderr: () => err.join('').replace(/\x1b\[[0-9;]*m/g, '') };
 }
 
-function heal(io: Io, json = false): Promise<void> {
-  return healWiredSkills({ io, json, homeDir: home, skillsSourceDir: SKILLS_SRC });
+function heal(io: Io, env: NodeJS.ProcessEnv = {}): Promise<void> {
+  return healWiredSkills({ io, env, homeDir: home, skillsSourceDir: SKILLS_SRC });
 }
 
 const claudeDir = (): string => skillsDirsFor(home)[0]!;
 const sharedDir = (): string => skillsDirsFor(home)[1]!;
 
-/** Put `name` in `dir` with the given SKILL.md bytes (a stale copy by default). */
-async function seedSkill(dir: string, name: string, text = 'stale\n'): Promise<string> {
+/** What an older build left behind: our frontmatter, someone else's body. */
+const stale = (name: string): string =>
+  `---\nname: ${name}\ndescription: an older build's copy\n---\n\nstale\n`;
+
+async function seedSkill(dir: string, name: string, text = stale(name)): Promise<string> {
   const path = join(dir, name, 'SKILL.md');
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, text);
@@ -56,12 +59,13 @@ async function packaged(name: string): Promise<string> {
 }
 
 describe('healWiredSkills', () => {
-  it('rewrites a stale skill and says so once', async () => {
+  it('rewrites a stale skill, naming the file and the edits it cost', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
     await heal(io);
     expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
-    expect(stderr()).toContain(claudeDir());
+    expect(stderr()).toContain(path);
+    expect(stderr()).toContain('local edits');
     expect(stderr().trimEnd().split('\n')).toHaveLength(1);
   });
 
@@ -82,19 +86,79 @@ describe('healWiredSkills', () => {
     expect(stderr()).toBe('');
   });
 
-  it('heals the skills either side of one that cannot be written', async () => {
+  // `install` writes THROUGH a symlink because the operator pointed it somewhere
+  // on purpose. Unattended, that same behavior turns any link at this path into a
+  // write to wherever it points, so the heal declines and leaves it to `install`.
+  it('skips a symlinked SKILL.md rather than writing through it', async () => {
     if (process.platform === 'win32') return;
-    const fifo = join(claudeDir(), 'tenjin-publish', 'SKILL.md');
+    const elsewhere = join(home, 'elsewhere.md');
+    await writeFile(elsewhere, 'not a skill\n');
+    await mkdir(join(claudeDir(), 'tenjin-search'), { recursive: true });
+    await symlink(elsewhere, join(claudeDir(), 'tenjin-search', 'SKILL.md'));
+    const { io, stderr } = captureIo();
+    await heal(io);
+    expect(await readFile(elsewhere, 'utf8')).toBe('not a skill\n');
+    expect(stderr()).toBe('');
+  });
+
+  it('skips a SKILL.md that is not a regular file', async () => {
+    if (process.platform === 'win32') return;
+    const fifo = join(claudeDir(), 'tenjin-search', 'SKILL.md');
     await mkdir(dirname(fifo), { recursive: true });
     execFileSync('mkfifo', [fifo]);
+    const { io, stderr } = captureIo();
+    await heal(io);
+    expect(stderr()).toBe('');
+  });
+
+  // Being at our path does not make a file ours: a third-party skill that happens
+  // to be named tenjin-search is the operator's, and gets left alone.
+  it('skips a same-named skill whose frontmatter is somebody else s', async () => {
+    const theirs = '---\nname: tenjin-search\n---\n';
+    const path = await seedSkill(
+      claudeDir(),
+      'tenjin-search',
+      theirs.replace('name: tenjin-search', 'name: acme-search'),
+    );
+    const { io, stderr } = captureIo();
+    await heal(io);
+    expect(await readFile(path, 'utf8')).toContain('acme-search');
+    expect(stderr()).toBe('');
+  });
+
+  it('skips a SKILL.md with no frontmatter at all', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search', '# just a note\n');
+    const { io } = captureIo();
+    await heal(io);
+    expect(await readFile(path, 'utf8')).toBe('# just a note\n');
+  });
+
+  it('keeps the mode the existing file had', async () => {
+    if (process.platform === 'win32') return;
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    await chmod(path, 0o600);
+    const { io } = captureIo();
+    await heal(io);
+    expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it('heals the skills either side of one that cannot be written', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const denied = await seedSkill(claudeDir(), 'tenjin-publish');
+    await chmod(dirname(denied), 0o500);
     const search = await seedSkill(claudeDir(), 'tenjin-search');
     const shared = await seedSkill(sharedDir(), 'tenjin-publish');
     const { io, stderr } = captureIo();
-    await heal(io);
+    try {
+      await heal(io);
+    } finally {
+      await chmod(dirname(denied), 0o700).catch(() => undefined);
+    }
     expect(await readFile(search, 'utf8')).toBe(await packaged('tenjin-search'));
     expect(await readFile(shared, 'utf8')).toBe(await packaged('tenjin-publish'));
     expect(stderr()).toContain('could not update');
-    expect(stderr()).toContain(join(claudeDir(), 'tenjin-publish'));
+    expect(stderr()).toContain(denied);
   });
 
   // The mirror of tenjin.blog/skills.md may legitimately be NEWER on disk than the
@@ -102,21 +166,21 @@ describe('healWiredSkills', () => {
   // there, so an unattended rewrite would undo their fetch and make that advice a
   // lie. Same skills `doctor`'s staleness check compares, for the same reason.
   it('leaves the hosted tenjin mirror exactly as it found it', async () => {
-    const hosted = await seedSkill(claudeDir(), HOSTED_SKILL_NAME, 'a newer fetch\n');
+    const text = stale(HOSTED_SKILL_NAME);
+    const hosted = await seedSkill(claudeDir(), HOSTED_SKILL_NAME, text);
     await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
     await heal(io);
-    expect(await readFile(hosted, 'utf8')).toBe('a newer fetch\n');
-    expect(stderr()).not.toContain(HOSTED_SKILL_NAME + '/');
+    expect(await readFile(hosted, 'utf8')).toBe(text);
+    expect(stderr()).not.toContain(hosted);
   });
 
-  // A machine carrying only the hosted skill is a working zero-install install,
-  // and nothing here is ours to refresh.
   it('does nothing at all in a directory holding only the hosted skill', async () => {
-    const hosted = await seedSkill(sharedDir(), HOSTED_SKILL_NAME);
+    const text = stale(HOSTED_SKILL_NAME);
+    const hosted = await seedSkill(sharedDir(), HOSTED_SKILL_NAME, text);
     const { io, stderr } = captureIo();
     await heal(io);
-    expect(await readFile(hosted, 'utf8')).toBe('stale\n');
+    expect(await readFile(hosted, 'utf8')).toBe(text);
     expect(stderr()).toBe('');
   });
 
@@ -136,11 +200,33 @@ describe('healWiredSkills', () => {
     expect(stderr()).toContain(sharedDir());
   });
 
-  it('says nothing to a machine consumer', async () => {
+  // A piped run is exactly the case where an unannounced rewrite of the
+  // operator's files would otherwise be invisible, so the line is not TTY-gated.
+  it('reports the write off a TTY too', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const { io, stderr } = captureIo(false);
+    await heal(io);
+    expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
+    expect(stderr()).toContain(path);
+  });
+
+  it('does nothing under CI, or when opted out', async () => {
+    for (const env of [{ CI: '1' }, { TENJIN_NO_SKILL_HEAL: '1' }]) {
+      const path = await seedSkill(claudeDir(), 'tenjin-search');
+      const { io, stderr } = captureIo();
+      await heal(io, env);
+      expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
+      expect(stderr()).toBe('');
+    }
+  });
+
+  // The default source resolution lands on this repo's own skills/ when the CLI
+  // runs from a checkout, and those are nobody's agreed-upon install.
+  it('does not heal from a source checkout', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
-    await heal(io, true);
-    expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
+    await healWiredSkills({ io, env: {}, homeDir: home });
+    expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
     expect(stderr()).toBe('');
   });
 
@@ -148,7 +234,7 @@ describe('healWiredSkills', () => {
     const { io } = captureIo();
     await healWiredSkills({
       io,
-      json: false,
+      env: {},
       homeDir: 'relative-home',
       skillsSourceDir: SKILLS_SRC,
     });
@@ -161,7 +247,7 @@ describe('healWiredSkills', () => {
     await expect(
       healWiredSkills({
         io,
-        json: false,
+        env: {},
         homeDir: home,
         skillsSourceDir: join(home, 'not-a-skills-dir'),
       }),
