@@ -11,6 +11,8 @@ const fsHooks = vi.hoisted(() => ({
   settingsReads: 0,
   /** Swap this path for a FIFO the moment it is renamed into place. */
   fifoAfterRename: '',
+  /** Deliver a SIGINT the moment this path is renamed into place. */
+  signalAfterRename: '',
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -26,6 +28,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         await actual.rm(target, { force: true });
         const { execFileSync } = await import('node:child_process');
         execFileSync('mkfifo', [target]);
+      }
+      // Ctrl-C landing inside the skills write, which is the one interruptible
+      // stretch of this command that holds no lock at all.
+      if (fsHooks.signalAfterRename !== '' && String(args[1]) === fsHooks.signalAfterRename) {
+        fsHooks.signalAfterRename = '';
+        process.emit('SIGINT', 'SIGINT');
       }
       return out;
     },
@@ -2087,6 +2095,23 @@ describe('runInstall: hosted skill already present (#35)', () => {
     }
   });
 
+  // The skills land first and are unaffected; what fails is recording the harness
+  // in the data dir, and a raw EACCES there reads as a CLI bug and carries no fix.
+  it('gives an unwritable data directory a typed error with a fix', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    await mkdir(data, { recursive: true });
+    await chmod(data, 0o500);
+    try {
+      const err = await caught(() => runInstall({ harness: ['claude'] }, makeCtx(), deps()));
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.message).not.toContain('EACCES');
+      expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
+    } finally {
+      await chmod(data, 0o700).catch(() => undefined);
+    }
+  });
+
   // The invocability readback happens AFTER the write, so the path can have been
   // swapped for a pipe in between. A raw read there hangs the command that has
   // already done its work.
@@ -2339,5 +2364,30 @@ describe('runInstall: the skill-directory write', () => {
   it('writes the skills without leaving any lock in the data dir', async () => {
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await readdir(data)).filter((e) => e.endsWith('.lock'))).toEqual([]);
+  });
+
+  // The skills write holds no lock, so `ownsAnyLock` cannot see it and the phase
+  // marker is the ONLY thing standing between an interrupt mid-copy and a report
+  // that nothing changed, on a machine where files have already landed.
+  it('an interrupt during the skills write reports a possibly half-written machine', async () => {
+    const written: string[] = [];
+    const exits: unknown[] = [];
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code: number) => {
+      exits.push(code);
+    }) as never);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    fsHooks.signalAfterRename = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    try {
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    } finally {
+      fsHooks.signalAfterRename = '';
+      exit.mockRestore();
+      stderr.mockRestore();
+    }
+    expect(written.join('')).toContain('half-written');
+    expect(exits).toEqual([130]);
   });
 });

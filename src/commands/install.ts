@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
+import { hasCode } from '../lib/errno';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import {
@@ -375,9 +376,11 @@ async function installBody(
   // and then invisible to every later doctor — including for the #35 shadowing defect
   // it was chosen to hold. `--dry-run` records nothing, like the publish-mode write.
   if (explicitHarness && !dryRun) {
-    await persistInstallHarness(
-      ctx.dataDir,
-      plans.map((p) => p.harness),
+    await underDataDir(ctx.dataDir, () =>
+      persistInstallHarness(
+        ctx.dataDir,
+        plans.map((p) => p.harness),
+      ),
     );
   }
   // The embedded doctor run inspects the same `home` install just wrote into, so
@@ -393,7 +396,9 @@ async function installBody(
   // The three decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
-  const publishMode = await resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
+  const publishMode = await underDataDir(ctx.dataDir, () =>
+    resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt),
+  );
   const permissions = await resolvePermissions({
     plans,
     home,
@@ -438,6 +443,24 @@ async function installBody(
     doctor,
   });
   return { data, humanLines };
+}
+
+/**
+ * The two steps that write to the Tenjin data dir, with a denial there reported as
+ * the directory it is rather than as a raw errno under INTERNAL. The skills are
+ * already on disk by now, so the message says what failed, not that nothing
+ * happened.
+ */
+async function underDataDir<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!hasCode(err, 'EACCES') && !hasCode(err, 'EPERM')) throw err;
+    throw new CliError('INTERNAL', `Could not use the Tenjin data directory ${dataDir}.`, {
+      fix: `Permission denied. Check that you can write to it (\`ls -ld ${dataDir}\`), then re-run \`tenjin install\`.`,
+      cause: err,
+    });
+  }
 }
 
 const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";

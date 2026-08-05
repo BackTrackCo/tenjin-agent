@@ -130,28 +130,33 @@ printf '%s' "$BOGUS_OUT" | node -e '
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 
-# 4) The self-heal, from the PACKED skills: a wired skill whose bytes are stale is
-# rewritten by an ordinary command, and a skill that is not wired is not created.
-# Only the published tarball can prove this: the heal reads skills/ out of the
-# installed package, which is exactly what the `files` allowlist governs.
+# 4) The self-heal, from the PACKED skills: a wired CLI adapter whose bytes are
+# stale is rewritten by an ordinary command, a skill that is not wired is not
+# created, and the hosted `tenjin` mirror is left alone (the copy on disk may be a
+# newer fetch from tenjin.blog than this package ships). Only the published
+# tarball can prove the first: the heal reads skills/ out of the installed
+# package, which is exactly what the `files` allowlist governs.
 HEAL_HOME="$(mktemp -d)"
 HEAL_DATA="$(mktemp -d)"
 PACKED_SKILL="./node_modules/tenjin-cli/skills/tenjin-search/SKILL.md"
-mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search"
+mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/tenjin"
 printf 'stale\n' > "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
+printf 'a newer fetch\n' > "$HEAL_HOME/.claude/skills/tenjin/SKILL.md"
 HOME="$HEAL_HOME" TENJIN_DATA_DIR="$HEAL_DATA" "$BIN" config >/dev/null
-if ! cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL"; then
-  echo "pack-smoke: FAIL — a stale wired skill was not healed by an ordinary command" >&2
+heal_fail() {
+  echo "pack-smoke: FAIL — $1" >&2
   rm -rf "$HEAL_HOME" "$HEAL_DATA"
   exit 1
-fi
+}
+cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL" ||
+  heal_fail "a stale wired skill was not healed by an ordinary command"
+[ "$(cat "$HEAL_HOME/.claude/skills/tenjin/SKILL.md")" = "a newer fetch" ] ||
+  heal_fail "the heal overwrote the hosted tenjin mirror"
 if [ -e "$HEAL_HOME/.claude/skills/tenjin-publish" ] || [ -e "$HEAL_HOME/.agents" ]; then
-  echo "pack-smoke: FAIL — the heal created a skill the operator never installed" >&2
-  rm -rf "$HEAL_HOME" "$HEAL_DATA"
-  exit 1
+  heal_fail "the heal created a skill the operator never installed"
 fi
 rm -rf "$HEAL_HOME" "$HEAL_DATA"
-echo "pack-smoke: stale wired skill healed, absent skills left absent (ok)"
+echo "pack-smoke: stale adapter healed, hosted mirror and absent skills untouched (ok)"
 
 # The signal contract, both lanes. Every step is asserted: the process must still
 # be alive when signalled, the signal must be delivered, the exit must be the

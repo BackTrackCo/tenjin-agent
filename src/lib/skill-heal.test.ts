@@ -6,9 +6,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { healWiredSkills } from './skill-heal';
-import { skillsHealLockPath } from './paths';
-import { resolveSkillsSource, SKILL_NAMES } from './skills-source';
-import { skillsDirsFor } from './skill-wiring';
+import { resolveSkillsSource } from './skills-source';
+import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, skillsDirsFor } from './skill-wiring';
 import type { Io } from './output';
 
 // The real packaged skills, so a heal that claims "matches this CLI" is compared
@@ -16,14 +15,11 @@ import type { Io } from './output';
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let home: string;
-let data: string;
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'tenjin-heal-home-'));
-  data = await mkdtemp(join(tmpdir(), 'tenjin-heal-data-'));
 });
 afterEach(async () => {
   await rm(home, { recursive: true, force: true });
-  await rm(data, { recursive: true, force: true });
 });
 
 function captureIo(isTTY = true) {
@@ -41,7 +37,7 @@ function captureIo(isTTY = true) {
 }
 
 function heal(io: Io, json = false): Promise<void> {
-  return healWiredSkills({ dir: data, io, json, homeDir: home, skillsSourceDir: SKILLS_SRC });
+  return healWiredSkills({ io, json, homeDir: home, skillsSourceDir: SKILLS_SRC });
 }
 
 const claudeDir = (): string => skillsDirsFor(home)[0]!;
@@ -92,47 +88,52 @@ describe('healWiredSkills', () => {
     await mkdir(dirname(fifo), { recursive: true });
     execFileSync('mkfifo', [fifo]);
     const search = await seedSkill(claudeDir(), 'tenjin-search');
-    const hosted = await seedSkill(claudeDir(), 'tenjin');
+    const shared = await seedSkill(sharedDir(), 'tenjin-publish');
     const { io, stderr } = captureIo();
     await heal(io);
     expect(await readFile(search, 'utf8')).toBe(await packaged('tenjin-search'));
-    expect(await readFile(hosted, 'utf8')).toBe(await packaged('tenjin'));
+    expect(await readFile(shared, 'utf8')).toBe(await packaged('tenjin-publish'));
     expect(stderr()).toContain('could not update');
     expect(stderr()).toContain(join(claudeDir(), 'tenjin-publish'));
   });
 
-  it('skips silently while another process holds the heal lock', async () => {
-    const path = await seedSkill(claudeDir(), 'tenjin-search');
-    await mkdir(skillsHealLockPath(data), { recursive: true });
+  // The mirror of tenjin.blog/skills.md may legitimately be NEWER on disk than the
+  // one this package ships, and `install` tells operators to re-fetch it from
+  // there, so an unattended rewrite would undo their fetch and make that advice a
+  // lie. Same skills `doctor`'s staleness check compares, for the same reason.
+  it('leaves the hosted tenjin mirror exactly as it found it', async () => {
+    const hosted = await seedSkill(claudeDir(), HOSTED_SKILL_NAME, 'a newer fetch\n');
+    await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
     await heal(io);
-    expect(await readFile(path, 'utf8')).toBe('stale\n');
-    expect(stderr()).toBe('');
-    expect(existsSync(skillsHealLockPath(data))).toBe(true); // still the holder's
+    expect(await readFile(hosted, 'utf8')).toBe('a newer fetch\n');
+    expect(stderr()).not.toContain(HOSTED_SKILL_NAME + '/');
   });
 
-  it('releases its own lock', async () => {
-    await seedSkill(claudeDir(), 'tenjin-search');
-    const { io } = captureIo();
+  // A machine carrying only the hosted skill is a working zero-install install,
+  // and nothing here is ours to refresh.
+  it('does nothing at all in a directory holding only the hosted skill', async () => {
+    const hosted = await seedSkill(sharedDir(), HOSTED_SKILL_NAME);
+    const { io, stderr } = captureIo();
     await heal(io);
-    expect(existsSync(skillsHealLockPath(data))).toBe(false);
+    expect(await readFile(hosted, 'utf8')).toBe('stale\n');
+    expect(stderr()).toBe('');
   });
 
-  it('heals both harness directories, and discloses the hosted mirror it replaced', async () => {
-    for (const name of SKILL_NAMES) {
+  it('heals both harness directories', async () => {
+    for (const name of CLI_SKILL_NAMES) {
       await seedSkill(claudeDir(), name);
       await seedSkill(sharedDir(), name);
     }
     const { io, stderr } = captureIo();
     await heal(io);
     for (const dir of [claudeDir(), sharedDir()]) {
-      for (const name of SKILL_NAMES) {
+      for (const name of CLI_SKILL_NAMES) {
         expect(await readFile(join(dir, name, 'SKILL.md'), 'utf8')).toBe(await packaged(name));
       }
     }
     expect(stderr()).toContain(claudeDir());
     expect(stderr()).toContain(sharedDir());
-    expect(stderr()).toContain('hosted tenjin skill');
   });
 
   it('says nothing to a machine consumer', async () => {
@@ -146,21 +147,12 @@ describe('healWiredSkills', () => {
   it('writes nothing when HOME is not absolute', async () => {
     const { io } = captureIo();
     await healWiredSkills({
-      dir: data,
       io,
       json: false,
       homeDir: 'relative-home',
       skillsSourceDir: SKILLS_SRC,
     });
     expect(existsSync('relative-home')).toBe(false);
-    expect(existsSync(skillsHealLockPath(data))).toBe(false);
-  });
-
-  it('does not touch the data dir when no skill is wired', async () => {
-    await rm(data, { recursive: true, force: true });
-    const { io } = captureIo();
-    await heal(io);
-    expect(existsSync(data)).toBe(false);
   });
 
   it('never rejects when the packaged source is gone', async () => {
@@ -168,7 +160,6 @@ describe('healWiredSkills', () => {
     const { io, stderr } = captureIo();
     await expect(
       healWiredSkills({
-        dir: data,
         io,
         json: false,
         homeDir: home,
