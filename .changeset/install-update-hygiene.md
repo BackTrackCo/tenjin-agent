@@ -75,10 +75,10 @@ install has) and says what state the machine is in.
 `tenjin doctor` now reports skills that are wired but not from this build.
 Updating the CLI does not update the copies install wrote, and every existing
 check passed the whole time an agent was reading an older version's
-instructions. Only the CLI adapters are compared, and only in directories a
-harness on this machine actually reads. When this build cannot read its own
-packaged copies that is reported as unverifiable rather than as a green tick,
-and the fix names the harness so it can actually clear.
+instructions. Only the CLI adapters are compared, in every skills directory that
+has them, whatever harnesses this machine turns out to have. When this build
+cannot read its own packaged copies that is reported as unverifiable rather than
+as a green tick, and the fix names the harness so it can actually clear.
 
 The AGENTS.md and CLAUDE.md pointer lines follow the same rules as the skill
 files: read through the same guarded descriptor (a FIFO at the path cannot hang
