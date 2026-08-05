@@ -267,11 +267,11 @@ instructions.
 Because that write is unattended, it is narrower than the `install` you ran
 yourself. It creates nothing you have not installed, and it rewrites only a
 regular file whose frontmatter `name:` says it is that skill, so a third-party
-skill sitting at one of those paths is left alone. It follows no symlink at any
-level, so a dotfiles-managed SKILL.md, skill directory or skills directory is
-never healed: `tenjin install` follows your link and writes through it, because
-you pointed it somewhere on purpose, and that is the command that keeps a
-symlinked skill current. The hosted `tenjin` mirror is never touched, because
+skill sitting at one of those paths is left alone. It follows no symlink at the
+three levels it writes: a dotfiles-managed SKILL.md, skill directory or skills
+directory is never healed. `tenjin install` follows your link and writes through
+it, because you pointed it somewhere on purpose, and that is the command that
+keeps a symlinked skill current. The hosted `tenjin` mirror is never touched, because
 your copy may be a newer fetch from
 [tenjin.blog/skills.md](https://tenjin.blog/skills.md) than this package ships. A
 rewritten file keeps its mode, and every rewrite prints one dim stderr line
