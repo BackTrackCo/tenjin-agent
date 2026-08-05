@@ -156,6 +156,13 @@ def _leaves_the_project(text: str) -> bool:
     return text.startswith(("/", "~", "@")) or text.startswith("..") or "/../" in text
 
 
+def _names_a_path(token: str) -> bool:
+    """Whole token or the part after an `=`, since that is where curl's form
+    flags put the path: `-F name=@/etc/passwd` is the canonical upload spelling
+    and the `@/etc/passwd` sits behind a field name."""
+    return _leaves_the_project(token) or _leaves_the_project(token.partition("=")[2])
+
+
 def _refusal_class(arg: str, following: str = "") -> str:
     """Which kind of refusal an unrecognised flag is, by what it carries.
 
@@ -166,11 +173,7 @@ def _refusal_class(arg: str, following: str = "") -> str:
     reach for. A flag carrying nothing path-shaped is a response this policy
     could not read, which is the runner's problem rather than the eval's."""
     carried = arg.partition("=")[2] or arg[2:]
-    return (
-        UNSANCTIONED
-        if _leaves_the_project(carried) or _leaves_the_project(following)
-        else UNRECOGNISED
-    )
+    return UNSANCTIONED if _names_a_path(carried) or _names_a_path(following) else UNRECOGNISED
 
 
 def _tenjin_argv_problem(args: list[str]) -> str | None:
@@ -199,10 +202,13 @@ def _tenjin_argv_problem(args: list[str]) -> str | None:
 # program does: `sed -f payload.sed` runs a script from disk and an awk program
 # reads ENVIRON without a filename ever appearing.
 #
-# `jq` is here in one narrow form only: exactly one positional filter and no
-# flags at all. Every way jq reaches a file needs a flag — `-f` for a program
-# from disk, `--rawfile`, `--slurpfile`, `--args`, or a filename argument — and
-# all of those are refused by the shape rather than by name. What a flagless
+# `jq` is here in one narrow form only: exactly one positional filter, and of
+# its flags only `-r` and `-c`, which choose how the output is printed and reach
+# nothing the bare form does not. Every way jq reaches a file needs some other
+# flag — `-f` for a program from disk, `--rawfile`, `--slurpfile`, `--args`, or
+# a filename argument — and all of those are refused by the shape rather than by
+# name. `-r` is here because it is the spelling an agent reaches for first after
+# a curl, and refusing it ended a whole paid run over an output format. What a flagless
 # program can still reach is the environment, through `env` and `$ENV`, and that
 # is inert here because the child environment is the nine-variable allowlist
 # documented in the README, with no production secret in it. The one file route
@@ -212,7 +218,7 @@ def _tenjin_argv_problem(args: list[str]) -> str | None:
 #
 # Anything not named here is refused, so this list is the whole grammar.
 PIPE_FILTERS = {
-    "jq": {"bare": 1, "switches": set(), "valued": set()},
+    "jq": {"bare": 1, "switches": {"-r", "--raw-output", "-c", "--compact-output"}, "valued": set()},
     "head": {"bare": 0, "switches": set(), "valued": {"-c", "-n", "--bytes", "--lines"}},
     "tail": {"bare": 0, "switches": set(), "valued": {"-c", "-n", "--bytes", "--lines"}},
     "wc": {

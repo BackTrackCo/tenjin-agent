@@ -231,11 +231,15 @@ when the command parses as one simple command with no shell operators at all, it
 exactly `curl` or `tenjin`, every argument is one this eval has a reason to allow, and every
 pipeline stage after it is one of a small set of inert shapers described flag by flag. `sed` and
 `awk` are not among them: each takes a program in a language of its own, and `sed -f payload.sed`
-runs one off the disk. `jq` is allowed in exactly one shape, a single positional filter with no
-flags at all, because every route jq has to a file needs a flag — `-f`, `--rawfile`,
-`--slurpfile`, or a filename argument — and the shape refuses all of them without naming any. A
+runs one off the disk. `jq` is allowed in one shape only: a single positional filter, plus `-r`
+and `-c`, which choose how the output is printed and reach nothing the bare form does not. Every
+route jq has to a file needs some other flag — `-f`, `--rawfile`, `--slurpfile`, or a filename
+argument — and the shape refuses all of them without naming any. `-r` earns its place by being
+the spelling an agent reaches for first after a curl, and refusing it ended a whole paid run
+over an output format. A
 flagless program can still read the environment through `env` and `$ENV`, which is inert here
-for the reason the next section gives: the child environment is a nine-variable allowlist with no
+for the reason the next section gives and which the self-test pins against the environment
+`child_env` actually builds: the child environment is a nine-variable allowlist with no
 production secret in it. `import` and `include` are refused in the filter text, since jq's module
 system loads from `~/.jq` and that is the one file route needing no flag. An unrecognised flag is
 a redaction rather than a pass, which is why curl's file-reading and upload flags never needed
