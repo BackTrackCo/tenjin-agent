@@ -270,6 +270,22 @@ export function isModelInvocationDisabled(skillMd: string): boolean {
   });
 }
 
+/**
+ * The `name:` a SKILL.md declares in its leading frontmatter, or null when it
+ * declares none. It is what a harness registers the skill AS, so it is also the
+ * cheapest evidence that a file at one of our paths is one of ours: the
+ * unattended self-heal refuses to overwrite a same-named third-party skill.
+ */
+export function skillFrontmatterName(skillMd: string): string | null {
+  const frontmatter = extractFrontmatter(skillMd);
+  if (frontmatter === null) return null;
+  for (const line of frontmatter) {
+    const m = /^name:\s*(.+?)\s*$/.exec(line);
+    if (m !== null) return (m[1] ?? '').replace(/^["']|["']$/g, '');
+  }
+  return null;
+}
+
 function extractFrontmatter(text: string): string[] | null {
   // Tolerate a UTF-8 BOM, CRLF, and leading blank lines before the opening fence.
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
