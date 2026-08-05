@@ -184,8 +184,9 @@ for attempt in 1 2 3 4 5; do
   wait "$WAITER_PID"
   WAITER_CODE=$?
   set -e
-  # The skills are written before the config lock is asked for, so the honest
-  # diagnostic for a waiter is the one naming what a re-run still has to finish.
+  # This diagnostic pins the lock-free ordering: the skills are already on disk by
+  # the time anything blocks on a lock, so a waiter reporting "nothing changed"
+  # would mean the wiring had moved back behind the lock.
   if [ "$WAITER_CODE" = "130" ] && grep -q "after the skills were written" "$LOCK_HOME/err"; then
     if [ ! -d "$LOCK_DATA/config.json.lock" ]; then
       echo "pack-smoke: FAIL — an interrupted WAITING install removed the holder's lock" >&2
