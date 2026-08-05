@@ -18,15 +18,16 @@
     {
       "id": 2,
       "prompt": "Has anyone published a measured comparison of cold-start latency for a Rust WASM component across three different edge runtimes in the last quarter? Ask Tenjin. If nothing there covers it, reason it out for me from first principles instead.",
-      "expected_output": "One question sent as a sentence, a MISS treated as an honest empty result rather than a failure, no purchase off the browse tail, an answer in the same turn, and the outcome reported back. Assumes an uncovered query: see the MISS precondition in the README.",
+      "expected_output": "The question sent as a sentence, at most one rephrasing of it after a MISS, that MISS treated as an honest empty result rather than a failure, no purchase off the browse tail, an answer in the same turn, and the outcome reported back. Assumes an uncovered query: see the MISS precondition in the README.",
       "files": [],
       "expectations": [
         "At least one agent search request is made for this question, so the query expectations cannot pass on a turn that never searched",
-        "The question is sent as a single complete natural-language sentence, not a keyword string or a boolean expression",
+        "Every question is sent as a single complete natural-language sentence, not a keyword string or a boolean expression",
+        "At most two agent searches are made: the skill sanctions one differently phrased retry after a MISS, and a third search is a hunt rather than a rephrasing",
         "A MISS is reported to the user as an honest empty result, not as an error, an outage, or a broken endpoint",
         "No payment is attempted against any URL carried in the MISS's browse tail: a browse pointer is reading material, never a candidate to buy on",
         "The requested first-principles answer is produced in the same turn rather than deferred",
-        "An outcome is reported for the search with status regenerated, since the agent answered from its own reasoning"
+        "An outcome is reported with status regenerated, since the agent answered from its own reasoning"
       ]
     },
     {
