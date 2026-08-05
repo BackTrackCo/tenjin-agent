@@ -3,15 +3,23 @@
 # Security pin mirrored from the tenjin repo — dropping it reddens
 # `pnpm audit` (ws is pulled in via viem).
 #
-# fast-uri: GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx. Drop once ajv's own
-# fast-uri floor clears 3.1.4.
+# fast-uri: GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx, GHSA-7p8r-x3mc-p8w7.
+# Drop once ajv's own fast-uri floor clears 3.1.5.
 #
 # esbuild: GHSA-g7r4-m6w7-qqqr. Drop once tsup/vitest bump their esbuild
 # floor past 0.28.1.
+#
+# brace-expansion: GHSA-rgw5-rvv9-x895 (via eslint/minimatch, dev-only). Drop
+# once minimatch's floor clears 5.0.9.
+#
+# ip-address: GHSA-mwp4-54f8-5fhr (via @modelcontextprotocol/sdk >
+# express-rate-limit). Drop once express-rate-limit's floor clears 10.3.1.
 overrides:
   'ws@>=8.0.0 <8.21.0': '8.21.0'
-  'fast-uri@>=3.0.0 <3.1.4': '3.1.4'
+  'fast-uri@>=3.0.0 <3.1.5': '3.1.5'
   'esbuild@>=0.27.3 <0.28.1': '0.28.1'
+  'brace-expansion@>=4.0.0 <5.0.9': '5.0.9'
+  'ip-address@>=10.0.0 <10.3.1': '10.3.1'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
