@@ -1887,6 +1887,28 @@ describe('runInstall: hosted skill already present (#35)', () => {
     }
   });
 
+  // The typed command follows a link the operator placed, one directory up as
+  // well as at the file. This is the half of the contract the unattended self-heal
+  // deliberately does NOT share (it skips both and leaves them here), so it is
+  // worth its own case: `install` has to remain the way a dotfiles-managed skill
+  // directory gets updated.
+  it('writes through a symlinked skill directory, keeping the link', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, 'SKILL.md'), 'what an older CLI shipped\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(managed, link);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+    );
+  });
+
   // A symlinked SKILL.md is written through to its target, so a denied write
   // happens in the link's TARGET directory, which no path under the skills tree
   // names. The fix must name that directory or the operator has nothing to check.

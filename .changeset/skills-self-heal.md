@@ -16,9 +16,10 @@ command in that sense and does not heal; the CLI surface is what this covers.)
 It writes unattended, so it is deliberately more cautious than the install you
 ran on purpose. It creates nothing: a skill that is not already in a directory is
 never put there. It rewrites only a regular file whose frontmatter `name:` says
-it is the skill in question, so a symlinked SKILL.md is left for `install` to
-follow instead of being written through, and a third-party skill sitting at one
-of our paths is left alone. It never touches the hosted `tenjin` skill, which
+it is the skill in question, so a third-party skill sitting at one of our paths
+is left alone. It follows no symlink, at any level: a symlinked SKILL.md, skill
+directory or skills directory is left for `install`, which follows your link on
+purpose because you placed it. It never touches the hosted `tenjin` skill, which
 mirrors [tenjin.blog/skills.md](https://tenjin.blog/skills.md) and may well be a
 newer fetch than this package ships. An updated file keeps the mode it had.
 

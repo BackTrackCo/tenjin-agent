@@ -136,6 +136,47 @@ describe('healWiredSkills', () => {
     expect(stderr()).toBe('');
   });
 
+  // The same rule one directory up. A dotfiles-managed skill DIRECTORY is the
+  // same deliberate operator choice as a dotfiles-managed SKILL.md, and we
+  // already declined to treat that as permission: following it writes outside
+  // the path the notice would name. Both targets are covered, inside HOME and
+  // outside it, because "outside" is the case where the write escapes entirely.
+  for (const where of ['inside', 'outside'] as const) {
+    it(`skips a symlinked skill directory pointing ${where} HOME`, async () => {
+      if (process.platform === 'win32') return;
+      const root = where === 'inside' ? home : await mkdtemp(join(tmpdir(), 'tenjin-heal-out-'));
+      const managed = join(root, 'dotfiles', 'tenjin-search');
+      await mkdir(managed, { recursive: true });
+      await writeFile(join(managed, 'SKILL.md'), stale('tenjin-search'));
+      await mkdir(claudeDir(), { recursive: true });
+      await symlink(managed, join(claudeDir(), 'tenjin-search'));
+      const { io, stderr } = captureIo();
+      try {
+        await heal(io);
+        expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(stale('tenjin-search'));
+        expect(stderr()).toBe('');
+      } finally {
+        if (where === 'outside') await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  // Two directories up is the same argument again: this one is ours as well.
+  it('skips a symlinked skills directory', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'skills');
+    await mkdir(join(managed, 'tenjin-search'), { recursive: true });
+    await writeFile(join(managed, 'tenjin-search', 'SKILL.md'), stale('tenjin-search'));
+    await mkdir(dirname(claudeDir()), { recursive: true });
+    await symlink(managed, claudeDir());
+    const { io, stderr } = captureIo();
+    await heal(io);
+    expect(await readFile(join(managed, 'tenjin-search', 'SKILL.md'), 'utf8')).toBe(
+      stale('tenjin-search'),
+    );
+    expect(stderr()).toBe('');
+  });
+
   it('skips a SKILL.md that is not a regular file', async () => {
     if (process.platform === 'win32') return;
     const fifo = join(claudeDir(), 'tenjin-search', 'SKILL.md');

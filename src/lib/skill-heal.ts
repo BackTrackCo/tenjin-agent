@@ -92,10 +92,16 @@ interface Target {
 /**
  * The (directory, skill) pairs this may rewrite, which is a deliberately narrow
  * set. A skill that is not there is never created, because presence is the
- * operator's consent to a directory. A destination that is not a REGULAR FILE is
- * left alone: `install` writes through a symlink on purpose, since the operator
- * pointed it somewhere, but doing that unattended turns any link at these paths
- * into a write to wherever it points.
+ * operator's consent to a directory.
+ *
+ * Nothing here is reached THROUGH a symlink. `install` follows one on purpose,
+ * since the operator pointed it somewhere; unattended, following one means a
+ * write landing wherever it points and a notice naming a path that is not where
+ * it landed. That argument does not get weaker one directory up, so every
+ * component this CLI creates is checked with `lstat`, not `stat`: the skills
+ * directory, the skill directory, and SKILL.md. Above them is the harness's own
+ * home, which every tool including the harness reaches through, so a link there
+ * is the operator's name for the place rather than a redirect around us.
  *
  * Gating SKILL.md gates the whole write, because it is the only file these skills
  * ship. The other gate, that the file is ours at all, needs its content and so
@@ -104,13 +110,20 @@ interface Target {
 function healable(home: string): Target[] {
   const found: Target[] = [];
   for (const dir of skillsDirsFor(home)) {
+    if (!isRealDirectory(dir)) continue;
     for (const name of CLI_SKILL_NAMES) {
+      if (!isRealDirectory(join(dir, name))) continue;
       const path = join(dir, name, 'SKILL.md');
       if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
       found.push({ dir, name, path });
     }
   }
   return found;
+}
+
+/** A directory, and not a symlink to one. */
+function isRealDirectory(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
 async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {

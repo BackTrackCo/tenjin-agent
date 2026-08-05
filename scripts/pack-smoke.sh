@@ -136,10 +136,11 @@ echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 # checkout. `CI` is cleared for these runs because the heal skips a build machine,
 # like the update nudge does.
 #
-# One run, four verdicts: a stale wired adapter is rewritten, and the three things
+# One run, five verdicts: a stale wired adapter is rewritten, and the four things
 # an unattended writer must not touch are not — the hosted `tenjin` mirror (the
 # copy on disk may be a newer fetch from tenjin.blog than this package ships), a
-# SYMLINKED destination (following it would write wherever it points), and a
+# symlinked SKILL.md and a symlinked skill DIRECTORY (following either writes
+# wherever it points, under a notice naming a path the write never reached), and a
 # same-named skill that is somebody else's by its frontmatter.
 HEAL_HOME="$(mktemp -d)"
 HEAL_DATA="$(mktemp -d)"
@@ -149,11 +150,15 @@ mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/te
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
   > "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
 printf 'a newer fetch\n' > "$HEAL_HOME/.claude/skills/tenjin/SKILL.md"
-# A VALID, stale tenjin-publish skill behind the link, which is the dotfiles setup
-# this guards: anything else would be refused by the frontmatter gate instead, and
-# the lstat gate would go untested.
+# VALID, stale skills behind both links, which is the dotfiles setup this guards:
+# anything else would be refused by the frontmatter gate instead, and the lstat
+# gates would go untested.
 printf -- '---\nname: tenjin-publish\n---\n\nstale\n' > "$HEAL_HOME/dotfiles-skill.md"
 ln -s "$HEAL_HOME/dotfiles-skill.md" "$HEAL_HOME/.claude/skills/tenjin-publish/SKILL.md"
+mkdir -p "$HEAL_HOME/dotfiles-skilldir"
+printf -- '---\nname: tenjin-publish\n---\n\nstale\n' \
+  > "$HEAL_HOME/dotfiles-skilldir/SKILL.md"
+ln -s "$HEAL_HOME/dotfiles-skilldir" "$HEAL_HOME/.agents/skills/tenjin-publish"
 printf -- '---\nname: acme-search\n---\n' > "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md"
 
 heal_fail() {
@@ -190,12 +195,15 @@ cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL" ||
   heal_fail "a stale wired skill was not healed by an ordinary command"
 [ "$(cat "$HEAL_HOME/.claude/skills/tenjin/SKILL.md")" = "a newer fetch" ] ||
   heal_fail "the heal overwrote the hosted tenjin mirror"
-[ "$(cat "$HEAL_HOME/dotfiles-skill.md")" = "$(printf -- '---\nname: tenjin-publish\n---\n\nstale')" ] ||
+STALE_PUBLISH="$(printf -- '---\nname: tenjin-publish\n---\n\nstale')"
+[ "$(cat "$HEAL_HOME/dotfiles-skill.md")" = "$STALE_PUBLISH" ] ||
   heal_fail "the heal wrote through a symlinked SKILL.md"
+[ "$(cat "$HEAL_HOME/dotfiles-skilldir/SKILL.md")" = "$STALE_PUBLISH" ] ||
+  heal_fail "the heal wrote through a symlinked skill directory"
 grep -q 'acme-search' "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md" ||
   heal_fail "the heal replaced a third-party skill sitting at one of our paths"
 rm -rf "$HEAL_HOME" "$HEAL_DATA"
-echo "pack-smoke: stale adapter healed; mirror, symlink and third-party skill untouched (ok)"
+echo "pack-smoke: stale adapter healed; mirror, both symlinks and third-party skill untouched (ok)"
 
 # 5) The heal's chunk is lazily imported, so a half-unpacked or corrupt install can
 # make that import fail. It must stay invisible: the command has already emitted
