@@ -290,6 +290,31 @@ describe('runDoctor — passing outcomes', () => {
     expect(readPathUrl).toBeDefined();
     expect(new URL(readPathUrl as string).searchParams.has('q')).toBe(false);
   });
+
+  it('every doctor check sends the tenjin-cli User-Agent and no X-Tenjin-Client', async () => {
+    const headersSeen: Record<string, string>[] = [];
+    const capturing: typeof fetch = (async (
+      input: Parameters<typeof fetch>[0],
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      headersSeen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+      const body = url.includes('/openapi.json') ? OPENAPI_OK : ARTICLES_OK;
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+    await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: capturing,
+    });
+    // api-contract, search-contract, and read-path each fetch (three requests).
+    expect(headersSeen.length).toBeGreaterThanOrEqual(3);
+    for (const headers of headersSeen) {
+      expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
+      expect(headers['x-tenjin-client']).toBeUndefined();
+    }
+  });
 });
 
 describe('runDoctor — required failures throw the mapped CliError', () => {

@@ -212,7 +212,7 @@ describe('runBuy, paid path', () => {
     expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100_000n);
   });
 
-  it('attaches X-Tenjin-Client on every request and X-Tenjin-Search-Id after a search', async () => {
+  it('attaches the tenjin-cli User-Agent on every request, never X-Tenjin-Client, and X-Tenjin-Search-Id after a search', async () => {
     const pr = buildPaymentRequired();
     await recordSearch(dir, {
       searchId: '0197aaaa-bbbb-cccc-dddd-abcabcabcabc',
@@ -232,7 +232,8 @@ describe('runBuy, paid path', () => {
       authorizer: fakeAuthorizer('allow'),
     });
     for (const call of calls) {
-      expect(call.headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
+      expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+      expect(call.headers['x-tenjin-client']).toBeUndefined();
     }
     // The attribution header rides ONLY the paid re-request (spec 09 §3), so a
     // search that never converts is not over-counted by probe/SIWX reads.

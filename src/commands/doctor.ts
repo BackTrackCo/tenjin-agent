@@ -28,7 +28,6 @@ import type {
   NotInvocableReason,
 } from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
-import { CLIENT_HEADER } from '../lib/client-meta';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
@@ -249,11 +248,7 @@ async function checkApiContract(
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    headers: { 'x-tenjin-client': CLIENT_HEADER },
-  });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -304,11 +299,7 @@ async function checkSearchContract(
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    headers: { 'x-tenjin-client': CLIENT_HEADER },
-  });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl });
   if (!res.ok) {
     return {
       result: {
@@ -741,11 +732,7 @@ async function checkReadPath(
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    headers: { 'x-tenjin-client': CLIENT_HEADER },
-  });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl });
   if (!res.ok) {
     return {
       result: {

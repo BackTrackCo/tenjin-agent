@@ -1,4 +1,5 @@
 import { CliError } from './errors';
+import { TENJIN_USER_AGENT } from './client-meta';
 
 /**
  * The single JSON client the whole CLI grows on: `doctor` uses it in B1, `search`
@@ -11,8 +12,22 @@ export interface FetchJsonOptions {
   timeoutMs: number;
   /** Override global fetch (tests inject a stub returning canned Responses). */
   fetchImpl?: typeof fetch;
-  /** Optional request headers (doctor sends the X-Tenjin-Client label). */
+  /** Optional request headers, merged onto the User-Agent this module always sends. */
   headers?: Record<string, string>;
+}
+
+/**
+ * Merge caller headers with the CLI's User-Agent identity. Built on the Headers
+ * API so the merge is case-insensitive: a caller header spelled `User-Agent` in
+ * any case is folded into the same slot `.set` then overwrites, so the identity
+ * this module sends can never be silently duplicated or shadowed by a caller
+ * value. Returned as a plain object (Headers.entries() is already
+ * lowercase-keyed) so callers and tests keep working with Record<string, string>.
+ */
+function withUserAgent(callerHeaders?: Record<string, string>): Record<string, string> {
+  const headers = new Headers(callerHeaders ?? {});
+  headers.set('user-agent', TENJIN_USER_AGENT);
+  return Object.fromEntries(headers.entries());
 }
 
 /** A successful 2xx whose body parsed as JSON. */
@@ -95,7 +110,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     try {
       res = await doFetch(url, {
         signal: controller.signal,
-        ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
+        headers: withUserAgent(opts.headers),
       });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
@@ -211,15 +226,19 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
   }, opts.timeoutMs);
 
   try {
-    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     let body: string | undefined;
+    // Headers.set below is case-insensitive, so an `accept`/`content-type` set
+    // here always wins the slot regardless of how a caller happened to case its
+    // own copy — the plain-object `??=` this replaced could not make that promise.
+    const merged = new Headers(opts.headers ?? {});
     if (opts.jsonBody !== undefined) {
       body = JSON.stringify(opts.jsonBody);
-      headers['content-type'] = 'application/json';
+      merged.set('content-type', 'application/json');
     }
-    if (opts.method === 'POST' || opts.method === 'PUT' || body !== undefined) {
-      headers['accept'] ??= 'application/json';
-    }
+    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+    if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
+    merged.set('user-agent', TENJIN_USER_AGENT);
+    const headers = Object.fromEntries(merged.entries());
 
     // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
     // A caller can also pin an unsigned request (blockRedirects) when the

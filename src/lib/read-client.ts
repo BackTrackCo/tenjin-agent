@@ -4,7 +4,6 @@ import type { PaymentRequired } from '@x402/core/types';
 import { CliError } from './errors';
 import { rateLimitError } from './agent-api';
 import { httpRequest } from './http';
-import { CLIENT_HEADER } from './client-meta';
 import { SIWX_HEADER } from './siwx';
 
 /**
@@ -13,8 +12,9 @@ import { SIWX_HEADER } from './siwx';
  * buy flow branches on: `entitled` (200 with the full body, free post, SIWX
  * re-read, or freshly paid), `payment_required` (402 with the decoded
  * PAYMENT-REQUIRED header + the leak-safe preview body), and `already_purchased`
- * (409 owned-re-pay gate, nothing charged). Purchase attribution rides
- * `X-Tenjin-Client` always and `X-Tenjin-Search-Id` when a search preceded the buy.
+ * (409 owned-re-pay gate, nothing charged). Purchase attribution rides the
+ * shared transport's User-Agent always and `X-Tenjin-Search-Id` when a search
+ * preceded the buy.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
@@ -174,10 +174,7 @@ export async function fetchRead(
 ): Promise<SessionReadResult>;
 export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<ReadResult>;
 export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<SessionReadResult> {
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    'x-tenjin-client': CLIENT_HEADER,
-  };
+  const headers: Record<string, string> = { accept: 'application/json' };
   if (opts.searchId !== undefined) headers['x-tenjin-search-id'] = opts.searchId;
   if (opts.siwxHeader !== undefined) headers[SIWX_HEADER] = opts.siwxHeader;
   if (opts.sessionHeaders !== undefined) Object.assign(headers, opts.sessionHeaders);

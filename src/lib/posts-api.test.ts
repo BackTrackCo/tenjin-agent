@@ -175,7 +175,8 @@ describe('publishPost — 201', () => {
     // The signed digest covers exactly those bytes.
     expect(signedBody(signed[0]!)).toBe(call.body);
     expect(call.headers['tenjin-session-delegation']).toBe('D');
-    expect(call.headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
+    expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(call.headers['x-tenjin-client']).toBeUndefined();
 
     expect(result).toMatchObject({
       resourceId: CREATED_POST.id,
@@ -401,6 +402,8 @@ describe('getOwnPost', () => {
     expect(call.url).toBe(`https://tenjin.blog/api/posts/${POST_ID}`);
     expect(call.body).toBe('');
     expect(call.headers['tenjin-session-delegation']).toBe('D');
+    expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(call.headers['x-tenjin-client']).toBeUndefined();
     // A bodiless request is signed without a content-digest over phantom bytes.
     expect(signed[0]).toEqual({ method: 'GET', url: call.url });
     expect(post.resource?.questionsAnswered).toEqual(['q']);
@@ -466,6 +469,8 @@ describe('updatePost', () => {
     );
     expect(signedBody(signed[0]!)).toBe(call.body);
     expect(signed[0]!.method).toBe('PUT');
+    expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(call.headers['x-tenjin-client']).toBeUndefined();
     expect(post.title).toBe('New');
   });
 

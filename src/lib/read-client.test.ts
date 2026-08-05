@@ -42,6 +42,13 @@ describe('fetchRead', () => {
     });
     expect(calls[0]?.headers['sign-in-with-x']).toBe('siwx-value');
     expect(calls[0]?.headers['payment-signature']).toBe('pay-value');
+    // The paid retry (signed x402 request) carries the same UA as every other
+    // request; the payment signature covers method/URL/body, never headers, so
+    // this identity field riding alongside it changes nothing about the signature.
+    for (const call of calls) {
+      expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+      expect(call.headers['x-tenjin-client']).toBeUndefined();
+    }
   });
 
   it('sends the session-key headers when provided, alongside the usual ones', async () => {
@@ -61,7 +68,8 @@ describe('fetchRead', () => {
     expect(calls[0]?.headers.signature).toBe('tenjin=:sig:');
     // The client's own headers survive the merge.
     expect(calls[0]?.headers.accept).toBe('application/json');
-    expect(calls[0]?.headers['x-tenjin-client']).toBeDefined();
+    expect(calls[0]?.headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(calls[0]?.headers['x-tenjin-client']).toBeUndefined();
   });
 
   it('reports session_rejected with the server code on a 401 to a session-signed read', async () => {

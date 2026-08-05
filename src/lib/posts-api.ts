@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { CliError } from './errors';
 import { httpRequest, type HttpResponse, type HttpResult } from './http';
-import { CLIENT_HEADER } from './client-meta';
 import { rateLimitError } from './agent-api';
 import { trimSlash } from './url';
 import type { ResourceCardInput } from './card';
@@ -234,7 +233,7 @@ export async function publishPost(
     const res = await httpRequest(url, {
       method: 'POST',
       timeoutMs: opts.timeoutMs,
-      headers: { 'x-tenjin-client': CLIENT_HEADER, ...authHeaders },
+      headers: { ...authHeaders },
       jsonBody: body,
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
@@ -417,7 +416,7 @@ export async function getOwnPost(
     const res = await httpRequest(url, {
       method: 'GET',
       timeoutMs: opts.timeoutMs,
-      headers: { accept: 'application/json', 'x-tenjin-client': CLIENT_HEADER, ...authHeaders },
+      headers: { accept: 'application/json', ...authHeaders },
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -474,7 +473,7 @@ export async function updatePost(
     const res = await httpRequest(url, {
       method: 'PUT',
       timeoutMs: opts.timeoutMs,
-      headers: { 'x-tenjin-client': CLIENT_HEADER, ...authHeaders },
+      headers: { ...authHeaders },
       jsonBody: body,
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });

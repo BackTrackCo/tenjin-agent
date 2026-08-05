@@ -144,7 +144,7 @@ describe('buildSearchRequest bounds (server strictObject mirror)', () => {
 });
 
 describe('postSearch', () => {
-  it('POSTs the request with the client-attribution header and parses CANDIDATES', async () => {
+  it('POSTs the request with the tenjin-cli User-Agent, never X-Tenjin-Client, and parses CANDIDATES', async () => {
     const { fetch, calls } = stubFetch(json(200, CANDIDATES));
     const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
@@ -155,7 +155,8 @@ describe('postSearch', () => {
     expect(calls[0]?.url).toBe('https://preview.example/api/agent/search');
     expect(calls[0]?.init.method).toBe('POST');
     const headers = calls[0]?.init.headers as Record<string, string>;
-    expect(headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
+    expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(headers['x-tenjin-client']).toBeUndefined();
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
       schemaVersion: 2,
       question: 'q',
@@ -490,6 +491,9 @@ describe('postOutcomes', () => {
     expect(res.accepted).toBe(1);
     expect(calls[0]?.url).toBe(`https://preview.example/api/agent/searches/${SEARCH_ID}/outcomes`);
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ status: 'used' });
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(headers['x-tenjin-client']).toBeUndefined();
   });
   it('POSTs a batch as an array', async () => {
     const { fetch, calls } = stubFetch(json(202, { accepted: 2 }));
