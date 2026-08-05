@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -32,10 +33,13 @@ from run_output_eval import (  # noqa: E402
     EXEC_ALLOWED,
     attempt_totals,
     grade_problem,
+    rate,
+    show,
     summarize,
     unusable_configurations,
 )
-from run_trigger_eval import invalid_reason, unusable_samples  # noqa: E402
+from run_trigger_eval import _fmt, _rate, invalid_reason, unusable_samples  # noqa: E402
+from sentinel import start_sentinel  # noqa: E402
 
 
 def sample(**overrides: object) -> dict:
@@ -197,6 +201,46 @@ class OutputConfigurations(unittest.TestCase):
 
     def test_missing_records_block_aggregation(self) -> None:
         self.assertEqual(len(unusable_configurations(self.jobs, {}, {})), 1)
+
+    def test_a_withheld_bash_result_blocks_aggregation(self) -> None:
+        # A clean run and a clean grading, graded on a log the command policy
+        # took the response out of. That used to score and publish.
+        runs = {(1, True): {"error": None, "bash_results_withheld": 1}}
+        broken = unusable_configurations(self.jobs, runs, {(1, True): BOTH})
+        self.assertEqual(len(broken), 1)
+        self.assertIsNotNone(broken[0]["evidence"])
+
+
+class Denominators(unittest.TestCase):
+    """`delta` is the headline, and it is a difference of two rates."""
+
+    def test_ungraded_stays_in_the_denominator(self) -> None:
+        self.assertEqual(rate([1, 0, 5]), 0.167)
+
+    def test_an_arm_that_did_nothing_does_not_tie_the_arm_that_did(self) -> None:
+        # Six passes with the skill against one pass and five expectations that
+        # never had a precondition. Dropping ungraded scored both 1.0.
+        self.assertEqual(rate([6, 0, 0]), 1.0)
+        self.assertGreater(rate([6, 0, 0]) - rate([1, 0, 5]), 0.8)
+
+    def test_both_arms_use_the_same_rule(self) -> None:
+        self.assertEqual(rate([1, 0, 5]), rate([1, 0, 5]))
+        self.assertEqual(rate([3, 3, 0]), 0.5)
+
+    def test_an_empty_slice_is_null_not_zero(self) -> None:
+        self.assertIsNone(rate([0, 0, 0]))
+        self.assertEqual(show(None), "n/a")
+        self.assertEqual(show(None, signed=True), "n/a")
+        self.assertEqual(show(0.0), "0.00")
+
+
+class EmptyTriggerSlices(unittest.TestCase):
+    def test_an_all_negative_set_reports_no_positive_rate(self) -> None:
+        self.assertIsNone(_rate([]))
+        self.assertIn("n/a", _fmt([]))
+
+    def test_a_real_all_fail_still_reports_zero(self) -> None:
+        self.assertEqual(_rate([{"passed": False}]), 0.0)
 
 
 SECRET = "sk-live-DO-NOT-FORWARD-4471"
@@ -494,6 +538,51 @@ class DiscardedAttemptEvidence(unittest.TestCase):
         self.assertEqual(totals["attempts"], 1)
 
 
+class TheSentinelIsNotItselfAChannel(unittest.TestCase):
+    """The one module whose job is to watch an exfil attempt without being one.
+
+    `Bash(curl:*)` is a prefix grant, so a query string is as reachable as a
+    body, and what the sentinel records is concatenated onto the graded log
+    after the redactor has already run."""
+
+    MARKER = "MARKER-DO-NOT-RECORD-8823"
+
+    def hit(self, target: str, body: bytes | None = None) -> list:
+        post = start_sentinel()
+        try:
+            request = urllib.request.Request(post.origin + target, data=body)
+            urllib.request.urlopen(request, timeout=5).read()
+        finally:
+            post.stop()
+        return post.hits
+
+    def test_the_route_is_kept_and_the_query_is_a_digest(self) -> None:
+        hits = self.hit(f"/api/posts?body={self.MARKER}")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].path, "/api/posts")
+        self.assertGreater(hits[0].query_bytes, len(self.MARKER))
+        self.assertNotIn(self.MARKER, hits[0].describe())
+
+    def test_the_marker_reaches_neither_the_benchmark_nor_the_grader_log(self) -> None:
+        hits = self.hit(f"/api/posts?body={self.MARKER}")
+        # Both places run_once_for puts it: the JSON the report is built from,
+        # and the log string interpolated into the grader's prompt.
+        recorded = json.dumps([h.describe() for h in hits])
+        post_summary = "; ".join(h.describe() for h in hits)
+        self.assertNotIn(self.MARKER, recorded)
+        self.assertNotIn(self.MARKER, post_summary)
+
+    def test_a_body_is_still_only_a_digest(self) -> None:
+        hits = self.hit("/api/posts", body=self.MARKER.encode("utf-8"))
+        self.assertNotIn(self.MARKER, hits[0].describe())
+        self.assertEqual(hits[0].bytes_received, len(self.MARKER))
+
+    def test_a_plain_route_reads_as_before(self) -> None:
+        hits = self.hit("/api/posts")
+        self.assertEqual(hits[0].query_bytes, 0)
+        self.assertTrue(hits[0].describe().startswith("GET /api/posts ("))
+
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -555,6 +644,52 @@ class TheGatesAreWiredIn(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("RUN INVALID", out.getvalue())
+        self.assertFalse((workspace / "benchmark.json").exists(), "a benchmark was written")
+
+    def test_the_output_runner_abandons_a_run_whose_evidence_was_withheld(self) -> None:
+        import run_output_eval
+
+        workspace = Path(tempfile.mkdtemp(prefix="selftest-withheld-"))
+        argv = [
+            "run_output_eval.py",
+            "--eval-set", str(REPO / "evals/tenjin/evals.json"),
+            "--skill", str(REPO / "skills/tenjin"),
+            "--workspace", str(workspace),
+            "--only", "6",
+            "--max-attempts", "2",
+            "--no-preflight",
+        ]
+        # A run and a grading that are clean in every other respect, so the
+        # withheld count is the only thing standing between this and a
+        # published number.
+        withheld = {
+            "log": "TOOL Bash {}\nRESULT [redacted Bash result for ...]",
+            "answer": "",
+            "cost_usd": 0.0,
+            "turns": 2,
+            "result": "success",
+            "error": None,
+            "bash_results_withheld": 1,
+        }
+
+        def all_pass(case: dict, *_args: object, **_kwargs: object) -> dict:
+            return {
+                "grades": [
+                    {"expectation": e, "grade": "pass", "evidence": "the log"}
+                    for e in case["expectations"]
+                ]
+            }
+
+        with mock.patch.object(run_output_eval, "run_case", return_value=withheld), mock.patch.object(
+            run_output_eval, "grade", side_effect=all_pass
+        ), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(
+            io.StringIO()
+        ) as out, contextlib.redirect_stderr(io.StringIO()):
+            exit_code = run_output_eval.main()
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("RUN INVALID", out.getvalue())
+        self.assertIn("withheld", out.getvalue())
         self.assertFalse((workspace / "benchmark.json").exists(), "a benchmark was written")
 
 

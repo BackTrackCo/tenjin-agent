@@ -394,15 +394,20 @@ def main() -> int:
     return 0
 
 
-def _rate(queries: list[dict]) -> float:
+def _rate(queries: list[dict]) -> float | None:
+    # None rather than 0.0. An all-negative set has no positives to score, and
+    # `positive_pass_rate: 0.0` in results.json is indistinguishable from every
+    # positive failing once someone quotes the file into a PR body.
     if not queries:
-        return 0.0
+        return None
     return round(sum(1 for q in queries if q["passed"]) / len(queries), 3)
 
 
 def _fmt(queries: list[dict]) -> str:
     passed = sum(1 for q in queries if q["passed"])
-    return f"{passed}/{len(queries)} = {_rate(queries):.2f}"
+    rate = _rate(queries)
+    shown = "n/a" if rate is None else f"{rate:.2f}"
+    return f"{passed}/{len(queries)} = {shown}"
 
 
 if __name__ == "__main__":

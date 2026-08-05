@@ -474,22 +474,36 @@ def unusable_configurations(
     Separate from main() for the same reason as the trigger gate: the property
     worth proving is that a failed executor run or a partial, misordered or
     invalidly-labelled grade array cannot contribute to a pass rate, and that is
-    a property of this function rather than of a run."""
+    a property of this function rather than of a run.
+
+    A withheld Bash result belongs here too. The command policy fails closed, so
+    a spelling it does not recognise costs the run the response the case is
+    graded on, and the grader then grades a log with a hole in it. That reads as
+    the skill doing badly rather than as a measurement that did not happen, which
+    is the same flattering-direction error in a different suit."""
     broken = []
     for case, with_skill in jobs:
         key = (case["id"], with_skill)
         run = runs.get(key)
         grading = graded.get(key)
         executor_fault = "no run was recorded" if run is None else run.get("error")
+        withheld = 0 if run is None else run.get("bash_results_withheld", 0)
+        evidence_fault = (
+            f"{withheld} Bash result(s) withheld by the command policy, so the "
+            "response this configuration is graded on is not in the log"
+            if withheld
+            else None
+        )
         grading_fault = (
             "no grading was recorded" if grading is None else grade_problem(case, grading)
         )
-        if executor_fault is not None or grading_fault is not None:
+        if executor_fault is not None or evidence_fault is not None or grading_fault is not None:
             broken.append(
                 {
                     "case": case["id"],
                     "configuration": "with_skill" if with_skill else "without_skill",
                     "executor": executor_fault,
+                    "evidence": evidence_fault,
                     "grading": grading_fault,
                 }
             )
@@ -504,6 +518,26 @@ def pass_rate(grades: list[dict]) -> tuple[int, int, int]:
     failed = sum(1 for g in grades if g.get("grade") == "fail")
     ungraded = sum(1 for g in grades if g.get("grade") == "ungraded")
     return passed, failed, ungraded
+
+
+def rate(slot: list[int]) -> float | None:
+    """Passes over every expectation, ungraded included, or None for an empty slice.
+
+    Both arms of a case are graded against the same expectation list, but they do
+    not accumulate `ungraded` at the same rate: the no-skill arm is the one whose
+    expectations most often have no precondition to evaluate. Dropping ungraded
+    from the denominator therefore scored 1 pass / 5 ungraded the same 1.0 as 6
+    passes, and `delta` printed +0.00 for a case where only the skill did any
+    work. An expectation a run never exercised is not one it met."""
+    total = slot[0] + slot[1] + slot[2]
+    return round(slot[0] / total, 3) if total else None
+
+
+def show(value: float | None, signed: bool = False) -> str:
+    """`None` prints as n/a rather than as 0.00, which reads as a real all-fail."""
+    if value is None:
+        return "n/a"
+    return f"{value:+.2f}" if signed else f"{value:.2f}"
 
 
 def main() -> int:
@@ -697,7 +731,7 @@ def main() -> int:
         print(f"\nRUN INVALID, nothing aggregated. {len(broken)} configuration(s) unusable.")
         print("A pass rate here would be computed over the expectations that survived:")
         for entry in broken:
-            fault = entry["executor"] or entry["grading"]
+            fault = entry["executor"] or entry["evidence"] or entry["grading"]
             print(f"  - case {entry['case']} {entry['configuration']}: {fault}")
         print(f"  detail    {detail}")
         return 2
@@ -731,14 +765,15 @@ def main() -> int:
             }
         report["cases"].append(entry)
 
-    def rate(slot: list[int]) -> float:
-        decided = slot[0] + slot[1]
-        return round(slot[0] / decided, 3) if decided else 0.0
-
+    with_rate, without_rate = rate(totals[True]), rate(totals[False])
     report["summary"] = {
-        "with_skill": {"passed": totals[True][0], "failed": totals[True][1], "ungraded": totals[True][2], "pass_rate": rate(totals[True])},
-        "without_skill": {"passed": totals[False][0], "failed": totals[False][1], "ungraded": totals[False][2], "pass_rate": rate(totals[False])},
-        "delta": round(rate(totals[True]) - rate(totals[False]), 3),
+        "with_skill": {"passed": totals[True][0], "failed": totals[True][1], "ungraded": totals[True][2], "pass_rate": with_rate},
+        "without_skill": {"passed": totals[False][0], "failed": totals[False][1], "ungraded": totals[False][2], "pass_rate": without_rate},
+        "delta": (
+            None
+            if with_rate is None or without_rate is None
+            else round(with_rate - without_rate, 3)
+        ),
         "executor_cost_usd": round(cost, 4),
     }
 
@@ -747,9 +782,9 @@ def main() -> int:
 
     summary = report["summary"]
     print(f"\n{name} output cases")
-    print(f"  with skill    {summary['with_skill']['pass_rate']:.2f}  ({summary['with_skill']['passed']} pass, {summary['with_skill']['failed']} fail, {summary['with_skill']['ungraded']} ungraded)")
-    print(f"  without skill {summary['without_skill']['pass_rate']:.2f}  ({summary['without_skill']['passed']} pass, {summary['without_skill']['failed']} fail, {summary['without_skill']['ungraded']} ungraded)")
-    print(f"  delta         {summary['delta']:+.2f}")
+    print(f"  with skill    {show(summary['with_skill']['pass_rate'])}  ({summary['with_skill']['passed']} pass, {summary['with_skill']['failed']} fail, {summary['with_skill']['ungraded']} ungraded)")
+    print(f"  without skill {show(summary['without_skill']['pass_rate'])}  ({summary['without_skill']['passed']} pass, {summary['without_skill']['failed']} fail, {summary['without_skill']['ungraded']} ungraded)")
+    print(f"  delta         {show(summary['delta'], signed=True)}")
     print(f"  benchmark     {out}")
 
     # Printed rather than buried in the JSON: a hit means an agent obeyed an
@@ -772,17 +807,6 @@ def main() -> int:
         print(f"  INJECTION OBEYED  case {case_id} {slot}{where}: {'; '.join(hits)}")
     if not obeyed:
         print("  injection         no attempt of any case reached the inert sentinel")
-    withheld = [
-        (case["id"], slot, count)
-        for case in report["cases"]
-        for slot, configuration in case["configurations"].items()
-        if (count := configuration.get("bash_results_withheld", 0))
-    ]
-    if withheld:
-        # Read this before reading a low score: a case graded on a response the
-        # command policy withheld scores badly for a reason that is not the skill.
-        detail = ", ".join(f"case {c} {s} x{n}" for c, s, n in withheld)
-        print(f"  withheld          {sum(n for _, _, n in withheld)} Bash result(s): {detail}")
     return 0
 
 
