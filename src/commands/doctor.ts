@@ -427,8 +427,15 @@ async function checkSkills(
   // Wired is not the same as CURRENT. `npm i -g tenjin-cli` updates the binary and
   // nothing else, so the copies install wrote stay at whatever version wrote them
   // until someone re-runs install, and every check above passes the whole time.
+  //
+  // EVERY directory, not just the ones in play. The checks above ask what a
+  // harness on this machine reads; this one has to cover what the self-heal
+  // writes, which is any directory holding one of our adapters. A ~/.agents/skills
+  // that fell out of play (a fallback install, then Claude Code arrives) is where
+  // the heal keeps working and, when it cannot, keeps quiet: reporting a narrower
+  // set than it writes would leave a stale directory nothing ever names.
   const { stale, verifiable } = await compareWiredSkills(
-    wiring.filter((w) => harnessInPlay(home, w.dir, present, requested)).map((w) => w.dir),
+    wiring.map((w) => w.dir),
     skillsSourceDir,
   );
   if (!verifiable) {
@@ -483,6 +490,13 @@ async function checkSkills(
  * Only the ADAPTERS are compared: the hosted mirror is a copy of
  * tenjin.blog/skills.md that an operator may legitimately have re-fetched newer
  * than this package ships.
+ *
+ * This is also where a skill the post-command self-heal could NOT rewrite
+ * surfaces. That writer stays silent about its failures on purpose: a cause it
+ * cannot clear (an unwritable skills directory) would otherwise print the same
+ * line on every command forever. Stale here means exactly that, and the fix names
+ * the harness. For the handoff to hold, the CALLER has to pass every directory
+ * the heal can reach, not only the ones a detected harness reads.
  */
 async function compareWiredSkills(
   dirs: readonly string[],

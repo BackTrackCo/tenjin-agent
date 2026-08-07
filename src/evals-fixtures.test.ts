@@ -53,7 +53,7 @@ interface TriggerCase {
   rationale: string;
 }
 
-const OUTPUT_FILES = ['tenjin-search/evals.json', 'tenjin-publish/evals.json'] as const;
+const FIXTURE_PATHS = walkFixtures();
 
 // The two skills that ship to npm (package.json `files`), so a stale verb in
 // them reaches every installed agent. The vendored `skills/tenjin/` mirror is
@@ -62,17 +62,29 @@ const OUTPUT_FILES = ['tenjin-search/evals.json', 'tenjin-publish/evals.json'] a
 const SHIPPED_SKILLS = ['tenjin-search/SKILL.md', 'tenjin-publish/SKILL.md'] as const;
 
 /**
- * Everything both guards below sweep, read once, each carrying the label a
+ * Everything the two verb guards sweep, read once, each carrying the label a
  * failure names it by. The fixtures and the shipped skills live under different
  * roots, so the text travels with the entry rather than the path.
  */
 const SOURCES: ReadonlyArray<{ label: string; text: string }> = [
-  ...walkFixtures().map((path) => ({ label: `evals/${path}`, text: read(path) })),
+  ...FIXTURE_PATHS.map((path) => ({ label: `evals/${path}`, text: read(path) })),
   ...SHIPPED_SKILLS.map((path) => ({
     label: `skills/${path}`,
     text: readFileSync(`${SKILLS_DIR}${path}`, 'utf8'),
   })),
 ];
+
+// Derived from the walk rather than listed, so a skill's fixtures are guarded
+// the day they land instead of the day someone remembers to add them here.
+const OUTPUT_FILES = FIXTURE_PATHS.filter((path) => path.endsWith('/evals.json'));
+const TRIGGER_FILES = FIXTURE_PATHS.filter((path) => path.endsWith('/trigger-eval.json'));
+
+// The deferral probe is a different instrument from the balanced set above, so
+// the balance rule does not apply to it: every query states that no CLI is
+// available, and a pass is the skill standing down rather than firing. What has
+// to hold instead is that it stays all-negative and keeps a balanced set beside
+// it, because on its own a description that never fires at all would ace it.
+const DEFER_FILES = FIXTURE_PATHS.filter((path) => path.endsWith('/trigger-eval-defer.json'));
 
 // Verbs the CLI has retired, and what replaced them. The invocation check below
 // only sees backtick-quoted commands, so on its own it reddens the build for
@@ -149,14 +161,81 @@ describe('eval fixtures', () => {
     }
   });
 
-  it('trigger set is balanced and free of duplicate queries', () => {
-    const cases = JSON.parse(read('tenjin-search/trigger-eval.json')) as TriggerCase[];
+  it.each(TRIGGER_FILES)('%s is balanced and free of duplicate queries', (path) => {
+    const cases = JSON.parse(read(path)) as TriggerCase[];
     const positives = cases.filter((c) => c.should_trigger);
 
     expect(cases.length).toBe(20);
     expect(positives.length).toBe(cases.length - positives.length);
     expect(new Set(cases.map((c) => c.query)).size).toBe(cases.length);
     for (const c of cases) expect(c.rationale.length, c.query).toBeGreaterThan(0);
+  });
+
+  it('the deferral probe is all-negative and sits beside a balanced trigger set', () => {
+    // Named rather than merely walked: the probe guards a gate the balanced set
+    // cannot reach (this skill standing down when the CLI it needs is absent),
+    // so deleting the file has to redden the build rather than pass vacuously.
+    expect(DEFER_FILES).toContain('tenjin-search/trigger-eval-defer.json');
+
+    for (const path of DEFER_FILES) {
+      const cases = JSON.parse(read(path)) as TriggerCase[];
+      expect(cases.length, `${path} is empty`).toBeGreaterThan(0);
+      expect(
+        cases.filter((c) => c.should_trigger).map((c) => c.query),
+        `${path} holds a positive; a deferral probe grades only standing down`,
+      ).toEqual([]);
+      expect(new Set(cases.map((c) => c.query)).size).toBe(cases.length);
+      for (const c of cases) expect(c.rationale.length, c.query).toBeGreaterThan(0);
+
+      const balanced = path.replace('trigger-eval-defer.json', 'trigger-eval.json');
+      expect(
+        TRIGGER_FILES,
+        `${path} has no ${balanced} beside it, so nothing measures the firing half`,
+      ).toContain(balanced);
+    }
+  });
+
+  // The injection fixtures are payloads that an agent under test is meant to
+  // sometimes obey: the run where such a case earns its keep is the run where an
+  // agent collects local state and sends it somewhere. So the destination they
+  // name has to be one that cannot receive anything, and that is a property to
+  // enforce rather than to keep remembering. The runner substitutes the
+  // placeholder with a loopback sentinel at seed time (harness/sentinel.py).
+  it('no seeded fixture body names an off-machine destination', () => {
+    const runner = readFileSync(
+      fileURLToPath(new URL('../evals/harness/run_output_eval.py', import.meta.url)),
+      'utf8',
+    );
+    const placeholder = /^SENTINEL_PLACEHOLDER = "([^"]+)"$/m.exec(runner)?.[1];
+    expect(placeholder, 'run_output_eval.py declares no SENTINEL_PLACEHOLDER').toBeDefined();
+
+    // Everything a case seeds, plus everything sitting in a fixtures directory
+    // waiting to be seeded, since the second becomes the first without a code
+    // change.
+    const seeded = new Set([
+      ...OUTPUT_FILES.flatMap((path) =>
+        (JSON.parse(read(path)) as EvalFile).evals.flatMap((c) => c.files),
+      ),
+      ...FIXTURE_PATHS.filter((path) => path.includes('/fixtures/')),
+    ]);
+    expect(seeded.size).toBeGreaterThan(0);
+
+    let usesPlaceholder = 0;
+    for (const path of seeded) {
+      const body = read(path);
+      expect(
+        body.match(/\bhttps?:\/\/[^\s)"'`]+/gi) ?? [],
+        `${path} names an absolute URL; a seeded payload must point at ${placeholder}, which the runner replaces with a loopback sentinel`,
+      ).toEqual([]);
+      if (body.includes(placeholder as string)) usesPlaceholder += 1;
+    }
+
+    // A rename on the Python side would otherwise leave the literal placeholder
+    // in the agent's workspace: harmless, but the case would stop measuring.
+    expect(
+      usesPlaceholder,
+      `no fixture uses ${placeholder}, so either the payload lost its destination or the constant was renamed on one side only`,
+    ).toBeGreaterThan(0);
   });
 
   // The drift guard. A fixture may only name a command the CLI actually has.

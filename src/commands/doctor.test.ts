@@ -806,7 +806,12 @@ describe('runDoctor — skill wiring', () => {
         expect(skills.detail).not.toContain(`${claudeSkills()}: `);
       });
 
-      it('is the ONLY reason that state warns: no record, no warning', async () => {
+      // Without the record, that shadowed skill is not what doctor warns about:
+      // the #35 rule is intact. This fixture's shadowed copy also differs from the
+      // packaged bytes, which the staleness branch now reports wherever it finds
+      // it, because the self-heal writes to that directory too. Both claims are
+      // asserted, so neither can quietly absorb the other.
+      it('does not warn about the shadowed skill without the record', async () => {
         for (const name of ['tenjin-search', 'tenjin-publish']) {
           await writeSkillIn(claudeSkills(), name);
         }
@@ -820,7 +825,9 @@ describe('runDoctor — skill wiring', () => {
           fetchImpl: healthyFetch,
         });
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
-        expect(skills.status).toBe('ok');
+        expect(skills.detail).not.toContain('not model-invocable');
+        expect(skills.detail).toContain('not from this CLI build');
+        expect(skills.fix).toBe('tenjin install --harness shared');
       });
 
       it('rides in the data as `requested`, leaving `harnessPresent` a detection fact', async () => {
@@ -1187,6 +1194,39 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('not from this CLI build');
+    await rm(src, { recursive: true, force: true });
+  });
+
+  // The self-heal writes to any directory holding our adapters, whatever this
+  // machine's harnesses are, and stays silent when it cannot. If staleness were
+  // only reported for directories in play, ~/.agents/skills on a Claude-only
+  // machine (a fallback install, then Claude Code arrives) would be a directory
+  // the heal keeps rewriting and nothing ever names when that stops working.
+  it('reports a stale directory no harness here reads', async () => {
+    const src = await mkdtemp(join(tmpdir(), 'tenjin-pkg-'));
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(src, name), { recursive: true });
+      await writeFile(join(src, name, 'SKILL.md'), 'current\n');
+    }
+    // Claude is detected (its home dir is what `wire` creates) and Codex is not,
+    // which is exactly what drops ~/.agents/skills out of play.
+    await wire('current\n');
+    const shared = join(skillHome, '.agents', 'skills');
+    for (const name of ['tenjin-search', 'tenjin-publish']) {
+      await mkdir(join(shared, name), { recursive: true });
+      await writeFile(join(shared, name, 'SKILL.md'), 'what an older CLI shipped\n');
+    }
+    const res = await runDoctor(ctxFor(), {
+      homeDir: skillHome,
+      skillsSourceDir: src,
+      which: () => false,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('not from this CLI build');
+    expect(check.detail).toContain(shared);
     await rm(src, { recursive: true, force: true });
   });
 

@@ -1,0 +1,22 @@
+[
+  {
+    "query": "There is no tenjin CLI on this machine and I cannot install one. Is there a maintained benchmark comparing pgvector HNSW against IVFFlat recall and latency at one million rows?",
+    "should_trigger": false,
+    "rationale": "The maintained-benchmark positive with one gate flipped: every reason to search holds, the CLI this skill runs on is absent, so the hosted skill owns it."
+  },
+  {
+    "query": "No tenjin CLI here, only curl. What is the tested workaround for the MCP TypeScript SDK stdio transport exiting non-zero on a clean stdin EOF?",
+    "should_trigger": false,
+    "rationale": "The verified-gotcha positive with the same gate flipped, and it names the one tool the zero-install path actually needs."
+  },
+  {
+    "query": "Nothing is installed on this box beyond curl. I would rather buy an answer than derive it: has anyone published a measured Base USDC settlement latency study? Check Tenjin.",
+    "should_trigger": false,
+    "rationale": "Verbatim from the hosted skill's positives, where this skill fired alongside it in the 2026-07-30 baseline."
+  },
+  {
+    "query": "No CLI here, only curl. Before I pay for https://tenjin.blog/a/aria/next-16-migration, check whether it actually covers Next 16. I do not want to buy the wrong version.",
+    "should_trigger": false,
+    "rationale": "Verbatim from the hosted skill's positives: an inspect-before-paying ask whose every mechanic is a CLI verb this skill cannot reach."
+  }
+]
