@@ -115,6 +115,17 @@ export function emitNotice(io: Io, text: string, opts: EmitOptions = {}): void {
 }
 
 /**
+ * The same dim stderr line, delivered whatever the surface is: no TTY gate and no
+ * `--json` gate. Only for an advisory that reports a WRITE to the operator's own
+ * files, where a piped or agent-driven run is precisely the case that must not
+ * have it happen in silence. stdout is untouched either way, so the exactly-one
+ * JSON object contract is unaffected.
+ */
+export function emitWriteNotice(io: Io, text: string): void {
+  io.stderr.write(`${paint(io, 'dim', sanitizeForTerminal(text))}\n`);
+}
+
+/**
  * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
  * formatting, and invisible tag/BOM characters from a string headed for a
  * terminal. Commands apply this to every SERVER-sourced string (titles,

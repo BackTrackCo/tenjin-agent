@@ -200,14 +200,19 @@ describe('candidate via main (one JSON object per invocation)', () => {
     return { io: { stdout: mk(), stderr: mk(), isTTY: false }, stdout: () => out.join('') };
   }
 
-  let prevDataDir: string | undefined;
+  // HOME goes with the data dir: the dispatcher heals the wired skills after every
+  // command, and these run the real one.
+  const prevEnv: Record<string, string | undefined> = {};
   beforeEach(() => {
-    prevDataDir = process.env.TENJIN_DATA_DIR;
+    for (const key of ['HOME', 'TENJIN_DATA_DIR']) prevEnv[key] = process.env[key];
+    process.env.HOME = dir;
     process.env.TENJIN_DATA_DIR = dir;
   });
   afterEach(() => {
-    if (prevDataDir === undefined) delete process.env.TENJIN_DATA_DIR;
-    else process.env.TENJIN_DATA_DIR = prevDataDir;
+    for (const [key, value] of Object.entries(prevEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   it('add emits exactly one success envelope, exits 0, and parks the draft', async () => {

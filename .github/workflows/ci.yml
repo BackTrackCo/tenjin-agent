@@ -39,9 +39,13 @@ jobs:
       # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
       # (scheduled + dispatch) so a server blip can never red an unrelated PR.
       - run: pnpm run check
-      # Blocking supply-chain gate (fails on high/critical). Runs after
-      # build/test so an advisory/network flake can't mask their signal.
-      - run: pnpm audit --audit-level=high
+      # Supply-chain advisory scan, WARN-ONLY: advisories publish against a
+      # frozen lockfile, so a blocking gate reds every open PR for drift
+      # unrelated to its diff. A hit annotates the run; clearing it is a
+      # range-scoped override in pnpm-workspace.yaml (see the entries there).
+      - name: Audit (warn-only)
+        run: |
+          pnpm audit --audit-level=high || echo "::warning title=pnpm audit::high/critical advisories in the lockfile; add a range-scoped override in pnpm-workspace.yaml"
       # Packed-artifact smoke on the engines floor (Node 22). npm-packs the
       # CLI, installs the tarball into a throwaway consumer, and exercises the
       # PUBLISHED shape (--version, config, a bogus command) — catching

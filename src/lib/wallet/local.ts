@@ -9,6 +9,7 @@ import { hasCode } from '../errno';
 import { archivedWalletPath, walletPath } from '../paths';
 import {
   PRIVATE_KEY_RE,
+  WALLET_SCHEMA_VERSION,
   readWalletRecord,
   walletFileMode,
   writeWalletRecord,
@@ -499,7 +500,7 @@ async function credentialOrThrow(deps: LocalProviderDeps): Promise<Credential> {
 
 function walletRecord(address: Address, keystore: Keystore.Keystore): WalletRecord {
   return {
-    schemaVersion: 2,
+    schemaVersion: WALLET_SCHEMA_VERSION,
     provider: 'local',
     address,
     keystore,

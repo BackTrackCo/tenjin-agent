@@ -1,14 +1,83 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+
+/**
+ * Arms failures the filesystem will not produce on demand. Inert unless a test
+ * sets one, so production carries no test-only branch.
+ */
+const fsHooks = vi.hoisted(() => ({
+  settingsInterleave: '',
+  /** Which settings.json read to land the interleave after (1-based). */
+  settingsInterleaveOnRead: 1,
+  settingsReads: 0,
+  /** Swap this path for a FIFO the moment it is renamed into place. */
+  fifoAfterRename: '',
+  /** Deliver a SIGINT the moment this path is renamed into place. */
+  signalAfterRename: '',
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      const out = await actual.rename(...args);
+      // An external writer swapping the just-landed file for a pipe, which is the
+      // window between the guarded write and the invocability readback.
+      if (fsHooks.fifoAfterRename !== '' && String(args[1]) === fsHooks.fifoAfterRename) {
+        const target = fsHooks.fifoAfterRename;
+        fsHooks.fifoAfterRename = '';
+        await actual.rm(target, { force: true });
+        const { execFileSync } = await import('node:child_process');
+        execFileSync('mkfifo', [target]);
+      }
+      // Ctrl-C landing inside the skills write, which is the one interruptible
+      // stretch of this command that holds no lock at all.
+      if (fsHooks.signalAfterRename !== '' && String(args[1]) === fsHooks.signalAfterRename) {
+        fsHooks.signalAfterRename = '';
+        process.emit('SIGINT', 'SIGINT');
+      }
+      return out;
+    },
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      const out = await actual.readFile(...args);
+      // A competing writer lands the instant the permissions read returns, which
+      // is the top of that writer's read-to-rename window.
+      if (fsHooks.settingsInterleave !== '' && String(args[0]).endsWith('settings.json')) {
+        fsHooks.settingsReads += 1;
+        if (fsHooks.settingsReads === fsHooks.settingsInterleaveOnRead) {
+          const bytes = fsHooks.settingsInterleave;
+          fsHooks.settingsInterleave = '';
+          await actual.writeFile(String(args[0]), bytes);
+        }
+      }
+      return out;
+    },
+  };
+});
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readdir,
+  realpath,
+  rm,
+  readFile,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
-import { claudeSettingsPath, FREE_VERB_RULES } from '../lib/harness-permissions';
+import {
+  claudeSettingsPath,
+  FREE_VERB_RULES,
+  inspectFreeVerbRules,
+} from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -84,6 +153,7 @@ type Harnesses = Array<{
     modelInvocable: boolean;
   }>;
   hostedPreexisting: boolean;
+  hostedArrivedFirst: boolean;
   agentsMd?: { path: string; status: string };
   claudeMd?: { path: string; status: string };
   codexNetworkRule?: string;
@@ -234,6 +304,80 @@ describe('runInstall: idempotency', () => {
     expect(agents.startsWith('# My notes\n')).toBe(true);
     expect(agents.split(MARKER).length - 1).toBe(1);
   });
+
+  // The nudge writers follow the same rule as the skill files: a dotfiles-managed
+  // AGENTS.md is written THROUGH its link. Committing with `rename` on the link's
+  // path would replace the link with a regular file and strand its target.
+  it('writes through a symlinked AGENTS.md, keeping the link and updating its target', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'AGENTS.md');
+    await mkdir(dirname(managed), { recursive: true });
+    await writeFile(managed, '# My notes\n');
+    await mkdir(join(home, '.agents'), { recursive: true });
+    const link = join(home, '.agents', 'AGENTS.md');
+    await symlink(managed, link);
+
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    const text = await readFile(managed, 'utf8');
+    expect(text.startsWith('# My notes\n')).toBe(true);
+    expect(text.split(MARKER).length - 1).toBe(1);
+  });
+
+  // A directory (or any non-regular file) at the AGENTS.md path is a typed error
+  // naming the path, not a raw EISDIR under INTERNAL. On the dry run too, so a
+  // dry run cannot promise would-append where the real run refuses.
+  it('fails a non-regular AGENTS.md with a typed error instead of a raw errno', async () => {
+    await mkdir(join(home, '.agents', 'AGENTS.md'), { recursive: true });
+    for (const dryRun of [true, false]) {
+      const err = (await runInstall({ harness: ['codex'], dryRun }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('not a regular file');
+      expect(err.message).not.toContain('EISDIR');
+      expect(err.fix).toContain('ls -l');
+    }
+  });
+
+  // The probe is lazy: once ~/.agents/AGENTS.md owns the marker (the steady state
+  // of a re-run), a broken ~/.codex/AGENTS.md this run would never write must not
+  // fail the install.
+  it('ignores a broken ~/.codex/AGENTS.md when the shared file already owns the marker', async () => {
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    await mkdir(join(home, '.codex', 'AGENTS.md'), { recursive: true });
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
+  });
+
+  // A directory cannot carry the marker, so it only fails the run when it is the
+  // path selected for the write; here the shared file is chosen and the broken
+  // codex candidate is irrelevant even with no owner yet.
+  it('appends to the shared file despite a non-regular ~/.codex/AGENTS.md', async () => {
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await writeFile(join(home, '.agents', 'AGENTS.md'), '# My notes\n');
+    await mkdir(join(home, '.codex', 'AGENTS.md'), { recursive: true });
+    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('appended');
+    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
+    expect(agents.split(MARKER).length - 1).toBe(1);
+  });
+
+  // Dry-run parity, same contract the skill path pins for its broken links: a
+  // dangling AGENTS.md link fails the dry run too, never reporting would-append
+  // where the real run refuses.
+  it('fails a dangling AGENTS.md link on --dry-run too, matching the real run', async () => {
+    if (process.platform === 'win32') return;
+    await mkdir(join(home, '.agents'), { recursive: true });
+    await symlink(join(home, 'nowhere', 'AGENTS.md'), join(home, '.agents', 'AGENTS.md'));
+    for (const dryRun of [true, false]) {
+      const err = (await runInstall({ harness: ['codex'], dryRun }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('broken symlink');
+    }
+  });
 });
 
 describe('runInstall: AGENTS.md instinct nudge', () => {
@@ -284,6 +428,39 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
 
 describe('runInstall: CLAUDE.md nudge', () => {
   const claudeMdPath = () => join(home, '.claude', 'CLAUDE.md');
+
+  // Same contract as the symlinked AGENTS.md: written through the link.
+  it('writes through a symlinked CLAUDE.md, keeping the link and updating its target', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'CLAUDE.md');
+    await mkdir(dirname(managed), { recursive: true });
+    await writeFile(managed, '# Mine\n');
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await symlink(managed, claudeMdPath());
+
+    await runInstall({ harness: ['claude'], claudeMd: true }, makeCtx(), deps());
+    expect((await lstat(claudeMdPath())).isSymbolicLink()).toBe(true);
+    const text = await readFile(managed, 'utf8');
+    expect(text.startsWith('# Mine\n')).toBe(true);
+    expect(text.split(MARKER).length - 1).toBe(1);
+  });
+
+  // The CLAUDE.md twin of the dangling AGENTS.md pin: dry run and real run must
+  // fail identically, never would-write on a link the real run refuses.
+  it('fails a dangling CLAUDE.md link on --dry-run too, matching the real run', async () => {
+    if (process.platform === 'win32') return;
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await symlink(join(home, 'nowhere', 'CLAUDE.md'), claudeMdPath());
+    for (const dryRun of [true, false]) {
+      const err = (await runInstall(
+        { harness: ['claude'], claudeMd: true, dryRun },
+        makeCtx(),
+        deps(),
+      ).catch((e) => e)) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('broken symlink');
+    }
+  });
   const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
   it('skips CLAUDE.md by default on a non-interactive run (no flag, no file)', async () => {
@@ -432,15 +609,17 @@ describe('runInstall: canonical overwrite', () => {
     expect(written).toBe(source);
   });
 
-  it('removes stray local files so the packaged copy is exactly what lands', async () => {
+  // install owns the files it ships, not the directory they live in. Anything else
+  // there is the operator's and is never read, listed, or removed.
+  it('writes the packaged files and leaves everything else in the directory alone', async () => {
     const dest = join(home, '.claude', 'skills', 'tenjin');
     await mkdir(dest, { recursive: true });
     await writeFile(join(dest, 'SKILL.md'), 'stale\n');
     await writeFile(join(dest, 'stray.txt'), 'orphan\n');
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(existsSync(join(dest, 'stray.txt'))).toBe(false);
-    expect(existsSync(join(dest, 'SKILL.md'))).toBe(true);
+    expect(await readFile(join(dest, 'stray.txt'), 'utf8')).toBe('orphan\n');
+    expect(await readFile(join(dest, 'SKILL.md'), 'utf8')).not.toBe('stale\n');
   });
 
   it('dry-run over a drifted copy reports would-update and warns, writing nothing', async () => {
@@ -1121,6 +1300,16 @@ describe('runInstall: permissions decision', () => {
     return (JSON.parse(raw) as { permissions?: { allow?: unknown[] } }).permissions?.allow;
   }
 
+  /** Seed ~/.claude/settings.json; a string is written verbatim (malformed cases). */
+  async function writeSettings(contents: unknown): Promise<void> {
+    const path = claudeSettingsPath(home);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      typeof contents === 'string' ? contents : JSON.stringify(contents, null, 2),
+    );
+  }
+
   it('writes the allowlist on an interactive yes and says so in one line', async () => {
     const confirm = vi.fn(async (_label: string) => true);
     const res = await runInstall(
@@ -1191,6 +1380,102 @@ describe('runInstall: permissions decision', () => {
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     expect(human(res)).toContain('were already allowed');
+  });
+
+  // Re-running install is the advice for refreshing a stale setup, so this is the
+  // ordinary second-run path, not an edge case.
+  it('does not re-ask once every rule is already allowed', async () => {
+    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ added: [], alreadyPresent: [...FREE_VERB_RULES] });
+    expect(human(res)).toContain('were already allowed');
+  });
+
+  // The no-prompt path must not perform a SECOND read. Re-reading meant a rule
+  // revoked between probe and write was silently re-added without a prompt, which
+  // is the one thing a consent gate cannot do.
+  it('reports the probe snapshot and writes nothing if a rule is revoked mid-run', async () => {
+    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        confirmPermissions: confirm,
+        // Probe says satisfied; the file loses a rule immediately afterwards.
+        inspectPermissions: async (h) => {
+          const out = await inspectFreeVerbRules(h);
+          await writeSettings({ permissions: { allow: [...FREE_VERB_RULES.slice(1)] } });
+          return out;
+        },
+      }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data).added).toEqual([]);
+    // The revoked rule stays revoked: no unprompted re-grant.
+    expect(await allowList()).toEqual([...FREE_VERB_RULES.slice(1)]);
+  });
+
+  // The summary must not tell the operator to fix a healthy file, or to re-run with
+  // a flag that is not the remedy. The warning beside it already says the right
+  // thing, so the two lines used to disagree.
+  it('says what to do when the settings file moved under the write', async () => {
+    await writeSettings({ model: 'opus', permissions: { allow: [] } });
+    // Read 1 is the consent probe; read 2 is the writer's own snapshot, and only a
+    // change after THAT one is the window the guard exists for.
+    fsHooks.settingsInterleave = `${JSON.stringify({ model: 'opus', theirs: 1 }, null, 2)}\n`;
+    fsHooks.settingsInterleaveOnRead = 2;
+    fsHooks.settingsReads = 0;
+    let res;
+    try {
+      res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: async () => true }),
+      );
+    } finally {
+      fsHooks.settingsInterleave = '';
+      fsHooks.settingsReads = 0;
+      fsHooks.settingsInterleaveOnRead = 1;
+    }
+    expect(wiredOf(res.data).skipped).toBe('changed-since-read');
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('changed while it was being updated');
+    expect(text).toContain('Re-run: tenjin install');
+    expect(text).not.toContain('Fix it, then');
+  });
+
+  it('still asks when only SOME of the rules are allowed', async () => {
+    await writeSettings({ permissions: { allow: [FREE_VERB_RULES[0]] } });
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(wiredOf(res.data).added).toEqual(FREE_VERB_RULES.slice(1));
+  });
+
+  // A file we cannot read is not "already allowed": the probe returns null and the
+  // question is still asked, so the writer gets to report why nothing was written.
+  it('still asks when the settings file cannot be parsed', async () => {
+    await writeSettings('not json at all');
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
   });
 
   it('--dry-run neither prompts nor writes', async () => {
@@ -1416,6 +1701,54 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(text).toContain('take precedence');
   });
 
+  // The notice is about arriving through the hosted skill. After run 1 the mirror on
+  // disk is one the CLI wrote, so claiming it "was already here" reports our own
+  // footprint back to the user as something they did.
+  it('does not claim a pre-existing hosted skill on a re-run of its own install', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const h = asData(res.data).harnesses[0]!;
+    // The raw fact stays true (a SKILL.md was on disk); only the notice gate narrows.
+    expect(h.hostedPreexisting).toBe(true);
+    expect(h.hostedArrivedFirst).toBe(false);
+    expect(h.notes.join('\n')).not.toContain('was already here');
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).not.toContain('kept as the zero-install fallback');
+  });
+
+  it('still notices the genuine hosted-first funnel', async () => {
+    await seedHostedSkill(join(home, '.claude', 'skills'));
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const h = asData(res.data).harnesses[0]!;
+    expect(h.hostedArrivedFirst).toBe(true);
+    expect(h.notes.join('\n')).toContain('was already here');
+  });
+
+  // The hosted-skill-first funnel puts the mirror in BOTH targets, and the notice
+  // is emitted once per harness. Without the directory the two lines are byte
+  // identical and read as the CLI stuttering.
+  it('names the directory, so a two-harness machine gets two distinguishable lines', async () => {
+    const claudeSkills = join(home, '.claude', 'skills');
+    const sharedSkills = join(home, '.agents', 'skills');
+    await seedHostedSkill(claudeSkills);
+    await seedHostedSkill(sharedSkills);
+
+    const res = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const lines = (res.humanLines ?? [])
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')) // eslint-disable-line no-control-regex
+      // The notice's own phrase: the per-harness warning says "stays as", and the
+      // summary's skill list says "(hosted, zero-install fallback)".
+      .filter((l) => l.includes('kept as the zero-install fallback'));
+    expect(lines).toHaveLength(2);
+    expect(new Set(lines).size).toBe(2);
+    expect(lines.some((l) => l.includes(claudeSkills))).toBe(true);
+    expect(lines.some((l) => l.includes(sharedSkills))).toBe(true);
+  });
+
   it('re-running on top of a hosted-skill machine is idempotent', async () => {
     const claudeSkills = join(home, '.claude', 'skills');
     await seedHostedSkill(claudeSkills);
@@ -1436,6 +1769,397 @@ describe('runInstall: hosted skill already present (#35)', () => {
       SKILL_NAMES.map((n) => readFile(join(claudeSkills, n, 'SKILL.md'), 'utf8')),
     );
     expect(after).toEqual(before);
+  });
+
+  // A user's own files beside the SKILL.md are not ours. The old wipe took them and
+  // called it "overwritten"; nothing removes them now.
+  it("leaves a user's files beside the skill untouched", async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(
+      join(dir, 'SKILL.md'),
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
+    await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+    // The packaged file was already identical, so nothing changed at all.
+    expect(skill.status).toBe('up-to-date');
+    expect(asData(data).harnesses[0]!.warnings.filter((w) => w.includes('tenjin-search'))).toEqual(
+      [],
+    );
+    expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
+  });
+
+  it('still warns when it overwrites local edits to a SKILL.md it owns', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nmy edits\n');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const warning = asData(data).harnesses[0]!.warnings.find((w) => w.includes('tenjin-search'));
+    expect(warning).toContain('overwritten');
+  });
+
+  // An unwritable HOME is an environment problem. It reached the envelope as a raw
+  // `EACCES: permission denied, mkdir ...` under INTERNAL with no fix, which reads
+  // as a CLI bug and leaves the operator nothing to do.
+  it('turns an unwritable skills directory into a typed error with a fix', async () => {
+    // root ignores mode bits, so the chmod would not deny anything.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const skills = join(home, '.claude', 'skills');
+    await mkdir(skills, { recursive: true });
+    await chmod(skills, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      // The child could not be created, so the culprit is the ancestor that
+      // refused: the skills root, the deepest directory that exists (resolved,
+      // hence realpath: the macOS tmpdir lives behind /var -> /private/var).
+      expect(err.fix).toContain(`ls -ld ${await realpath(skills)}`);
+      expect(err.fix).toContain('tenjin install');
+      expect(err.message).not.toContain('EACCES'); // the raw errno is the cause, not the message
+    } finally {
+      await chmod(skills, 0o700);
+    }
+  });
+
+  // An empty HOME (sudo/docker env_reset) makes every target relative, so the old
+  // behavior installed into the CURRENT DIRECTORY and reported success while no
+  // harness read a thing.
+  it('refuses an empty or relative home directory instead of installing into the cwd', async () => {
+    for (const homeDir of ['', 'relative/home']) {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps({ homeDir })).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.message).toContain('did not resolve to an absolute path');
+      expect(err.fix).toContain('HOME');
+    }
+    expect(existsSync(join(process.cwd(), '.claude'))).toBe(false);
+  });
+
+  // On a case-insensitive filesystem the user's own TENJIN directory IS the tenjin
+  // skill's path, and the old behavior replaced their SKILL.md under a warning
+  // naming a lowercase path that is not on disk.
+  it('refuses a case-variant skill directory instead of overwriting it', async () => {
+    const skills = join(home, '.claude', 'skills');
+    await mkdir(skills, { recursive: true });
+    // Only meaningful where the filesystem aliases case; probe it.
+    await writeFile(join(skills, 'Aa'), '');
+    const caseInsensitive = existsSync(join(skills, 'aa'));
+    await rm(join(skills, 'Aa'));
+    if (!caseInsensitive) return;
+    const dir = join(skills, 'TENJIN');
+    await mkdir(dir);
+    await writeFile(join(dir, 'SKILL.md'), 'my own unrelated skill');
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('TENJIN');
+    expect(err.message).toContain('case variant');
+    expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toBe('my own unrelated skill');
+  });
+
+  // The inverse of the missing-child case: the skill directory EXISTS and is
+  // itself what refuses the temp-file write. Its parent is writable and innocent,
+  // so a fix pointing one directory up sends the operator to chmod the wrong thing.
+  it('names the skill directory itself when it exists and refuses the write', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await chmod(dir, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.fix).toContain(`ls -ld ${await realpath(dir)}`);
+    } finally {
+      await chmod(dir, 0o700);
+    }
+  });
+
+  // The typed command follows a link the operator placed, one directory up as
+  // well as at the file. This is the half of the contract the unattended self-heal
+  // deliberately does NOT share (it skips both and leaves them here), so it is
+  // worth its own case: `install` has to remain the way a dotfiles-managed skill
+  // directory gets updated.
+  it('writes through a symlinked skill directory, keeping the link', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(managed, { recursive: true });
+    await writeFile(join(managed, 'SKILL.md'), 'what an older CLI shipped\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(managed, link);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+    );
+  });
+
+  // A symlinked SKILL.md is written through to its target, so a denied write
+  // happens in the link's TARGET directory, which no path under the skills tree
+  // names. The fix must name that directory or the operator has nothing to check.
+  it('names the link target directory when a symlinked SKILL.md cannot be written', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dotfiles = join(home, 'dotfiles');
+    const managed = join(dotfiles, 'search.md');
+    await mkdir(dotfiles, { recursive: true });
+    await writeFile(managed, 'my managed copy\n');
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await symlink(managed, join(dir, 'SKILL.md'));
+    await chmod(dotfiles, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      // realpath, because the write goes through the link: on macOS the tmpdir is
+      // itself behind a symlink (/var -> /private/var), and the resolved directory
+      // is the one whose mode actually decides.
+      expect(err.fix).toContain(`ls -ld ${await realpath(dotfiles)}`);
+      expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
+      expect(await readFile(managed, 'utf8')).toBe('my managed copy\n');
+    } finally {
+      await chmod(dotfiles, 0o700);
+    }
+  });
+
+  // The directory variant of the case above: the skill directory is itself a
+  // symlink, and the mode that denied the write lives on its TARGET. Naming the
+  // link's path tells the operator to chmod a healthy link.
+  it('names the resolved directory when a symlinked skill directory refuses the write', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const real = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(real, { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(real, link);
+    await chmod(real, 0o500);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.fix).toContain(`ls -ld ${await realpath(real)}`);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    } finally {
+      await chmod(real, 0o700);
+    }
+  });
+
+  // Writing through the link is what the operator asked for by making it. Nothing
+  // is removed, so the dotfiles tree keeps both its link and its own files.
+  it('writes through a symlinked skill directory, keeping the link and their files', async () => {
+    if (process.platform === 'win32') return;
+    const real = join(home, 'dotfiles', 'tenjin-search');
+    await mkdir(join(real, 'references'), { recursive: true });
+    await writeFile(join(real, 'SKILL.md'), '---\nname: tenjin-search\n---\n\nstale\n');
+    await writeFile(join(real, 'references', 'notes.md'), 'my private notes');
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(real, link);
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(real, 'SKILL.md'))).toEqual(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
+    expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
+  });
+
+  // A broken link cannot be written through. It must fail saying so, and must not
+  // quietly become a real directory.
+  it('fails a dangling symlink with a fix naming it, and leaves it a link', async () => {
+    if (process.platform === 'win32') return;
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(join(home, 'nowhere', 'tenjin-search'), link);
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('broken symlink');
+    expect(err.message).not.toContain('ENOENT');
+    expect(err.fix).toContain('ls -ld');
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  });
+
+  // The write commits with `rename`, which replaces a symlink at the destination
+  // PATH with a regular file. A file the operator manages through a link has to be
+  // written through it, like the directory case and like settings.json.
+  it('writes through a symlinked SKILL.md, keeping the link and updating its target', async () => {
+    if (process.platform === 'win32') return;
+    const managed = join(home, 'dotfiles', 'search.md');
+    await mkdir(dirname(managed), { recursive: true });
+    await writeFile(managed, 'my managed copy\n');
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await symlink(managed, join(dir, 'SKILL.md'));
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
+    expect(await readFile(managed)).toEqual(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
+  });
+
+  // Treating every read failure as "absent" classified an unreadable skill as a
+  // fresh install and then replaced it, because the atomic rename needs DIRECTORY
+  // permission, not file permission.
+  it('refuses an unreadable SKILL.md instead of replacing it', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, 'SKILL.md');
+    await writeFile(file, 'secret');
+    await chmod(file, 0o000);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      await chmod(file, 0o644);
+      expect(await readFile(file, 'utf8')).toBe('secret');
+    } finally {
+      await chmod(file, 0o644).catch(() => undefined);
+    }
+  });
+
+  // A dry run must reach the same verdict as the real run.
+  it('fails a broken destination link on --dry-run too, matching the real run', async () => {
+    if (process.platform === 'win32') return;
+    const link = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(join(home, 'nowhere', 'tenjin-search'), link);
+
+    const dry = (await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    const real = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(dry).toBeInstanceOf(CliError);
+    expect(real).toBeInstanceOf(CliError);
+    expect(dry.fix).toBe(real.fix);
+  });
+
+  // `readFile` on a FIFO blocks until a writer appears, so a pipe left at a
+  // SKILL.md path hung install past SIGTERM until it was SIGKILLed. An errno
+  // mapping cannot help: the call does not fail, it never returns.
+  it('refuses a non-regular file at a shipped path instead of reading it', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('mkfifo', [join(dir, 'SKILL.md')]);
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('not a regular file');
+    expect(err.fix).toContain('ls -l');
+  }, 10000);
+
+  // A SKILL.md that is itself a dangling link: resolveThroughLink's throw, which
+  // is a different path from a dangling skill DIRECTORY (that one is assertReachable).
+  it('fails a SKILL.md that is itself a broken symlink', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await symlink(join(home, 'nowhere.md'), join(dir, 'SKILL.md'));
+
+    const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+      (e) => e,
+    )) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toContain('broken symlink');
+    expect(err.fix).toContain('ls -ld');
+  });
+
+  // The permission error must name the FILE. Naming its parent sent operators to
+  // chmod a directory that was fine, which is the same defect this PR removed from
+  // the skills-not-written error.
+  it('names the unreadable file, not its writable parent directory', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, 'SKILL.md');
+    await writeFile(file, 'secret');
+    await chmod(file, 0o000);
+    try {
+      const err = (await runInstall({ harness: ['claude'] }, makeCtx(), deps()).catch(
+        (e) => e,
+      )) as CliError;
+      expect(err.fix).toContain(file);
+      expect(err.fix).not.toContain(`ls -ld ${dirname(dir)}\``);
+    } finally {
+      await chmod(file, 0o644).catch(() => undefined);
+    }
+  });
+
+  // The skills land first and are unaffected; what fails is recording the harness
+  // in the data dir, and a raw EACCES there reads as a CLI bug and carries no fix.
+  it('gives an unwritable data directory a typed error with a fix', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    await mkdir(data, { recursive: true });
+    await chmod(data, 0o500);
+    try {
+      const err = await caught(() => runInstall({ harness: ['claude'] }, makeCtx(), deps()));
+      expect(err).toBeInstanceOf(CliError);
+      expect(err.fix).toContain('Permission denied');
+      expect(err.message).not.toContain('EACCES');
+      expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
+    } finally {
+      await chmod(data, 0o700).catch(() => undefined);
+    }
+  });
+
+  // The invocability readback happens AFTER the write, so the path can have been
+  // swapped for a pipe in between. A raw read there hangs the command that has
+  // already done its work.
+  it('does not hang when a landed SKILL.md is swapped for a pipe before the readback', async () => {
+    if (process.platform === 'win32') return;
+    fsHooks.fifoAfterRename = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    try {
+      const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+      // Reaching here at all is the assertion; a pipe is not model-invocable.
+      expect(skill.modelInvocable).toBe(false);
+    } finally {
+      fsHooks.fifoAfterRename = '';
+    }
+  }, 15000);
+
+  it('leaves a nested symlink in the skill directory alone', async () => {
+    if (process.platform === 'win32') return;
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(home, 'real-notes.md'), 'my private notes');
+    await symlink(join(home, 'real-notes.md'), join(dir, 'notes.md'));
+
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await lstat(join(dir, 'notes.md'))).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(dir, 'notes.md'), 'utf8')).toBe('my private notes');
   });
 
   it('a stale disable-model-invocation publish skill is overwritten and re-wired', async () => {
@@ -1578,19 +2302,17 @@ describe('runInstall: preexisting means a real prior copy', () => {
     const h = asData(d).harnesses[0]!;
     expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
     expect(h.hostedPreexisting).toBe(false);
-    // The stray file is cleared by the wholesale overwrite.
-    expect(existsSync(join(home, '.claude', 'skills', 'tenjin', 'asset.bin'))).toBe(false);
-    // ...and because bytes were destroyed, the destruction is still reported:
-    // `preexisting` answers "was a real copy here", `status`/`warnings` answer
-    // "did this run delete anything", and they are different questions.
-    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('updated');
-    expect(h.warnings.join('\n')).toContain(dir);
+    // The stray file is the operator's; nothing removes it, so this is a plain
+    // install of a skill that was not here, with nothing to warn about.
+    expect(await readFile(join(dir, 'asset.bin'), 'utf8')).toBe('partial');
+    expect(h.skills.find((s) => s.name === 'tenjin')?.status).toBe('installed');
+    expect(h.warnings.filter((w) => w.includes(dir))).toEqual([]);
   });
 
-  it('a destination holding the user OWN files keeps the overwrite warning', async () => {
+  it('installs alongside the user OWN files without touching any of them', async () => {
     // ~/.claude/skills/tenjin/skills.md is what `curl tenjin.blog/skills.md -o`
-    // leaves behind, and NOTES.md is the user's. rm(recursive) deletes both, so a
-    // silent `installed` with no warning was the only notice they ever got.
+    // leaves behind, and NOTES.md is the user's. The old rm(recursive) deleted
+    // both; the skill is now written beside them.
     const searchDir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(searchDir, 'references'), { recursive: true });
     await writeFile(join(searchDir, 'NOTES.md'), 'mine');
@@ -1601,14 +2323,17 @@ describe('runInstall: preexisting means a real prior copy', () => {
 
     const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const h = asData(d).harnesses[0]!;
-    const warnings = h.warnings.join('\n');
-    expect(warnings).toContain(searchDir);
-    expect(warnings).toContain(hostedDir);
-    expect(h.skills.find((s) => s.name === 'tenjin-search')?.status).toBe('updated');
-    // The `preexisting` semantics are unchanged: neither held a SKILL.md.
+    expect(await readFile(join(searchDir, 'NOTES.md'), 'utf8')).toBe('mine');
+    expect(await readFile(join(searchDir, 'references', 'mine.md'), 'utf8')).toBe('also mine');
+    expect(await readFile(join(hostedDir, 'skills.md'), 'utf8')).toBe(
+      '# a hand-saved hosted skill',
+    );
+    // Neither directory held a SKILL.md, so both are installs and neither is a
+    // copy that "was already here".
+    expect(h.skills.find((s) => s.name === 'tenjin-search')?.status).toBe('installed');
     expect(h.skills.find((s) => s.name === 'tenjin')?.preexisting).toBe(false);
     expect(h.hostedPreexisting).toBe(false);
-    expect(existsSync(join(searchDir, 'NOTES.md'))).toBe(false);
+    expect(h.warnings).toEqual([]);
   });
 
   it('the mirror-replacement warning claims no direction about which copy is newer', async () => {
@@ -1619,5 +2344,72 @@ describe('runInstall: preexisting means a real prior copy', () => {
     const warnings = asData(d).harnesses[0]!.warnings.join('\n');
     expect(warnings).toContain('may be older');
     expect(warnings).not.toContain('was would be');
+  });
+});
+
+/** Writing the skill tree: locking, interrupts and destructive-write reporting. */
+/**
+ * The safety net under write-in-place. `installSkill` writes the files it ships and
+ * removes nothing, which cannot orphan anything while each skill is a single file.
+ * The day a skill ships a second file and a later release drops it, that file would
+ * linger in every install forever, and the fix is a manifest of what the previous
+ * version wrote. This fails first and says so.
+ */
+describe('the packaged skills are single-file, which is what makes write-in-place safe', () => {
+  it('ships exactly one SKILL.md per skill and nothing else', async () => {
+    for (const name of SKILL_NAMES) {
+      const entries = await readdir(join(SKILLS_SRC, name), { recursive: true });
+      expect(entries).toEqual(['SKILL.md']);
+    }
+  });
+});
+
+describe('runInstall: the skill-directory write', () => {
+  // 5 concurrent runs used to fail 7 of 15 times on raw ENOENT/ENOTEMPTY renames,
+  // when each skill was replaced by rm-then-write. Named for what these assertions
+  // can actually see: the lock is NOT what this proves, and the tree surviving is
+  // delivered by the per-file atomic renames (install.ts says the same).
+  it('leaves concurrent installs neither failing nor corrupting the tree', async () => {
+    const runs = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps()),
+      ),
+    );
+    expect(runs.filter((r) => r.status === 'rejected')).toEqual([]);
+    for (const name of SKILL_NAMES) {
+      expect(existsSync(join(home, '.claude', 'skills', name, 'SKILL.md'))).toBe(true);
+    }
+  });
+
+  // No lock at all, so nothing serializes these: what keeps a run that arrives
+  // mid-write from reading a half-built tree is the per-file atomic rename.
+  it('writes the skills without leaving any lock in the data dir', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect((await readdir(data)).filter((e) => e.endsWith('.lock'))).toEqual([]);
+  });
+
+  // The skills write holds no lock, so `ownsAnyLock` cannot see it and the phase
+  // marker is the ONLY thing standing between an interrupt mid-copy and a report
+  // that nothing changed, on a machine where files have already landed.
+  it('an interrupt during the skills write reports a possibly half-written machine', async () => {
+    const written: string[] = [];
+    const exits: unknown[] = [];
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code: number) => {
+      exits.push(code);
+    }) as never);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    fsHooks.signalAfterRename = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    try {
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    } finally {
+      fsHooks.signalAfterRename = '';
+      exit.mockRestore();
+      stderr.mockRestore();
+    }
+    expect(written.join('')).toContain('half-written');
+    expect(exits).toEqual([130]);
   });
 });

@@ -1,13 +1,22 @@
 import { existsSync } from 'node:fs';
-import { readFile, readdir, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join, relative } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
+import { hasCode } from '../lib/errno';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
+import {
+  deepestExisting,
+  installSkill,
+  resolveThroughLink,
+  wrapWriteError,
+} from '../lib/skill-writer';
+import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
   CLI_SKILL_NAMES,
@@ -17,6 +26,7 @@ import {
   harnessTargetDir,
   isModelInvocationDisabled,
   onPath,
+  readSkillFile,
 } from '../lib/skill-wiring';
 import type { HarnessTarget } from '../lib/skill-wiring';
 import {
@@ -35,6 +45,7 @@ import { walletFileExists } from '../lib/wallet/store';
 import { recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
+  inspectFreeVerbRules,
   permissionsSkipped,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
@@ -137,7 +148,7 @@ const CODEX_NETWORK_RULE = '[sandbox_workspace_write]\nnetwork_access = true';
 /** Per-skill install outcome for one harness target. */
 interface SkillResult {
   name: string;
-  status: 'installed' | 'updated' | 'up-to-date' | 'would-install' | 'would-update';
+  status: SkillInstallStatus;
   /** Was a real copy (a SKILL.md, not just the directory) already on disk before this run? */
   preexisting: boolean;
   /** Is this one of the two CLI adapter skills (as opposed to the hosted mirror)? */
@@ -169,6 +180,12 @@ interface HarnessResult {
    * which is exactly the state #35 was invisible in.
    */
   hostedPreexisting: boolean;
+  /**
+   * Narrower than {@link HarnessResult.hostedPreexisting}: the hosted skill was here
+   * AND the CLI adapters were not, which is the hosted-zero-install-first funnel
+   * rather than a second run finding our own mirror. This is what gates the notice.
+   */
+  hostedArrivedFirst: boolean;
   agentsMd?: AgentsMdResult;
   claudeMd?: ClaudeMdResult;
   codexNetworkRule?: string;
@@ -193,6 +210,10 @@ export interface InstallDeps {
   promptPublishMode?: PromptPublishModeFn;
   /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
   confirmPermissions?: ConfirmFn;
+  /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
+  inspectPermissions?: (
+    home: string,
+  ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
   /** Decision 3: "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. Seams so tests never load the renderer. */
@@ -228,6 +249,65 @@ export async function runInstall(
   ctx: CommandContext,
   deps: InstallDeps = {},
 ): Promise<CommandResult> {
+  return withInterruptGuard((markPhase) => installBody(input, ctx, deps, markPhase));
+}
+
+/** How far the command got, for the interrupt diagnostic. */
+type InstallPhase = 'writing-skills' | 'wired';
+
+/**
+ * Run `fn` with SIGINT/SIGTERM answered for the WHOLE command, not just the
+ * blocks that hold a lock. The default signal action terminates without running
+ * `finally`, stranding whichever lock the command holds so every later run times
+ * out on it; install takes two (the config lock behind decision 1, and the
+ * wallet-create lock behind decision 3, whose scrypt work is the longest
+ * interruptible window this command has). Ownership is tracked by the lock
+ * itself, so the handler releases exactly what this process holds and a run still
+ * QUEUED behind another cannot touch that other run's lock.
+ *
+ * `markPhase` carries the diagnostic past the states no lock covers: the skills
+ * write holds nothing (each file lands by its own atomic rename), so without it an
+ * interrupt mid-copy would report that nothing changed.
+ */
+async function withInterruptGuard(
+  fn: (markPhase: (phase: InstallPhase) => void) => Promise<CommandResult>,
+): Promise<CommandResult> {
+  let phase: InstallPhase | undefined;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    const wasWriting = ownsAnyLock() || phase === 'writing-skills';
+    releaseOwnedLocks();
+    // An external SIGINT/SIGTERM can land while a clack prompt has the terminal
+    // in raw mode with the cursor hidden; process.exit skips clack's teardown.
+    // (Ctrl-C at a prompt is unaffected: raw mode delivers it as a keypress.)
+    if (process.stdin.isTTY) process.stdin.setRawMode?.(false);
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?25h');
+    process.stderr.write(
+      wasWriting
+        ? `\nInterrupted mid-write. Some files may be half-written; re-run \`tenjin install\` to finish.\n`
+        : phase === 'wired'
+          ? `\nInterrupted after the skills were written; later setup steps may not have finished. Re-run \`tenjin install\` to finish.\n`
+          : '\nInterrupted before anything was written; nothing changed.\n',
+    );
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    return await fn((p) => {
+      phase = p;
+    });
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
+}
+
+async function installBody(
+  input: InstallInput,
+  ctx: CommandContext,
+  deps: InstallDeps,
+  markPhase: (phase: InstallPhase) => void,
+): Promise<CommandResult> {
   const parsed = InstallInputSchema.safeParse(input);
   if (!parsed.success) {
     throw new CliError('USAGE', 'Invalid install options', {
@@ -244,6 +324,18 @@ export async function runInstall(
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
+  // An empty or relative HOME (sudo/docker env_reset, systemd units) would make
+  // every target below relative, silently installing into the current working
+  // directory and reporting success while no harness reads a thing.
+  if (!isAbsolute(home)) {
+    throw new CliError(
+      'INTERNAL',
+      'The home directory did not resolve to an absolute path, so nothing was installed.',
+      {
+        fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
+      },
+    );
+  }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
 
   // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
@@ -266,19 +358,29 @@ export async function runInstall(
   // the walkthrough's whole point is that there are three.
   const claudeMdWrite = claudeMdFlag === true;
   const harnesses: HarnessResult[] = [];
+  // Unlocked. What makes concurrent writers safe here is the per-file atomic
+  // rename, not serialization: the rm-then-write this used to be had two runs
+  // reading each other's half-built trees (7 of 15 concurrent runs failed on raw
+  // ENOENT/ENOTEMPTY renames), and 24 concurrent runs pass without a lock. The
+  // self-heal is the other writer, and it writes these same bytes to these same
+  // paths through the same writer.
+  if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
   }
   await assertSkillsLanded(plans, dryRun);
+  if (!dryRun) markPhase('wired');
   // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
   // own check already honours it. Detection cannot see a harness we do not probe for,
   // so without the record a directory the user named by hand is a target for one run
   // and then invisible to every later doctor — including for the #35 shadowing defect
   // it was chosen to hold. `--dry-run` records nothing, like the publish-mode write.
   if (explicitHarness && !dryRun) {
-    await persistInstallHarness(
-      ctx.dataDir,
-      plans.map((p) => p.harness),
+    await underDataDir(ctx.dataDir, () =>
+      persistInstallHarness(
+        ctx.dataDir,
+        plans.map((p) => p.harness),
+      ),
     );
   }
   // The embedded doctor run inspects the same `home` install just wrote into, so
@@ -294,7 +396,9 @@ export async function runInstall(
   // The three decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
-  const publishMode = await resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt);
+  const publishMode = await underDataDir(ctx.dataDir, () =>
+    resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt),
+  );
   const permissions = await resolvePermissions({
     plans,
     home,
@@ -341,6 +445,24 @@ export async function runInstall(
   return { data, humanLines };
 }
 
+/**
+ * The two steps that write to the Tenjin data dir, with a denial there reported as
+ * the directory it is rather than as a raw errno under INTERNAL. The skills are
+ * already on disk by now, so the message says what failed, not that nothing
+ * happened.
+ */
+async function underDataDir<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!hasCode(err, 'EACCES') && !hasCode(err, 'EPERM')) throw err;
+    throw new CliError('INTERNAL', `Could not use the Tenjin data directory ${dataDir}.`, {
+      fix: `Permission denied. Check that you can write to it (\`ls -ld ${dataDir}\`), then re-run \`tenjin install\`.`,
+      cause: err,
+    });
+  }
+}
+
 const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 
 interface WalkthroughState {
@@ -374,12 +496,14 @@ function buildWalkthrough(io: Io, s: WalkthroughState): string[] {
 function noticeLines(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
   for (const h of s.harnesses) {
-    if (h.hostedPreexisting) {
+    if (h.hostedArrivedFirst) {
+      // Named by DIRECTORY: one line per harness, and the funnel puts the mirror
+      // in both, so an unqualified line appears twice and reads as a stutter.
       lines.push(
         paint(
           io,
           'dim',
-          `The hosted ${HOSTED_SKILL_NAME} skill was already here: kept as the zero-install fallback, and the CLI skills now take precedence.`,
+          `The hosted ${HOSTED_SKILL_NAME} skill was already in ${h.skillsDir}: kept as the zero-install fallback, and the CLI skills now take precedence.`,
         ),
       );
     }
@@ -489,6 +613,12 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
   }
   if (p.skipped === 'not-requested') {
     return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
+  }
+  if (p.skipped === 'changed-since-read') {
+    // Nothing is wrong with the file and the flag is not the remedy: another
+    // writer touched it mid-run, so the merge has to be recomputed against what
+    // is there now. The catch-all below says "fix it", which is wrong here.
+    return `${paint(io, 'yellow', '!')} ${label} ${p.path} changed while it was being updated, so nothing was written. Re-run: tenjin install`;
   }
   return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched. Fix it, then: tenjin install --allow-free-verbs`;
 }
@@ -731,6 +861,14 @@ async function resolvePermissions(args: {
   if (flag) return wireFreeVerbAllowlist(home);
   if (!canPrompt) return permissionsSkipped('claude', home, 'not-requested');
 
+  // Nothing left to grant is not a question: every rule already present is the
+  // ordinary state of a re-run. The SNAPSHOT's result is returned rather than
+  // calling the writer again, because a second read would re-add a rule revoked in
+  // between with no prompt. An unreadable file is "unknown", not "already
+  // allowed", so it falls through and still asks.
+  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home);
+  if (probe.satisfied !== undefined) return probe.satisfied;
+
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(PERMISSIONS_QUESTION))) {
     return permissionsSkipped('claude', home, 'declined');
@@ -844,6 +982,10 @@ async function applyPlan(
   }
 
   const hostedPreexisting = skills.some((s) => s.name === HOSTED_SKILL_NAME && s.preexisting);
+  // The notice is about arriving through the hosted skill, which is only news when
+  // the CLI adapters were NOT already wired: after an earlier install the mirror on
+  // disk is one we wrote, and announcing it is the CLI reporting its own footprint.
+  const hostedArrivedFirst = hostedPreexisting && !skills.some((s) => s.cli && s.preexisting);
   const result: HarnessResult = {
     harness: plan.harness,
     detected: plan.detected,
@@ -851,7 +993,8 @@ async function applyPlan(
     skillsDir: plan.skillsDir,
     skills,
     hostedPreexisting,
-    notes: notesFor(plan, hostedPreexisting),
+    hostedArrivedFirst,
+    notes: notesFor(plan, hostedArrivedFirst),
     warnings,
   };
 
@@ -877,15 +1020,16 @@ async function wireClaudeMd(
   const path = join(plan.home, '.claude', 'CLAUDE.md');
   if (!write) return { path, status: 'skipped' };
 
-  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
-  const { content, change } = upsertMarkerLine(existing, nudgeLine(plan.skillsDir));
+  const probe = await probeMarkerText(path);
+  const { content, change } = upsertMarkerLine(probe.text, nudgeLine(plan.skillsDir));
   if (change === 'none') return { path, status: 'up-to-date' };
-  if (!dryRun && content !== null) await writeFileAtomic(path, content);
+  const writeTo = await prepareMarkerWrite(path, probe);
+  if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
   if (change === 'append') return { path, status: dryRun ? 'would-write' : 'written' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
-function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
+function notesFor(plan: HarnessPlan, hostedArrivedFirst: boolean): string[] {
   const notes =
     plan.harness === 'claude'
       ? [
@@ -894,9 +1038,12 @@ function notesFor(plan: HarnessPlan, hostedPreexisting: boolean): string[] {
       : [
           'Copied into the shared Agent Skills location (~/.agents/skills). Codex and any Agent-Skills-compatible harness read it there.',
         ];
-  if (hostedPreexisting) {
+  if (hostedArrivedFirst) {
+    // "The skill stays", never "your copy is untouched": the FILE is replaced by
+    // this package's mirror, and a note reading as preservation beside a warning
+    // saying replacement is worse than either alone.
     notes.push(
-      `The hosted ${HOSTED_SKILL_NAME} skill was already here; it stays as the zero-install fallback and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
+      `The hosted ${HOSTED_SKILL_NAME} skill was already here; the skill stays as the zero-install fallback (its file is replaced by this package's mirror) and the CLI skills (${CLI_SKILL_NAMES.join(', ')}) take precedence while the CLI is installed.`,
     );
   }
   return notes;
@@ -917,13 +1064,12 @@ async function landedInvocable(
   name: string,
   dryRun: boolean,
 ): Promise<boolean> {
-  const path = join(dryRun ? skillsSource : skillsDir, name, 'SKILL.md');
-  if (!existsSync(path)) return false;
-  try {
-    return !isModelInvocationDisabled(await readFile(path, 'utf8'));
-  } catch {
-    return false;
-  }
+  // Guarded like every other read of this path. It is read back AFTER the write, so
+  // an external writer can have swapped it for a pipe or a device in between, and a
+  // raw read there would hang the command that just finished its work.
+  const read = await readSkillFile(join(dryRun ? skillsSource : skillsDir, name, 'SKILL.md'));
+  if (read.kind !== 'ok') return false;
+  return !isModelInvocationDisabled(read.bytes.toString('utf8'));
 }
 
 /**
@@ -947,93 +1093,12 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
   }
   if (missing.length === 0) return;
   throw new CliError('INTERNAL', `Skills were not written: ${missing.join(', ')}`, {
-    fix: 'Check permissions on the skills directory and re-run `tenjin install`.',
+    // Safe to point at permissions because nothing removes a landed file any more:
+    // each shipped file arrives by its own atomic rename. When this was a
+    // rm-then-write it also fired on a lost race, and sent people to chmod a
+    // directory that was fine.
+    fix: `Check that you can write to the skills directory (\`ls -ld ${dirname(missing[0] ?? '')}\`), then re-run \`tenjin install\`.`,
   });
-}
-
-/**
- * Copy one skill directory. The packaged copy is canonical: an absent target is
- * `installed`, an identical target is `up-to-date`, and any local drift is
- * overwritten and reported as `updated` with a warning. On --dry-run nothing is
- * written and the status reads `would-*`.
- */
-async function installSkill(
-  srcDir: string,
-  destDir: string,
-  dryRun: boolean,
-  name: string,
-): Promise<{ status: SkillResult['status']; warning?: string; preexisting: boolean }> {
-  const src = await readTree(srcDir);
-  const dest = await readTree(destDir);
-  if (src === null) {
-    // assertSkillsSource already guards SKILL.md; this is defensive for an empty dir.
-    throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
-  }
-  // A real prior copy means a SKILL.md, not merely the directory: readTree returns
-  // an empty Map for a bare `mkdir`, and an interrupted write leaves a stray file
-  // with no SKILL.md. Neither is a skill that "was already here".
-  const preexisting = dest?.has('SKILL.md') === true;
-
-  // `change` is keyed off BYTES, not off `preexisting`: the rm below deletes whatever
-  // is in the destination, so anything with content in it is an overwrite and must
-  // carry the warning, even with no SKILL.md — a hand-saved `skills.md` and a
-  // directory of the user's own notes both live here. Only a bare `mkdir` (or a dir
-  // that does not exist) is a create, which is what `preexisting` reporting is for.
-  const change =
-    dest === null || dest.size === 0 ? 'create' : treesEqual(src, dest) ? 'none' : 'update';
-
-  if (!dryRun && change !== 'none') {
-    // Overwrite wholesale so the packaged copy is exactly what lands, with no stray
-    // local files left behind. rm is a no-op when the dir is absent.
-    await rm(destDir, { recursive: true, force: true });
-    for (const [rel, content] of src) {
-      await writeFileAtomic(join(destDir, rel), content);
-    }
-  }
-
-  if (change === 'create') return { status: dryRun ? 'would-install' : 'installed', preexisting };
-  if (change === 'none') return { status: 'up-to-date', preexisting };
-  return {
-    status: dryRun ? 'would-update' : 'updated',
-    preexisting,
-    // The hosted skill is a MIRROR of tenjin.blog/skills.md (roadmap G4), so a
-    // differing local copy is a replacement, not the drift warning the CLI skills
-    // get. Neither side carries a version or date, so the wording claims no
-    // direction: the local file may well be a newer fetch than this package's copy.
-    warning:
-      name === HOSTED_SKILL_NAME
-        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.`
-        : `${destDir}: local skill copy differed and ${dryRun ? 'would be' : 'was'} overwritten (the packaged copy is canonical).`,
-  };
-}
-
-/**
- * Read a directory tree into a rel-path -> content map, or null when it does not
- * exist. Reads as raw `Buffer`, not `utf8`: today's skills are markdown-only, but
- * this is a general recursive dir-copy, and decoding to a string here would
- * silently corrupt a future non-text asset (an image, a font) on write, or worse,
- * make two different corrupted binaries both decode to U+FFFD and compare equal.
- */
-async function readTree(dir: string): Promise<Map<string, Buffer> | null> {
-  if (!existsSync(dir)) return null;
-  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
-  const files = new Map<string, Buffer>();
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const full = join(entry.parentPath, entry.name);
-    files.set(relative(dir, full), await readFile(full));
-  }
-  return files;
-}
-
-function treesEqual(a: Map<string, Buffer>, b: Map<string, Buffer> | null): boolean {
-  if (b === null) return false;
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a) {
-    const other = b.get(k);
-    if (other === undefined || !v.equals(other)) return false;
-  }
-  return true;
 }
 
 /**
@@ -1053,27 +1118,112 @@ async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsM
 
   // If either file Codex reads already carries the marker, that file owns the line:
   // refresh it in place when an older install's text drifted, else leave it. This
-  // keeps append-once global while still upgrading a stale line.
+  // keeps append-once global while still upgrading a stale line. Probed LAZILY,
+  // returning as soon as an owner is found: with the marker already in
+  // ~/.agents/AGENTS.md (the steady state of a re-run), a broken ~/.codex/AGENTS.md
+  // this run would never write must not fail the install. A probe can only fail the
+  // run outright on an UNREADABLE candidate (see probeMarkerText for why); a
+  // not-regular one fails only if it ends up the chosen path.
+  const probes = new Map<string, MarkerProbe>();
   for (const path of [shared, codex]) {
-    if (existsSync(path) && (await readFile(path, 'utf8')).includes(SKILLS_MARKER)) {
-      return upsertAgentsMd(path, line, dryRun);
+    const probe = await probeMarkerText(path);
+    probes.set(path, probe);
+    if (probe.text?.includes(SKILLS_MARKER) === true) {
+      return upsertAgentsMd(path, probe, line, dryRun);
     }
   }
 
-  return upsertAgentsMd(chooseAgentsMdPath(plan.home), line, dryRun);
+  const chosen = chooseAgentsMdPath(plan.home);
+  // Non-null: chooseAgentsMdPath only ever returns shared or codex, both probed.
+  return upsertAgentsMd(chosen, probes.get(chosen)!, line, dryRun);
 }
 
 async function upsertAgentsMd(
   path: string,
+  probe: MarkerProbe,
   line: string,
   dryRun: boolean,
 ): Promise<AgentsMdResult> {
-  const existing = existsSync(path) ? await readFile(path, 'utf8') : null;
-  const { content, change } = upsertMarkerLine(existing, line);
+  const { content, change } = upsertMarkerLine(probe.text, line);
   if (change === 'none') return { path, status: 'already-present' };
-  if (!dryRun && content !== null) await writeFileAtomic(path, content);
+  const writeTo = await prepareMarkerWrite(path, probe);
+  if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
   if (change === 'append') return { path, status: dryRun ? 'would-append' : 'appended' };
   return { path, status: dryRun ? 'would-update' : 'updated' };
+}
+
+/**
+ * The write-side contract both nudge writers share, in ONE place so a refactor
+ * cannot half-drop it: refuse a non-regular chosen path and resolve through a
+ * link, BOTH unconditionally (dry runs included), so a dry run can never report
+ * would-append where the real run refuses. Returns the resolved target for the
+ * real write. Safe after the change-none early return: a not-regular probe has
+ * null text, which can never produce `none`.
+ */
+async function prepareMarkerWrite(declared: string, probe: MarkerProbe): Promise<string> {
+  assertRegularMarker(declared, probe);
+  return resolveThroughLink(declared, 'the Tenjin pointer');
+}
+
+/**
+ * The nudge files (AGENTS.md, CLAUDE.md) are the other two files install writes
+ * into the operator's home, so the skill files' rules apply for the same reasons:
+ * read through the guarded descriptor (a FIFO at the path must not hang install,
+ * and an unreadable file is a typed error, not a raw errno), and write through a
+ * symlink (committing with `rename` over a dotfiles-managed link would replace
+ * the link with a regular file and strand its target).
+ */
+async function probeMarkerText(declared: string): Promise<MarkerProbe> {
+  // `open` follows symlinks, so a dangling link reads as absent here; the
+  // reachability check in the upserts fails it, on dry runs too, naming the link.
+  const read = await readSkillFile(declared);
+  if (read.kind === 'absent') return { text: null, notRegular: false };
+  if (read.kind === 'ok') return { text: read.bytes.toString('utf8'), notRegular: false };
+  // Not-regular is recorded, not thrown: a directory or FIFO cannot carry the
+  // marker, so it only fails a path this run selects to write (assertRegularMarker,
+  // in the upserts). Unreadable stays a hard failure even for a mere candidate: a
+  // file we cannot read could own the marker (skipping it appends a duplicate into
+  // the other file) or hold the operator's notes (writing over it clobbers them).
+  if (read.kind === 'not-regular') return { text: null, notRegular: true };
+  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared, {
+    verb: 'read',
+    expected: ': the pointer lands in a regular markdown file',
+  });
+}
+
+interface MarkerProbe {
+  text: string | null;
+  notRegular: boolean;
+}
+
+/** The write-path half of {@link probeMarkerText}'s not-regular rule: fails the
+ * path this run selects, dry runs included, so a dry run cannot promise a write
+ * the real run refuses. */
+function assertRegularMarker(declared: string, probe: MarkerProbe): void {
+  if (!probe.notRegular) return;
+  throw new CliError(
+    'INTERNAL',
+    `${declared} is not a regular file, so the Tenjin pointer was not written.`,
+    {
+      fix: `Check what is there (\`ls -l ${declared}\`) and remove or replace it, then re-run \`tenjin install\`.`,
+    },
+  );
+}
+
+/** See {@link probeMarkerText}; the write half of the same contract. `writeTo` is
+ * the link-resolved target the caller obtained from `resolveThroughLink`. */
+async function writeMarkerFile(declared: string, writeTo: string, content: string): Promise<void> {
+  try {
+    await writeFileAtomic(writeTo, content);
+  } catch (err) {
+    throw wrapWriteError(
+      err,
+      declared,
+      'the Tenjin pointer',
+      await deepestExisting(dirname(writeTo)),
+      { expected: ': the pointer lands in a regular markdown file' },
+    );
+  }
 }
 
 function chooseAgentsMdPath(home: string): string {

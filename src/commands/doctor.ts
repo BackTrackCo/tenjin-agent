@@ -1,6 +1,9 @@
 import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveSkillsSource } from '../lib/skills-source';
 import { CliError } from '../lib/errors';
 import {
   CLI_SKILL_NAMES,
@@ -15,6 +18,7 @@ import {
   missingCliSkills,
   onPath,
   readAllWiring,
+  readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
 import type {
@@ -105,6 +109,8 @@ export interface DoctorDeps {
   which?: (bin: string) => boolean;
   /** Clock seam (ms since epoch) for the session-expiry check. */
   now?: () => number;
+  /** Packaged skills to compare the wired copies against; defaults to this build's. */
+  skillsSourceDir?: string;
 }
 
 /**
@@ -137,6 +143,7 @@ export async function collectDoctorChecks(
       deps.homeDir ?? homedir(),
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
+      deps.skillsSourceDir,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
@@ -370,6 +377,7 @@ async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
+  skillsSourceDir?: string,
 ): Promise<BuiltCheck> {
   const present = detectHarnesses(home, which);
   const wiring = await readAllWiring(home);
@@ -425,6 +433,51 @@ async function checkSkills(
     };
   }
 
+  // Wired is not the same as CURRENT. `npm i -g tenjin-cli` updates the binary and
+  // nothing else, so the copies install wrote stay at whatever version wrote them
+  // until someone re-runs install, and every check above passes the whole time.
+  //
+  // EVERY directory, not just the ones in play. The checks above ask what a
+  // harness on this machine reads; this one has to cover what the self-heal
+  // writes, which is any directory holding one of our adapters. A ~/.agents/skills
+  // that fell out of play (a fallback install, then Claude Code arrives) is where
+  // the heal keeps working and, when it cannot, keeps quiet: reporting a narrower
+  // set than it writes would leave a stale directory nothing ever names.
+  const { stale, verifiable } = await compareWiredSkills(
+    wiring.map((w) => w.dir),
+    skillsSourceDir,
+  );
+  if (!verifiable) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read, so whether they are current is unknown`,
+        fix: 'Reinstall the CLI: `npm i -g tenjin-cli`, then `tenjin install`.',
+        data,
+      },
+    };
+  }
+  if (stale.length > 0) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: `${CLI_SKILL_NAMES.join(' + ')} wired but not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
+        // fixFor, like every neighbouring branch: a plain `tenjin install` targets
+        // DETECTED harnesses only, so for a directory that exists because someone
+        // passed --harness it would be a fix that never clears the warning.
+        fix: fixFor(
+          home,
+          wiring.filter((w) => stale.includes(w.dir)),
+        ),
+        data,
+      },
+    };
+  }
+
   return {
     result: {
       name: 'skills',
@@ -434,6 +487,59 @@ async function checkSkills(
       data,
     },
   };
+}
+
+/**
+ * How the wired CLI adapter skills compare to the packaged ones.
+ *
+ * `verifiable` is false when this build cannot read its own packaged copies, which
+ * is a broken package rather than evidence of no drift; reporting that as current
+ * would make the check quietly green on exactly the install doctor should describe.
+ *
+ * Only the ADAPTERS are compared: the hosted mirror is a copy of
+ * tenjin.blog/skills.md that an operator may legitimately have re-fetched newer
+ * than this package ships.
+ *
+ * This is also where a skill the post-command self-heal could NOT rewrite
+ * surfaces. That writer stays silent about its failures on purpose: a cause it
+ * cannot clear (an unwritable skills directory) would otherwise print the same
+ * line on every command forever. Stale here means exactly that, and the fix names
+ * the harness. For the handoff to hold, the CALLER has to pass every directory
+ * the heal can reach, not only the ones a detected harness reads.
+ */
+async function compareWiredSkills(
+  dirs: readonly string[],
+  sourceDir?: string,
+): Promise<{ stale: string[]; verifiable: boolean }> {
+  let source: string;
+  try {
+    source = sourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+  } catch {
+    return { stale: [], verifiable: false };
+  }
+  // Read once, not once per directory.
+  const packaged = new Map<string, Buffer>();
+  for (const name of CLI_SKILL_NAMES) {
+    const read = await readSkillFile(join(source, name, 'SKILL.md'));
+    if (read.kind === 'ok') packaged.set(name, read.bytes);
+  }
+  if (packaged.size !== CLI_SKILL_NAMES.length) return { stale: [], verifiable: false };
+
+  const stale: string[] = [];
+  for (const dir of dirs) {
+    for (const name of CLI_SKILL_NAMES) {
+      // Guarded: a pipe or device at this path would otherwise block the whole
+      // diagnostic. Anything but a readable regular file is the wiring check's
+      // business, not this one's.
+      const onDisk = await readSkillFile(join(dir, name, 'SKILL.md'));
+      if (onDisk.kind !== 'ok') continue;
+      if (!packaged.get(name)!.equals(onDisk.bytes)) {
+        stale.push(dir);
+        break;
+      }
+    }
+  }
+  return { stale, verifiable: true };
 }
 
 /** What is wrong in ONE directory, naming the directory and the skills. */
@@ -579,6 +685,18 @@ async function checkSession(
     return warn(
       `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
     );
+  }
+  // Same standing as `absent`: a cache this CLI cannot use, re-minted by one
+  // command. A failing check here meant a permanent post-update warning.
+  if (state.kind === 'outdated') {
+    return {
+      result: {
+        name: 'session',
+        status: 'ok',
+        required: false,
+        detail: `Cached session key at ${sessionPath(dataDir)} predates this CLI version (no \`${state.field}\`) and is not used; \`tenjin session start --scope read\` mints a current one`,
+      },
+    };
   }
   if (state.kind === 'corrupt') {
     return warn(`Session key at ${sessionPath(dataDir)} could not be parsed (${state.reason})`);

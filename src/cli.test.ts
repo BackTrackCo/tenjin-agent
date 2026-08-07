@@ -1,19 +1,49 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * Where the self-heal resolves its packaged skills from. Empty means the real
+ * resolution, which from a source checkout is a working tree the heal refuses;
+ * the heal case below points it at a packaged LAYOUT instead, because that
+ * refusal is by directory shape and nothing else here can produce one.
+ */
+const skillsSrc = vi.hoisted(() => ({ dir: '' }));
+vi.mock('./lib/skills-source', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/skills-source')>();
+  return {
+    ...actual,
+    resolveSkillsSource: (startDir: string) =>
+      skillsSrc.dir === '' ? actual.resolveSkillsSource(startDir) : skillsSrc.dir,
+  };
+});
 import { main } from './cli';
+import { resolveSkillsSource } from './lib/skills-source';
 import type { Io } from './lib/output';
 
-// The dispatcher now runs the update check after every command, and the TTY cases
-// below would otherwise let it reach the npm registry and write the real
-// ~/.tenjin. CI is the production skip signal, so setting it keeps this file
-// offline through the same door a build machine uses.
-let prevCI: string | undefined;
-beforeAll(() => {
-  prevCI = process.env.CI;
+// The dispatcher runs the update check and the skills self-heal after every
+// command, and the cases below would otherwise let one reach the npm registry and
+// the other rewrite the developer's own ~/.claude/skills. CI is the production
+// skip signal for the check, so setting it keeps this file offline through the
+// same door a build machine uses; the heal is bounded by pointing HOME and the
+// data dir at a sandbox for the whole file.
+let sandbox: string;
+const prevEnv: Record<string, string | undefined> = {};
+beforeAll(async () => {
+  sandbox = await mkdtemp(join(tmpdir(), 'tenjin-cli-sandbox-'));
+  for (const key of ['CI', 'HOME', 'TENJIN_DATA_DIR']) prevEnv[key] = process.env[key];
   process.env.CI = '1';
+  process.env.HOME = join(sandbox, 'home');
+  process.env.TENJIN_DATA_DIR = join(sandbox, 'data');
 });
-afterAll(() => {
-  if (prevCI === undefined) delete process.env.CI;
-  else process.env.CI = prevCI;
+afterAll(async () => {
+  for (const [key, value] of Object.entries(prevEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  await rm(sandbox, { recursive: true, force: true });
 });
 
 function captureIo(isTTY = false) {
@@ -320,5 +350,67 @@ describe('session command group', () => {
     const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
     expect(code).toBe(2);
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});
+
+/**
+ * The post-command skills self-heal, at the dispatcher. It runs after the
+ * envelope, so what matters here is that a command's contract is untouched by it;
+ * the heal's own behavior is covered in lib/skill-heal.test.ts, and the packed
+ * binary actually healing a stale skill is covered in scripts/pack-smoke.sh.
+ */
+describe('skills self-heal', () => {
+  const wiredPath = (): string =>
+    join(process.env.HOME!, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+  const STALE = '---\nname: tenjin-search\n---\n\nstale\n';
+
+  // The file-level CI=1 would skip the heal outright and make both cases below
+  // pass for the wrong reason, so this block clears it. Every case here stays off
+  // a TTY, which is what keeps the update nudge (TTY-gated, unlike the heal) from
+  // reaching the network once CI is out of the way.
+  beforeEach(async () => {
+    process.env.CI = '';
+    await mkdir(join(process.env.HOME!, '.claude', 'skills', 'tenjin-search'), { recursive: true });
+    await writeFile(wiredPath(), STALE);
+  });
+  afterEach(async () => {
+    process.env.CI = '1';
+    skillsSrc.dir = '';
+    await rm(join(process.env.HOME!, '.claude'), { recursive: true, force: true });
+  });
+
+  /**
+   * The packaged shape the heal insists on: a `skills/` whose parent holds no
+   * `src/`. Copied out of the real one, so what lands is the bytes this build
+   * ships.
+   */
+  async function packagedLayout(): Promise<string> {
+    const real = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    const dir = join(sandbox, 'pkg', 'skills');
+    await cp(real, dir, { recursive: true });
+    return dir;
+  }
+
+  // A heal that RAN: the packaged-layout copy below passes the source-checkout
+  // discriminator, so the file is genuinely rewritten while this asserts stdout.
+  // Without it the case would pass on a heal that never happened.
+  it('heals a stale skill and still emits exactly one JSON object, exit 0', async () => {
+    skillsSrc.dir = await packagedLayout();
+    const cap = captureIo();
+    expect(await main(['config', '--json'], cap.io)).toBe(0);
+    const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
+    expect(parsed.ok).toBe(true);
+    expect(await readFile(wiredPath(), 'utf8')).toBe(
+      await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+    );
+    expect(cap.stderr()).toContain('Updated');
+  });
+
+  // This suite runs from the source tree, which is exactly the case the heal
+  // declines: a checkout's skills/ can be half-edited, and nobody installed it.
+  it('does not heal from a source checkout', async () => {
+    const cap = captureIo();
+    expect(await main(['config'], cap.io)).toBe(0);
+    expect(await readFile(wiredPath(), 'utf8')).toBe(STALE);
   });
 });
