@@ -218,6 +218,53 @@ export interface HttpResponse {
 
 export type HttpResult = HttpResponse | FetchJsonFailure;
 
+/** The wire form of one request: what to send, and whether it may follow a redirect. */
+interface PreparedRequest {
+  ok: true;
+  headers: Record<string, string>;
+  body: string | undefined;
+  signed: boolean;
+  pinned: boolean;
+}
+
+/**
+ * Assemble the request and DERIVE its redirect decision from the headers that
+ * were actually built, in one place and one pass. The redirect flags are
+ * returned rather than assigned, so they have no value until the headers do:
+ * there is no state in which `pinned` is readable but not yet computed, which
+ * is what would let a signed request follow a 3xx to another host. Anything
+ * that refuses here (`new Headers` throws on a malformed caller header) becomes
+ * the same discriminated failure a dead socket does, because this transport
+ * documents a returned failure for every refusal, not an exception.
+ */
+function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest | FetchJsonFailure {
+  try {
+    let body: string | undefined;
+    const merged = new Headers(opts.headers ?? {});
+    if (opts.jsonBody !== undefined) {
+      body = JSON.stringify(opts.jsonBody);
+      merged.set('content-type', 'application/json');
+    }
+    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+    if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
+    // An `accept`/`content-type` set here wins the slot regardless of how a
+    // caller cased its own copy.
+    const headers = Object.fromEntries(applyUserAgent(merged).entries());
+
+    // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
+    // A caller can also pin an unsigned request (blockRedirects) when the
+    // response it gets back becomes a durable local record.
+    const signed = carriesSignedMaterial(headers);
+    return { ok: true, headers, body, signed, pinned: signed || opts.blockRedirects === true };
+  } catch (err) {
+    return {
+      ok: false,
+      kind: 'network',
+      message: `Request to ${url} failed: ${errorMessage(err)}`,
+    };
+  }
+}
+
 export async function httpRequest(url: string, opts: HttpRequestOptions): Promise<HttpResult> {
   const doFetch = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -228,33 +275,12 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
   }, opts.timeoutMs);
 
   try {
-    // Assigned inside the try below, read after it by the redirect gate.
-    let signed = false;
-    let pinned = false;
+    const prepared = prepareRequest(url, opts);
+    if (!prepared.ok) return prepared;
+    const { headers, body, signed, pinned } = prepared;
 
     let res: Response;
     try {
-      // Header construction shares the fetch's try: `new Headers` rejects a
-      // malformed caller header by throwing, and this function documents a
-      // returned failure for every transport-layer refusal, not an exception.
-      let body: string | undefined;
-      const merged = new Headers(opts.headers ?? {});
-      if (opts.jsonBody !== undefined) {
-        body = JSON.stringify(opts.jsonBody);
-        merged.set('content-type', 'application/json');
-      }
-      const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
-      if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
-      // An `accept`/`content-type` set here wins the slot regardless of how a
-      // caller cased its own copy.
-      const headers = Object.fromEntries(applyUserAgent(merged).entries());
-
-      // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
-      // A caller can also pin an unsigned request (blockRedirects) when the
-      // response it gets back becomes a durable local record.
-      signed = carriesSignedMaterial(headers);
-      pinned = signed || opts.blockRedirects === true;
-
       res = await doFetch(url, {
         method: opts.method ?? 'GET',
         headers,

@@ -412,25 +412,49 @@ describe('httpRequest, signed requests never follow redirects', () => {
 describe('a caller header the Headers API rejects is a returned failure, not a throw', () => {
   // A space is not a legal token character, so `new Headers` throws on it.
   const malformed = { 'bad header': 'v' };
-  const never: typeof fetch = async () => {
-    throw new Error('fetch must not be reached');
-  };
+  function unreachedFetch(): { fetchImpl: typeof fetch; calls: number[] } {
+    const calls: number[] = [];
+    const fetchImpl: typeof fetch = async () => {
+      calls.push(1);
+      return new Response('{}', { status: 200 });
+    };
+    return { fetchImpl, calls };
+  }
 
-  it('httpRequest returns a network failure', async () => {
+  it('httpRequest returns a network failure and dispatches nothing', async () => {
+    const { fetchImpl, calls } = unreachedFetch();
     const res = await httpRequest('https://tenjin.blog/api/search', {
       timeoutMs: 1000,
       headers: malformed,
-      fetchImpl: never,
+      fetchImpl,
     });
     expect(res).toMatchObject({ ok: false, kind: 'network' });
+    // Counted, not inferred from an error: a request that could not be assembled
+    // must not reach the wire in a half-built state, least of all an unpinned one.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('httpRequest refuses a signed request it cannot assemble, rather than sending it unpinned', async () => {
+    const { fetchImpl, calls } = unreachedFetch();
+    const res = await httpRequest('https://tenjin.blog/api/posts', {
+      method: 'POST',
+      timeoutMs: 1000,
+      headers: { ...malformed, [SIWX_HEADER]: 'siwx-value' },
+      jsonBody: { title: 'x' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
+    expect(calls).toHaveLength(0);
   });
 
   it('fetchJson returns a network failure', async () => {
+    const { fetchImpl, calls } = unreachedFetch();
     const res = await fetchJson('https://tenjin.blog/openapi.json', {
       timeoutMs: 1000,
       headers: malformed,
-      fetchImpl: never,
+      fetchImpl,
     });
     expect(res).toMatchObject({ ok: false, kind: 'network' });
+    expect(calls).toHaveLength(0);
   });
 });
