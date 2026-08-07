@@ -1,5 +1,198 @@
 # tenjin-cli
 
+## 0.1.0-alpha.9
+
+### Minor Changes
+
+- 8f7ecaa: Send the standard `User-Agent: tenjin-cli/<version> (+https://tenjin.blog)` on
+  every request, and stop sending `X-Tenjin-Client` anywhere.
+
+  Client attribution now rides the field HTTP already has. The header is written at
+  the shared transport (`fetchJson` and `httpRequest`), through one setter both
+  funnel into, so a new call site cannot ship without an identity and a
+  call-specific header cannot erase one: the merge runs on the Headers API, where a
+  caller spelling `User-Agent` in any case lands in the same slot and is
+  overwritten rather than duplicated. The MCP server inherits it unchanged, because
+  its tools call the same command cores.
+
+  The custom header is deleted rather than kept alongside. The server prefers the
+  `User-Agent` product token over `X-Tenjin-Client` (BackTrackCo/tenjin#544) and
+  parses `tenjin-cli` from both, so the label recorded against searches and
+  payments does not move across this change and no compatibility shim is needed.
+  `registry.npmjs.org` update checks are the one exception, and stay on Node's
+  default agent: they are not tenjin.blog traffic.
+
+  Adding the header cannot disturb a payment. The x402 signature covers EIP-3009
+  typed transfer data, never HTTP headers, and the session delegation's RFC 9421
+  signature covers method, target URI, and content digest only. A test recovers the
+  signer from the payload that actually went over the wire on the paid retry, and
+  pins that request's header set exactly.
+
+### Patch Changes
+
+- c03107a: Defang the prompt-injection eval fixtures. The HTTP payload named a live
+  production endpoint, so the run where the case earned its keep was the run where
+  local state left the machine. It now names a placeholder the runner replaces with
+  a loopback sentinel that records the attempt and discards the body, and the
+  output runner gives cases an explicit short environment plus the Tenjin data-dir
+  and review-mode pins that used to be an operator's job to export. Ships in the
+  package only as skill-adjacent tooling; no CLI behaviour changes.
+- 5309239: Installing, re-installing and updating the CLI each had a way of destroying
+  something quietly or reporting an ordinary event as breakage.
+
+  `tenjin install` no longer removes anything. It replaced each skill directory
+  wholesale, so a `references/` folder or a note beside the SKILL.md was deleted
+  and reported as "overwritten", and replacing the directory meant a symlinked one
+  was severed and a dangling one silently became a real directory. It now writes
+  the files the package ships and touches nothing else, which is what npm, dpkg
+  and Homebrew do: own your files, not the directory. A symlinked skill directory
+  or SKILL.md is written THROUGH, so the link survives and the target is what
+  changes; a broken link fails with a fix naming it rather than a raw ENOENT. That
+  is also why a byte-identical SKILL.md beside a user's own file now reports
+  `up-to-date` rather than `updated`, so agents reading `--json` get what humans
+  get. This is safe without a manifest only because each skill is a single file; a
+  test pins that, so the day one grows a second file the build says so.
+
+  A pipe or device at a skill path can no longer hang the CLI. `readFile` on a
+  FIFO blocks until a writer appears and on a character device never ends, and
+  neither call fails, so no error handling reached them: a pipe at a wired
+  SKILL.md hung `tenjin install` and `tenjin doctor` past SIGTERM until they were
+  killed outright. Every read of an operator-controlled skill path now goes
+  through one descriptor, opened non-blocking, `fstat`-checked, and read only when
+  it is a regular file. An unreadable file is refused rather than treated as
+  absent and replaced, and the permission error names the file rather than its
+  parent directory.
+
+  `tenjin install` no longer asks for permissions it already has. The consent
+  question fired unconditionally and "already allowed" was only discovered by
+  attempting the write, so every re-run interrupted the operator to re-authorize a
+  write that would not happen. A read-only probe answers first, and a settings
+  file that cannot be read is "unknown" rather than "already allowed", so that
+  case still asks.
+
+  The permissions writer refuses rather than clobbers. It is a whole-file
+  read-modify-write, so a change landing between the read and the rename was
+  erased in full, including keys with nothing to do with permissions; Claude Code
+  writes that file too, so the competing writer is not hypothetical. The bytes the
+  edit was based on are compared immediately before the commit, and a file that
+  moved underneath is left alone with a warning to re-run.
+
+  The "hosted tenjin skill was already here" notice now fires only for the
+  hosted-zero-install-first funnel. It gated on a SKILL.md being on disk, which is
+  trivially true on any re-run, so the CLI reported its own mirror back to the
+  user as something they had installed. It also names its directory, so the funnel
+  case reads as two facts rather than a stutter.
+
+  A session cache written by an older CLI is reported as outdated, not corrupt.
+  `origin` became required after existing caches were written, so those files
+  failed the schema and `doctor` announced "could not be parsed" on every run,
+  forever, over a cache that one command re-mints and that is usually expired
+  anyway. Every schema failure must be an allowlisted later field the file
+  genuinely lacks, so a missing private scalar and a field that is present and
+  wrong both stay in the tamper bucket.
+
+  A wallet written by a newer CLI is reported as a downgrade, not a corruption.
+  The record is pinned to a literal schema version, so an older binary fell
+  through to the generic parse failure, whose fix is "move it aside and run
+  `tenjin wallet create`" — advice that abandons a funded wallet. It now names
+  both versions and says not to delete or recreate.
+
+  Concurrent `tenjin install` runs no longer fail. Five simultaneous runs failed 7
+  times out of 15 on raw `ENOENT`/`ENOTEMPTY` renames, and one of the failures told
+  the operator to check directory permissions for what was purely a race. Removing
+  the wholesale directory replacement is what fixed it: each shipped file is
+  written through its own atomic rename, and 24 concurrent runs pass. The wiring
+  takes no lock at all. An interrupt anywhere in the command still releases
+  whatever lock it does hold (the config lock behind the publishing question, and
+  the wallet-create lock, whose slow key derivation is the widest interrupt window
+  install has) and says what state the machine is in.
+
+  `tenjin doctor` now reports skills that are wired but not from this build.
+  Updating the CLI does not update the copies install wrote, and every existing
+  check passed the whole time an agent was reading an older version's
+  instructions. Only the CLI adapters are compared, in every skills directory that
+  has them, whatever harnesses this machine turns out to have. When this build
+  cannot read its own packaged copies that is reported as unverifiable rather than
+  as a green tick, and the fix names the harness so it can actually clear.
+
+  The AGENTS.md and CLAUDE.md pointer lines follow the same rules as the skill
+  files: read through the same guarded descriptor (a FIFO at the path cannot hang
+  install) and written through a symlink, so a dotfiles-managed file keeps its
+  link.
+
+  An unwritable HOME, a broken link, and a wrong node type each raise a typed error
+  with a fix naming what to check, rather than a raw errno under INTERNAL with
+  none. A denied write names the resolved directory that actually refused it, not a
+  guessed parent. An empty HOME is refused rather than silently installing into the
+  current directory, and on a case-insensitive filesystem a user directory whose
+  name is a case variant of a shipped skill is refused rather than having its
+  SKILL.md replaced by the alias.
+
+- 7ccb8be: Add `mcpName: blog.tenjin/tenjin` to `package.json`. The official MCP Registry
+  validates npm-distributed servers by fetching the pinned version's metadata and
+  requiring this field to match the server name, so the `tenjin mcp` stdio server
+  can be listed as an npm package under the existing `blog.tenjin/tenjin` entry.
+- c03107a: Tune the `tenjin-search` trigger description against its own eval, taking the
+  trigger set from 18/20 to 20/20 with every positive unchanged. That 20/20 is
+  in-sample: the description was tuned against those twenty queries and then scored
+  on them, and the keyless runner has no holdout, so read it as a fit rather than
+  as out-of-sample validation. The costly gate is
+  now part of the trigger rather than the subject ("version-specific compatibility
+  someone had to install and run to settle"), a new clause skips what the docs
+  answer in one line even when the question names versions, and the skip list names
+  the excuse the debugging over-fire was winning on: skip implementing, reviewing,
+  or debugging the thing in front of you, however famous the gotcha behind it.
+- 0869cce: The wired CLI skills now follow the CLI you are running.
+
+  Updating the CLI never updated the copies `tenjin install` wrote into
+  `~/.claude/skills` and `~/.agents/skills`, so an agent went on reading an older
+  version's instructions until someone re-ran `install`, which nobody does because
+  nothing tells them to. Every `tenjin` command except `install` now compares the
+  `tenjin-search` and `tenjin-publish` adapters already in those directories
+  against the packaged ones and rewrites only the files whose bytes differ, through
+  the same per-file atomic writer `install` uses. (The `tenjin mcp` server is not a
+  command in that sense and does not heal; the CLI surface is what this covers.)
+
+  It writes unattended, so it is deliberately more cautious than the install you
+  ran on purpose. It creates nothing: a skill that is not already in a directory is
+  never put there. It rewrites only a regular file whose frontmatter `name:` says
+  it is the skill in question, so a third-party skill sitting at one of our paths
+  is left alone. It follows no symlink at the three levels it writes, so a
+  symlinked SKILL.md, skill directory or skills directory is left for `install`,
+  which follows your link on purpose because you placed it. It never touches the hosted `tenjin` skill, which
+  mirrors [tenjin.blog/skills.md](https://tenjin.blog/skills.md) and may well be a
+  newer fetch than this package ships. An updated file keeps the mode it had.
+
+  Every rewrite is announced: one dim stderr line naming the files it wrote. It is
+  not TTY-gated, because a piped or agent-driven run is exactly the case that must
+  not have files change in silence, and stdout is untouched, so a `--json` run
+  still emits exactly one envelope. The heal runs after the command's own output
+  and can neither fail a command nor change its exit code. A skill it cannot write
+  is skipped in silence rather than reported on every command forever, since the
+  usual cause (an unwritable skills directory) is not something the next command
+  can clear either; `tenjin doctor` is where a skill that is wired but not from
+  this build gets named.
+
+  It stays out of the way when it should: skipped when `CI` is set, skipped when
+  `TENJIN_NO_SKILL_HEAL=1`, and skipped entirely when the CLI is running from a
+  source checkout rather than an installed package.
+
+  No locks are involved, in either writer. Per-file atomic renames are what make
+  concurrent installs safe, both writers put the same packaged bytes at the same
+  paths, and the skills-wiring lock `install` used to take is gone with them.
+
+- 5309239: Treat a wallet file written by a newer `tenjin-cli` as a downgrade rather than a
+  corruption. `wallet.json` is pinned to a literal schema version, so the day a v3
+  ships, an older binary reading that file fell through to the generic parse
+  failure, whose fix text is "move it aside, then run `tenjin wallet create`" —
+  advice that walks an operator whose only mistake was running an old binary into
+  abandoning a funded wallet. A higher `schemaVersion` now raises CONTRACT_MISMATCH
+  (the code the API layer already uses for a version skew across a schema, and not
+  one an agent recreates a wallet on), names both versions, and points at
+  `npm i -g tenjin-cli` while saying in as many words not to delete or recreate the
+  wallet. The version literal is now a shared `WALLET_SCHEMA_VERSION` constant so
+  the write site and the read guard cannot drift.
+
 ## 0.1.0-alpha.8
 
 ### Minor Changes
