@@ -18,6 +18,14 @@
 # js-yaml: GHSA-5p4m-2wfm-xmqj, both the 3.x and 4.x ranges (via
 # @changesets/cli, dev-only). Drop once @changesets/cli's own floors clear
 # 4.3.1 and read-yaml-file's clears 3.15.1.
+#
+# nanoid: GHSA-2v37-7h3g-55p8 (floor 3.3.17) and GHSA-28wg-ghj8-5hjv (floor
+# 3.3.16), via tsup/vitest > postcss, dev-only. 3.3.17 clears both; it is the
+# advisory floor on purpose, not npm's `legacy` tag (3.3.18). Lower-bounded at
+# 3.0.0 so a 1.x/2.x consumer is never dragged across two majors, which is
+# where nanoid's CJS/ESM shape changed. Both advisories also name 4.x/5.x
+# (effective floor 5.1.16), deliberately outside this 3.x entry. Drop once
+# the lockfile resolves nanoid at 3.3.17+ without this entry.
 overrides:
   'ws@>=8.0.0 <8.21.0': '8.21.0'
   'fast-uri@>=3.0.0 <3.1.5': '3.1.5'
@@ -26,6 +34,7 @@ overrides:
   'ip-address@>=10.0.0 <10.3.1': '10.3.1'
   'js-yaml@>=4.0.0 <4.3.1': '4.3.1'
   'js-yaml@>=3.0.0 <3.15.1': '3.15.1'
+  'nanoid@>=3.0.0 <3.3.17': '3.3.17'
 
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
