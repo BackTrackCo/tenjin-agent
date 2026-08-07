@@ -17,17 +17,19 @@ export interface FetchJsonOptions {
 }
 
 /**
- * Merge caller headers with the CLI's User-Agent identity. Built on the Headers
- * API so the merge is case-insensitive: a caller header spelled `User-Agent` in
- * any case is folded into the same slot `.set` then overwrites, so the identity
- * this module sends can never be silently duplicated or shadowed by a caller
- * value. Returned as a plain object (Headers.entries() is already
- * lowercase-keyed) so callers and tests keep working with Record<string, string>.
+ * The one place the identity is written; both transports funnel their Headers
+ * through it, so a third entry point cannot ship without it. `.set` on a Headers
+ * object is what makes it total: a caller header spelled `User-Agent` in any
+ * case lands in the same slot and is overwritten, never duplicated.
  */
-function withUserAgent(callerHeaders?: Record<string, string>): Record<string, string> {
-  const headers = new Headers(callerHeaders ?? {});
+function applyUserAgent(headers: Headers): Headers {
   headers.set('user-agent', TENJIN_USER_AGENT);
-  return Object.fromEntries(headers.entries());
+  return headers;
+}
+
+/** The same write for `fetchJson`'s plain-object headers; Headers.entries() is lowercase-keyed. */
+function withUserAgent(callerHeaders?: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(applyUserAgent(new Headers(callerHeaders ?? {})).entries());
 }
 
 /** A successful 2xx whose body parsed as JSON. */
@@ -226,28 +228,33 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
   }, opts.timeoutMs);
 
   try {
-    let body: string | undefined;
-    // Headers.set below is case-insensitive, so an `accept`/`content-type` set
-    // here always wins the slot regardless of how a caller happened to case its
-    // own copy — the plain-object `??=` this replaced could not make that promise.
-    const merged = new Headers(opts.headers ?? {});
-    if (opts.jsonBody !== undefined) {
-      body = JSON.stringify(opts.jsonBody);
-      merged.set('content-type', 'application/json');
-    }
-    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
-    if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
-    merged.set('user-agent', TENJIN_USER_AGENT);
-    const headers = Object.fromEntries(merged.entries());
-
-    // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
-    // A caller can also pin an unsigned request (blockRedirects) when the
-    // response it gets back becomes a durable local record.
-    const signed = carriesSignedMaterial(headers);
-    const pinned = signed || opts.blockRedirects === true;
+    // Assigned inside the try below, read after it by the redirect gate.
+    let signed = false;
+    let pinned = false;
 
     let res: Response;
     try {
+      // Header construction shares the fetch's try: `new Headers` rejects a
+      // malformed caller header by throwing, and this function documents a
+      // returned failure for every transport-layer refusal, not an exception.
+      let body: string | undefined;
+      const merged = new Headers(opts.headers ?? {});
+      if (opts.jsonBody !== undefined) {
+        body = JSON.stringify(opts.jsonBody);
+        merged.set('content-type', 'application/json');
+      }
+      const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+      if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
+      // An `accept`/`content-type` set here wins the slot regardless of how a
+      // caller cased its own copy.
+      const headers = Object.fromEntries(applyUserAgent(merged).entries());
+
+      // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
+      // A caller can also pin an unsigned request (blockRedirects) when the
+      // response it gets back becomes a durable local record.
+      signed = carriesSignedMaterial(headers);
+      pinned = signed || opts.blockRedirects === true;
+
       res = await doFetch(url, {
         method: opts.method ?? 'GET',
         headers,

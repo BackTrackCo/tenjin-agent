@@ -404,3 +404,33 @@ describe('httpRequest, signed requests never follow redirects', () => {
     expect(calls[0]?.redirect).toBe('manual');
   });
 });
+
+/**
+ * Both transports document a returned discriminated failure for every
+ * transport-layer refusal, so neither may throw where the other returns.
+ */
+describe('a caller header the Headers API rejects is a returned failure, not a throw', () => {
+  // A space is not a legal token character, so `new Headers` throws on it.
+  const malformed = { 'bad header': 'v' };
+  const never: typeof fetch = async () => {
+    throw new Error('fetch must not be reached');
+  };
+
+  it('httpRequest returns a network failure', async () => {
+    const res = await httpRequest('https://tenjin.blog/api/search', {
+      timeoutMs: 1000,
+      headers: malformed,
+      fetchImpl: never,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
+  });
+
+  it('fetchJson returns a network failure', async () => {
+    const res = await fetchJson('https://tenjin.blog/openapi.json', {
+      timeoutMs: 1000,
+      headers: malformed,
+      fetchImpl: never,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
+  });
+});

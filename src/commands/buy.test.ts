@@ -5,14 +5,17 @@ import { join } from 'node:path';
 import { runBuy } from './buy';
 import { findDelivered, saveDelivery } from '../lib/library';
 import { recordSearch } from '../lib/search-store';
+import { verifyTypedData } from 'viem';
 import {
   buildPaymentRequired,
   makeReadServer,
   readBody,
   reply,
+  testSigner,
   testWalletProvider,
   withTrailingSlashRedirect,
 } from '../lib/read-test-utils';
+import { TENJIN_USER_AGENT } from '../lib/client-meta';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -36,6 +39,22 @@ function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContex
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 
 const RESERVATION = 'rsv-test';
+
+/** The fields of the x402 v2 PAYMENT-SIGNATURE envelope this suite verifies. */
+interface X402Envelope {
+  payload: {
+    authorization: {
+      from: `0x${string}`;
+      to: `0x${string}`;
+      value: string;
+      validAfter: string;
+      validBefore: string;
+      nonce: `0x${string}`;
+    };
+    signature: `0x${string}`;
+  };
+  accepted: { asset: `0x${string}`; extra: { name: string; version: string } };
+}
 
 /** A spend authorizer whose decision is fixed; records authorize/commit/release. */
 function fakeAuthorizer(
@@ -242,6 +261,74 @@ describe('runBuy, paid path', () => {
     for (const call of calls.filter((c) => c.phase !== 'payment')) {
       expect(call.headers['x-tenjin-search-id']).toBeUndefined();
     }
+  });
+
+  it('adds the User-Agent to the signed x402 retry without touching what the wallet signed', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+    await runBuy({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    const paid = calls.find((c) => c.phase === 'payment');
+    // Exact set, not a subset: the whole point of the claim is that the paid
+    // retry gained the identity and NOTHING else, so a fourth header appearing
+    // on the one signed request the CLI sends has to fail here.
+    expect(Object.keys(paid?.headers ?? {}).sort()).toEqual([
+      'accept',
+      'payment-signature',
+      'user-agent',
+    ]);
+    expect(paid?.headers['user-agent']).toBe(TENJIN_USER_AGENT);
+
+    // Recover the signer from the payload that actually went over the wire. This
+    // is the byte-identity check: EIP-712 recovery fails on a single altered
+    // byte, so a passing verify proves the transport handed the server exactly
+    // what the wallet produced. It also shows WHY the header is harmless — the
+    // signed struct is EIP-3009 transfer authorization, with no HTTP header in
+    // its domain, its types, or its message.
+    const envelope = JSON.parse(
+      Buffer.from(paid?.headers['payment-signature'] ?? '', 'base64').toString('utf8'),
+    ) as X402Envelope;
+    const auth = envelope.payload.authorization;
+    await expect(
+      verifyTypedData({
+        address: auth.from,
+        domain: {
+          name: envelope.accepted.extra.name,
+          version: envelope.accepted.extra.version,
+          chainId: 8453,
+          verifyingContract: envelope.accepted.asset,
+        },
+        types: {
+          TransferWithAuthorization: [
+            { name: 'from', type: 'address' },
+            { name: 'to', type: 'address' },
+            { name: 'value', type: 'uint256' },
+            { name: 'validAfter', type: 'uint256' },
+            { name: 'validBefore', type: 'uint256' },
+            { name: 'nonce', type: 'bytes32' },
+          ],
+        },
+        primaryType: 'TransferWithAuthorization',
+        message: {
+          from: auth.from,
+          to: auth.to,
+          value: BigInt(auth.value),
+          validAfter: BigInt(auth.validAfter),
+          validBefore: BigInt(auth.validBefore),
+          nonce: auth.nonce,
+        },
+        signature: envelope.payload.signature,
+      }),
+    ).resolves.toBe(true);
+    expect(auth.from).toBe(testSigner().address);
+    expect(JSON.stringify(envelope)).not.toContain('tenjin-cli/');
   });
 });
 
