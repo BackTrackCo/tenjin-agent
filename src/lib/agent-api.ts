@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { CliError } from './errors';
 import { httpRequest, type HttpResult } from './http';
-import { CLIENT_HEADER } from './client-meta';
 import { ATOMIC_RE, UUID_RE } from './ids';
 import { trimSlash } from './url';
 
@@ -11,8 +10,8 @@ import { trimSlash } from './url';
  * unknown `schemaVersion` degrades to a parse refusal rather than a guess, and
  * unrecognized candidate fields are ignored (forward-compatible), per spec 10.
  *
- * These endpoints are anonymous: no wallet, no SIWX. The only header of note is
- * `X-Tenjin-Client`, which attributes a later purchase back to the search flow.
+ * These endpoints are anonymous: no wallet, no SIWX. The shared transport's
+ * User-Agent is what attributes a later purchase back to the search flow.
  */
 
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
@@ -262,10 +261,7 @@ export async function postSearch(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
-    headers: {
-      'x-tenjin-client': CLIENT_HEADER,
-      ...(opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {}),
-    },
+    headers: opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {},
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
   });
@@ -470,7 +466,6 @@ export async function postOutcomes(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
-    headers: { 'x-tenjin-client': CLIENT_HEADER },
     jsonBody: items.length === 1 ? items[0] : items,
     fetchImpl: opts.fetchImpl,
   });

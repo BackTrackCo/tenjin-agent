@@ -258,7 +258,8 @@ describe('runEdit — flag to body mapping', () => {
     expect(stub.calls.map((c) => c.method)).toEqual(['GET', 'PUT']);
     for (const call of stub.calls) {
       expect(call.url).toBe(`https://preview.example/api/posts/${POST_ID}`);
-      expect(call.headers['x-tenjin-client']).toMatch(/^tenjin-cli\//);
+      expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+      expect(call.headers['x-tenjin-client']).toBeUndefined();
     }
   });
 

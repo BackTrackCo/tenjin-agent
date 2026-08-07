@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { fetchJson, fetchFailureToCliError, httpRequest } from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError } from './errors';
+import { TENJIN_USER_AGENT } from './client-meta';
 import type { FetchJsonFailure, HttpRequestOptions } from './http';
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -77,6 +78,96 @@ describe('fetchJson', () => {
       fetchImpl: stalledFetch,
     });
     expect(res).toMatchObject({ ok: false, kind: 'timeout' });
+  });
+});
+
+/**
+ * The tenjin-cli User-Agent identity (spec: user-agent-telemetry-and-client-
+ * attribution.md PR 3). Both transports send it on every request from a single
+ * source, merged through the Headers API so it survives regardless of what a
+ * caller-supplied header carries or how it is cased.
+ */
+describe('User-Agent identity', () => {
+  function headerCapture(): { fetchImpl: typeof fetch; calls: Headers[] } {
+    const calls: Headers[] = [];
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      calls.push(new Headers(init?.headers));
+      return new Response(JSON.stringify({ ok: 1 }), { status: 200 });
+    };
+    return { fetchImpl, calls };
+  }
+
+  it('fetchJson sends the tenjin-cli User-Agent with no caller headers at all', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
+  });
+
+  it('fetchJson merges caller headers alongside the User-Agent', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await fetchJson('https://tenjin.blog/openapi.json', {
+      timeoutMs: 1000,
+      headers: { accept: 'application/json' },
+      fetchImpl,
+    });
+    expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
+    expect(calls[0]?.get('accept')).toBe('application/json');
+  });
+
+  it('fetchJson never sends X-Tenjin-Client', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.has('x-tenjin-client')).toBe(false);
+  });
+
+  it('httpRequest sends the tenjin-cli User-Agent on a plain GET', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
+    expect(calls[0]?.has('x-tenjin-client')).toBe(false);
+  });
+
+  it('httpRequest sends the User-Agent alongside a signed request, untouched by signing', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/posts', {
+      method: 'POST',
+      timeoutMs: 1000,
+      headers: { [SIWX_HEADER]: 'siwx-value' },
+      jsonBody: { title: 'x' },
+      fetchImpl,
+    });
+    const sent = calls[0]!;
+    expect(sent.get('user-agent')).toBe(TENJIN_USER_AGENT);
+    expect(sent.get(SIWX_HEADER)).toBe('siwx-value');
+    expect(sent.get('content-type')).toBe('application/json');
+    expect(sent.has('x-tenjin-client')).toBe(false);
+  });
+
+  it('a caller header spelled `User-Agent` in any case cannot erase or duplicate the identity', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/search', {
+      timeoutMs: 1000,
+      // A caller-supplied value under a differently-cased key must not survive
+      // alongside, or instead of, the CLI's own identity: exactly one User-Agent
+      // reaches the wire, and it is always the CLI's.
+      headers: { 'USER-AGENT': 'something-else/1.0' },
+      fetchImpl,
+    });
+    const sent = calls[0]!;
+    expect(sent.get('user-agent')).toBe(TENJIN_USER_AGENT);
+    expect([...sent.keys()].filter((k) => k === 'user-agent')).toHaveLength(1);
+  });
+
+  it('call-specific accept/content-type still win their own slot without disturbing the User-Agent', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: { Accept: 'application/json' },
+      fetchImpl,
+    });
+    const sent = calls[0]!;
+    expect(sent.get('accept')).toBe('application/json');
+    expect(sent.get('user-agent')).toBe(TENJIN_USER_AGENT);
   });
 });
 
@@ -311,5 +402,59 @@ describe('httpRequest, signed requests never follow redirects', () => {
 
     expect(res).toMatchObject({ ok: true, status: 200 });
     expect(calls[0]?.redirect).toBe('manual');
+  });
+});
+
+/**
+ * Both transports document a returned discriminated failure for every
+ * transport-layer refusal, so neither may throw where the other returns.
+ */
+describe('a caller header the Headers API rejects is a returned failure, not a throw', () => {
+  // A space is not a legal token character, so `new Headers` throws on it.
+  const malformed = { 'bad header': 'v' };
+  function unreachedFetch(): { fetchImpl: typeof fetch; calls: number[] } {
+    const calls: number[] = [];
+    const fetchImpl: typeof fetch = async () => {
+      calls.push(1);
+      return new Response('{}', { status: 200 });
+    };
+    return { fetchImpl, calls };
+  }
+
+  it('httpRequest returns a network failure and dispatches nothing', async () => {
+    const { fetchImpl, calls } = unreachedFetch();
+    const res = await httpRequest('https://tenjin.blog/api/search', {
+      timeoutMs: 1000,
+      headers: malformed,
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
+    // Counted, not inferred from an error: a request that could not be assembled
+    // must not reach the wire in a half-built state, least of all an unpinned one.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('httpRequest refuses a signed request it cannot assemble, rather than sending it unpinned', async () => {
+    const { fetchImpl, calls } = unreachedFetch();
+    const res = await httpRequest('https://tenjin.blog/api/posts', {
+      method: 'POST',
+      timeoutMs: 1000,
+      headers: { ...malformed, [SIWX_HEADER]: 'siwx-value' },
+      jsonBody: { title: 'x' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('fetchJson returns a network failure', async () => {
+    const { fetchImpl, calls } = unreachedFetch();
+    const res = await fetchJson('https://tenjin.blog/openapi.json', {
+      timeoutMs: 1000,
+      headers: malformed,
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'network' });
+    expect(calls).toHaveLength(0);
   });
 });

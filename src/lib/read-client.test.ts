@@ -42,6 +42,15 @@ describe('fetchRead', () => {
     });
     expect(calls[0]?.headers['sign-in-with-x']).toBe('siwx-value');
     expect(calls[0]?.headers['payment-signature']).toBe('pay-value');
+    // The paid retry (signed x402 request) carries the same UA as every other
+    // request. What x402 signs is an EIP-3009 transfer authorization, a typed
+    // struct of from/to/value/validity/nonce, so no HTTP header is inside the
+    // signature at all and an identity field riding alongside cannot disturb it.
+    // `buy.test.ts` proves that by recovering the signer from the wire payload.
+    for (const call of calls) {
+      expect(call.headers['user-agent']).toMatch(/^tenjin-cli\//);
+      expect(call.headers['x-tenjin-client']).toBeUndefined();
+    }
   });
 
   it('sends the session-key headers when provided, alongside the usual ones', async () => {
@@ -61,7 +70,8 @@ describe('fetchRead', () => {
     expect(calls[0]?.headers.signature).toBe('tenjin=:sig:');
     // The client's own headers survive the merge.
     expect(calls[0]?.headers.accept).toBe('application/json');
-    expect(calls[0]?.headers['x-tenjin-client']).toBeDefined();
+    expect(calls[0]?.headers['user-agent']).toMatch(/^tenjin-cli\//);
+    expect(calls[0]?.headers['x-tenjin-client']).toBeUndefined();
   });
 
   it('reports session_rejected with the server code on a 401 to a session-signed read', async () => {

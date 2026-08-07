@@ -1,4 +1,5 @@
 import { CliError } from './errors';
+import { TENJIN_USER_AGENT } from './client-meta';
 
 /**
  * The single JSON client the whole CLI grows on: `doctor` uses it in B1, `search`
@@ -11,8 +12,24 @@ export interface FetchJsonOptions {
   timeoutMs: number;
   /** Override global fetch (tests inject a stub returning canned Responses). */
   fetchImpl?: typeof fetch;
-  /** Optional request headers (doctor sends the X-Tenjin-Client label). */
+  /** Optional request headers, merged onto the User-Agent this module always sends. */
   headers?: Record<string, string>;
+}
+
+/**
+ * The one place the identity is written; both transports funnel their Headers
+ * through it, so a third entry point cannot ship without it. `.set` on a Headers
+ * object is what makes it total: a caller header spelled `User-Agent` in any
+ * case lands in the same slot and is overwritten, never duplicated.
+ */
+function applyUserAgent(headers: Headers): Headers {
+  headers.set('user-agent', TENJIN_USER_AGENT);
+  return headers;
+}
+
+/** The same write for `fetchJson`'s plain-object headers; Headers.entries() is lowercase-keyed. */
+function withUserAgent(callerHeaders?: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(applyUserAgent(new Headers(callerHeaders ?? {})).entries());
 }
 
 /** A successful 2xx whose body parsed as JSON. */
@@ -95,7 +112,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     try {
       res = await doFetch(url, {
         signal: controller.signal,
-        ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
+        headers: withUserAgent(opts.headers),
       });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
@@ -201,6 +218,53 @@ export interface HttpResponse {
 
 export type HttpResult = HttpResponse | FetchJsonFailure;
 
+/** The wire form of one request: what to send, and whether it may follow a redirect. */
+interface PreparedRequest {
+  ok: true;
+  headers: Record<string, string>;
+  body: string | undefined;
+  signed: boolean;
+  pinned: boolean;
+}
+
+/**
+ * Assemble the request and DERIVE its redirect decision from the headers that
+ * were actually built, in one place and one pass. The redirect flags are
+ * returned rather than assigned, so they have no value until the headers do:
+ * there is no state in which `pinned` is readable but not yet computed, which
+ * is what would let a signed request follow a 3xx to another host. Anything
+ * that refuses here (`new Headers` throws on a malformed caller header) becomes
+ * the same discriminated failure a dead socket does, because this transport
+ * documents a returned failure for every refusal, not an exception.
+ */
+function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest | FetchJsonFailure {
+  try {
+    let body: string | undefined;
+    const merged = new Headers(opts.headers ?? {});
+    if (opts.jsonBody !== undefined) {
+      body = JSON.stringify(opts.jsonBody);
+      merged.set('content-type', 'application/json');
+    }
+    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+    if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
+    // An `accept`/`content-type` set here wins the slot regardless of how a
+    // caller cased its own copy.
+    const headers = Object.fromEntries(applyUserAgent(merged).entries());
+
+    // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
+    // A caller can also pin an unsigned request (blockRedirects) when the
+    // response it gets back becomes a durable local record.
+    const signed = carriesSignedMaterial(headers);
+    return { ok: true, headers, body, signed, pinned: signed || opts.blockRedirects === true };
+  } catch (err) {
+    return {
+      ok: false,
+      kind: 'network',
+      message: `Request to ${url} failed: ${errorMessage(err)}`,
+    };
+  }
+}
+
 export async function httpRequest(url: string, opts: HttpRequestOptions): Promise<HttpResult> {
   const doFetch = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -211,21 +275,9 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
   }, opts.timeoutMs);
 
   try {
-    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-    let body: string | undefined;
-    if (opts.jsonBody !== undefined) {
-      body = JSON.stringify(opts.jsonBody);
-      headers['content-type'] = 'application/json';
-    }
-    if (opts.method === 'POST' || opts.method === 'PUT' || body !== undefined) {
-      headers['accept'] ??= 'application/json';
-    }
-
-    // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
-    // A caller can also pin an unsigned request (blockRedirects) when the
-    // response it gets back becomes a durable local record.
-    const signed = carriesSignedMaterial(headers);
-    const pinned = signed || opts.blockRedirects === true;
+    const prepared = prepareRequest(url, opts);
+    if (!prepared.ok) return prepared;
+    const { headers, body, signed, pinned } = prepared;
 
     let res: Response;
     try {
