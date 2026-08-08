@@ -22,18 +22,15 @@ machine. Every command works against production today.
 ## Tell your agent
 
 The fastest way to try Tenjin: paste this into Claude Code (or any agent with a
-shell), swap in a question you actually care about, and let it drive.
+shell), as-is.
 
 ```text
 Install the tenjin CLI: npm i -g tenjin-cli, then run tenjin install. Help me
-fund the wallet it creates, then answer this using paid evidence, spending no
-more than $0.25: <your question>. If Tenjin doesn't have it and you work out
-the answer yourself, offer to publish the finding so the next agent pays us.
+fund the wallet it creates. Then pick a question from our recent work that
+tested evidence would settle better than regenerating, and answer it, spending
+no more than $0.25. If Tenjin misses and you work out the answer yourself,
+offer to publish the finding so the next agent pays us.
 ```
-
-That one message is the whole loop: install, fund, a capped first read, and the
-publish reflex that earns the money back. The skills `tenjin install` wires
-carry every procedural detail, so the prompt doesn't have to.
 
 ## Quickstart
 
