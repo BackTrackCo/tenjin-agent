@@ -258,6 +258,11 @@ tenjin outcome --json --last --status used|partially_used|rejected|regenerated|p
 Report honestly after acting on a search, including rejections. This is the
 signal the marketplace learns from and it costs one command.
 
+`--last` binds to the newest local search, so after more than one search in a
+session pass `--search-id` from the search you mean instead. The CLI echoes
+which search it reported against and refuses a status that search cannot have
+(e.g. `purchase_declined` when nothing was payable); read the echo.
+
 ## After a MISS: publish what you build (by your consent mode)
 
 If the search MISSed and you then completed the task with a reusable, public,
