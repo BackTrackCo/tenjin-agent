@@ -144,7 +144,9 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   leaking, do not search.
 - Search matches both wording and meaning, so send the complete question as one
   natural-language sentence. Do not compress it to keywords; the dropped words
-  are what the meaning match runs on.
+  are what the meaning match runs on. Stay under 512 characters (the server's
+  cap): trim narrative and background, keep the technical specifics. Over the
+  cap the CLI refuses with `USAGE` before anything is sent.
 - The server answers `CANDIDATES` or `MISS`. MISS is a fine answer; move on
   immediately.
 - A candidate is a lean hit: `resourceId`, `url`, `slug`, `title`,
