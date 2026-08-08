@@ -110,6 +110,9 @@ describe('runSearch', () => {
     const { fetch } = stub(miss);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect((res.data as { decision: string }).decision).toBe('MISS');
+    // A bare MISS offered nothing to buy, and the store has to say so rather than
+    // leave it unknown: that is what lets `outcome` refuse purchase_declined here.
+    expect(await latestSearch(dir)).toMatchObject({ candidates: [], browseCount: 0 });
   });
 
   // The browse tail (tenjin#460) is MISS-only and must stay a hint: one human
@@ -162,6 +165,11 @@ describe('runSearch', () => {
     expect((res.data as { candidates?: unknown[] }).candidates).toBeUndefined();
     const latest = await latestSearch(dir);
     expect(latest?.candidates).toEqual([]);
+    // How many, never which: the count is what tells `outcome` this MISS had a
+    // payable tail, and storing the pointers themselves is what would make
+    // `buy <resourceId>` reach one.
+    expect(latest?.browseCount).toBe(2);
+    expect(JSON.stringify(latest)).not.toContain('/api/read/iris/one');
   });
 
   // A plainly different host is the easy case. The two shapes this check exists

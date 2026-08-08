@@ -100,6 +100,11 @@ export async function runSearch(
       title: c.title,
       price: c.price,
     })),
+    // The pointers stay unrecorded on purpose (see below); only how many there
+    // were, so `outcome` can tell a MISS that offered a payable browse tail from
+    // one that offered nothing at all. Zero on a CANDIDATES decision, where the
+    // contract carries no browse array and the parser drops any that appears.
+    browseCount: response.browse?.length ?? 0,
   });
 
   // A parked-candidate nudge on stderr (not in the machine JSON), MISS only: a
