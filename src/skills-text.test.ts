@@ -266,6 +266,50 @@ describe('the published docs do not drift from the allowlist constants', () => {
     for (const e of ALWAYS_SAFE_ALLOWLIST) expect(PERMISSIONS_DOC).toContain(e.command);
   });
 
+  // These three claims were pinned against the block `doctor` used to print. The
+  // block is gone (#81) and the page is now the only place they are made, so the
+  // pins move with them rather than being dropped.
+
+  // search and outcome both POST. Pre-clearing them is defensible; calling them
+  // read-only in order to justify it is not.
+  it('the permissions doc does not call the free set read-only', () => {
+    expect(PERMISSIONS_DOC).not.toMatch(/free, read-only verbs/i);
+    expect(PERMISSIONS_DOC).toMatch(/None of those can spend, and none can open the keystore/i);
+    expect(PERMISSIONS_DOC).toMatch(/`tenjin search` POSTs[\s\S]{0,120}`tenjin outcome` POSTs/);
+  });
+
+  // The old definition said "no wallet, no signing, no payment". `read` signs
+  // (P-256, with a delegation it loaded), so that sentence would be a false claim
+  // on the page an operator pastes from. Pinned as a negative: the tier is defined
+  // by what it CANNOT do, and signing left the list.
+  it('the permissions doc never claims the safe verbs sign nothing', () => {
+    // Scoped to the paragraph that DEFINES the tier. "No wallet, no signing, no
+    // payment" is still true of `tenjin search` and is still that verb's own
+    // note; what it may never be again is the whole tier's definition.
+    const definition = PERMISSIONS_DOC.slice(
+      PERMISSIONS_DOC.indexOf('## The free tier'),
+      PERMISSIONS_DOC.indexOf('### What each verb actually does'),
+    );
+    expect(definition).not.toMatch(/no wallet, no signing, no payment/i);
+    expect(PERMISSIONS_DOC).toMatch(/wallet-derived credential/i);
+    expect(PERMISSIONS_DOC).toMatch(/wrong curve/i);
+    // And it must not offer the scope as the reason the file is safe to hold.
+    expect(PERMISSIONS_DOC).toMatch(/scope is not a containment boundary/i);
+  });
+
+  it('the permissions doc tells the operator where the lines go', () => {
+    expect(PERMISSIONS_DOC).toContain('.claude/settings.json');
+  });
+
+  // Every exclusion needs its REASON on the page, not just the verb name: the
+  // list above proves the verb is mentioned, which a stray reference satisfies.
+  it('the permissions doc gives a reason for every excluded verb', () => {
+    const table = PERMISSIONS_DOC.slice(PERMISSIONS_DOC.indexOf('## Never recommended'));
+    for (const e of NEVER_ALLOWLISTED) {
+      for (const verb of e.command.split(' / ')) expect(table).toContain(verb.trim());
+    }
+  });
+
   it('the README still points at the doc the detail moved to', () => {
     expect(README).toContain('docs/agent-permissions.md');
   });

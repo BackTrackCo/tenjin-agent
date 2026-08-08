@@ -10,12 +10,7 @@ import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
 import { fakeRecord } from '../lib/wallet/test-support';
-import {
-  ALWAYS_SAFE_ALLOWLIST,
-  NEVER_ALLOWLISTED,
-  OPT_IN_ALLOWLIST,
-  renderPermissionsBlock,
-} from '../lib/permissions';
+import { ALWAYS_SAFE_ALLOWLIST, OPT_IN_ALLOWLIST, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import { saveSessionFile } from '../lib/session-key';
@@ -68,6 +63,16 @@ afterEach(async () => {
   if (prevWalletKey === undefined) delete process.env.TENJIN_WALLET_KEY;
   else process.env.TENJIN_WALLET_KEY = prevWalletKey;
 });
+
+/**
+ * The wallet check verifies the keystore actually decrypts (#70), which reads the
+ * OS credential store. Every runDoctor below passes this so no assertion depends
+ * on what is in the developer's real keychain: on a machine carrying a legacy
+ * `tenjin-cli` entry the wallet checks would report differently than in CI.
+ * `openbsd` is simply a platform with no built-in store, which is the state these
+ * tests mean to be in — no passphrase reachable, nothing to prompt.
+ */
+const NO_OS_STORE = { platform: 'openbsd' } as const;
 
 function captureIo(isTTY = false): { io: Io; stderr: () => string } {
   const err: string[] = [];
@@ -124,6 +129,7 @@ async function writeWallet(mode: number): Promise<void> {
 describe('runDoctor — passing outcomes', () => {
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -137,15 +143,11 @@ describe('runDoctor — passing outcomes', () => {
     // A bare temp HOME has no skills, so the wiring check warns with a fix too.
     expect(find(data.checks, 'skills').status).toBe('warn');
     // checks + a wallet-warn fix line + a skills-warn fix line, then a blank
-    // separator and the allowlist block. The block's own length is NOT asserted
-    // against renderPermissionsBlock(): recomputing the production value on both
-    // sides makes that term unfalsifiable. Pin the seam instead.
+    // separator and the one pointer line — and nothing after it (#81).
     const checkLines = data.checks.length + 2; // wallet + skills warns add a fix line each
     expect(res.humanLines?.[checkLines]).toBe('');
-    expect(res.humanLines?.[checkLines + 1]).toBe(
-      'Auto-mode permission allowlist (add these once, then agents stop being denied):',
-    );
-    expect((res.humanLines ?? []).length).toBeGreaterThan(checkLines + 20);
+    expect(res.humanLines?.[checkLines + 1]).toContain(PERMISSIONS_DOC_URL);
+    expect((res.humanLines ?? []).length).toBe(checkLines + 2);
   });
 
   it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
@@ -154,6 +156,7 @@ describe('runDoctor — passing outcomes', () => {
       '/api/articles': { body: ARTICLES_OK },
     });
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -168,6 +171,7 @@ describe('runDoctor — passing outcomes', () => {
     await writeWallet(0o644);
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -196,6 +200,7 @@ describe('runDoctor — passing outcomes', () => {
     process.env.TENJIN_WALLET_KEY = envKey; // provider reads process.env
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: { TENJIN_WALLET_KEY: envKey },
@@ -215,6 +220,7 @@ describe('runDoctor — passing outcomes', () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(0n);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -229,6 +235,7 @@ describe('runDoctor — passing outcomes', () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -244,6 +251,7 @@ describe('runDoctor — passing outcomes', () => {
     await writeWallet(0o600);
     balanceMock.mockRejectedValue(new Error('rpc down'));
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -257,6 +265,7 @@ describe('runDoctor — passing outcomes', () => {
   it('a corrupt wallet file warns, never fails doctor', async () => {
     await writeFile(join(dir, 'wallet.json'), '{ not json');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -282,6 +291,7 @@ describe('runDoctor — passing outcomes', () => {
       return new Response(JSON.stringify(body), { status: 200 });
     }) as typeof fetch;
     await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -303,6 +313,7 @@ describe('runDoctor — passing outcomes', () => {
       return new Response(JSON.stringify(body), { status: 200 });
     }) as typeof fetch;
     await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -320,6 +331,7 @@ describe('runDoctor — passing outcomes', () => {
 describe('runDoctor — required failures throw the mapped CliError', () => {
   async function catchDoctor(fetchImpl: typeof fetch): Promise<CliError> {
     const err = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -404,6 +416,7 @@ describe('runDoctor — injected remote provider', () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -426,6 +439,7 @@ describe('runDoctor — injected remote provider', () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     balanceMock.mockResolvedValue(5_000_000n);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: { TENJIN_WALLET_KEY: process.env.TENJIN_WALLET_KEY },
@@ -438,6 +452,106 @@ describe('runDoctor — injected remote provider', () => {
     expect(data.checks.filter((c) => c.name === 'wallet-custody')).toEqual([]);
     expect(balanceMock.mock.calls[0]?.[0]).toBe(address);
     expect(JSON.stringify(res.data)).not.toContain(PRIVATE_KEY);
+  });
+});
+
+// #70: the wallet check used to pass on existence + parse + perms, so a keystore
+// whose passphrase was gone read `wallet: ok` and the loss surfaced at the first
+// signing. The verification itself (real scrypt, real credential store) is
+// covered in lib/wallet/local.test.ts; what these pin is that doctor folds its
+// verdict INTO the wallet check rather than reporting it beside a green line.
+describe('runDoctor — wallet verification', () => {
+  const address = privateKeyToAccount(generatePrivateKey()).address;
+
+  function providerVerifying(verify?: WalletProvider['verify']): WalletProvider {
+    return {
+      id: 'fake',
+      describe: async () => ({
+        address,
+        provider: 'fake',
+        credentialSource: 'file',
+        policyEnforcement: 'client-only',
+      }),
+      diagnostics: async () => ({ warnings: [] }),
+      getSigner: async () => {
+        throw new Error('doctor must never acquire a signer');
+      },
+      ...(verify !== undefined ? { verify } : {}),
+    };
+  }
+
+  async function walletFor(verify?: WalletProvider['verify']): Promise<CheckResult> {
+    balanceMock.mockResolvedValue(5_000_000n);
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+      provider: providerVerifying(verify),
+    });
+    return find((res.data as { checks: CheckResult[] }).checks, 'wallet');
+  }
+
+  it('is ok only when the credential is proven to sign', async () => {
+    const wallet = await walletFor(async () => ({
+      status: 'verified',
+      detail: 'keystore decrypts',
+    }));
+    expect(wallet.status).toBe('ok');
+    expect(wallet.detail).toContain(address);
+    expect(wallet.detail).toContain('keystore decrypts');
+  });
+
+  it('warns with a fix when the keystore cannot be opened', async () => {
+    const wallet = await walletFor(async () => ({
+      status: 'broken',
+      detail: 'the keystore cannot be decrypted',
+      fix: 'Set TENJIN_WALLET_PASSPHRASE to this wallet’s passphrase.',
+    }));
+    expect(wallet.status).toBe('warn');
+    expect(wallet.detail).toContain('cannot be decrypted');
+    expect(wallet.fix).toContain('TENJIN_WALLET_PASSPHRASE');
+  });
+
+  it('says present, not verified rather than ok when it could not check', async () => {
+    const wallet = await walletFor(async () => ({
+      status: 'unverified',
+      detail: 'no passphrase is reachable without prompting',
+    }));
+    expect(wallet.status).toBe('warn');
+    expect(wallet.detail).toContain('present, not verified');
+    expect(wallet.fix).toBeDefined();
+  });
+
+  // A provider that cannot answer without a prompt or a network call omits the
+  // method; that is the unverified state, not a pass and not a failure.
+  it('treats a provider with no verify as unverified', async () => {
+    const wallet = await walletFor(undefined);
+    expect(wallet.status).toBe('warn');
+    expect(wallet.detail).toContain('present, not verified');
+  });
+
+  // doctor is diagnostics: a diagnostic that throws must not become a verdict
+  // about the wallet, and must never take down the run explaining the rest.
+  it('survives a provider whose verify throws', async () => {
+    const wallet = await walletFor(async () => {
+      throw new Error('keychain exploded');
+    });
+    expect(wallet.status).toBe('warn');
+    expect(wallet.detail).toContain('keychain exploded');
+  });
+
+  // Never required, never a fail: `read` and `search` work without a wallet at
+  // all, so an unopenable one must not change the exit code.
+  it('never moves the exit code, however broken the wallet is', async () => {
+    const wallet = await walletFor(async () => ({
+      status: 'broken',
+      detail: 'gone',
+      fix: 'fix it',
+    }));
+    expect(wallet.required).toBe(false);
+    expect(wallet.status).not.toBe('fail');
   });
 });
 
@@ -482,6 +596,7 @@ const installCodex = (): Promise<string | undefined> =>
 describe('runDoctor — skill wiring', () => {
   it('no skills anywhere: warns and points at tenjin install', async () => {
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -499,6 +614,7 @@ describe('runDoctor — skill wiring', () => {
   it('hosted skill only: warns that both CLI skills are missing', async () => {
     await writeSkill('tenjin');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -517,6 +633,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -534,6 +651,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish', 'disable-model-invocation: true\n');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -553,6 +671,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -569,6 +688,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(sharedSkills(), name);
     }
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -585,6 +705,7 @@ describe('runDoctor — skill wiring', () => {
     await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o000);
     try {
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -605,6 +726,7 @@ describe('runDoctor — skill wiring', () => {
     await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o000);
     try {
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -628,6 +750,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -652,6 +775,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(sharedSkills(), 'tenjin');
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -677,6 +801,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(sharedSkills(), 'tenjin-search');
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -698,6 +823,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(sharedSkills(), 'tenjin-search');
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -719,6 +845,7 @@ describe('runDoctor — skill wiring', () => {
       }
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -741,6 +868,7 @@ describe('runDoctor — skill wiring', () => {
       }
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -760,6 +888,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(sharedSkills(), 'tenjin-search');
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -789,6 +918,7 @@ describe('runDoctor — skill wiring', () => {
         await recordHarness('shared');
 
         const res = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -819,6 +949,7 @@ describe('runDoctor — skill wiring', () => {
         await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
 
         const res = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -837,6 +968,7 @@ describe('runDoctor — skill wiring', () => {
         await recordHarness('codex'); // `codex` and `shared` are the same directory
 
         const res = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -859,6 +991,7 @@ describe('runDoctor — skill wiring', () => {
         await recordHarness('shared');
 
         const res = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -877,6 +1010,7 @@ describe('runDoctor — skill wiring', () => {
         await recordHarness('shared');
 
         const res = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -892,6 +1026,7 @@ describe('runDoctor — skill wiring', () => {
           await writeSkillIn(sharedSkills(), name);
         }
         const after = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -914,6 +1049,7 @@ describe('runDoctor — skill wiring', () => {
         await recordHarness('shared');
 
         const res = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -929,6 +1065,7 @@ describe('runDoctor — skill wiring', () => {
           for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
         }
         const after = await runDoctor(ctxFor(), {
+          walletPassphrase: NO_OS_STORE,
           homeDir: skillHome,
           skillsSourceDir: pkgSrc,
           env: {},
@@ -946,6 +1083,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(sharedSkills(), 'tenjin');
 
       const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
         skillsSourceDir: pkgSrc,
         env: {},
@@ -963,6 +1101,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(claudeSkills(), name);
     }
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -988,7 +1127,11 @@ describe('runDoctor — skill wiring', () => {
 
 describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
   it('emits the three tiers in the machine payload', async () => {
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as {
       permissions: {
         alwaysSafe: { rule: string }[];
@@ -1006,33 +1149,37 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
   });
 
-  it('prints every free-verb line, and buy only as the opt-in', async () => {
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+  // #81: the human render is the check list plus ONE pointer. The rules, the
+  // opt-in notes, the exclusions and both caveats live on the page it points at
+  // and in `--json` (asserted above), so none of them may be back in the terminal.
+  it('prints no allowlist rule at all, only the pointer', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const text = (res.humanLines ?? []).join('\n');
-    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).toContain(e.rule);
-    for (const e of OPT_IN_ALLOWLIST) expect(text).toContain(e.rule);
-    expect(text).toContain('Opt in separately');
-    expect(text).toContain('.claude/settings.json');
-  });
-
-  it('never prints an allowlist rule for a money-moving or state-changing verb', async () => {
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
-    const text = (res.humanLines ?? []).join('\n');
-    for (const e of NEVER_ALLOWLISTED) {
-      const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
-      expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
+    for (const e of [...ALWAYS_SAFE_ALLOWLIST, ...OPT_IN_ALLOWLIST]) {
+      expect(text).not.toContain(e.rule);
     }
-    // but it does name them, with the reason, so the exclusion is visible.
-    expect(text).toContain('Never recommended');
-    expect(text).toContain('tenjin send');
+    expect(text).not.toContain('Never recommended');
+    expect(text).not.toContain('mcp__tenjin__tenjin_publish');
+    expect(text).toContain(PERMISSIONS_DOC_URL);
   });
 
-  it('prints the flag caveat and the MCP caveat with the rules', () => {
-    const block = renderPermissionsBlock().join('\n');
-    expect(block).toContain('--base-url');
-    expect(block).toContain('mcp__tenjin__tenjin_publish');
-    expect(block).toContain('Free: cannot spend and cannot open the keystore');
-    expect(block).not.toContain('free, read-only verbs');
+  // The essay was ~60 lines above a check list of ~9. Pinned as a budget rather
+  // than an exact count: what regressed here is prose creeping back in, and an
+  // exact length would just be rewritten alongside it.
+  it('stays within a couple of lines of the check list it was run for', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { checks: CheckResult[] };
+    const fixes = data.checks.filter((c) => c.status !== 'ok' && c.fix !== undefined).length;
+    // checks + their fix lines + one blank separator + the pointer.
+    expect((res.humanLines ?? []).length).toBe(data.checks.length + fixes + 2);
   });
 });
 
@@ -1045,9 +1192,11 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
       '/openapi.json': { body: OPENAPI_OK },
       '/api/articles': { body: { nope: true } },
     });
-    const err: unknown = await runDoctor(ctxFor(), { env: {}, fetchImpl: brokenFetch }).catch(
-      (e: unknown) => e,
-    );
+    const err: unknown = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: brokenFetch,
+    }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CliError);
     const details = (err as CliError).details as {
       checks: CheckResult[];
@@ -1075,7 +1224,11 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
       },
       '/api/articles': { body: ARTICLES_OK },
     });
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: hostile });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: hostile,
+    });
     const lines = res.humanLines ?? [];
     const apiLine = lines.find((l) => l.includes('api-contract')) ?? '';
     // The payload survives as inert text on ONE line: no newline to start a
@@ -1113,6 +1266,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     }
     await wire('current\n');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: src,
       env: {},
@@ -1130,6 +1284,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     }
     const skills = await wire('what an older CLI shipped\n');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: src,
       env: {},
@@ -1152,6 +1307,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     const gone = join(tmpdir(), 'tenjin-nonexistent-skills-source');
     await wire('anything\n');
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: gone,
       env: {},
@@ -1186,6 +1342,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     await symlink(real, link);
 
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: src,
       env: {},
@@ -1217,6 +1374,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       await writeFile(join(shared, name, 'SKILL.md'), 'what an older CLI shipped\n');
     }
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: src,
       which: () => false,
@@ -1247,6 +1405,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     // misses: the harness record is what put this directory in play.
     await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: ['codex'] } }));
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: src,
       env: {},
@@ -1277,6 +1436,7 @@ describe('runDoctor — a pipe at a skill path cannot hang the diagnostic', () =
     execFileSync('mkfifo', [join(skills, 'tenjin-search', 'SKILL.md')]);
 
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
       env: {},
@@ -1290,7 +1450,11 @@ describe('runDoctor — a pipe at a skill path cannot hang the diagnostic', () =
 
 describe('runDoctor — session key', () => {
   it('reports ok with no session, naming the verb that would mint one', async () => {
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
     expect(check.status).toBe('ok');
     expect(check.required).toBe(false);
@@ -1302,7 +1466,11 @@ describe('runDoctor — session key', () => {
   it('reports a live session as ok with address, scope and expiry — never key material', async () => {
     const { file } = await testSessionKey();
     await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
     expect(check.status).toBe('ok');
     expect(check.data).toEqual({
@@ -1319,7 +1487,11 @@ describe('runDoctor — session key', () => {
   it('warns (never fails) on an expired session, with the fix that renews it', async () => {
     const { file } = await testSessionKey({ exp: new Date(Date.now() - 1000).toISOString() });
     await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     const check = find(data.checks, 'session');
     expect(check.status).toBe('warn');
@@ -1339,7 +1511,11 @@ describe('runDoctor — session key', () => {
     delete stale.origin;
     await writeFile(sessionPath(dir), JSON.stringify(stale), { mode: 0o600 });
 
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     const check = find(data.checks, 'session');
     expect(check.status).toBe('ok');
@@ -1356,7 +1532,11 @@ describe('runDoctor — session key', () => {
     await saveSessionFile(dir, file);
     await writeFile(sessionPath(dir), JSON.stringify({ ...file, origin: 42 }), { mode: 0o600 });
 
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('could not be parsed');
@@ -1366,6 +1546,7 @@ describe('runDoctor — session key', () => {
     const { file } = await testSessionKey();
     await saveSessionFile(dir, file);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
       now: () => Date.parse(file.exp) + 1,
@@ -1389,7 +1570,13 @@ describe('runDoctor — session key, the states loadSessionFile flattens', () =>
     await chmod(join(dir, 'session.json'), 0o644);
     const check = find(
       (
-        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+        (
+          await runDoctor(ctxFor(), {
+            walletPassphrase: NO_OS_STORE,
+            env: {},
+            fetchImpl: healthyFetch,
+          })
+        ).data as {
           checks: CheckResult[];
         }
       ).checks,
@@ -1404,7 +1591,13 @@ describe('runDoctor — session key, the states loadSessionFile flattens', () =>
     await writeFile(join(dir, 'session.json'), 'not json {{{', { mode: 0o600 });
     const check = find(
       (
-        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+        (
+          await runDoctor(ctxFor(), {
+            walletPassphrase: NO_OS_STORE,
+            env: {},
+            fetchImpl: healthyFetch,
+          })
+        ).data as {
           checks: CheckResult[];
         }
       ).checks,
@@ -1419,7 +1612,13 @@ describe('runDoctor — session key, the states loadSessionFile flattens', () =>
     await saveSessionFile(dir, file);
     const check = find(
       (
-        (await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch })).data as {
+        (
+          await runDoctor(ctxFor(), {
+            walletPassphrase: NO_OS_STORE,
+            env: {},
+            fetchImpl: healthyFetch,
+          })
+        ).data as {
           checks: CheckResult[];
         }
       ).checks,
@@ -1437,7 +1636,11 @@ describe('runDoctor — session key, the states loadSessionFile flattens', () =>
     if (process.platform === 'win32' || process.getuid?.() === 0) return;
     await writeFile(join(dir, 'session.json'), '{}', { mode: 0o600 });
     await chmod(join(dir, 'session.json'), 0o000);
-    const res = await runDoctor(ctxFor(), { env: {}, fetchImpl: healthyFetch });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
     const data = res.data as { status: string; checks: CheckResult[] };
     // Every other check still ran, and the session one warns with its fix.
     expect(data.status).toBe('pass');
@@ -1465,6 +1668,7 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
     ['a non-http scheme', 'foo://tenjin.blog'],
   ])('still produces a check list with %s in TENJIN_BASE_URL', async (_name, baseUrl) => {
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       env: { TENJIN_BASE_URL: baseUrl },
       fetchImpl: healthyFetch,
     });
@@ -1477,6 +1681,7 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
   it('warns that a cached session cannot be matched, instead of throwing', async () => {
     await saveSessionFile(dir, (await testSessionKey()).file);
     const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
       env: { TENJIN_BASE_URL: 'foo://tenjin.blog' },
       fetchImpl: healthyFetch,
     });

@@ -1,7 +1,7 @@
 import { CliError } from '../errors';
 import { emitNotice } from '../output';
 import { spendLedgerPath } from '../paths';
-import { createLocalProvider } from './local';
+import { createLocalProvider, type PassphraseOverrides } from './local';
 import { createLocalSpendAuthorizer, type SpendAuthorizer } from './spend';
 import type { SpendPolicy } from '../policy';
 import type { CommandContext } from '../../context';
@@ -15,11 +15,13 @@ export {
   prepareLocalWallet,
   restoreParkedWallet,
   verifyAndPreserveOutgoingWallet,
+  verifyLocalWallet,
   type ArchivedPassphraseLocation,
   type ArchivedWalletInfo,
   type CreatePassphrase,
   type LocalWalletInfo,
   type PreparedLocalWallet,
+  type PassphraseOverrides,
   type PreservedWalletInfo,
   type UnarchivedReason,
 } from './local';
@@ -33,6 +35,12 @@ export {
 export interface ResolveWalletProviderOptions {
   /** Test-injection seam: bypass the local provider with a fake (e.g. a remote stub). */
   provider?: WalletProvider;
+  /**
+   * Passphrase seams (keychain exec, platform) for the local provider. `doctor`
+   * threads its own through so a test never reaches the developer's real OS
+   * credential store; `isTTY` is still decided here, never by a caller.
+   */
+  passphrase?: Omit<PassphraseOverrides, 'isTTY'>;
 }
 
 /**
@@ -57,7 +65,7 @@ export function resolveWalletProvider(
   return createLocalProvider({
     dir: ctx.dataDir,
     env: process.env,
-    passphrase: { isTTY: ctx.io.isTTY ? undefined : false },
+    passphrase: { ...opts.passphrase, isTTY: ctx.io.isTTY ? undefined : false },
   });
 }
 

@@ -20,6 +20,7 @@ import {
   storePassphraseForWallet,
   walletStoreAccount,
   type PassphraseDeps,
+  type PassphraseSource,
   type StorePassphraseOutcome,
 } from './passphrase';
 import type {
@@ -27,6 +28,7 @@ import type {
   WalletDescription,
   WalletDiagnostics,
   WalletProvider,
+  WalletVerification,
 } from './provider';
 
 /** Passphrase seams the local provider forwards to the resolver (env comes from `deps.env`). */
@@ -84,7 +86,98 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
     diagnostics(): Promise<WalletDiagnostics> {
       return localWalletDiagnostics(deps);
     },
+    verify(): Promise<WalletVerification> {
+      return verifyLocalWallet(deps);
+    },
   };
+}
+
+/**
+ * Can this wallet actually sign, without asking anyone? An env key is proven by
+ * deriving it; a file wallet needs its passphrase from the env or the OS store,
+ * and the keystore decrypted and checked against the stored address.
+ *
+ * Nothing here prompts (`isTTY: false` is forced last, so no test seam can turn
+ * it back on) and nothing here writes: a legacy-slot hit is used to decrypt but
+ * its `migrateLegacy` handle is deliberately never invoked, and the signer cache
+ * is left alone so the migration still happens on the first real signing. Both
+ * would be side effects of a read-only diagnostic.
+ *
+ * scrypt is deliberately slow, which is why this runs only once a passphrase has
+ * already been found without a prompt.
+ */
+export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<WalletVerification> {
+  const cred = await loadCredential(deps);
+  // Details read as a fragment: the caller prefixes them with the wallet line.
+  if (cred === null) return { status: 'unverified', detail: 'there is no credential to verify' };
+  if (cred.source === 'env') {
+    // Deriving is the whole proof for a raw key, and it is cheap.
+    accountFromKey(cred.key, 'env');
+    return { status: 'verified', detail: 'TENJIN_WALLET_KEY derives a valid signing key' };
+  }
+
+  const account = walletStoreAccount(cred.address);
+  let resolved: Awaited<ReturnType<typeof resolvePassphrase>>;
+  try {
+    resolved = await resolvePassphrase(
+      { env: deps.env, dir: deps.dir, ...deps.passphrase, isTTY: false },
+      cred.address,
+    );
+  } catch {
+    return {
+      status: 'unverified',
+      detail: 'no passphrase is reachable without prompting, so the keystore was not opened',
+    };
+  }
+
+  let key: Hex;
+  try {
+    const derived = await Keystore.toKeyAsync(cred.keystore, { password: resolved.passphrase });
+    key = Keystore.decrypt(cred.keystore, derived);
+  } catch {
+    // The #70 shape: the only durable passphrase is the pre-per-address shared
+    // slot and it belongs to some later wallet, so this keystore is unopenable
+    // and the address it identifies you by is unsignable. Named apart from a
+    // plain wrong passphrase because the remedy is different.
+    if (resolved.migrateLegacy !== undefined) {
+      return {
+        status: 'broken',
+        detail:
+          'the keystore cannot be decrypted: the only stored passphrase is the legacy shared entry (service tenjin-cli, account "wallet"), which does not open it',
+        fix: `That entry likely belongs to a wallet created later. Set TENJIN_WALLET_PASSPHRASE to this wallet's own passphrase, or restore its entry under account ${account}.`,
+      };
+    }
+    // Name the escape that applies to where the passphrase came from, the same
+    // way accountForSigning does: "set TENJIN_WALLET_PASSPHRASE" is not advice
+    // when TENJIN_WALLET_PASSPHRASE is the thing that just failed.
+    const escape =
+      resolved.source === 'env'
+        ? 'TENJIN_WALLET_PASSPHRASE is set but does not open it; set it to the correct passphrase'
+        : `The OS credential store entry (service tenjin-cli, account ${account}) does not open it; set TENJIN_WALLET_PASSPHRASE to the correct passphrase`;
+    return {
+      status: 'broken',
+      detail: `the keystore cannot be decrypted with the passphrase from ${passphraseOrigin(resolved.source, account)}`,
+      fix: `${escape}. Without it the key is unrecoverable and this address can no longer sign or publish.`,
+    };
+  }
+  if (privateKeyToAccount(key).address.toLowerCase() !== account) {
+    return {
+      status: 'broken',
+      detail: `the decrypted key does not derive the wallet file's stored address ${cred.address}`,
+      fix: 'The wallet file may be tampered. Move it aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
+    };
+  }
+  return {
+    status: 'verified',
+    detail: `keystore decrypts with the passphrase from ${passphraseOrigin(resolved.source, account)}`,
+  };
+}
+
+/** Where a resolved passphrase came from, in words an operator can act on. */
+function passphraseOrigin(source: PassphraseSource, account: string): string {
+  if (source === 'env') return 'TENJIN_WALLET_PASSPHRASE';
+  if (source === 'prompt') return 'the prompt';
+  return `the OS credential store (service tenjin-cli, account ${account})`;
 }
 
 /**

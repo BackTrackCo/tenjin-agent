@@ -7,9 +7,9 @@ forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
 behind which verbs are on that list, which two are separate opt-ins, and which are
-never recommended at all. The
-[README](../README.md#auto-mode-permission-allowlist) carries the paste block and
-the three-tier summary.
+never recommended at all, and it is where `tenjin install` and `tenjin doctor`
+send you. The [README](../README.md#auto-mode-permission-allowlist) carries the
+paste block and the three-tier summary.
 
 ## The free tier
 
@@ -78,7 +78,8 @@ you, as one of its up-to-three setup decisions:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
 > `~/.claude/settings.json`. None can spend USDC or open your wallet keystore;
-> three send or store data (search, outcome, read). Full caveats: tenjin doctor.
+> three send or store data (search, outcome, read). Full caveats:
+> https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
 
 Answer yes and it merges them in. The write is additive only: it appends the rules
 that are missing and never removes, reorders, or rewrites an existing entry or any
@@ -91,9 +92,11 @@ fixed constant, so no flag or config value can widen it to `buy`, `publish`,
 `--json`. Without the flag, a non-interactive install changes nothing and says the
 flag is available.
 
-`tenjin doctor` reprints the full block on every run (including in `doctor --json`
-under `permissions`, on the failure envelope as well as the success one), so an
-agent that just got denied can point you at the exact line.
+`tenjin doctor --json` carries this whole recommendation as data under
+`permissions` — every rule, every per-verb note, both caveats, on the failure
+envelope as well as the success one — so an agent that just got denied can point
+you at the exact line. Its human render is the check list plus one link back
+here.
 
 ## A prefix rule pins the verb, not the flags
 
