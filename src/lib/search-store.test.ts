@@ -63,6 +63,24 @@ describe('search-store', () => {
     expect(await loadSearches(dir)).toHaveLength(1);
   });
 
+  it('round-trips browseCount and reads it as unknown on an entry written without it', async () => {
+    await recordSearch(dir, entry({ decision: 'MISS', candidates: [], browseCount: 3 }));
+    expect((await latestSearch(dir))?.browseCount).toBe(3);
+
+    // A store written by a CLI from before the field. It must still load, and the
+    // missing count must stay `undefined` rather than default to 0: `outcome`
+    // refuses purchase_declined on a zero and must not invent that refusal for an
+    // entry that never recorded whether it had a payable browse tail.
+    const legacy = {
+      schemaVersion: 1,
+      searches: [{ ...entry({ decision: 'MISS', candidates: [] }) }],
+    };
+    await writeFile(join(dir, 'searches.json'), JSON.stringify(legacy), 'utf8');
+    const loaded = await loadSearches(dir);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0]?.browseCount).toBeUndefined();
+  });
+
   it('reads empty (never throws) on a corrupt store', async () => {
     await writeFile(join(dir, 'searches.json'), 'not json', 'utf8');
     expect(await loadSearches(dir)).toEqual([]);
