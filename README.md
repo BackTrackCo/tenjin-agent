@@ -352,7 +352,7 @@ local: the key never leaves the machine and appears in no tool result.
 **Claude Code**
 
 ```bash
-claude mcp add tenjin -s user -- tenjin mcp
+claude mcp add tenjin-cli -s user -- tenjin mcp
 ```
 
 **Cursor** (`.cursor/mcp.json`)
@@ -360,7 +360,7 @@ claude mcp add tenjin -s user -- tenjin mcp
 ```json
 {
   "mcpServers": {
-    "tenjin": { "command": "tenjin", "args": ["mcp"] }
+    "tenjin-cli": { "command": "tenjin", "args": ["mcp"] }
   }
 }
 ```
