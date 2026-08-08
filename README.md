@@ -65,6 +65,22 @@ on Base for gas). Searching and free pieces cost nothing.
 | `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a search MISS nudges you about parked ones                                                                           |
 | `tenjin send <amount> usdc <to> [--yes]`                | **Escape hatch:** move USDC on Base out of the agent wallet (preview, explicit confirm, then the tx hash)                                                         |
 
+### `doctor`
+
+A flat list of named checks — node, config, api-contract, read-path,
+search-contract, skills, session, wallet, balance — one line each, and a `fix:`
+line under anything that is not ok. Exit 0 when every required check passes;
+warn-level checks (skills, session, wallet, balance) never move the exit code.
+The closing line links
+[docs/agent-permissions.md](./docs/agent-permissions.md); `--json` carries the
+whole permission recommendation as data under `permissions`.
+
+The `wallet` check proves the keystore still opens. When the passphrase is
+reachable without a prompt (`TENJIN_WALLET_PASSPHRASE` or the OS credential
+store) it decrypts and checks the recovered key against the stored address;
+otherwise it reports the wallet present but not verified. It never prompts and
+never writes.
+
 ### `read` vs `buy`
 
 They split by whether money can move. `read` is free-only: it tries the local
@@ -170,8 +186,9 @@ Three tiers:
   cannot spend, but does open the keystore.
 
 `tenjin install` offers to write the free tier for you (`--allow-free-verbs`
-headlessly), and `tenjin doctor` reprints all three tiers on every run, including
-under `doctor --json`.
+headlessly). `tenjin doctor --json` carries all three tiers, with the per-verb
+notes and both caveats, under `permissions`; the human render points at the page
+below instead of printing them.
 
 Read [docs/agent-permissions.md](./docs/agent-permissions.md) before you paste
 either opt-in line. It covers the per-verb rationale, why a prefix rule pins the
@@ -194,8 +211,9 @@ Nothing else is a decision:
 2. **Permissions.** "Let your agent search tenjin without permission popups? Adds
    9 free commands to `~/.claude/settings.json`. None can spend USDC or open your
    wallet keystore; three send or store data (search, outcome, read). Full
-   caveats: tenjin doctor." Yes merges the free-verb allowlist into that file.
-   Claude Code only; other harnesses skip it with a note.
+   caveats: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md"
+   Yes merges the free-verb allowlist into that file. Claude Code only; other
+   harnesses skip it with a note.
 3. **Wallet.** "Create a wallet now?", asked only when you do not already have one.
 
 Every question has a flag, so a headless install never waits on one:
@@ -383,9 +401,11 @@ approval.
   approval or an explicitly configured policy.
 - Keys are generated locally and stored **encrypted at rest** in
   `~/.tenjin/wallet.json` (Keystore v3, scrypt), mode `0600`. The plaintext key
-  is never written to disk. The wallet address stays readable, so `show`,
-  `balance`, and `doctor` work without a passphrase; only signing decrypts.
-  Signing is local and the CLI talks only to the configured base URL.
+  is never written to disk. The wallet address stays readable, so `show` and
+  `balance` work without a passphrase. `doctor` decrypts only when the passphrase
+  is already reachable without a prompt, purely to verify the keystore still
+  opens; otherwise only signing decrypts. Signing is local and the CLI talks only
+  to the configured base URL.
 - There is exactly **one active wallet**. `wallet create` refuses when one
   exists; the explicit `wallet create --replace` first verifies the outgoing
   wallet's passphrase against its keystore, preserves it under the wallet's own

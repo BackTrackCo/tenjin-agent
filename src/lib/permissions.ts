@@ -36,10 +36,11 @@
  * it, and `assertOnBaseOrigin` only checks that a resource URL shares an origin
  * with the CONFIGURED base, so an attacker-controlled pair satisfies the pin. No
  * prefix syntax expresses "this verb but not that flag", so the mitigation is
- * disclosure rather than a narrower rule: FLAG_CAVEAT prints alongside the rules
- * on every surface, and the skills tell the agent never to pass `--base-url` on
- * an allowlisted verb. Pinning the paying path to a constant origin instead is
- * the real fix and is an x402/payments-semantics change, tracked separately.
+ * disclosure rather than a narrower rule: FLAG_CAVEAT rides the `--json` payload
+ * and docs/agent-permissions.md, every human surface points at that page, and the
+ * skills tell the agent never to pass `--base-url` on an allowlisted verb. Pinning
+ * the paying path to a constant origin instead is the real fix and is an
+ * x402/payments-semantics change, tracked separately.
  */
 
 /** One pasteable allowlist rule plus why it is safe (or what it costs). */
@@ -329,36 +330,26 @@ export function recommendedRules(): string[] {
 }
 
 /**
- * The human block both `doctor` and `install` print. Plain lines; the caller
- * decides how (or whether) to paint them.
+ * The permission caveats' one home. `doctor` used to print the whole thing —
+ * nine rules, both opt-in notes, every exclusion, the flag caveat and the MCP
+ * caveat, ~60 lines ahead of the check list it was actually run for. No doctor
+ * command in the wider ecosystem carries security prose, and an operator reading
+ * a wall of it in a terminal cannot paste from it, search it, or link a colleague
+ * to a section. The page can do all three, so it is where the caveats live and
+ * where every human surface points; `--json` still carries them as data
+ * (`recommendedPermissions`), which is what an agent reads.
  */
-export function renderPermissionsBlock(): string[] {
-  const lines: string[] = [
-    'Auto-mode permission allowlist (add these once, then agents stop being denied):',
-  ];
-  for (const e of ALWAYS_SAFE_ALLOWLIST) lines.push(`  ${e.rule}`);
-  lines.push('  Free: cannot spend and cannot open the keystore. Not all read-only, though:');
-  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report),');
-  lines.push('  and `read` saves a delivered piece to your local library. `read` may also');
-  lines.push('  PRESENT a cached session key — a wallet-derived credential — to the origin it');
-  lines.push('  was minted for. It cannot mint one and cannot sign a payment with it (wrong');
-  lines.push('  curve), but treat the file itself as sensitive: its scope is not a bound.');
-  lines.push('');
-  lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
-  lines.push('');
-  lines.push('Opt in separately (unattended purchases; unattended keystore access):');
-  for (const e of OPT_IN_ALLOWLIST) {
-    lines.push(`  ${e.rule}`);
-    lines.push(`    ${e.note}`);
-  }
-  lines.push('');
-  lines.push('Never recommended (each one is a human decision):');
-  for (const e of NEVER_ALLOWLISTED) lines.push(`  ${e.command} - ${e.reason}`);
-  lines.push('');
-  lines.push(...MCP_CAVEAT.map((l) => `  ${l}`));
-  lines.push('');
-  lines.push(
-    'Claude Code: add the lines to the "permissions.allow" array in .claude/settings.json.',
+export const PERMISSIONS_DOC_URL =
+  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md';
+
+/**
+ * The single line that replaced the block: what is on the page, and its URL. It
+ * names the counts rather than the rules so the operator knows whether the page
+ * answers their question before they open it.
+ */
+export function permissionsPointer(): string {
+  return (
+    `Auto-mode permission allowlist (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
+    `${OPT_IN_ALLOWLIST.length} opt-ins, the --base-url caveat): ${PERMISSIONS_DOC_URL}`
   );
-  return lines;
 }

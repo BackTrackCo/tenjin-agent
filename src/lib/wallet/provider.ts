@@ -82,10 +82,35 @@ export interface TenjinSigner {
   signTransaction(tx: TransactionSerializable): Promise<Hex>;
 }
 
+/**
+ * Whether the credential can actually produce a signature, as far as the provider
+ * can tell WITHOUT prompting anyone.
+ *
+ * `unverified` is the honest third answer and the reason this type is not a
+ * boolean: a keystore whose passphrase is only reachable through a TTY prompt is
+ * neither proven good nor proven bad, and reporting either would be a guess.
+ */
+export type WalletVerification =
+  | { status: 'verified'; detail: string }
+  | { status: 'unverified'; detail: string }
+  | { status: 'broken'; detail: string; fix: string };
+
 export interface WalletProvider {
   id: string;
   describe(): Promise<WalletDescription>;
   getSigner(): Promise<TenjinSigner>;
   /** Provider-owned custody warnings; keyless, safe for `show`/`doctor`. */
   diagnostics(): Promise<WalletDiagnostics>;
+  /**
+   * Prove the credential can sign, for `doctor` only (#70: a keystore whose
+   * passphrase is gone reported `wallet: ok` until the first signing failed).
+   *
+   * Two hard constraints, because `doctor` is an allowlisted verb an unattended
+   * agent runs on its own: it MUST NOT prompt, and it MUST NOT mutate anything
+   * (no legacy-slot re-key, no cache write) — a diagnostic that changes the thing
+   * it is diagnosing is not one. A provider that cannot answer under those terms
+   * omits the method entirely, and `doctor` reports the wallet as present but
+   * unverified rather than inventing a verdict for it.
+   */
+  verify?(): Promise<WalletVerification>;
 }
