@@ -23,13 +23,18 @@ exactly what a MISS deserves to record.
 delivered by `read` with no payment, so an all-free result had no purchase to
 decline however many rows it listed. When `--resource` names a candidate the
 store knows, that candidate's own price decides, so a decline aimed at a free
-piece is refused even when a paid one sat beside it in the same result. An id the
-search never surfaced is refused outright on a CANDIDATES decision, where the
-stored candidates are provably the whole payable set (browse is MISS-only, and
-the parser drops it on CANDIDATES rather than trust the server) — the server
-discards such an item behind its 202, so the CLI would otherwise report success
-for an outcome nobody recorded. On a MISS the same id stays fail-open, because
-its browse tail is payable and deliberately unrecorded.
+piece is refused even when a paid one sat beside it in the same result.
+
+Separately, and for any status rather than the decline alone, `--resource` has to
+name an id the search actually surfaced. On a CANDIDATES decision the stored
+candidates are provably the whole payable set (browse is MISS-only, and the
+parser drops it on CANDIDATES rather than trust the server), the server discards
+an outcome naming anything else behind its 202 whatever the status says, and the
+CLI would otherwise report success for something nobody recorded. On a MISS, and
+on any other decision value, the same id stays fail-open, because a MISS's browse
+tail is payable and deliberately unrecorded. Membership is about what the search
+showed, never about price: `used` on a known free candidate is a real report and
+is left alone.
 `search` records how many of a result's
 browse pointers cost money (the count only, never the pointers, which stay
 unrecorded so `buy <resourceId>` still cannot reach one) so a MISS with a payable

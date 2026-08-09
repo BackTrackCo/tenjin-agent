@@ -322,6 +322,48 @@ describe('runOutcome, locally incoherent statuses', () => {
       expect(urls).toHaveLength(0);
     });
 
+    // Membership is not about price, so it cannot hang off purchase_declined:
+    // the server drops an outcome naming an unsurfaced id whatever the status
+    // says, and the CLI would report success for something nobody recorded.
+    it('refuses an unsurfaced id on a CANDIDATES search for a non-decline status', async () => {
+      await record({ decision: 'CANDIDATES', candidates: [CANDIDATE] });
+      const { fetch, urls } = stub();
+      const call = runOutcome(
+        { last: true, status: 'used', resource: '0197aaaa-bbbb-cccc-dddd-888888888888' },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      await expect(call).rejects.toMatchObject({ code: 'USAGE' });
+      await expect(call).rejects.toThrow('0197aaaa-bbbb-cccc-dddd-888888888888');
+      expect(urls).toHaveLength(0);
+    });
+
+    // The price arm must not leak out of purchase_declined. A free piece really
+    // is used, and reporting that is the honest thing this whole command exists
+    // to collect.
+    it('allows used on a known free candidate', async () => {
+      await record({ decision: 'CANDIDATES', candidates: [FREE_CANDIDATE, CANDIDATE] });
+      const { fetch, urls } = stub();
+      await runOutcome(
+        { last: true, status: 'used', resource: FREE_CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      expect(urls).toHaveLength(1);
+    });
+
+    // The MISS fail-open covers every status, not just the decline.
+    it('passes through an unseen id on a MISS for a non-decline status', async () => {
+      await record({ decision: 'MISS', paidBrowseCount: 0 });
+      const { fetch, urls } = stub();
+      await runOutcome(
+        { last: true, status: 'used', resource: '0197aaaa-bbbb-cccc-dddd-888888888888' },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      expect(urls).toHaveLength(1);
+    });
+
     // A MISS keeps the fail-open: its browse tail is payable and deliberately
     // never stored, so there an absent id is unknowable rather than wrong. It
     // falls back to the search's aggregate answer.

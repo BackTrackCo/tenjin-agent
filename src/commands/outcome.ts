@@ -16,7 +16,8 @@ import type { CommandContext, CommandResult } from '../context';
  * session is often not the one the agent means (issue #100). Two guards, both
  * local: the targeted search's question is echoed back in the success line and in
  * the machine data, so a misfire is visible in the same breath as the report; and
- * a status that could not describe that search is refused before the request.
+ * an outcome that could not describe that search, whether by its status or by
+ * naming a resource the search never surfaced, is refused before the request.
  */
 
 export interface OutcomeArgs {
@@ -44,7 +45,7 @@ export async function runOutcome(
     ...(args.resource !== undefined ? { resourceId: args.resource } : {}),
     ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
   });
-  if (target.stored !== null) assertStatusCoherent(item.status, target.stored, item.resourceId);
+  if (target.stored !== null) assertOutcomeCoherent(item.status, target.stored, item.resourceId);
   const { searchId } = target;
   const question = target.stored !== null ? echoQuestion(target.stored.question) : undefined;
 
@@ -121,13 +122,28 @@ function echoQuestion(question: string): string {
 }
 
 /**
- * Refuse a status that could not describe the search it is aimed at. The matrix
- * is deliberately one-sided: four of the five statuses are coherent against ANY
- * search, so only `purchase_declined` carries a precondition.
+ * Refuse an outcome that could not describe the search it is aimed at. Two
+ * independent checks, because they answer to different rules.
+ *
+ * MEMBERSHIP, for any status that names a `--resource`: the id has to be one this
+ * search surfaced. On a CANDIDATES decision that is provable, since browse
+ * pointers are MISS-only by contract AND truncateResponse deletes the array
+ * outright on CANDIDATES rather than trust the server, so `candidates` is the
+ * entire payable set the agent was shown and `search` records all of it. A uuid
+ * outside it is a typo or another search's, and the server drops the item behind
+ * its 202 (tenjin#641) whatever the status says, leaving the CLI to report
+ * success for an outcome nobody stored. A MISS keeps the fail-open: its browse
+ * tail is payable and deliberately unrecorded, so an absent id there is
+ * unknowable rather than wrong. So does any other decision value.
+ *
+ * PAYABILITY, for `purchase_declined` alone. The status matrix is deliberately
+ * one-sided: four of the five describe ANY search, so only this one has a
+ * precondition.
  *
  *   used, partially_used  always. A MISS's browse tail is readable, and a free
  *                         piece is used without any purchase, so "used" on a
- *                         MISS is a real report and not a mistake (issue #100).
+ *                         MISS, or on a free candidate, is a real report and not
+ *                         a mistake (issue #100).
  *   rejected, regenerated always. "Nothing here helped, I wrote it myself" is
  *                         exactly what a MISS deserves to record.
  *   purchase_declined     needs the search to have offered something to buy, or,
@@ -140,16 +156,27 @@ function echoQuestion(question: string): string {
  * Local knowledge only, and fail-open by construction: an unknown is never a
  * refusal. The server owns the checks this cannot make.
  */
-function assertStatusCoherent(status: string, stored: StoredSearch, resourceId?: string): void {
+function assertOutcomeCoherent(status: string, stored: StoredSearch, resourceId?: string): void {
+  const named =
+    resourceId !== undefined
+      ? stored.candidates.find((c) => c.resourceId === resourceId)
+      : undefined;
+
+  if (resourceId !== undefined && named === undefined && stored.decision === 'CANDIDATES') {
+    throw new CliError(
+      'USAGE',
+      `Search ${stored.searchId} "${echoQuestion(stored.question)}" surfaced no candidate ${resourceId}, so an outcome naming it would not be recorded.`,
+      {
+        fix: 'Pass a resourceId from this search, or drop --resource to report on the search as a whole.',
+      },
+    );
+  }
+
   if (status !== 'purchase_declined') return;
 
   // A named candidate the store knows answers for itself. A piece that was free
   // is not made purchasable by a paid sibling in the same result, so the specific
   // claim is checked against the specific price rather than the search's total.
-  const named =
-    resourceId !== undefined
-      ? stored.candidates.find((c) => c.resourceId === resourceId)
-      : undefined;
   if (named !== undefined) {
     if (isPaidPrice(named.price) !== false) return;
     throw new CliError(
@@ -157,25 +184,6 @@ function assertStatusCoherent(status: string, stored: StoredSearch, resourceId?:
       `Search ${stored.searchId} "${echoQuestion(stored.question)}" listed ${resourceId} at no cost, so purchase_declined cannot describe it.`,
       {
         fix: 'A free piece is reported as used, partially_used, rejected or regenerated; pass the --resource you actually declined to buy.',
-      },
-    );
-  }
-
-  // An id this search never surfaced. On a CANDIDATES decision that is provable:
-  // browse pointers are MISS-only by contract, and truncateResponse deletes the
-  // array outright on CANDIDATES rather than trust the server, so `candidates` is
-  // the entire payable set the agent was shown and all of it is recorded. A uuid
-  // outside it is a typo or another search's, and the server discards such an
-  // item behind its 202 (tenjin#641), which would leave the CLI reporting success
-  // for an outcome nobody stored. A MISS keeps the fail-open: its browse tail is
-  // payable and deliberately unrecorded, so there an absent id is unknowable
-  // rather than wrong. Any other decision value falls through to the aggregate.
-  if (resourceId !== undefined && stored.decision === 'CANDIDATES') {
-    throw new CliError(
-      'USAGE',
-      `Search ${stored.searchId} "${echoQuestion(stored.question)}" surfaced no candidate ${resourceId}, so purchase_declined cannot describe it.`,
-      {
-        fix: 'Pass a resourceId from this search, or drop --resource to report on the search as a whole.',
       },
     );
   }
