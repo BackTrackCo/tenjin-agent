@@ -64,7 +64,7 @@ on Base for gas). Searching and free pieces cost nothing.
 | --------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `tenjin install`                        | Wire the harness skills, hooks and permissions, run the doctor checks, settle the setup decisions |
 | `tenjin doctor`                         | Environment, API reachability, contract, skill-wiring, and wallet checks                          |
-| `tenjin config [get\|set]`              | Spend policy, publish consent, and the search-hook mode                                           |
+| `tenjin config [get\|set]`              | Spend policy, publish consent, and the hook toggles                                               |
 | `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                                               |
 | `tenjin search "<question>"`            | Ask for payable candidates or an honest MISS                                                      |
 | `tenjin inspect <url-or-id>`            | Show a candidate's pre-purchase answer card; never pays                                           |
@@ -103,8 +103,9 @@ Every command also takes the three global flags.
 | `--publish-mode`        | `review\|auto\|full-auto` | ask, else unset  | Set the publish consent mode without asking                   |
 | `--allow-free-verbs`    | —                         | on               | Write the nine free-verb rules into `~/.claude/settings.json` |
 | `--no-allow-free-verbs` | —                         | —                | Write no permission rules at all                              |
-| `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the WebSearch and Stop hooks in this mode            |
-| `--no-wallet`           | —                         | off              | Never offer to create a wallet                                |
+| `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode`  |
+| `--no-hooks`            | —                         | —                | Register no hooks this run; writes no config                  |
+| `--no-wallet`           | —                         | —                | Create no wallet                                              |
 | `--claude-md`           | —                         | off              | Append the one-line search nudge to `~/.claude/CLAUDE.md`     |
 | `--no-claude-md`        | —                         | —                | Skip that nudge                                               |
 
@@ -226,6 +227,7 @@ overwritten.
 | `publish.mode`         | `review\|auto\|full-auto` | `review`                   | Publish consent mode                                      |
 | `publish.defaultPrice` | decimal USD               | `0.10`                     | Price used when none is given                             |
 | `hooks.searchMode`     | `auto\|remind\|off`       | `auto`                     | What the harness WebSearch hook does                      |
+| `hooks.stopNag`        | `on\|off`                 | `on`                       | Whether the Stop hook raises an unanswered search         |
 
 Note `sessionBudget: 0` means no ceiling, while `maxAutoSpend: 0` means
 auto-approve nothing.
@@ -238,16 +240,28 @@ and neither can block, deny, or delay a tool call.
 
 - **PreToolUse on `WebSearch`** asks the marketplace the same question the agent
   is about to ask the web, with a hard two-second budget, and mentions a tested
-  answer when one exists. The query text leaves the machine. A miss, a timeout, a
-  dead network, or anything malformed exits silently.
+  answer when one exists. The query text leaves the machine. Every search it runs
+  is recorded in the same local store `tenjin search` writes, tagged
+  `websearch-hook`, so a hit can be bought and attributed and a miss stays visible
+  to the reminder below. A miss, a timeout, a dead network, or anything malformed
+  exits silently.
 - **Stop** checks locally, with no network call, for a MISS from the last eight
-  hours that no outcome report, publish, or parked candidate has closed, and
-  reminds you once to publish it back.
+  hours that no outcome report, publish, or parked candidate has closed. A
+  deliberate `tenjin search` that went unanswered is named on its own line with
+  its `searchId`. Searches the WebSearch hook ran are batched into one line, at
+  most three, because nobody vetted those questions for the marketplace and only
+  the agent can tell which produced something durable. Each search is raised once.
 
-`hooks.searchMode` selects the behavior and is read on every run, so
-`tenjin config set hooks.searchMode off` disarms both immediately with no
-re-install. `remind` prints a one-line reminder instead of sending the query
-anywhere. To remove them entirely, delete the tenjin entries from
+Both are runtime toggles, read from config on every run, so neither needs a
+re-install to change:
+
+```bash
+tenjin config set hooks.searchMode off   # disarm the WebSearch hook
+tenjin config set hooks.stopNag off      # stop the end-of-turn reminder
+```
+
+`remind` prints a one-line reminder instead of sending the query anywhere. To
+remove the hooks entirely, delete the tenjin entries from
 `~/.claude/settings.json` and the scripts in `~/.tenjin/hooks/`.
 
 ## Consent modes and pricing
@@ -341,12 +355,23 @@ decision:
    [Search hooks](#search-hooks).
 4. **Wallet.** "Create a wallet now?", asked only when you do not already have one.
 
-A run with nobody to ask still produces a working install: the permission
-allowlist and the search hooks are written by default, both are disclosed with
-their undo, and both have an opt-out flag (`--no-allow-free-verbs`,
-`--search-hooks off`). The wallet is the exception. A machine run never creates a
-key, and the envelope reports `wallet: { "status": "not-offered" }` rather than
-leaving the decision invisible.
+A run with nobody to ask still produces a working install. Everything is on by
+default on both paths, each with an opt-out flag: the permission allowlist
+(`--no-allow-free-verbs`), the search hooks (`--no-hooks`, or `--search-hooks
+off` to make it durable), and the wallet (`--no-wallet`). Everything written is
+disclosed in the output with its undo.
+
+The wallet is created headlessly too, because `buy` and publishing back after a
+MISS both need one and a walletless install stops at the first useful thing an
+agent tries. The passphrase resolves as it does everywhere else: an explicit
+`TENJIN_WALLET_PASSPHRASE`, else a strong generated one written to the OS
+credential store and verified by reading it back. **With neither available,
+nothing is created**: the run reports
+`wallet: { "status": "skipped", "reason": "no-passphrase-store", "fix": ... }`
+naming both remedies. There is no plain-file fallback, because a passphrase
+stored next to the keystore it unlocks protects nothing. A wallet that cannot be
+created never fails the install; the skills, hooks, and permissions are useful
+without one.
 
 It is idempotent: re-run any time, and `--dry-run` previews without writing.
 `--harness` is remembered, so `doctor` keeps checking a directory you named by
