@@ -147,6 +147,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
     .option('--no-wallet', 'create no wallet (the default is to create one)')
+    .option(
+      '--wallet-provider <provider>',
+      'reuse an existing wallet provider instead of creating a Tenjin wallet: clawrouter',
+    )
     // The two affirmative flags are pre-default-on compat only: released docs and
     // the alpha.9 doctor's fix strings name them, so they must parse, but they add
     // nothing over the default and would only clutter --help. Hidden, not removed.
@@ -189,6 +193,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(o.dryRun === true ? { dryRun: true } : {}),
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
+            ...(typeof o.walletProvider === 'string'
+              ? { walletProvider: o.walletProvider as 'clawrouter' }
+              : {}),
             ...(claudeMdGiven && typeof o.claudeMd === 'boolean' ? { claudeMd: o.claudeMd } : {}),
             ...(allowGiven && typeof o.allowFreeVerbs === 'boolean'
               ? { allowFreeVerbs: o.allowFreeVerbs }

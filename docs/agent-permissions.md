@@ -194,7 +194,7 @@ Deliberately **never** recommended, because each is a human decision:
 | `tenjin config set`                              | It can widen the agent's own spend policy.                                           |
 | `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.             |
 | `tenjin install`                                 | Writes into harness config and skills directories.                                   |
-| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                  |
+| `tenjin mcp`                                     | It exposes task cores under a separate, broad tool-permission surface.               |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
@@ -271,10 +271,11 @@ damage, so never pass one.
 That is a different permission surface: the harness gates tools there, and these
 Bash rules do not apply. If you follow the
 [MCP section](../README.md#local-stdio-mcp-server) as well, leave
-`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and
-`mcp__tenjin__tenjin_wallet` gated, treat `mcp__tenjin__tenjin_candidate` as
+`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_edit` gated, treat
+`mcp__tenjin__tenjin_candidate` as
 gated for its add/drop actions, and treat `mcp__tenjin__tenjin_buy` as the same
-opt-in decision as the `buy` line above.
+opt-in decision as the `buy` line above. Wallet management and funds-out sends
+are not exposed over MCP; select the wallet provider with the operator-facing CLI.
 
 ## Not the same as `allowlistCreators`
 

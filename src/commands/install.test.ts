@@ -230,7 +230,13 @@ type Harnesses = Array<{
     activation: { status: string };
   };
 }>;
-type Data = { dryRun: boolean; skillsSource: string; harnesses: Harnesses; doctor: unknown };
+type Data = {
+  dryRun: boolean;
+  skillsSource: string;
+  harnesses: Harnesses;
+  doctor: unknown;
+  wallet?: { status: string; address?: string; provider?: string };
+};
 
 const asData = (d: unknown) => d as Data;
 
@@ -283,6 +289,45 @@ describe('runInstall: harness override', () => {
     expect(await readFile(join(home, '.hermes', 'config.yaml'), 'utf8')).toContain(
       'enabled:\n    - tenjin',
     );
+  });
+
+  it('reuses the existing ClawRouter signer for Hermes without creating a second wallet', async () => {
+    const address = '0x0000000000000000000000000000000000000002';
+    const connectWallet = vi.fn(async () => address);
+    const createWallet = vi.fn(async () =>
+      Promise.reject(new Error('must not create a second wallet')),
+    );
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], walletProvider: 'clawrouter' },
+      makeCtx({ json: true }),
+      deps({ connectWallet, createWallet }),
+    );
+
+    expect(connectWallet).toHaveBeenCalledOnce();
+    expect(connectWallet).toHaveBeenCalledWith(expect.anything(), 'clawrouter');
+    expect(createWallet).not.toHaveBeenCalled();
+    expect(asData(d).wallet).toMatchObject({
+      status: 'connected',
+      provider: 'clawrouter',
+      address,
+    });
+  });
+
+  it('rejects contradictory or unsupported wallet-provider options before wiring files', async () => {
+    const conflicting = await caught(() =>
+      runInstall(
+        { harness: ['hermes'], noWallet: true, walletProvider: 'clawrouter' },
+        makeCtx(),
+        deps(),
+      ),
+    );
+    expect(conflicting.code).toBe('USAGE');
+
+    const unsupported = await caught(() =>
+      runInstall({ harness: ['hermes'], walletProvider: 'other' } as never, makeCtx(), deps()),
+    );
+    expect(unsupported.code).toBe('USAGE');
+    expect(existsSync(join(home, '.hermes'))).toBe(false);
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {
@@ -353,6 +398,15 @@ describe('runInstall: dry run', () => {
     expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
+  });
+  it('does not connect ClawRouter during a dry run', async () => {
+    const connectWallet = vi.fn(async () => '0x0000000000000000000000000000000000000002');
+    await runInstall(
+      { harness: ['hermes'], walletProvider: 'clawrouter', dryRun: true },
+      makeCtx({ json: true }),
+      deps({ connectWallet }),
+    );
+    expect(connectWallet).not.toHaveBeenCalled();
   });
 });
 

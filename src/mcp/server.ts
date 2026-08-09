@@ -1,5 +1,5 @@
 // The local stdio MCP server. It exposes the SAME command cores the CLI runs
-// (search, inspect, buy, outcome, publish, candidate, wallet) to an MCP client,
+// (search, inspect, buy, outcome, publish, candidate) to an MCP client,
 // in-process — no shelling out and no second implementation of the consent gates.
 //
 // Each tool builds a fresh CommandContext, calls the core in a try/catch, and
@@ -38,13 +38,6 @@ import {
   type CandidateAddArgs,
   type CandidateDeps,
 } from '../commands/candidate';
-import {
-  runWalletBalance,
-  runWalletCreate,
-  runWalletShow,
-  type WalletCreateOptions,
-} from '../commands/wallet';
-import type { ResolveWalletProviderOptions } from '../lib/wallet';
 
 /**
  * Per-command test-injection seams, threaded into each core's existing third
@@ -58,7 +51,6 @@ export interface McpCommandDeps {
   publish?: PublishDeps;
   edit?: EditDeps;
   candidate?: CandidateDeps;
-  wallet?: ResolveWalletProviderOptions & WalletCreateOptions;
 }
 
 export interface BuildMcpOptions {
@@ -72,7 +64,7 @@ export interface BuildMcpOptions {
 
 const INSTRUCTIONS =
   'Tenjin is an x402 knowledge marketplace on Base. This local server runs the ' +
-  'Tenjin CLI cores in-process: a self-custody wallet on THIS machine signs every ' +
+  'Tenjin CLI cores in-process: the active wallet provider on THIS machine signs every ' +
   'payment and write, and its private key never leaves the machine or reaches ' +
   'Tenjin. Paid reads are gated by the local spend policy: a purchase that needs ' +
   'approval fails with POLICY_REFUSED / NEEDS_CONFIRMATION rather than paying, and ' +
@@ -225,17 +217,6 @@ const candidateInput = {
   ...candidateAddInput,
   ...candidateDropInput,
 };
-
-// The wallet cores take no args beyond the action discriminator.
-//
-// `tenjin send` (the funds-out escape hatch, src/commands/send.ts) is
-// DELIBERATELY EXCLUDED from this toolset, as an action here and as a tool of
-// its own: the MCP surface stays narrower than the CLI (spec 10's narrow-toolset
-// rule; MCP agents discover and pay under policy, they never export a wallet or
-// move funds out of it). Do not add a send tool or action.
-const walletInput = {
-  action: z.enum(['show', 'balance', 'create']).describe('show | balance | create'),
-} satisfies Record<'action', z.ZodTypeAny>;
 
 /**
  * Build the local Tenjin MCP server with every tool registered against the CLI
@@ -532,26 +513,6 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           return runCandidateDrop({ id: args.id }, ctx);
         }
         return runCandidateList(ctx, deps.candidate);
-      }),
-  );
-
-  server.registerTool(
-    'tenjin_wallet',
-    {
-      title: 'Manage the local wallet',
-      description:
-        'Inspect or create the local self-custody wallet used for paid reads and publishing. ' +
-        'action:show prints the address and key source; action:balance reads the USDC balance on ' +
-        'Base; action:create makes a new local wallet. The private key never leaves this machine and ' +
-        'is never included in any result.',
-      inputSchema: walletInput,
-      annotations: { readOnlyHint: false, openWorldHint: true },
-    },
-    async (args) =>
-      runCore(`wallet.${args.action}`, (ctx) => {
-        if (args.action === 'create') return runWalletCreate(ctx, deps.wallet);
-        if (args.action === 'balance') return runWalletBalance(ctx, deps.wallet);
-        return runWalletShow(ctx, deps.wallet);
       }),
   );
 

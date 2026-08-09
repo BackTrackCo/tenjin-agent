@@ -199,8 +199,8 @@ describe('the flag surface inside an allowed verb', () => {
     const mcp = MCP_CAVEAT.join(' ');
     expect(mcp).toContain('mcp__tenjin__tenjin_publish');
     expect(mcp).toContain('mcp__tenjin__tenjin_edit');
-    expect(mcp).toContain('mcp__tenjin__tenjin_wallet');
     expect(mcp).toContain('mcp__tenjin__tenjin_candidate');
+    expect(mcp).toContain('Wallet management and sends are not tools');
   });
 
   it('carries both caveats in the machine payload', () => {

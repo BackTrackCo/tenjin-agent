@@ -24,7 +24,7 @@
  * Scope: `tenjin mcp` exposes the same command cores over MCP, where the harness
  * gates TOOLS, not Bash lines. These rules say nothing about that surface, which
  * is why `tenjin mcp` is itself never recommended here: clearing it would route
- * around every rule below. MCP_CAVEAT names the tools to leave gated for an
+ * around every rule below. MCP_CAVEAT names the consequential tools to leave gated for an
  * operator who runs the server anyway.
  *
  * LIMIT OF A PREFIX RULE, read this before adding an entry: the rule constrains
@@ -275,8 +275,8 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   {
     command: 'tenjin mcp',
     reason:
-      'Long-running server that re-exposes every command core over stdio; ' +
-      'clearing it would indirectly clear everything above.',
+      'Long-running server exposing paid and write-capable task cores over stdio; ' +
+      'its tools need their own harness permissions.',
   },
 ];
 
@@ -303,14 +303,14 @@ export const FLAG_CAVEAT: readonly string[] = [
 /**
  * The MCP caveat. `tenjin mcp` is never recommended as a Bash rule, but an
  * operator who registers the server anyway is on a different permission surface
- * (tools, not command strings) where three excluded verbs come back.
+ * (tools, not command strings). Wallet management and funds-out sends stay CLI-only.
  */
 export const MCP_CAVEAT: readonly string[] = [
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
-  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
-  '`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_candidate` as gated',
-  'for its add/drop actions. `tenjin_buy` is the same opt-in decision as the buy line above.',
+  '`mcp__tenjin__tenjin_publish` and `mcp__tenjin__tenjin_edit` gated, and treat',
+  '`mcp__tenjin__tenjin_candidate` as gated for its add/drop actions. `tenjin_buy` is the',
+  'same opt-in decision as the buy line above. Wallet management and sends are not tools.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */

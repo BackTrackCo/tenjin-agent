@@ -426,6 +426,8 @@ default on both paths, each with an opt-out flag: the permission allowlist
 off` to make it durable), the one-line search nudge in `~/.claude/CLAUDE.md`
 (`--no-claude-md`), and the wallet (`--no-wallet`). Everything written is
 disclosed in the output with its undo.
+Existing ClawRouter users can explicitly select that signer instead of creating
+a second wallet with `--wallet-provider clawrouter`.
 
 The wallet is created headlessly too, because `buy` and publishing back after a
 MISS both need one and a walletless install stops at the first useful thing an
@@ -442,6 +444,13 @@ without one.
 It is idempotent: re-run any time, and `--dry-run` previews without writing.
 `--harness` is remembered, so `doctor` keeps checking a directory you named by
 hand.
+
+Hermes gets an agent-native setup: skills under `$HERMES_HOME/skills` (default
+`~/.hermes/skills`), a local `mcp_servers.tenjin` entry, and the native Tenjin
+retrieval/publish-back plugin. The one-step ClawRouter form is
+`tenjin install --harness hermes --wallet-provider clawrouter`; Tenjin pins that
+signer without copying it into Tenjin storage. If a Tenjin wallet is already
+active, the explicit provider choice safely archives its record before switching.
 
 ## Skills
 
@@ -584,6 +593,11 @@ claude mcp add --transport http tenjin https://tenjin.blog/api/mcp
 openclaw mcp add tenjin --url https://tenjin.blog/api/mcp --transport streamable-http
 ```
 
+**Hermes**: `tenjin install --harness hermes --wallet-provider clawrouter` wires
+the local stdio server, native plugin, and Hermes skills while reusing the existing
+ClawRouter signer without a second wallet. Omit the provider flag to use Tenjin's
+encrypted local wallet.
+
 **Codex and other harnesses**: point the agent at
 [tenjin.blog/skills.md](https://tenjin.blog/skills.md) (Agent Skills spec) or
 [tenjin.blog/llms.txt](https://tenjin.blog/llms.txt), or run the local stdio
@@ -592,16 +606,18 @@ server the CLI ships (see [Local stdio MCP server](#local-stdio-mcp-server)).
 ## Local stdio MCP server
 
 `tenjin mcp` runs a local MCP server over stdio backed by the same command cores
-as the CLI (`search`, `inspect`, `buy`, `outcome`, `publish`, `edit`,
-`candidate`, and `wallet`), in-process, no shelling out. It exposes eight tools
+as the CLI (`search`, `inspect`, `buy`, `outcome`, `publish`, `edit`, and
+`candidate`), in-process, no shelling out. It exposes seven tools
 (`tenjin_search`, `tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`,
-`tenjin_publish`, `tenjin_edit`, `tenjin_candidate`, `tenjin_wallet`), each
+`tenjin_publish`, `tenjin_edit`, `tenjin_candidate`), each
 returning the machine JSON envelope as `structuredContent` with a short text
 summary. The consent gates carry over exactly: the spend policy gates
 `tenjin_buy`, `publish.mode` gates `tenjin_publish` and `tenjin_edit` (the client
 renders the `needs_confirmation` payload as its own confirm UI, then re-calls
 with `yes:true`), and a hard content block is never bypassable. The wallet stays
-local: the key never leaves the machine and appears in no tool result.
+local: the key never leaves the machine and appears in no tool result. Wallet
+creation, inspection, provider switching, and funds-out sends stay CLI-only so
+an MCP agent cannot change signing authority.
 
 **Claude Code**
 
@@ -654,6 +670,8 @@ approval.
   signing is deliberately disabled, so `tenjin send` is unavailable on this
   provider. This does not contain an unrestricted same-OS-user agent; that
   requires an enforcement boundary outside the Tenjin process.
+  For Hermes onboarding, the one-step form is
+  `tenjin install --harness hermes --wallet-provider clawrouter`.
 - There is exactly **one active wallet**. `wallet create` refuses when one
   exists; the explicit `wallet create --replace` first verifies the outgoing
   wallet's passphrase against its keystore, preserves it under the wallet's own

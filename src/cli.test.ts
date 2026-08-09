@@ -112,6 +112,19 @@ describe('main', () => {
     expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
+  it('accepts and forwards the Hermes wallet-provider option', async () => {
+    const help = captureIo();
+    expect(await main(['install', '--help'], help.io)).toBe(0);
+    expect(help.stdout()).toContain('--wallet-provider <provider>');
+
+    const cap = captureIo();
+    const code = await main(['install', '--wallet-provider', 'unknown', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('install');
+    expect(parsed.error.code).toBe('USAGE');
+  });
+
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
     const cap = captureIo(true);
     const code = await main([], cap.io);

@@ -61,7 +61,7 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string; detail
 type SuccessEnvelope = { ok: true; command: string; data: Record<string, unknown> };
 
 describe('buildTenjinMcpServer, tool surface', () => {
-  it('exposes exactly the eight Tenjin tools', async () => {
+  it('exposes exactly the seven task tools, with no wallet-management surface', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -74,7 +74,6 @@ describe('buildTenjinMcpServer, tool surface', () => {
         'tenjin_search',
         'tenjin_outcome',
         'tenjin_publish',
-        'tenjin_wallet',
       ].sort(),
     );
   });
@@ -86,18 +85,13 @@ describe('buildTenjinMcpServer, tool surface', () => {
     expect(client.getServerVersion()?.name).toBe('tenjin-cli');
   });
 
-  // `tenjin send` is the human-invoked funds-out escape hatch (issue #34). Doc
-  // 10's narrow-toolset rule keeps it OFF the MCP surface: no send tool, and no
-  // send action on tenjin_wallet. This pin fails if either ever appears.
-  it('never exposes the funds-out send verb (no tool, no wallet action)', async () => {
+  // Wallet authority belongs to the operator-facing CLI. An MCP agent may use the
+  // active signer under policy, but cannot inspect, create, switch, or send from it.
+  it('never exposes wallet management or the funds-out send verb', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).not.toContain('tenjin_send');
-    const wallet = tools.find((t) => t.name === 'tenjin_wallet');
-    expect(wallet).toBeDefined();
-    const schema = JSON.stringify(wallet?.inputSchema ?? {});
-    expect(schema).toContain('show');
-    expect(schema).not.toContain('send');
+    expect(tools.map((t) => t.name)).not.toContain('tenjin_wallet');
   });
 });
 

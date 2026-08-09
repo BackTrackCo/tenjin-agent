@@ -39,7 +39,7 @@ import {
 } from '../lib/config';
 import type { PublishMode, SearchHookMode } from '../lib/config';
 import { persistInstallHarness, persistPublishMode, persistSearchHookMode } from './config';
-import { runWalletCreate } from './wallet';
+import { runWalletConnect, runWalletCreate } from './wallet';
 import { collectDoctorChecks, isNoWalletCheck } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
@@ -74,6 +74,7 @@ const InstallInputSchema = z.object({
   dryRun: z.boolean().optional(),
   publishMode: z.string().optional(),
   noWallet: z.boolean().optional(),
+  walletProvider: z.enum(['clawrouter']).optional(),
   /**
    * The ~/.claude/CLAUDE.md nudge: `false` (`--no-claude-md`) suppresses it,
    * `true` (`--claude-md`) states the default explicitly, and `undefined` writes
@@ -136,8 +137,9 @@ type WalletSkipReason = 'no-passphrase-store' | 'create-failed' | 'dry-run' | 'f
  * one the operator told not to, and only the first needs a remedy.
  */
 interface WalletOutcome {
-  status: 'existing' | 'created' | 'declined' | 'skipped';
+  status: 'existing' | 'created' | 'connected' | 'declined' | 'skipped';
   address?: string;
+  provider?: 'clawrouter';
   /** Only ever set on `skipped`. */
   reason?: WalletSkipReason;
   /** The exact command that changes this outcome, mirroring the CliError contract. */
@@ -309,6 +311,8 @@ export interface InstallDeps {
   tenjinCommand?: string;
   /** Absolute Node executable embedded in the Hermes native plugin. */
   nodeCommand?: string;
+  /** Connect an existing external signer. Defaults to runWalletConnect with explicit replacement. */
+  connectWallet?: (ctx: CommandContext, provider: 'clawrouter') => Promise<string>;
 }
 
 /**
@@ -407,6 +411,12 @@ async function installBody(
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
   const noHooks = parsed.data.noHooks === true;
+  const walletProvider = parsed.data.walletProvider;
+  if (noWallet && walletProvider !== undefined) {
+    throw new CliError('USAGE', '`--no-wallet` cannot be combined with `--wallet-provider`.', {
+      fix: 'Remove one of the two wallet options and re-run `tenjin install`.',
+    });
+  }
   const claudeMdFlag = parsed.data.claudeMd;
   const allowFreeVerbs = parsed.data.allowFreeVerbs;
   // Validate the enum flags UP FRONT so a bad value fails before any wiring.
@@ -534,7 +544,7 @@ async function installBody(
   // run creates one rather than leaving the operator a setup that stops at the
   // first buy or publish.
   const wallet = await underDataDir(ctx.dataDir, () =>
-    resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt),
+    resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt, walletProvider),
   );
 
   // AFTER all four decisions, never before (#101). The snapshot used to be taken
@@ -883,6 +893,9 @@ function walletLine(io: Io, w: WalletOutcome): string {
     const color = icon === '!' ? 'yellow' : 'dim';
     return `${paint(io, color, icon)} ${label} none (${w.reason}). ${w.fix}`;
   }
+  if (w.status === 'connected') {
+    return `${paint(io, 'green', '✓')} ${label} ${w.address} (ClawRouter). Tenjin pinned the existing signer; no key was copied.`;
+  }
   return `${paint(io, 'dim', '-')} ${label} none. Create one later with: tenjin wallet create`;
 }
 
@@ -964,16 +977,24 @@ async function resolveWallet(
   deps: InstallDeps,
   skipReason: 'dry-run' | 'flag' | undefined,
   canPrompt: boolean,
+  provider?: 'clawrouter',
 ): Promise<WalletOutcome> {
+  if (skipReason !== undefined) {
+    return { status: 'skipped', reason: skipReason, fix: walletFix(skipReason) };
+  }
+  if (provider !== undefined) {
+    return {
+      status: 'connected',
+      provider,
+      address: await (deps.connectWallet ?? defaultConnectWallet)(ctx, provider),
+    };
+  }
   const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
   if (exists) {
     return {
       status: 'existing',
       address: await (deps.walletAddress ?? existingWalletAddress)(ctx),
     };
-  }
-  if (skipReason !== undefined) {
-    return { status: 'skipped', reason: skipReason, fix: walletFix(skipReason) };
   }
 
   // Interactive keeps the question (default yes); headless has nobody to ask and
@@ -1032,6 +1053,11 @@ async function defaultCreateWallet(
     ...(passphrase !== undefined ? { passphrase } : {}),
     ...(env !== undefined ? { env } : {}),
   });
+  return (result.data as { address: string }).address;
+}
+
+async function defaultConnectWallet(ctx: CommandContext, provider: 'clawrouter'): Promise<string> {
+  const result = await runWalletConnect({ provider }, ctx, { replace: true });
   return (result.data as { address: string }).address;
 }
 
