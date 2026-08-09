@@ -877,6 +877,10 @@ describe('runInstall: walkthrough ordering', () => {
           required: false,
           detail: 'No wallet; needed only for buy/publish',
           fix: 'tenjin wallet create',
+          // The marker doctor's noWalletCheck sets; doctor.test.ts pins that the
+          // production check really carries it, so this stub cannot drift into
+          // testing a shape nothing emits.
+          data: { credential: 'absent' },
         },
       ],
     };
@@ -922,6 +926,41 @@ describe('runInstall: walkthrough ordering', () => {
     const text = human(res);
     expect(text).toContain('need attention');
     expect(text).toContain('the keystore cannot be decrypted');
+  });
+
+  // The suppression keys on the check that says there is NO credential, never on
+  // the name `wallet`. `walletExists` is a wallet-FILE probe, so a broken
+  // TENJIN_WALLET_KEY with no file on disk records `none` in the summary while
+  // doctor is warning about a credential that exists and does not work. Filtering
+  // by name hid exactly that, which is the one wallet state install says nothing
+  // else about.
+  it('reports a broken env key even while the summary says none', async () => {
+    const badEnvKey: DoctorChecks = {
+      checks: [
+        {
+          name: 'wallet',
+          status: 'warn',
+          required: false,
+          detail: 'TENJIN_WALLET_KEY is not a valid private key.',
+          fix: 'Set TENJIN_WALLET_KEY to a 0x-prefixed 32-byte hex key, or unset it to use the wallet file.',
+        },
+      ],
+    };
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        walletExists: async () => false,
+        confirmWallet: async () => false,
+        collectChecks: async () => badEnvKey,
+      }),
+    );
+    const text = human(res);
+    expect(text).toContain('need attention');
+    expect(text).toContain('not a valid private key');
+    // ...and the summary still reports what the walkthrough itself settled.
+    expect(text).toContain('Wallet: none');
   });
 });
 

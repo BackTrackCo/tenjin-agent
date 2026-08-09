@@ -911,7 +911,19 @@ function noWalletCheck(): CheckResult {
     required: false,
     detail: 'No wallet; needed only for buy/publish',
     fix: 'tenjin wallet create',
+    data: { credential: 'absent' },
   };
+}
+
+/**
+ * Is this the check that says there is no credential at all? `install` prints its
+ * own line for that state and drops the duplicate, so it has to recognise THIS
+ * check and not merely one named `wallet`: a warn about a credential that exists
+ * and does not work (an unopenable keystore, an invalid TENJIN_WALLET_KEY) shares
+ * the name and is the one wallet state nothing else in install's output carries.
+ */
+export function isNoWalletCheck(c: CheckResult): boolean {
+  return c.name === 'wallet' && isRecord(c.data) && c.data.credential === 'absent';
 }
 
 function walletWarn(err: unknown): CheckResult {
@@ -982,12 +994,11 @@ export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
           ? paint(io, 'yellow', '!')
           : paint(io, 'red', '✗');
     // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
-    // info.version, a provider's error text). doctor now prints them directly
-    // above the allowlist block the operator is told to paste, so a newline or
-    // ANSI in a hostile deployment's version string could forge a second, wider
-    // "allowlist" section in the terminal. Sanitize at the render seam: output.ts
-    // exempts doctor on the assumption it only paints its OWN text, which stopped
-    // being true the moment these lines sat next to a copy-paste block.
+    // info.version, a provider's error text), so a newline or ANSI in a hostile
+    // deployment's version string could forge extra lines here — including a
+    // convincing closing pointer at a URL of its choosing. Sanitize at the render
+    // seam: output.ts exempts doctor on the assumption it only paints its OWN
+    // text, which has not been true since these lines began carrying server text.
     lines.push(
       `${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
     );

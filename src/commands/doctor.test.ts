@@ -5,10 +5,11 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
-import { runDoctor } from './doctor';
+import { isNoWalletCheck, runDoctor } from './doctor';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
+import { emitFailure } from '../lib/output';
 import { fakeRecord } from '../lib/wallet/test-support';
 import { ALWAYS_SAFE_ALLOWLIST, OPT_IN_ALLOWLIST, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import type { CommandContext } from '../context';
@@ -139,6 +140,10 @@ describe('runDoctor — passing outcomes', () => {
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
+    // `install` suppresses this one check as a duplicate of its own wallet line,
+    // and recognises it by this marker rather than by the name it shares with
+    // every other wallet warning.
+    expect(isNoWalletCheck(find(data.checks, 'wallet'))).toBe(true);
     expect(find(data.checks, 'search-contract').status).toBe('ok');
     // A bare temp HOME has no skills, so the wiring check warns with a fix too.
     expect(find(data.checks, 'skills').status).toBe('warn');
@@ -1206,6 +1211,35 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
     expect(details.permissions.alwaysSafe.map((e) => e.rule)).toEqual(
       ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
     );
+  });
+
+  // A required failure throws, so the HUMAN sees what every failing command
+  // shows — the error and its fix — and neither the check list nor the pointer.
+  // That is emitFailure's contract, not doctor's, and the README says so rather
+  // than promising a rendering this path does not produce.
+  it('renders no checks and no pointer on the human failure path', async () => {
+    const brokenFetch = routeFetch({
+      '/openapi.json': { body: OPENAPI_OK },
+      '/api/articles': { body: { nope: true } },
+    });
+    const err: unknown = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: brokenFetch,
+    }).catch((e: unknown) => e);
+
+    const out: string[] = [];
+    const io: Io = {
+      stdout: { write: (c: string | Uint8Array) => (out.push(c.toString()), true) },
+      stderr: { write: () => true },
+      isTTY: true,
+    } as unknown as Io;
+    emitFailure(io, 'doctor', err);
+    const text = out.join('');
+    expect(text).toContain('error: Read path');
+    expect(text).toContain('fix: ');
+    expect(text).not.toContain(PERMISSIONS_DOC_URL);
+    expect(text).not.toContain('api-contract'); // no check list on this path
   });
 
   // `info.version` is server-controlled and now renders directly above a block

@@ -38,7 +38,7 @@ import {
 import type { PublishMode } from '../lib/config';
 import { persistInstallHarness, persistPublishMode } from './config';
 import { runWalletCreate } from './wallet';
-import { collectDoctorChecks } from './doctor';
+import { collectDoctorChecks, isNoWalletCheck } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
@@ -231,11 +231,12 @@ export interface InstallDeps {
 
 /**
  * `tenjin install`: detect the installed harness(es), copy the packaged skills
- * into each one's skills directory, wire the AGENTS.md pointer, run the doctor
- * checks, then ask AT MOST THREE questions (publishing, harness permissions,
- * wallet) and print a short summary. Everything that is not one of those three
- * decisions is display: the security reference material lives in
- * docs/agent-permissions.md, not in the middle of a setup flow.
+ * into each one's skills directory, wire the AGENTS.md pointer, ask AT MOST THREE
+ * questions (publishing, harness permissions, wallet), then run the doctor checks
+ * over the machine those answers just produced and print a short summary.
+ * Everything that is not one of those three decisions is display: the security
+ * reference material lives in docs/agent-permissions.md, not in the middle of a
+ * setup flow.
  *
  * Like every command it is human-first (the global output contract): at a TTY
  * without `--json` it prompts and returns the walkthrough as humanLines, which
@@ -738,12 +739,17 @@ function defaultConfirm(label: string): Promise<boolean> {
  * summary's own wallet line says `none` and names the same `tenjin wallet create`,
  * and someone who only wants `tenjin search` does not need it twice, in yellow,
  * for a wallet they were just told is optional. Every other wallet warn — a
- * keystore that will not open, loose file permissions — still prints, because
- * nothing else in the output says it.
+ * keystore that will not open, an invalid TENJIN_WALLET_KEY, loose file
+ * permissions — still prints, because nothing else in the output says it.
+ *
+ * Hence `isNoWalletCheck` rather than the check's NAME. `resolveWallet` probes for
+ * a wallet FILE, so it records `none` for a machine whose credential is a broken
+ * env key; matching on the name suppressed doctor's warning about it and left the
+ * run silent about the only wallet state install cannot describe itself.
  */
 function doctorNotices(io: Io, doctor: DoctorChecks, wallet: WalletOutcome): string[] {
   const problems = doctor.checks.filter(
-    (c) => c.status !== 'ok' && !(c.name === 'wallet' && wallet.status === 'none'),
+    (c) => c.status !== 'ok' && !(wallet.status === 'none' && isNoWalletCheck(c)),
   );
   if (problems.length === 0) return [];
   const lines = [paint(io, 'yellow', 'Some checks need attention:')];
