@@ -35,11 +35,16 @@ import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
-import { recommendedPermissions, renderPermissionsBlock } from '../lib/permissions';
+import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
-import type { WalletDescription, WalletProvider } from '../lib/wallet';
+import type {
+  PassphraseOverrides,
+  WalletDescription,
+  WalletProvider,
+  WalletVerification,
+} from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -110,6 +115,12 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
+  /**
+   * Passphrase seams for the wallet verification (#70), which reads the OS
+   * credential store. Tests inject a platform with no store, or a stubbed exec,
+   * so no assertion here depends on what is in the developer's real keychain.
+   */
+  walletPassphrase?: Omit<PassphraseOverrides, 'isTTY'>;
 }
 
 /**
@@ -178,13 +189,15 @@ export async function runDoctor(
     });
   }
 
-  // The discoverability surface for the auto-mode denial problem (#33): an
-  // operator whose agent just got denied runs doctor and gets the exact lines to
-  // paste, without having to already know they exist. It reports nothing about the
-  // local machine, so it is deliberately NOT a check: it can never pass or fail.
+  // The discoverability surface for the auto-mode denial problem (#33), now one
+  // line rather than the ~60 that used to bury the check list this command was
+  // run for: an operator whose agent just got denied still learns the allowlist
+  // exists and where to get it. It reports nothing about the local machine, so it
+  // is deliberately NOT a check: it can never pass or fail. `--json` is unchanged
+  // and still carries the whole recommendation as data.
   return {
     data: { status: 'pass', checks, permissions: recommendedPermissions() },
-    humanLines: [...renderDoctorHuman(ctx.io, checks), '', ...renderPermissionsBlock()],
+    humanLines: [...renderDoctorHuman(ctx.io, checks), '', permissionsPointer()],
   };
 }
 
@@ -783,7 +796,8 @@ async function checkReadPath(
  * With no injected provider we do ONE cheap fs/env probe purely to decide whether
  * any credential exists: none → emit the "no wallet" warn WITHOUT importing the
  * wallet lib (that import statically pulls viem, and a no-wallet run must not parse
- * it). Otherwise the provider describes itself (address + source), reports its own
+ * it). Otherwise the provider describes itself (address + source), PROVES the
+ * credential can sign when it can do so without prompting (#70), reports its own
  * custody warnings, and the balance probes describe()'s address. A custody problem
  * (bad key, provider refusal) is warn-level, never a hard fail.
  */
@@ -793,7 +807,7 @@ async function checkWallet(
   env: NodeJS.ProcessEnv,
   rpcUrl: string,
 ): Promise<CheckResult[]> {
-  const provider = deps.provider ?? (await resolveLocalProviderOrNull(ctx, env));
+  const provider = deps.provider ?? (await resolveLocalProviderOrNull(ctx, env, deps));
   if (provider === null) return [noWalletCheck()];
 
   const { describeWallet } = await import('../lib/wallet');
@@ -805,14 +819,7 @@ async function checkWallet(
     return [walletWarn(err)];
   }
 
-  const checks: CheckResult[] = [
-    {
-      name: 'wallet',
-      status: 'ok',
-      required: false,
-      detail: `Wallet ${desc.address} (${desc.credentialSource})`,
-    },
-  ];
+  const checks: CheckResult[] = [walletCheck(desc, await verifyWallet(provider))];
   // Custody warnings are the provider's own (perms, env-shadow for the local
   // provider; none for a remote one). Render each as a warn check; the fix text,
   // when there is one, is carried inline in the warning string.
@@ -830,12 +837,71 @@ async function checkWallet(
 async function resolveLocalProviderOrNull(
   ctx: CommandContext,
   env: NodeJS.ProcessEnv,
+  deps: DoctorDeps,
 ): Promise<WalletProvider | null> {
   const envKey = env.TENJIN_WALLET_KEY;
   const envKeySet = typeof envKey === 'string' && envKey.length > 0;
   if (!envKeySet && !(await walletFileExists(ctx.dataDir))) return null;
   const { resolveWalletProvider } = await import('../lib/wallet');
-  return resolveWalletProvider(ctx);
+  return resolveWalletProvider(ctx, {
+    ...(deps.walletPassphrase !== undefined ? { passphrase: deps.walletPassphrase } : {}),
+  });
+}
+
+/**
+ * Ask the provider to prove the credential can sign (#70). A provider without a
+ * `verify` is not a failure and not a pass: it is the `unverified` state, same as
+ * a keystore whose passphrase only a human could supply. A provider that throws
+ * is treated the same way — doctor reports what it could not establish and keeps
+ * going; it never turns a diagnostic's own failure into a verdict about the
+ * wallet.
+ */
+async function verifyWallet(provider: WalletProvider): Promise<WalletVerification> {
+  if (provider.verify === undefined) {
+    return {
+      status: 'unverified',
+      detail: `provider "${provider.id}" cannot verify without a key`,
+    };
+  }
+  try {
+    return await provider.verify();
+  } catch (err) {
+    return {
+      status: 'unverified',
+      detail: `verification could not run (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+}
+
+/**
+ * The wallet check, with the verification folded INTO its status rather than
+ * reported beside it. #70 was exactly a green `wallet` line above an unopenable
+ * keystore, so an `ok` here has to mean the key is usable, not merely that a file
+ * parsed. Still never `required` and never a `fail`: a wallet nobody can open is
+ * a real problem, but `read` and `search` work without one, so it must not move
+ * the exit code.
+ */
+function walletCheck(desc: WalletDescription, v: WalletVerification): CheckResult {
+  const head = `Wallet ${desc.address} (${desc.credentialSource})`;
+  if (v.status === 'broken') {
+    return {
+      name: 'wallet',
+      status: 'warn',
+      required: false,
+      detail: `${head}: ${v.detail}`,
+      fix: v.fix,
+    };
+  }
+  if (v.status === 'unverified') {
+    return {
+      name: 'wallet',
+      status: 'warn',
+      required: false,
+      detail: `${head} present, not verified: ${v.detail}`,
+      fix: 'Set TENJIN_WALLET_PASSPHRASE, or store the passphrase in your OS credential store, so doctor can prove the keystore still opens.',
+    };
+  }
+  return { name: 'wallet', status: 'ok', required: false, detail: `${head}, ${v.detail}` };
 }
 
 function noWalletCheck(): CheckResult {
@@ -845,7 +911,19 @@ function noWalletCheck(): CheckResult {
     required: false,
     detail: 'No wallet; needed only for buy/publish',
     fix: 'tenjin wallet create',
+    data: { credential: 'absent' },
   };
+}
+
+/**
+ * Is this the check that says there is no credential at all? `install` prints its
+ * own line for that state and drops the duplicate, so it has to recognise THIS
+ * check and not merely one named `wallet`: a warn about a credential that exists
+ * and does not work (an unopenable keystore, an invalid TENJIN_WALLET_KEY) shares
+ * the name and is the one wallet state nothing else in install's output carries.
+ */
+export function isNoWalletCheck(c: CheckResult): boolean {
+  return c.name === 'wallet' && isRecord(c.data) && c.data.credential === 'absent';
 }
 
 function walletWarn(err: unknown): CheckResult {
@@ -916,12 +994,11 @@ export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
           ? paint(io, 'yellow', '!')
           : paint(io, 'red', '✗');
     // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
-    // info.version, a provider's error text). doctor now prints them directly
-    // above the allowlist block the operator is told to paste, so a newline or
-    // ANSI in a hostile deployment's version string could forge a second, wider
-    // "allowlist" section in the terminal. Sanitize at the render seam: output.ts
-    // exempts doctor on the assumption it only paints its OWN text, which stopped
-    // being true the moment these lines sat next to a copy-paste block.
+    // info.version, a provider's error text), so a newline or ANSI in a hostile
+    // deployment's version string could forge extra lines here — including a
+    // convincing closing pointer at a URL of its choosing. Sanitize at the render
+    // seam: output.ts exempts doctor on the assumption it only paints its OWN
+    // text, which has not been true since these lines began carrying server text.
     lines.push(
       `${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
     );

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseUsdToAtomic, atomicToUsd, toMoney, formatUsdDisplay } from './money';
+import { parseUsdToAtomic, atomicToUsd, toMoney, formatUsdDisplay, isPaidPrice } from './money';
 import { CliError } from './errors';
 
 describe('parseUsdToAtomic', () => {
@@ -61,6 +61,45 @@ describe('atomicToUsd', () => {
 describe('toMoney', () => {
   it('emits both atomic and USD forms', () => {
     expect(toMoney('250000')).toEqual({ atomic: '250000', usd: '0.25' });
+  });
+});
+
+// Three-valued on purpose: the caller refuses an incoherent outcome report on a
+// `false`, so anything it cannot actually read has to come back `null` instead.
+describe('isPaidPrice', () => {
+  it.each([
+    ['100000', true],
+    ['1', true],
+    ['0', false],
+    ['000', false],
+  ])('%s -> %s', (atomic, expected) => {
+    expect(isPaidPrice(atomic)).toBe(expected);
+  });
+
+  // Only the wire schema enforces ATOMIC_RE; the local store types `price` as a
+  // bare string, so these can reach the helper from a corrupt or edited file. A
+  // digit anywhere in the string must not be enough to call it paid.
+  //
+  // The padded pair is the subtle one. The contract carries the canonical string
+  // and nothing else, so " 0 " never came off the wire; trimming it first would
+  // turn an edited entry into a confident "free", and a confident "free" is what
+  // makes the caller refuse an honest report.
+  it.each([
+    ['-1'],
+    ['0.1'],
+    ['abc1'],
+    ['1e6'],
+    [''],
+    ['   '],
+    ['1'.repeat(40)],
+    [' 0 '],
+    [' 250000 '],
+  ])('%s is unknown, not paid and not free', (atomic) => {
+    expect(isPaidPrice(atomic)).toBeNull();
+  });
+
+  it('never throws on malformed input', () => {
+    expect(() => isPaidPrice('💸')).not.toThrow();
   });
 });
 

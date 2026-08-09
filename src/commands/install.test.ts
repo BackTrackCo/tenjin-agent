@@ -73,7 +73,7 @@ import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import type { ExecFn } from '../lib/wallet/passphrase';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
-import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
+import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import {
   claudeSettingsPath,
   FREE_VERB_RULES,
@@ -852,6 +852,185 @@ describe('runInstall: doctor as the final step', () => {
     const out = asData(d) as Data & { doctor: { status: string } };
     expect(out.doctor.status).toBe('pass');
   });
+
+  // #101: the snapshot used to be taken right after the skills were written, so a
+  // run that created a wallet still reported "No wallet". Pinned on the ORDER
+  // rather than on the rendered line, because the same staleness reached
+  // `data.doctor` in --json, where no amount of render-side filtering finds it.
+  it('collects the checks after the wallet decision, not before', async () => {
+    const order: string[] = [];
+    await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        walletExists: async () => false,
+        confirmWallet: async () => {
+          order.push('wallet');
+          return true;
+        },
+        createWallet: async () => {
+          order.push('create');
+          return '0xe4C1000000000000000000000000000000000000';
+        },
+        collectChecks: async () => {
+          order.push('doctor');
+          return okChecks;
+        },
+      }),
+    );
+    expect(order).toEqual(['wallet', 'create', 'doctor']);
+  });
+});
+
+// #80: the run reads "here is what happened", then "here is what still needs
+// you". It used to read the other way round, so "Setup complete" was followed by
+// a block of warnings before a single ✓.
+describe('runInstall: walkthrough ordering', () => {
+  const human = (res: { humanLines?: string[] }): string =>
+    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+  const warning: DoctorChecks = {
+    checks: [
+      {
+        name: 'search-contract',
+        status: 'warn',
+        required: false,
+        detail: 'A2 not deployed',
+        fix: 'point baseUrl at a deploy that has it',
+      },
+    ],
+  };
+
+  it('puts the summary above the attention items', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, collectChecks: async () => warning }),
+    );
+    const lines = human(res).split('\n');
+    const firstTick = lines.findIndex((l) => l.includes('Claude Code:'));
+    const attention = lines.findIndex((l) => l.includes('need attention'));
+    expect(firstTick).toBeGreaterThanOrEqual(0);
+    expect(attention).toBeGreaterThan(firstTick);
+  });
+
+  it('a clean run is the summary and nothing else', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    expect(human(res)).not.toContain('need attention');
+  });
+
+  // The dry-run banner is not an attention item: it says what the rest of the
+  // output means, so it stays on top of the thing it qualifies.
+  it('keeps the dry-run banner above the summary', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const lines = human(res).split('\n');
+    expect(lines[0]).toContain('Dry run');
+    expect(lines.findIndex((l) => l.includes('Claude Code:'))).toBeGreaterThan(0);
+  });
+
+  // The other half of #80: with no wallet, the summary's own line already says
+  // `none` and names `tenjin wallet create`. Repeating it as a yellow warning
+  // told someone who only wants `tenjin search` that their setup needs attention
+  // when it does not.
+  it('does not repeat the no-wallet line as a warning', async () => {
+    const noWallet: DoctorChecks = {
+      checks: [
+        {
+          name: 'wallet',
+          status: 'warn',
+          required: false,
+          detail: 'No wallet; needed only for buy/publish',
+          fix: 'tenjin wallet create',
+          // The marker doctor's noWalletCheck sets; doctor.test.ts pins that the
+          // production check really carries it, so this stub cannot drift into
+          // testing a shape nothing emits.
+          data: { credential: 'absent' },
+        },
+      ],
+    };
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        walletExists: async () => false,
+        confirmWallet: async () => false,
+        collectChecks: async () => noWallet,
+      }),
+    );
+    const text = human(res);
+    expect(text).not.toContain('need attention');
+    expect(text).toContain('Wallet: none. Create one later with: tenjin wallet create');
+  });
+
+  // ...but a wallet that is BROKEN is not something the summary says anywhere,
+  // so suppressing the no-wallet case must not suppress the whole check.
+  it('still reports a wallet warning the summary does not carry', async () => {
+    const broken: DoctorChecks = {
+      checks: [
+        {
+          name: 'wallet',
+          status: 'warn',
+          required: false,
+          detail: 'Wallet 0xabc (file): the keystore cannot be decrypted',
+          fix: 'Set TENJIN_WALLET_PASSPHRASE',
+        },
+      ],
+    };
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        walletExists: async () => true,
+        walletAddress: async () => '0xabc',
+        collectChecks: async () => broken,
+      }),
+    );
+    const text = human(res);
+    expect(text).toContain('need attention');
+    expect(text).toContain('the keystore cannot be decrypted');
+  });
+
+  // The suppression keys on the check that says there is NO credential, never on
+  // the name `wallet`. `walletExists` is a wallet-FILE probe, so a broken
+  // TENJIN_WALLET_KEY with no file on disk records `none` in the summary while
+  // doctor is warning about a credential that exists and does not work. Filtering
+  // by name hid exactly that, which is the one wallet state install says nothing
+  // else about.
+  it('reports a broken env key even while the summary says none', async () => {
+    const badEnvKey: DoctorChecks = {
+      checks: [
+        {
+          name: 'wallet',
+          status: 'warn',
+          required: false,
+          detail: 'TENJIN_WALLET_KEY is not a valid private key.',
+          fix: 'Set TENJIN_WALLET_KEY to a 0x-prefixed 32-byte hex key, or unset it to use the wallet file.',
+        },
+      ],
+    };
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        walletExists: async () => false,
+        confirmWallet: async () => false,
+        collectChecks: async () => badEnvKey,
+      }),
+    );
+    const text = human(res);
+    expect(text).toContain('need attention');
+    expect(text).toContain('not a valid private key');
+    // ...and the summary still reports what the walkthrough itself settled.
+    expect(text).toContain('Wallet: none');
+  });
 });
 
 // An explicit --harness is the user telling the CLI which directory they use.
@@ -1206,18 +1385,23 @@ describe('runInstall: interactive walkthrough', () => {
     }
   });
 
-  it('the consent question says what is true of the tier, and points at doctor', async () => {
-    // Cannot spend and cannot open the keystore is the honest whole-tier claim;
-    // the three that send or store data are named rather than papered over.
-    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or open your wallet keystore');
-    expect(PERMISSIONS_QUESTION).toContain('three send or store data (search, outcome, read)');
+  it('the consent question says what is true of the tier, and points at the caveats', async () => {
+    // Cannot spend and cannot move your keys is the honest whole-tier claim, and
+    // doctor's local decrypt is named rather than papered over; so are the three
+    // that send or store data.
+    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or move your keys');
+    expect(PERMISSIONS_QUESTION).toContain('doctor may check your wallet still opens');
+    expect(PERMISSIONS_QUESTION).toContain('Three send or store data (search, outcome, read)');
     // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
-    // walkthrough prints neither, so the consent moment names the command that
-    // prints both in full.
-    expect(PERMISSIONS_QUESTION).toContain('tenjin doctor');
+    // walkthrough prints neither, so the consent moment names where both are, in
+    // full. It used to name `tenjin doctor`, which printed them; doctor now
+    // points at the same page (#81), so pointing there too is what keeps this
+    // question one hop from the caveats rather than two.
+    expect(PERMISSIONS_QUESTION).toContain(PERMISSIONS_DOC_URL);
+    expect(PERMISSIONS_QUESTION).not.toContain('tenjin doctor');
   });
 
-  it('the line reporting a write also points at doctor for the caveats', async () => {
+  it('the line reporting a write also points at the caveats', async () => {
     const res = await runInstall(
       { harness: ['claude'], allowFreeVerbs: true },
       makeCtx(),
@@ -1227,7 +1411,7 @@ describe('runInstall: interactive walkthrough', () => {
       .split('\n')
       .find((l) => l.includes('Permissions:'));
     expect(line).toContain(`${FREE_VERB_RULES.length} free tenjin commands added to`);
-    expect(line).toContain('Full caveats: tenjin doctor');
+    expect(line).toContain(`Full caveats: ${PERMISSIONS_DOC_URL}`);
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {

@@ -54,7 +54,8 @@ Bash(tenjin candidate list:*)
 ```
 
 Those verbs are free in the sense that matters: **they cannot spend and cannot
-open the keystore.** Say it that way rather than "no signing" — `read` may
+move your keys**, and `doctor` may decrypt locally to check the wallet still
+opens. Say it that way rather than "no signing" — `read` may
 present a session key that was already minted (see below), which is a signature,
 just not one that can move money: it is a P-256 delegation, the wrong curve for a
 payment authorization. If asked, say also that `read` **transmits that
@@ -135,8 +136,8 @@ Any one of the four failing means skip it.
 ## Delegating Tenjin work
 
 Read-only subagents may run: `search`, `inspect`, `read`, `doctor`, `config get`,
-`wallet show`, `wallet balance`, `candidate list`. None can spend or open the
-keystore. Two caveats travel with them: `search` POSTs off-machine and `read`
+`wallet show`, `wallet balance`, `candidate list`. None can spend and none can
+move your keys. Two caveats travel with them: `search` POSTs off-machine and `read`
 saves to the local library, so "read-only" describes your wallet and your repo,
 not the network; and a delegated context is where a stray `--base-url` does the
 most damage, so never pass one. `outcome` is the one free verb to keep back: it

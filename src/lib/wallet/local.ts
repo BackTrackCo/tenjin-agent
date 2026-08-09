@@ -20,6 +20,7 @@ import {
   storePassphraseForWallet,
   walletStoreAccount,
   type PassphraseDeps,
+  type PassphraseSource,
   type StorePassphraseOutcome,
 } from './passphrase';
 import type {
@@ -27,6 +28,7 @@ import type {
   WalletDescription,
   WalletDiagnostics,
   WalletProvider,
+  WalletVerification,
 } from './provider';
 
 /** Passphrase seams the local provider forwards to the resolver (env comes from `deps.env`). */
@@ -42,6 +44,9 @@ export interface LocalProviderDeps {
 const isWindows = process.platform === 'win32';
 const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 
+/** How long `verifyLocalWallet` gives a credential-store CLI before giving up. */
+const STORE_READ_TIMEOUT_MS = 5_000;
+
 /**
  * A one-shot decrypt cache. The CLI is a single invocation, so a signer derived
  * once (scrypt is deliberately slow) is reused for the rest of the process.
@@ -53,8 +58,8 @@ const signerCache = new Map<string, PrivateKeyAccount>();
  * The only real B1 provider: a local viem account whose key comes from the env
  * override or the encrypted wallet file. `describe()` returns just the address
  * and posture WITHOUT a passphrase (the address is stored cleartext on purpose);
- * `getSigner()` is the single door to the key material and the only path that
- * decrypts the keystore.
+ * `getSigner()` is the single door to key material a caller can SIGN with.
+ * `verify()` also decrypts, but returns a verdict rather than the key.
  */
 export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
   return {
@@ -84,7 +89,121 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
     diagnostics(): Promise<WalletDiagnostics> {
       return localWalletDiagnostics(deps);
     },
+    verify(): Promise<WalletVerification> {
+      return verifyLocalWallet(deps);
+    },
   };
+}
+
+/**
+ * Can this wallet actually sign, without asking anyone? An env key is proven by
+ * deriving it; a file wallet needs its passphrase from the env or the OS store,
+ * and the keystore decrypted and checked against the stored address.
+ *
+ * Nothing here prompts (`isTTY: false` is forced last, so no test seam can turn
+ * it back on) and nothing here writes: a legacy-slot hit is used to decrypt but
+ * its `migrateLegacy` handle is deliberately never invoked, and the signer cache
+ * is left alone so the migration still happens on the first real signing. Both
+ * would be side effects of a read-only diagnostic.
+ *
+ * scrypt is deliberately slow, which is why this runs only once a passphrase has
+ * already been found without a prompt.
+ *
+ * The one caller that deadlines the store CLIs, because it is the one that only
+ * ever READS them: `doctor` runs unattended and a locked keychain would otherwise
+ * hang it forever, while a killed read costs nothing — the entry is untouched and
+ * "unreachable" is already a state this reports.
+ */
+export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<WalletVerification> {
+  const cred = await loadCredential(deps);
+  // Details read as a fragment: the caller prefixes them with the wallet line.
+  if (cred === null) return { status: 'unverified', detail: 'there is no credential to verify' };
+  if (cred.source === 'env') {
+    // Deriving is the whole proof for a raw key, and it is cheap.
+    accountFromKey(cred.key, 'env');
+    return { status: 'verified', detail: 'TENJIN_WALLET_KEY derives a valid signing key' };
+  }
+
+  const account = walletStoreAccount(cred.address);
+  let resolved: Awaited<ReturnType<typeof resolvePassphrase>>;
+  try {
+    resolved = await resolvePassphrase(
+      {
+        env: deps.env,
+        dir: deps.dir,
+        ...deps.passphrase,
+        isTTY: false,
+        timeoutMs: STORE_READ_TIMEOUT_MS,
+      },
+      cred.address,
+    );
+  } catch {
+    return {
+      status: 'unverified',
+      detail: 'no passphrase is reachable without prompting, so the keystore was not opened',
+    };
+  }
+
+  let key: Hex;
+  try {
+    const derived = await Keystore.toKeyAsync(cred.keystore, { password: resolved.passphrase });
+    key = Keystore.decrypt(cred.keystore, derived);
+  } catch {
+    // The #70 shape: the only durable passphrase is the pre-per-address shared
+    // slot and it belongs to some later wallet, so this keystore is unopenable
+    // and the address it identifies you by is unsignable. Named apart from a
+    // plain wrong passphrase because the remedy is different.
+    if (resolved.migrateLegacy !== undefined) {
+      return {
+        status: 'broken',
+        detail: `the keystore cannot be decrypted: the only stored passphrase is ${legacyOrigin(resolved.source)}, which does not open it`,
+        fix: `That passphrase likely belongs to a wallet created later. Set TENJIN_WALLET_PASSPHRASE to this wallet's own passphrase, or restore ${passphraseOrigin(resolved.source, account)}.`,
+      };
+    }
+    // Name the escape that applies to where the passphrase came from, the same
+    // way accountForSigning does: "set TENJIN_WALLET_PASSPHRASE" is not advice
+    // when TENJIN_WALLET_PASSPHRASE is the thing that just failed.
+    const escape =
+      resolved.source === 'env'
+        ? 'TENJIN_WALLET_PASSPHRASE is set but does not open it; set it to the correct passphrase'
+        : `The passphrase from ${passphraseOrigin(resolved.source, account)} does not open it; set TENJIN_WALLET_PASSPHRASE to the correct passphrase`;
+    return {
+      status: 'broken',
+      detail: `the keystore cannot be decrypted with the passphrase from ${passphraseOrigin(resolved.source, account)}`,
+      fix: `${escape}. Without it the key is unrecoverable and this address can no longer sign or publish.`,
+    };
+  }
+  if (privateKeyToAccount(key).address.toLowerCase() !== account) {
+    return {
+      status: 'broken',
+      detail: `the decrypted key does not derive the wallet file's stored address ${cred.address}`,
+      fix: 'The wallet file may be tampered. Move it aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
+    };
+  }
+  return {
+    status: 'verified',
+    detail: `keystore decrypts with the passphrase from ${passphraseOrigin(resolved.source, account)}`,
+  };
+}
+
+/**
+ * Where a resolved passphrase came from, in words an operator can act on.
+ * Windows stores a per-wallet DPAPI file rather than a service/account entry, so
+ * naming one model for both would send that operator looking for something that
+ * does not exist on their machine.
+ */
+function passphraseOrigin(source: PassphraseSource, account: string): string {
+  if (source === 'env') return 'TENJIN_WALLET_PASSPHRASE';
+  if (source === 'prompt') return 'the prompt';
+  if (source === 'dpapi') return `the DPAPI-protected passphrase file for ${account}`;
+  return `the OS credential store (service tenjin-cli, account ${account})`;
+}
+
+/** The same, for the pre-per-wallet shared slot every backend still reads once. */
+function legacyOrigin(source: PassphraseSource): string {
+  return source === 'dpapi'
+    ? 'the legacy shared DPAPI passphrase file (passphrase.dpapi)'
+    : 'the legacy shared entry (service tenjin-cli, account "wallet")';
 }
 
 /**

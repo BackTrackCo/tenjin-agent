@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { passphraseBlobPath, passphraseBlobPathFor } from '../paths';
 import {
+  defaultExecFor,
   resolvePassphrase,
   resolvePassphraseForCreate,
   storePassphraseForWallet,
@@ -649,5 +650,31 @@ describe('argv hygiene across every backend', () => {
       (call.stdin ?? '').includes(secret),
     );
     expect(carriedOnStdin.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// The deadline is real (it kills a live child), and it is opt-in. Every other
+// test in this file injects `exec`, which bypasses the executor entirely, so
+// these two drive the actual execFile path with a child that outlives the
+// deadline. `process.execPath` keeps them portable — no `sleep` binary needed.
+describe('defaultExecFor', () => {
+  const hang = ['-e', 'setTimeout(() => {}, 30000)'];
+
+  it('kills a child that outlives the deadline, and rejects fast', async () => {
+    const started = Date.now();
+    await expect(defaultExecFor(300)(process.execPath, hang)).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  // Unbounded is the DEFAULT and a correctness requirement, not caution: a
+  // credential-store write that commits and is then killed makes
+  // resolvePassphraseForCreate fall through to a different passphrase while the
+  // committed value wins every later decrypt. Only read-only callers opt in.
+  it('lets a child outlive that deadline when none is set', async () => {
+    const slower = ['-e', 'setTimeout(() => {}, 600)'];
+    await expect(defaultExecFor()(process.execPath, slower)).resolves.toEqual({
+      stdout: '',
+      stderr: '',
+    });
   });
 });

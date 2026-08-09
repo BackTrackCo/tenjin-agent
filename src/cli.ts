@@ -3,6 +3,7 @@ import { z } from 'zod';
 import pkg from '../package.json';
 import { CliError } from './lib/errors';
 import { dataDir } from './lib/paths';
+import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
 import { maybeNudgeUpdate } from './lib/update-check';
@@ -153,7 +154,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--no-claude-md', 'write no CLAUDE.md nudge')
     .option(
       '--allow-free-verbs',
-      "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist (the default; the flag states it explicitly); none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",
+      // The absolute URL, like every other pointer: `docs/agent-permissions.md`
+      // resolves against the reader's cwd, and an operator running `--help` is in
+      // their own project, not in this package.
+      `add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist (the default; the flag states it explicitly); none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
     )
     .option('--no-allow-free-verbs', 'write no harness permission rules at all')
     .option(
