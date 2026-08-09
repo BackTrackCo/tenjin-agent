@@ -5,6 +5,7 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
+import { markSearchResolved } from '../lib/search-store';
 import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
@@ -239,6 +240,13 @@ export async function runPublish(
   // cleared:false with a warning, and let the human drop it manually.
   const candidateInfo =
     candidate !== undefined ? await clearPublishedCandidate(ctx, candidate.id) : undefined;
+  // The strongest way to close a loop: the answer is on the marketplace. Only a
+  // candidate publish can name the search it answers, so a bare file publish
+  // leaves the loop open and the Stop hook keeps the reminder. Local bookkeeping,
+  // best-effort, never throws.
+  if (candidate !== undefined) {
+    await markSearchResolved(ctx.dataDir, candidate.meta.searchId, 'publish');
+  }
   return receipt(result, runtime.baseUrl, candidateInfo);
 }
 

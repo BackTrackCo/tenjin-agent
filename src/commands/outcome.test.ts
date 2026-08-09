@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOutcome } from './outcome';
-import { recordSearch } from '../lib/search-store';
+import { loadSearches, recordSearch } from '../lib/search-store';
 import type { CommandContext } from '../context';
 
 let dir: string;
@@ -88,5 +88,42 @@ describe('runOutcome', () => {
       runOutcome({ searchId: LOOKUP, status: 'loved-it' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(urls).toHaveLength(0);
+  });
+});
+
+describe('runOutcome closes the open loop locally', () => {
+  const seed = async (): Promise<void> => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
+  };
+
+  it('marks the search resolved, so the Stop hook stops raising it', async () => {
+    await seed();
+    const { fetch } = stub();
+    await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('marks the right search when --last resolved the target', async () => {
+    await seed();
+    const { fetch } = stub();
+    await runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  // The mark is local bookkeeping for a nudge; a search this machine never
+  // recorded still reports fine.
+  it('reports normally for a searchId with no local record', async () => {
+    const { fetch } = stub();
+    const res = await runOutcome({ searchId: LOOKUP, status: 'used' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({ searchId: LOOKUP, status: 'used' });
+    expect(await loadSearches(dir)).toEqual([]);
   });
 });

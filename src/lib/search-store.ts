@@ -22,12 +22,23 @@ const StoredCandidateSchema = z.object({
 });
 export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
 
+/**
+ * What closed an open loop. A MISS the agent acted on ends in exactly one of
+ * these three, and the Stop hook stays quiet once any of them is recorded:
+ * `outcome` (the loop was reported), `publish` (the answer went back to the
+ * marketplace), `candidate` (the draft was parked to publish later).
+ */
+export const SearchResolutionSchema = z.enum(['outcome', 'publish', 'candidate']);
+export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
+
 const StoredSearchSchema = z.object({
   searchId: z.string(),
   at: z.string(),
   question: z.string(),
   decision: z.string(),
   candidates: z.array(StoredCandidateSchema),
+  /** Absent until something closes the loop; see {@link markSearchResolved}. */
+  resolved: z.object({ by: SearchResolutionSchema, at: z.string() }).optional(),
 });
 export type StoredSearch = z.infer<typeof StoredSearchSchema>;
 
@@ -74,6 +85,40 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
       { mode: 0o644, dirMode: 0o700 },
     );
   });
+}
+
+/**
+ * Record that something closed the loop on `searchId`, so the Stop hook stops
+ * raising it. Best-effort in both directions and it NEVER throws: an unknown id
+ * (the search aged past MAX_ENTRIES, or came from another machine) writes
+ * nothing, and a failure to persist costs one stale nag rather than the command
+ * the caller actually ran. The FIRST resolution wins, so a publish after an
+ * outcome report does not rewrite who closed it.
+ */
+export async function markSearchResolved(
+  dataDir: string,
+  searchId: string,
+  by: SearchResolution,
+  at: string = new Date().toISOString(),
+): Promise<void> {
+  try {
+    const lockPath = `${storePath(dataDir)}.lock`;
+    await withFileLock(lockPath, async () => {
+      const existing = await loadSearches(dataDir);
+      const target = existing.find((s) => s.searchId === searchId);
+      if (target === undefined || target.resolved !== undefined) return;
+      const searches = existing.map((s) =>
+        s.searchId === searchId ? { ...s, resolved: { by, at } } : s,
+      );
+      await writeFileAtomic(
+        storePath(dataDir),
+        `${JSON.stringify({ schemaVersion: 1, searches }, null, 2)}\n`,
+        { mode: 0o644, dirMode: 0o700 },
+      );
+    });
+  } catch {
+    // Bookkeeping for a hook nudge. It must never fail the verb that ran.
+  }
 }
 
 export async function latestSearch(dataDir: string): Promise<StoredSearch | null> {

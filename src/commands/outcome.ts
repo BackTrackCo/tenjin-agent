@@ -1,7 +1,7 @@
 import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
-import { latestSearch } from '../lib/search-store';
+import { latestSearch, markSearchResolved } from '../lib/search-store';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -41,6 +41,10 @@ export async function runOutcome(
     timeoutMs: ctx.flags.timeout,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
+
+  // The loop is closed, so the Stop hook has nothing left to raise about it.
+  // Local bookkeeping only, and it never throws: see markSearchResolved.
+  await markSearchResolved(ctx.dataDir, searchId, 'outcome');
 
   return {
     data: { searchId, status: item.status, accepted: result.accepted },

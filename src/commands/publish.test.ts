@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
 import { createCandidate, readCandidate } from '../lib/candidate-store';
+import { loadSearches, recordSearch } from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -621,6 +622,48 @@ describe('runPublish — publish --candidate', () => {
       cleared: true,
     });
     expect(await readCandidate(dir, id)).toBeNull(); // dropped
+  });
+
+  // The strongest close there is: the answer is on the marketplace. Only a
+  // candidate publish can name the search it answers.
+  it('marks the candidate’s search resolved by publish', async () => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
+    const id = await park();
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    await runPublish(
+      baseArgs(undefined, { candidate: id, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // A refusal leaves the draft parked, so the loop is still open and the reminder
+  // has to keep firing.
+  it('leaves the loop open when the publish was refused', async () => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
+    const id = await park();
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    await runPublish(
+      baseArgs(undefined, { candidate: id, mode: 'review' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    ).catch(() => undefined);
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
   it('prefills questionsAnswered from the candidate meta, explicit --question wins', async () => {
