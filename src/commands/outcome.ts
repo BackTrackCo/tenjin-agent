@@ -2,6 +2,7 @@ import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
 import { latestSearch, loadSearches, type StoredSearch } from '../lib/search-store';
+import { isPaidPrice } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -149,11 +150,15 @@ function assertStatusCoherent(status: string, stored: StoredSearch): void {
   );
 }
 
-/** Whether the search put anything payable in front of the agent. Null when the
- *  stored entry cannot say: it predates `browseCount`, so its empty candidates
- *  array might still have been a MISS with a payable browse tail. */
+/**
+ * Whether the search put anything payable in front of the agent. Priced at zero
+ * does not count: `read` delivers a free piece with no payment, so a result that
+ * was free end to end offered no purchase to decline, however many rows it had.
+ * Null when the stored entry cannot say: it predates `paidBrowseCount`, so an
+ * all-free candidate list might still have sat above a payable browse tail.
+ */
 function offeredSomethingToBuy(stored: StoredSearch): boolean | null {
-  if (stored.candidates.length > 0) return true;
-  if (stored.browseCount === undefined) return null;
-  return stored.browseCount > 0;
+  if (stored.candidates.some((c) => isPaidPrice(c.price))) return true;
+  if (stored.paidBrowseCount === undefined) return null;
+  return stored.paidBrowseCount > 0;
 }

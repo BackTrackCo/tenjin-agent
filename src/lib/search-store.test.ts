@@ -63,9 +63,9 @@ describe('search-store', () => {
     expect(await loadSearches(dir)).toHaveLength(1);
   });
 
-  it('round-trips browseCount and reads it as unknown on an entry written without it', async () => {
-    await recordSearch(dir, entry({ decision: 'MISS', candidates: [], browseCount: 3 }));
-    expect((await latestSearch(dir))?.browseCount).toBe(3);
+  it('round-trips paidBrowseCount and reads it as unknown on an entry written without it', async () => {
+    await recordSearch(dir, entry({ decision: 'MISS', candidates: [], paidBrowseCount: 3 }));
+    expect((await latestSearch(dir))?.paidBrowseCount).toBe(3);
 
     // A store written by a CLI from before the field. It must still load, and the
     // missing count must stay `undefined` rather than default to 0: `outcome`
@@ -78,7 +78,7 @@ describe('search-store', () => {
     await writeFile(join(dir, 'searches.json'), JSON.stringify(legacy), 'utf8');
     const loaded = await loadSearches(dir);
     expect(loaded).toHaveLength(1);
-    expect(loaded[0]?.browseCount).toBeUndefined();
+    expect(loaded[0]?.paidBrowseCount).toBeUndefined();
   });
 
   it('reads empty (never throws) on a corrupt store', async () => {

@@ -49,6 +49,18 @@ export function atomicToUsd(atomic: string): string {
   return frac.length > 0 ? `${whole}.${frac}` : whole.toString();
 }
 
+/**
+ * Whether an atomic price would actually cost something. A Tenjin piece may be
+ * priced at zero and is then delivered by `read` with no payment at all, so
+ * "there is a price field" and "there is a purchase to make" are different
+ * questions. Digits-only by schema (ATOMIC_RE), so a positive value is exactly
+ * one with a non-zero digit in it; deliberately not BigInt, which would throw on
+ * the malformed input this predicate should simply answer "no" to.
+ */
+export function isPaidPrice(atomic: string): boolean {
+  return /[1-9]/.test(atomic.trim());
+}
+
 /** Dual-form money object for machine output. */
 export function toMoney(atomic: string): Money {
   return { atomic, usd: atomicToUsd(atomic) };

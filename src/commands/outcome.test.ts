@@ -46,7 +46,7 @@ async function record(over: Partial<StoredSearch> = {}): Promise<void> {
     question: 'how do I rotate a session key',
     decision: 'MISS',
     candidates: [],
-    browseCount: 0,
+    paidBrowseCount: 0,
     ...over,
   });
 }
@@ -56,6 +56,13 @@ const CANDIDATE = {
   url: 'https://preview.example/api/read/iris/one',
   title: 't',
   price: '100000',
+};
+
+/** A Tenjin piece may be priced at zero, and `read` then delivers it for nothing. */
+const FREE_CANDIDATE = {
+  ...CANDIDATE,
+  resourceId: '0197aaaa-bbbb-cccc-dddd-222222222222',
+  price: '0',
 };
 
 describe('runOutcome', () => {
@@ -183,8 +190,12 @@ describe('runOutcome, locally incoherent statuses', () => {
   });
 
   it.each([
-    ['a payable browse tail', { browseCount: 2 }],
-    ['candidates', { decision: 'CANDIDATES', candidates: [CANDIDATE] }],
+    ['a payable browse tail', { paidBrowseCount: 2 }],
+    ['a paid candidate', { decision: 'CANDIDATES', candidates: [CANDIDATE] }],
+    [
+      'one paid candidate among free ones',
+      { decision: 'CANDIDATES', candidates: [FREE_CANDIDATE, CANDIDATE] },
+    ],
   ])('allows purchase_declined when the search offered %s', async (_label, over) => {
     await record(over);
     const { fetch, urls } = stub();
@@ -192,9 +203,24 @@ describe('runOutcome, locally incoherent statuses', () => {
     expect(urls).toHaveLength(1);
   });
 
-  // The check is local knowledge only, so an entry that predates `browseCount`
+  // A row is not an offer. A piece priced at zero is delivered by `read` with no
+  // payment, so a result that was free end to end had no purchase to decline
+  // however many candidates or browse pointers it listed.
+  it.each([
+    ['candidates that are all free', { decision: 'CANDIDATES', candidates: [FREE_CANDIDATE] }],
+    ['a browse tail that is all free', { paidBrowseCount: 0 }],
+  ])('refuses purchase_declined on a search offering %s', async (_label, over) => {
+    await record(over);
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  // The check is local knowledge only, so an entry that predates `paidBrowseCount`
   // cannot answer, and unknown must never become a refusal.
-  it('allows purchase_declined on an entry written before browseCount existed', async () => {
+  it('allows purchase_declined on an entry written before paidBrowseCount existed', async () => {
     await writeFile(
       join(dir, 'searches.json'),
       JSON.stringify({
@@ -204,8 +230,10 @@ describe('runOutcome, locally incoherent statuses', () => {
             searchId: LOOKUP,
             at: new Date().toISOString(),
             question: 'q',
-            decision: 'MISS',
-            candidates: [],
+            decision: 'CANDIDATES',
+            // All free, so the candidates cannot answer the question either. The
+            // entry predates the field that could, and unknown must stay unknown.
+            candidates: [FREE_CANDIDATE],
           },
         ],
       }),

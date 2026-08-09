@@ -17,8 +17,12 @@ offered nothing to buy, and the error names the search and question it would hav
 landed on. The other four statuses are coherent against any search and are left
 alone: a MISS's browse tail is readable and its free pieces are usable, so `used`
 and `partially_used` on a MISS are real reports, and `rejected`/`regenerated` are
-exactly what a MISS deserves to record. `search` records how many browse pointers
-a result carried (the count only, never the pointers, which stay unrecorded so
-`buy <resourceId>` still cannot reach one) so a MISS with a payable tail is
-distinguishable from a bare one. Entries written before that field read as
-unknown rather than zero, so an upgrade never invents a refusal.
+exactly what a MISS deserves to record.
+
+"Offered something to buy" is priced strictly: a piece priced at zero is
+delivered by `read` with no payment, so an all-free result had no purchase to
+decline however many rows it listed. `search` records how many of a result's
+browse pointers cost money (the count only, never the pointers, which stay
+unrecorded so `buy <resourceId>` still cannot reach one) so a MISS with a payable
+tail is distinguishable from a free or bare one. Entries written before that
+field read as unknown rather than zero, so an upgrade never invents a refusal.
