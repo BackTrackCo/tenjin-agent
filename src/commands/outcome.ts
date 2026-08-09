@@ -161,6 +161,25 @@ function assertStatusCoherent(status: string, stored: StoredSearch, resourceId?:
     );
   }
 
+  // An id this search never surfaced. On a CANDIDATES decision that is provable:
+  // browse pointers are MISS-only by contract, and truncateResponse deletes the
+  // array outright on CANDIDATES rather than trust the server, so `candidates` is
+  // the entire payable set the agent was shown and all of it is recorded. A uuid
+  // outside it is a typo or another search's, and the server discards such an
+  // item behind its 202 (tenjin#641), which would leave the CLI reporting success
+  // for an outcome nobody stored. A MISS keeps the fail-open: its browse tail is
+  // payable and deliberately unrecorded, so there an absent id is unknowable
+  // rather than wrong. Any other decision value falls through to the aggregate.
+  if (resourceId !== undefined && stored.decision === 'CANDIDATES') {
+    throw new CliError(
+      'USAGE',
+      `Search ${stored.searchId} "${echoQuestion(stored.question)}" surfaced no candidate ${resourceId}, so purchase_declined cannot describe it.`,
+      {
+        fix: 'Pass a resourceId from this search, or drop --resource to report on the search as a whole.',
+      },
+    );
+  }
+
   if (offeredSomethingToBuy(stored) !== false) return;
   throw new CliError(
     'USAGE',

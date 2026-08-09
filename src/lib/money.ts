@@ -61,11 +61,15 @@ export function atomicToUsd(atomic: string): string {
  * so a hand-edited or half-written entry can hold "-1" or "0.1". Those must not
  * read as "free", or corrupt local data would start refusing honest reports.
  * Never throws, which is why the check is a regex and not a BigInt compare.
+ *
+ * Matched against the RAW string, with no trimming. The contract carries the
+ * canonical form and nothing else, so " 0 " did not come off the wire; padding is
+ * evidence the value was edited, and normalizing it away would launder a corrupt
+ * entry into a confident "free" and hand back the false refusal this avoids.
  */
 export function isPaidPrice(atomic: string): boolean | null {
-  const trimmed = atomic.trim();
-  if (!ATOMIC_RE.test(trimmed)) return null;
-  return /[1-9]/.test(trimmed);
+  if (!ATOMIC_RE.test(atomic)) return null;
+  return /[1-9]/.test(atomic);
 }
 
 /** Dual-form money object for machine output. */

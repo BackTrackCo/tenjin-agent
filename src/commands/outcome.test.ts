@@ -300,11 +300,33 @@ describe('runOutcome, locally incoherent statuses', () => {
       expect(urls).toHaveLength(1);
     });
 
-    // Browse pointers are payable and deliberately never stored, so an id the
-    // store does not hold is unknowable, not wrong. It falls back to the search's
-    // aggregate answer rather than being refused for being absent.
-    it('passes through an id the store has never seen', async () => {
-      await record({ paidBrowseCount: 2 });
+    // On a CANDIDATES decision the stored candidates are the whole payable set the
+    // agent saw: browse is MISS-only by contract, and the parser deletes the array
+    // outright here rather than trust the server. So a uuid outside that set is a
+    // typo or another search's, the server drops the item behind its 202, and
+    // without this the CLI would report success for an outcome nobody recorded.
+    it('refuses an id this CANDIDATES search never surfaced', async () => {
+      await record({ decision: 'CANDIDATES', candidates: [CANDIDATE] });
+      const { fetch, urls } = stub();
+      const call = runOutcome(
+        {
+          last: true,
+          status: 'purchase_declined',
+          resource: '0197aaaa-bbbb-cccc-dddd-888888888888',
+        },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      await expect(call).rejects.toMatchObject({ code: 'USAGE' });
+      await expect(call).rejects.toThrow('0197aaaa-bbbb-cccc-dddd-888888888888');
+      expect(urls).toHaveLength(0);
+    });
+
+    // A MISS keeps the fail-open: its browse tail is payable and deliberately
+    // never stored, so there an absent id is unknowable rather than wrong. It
+    // falls back to the search's aggregate answer.
+    it('passes through an id the store has never seen on a MISS', async () => {
+      await record({ decision: 'MISS', paidBrowseCount: 2 });
       const { fetch, urls } = stub();
       await runOutcome(
         {
