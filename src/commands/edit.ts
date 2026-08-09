@@ -133,7 +133,7 @@ export async function runEdit(
   const wantsChange = hasChangeFlags(args);
 
   const runtime = await resolveContextSettings(ctx);
-  const provider = resolveWalletProvider(
+  const provider = await resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );

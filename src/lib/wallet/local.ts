@@ -13,7 +13,7 @@ import {
   readWalletRecord,
   walletFileMode,
   writeWalletRecord,
-  type WalletRecord,
+  type LocalWalletRecord,
 } from './store';
 import {
   resolvePassphrase,
@@ -285,7 +285,7 @@ export type CreatePassphrase = string | ((address: Address) => Promise<string>);
  */
 export interface PreparedLocalWallet {
   address: Address;
-  record: WalletRecord;
+  record: LocalWalletRecord;
 }
 
 /**
@@ -358,6 +358,15 @@ export async function verifyAndPreserveOutgoingWallet(
     throw new CliError('WALLET_MISSING', 'No wallet found to archive.', {
       fix: 'Run `tenjin wallet create` without --replace.',
     });
+  }
+  if (record.provider !== 'local') {
+    throw new CliError(
+      'REFUSED',
+      'The active wallet is managed by ClawRouter; it has no Tenjin keystore to archive.',
+      {
+        fix: `Move ${walletPath(deps.dir)} aside if you intentionally want to disconnect it, then run \`tenjin wallet create\`. The ClawRouter key itself is untouched.`,
+      },
+    );
   }
   const address = record.address as Address;
   const account = walletStoreAccount(address);
@@ -500,7 +509,7 @@ async function loadCredential(deps: LocalProviderDeps): Promise<Credential | nul
     return { source: 'env', key: key as Hex };
   }
   const record = await readWalletRecord(deps.dir);
-  if (record !== null) {
+  if (record?.provider === 'local') {
     return { source: 'file', keystore: record.keystore, address: record.address as Address };
   }
   return null;
@@ -617,7 +626,7 @@ async function credentialOrThrow(deps: LocalProviderDeps): Promise<Credential> {
   });
 }
 
-function walletRecord(address: Address, keystore: Keystore.Keystore): WalletRecord {
+function walletRecord(address: Address, keystore: Keystore.Keystore): LocalWalletRecord {
   return {
     schemaVersion: WALLET_SCHEMA_VERSION,
     provider: 'local',

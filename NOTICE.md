@@ -8,6 +8,8 @@ archived `BackTrackCo/tenjin-mcp` prototype, including:
 
 - the local wallet lifecycle and safety model (lazily created key file with
   mode `0600`, fund-small posture);
+- the canonical ClawRouter EVM wallet location and file-before-env resolution
+  contract used by Tenjin's explicit read-only connector;
 - the buy-safety flow: hard price ceiling plus explicit confirmation, with a
   fresh challenge re-fetch and refusal to sign if the live price increased;
 - the `wallet export --yes` gate (printing a private key requires an explicit

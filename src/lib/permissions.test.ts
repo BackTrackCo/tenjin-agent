@@ -23,6 +23,7 @@ const FORBIDDEN_VERBS = [
   'tenjin publish',
   'tenjin edit',
   'tenjin wallet create',
+  'tenjin wallet connect',
   'tenjin config set',
   'tenjin candidate add',
   'tenjin candidate drop',

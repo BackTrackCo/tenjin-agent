@@ -224,6 +224,15 @@ describe('global flags are position-independent', () => {
     expect(parsed.command).toBe('wallet.show');
   });
 
+  it('routes wallet connect through its own command envelope', async () => {
+    const cap = captureIo();
+    const code = await main(['wallet', 'connect', 'unknown-provider', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('wallet.connect');
+    expect(parsed.error.code).toBe('USAGE');
+  });
+
   it('trailing --json suppresses stderr on a TTY, exactly like leading --json', async () => {
     const lead = captureIo(true);
     await main(['--json', 'doctor', '--timeout', 'abc'], lead.io);

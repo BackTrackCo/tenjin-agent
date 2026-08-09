@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import * as Keystore from 'ox/Keystore';
-import type { WalletRecord } from './store';
+import type { LocalWalletRecord } from './store';
 
 /** Shared test-only fixtures for encrypted (keystore v3) wallet records. Never bundled into dist. */
 
@@ -29,7 +29,7 @@ export function fakeKeystore(id: string = randomUUID()): Keystore.Keystore {
 }
 
 /** A v2 record with a fast fake keystore and a real, coherent top-level address. */
-export function fakeRecord(overrides: Partial<WalletRecord> = {}): WalletRecord {
+export function fakeRecord(overrides: Partial<LocalWalletRecord> = {}): LocalWalletRecord {
   return {
     schemaVersion: 2,
     provider: 'local',
@@ -49,7 +49,7 @@ export async function encryptedRecord(
   key: Hex,
   passphrase: string = KNOWN_PASSPHRASE,
   address?: Address,
-): Promise<WalletRecord> {
+): Promise<LocalWalletRecord> {
   const [derivedKey, opts] = await Keystore.scryptAsync({ password: passphrase });
   const keystore = Keystore.encrypt(key, derivedKey, opts);
   return {

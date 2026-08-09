@@ -499,7 +499,7 @@ describe('createLocalWallet', () => {
     expect(path).toBe(walletPath(dataDir));
 
     const record = await readWalletRecord(dataDir);
-    expect(record?.schemaVersion).toBe(2);
+    expect(record?.schemaVersion).toBe(3);
 
     // The signer decrypts back to the same address.
     const provider = createLocalProvider(envPass(KNOWN_PASSPHRASE));

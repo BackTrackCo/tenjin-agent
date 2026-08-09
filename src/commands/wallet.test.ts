@@ -150,12 +150,12 @@ describe('runWalletCreate', () => {
     expect((await stat(dataDir)).mode & 0o777).toBe(0o700);
   });
 
-  it('stores an encrypted keystore v2 record and never the raw key', async () => {
+  it('stores an encrypted provider-discriminated v3 record and never the raw key', async () => {
     const res = await runWalletCreate(makeCtx());
     const address = (res.data as { address: string }).address;
     expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
     const stored = await readStored();
-    expect(stored.schemaVersion).toBe(2);
+    expect(stored.schemaVersion).toBe(3);
     expect(stored.keystore.version).toBe(3);
     expect(stored.address).toBe(address);
     expect(res.data).toMatchObject({

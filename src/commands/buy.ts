@@ -126,7 +126,7 @@ export async function runBuy(
   }
   const firstSeenAmount = BigInt(firstRequirement.amount);
 
-  const provider = resolveWalletProvider(
+  const provider = await resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );

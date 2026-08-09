@@ -1020,7 +1020,7 @@ function errorText(err: unknown): string {
 }
 
 async function existingWalletAddress(ctx: CommandContext): Promise<string> {
-  return (await describeWallet(resolveWalletProvider(ctx))).address;
+  return (await describeWallet(await resolveWalletProvider(ctx))).address;
 }
 
 async function defaultCreateWallet(

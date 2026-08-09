@@ -65,7 +65,7 @@ export async function runSend(
   }
   const to = parseRecipient(args.to);
 
-  const provider = resolveWalletProvider(
+  const provider = await resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );

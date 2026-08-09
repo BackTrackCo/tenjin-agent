@@ -2,12 +2,21 @@ import { CliError } from '../errors';
 import { emitNotice } from '../output';
 import { spendLedgerPath } from '../paths';
 import { createLocalProvider, type PassphraseOverrides } from './local';
+import { createClawRouterProvider, type ClawRouterProviderDeps } from './clawrouter';
+import { readWalletRecord } from './store';
 import { createLocalSpendAuthorizer, type SpendAuthorizer } from './spend';
 import type { SpendPolicy } from '../policy';
 import type { CommandContext } from '../../context';
 import type { WalletDescription, WalletProvider } from './provider';
 
 export * from './provider';
+export {
+  CLAWROUTER_WALLET_ENV,
+  createClawRouterProvider,
+  defaultClawRouterWalletPath,
+  discoverClawRouterWallet,
+  type ClawRouterProviderDeps,
+} from './clawrouter';
 export {
   commitLocalWallet,
   createLocalWallet,
@@ -41,13 +50,14 @@ export interface ResolveWalletProviderOptions {
    * credential store; `isTTY` is still decided here, never by a caller.
    */
   passphrase?: Omit<PassphraseOverrides, 'isTTY'>;
+  /** Test seams for the explicit ClawRouter connector. */
+  clawrouter?: ClawRouterProviderDeps;
 }
 
 /**
- * The commands' one entry to a wallet. Production always gets the `local`
- * provider bound to the context's data dir and process env; tests pass
- * `opts.provider` to prove `show`/`balance` work against any provider without a
- * real key on disk.
+ * The commands' one entry to a wallet. A persisted provider pointer selects the
+ * explicit ClawRouter connector; otherwise production gets `local`, bound to
+ * the context's data dir and process env. Tests may inject either provider.
  *
  * The context's interactivity is threaded into the passphrase resolver: a
  * non-interactive context (io.isTTY:false — every `tenjin mcp` context, and any
@@ -57,11 +67,15 @@ export interface ResolveWalletProviderOptions {
  * already declines when !ctx.io.isTTY. A real TTY passes isTTY:undefined, keeping
  * the resolver's existing process.stdin.isTTY default untouched.
  */
-export function resolveWalletProvider(
+export async function resolveWalletProvider(
   ctx: CommandContext,
   opts: ResolveWalletProviderOptions = {},
-): WalletProvider {
+): Promise<WalletProvider> {
   if (opts.provider !== undefined) return opts.provider;
+  const record = await readWalletRecord(ctx.dataDir);
+  if (record?.provider === 'clawrouter') {
+    return createClawRouterProvider(record, opts.clawrouter);
+  }
   return createLocalProvider({
     dir: ctx.dataDir,
     env: process.env,

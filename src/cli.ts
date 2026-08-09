@@ -253,6 +253,19 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runWalletCreate(ctx, o.replace === true ? { replace: true } : {});
       });
     });
+  addGlobalFlags(wallet.command('connect <provider>'))
+    .description('Use an existing wallet provider (currently: clawrouter); never creates a key')
+    .option(
+      '--replace',
+      'archive the active wallet record and explicitly switch providers; no funds are moved',
+    )
+    .action(async function (this: Command, provider: string) {
+      await runCommand('wallet.connect', this, async (ctx) => {
+        const o = this.opts();
+        const { runWalletConnect } = await import('./commands/wallet');
+        return runWalletConnect({ provider }, ctx, o.replace === true ? { replace: true } : {});
+      });
+    });
   addGlobalFlags(wallet.command('show'))
     .description('Show the wallet address and key source (never the key)')
     .action(async function (this: Command) {

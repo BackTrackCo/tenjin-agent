@@ -9,16 +9,26 @@ import { getUsdcBalance } from '../lib/usdc';
 import {
   commitLocalWallet,
   createLocalWallet,
+  defaultClawRouterWalletPath,
   describeWallet,
+  discoverClawRouterWallet,
   parkOutgoingWallet,
   prepareLocalWallet,
   resolveWalletProvider,
   restoreParkedWallet,
   verifyAndPreserveOutgoingWallet,
   type ArchivedWalletInfo,
+  type ClawRouterProviderDeps,
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
-import { walletExistsError, walletFileExists } from '../lib/wallet/store';
+import {
+  WALLET_SCHEMA_VERSION,
+  readWalletRecord,
+  walletExistsError,
+  walletFileExists,
+  writeWalletRecord,
+  type ClawRouterWalletRecord,
+} from '../lib/wallet/store';
 import { resolvePassphraseForCreate, type PassphraseSource } from '../lib/wallet/passphrase';
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
@@ -45,6 +55,168 @@ export interface WalletCreateOptions {
    * environment, which under a parallel runner leaks across whole test files.
    */
   env?: NodeJS.ProcessEnv;
+}
+
+export interface WalletConnectArgs {
+  provider: string;
+}
+
+export interface WalletConnectOptions {
+  /** Explicitly archive and replace an existing active wallet record. */
+  replace?: boolean;
+  /** Test seam for ClawRouter key path/env/fs access. */
+  clawrouter?: ClawRouterProviderDeps;
+  /** Passphrase seam used only when preserving an outgoing local wallet. */
+  passphrase?: PassphraseOverrides;
+}
+
+/** Explicitly select ClawRouter's existing EVM wallet; never creates a key. */
+export async function runWalletConnect(
+  args: WalletConnectArgs,
+  ctx: CommandContext,
+  opts: WalletConnectOptions = {},
+): Promise<CommandResult> {
+  if (args.provider !== 'clawrouter') {
+    throw new CliError('USAGE', `Unsupported wallet provider: ${JSON.stringify(args.provider)}.`, {
+      fix: 'Use `tenjin wallet connect clawrouter`.',
+    });
+  }
+
+  // Resolve and validate the new signer before touching the active slot. This
+  // reads wallet.key (or the env fallback), never ClawRouter's mnemonic.
+  const discovered = await discoverClawRouterWallet(opts.clawrouter);
+  const record: ClawRouterWalletRecord = {
+    schemaVersion: WALLET_SCHEMA_VERSION,
+    provider: 'clawrouter',
+    address: discovered.address,
+    connectedAt: new Date().toISOString(),
+  };
+  const switched = await connectClawRouterLocked(ctx.dataDir, record, opts);
+  const path = opts.clawrouter?.walletKeyPath ?? defaultClawRouterWalletPath();
+  return {
+    data: {
+      address: record.address,
+      provider: 'clawrouter',
+      credentialSource: discovered.credentialSource,
+      policyEnforcement: 'client-only',
+      connected: !switched.alreadyConnected,
+      ...(discovered.credentialSource === 'file' ? { signerPath: path } : {}),
+      ...(switched.archivedPath !== undefined
+        ? {
+            replaced: {
+              address: switched.replacedAddress,
+              archivedWalletPath: switched.archivedPath,
+              ...(switched.localPassphrasePreserved !== undefined
+                ? { passphrasePreserved: switched.localPassphrasePreserved }
+                : {}),
+            },
+          }
+        : {}),
+    },
+    humanLines: switched.alreadyConnected
+      ? [`ClawRouter wallet already connected: ${record.address}`]
+      : [
+          `ClawRouter wallet connected: ${record.address}`,
+          discovered.credentialSource === 'file'
+            ? `Signer source: ${path}`
+            : 'Signer source: BLOCKRUN_WALLET_KEY',
+          'Tenjin pinned this address and will refuse to sign if ClawRouter changes wallets.',
+          'Raw transaction signing (`tenjin send`) is disabled for this provider.',
+          ...(switched.archivedPath !== undefined
+            ? [
+                `Previous wallet record archived at ${switched.archivedPath}; its funds were not moved.`,
+              ]
+            : []),
+        ],
+  };
+}
+
+async function connectClawRouterLocked(
+  dir: string,
+  record: ClawRouterWalletRecord,
+  opts: WalletConnectOptions,
+): Promise<{
+  alreadyConnected: boolean;
+  archivedPath?: string;
+  replacedAddress?: string;
+  localPassphrasePreserved?: string;
+}> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const lockPath = join(dir, 'wallet.create.lock');
+  try {
+    return await withFileLock(lockPath, async () => {
+      const current = await readWalletRecord(dir);
+      if (
+        current?.provider === 'clawrouter' &&
+        current.address.toLowerCase() === record.address.toLowerCase()
+      ) {
+        return { alreadyConnected: true };
+      }
+      if (current === null) {
+        await writeWalletRecord(dir, record);
+        return { alreadyConnected: false };
+      }
+      if (opts.replace !== true) {
+        throw new CliError(
+          'WALLET_EXISTS',
+          `An active ${current.provider} wallet already exists.`,
+          {
+            fix:
+              'Re-run `tenjin wallet connect clawrouter --replace` to archive the active wallet ' +
+              'record and explicitly switch. No funds are moved.',
+          },
+        );
+      }
+
+      const preserved =
+        current.provider === 'local'
+          ? await verifyAndPreserveOutgoingWallet({
+              dir,
+              env: process.env,
+              ...(opts.passphrase !== undefined ? { passphrase: opts.passphrase } : {}),
+            })
+          : undefined;
+      const account = current.address.toLowerCase();
+      const archivedPath = await parkOutgoingWallet(dir, account);
+      try {
+        await writeWalletRecord(dir, record);
+      } catch (err) {
+        try {
+          await restoreParkedWallet(dir, archivedPath);
+        } catch (restoreErr) {
+          throw new CliError(
+            'INTERNAL',
+            'Connecting ClawRouter failed after the active wallet was archived, and restoring it also failed.',
+            {
+              fix: `The previous wallet record is intact at ${archivedPath}. Move any new ${walletPath(dir)} aside, then restore it with \`mv ${archivedPath} ${walletPath(dir)}\`.`,
+              cause: restoreErr,
+            },
+          );
+        }
+        throw new CliError(
+          'INTERNAL',
+          'Connecting ClawRouter failed; the previous wallet was restored as active.',
+          { fix: 'Nothing was lost. Fix the underlying filesystem error and retry.', cause: err },
+        );
+      }
+      return {
+        alreadyConnected: false,
+        archivedPath,
+        replacedAddress: current.address,
+        ...(preserved !== undefined
+          ? { localPassphrasePreserved: preserved.passphraseLocation }
+          : {}),
+      };
+    });
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      throw new CliError('INTERNAL', err.message, {
+        fix: `If no other tenjin process is running, remove ${lockPath} and retry.`,
+        cause: err,
+      });
+    }
+    throw err;
+  }
 }
 
 export async function runWalletCreate(
@@ -237,7 +409,7 @@ export async function runWalletShow(
   ctx: CommandContext,
   opts: ResolveWalletProviderOptions = {},
 ): Promise<CommandResult> {
-  const provider = resolveWalletProvider(ctx, opts);
+  const provider = await resolveWalletProvider(ctx, opts);
   const desc = await describeWallet(provider);
   // Diagnostics are the provider's own: a remote provider reports no local file
   // path or perms warning, so `show` never contaminates a remote wallet's output
@@ -282,7 +454,7 @@ export async function runWalletBalance(
   ctx: CommandContext,
   opts: ResolveWalletProviderOptions = {},
 ): Promise<CommandResult> {
-  const provider = resolveWalletProvider(ctx, opts);
+  const provider = await resolveWalletProvider(ctx, opts);
   const desc = await describeWallet(provider);
 
   const config = await loadRawConfig(ctx.dataDir);

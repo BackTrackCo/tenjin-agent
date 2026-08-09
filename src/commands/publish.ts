@@ -200,7 +200,7 @@ export async function runPublish(
   // base URL is resolved through the shared settings seam and used for BOTH the
   // SIWX/session header domain and the POST host, so the two never diverge.
   const runtime = await resolveContextSettings(ctx);
-  const provider = resolveWalletProvider(
+  const provider = await resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );

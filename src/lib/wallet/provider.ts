@@ -4,12 +4,12 @@ import type { Address, Hex, TransactionSerializable, TypedDataDefinition } from 
  * The wallet seam. Commands resolve a WalletProvider and never touch a raw key:
  * `describe()` is enough for `show`/`balance` (address + posture, no signing),
  * and `getSigner()` returns a structural signer only when a command needs to
- * sign (B2+). B1 ships exactly one provider (`local`); a hosted signer later is
- * an adapter that implements these interfaces, not a refactor of the callers.
+ * sign (B2+). Local and explicitly connected external signers are adapters that
+ * implement these interfaces, not forks of the command callers.
  */
 
 /**
- * Where a provider's key material lives. B1's `local` provider only ever reports
+ * Where a provider's key material lives. Local and ClawRouter providers report
  * `file` or `env`; `keychain`/`remote` exist so a hosted or OS-keychain signer
  * can describe its true source honestly instead of masquerading as `env`.
  */

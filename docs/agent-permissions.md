@@ -190,6 +190,7 @@ Deliberately **never** recommended, because each is a human decision:
 | `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                       |
 | `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
 | `tenjin wallet create`                           | Creates the payment credential.                                                      |
+| `tenjin wallet connect`                          | Selects which existing payment credential Tenjin may use.                            |
 | `tenjin config set`                              | It can widen the agent's own spend policy.                                           |
 | `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.             |
 | `tenjin install`                                 | Writes into harness config and skills directories.                                   |

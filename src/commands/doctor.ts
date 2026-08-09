@@ -856,7 +856,12 @@ async function checkWallet(
   env: NodeJS.ProcessEnv,
   rpcUrl: string,
 ): Promise<CheckResult[]> {
-  const provider = deps.provider ?? (await resolveLocalProviderOrNull(ctx, env, deps));
+  let provider: WalletProvider | null;
+  try {
+    provider = deps.provider ?? (await resolveLocalProviderOrNull(ctx, env, deps));
+  } catch (err) {
+    return [walletWarn(err)];
+  }
   if (provider === null) return [noWalletCheck()];
 
   const { describeWallet } = await import('../lib/wallet');

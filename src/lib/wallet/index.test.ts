@@ -23,15 +23,15 @@ const stubProvider = (describe: WalletProvider['describe']): WalletProvider => (
 });
 
 describe('resolveWalletProvider', () => {
-  it('returns the injected provider when given one', () => {
+  it('returns the injected provider when given one', async () => {
     const injected = stubProvider(async () => {
       throw new Error('unused');
     });
-    expect(resolveWalletProvider(makeCtx('/tmp/x'), { provider: injected })).toBe(injected);
+    expect(await resolveWalletProvider(makeCtx('/tmp/x'), { provider: injected })).toBe(injected);
   });
 
-  it('defaults to the local provider', () => {
-    expect(resolveWalletProvider(makeCtx('/tmp/x')).id).toBe('local');
+  it('defaults to the local provider', async () => {
+    expect((await resolveWalletProvider(makeCtx('/tmp/x'))).id).toBe('local');
   });
 });
 

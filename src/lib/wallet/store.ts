@@ -31,12 +31,12 @@ const KeystoreV3Schema = z.object({
   version: z.literal(3),
 });
 
-/** The wallet-record schema this build writes and reads. Anything higher on disk
- *  was written by a newer CLI; see `readWalletRecord`. */
-export const WALLET_SCHEMA_VERSION = 2;
+/** The wallet-record schema this build writes. It also reads encrypted local v2
+ * records; anything higher on disk was written by a newer CLI. */
+export const WALLET_SCHEMA_VERSION = 3;
 
 /**
- * The persisted wallet record (schema v2). The private key is NEVER stored in
+ * The persisted local-wallet arm. The private key is NEVER stored in
  * cleartext: `keystore` is a Keystore v3 document (scrypt + AES-128-CTR) and the
  * key is recovered only by decrypting it with the wallet passphrase. `address`
  * stays top-level in cleartext ON PURPOSE so `show`/`balance` keep working
@@ -46,16 +46,38 @@ export const WALLET_SCHEMA_VERSION = 2;
  * keystore. Validated on read (a corrupt file is WALLET_INVALID_KEY, never a
  * silent partial parse).
  */
-export const WalletRecordSchema = z.object({
-  schemaVersion: z.literal(WALLET_SCHEMA_VERSION),
+const LocalWalletRecordV2Schema = z.object({
+  schemaVersion: z.literal(2),
   provider: z.literal('local'),
   address: z.string().regex(ADDRESS_RE, 'expected a 0x-prefixed 20-byte address'),
   keystore: KeystoreV3Schema,
   createdAt: z.string(),
 });
-export type WalletRecord = Omit<z.infer<typeof WalletRecordSchema>, 'keystore'> & {
+
+/** Schema v3 makes the provider discriminator real while retaining v2 reads. */
+const LocalWalletRecordV3Schema = LocalWalletRecordV2Schema.extend({
+  schemaVersion: z.literal(WALLET_SCHEMA_VERSION),
+});
+const ClawRouterWalletRecordSchema = z.object({
+  schemaVersion: z.literal(WALLET_SCHEMA_VERSION),
+  provider: z.literal('clawrouter'),
+  address: z.string().regex(ADDRESS_RE, 'expected a 0x-prefixed 20-byte address'),
+  connectedAt: z.string(),
+});
+
+export const WalletRecordSchema = z.union([
+  LocalWalletRecordV2Schema,
+  LocalWalletRecordV3Schema,
+  ClawRouterWalletRecordSchema,
+]);
+export type LocalWalletRecord = Omit<
+  z.infer<typeof LocalWalletRecordV2Schema> | z.infer<typeof LocalWalletRecordV3Schema>,
+  'keystore'
+> & {
   keystore: Keystore.Keystore;
 };
+export type ClawRouterWalletRecord = z.infer<typeof ClawRouterWalletRecordSchema>;
+export type WalletRecord = LocalWalletRecord | ClawRouterWalletRecord;
 
 export async function walletFileExists(dir: string): Promise<boolean> {
   return (await walletFileMode(dir)) !== null;
@@ -112,7 +134,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
   if (newer !== null) {
     throw new CliError(
       'CONTRACT_MISMATCH',
-      `The wallet file at ${path} was written by a newer tenjin-cli (wallet schema v${newer}; this build reads v${WALLET_SCHEMA_VERSION}).`,
+      `The wallet file at ${path} was written by a newer tenjin-cli (wallet schema v${newer}; this build reads through v${WALLET_SCHEMA_VERSION}).`,
       {
         fix: 'Upgrade with `npm i -g tenjin-cli`. Do not delete or recreate the wallet: the newer CLI still reads this one, and the funds are on the address it holds.',
       },

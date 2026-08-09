@@ -256,6 +256,10 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason: 'Creates the payment credential; a stray run is a wallet you did not mean to have.',
   },
   {
+    command: 'tenjin wallet connect',
+    reason: 'Selects which existing payment credential Tenjin may use.',
+  },
+  {
     command: 'tenjin config set',
     reason:
       'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy.',

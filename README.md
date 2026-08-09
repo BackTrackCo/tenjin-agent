@@ -42,6 +42,20 @@ tenjin wallet show          # your wallet address; `tenjin wallet balance` for U
 tenjin search "what actually changed in <library> v3's public API"
 ```
 
+Already use ClawRouter? Reuse its funded Base wallet instead of creating and
+funding another one:
+
+```bash
+tenjin wallet connect clawrouter
+tenjin wallet show
+```
+
+The connector reads ClawRouter's canonical
+`~/.openclaw/blockrun/wallet.key`, falling back to `BLOCKRUN_WALLET_KEY` only
+when that file is absent. It never reads, copies, stores, or returns the
+ClawRouter mnemonic or private key; `~/.tenjin/wallet.json` stores only the
+provider name and pinned address.
+
 A hit looks like this (`--json` shown; at a terminal you get the same as plain
 lines, with prices in USD):
 
@@ -60,23 +74,23 @@ on Base for gas). Searching and free pieces cost nothing.
 
 ## Commands
 
-| Command                                 | Purpose                                                                                                     |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `tenjin install`                        | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
-| `tenjin doctor`                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
-| `tenjin config [get\|set]`              | Spend policy, publish consent, and the hook toggles                                                         |
-| `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                                                         |
-| `tenjin search "<question>"`            | Ask for payable candidates or an honest MISS                                                                |
-| `tenjin inspect <url-or-id>`            | Show a candidate's pre-purchase answer card; never pays                                                     |
-| `tenjin read <url-or-id>`               | Deliver free, library, or already-owned pieces; exit 3 rather than pay                                      |
-| `tenjin session start`                  | Mint a ≤24h read-scoped session key so `read` can recover owned pieces; spends nothing                      |
-| `tenjin buy <url-or-id>`                | Entitlement re-check, then x402 exact payment                                                               |
-| `tenjin outcome`                        | Report how a search ended; this is the signal the marketplace learns from                                   |
-| `tenjin publish [file]`                 | Publish Markdown with an optional answer card, gated by a local scan and your consent mode                  |
-| `tenjin edit <postId>`                  | Show one of your posts and its card, or merge-update it                                                     |
-| `tenjin candidate [add\|list\|drop]`    | Park, list, or discard local publish drafts                                                                 |
-| `tenjin send <amount> usdc <to>`        | **Escape hatch:** move USDC on Base out of the agent wallet                                                 |
-| `tenjin mcp`                            | Local stdio MCP server over the same command cores                                                          |
+| Command                                         | Purpose                                                                                                     |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `tenjin install`                                | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
+| `tenjin doctor`                                 | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
+| `tenjin config [get\|set]`                      | Spend policy, publish consent, and the hook toggles                                                         |
+| `tenjin wallet [create\|connect\|show\|balance]` | Create a local Base wallet or explicitly connect ClawRouter's signer                                        |
+| `tenjin search "<question>"`                    | Ask for payable candidates or an honest MISS                                                                |
+| `tenjin inspect <url-or-id>`                    | Show a candidate's pre-purchase answer card; never pays                                                     |
+| `tenjin read <url-or-id>`                       | Deliver free, library, or already-owned pieces; exit 3 rather than pay                                      |
+| `tenjin session start`                          | Mint a ≤24h read-scoped session key so `read` can recover owned pieces; spends nothing                      |
+| `tenjin buy <url-or-id>`                        | Entitlement re-check, then x402 exact payment                                                               |
+| `tenjin outcome`                                | Report how a search ended; this is the signal the marketplace learns from                                   |
+| `tenjin publish [file]`                         | Publish Markdown with an optional answer card, gated by a local scan and your consent mode                  |
+| `tenjin edit <postId>`                          | Show one of your posts and its card, or merge-update it                                                     |
+| `tenjin candidate [add\|list\|drop]`            | Park, list, or discard local publish drafts                                                                 |
+| `tenjin send <amount> usdc <to>`                | **Escape hatch:** move USDC on Base out of the agent wallet                                                 |
+| `tenjin mcp`                                    | Local stdio MCP server over the same command cores                                                          |
 
 `read` and `buy` split by whether money can move. `read` tries the local library,
 then an unauthenticated fetch, then one signed GET if a read-scoped session key is
@@ -613,13 +627,21 @@ approval.
 
 - Default maximum automatic spend is **zero**. Nothing pays without explicit
   approval or an explicitly configured policy.
-- Keys are generated locally and stored **encrypted at rest** in
+- A Tenjin-created key is generated locally and stored **encrypted at rest** in
   `~/.tenjin/wallet.json` (Keystore v3, scrypt), mode `0600`. The plaintext key
   is never written to disk. The wallet address stays readable, so `show` and
   `balance` work without a passphrase. `doctor` decrypts only when the passphrase
   is already reachable without a prompt, purely to verify the keystore still
   opens; otherwise only signing decrypts. Signing is local and the CLI talks only
   to the configured base URL.
+- `wallet connect clawrouter` is an explicit alternative for people already
+  using ClawRouter (including through Hermes). Tenjin follows ClawRouter's own
+  EVM precedence—`~/.openclaw/blockrun/wallet.key`, then
+  `BLOCKRUN_WALLET_KEY` only if the file is absent—and never reads the mnemonic.
+  The address is pinned at connect time; any later signer drift is refused until
+  the user explicitly reconnects with `--replace`. Message and typed-data
+  signing work for SIWX, publishing, and x402; raw transaction signing is
+  deliberately disabled, so `tenjin send` is unavailable on this provider.
 - There is exactly **one active wallet**. `wallet create` refuses when one
   exists; the explicit `wallet create --replace` first verifies the outgoing
   wallet's passphrase against its keystore, preserves it under the wallet's own

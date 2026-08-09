@@ -39,6 +39,20 @@ describe('writeWalletRecord', () => {
     expect(await readWalletRecord(dataDir)).toEqual(record);
   });
 
+  it('round-trips a v3 ClawRouter pointer without storing key material', async () => {
+    const record = {
+      schemaVersion: WALLET_SCHEMA_VERSION as 3,
+      provider: 'clawrouter' as const,
+      address: `0x${'ab'.repeat(20)}`,
+      connectedAt: '2026-08-09T00:00:00.000Z',
+    };
+    await writeWalletRecord(dataDir, record);
+    expect(await readWalletRecord(dataDir)).toEqual(record);
+    const raw = await readFile(walletFile(), 'utf8');
+    expect(raw).not.toContain('privateKey');
+    expect(raw).not.toContain('mnemonic');
+  });
+
   it('never writes the raw private key: no 0x-prefixed 64-hex appears in the file', async () => {
     await writeWalletRecord(dataDir, fakeRecord());
     const raw = await readFile(walletFile(), 'utf8');

@@ -58,7 +58,7 @@ export async function runSessionStart(
   }
 
   const settings = await resolveContextSettings(ctx);
-  const provider = resolveWalletProvider(
+  const provider = await resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
