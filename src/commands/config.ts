@@ -10,6 +10,7 @@ import {
   SEND_MAX_UNSET,
   loadRawConfig,
   parseSearchHookModeFlag,
+  parseStopNagFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
@@ -68,6 +69,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'publish.defaultPrice': 'price used when none is given',
   'hooks.searchMode':
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.stopNag': 'end-of-turn reminder about searches nothing answered yet',
 };
 
 function isPublishKey(key: string): key is PublishConfigKey {
@@ -99,7 +101,7 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     humanLines.push(describedLine(key, entry, downgradeNote(key, settings)));
   }
   for (const key of HOOKS_CONFIG_KEYS) {
-    const entry = renderHooksSetting(settings);
+    const entry = renderHooksSetting(key, settings);
     data[key] = entry;
     humanLines.push(describedLine(key, entry));
   }
@@ -120,7 +122,7 @@ export async function runConfigGet(
     };
   }
   if (isHooksKey(key)) {
-    const entry = renderHooksSetting(await resolveFromContext(ctx));
+    const entry = renderHooksSetting(key, await resolveFromContext(ctx));
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   const configKey = assertKey(key);
@@ -182,12 +184,14 @@ async function setHooksKey(
   value: string,
   ctx: CommandContext,
 ): Promise<CommandResult> {
-  const mode = parseSearchHookModeFlag(value, key);
+  const subkey = key === 'hooks.searchMode' ? 'searchMode' : 'stopNag';
+  const parsed =
+    key === 'hooks.searchMode' ? parseSearchHookModeFlag(value, key) : parseStopNagFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
-    hooks: { ...existing.hooks, searchMode: mode },
+    hooks: { ...existing.hooks, [subkey]: parsed },
   }));
-  const entry: RenderedSetting = { value: mode, source: 'file' };
+  const entry: RenderedSetting = { value: parsed, source: 'file' };
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
@@ -283,9 +287,10 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
   };
 }
 
-/** The list/get shape for the one hooks key: a plain enum string. */
-function renderHooksSetting(settings: EffectiveSettings): RenderedSetting {
-  return { value: settings.hooksSearchMode.value, source: settings.hooksSearchMode.source };
+/** The list/get shape for a hooks key: a plain enum string either way. */
+function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
+  const resolved = key === 'hooks.searchMode' ? settings.hooksSearchMode : settings.hooksStopNag;
+  return { value: resolved.value, source: resolved.source };
 }
 
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {

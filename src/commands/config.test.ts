@@ -57,7 +57,8 @@ describe('runConfigList', () => {
       source: 'default',
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
-    expect(humanLines).toHaveLength(11);
+    expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
+    expect(humanLines).toHaveLength(12);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -489,5 +490,30 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
       process.chdir(prev);
       await rm(projectCwd, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the hooks block is set through config, which stays human-gated', () => {
+  it('round-trips both hook keys and rejects a value outside the enum', async () => {
+    const ctx = makeCtx();
+    for (const [key, value] of [
+      ['hooks.searchMode', 'remind'],
+      ['hooks.stopNag', 'off'],
+    ] as const) {
+      const set = await runConfigSet({ key, value }, ctx);
+      expect(set.data).toMatchObject({ key, value, source: 'file' });
+      expect(await runConfigGet({ key }, ctx)).toMatchObject({
+        data: { key, value, source: 'file' },
+      });
+    }
+    // Both subkeys survive each other's write, so silencing one hook cannot
+    // silently reset the other.
+    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
+      data: { value: 'remind' },
+    });
+
+    const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
+    expect(bad.code).toBe('USAGE');
+    expect(bad.fix).toContain('"on"');
   });
 });

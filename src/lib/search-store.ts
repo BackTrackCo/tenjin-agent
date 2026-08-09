@@ -31,6 +31,25 @@ export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
 export const SearchResolutionSchema = z.enum(['outcome', 'publish', 'candidate']);
 export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
 
+/**
+ * Who ran the search. `cli` is a deliberate `tenjin search`: the agent decided
+ * the question was worth looking up, so an unanswered one is a strong signal.
+ * `websearch-hook` is the PreToolUse hook riding along with a WebSearch the agent
+ * was going to run anyway, which is a much weaker signal, because nobody judged
+ * the question suitable for the marketplace before it was sent.
+ *
+ * The distinction exists because the Stop hook must not treat them alike: an
+ * unanswered deliberate search deserves being named on its own, while a batch of
+ * hook searches deserves one line the agent can dismiss at a glance. Keeping both
+ * in ONE store is what makes the hook's misses reachable by `outcome --last`,
+ * `buy <resourceId>`, and the open-loop reminder at all.
+ *
+ * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
+ * source field, and those entries were all explicit searches.
+ */
+export const SearchSourceSchema = z.enum(['cli', 'websearch-hook']);
+export type SearchSource = z.infer<typeof SearchSourceSchema>;
+
 const StoredSearchSchema = z.object({
   searchId: z.string(),
   at: z.string(),
@@ -39,6 +58,8 @@ const StoredSearchSchema = z.object({
   candidates: z.array(StoredCandidateSchema),
   /** Absent until something closes the loop; see {@link markSearchResolved}. */
   resolved: z.object({ by: SearchResolutionSchema, at: z.string() }).optional(),
+  /** Absent on entries written before sources existed; see {@link SearchSourceSchema}. */
+  source: SearchSourceSchema.optional(),
 });
 export type StoredSearch = z.infer<typeof StoredSearchSchema>;
 
@@ -47,8 +68,23 @@ const StoreSchema = z.object({
   searches: z.array(StoredSearchSchema),
 });
 
-function storePath(dataDir: string): string {
+/**
+ * The store and its lock. Both paths are EXPORTED because the installed hook
+ * scripts write this same file from outside the CLI process: they cannot import
+ * this module, so they reimplement the lock protocol against this exact path.
+ * Two writers of one file must at least agree on where the mutex lives, and a
+ * test pins the script's protocol against this one.
+ */
+export function searchStorePath(dataDir: string): string {
   return join(dataDir, 'searches.json');
+}
+
+export function searchStoreLockPath(dataDir: string): string {
+  return `${searchStorePath(dataDir)}.lock`;
+}
+
+function storePath(dataDir: string): string {
+  return searchStorePath(dataDir);
 }
 
 export async function loadSearches(dataDir: string): Promise<StoredSearch[]> {

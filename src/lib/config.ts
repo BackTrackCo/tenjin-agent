@@ -57,10 +57,29 @@ export function parseSearchHookModeFlag(value: string, flagName: string): Search
   });
 }
 
-/** The harness-hook block. `searchMode` is read by the installed hook script at
- *  run time, so `config set hooks.searchMode` changes behavior with no re-install. */
+/** Whether the Stop hook may raise an open loop at the end of a turn. */
+export const StopNagModeSchema = z.enum(['on', 'off']);
+export type StopNagMode = z.infer<typeof StopNagModeSchema>;
+
+export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
+  const parsed = StopNagModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
+/**
+ * The harness-hook block. BOTH keys are read by the installed scripts at run
+ * time, which is what makes them runtime toggles rather than install-time
+ * choices: `tenjin config set hooks.searchMode off` or `hooks.stopNag off`
+ * silences a hook immediately, with no re-install and nothing to unwire. The
+ * scripts stay registered and no-op, which is also what lets turning one back on
+ * be a single `config set`.
+ */
 const HooksConfigSchema = z.object({
   searchMode: SearchHookModeSchema,
+  stopNag: StopNagModeSchema,
 });
 
 /**
@@ -158,7 +177,7 @@ export const CONFIG_DEFAULTS: Config = {
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json.
-  hooks: { searchMode: 'auto' },
+  hooks: { searchMode: 'auto', stopNag: 'on' },
 };
 
 /**
@@ -179,7 +198,7 @@ export const PUBLISH_CONFIG_KEYS = ['publish.mode', 'publish.defaultPrice'] as c
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
-export const HOOKS_CONFIG_KEYS = ['hooks.searchMode'] as const;
+export const HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.stopNag'] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
 
 /**
@@ -231,7 +250,10 @@ export async function loadConfig(dir: string): Promise<Config> {
       defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
     },
     install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
-    hooks: { searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode },
+    hooks: {
+      searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
+      stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
+    },
   };
 }
 
@@ -273,6 +295,7 @@ export interface EffectiveSettings {
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
+  hooksStopNag: ResolvedSetting<StopNagMode>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -309,7 +332,15 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),
+    hooksStopNag: resolveHooksStopNag(config),
   };
+}
+
+/** hooks.stopNag: file or default, same shape as hooks.searchMode. */
+function resolveHooksStopNag(config: PartialConfig): ResolvedSetting<StopNagMode> {
+  const fromFile = config.hooks?.stopNag;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.stopNag, source: 'default' };
 }
 
 /** hooks.searchMode: file or default. No env, flag, or project layer, because the

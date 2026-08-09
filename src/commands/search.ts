@@ -99,6 +99,10 @@ export async function runSearch(
     at: new Date().toISOString(),
     question: request.question,
     decision: response.decision,
+    // A deliberate search, as opposed to one the WebSearch hook rode along with.
+    // The Stop hook nags on the two differently, so the tag has to be written
+    // here rather than inferred later from anything.
+    source: 'cli',
     candidates: candidates.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
