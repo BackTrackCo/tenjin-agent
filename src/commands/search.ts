@@ -1,5 +1,5 @@
 import { CliError } from '../lib/errors';
-import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
+import { formatUsdDisplay, isPaidPrice, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
@@ -100,6 +100,13 @@ export async function runSearch(
       title: c.title,
       price: c.price,
     })),
+    // The pointers stay unrecorded on purpose (see below); only how many of them
+    // cost money, so `outcome` can tell a MISS that offered a payable browse tail
+    // from one that offered nothing to buy. A zero-priced pointer does not count:
+    // `read` delivers it for nothing, so there was no purchase to decline. Zero on
+    // a CANDIDATES decision, where the contract carries no browse array and the
+    // parser drops any that appears.
+    paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price) === true).length,
   });
 
   // A parked-candidate nudge on stderr (not in the machine JSON), MISS only: a

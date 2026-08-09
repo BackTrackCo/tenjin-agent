@@ -28,6 +28,16 @@ const StoredSearchSchema = z.object({
   question: z.string(),
   decision: z.string(),
   candidates: z.array(StoredCandidateSchema),
+  // How many of the search's browse pointers cost money, and NOT the pointers
+  // themselves: keeping them out of the store is what makes `buy <resourceId>`
+  // unable to reach one (see the browse comment in agent-api.ts), and a count
+  // cannot undo that. It exists so `outcome` can tell "this search offered
+  // nothing to buy" from "this search offered a payable browse tail", which the
+  // candidates array alone cannot say. Counts only PAID pointers because a
+  // zero-priced piece is delivered by `read` with no purchase to decline.
+  // Optional because entries written before this field existed have no answer,
+  // and `undefined` must read as unknown rather than as zero.
+  paidBrowseCount: z.number().int().nonnegative().optional(),
 });
 export type StoredSearch = z.infer<typeof StoredSearchSchema>;
 
