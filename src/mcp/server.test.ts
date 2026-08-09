@@ -79,6 +79,13 @@ describe('buildTenjinMcpServer, tool surface', () => {
     );
   });
 
+  // The hosted server at tenjin.blog/api/mcp identifies as `tenjin`; this one
+  // must not, or a client connected to both cannot tell them apart (issue #103).
+  it('identifies as tenjin-cli, not tenjin', async () => {
+    const client = await connect({ dataDir: dir });
+    expect(client.getServerVersion()?.name).toBe('tenjin-cli');
+  });
+
   // `tenjin send` is the human-invoked funds-out escape hatch (issue #34). Doc
   // 10's narrow-toolset rule keeps it OFF the MCP surface: no send tool, and no
   // send action on tenjin_wallet. This pin fails if either ever appears.
