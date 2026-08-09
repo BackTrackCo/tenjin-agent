@@ -90,3 +90,14 @@ read-only subagent may run and which stay human-gated; `tenjin doctor` mirrors i
 in one line. The README documents every user-facing flag as a per-command table,
 including `--artifact-type`, `--temporal-mode` and `--content-hash`, and adds the
 config-key and search-hook references.
+
+The `~/.claude/CLAUDE.md` search nudge is written by default too, with
+`--no-claude-md` as the opt-out. Codex's AGENTS.md already got that line by
+default, so leaving Claude Code's copy behind a flag left the harness most people
+run as the one that never learned to search first. Its text now carries the same
+single heuristic the skill's entry gate collapsed to (public, durable, costly to
+reproduce) rather than a list of example categories, and the existing marker-line
+disclosure and undo cover it unchanged.
+
+Uninstalling the hooks is still manual (the install output prints the lines to
+remove); an unwire command is deliberately out of scope here.

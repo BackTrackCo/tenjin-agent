@@ -146,8 +146,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
     .option('--no-wallet', 'create no wallet (the default is to create one)')
-    .option('--claude-md', 'append the Tenjin search nudge to ~/.claude/CLAUDE.md')
-    .option('--no-claude-md', 'skip the CLAUDE.md nudge')
+    .option(
+      '--claude-md',
+      'append the Tenjin search nudge to ~/.claude/CLAUDE.md (the default; the flag states it explicitly)',
+    )
+    .option('--no-claude-md', 'write no CLAUDE.md nudge')
     .option(
       '--allow-free-verbs',
       "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist (the default; the flag states it explicitly); none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",

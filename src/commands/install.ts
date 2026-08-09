@@ -72,9 +72,11 @@ const InstallInputSchema = z.object({
   dryRun: z.boolean().optional(),
   publishMode: z.string().optional(),
   noWallet: z.boolean().optional(),
-  /** Opt-in for the ~/.claude/CLAUDE.md nudge: true (--claude-md), false
-   * (--no-claude-md), or undefined (skip). Never a question: the walkthrough is
-   * capped at three decisions. */
+  /**
+   * The ~/.claude/CLAUDE.md nudge: `false` (`--no-claude-md`) suppresses it,
+   * `true` (`--claude-md`) states the default explicitly, and `undefined` writes
+   * it. Never a question, just a default with an opt-out.
+   */
   claudeMd: z.boolean().optional(),
   /**
    * Tri-state, like `claudeMd`. `true` (`--allow-free-verbs`) wires the free-verb
@@ -166,11 +168,17 @@ function walletFix(reason: WalletSkipReason): string {
 const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
 
 /**
- * The instinct nudge line, pointed at `skillsDir`. One line, no em dashes: the
- * marker, the search-before-regenerating nudge, then where the skills live.
+ * The instinct nudge line, pointed at `skillsDir`. One line: the marker, the
+ * gate, the disclosure, then where the skills live.
+ *
+ * The gate is ONE heuristic (public + durable + costly to reproduce), matching
+ * the collapsed entry gate in the tenjin-search skill. It used to list example
+ * categories instead, which read as a checklist to work through at exactly the
+ * moment the agent should be deciding in a second. The two must stay in sync:
+ * this line is what a harness reads when the skill is not in play.
  */
 function nudgeLine(skillsDir: string): string {
-  return `${SKILLS_MARKER} Tenjin: before regenerating public research (version-specific compatibility, integration gotchas, benchmarks, dated probes), run 'tenjin search "<question>" --json' first; it is free and anonymous but sends the generalized question text to tenjin.blog, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
+  return `${SKILLS_MARKER} Tenjin: when a question is public, durable, and costly to reproduce, run 'tenjin search "<question>" --json' before regenerating the answer; it is free and anonymous, but the generalized question text leaves the machine, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
 }
 
 /**
@@ -432,10 +440,13 @@ async function installBody(
   // Same condition resolvePlans treats as an override, so what gets recorded below is
   // exactly what overrode detection.
   const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
-  // The CLAUDE.md nudge is flag-only: `--claude-md` writes it, `--no-claude-md`
-  // and an absent flag skip it. It is not a question because it is a preference
-  // with no consequence worth a prompt, unlike the four that are.
-  const claudeMdWrite = claudeMdFlag === true;
+  // The CLAUDE.md nudge is written BY DEFAULT, on both paths, only
+  // `--no-claude-md` suppresses it. Codex already got the same line in its
+  // AGENTS.md by default, so leaving Claude Code's copy behind a flag meant the
+  // harness most people run was the one that never learned to search first. It is
+  // still not a question: it is one idempotent marker line whose disclosure and
+  // undo ride the output, which is a smaller consequence than the four decisions.
+  const claudeMdWrite = claudeMdFlag !== false;
   const harnesses: HarnessResult[] = [];
   // Unlocked. What makes concurrent writers safe here is the per-file atomic
   // rename, not serialization: the rm-then-write this used to be had two runs

@@ -87,6 +87,8 @@ import type { CommandContext, GlobalFlags } from '../context';
 // source (not a fixture) also proves the copy lands byte-identical content.
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 const MARKER = 'tenjin-cli:skills';
+/** The full marker as it appears in the undo line the walkthrough prints. */
+const MARKER_COMMENT = `<!-- ${MARKER} -->`;
 
 let home: string;
 let data: string;
@@ -450,8 +452,10 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
     await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
     expect(agents).toContain(`'tenjin search "<question>" --json'`);
-    expect(agents).toContain('before regenerating public research');
-    expect(agents).toContain('sends the generalized question text to tenjin.blog');
+    // ONE heuristic, matching the tenjin-search skill's collapsed entry gate, not
+    // a list of example categories to work through.
+    expect(agents).toContain('when a question is public, durable, and costly to reproduce');
+    expect(agents).toContain('the generalized question text leaves the machine');
     expect(agents).toContain(join(home, '.agents', 'skills'));
     expect(agents).not.toContain('—'); // no em dashes
   });
@@ -526,10 +530,12 @@ describe('runInstall: CLAUDE.md nudge', () => {
   });
   const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
-  it('skips CLAUDE.md by default on a non-interactive run (no flag, no file)', async () => {
+  // Codex's AGENTS.md already got this line by default, so leaving Claude Code's
+  // copy behind a flag left the most-used harness the one that never learned it.
+  it('writes CLAUDE.md by default on a non-interactive run, with no flag', async () => {
     const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
-    expect(existsSync(claudeMdPath())).toBe(false);
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
+    expect(existsSync(claudeMdPath())).toBe(true);
   });
 
   it('--claude-md writes the nudge pointing at ~/.claude/skills', async () => {
@@ -541,7 +547,7 @@ describe('runInstall: CLAUDE.md nudge', () => {
     expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
     const md = await readFile(claudeMdPath(), 'utf8');
     expect(md).toContain(`'tenjin search "<question>" --json'`);
-    expect(md).toContain('sends the generalized question text to tenjin.blog');
+    expect(md).toContain('the generalized question text leaves the machine');
     expect(md).toContain(join(home, '.claude', 'skills'));
     expect(md.split(MARKER).length - 1).toBe(1);
   });
@@ -595,10 +601,10 @@ describe('runInstall: CLAUDE.md nudge', () => {
 
   // The walkthrough is capped at three decisions, so the nudge is never a fourth
   // question: an interactive run without the flag behaves like a headless one.
-  it('is never asked about interactively; an absent flag skips it', async () => {
+  it('is never asked about interactively; an absent flag writes it', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('skipped');
-    expect(existsSync(claudeMdPath())).toBe(false);
+    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('written');
+    expect(existsSync(claudeMdPath())).toBe(true);
   });
 
   it('--claude-md writes it on an interactive run too', async () => {
@@ -1104,8 +1110,10 @@ describe('runInstall: interactive walkthrough', () => {
   // off the TAIL: whatever disclosures a given run owed the operator sit above it,
   // and adding one must not be able to quietly drop a summary line.
   it('closes with a six-line summary: skills, publishing, permissions, hooks, wallet, next', async () => {
+    // Nothing disclosable: hooks off, permissions declined by the default seam,
+    // no nudge. What is left is the summary, which is what this pins.
     const res = await runInstall(
-      { harness: ['claude'], searchHooks: 'off' },
+      { harness: ['claude'], searchHooks: 'off', claudeMd: false },
       makeCtx(),
       deps({ isInteractive: true }),
     );
@@ -1133,6 +1141,19 @@ describe('runInstall: interactive walkthrough', () => {
 
   // The disclosure names the count, the file and the undo. It does NOT recite the
   // nine rules: that block is `doctor`'s, and the machine envelope carries them.
+  // The nudge is written by default now, so its existing disclosure block has to
+  // fire on a bare run rather than only behind the flag it used to need.
+  it('discloses the CLAUDE.md nudge it wrote by default, and how to take it back', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const text = human(res);
+    expect(text).toContain('The nudge tells agents to run a free anonymous `tenjin search`');
+    expect(text).toContain(
+      `Undo anytime: delete the ${MARKER_COMMENT} line from ${join(home, '.claude', 'CLAUDE.md')}`,
+    );
+    // And the summary names it among what was wired.
+    expect(text).toContain('CLAUDE.md nudge');
+  });
+
   it('discloses the permission rules it wired and how to take them back', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1341,7 +1362,7 @@ describe('runInstall: interactive walkthrough', () => {
 
   it('a green doctor says nothing; a failure surfaces with its fix', async () => {
     const okRes = await runInstall(
-      { harness: ['claude'], searchHooks: 'off' },
+      { harness: ['claude'], searchHooks: 'off', claudeMd: false },
       makeCtx(),
       deps({ isInteractive: true }),
     );

@@ -106,8 +106,8 @@ Every command also takes the three global flags.
 | `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode`  |
 | `--no-hooks`            | —                         | —                | Register no hooks this run; writes no config                  |
 | `--no-wallet`           | —                         | —                | Create no wallet                                              |
-| `--claude-md`           | —                         | off              | Append the one-line search nudge to `~/.claude/CLAUDE.md`     |
-| `--no-claude-md`        | —                         | —                | Skip that nudge                                               |
+| `--claude-md`           | —                         | on               | Append the one-line search nudge to `~/.claude/CLAUDE.md`     |
+| `--no-claude-md`        | —                         | —                | Write no CLAUDE.md nudge                                      |
 
 ### `tenjin search <question>`
 
@@ -358,7 +358,8 @@ decision:
 A run with nobody to ask still produces a working install. Everything is on by
 default on both paths, each with an opt-out flag: the permission allowlist
 (`--no-allow-free-verbs`), the search hooks (`--no-hooks`, or `--search-hooks
-off` to make it durable), and the wallet (`--no-wallet`). Everything written is
+off` to make it durable), the one-line search nudge in `~/.claude/CLAUDE.md`
+(`--no-claude-md`), and the wallet (`--no-wallet`). Everything written is
 disclosed in the output with its undo.
 
 The wallet is created headlessly too, because `buy` and publishing back after a
@@ -395,6 +396,13 @@ Where the three skills land:
 
 - **Nothing detected**: the installer falls back to `~/.agents/skills/`, so a
   harness installed later still finds the skills.
+
+Both harnesses get the same one-line pointer as global guidance: Codex in its
+AGENTS.md, Claude Code in `~/.claude/CLAUDE.md`. It carries one heuristic (public,
+durable, costly to reproduce, so search before regenerating), the disclosure that
+the generalized question text leaves the machine, and where the skills live. It is
+marked with an HTML comment, so a re-run refreshes a drifted copy in place and
+never duplicates it; deleting that line is the undo.
 
 The three skills:
 
