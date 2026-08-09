@@ -199,13 +199,17 @@ const LOCK_PATH = SEARCH_STORE + '.lock';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * The search store's mutex, and it is deliberately THE SAME PROTOCOL the CLI uses
- * (src/lib/lock.ts): the lock IS a directory, mkdir is atomic so a second holder
- * gets EEXIST and retries, and there is no stale-stealing, so a lock left by a
- * crash is never removed out from under a live holder. Two writers of one file
- * have to agree on the mutex or the mutex is decorative, and this script cannot
- * import the CLI's copy. A test runs this script concurrently against the CLI's
- * own recorder and asserts neither write is lost.
+ * The search store's mutex.
+ *
+ * ⚠ MIRRORED, MUST UPDATE TOGETHER with src/lib/lock.ts (\`withFileLock\`). This is
+ * deliberately THE SAME PROTOCOL: the lock IS a directory at
+ * \`<searches.json>.lock\`, mkdir is atomic so a second holder gets EEXIST and
+ * retries, and there is no stale-stealing, so a lock left by a crash is never
+ * removed out from under a live holder. This script runs standalone and cannot
+ * import the CLI's copy, but it writes the CLI's searches.json, and two writers
+ * of one file that disagree about the mutex have no mutex. If you change what the
+ * lock is, where it lives, or the no-steal rule, change it in BOTH places.
+ * lib/hook-scripts.test.ts pins them together and fails loudly on drift.
  *
  * Unlike the CLI it gives up FAST and silently: recording is best-effort
  * bookkeeping on a two-second budget, and a contended store is worth losing one
