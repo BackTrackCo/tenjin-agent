@@ -78,6 +78,14 @@ on Base for gas). Searching and free pieces cost nothing.
 | `tenjin candidate [add\|list\|drop]`                    | Park, list, or discard local publish drafts; a search MISS nudges you about parked ones                                                                           |
 | `tenjin send <amount> usdc <to> [--yes]`                | **Escape hatch:** move USDC on Base out of the agent wallet (preview, explicit confirm, then the tx hash)                                                         |
 
+Harness integrations can keep different autonomy settings without splitting the
+wallet or spend history. Use `tenjin config --profile hermes` (or `openclaw`) to
+inspect one, and `tenjin config set maxAutoSpend 0.25 --profile hermes` to change
+it. At runtime, `TENJIN_HARNESS=hermes` selects that profile. Only read-spend,
+confirmation, creator-allowlist, and publish settings are profile-scoped;
+`sendMaxAmount`, endpoints, telemetry, credentials, and the rolling spend ledger
+remain global.
+
 ### `read` vs `buy`
 
 They split by whether money can move. `read` is free-only: it tries the local

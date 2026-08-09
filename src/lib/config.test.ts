@@ -99,6 +99,45 @@ describe('resolveSettings — precedence and provenance', () => {
     });
     expect(s.baseUrl).toEqual({ value: 'https://flag.example', source: 'flag' });
   });
+
+  it('layers the selected harness profile over global autonomy settings only', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        maxAutoSpend: '100000',
+        sendMaxAmount: '0',
+        baseUrl: 'https://global.example',
+        policyProfiles: {
+          hermes: {
+            maxAutoSpend: '250000',
+            sessionBudget: '5000000',
+            confirm: 'above:250000',
+            allowlistCreators: ['alice'],
+          },
+        },
+      }),
+    );
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: { TENJIN_HARNESS: 'hermes' } });
+    expect(s.policyProfile).toBe('hermes');
+    expect(s.maxAutoSpend).toEqual({ value: '250000', source: 'profile' });
+    expect(s.sessionBudget).toEqual({ value: '5000000', source: 'profile' });
+    expect(s.confirm).toEqual({ value: 'above:250000', source: 'profile' });
+    expect(s.allowlistCreators).toEqual({ value: ['alice'], source: 'profile' });
+    expect(s.sendMaxAmount).toEqual({ value: '0', source: 'file' });
+    expect(s.baseUrl).toEqual({ value: 'https://global.example', source: 'file' });
+  });
+
+  it('ignores an unknown TENJIN_HARNESS and keeps the global fail-closed policy', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ policyProfiles: { hermes: { maxAutoSpend: '250000' } } }),
+    );
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: { TENJIN_HARNESS: 'unknown' } });
+    expect(s.policyProfile).toBeUndefined();
+    expect(s.maxAutoSpend).toEqual({ value: '0', source: 'default' });
+  });
 });
 
 describe('writeConfig', () => {
@@ -130,6 +169,33 @@ describe('publish block', () => {
     expect(s.publishMode).toEqual({ value: 'review', source: 'file' });
     expect(s.publishDefaultPrice).toEqual({ value: '250000', source: 'file' });
   });
+
+  it('uses profile publish defaults below project/env/flag overrides', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        publish: { mode: 'review', defaultPrice: '100000' },
+        policyProfiles: { hermes: { publish: { mode: 'auto', defaultPrice: '250000' } } },
+      }),
+    );
+    const config = await loadRawConfig(dir);
+    const profile = resolveSettings({
+      config,
+      flags: {},
+      env: { TENJIN_HARNESS: 'hermes' },
+    });
+    expect(profile.publishMode).toEqual({ value: 'auto', source: 'profile' });
+    expect(profile.publishDefaultPrice).toEqual({ value: '250000', source: 'profile' });
+
+    const project = resolveSettings({
+      config,
+      flags: {},
+      env: { TENJIN_HARNESS: 'hermes' },
+      project: { gitignored: true, publish: { mode: 'review', defaultPrice: '500000' } },
+    });
+    expect(project.publishMode).toEqual({ value: 'review', source: 'project' });
+    expect(project.publishDefaultPrice).toEqual({ value: '500000', source: 'project' });
+  });
 });
 
 describe('install block', () => {
@@ -151,5 +217,6 @@ describe('install block', () => {
   it('is not a `config set` key: it is never rendered as a scalar', () => {
     expect(CONFIG_KEYS as readonly string[]).not.toContain('install');
     expect(CONFIG_KEYS as readonly string[]).not.toContain('publish');
+    expect(CONFIG_KEYS as readonly string[]).not.toContain('policyProfiles');
   });
 });

@@ -338,6 +338,74 @@ describe('runConfigSet — persistence', () => {
   });
 });
 
+describe('harness policy profiles', () => {
+  it('sets and reads profile-scoped autonomy without changing the global value', async () => {
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.1' }, makeCtx());
+    const set = await runConfigSet(
+      { key: 'maxAutoSpend', value: '0.25', profile: 'hermes' },
+      makeCtx(),
+    );
+    expect(set.data).toMatchObject({
+      key: 'maxAutoSpend',
+      value: { atomic: '250000', usd: '0.25' },
+      source: 'profile',
+    });
+    expect(await readRawFile()).toEqual({
+      maxAutoSpend: '100000',
+      policyProfiles: { hermes: { maxAutoSpend: '250000' } },
+    });
+
+    const global = await runConfigGet({ key: 'maxAutoSpend' }, makeCtx());
+    const hermes = await runConfigGet({ key: 'maxAutoSpend', profile: 'hermes' }, makeCtx());
+    expect(global.data).toMatchObject({ value: { atomic: '100000' }, source: 'file' });
+    expect(hermes.data).toMatchObject({ value: { atomic: '250000' }, source: 'profile' });
+  });
+
+  it('merges profile publish fields and preserves unrelated profile data', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        policyProfiles: {
+          hermes: { future: true, publish: { defaultPrice: '500000', visibility: 'unlisted' } },
+          openclaw: { maxAutoSpend: '100000' },
+        },
+      }),
+    );
+    await runConfigSet({ key: 'publish.mode', value: 'auto', profile: 'hermes' }, makeCtx());
+    expect(await readRawFile()).toEqual({
+      policyProfiles: {
+        hermes: {
+          future: true,
+          publish: { defaultPrice: '500000', visibility: 'unlisted', mode: 'auto' },
+        },
+        openclaw: { maxAutoSpend: '100000' },
+      },
+    });
+  });
+
+  it.each(['sendMaxAmount', 'baseUrl', 'rpcUrl', 'evalCohort'])(
+    'keeps %s global-only',
+    async (key) => {
+      const err = await caught(() =>
+        runConfigSet(
+          { key, value: key.endsWith('Url') ? 'https://x.example' : '0', profile: 'hermes' },
+          makeCtx(),
+        ),
+      );
+      expect(err.code).toBe('USAGE');
+      expect(err.message).toContain('global-only');
+    },
+  );
+
+  it('rejects unknown profile names rather than silently writing them', async () => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'maxAutoSpend', value: '1', profile: 'other' }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.fix).toContain('hermes');
+  });
+});
+
 // Local mirror of lib/money's atomicToUsd expectation, used only to phrase the
 // spend-key table above without importing an extra symbol for one call site.
 function atomicToUsd(atomic: string): string {

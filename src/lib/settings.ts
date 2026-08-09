@@ -8,6 +8,7 @@ import {
   PublishModeSchema,
   SEND_MAX_UNSET,
   loadRawConfig,
+  resolvePolicyProfileName,
   resolvePublishDefaultPrice,
   resolvePublishMode,
   resolveSettings,
@@ -121,9 +122,10 @@ export interface ResolvedPublishSettings {
 
 /**
  * Resolve the effective publish mode + default price across every layer:
- * global config.json < project `.tenjin.json` < env (TENJIN_PUBLISH_MODE) <
- * flag (`--mode`), with the `full-auto` loosening gate applied to the project
- * layer. The seam a `publish` command (B3.2) resolves its consent through.
+ * global config.json < harness profile < project `.tenjin.json` < env
+ * (TENJIN_PUBLISH_MODE) < flag (`--mode`), with the `full-auto` loosening gate
+ * applied to the project layer. The seam a `publish` command resolves its
+ * consent through.
  */
 export async function resolvePublishSettings(
   input: { dataDir: string; cwd: string; flag?: string; env?: NodeJS.ProcessEnv },
@@ -133,9 +135,10 @@ export async function resolvePublishSettings(
   const config = await loadRawConfig(input.dataDir);
   const project = await loadProjectConfig(input.cwd, deps);
   const layer = project?.layer;
+  const profile = resolvePolicyProfileName(env);
 
-  const mode = resolvePublishMode({ config, project: layer, env, flag: input.flag });
-  const price = resolvePublishDefaultPrice({ config, project: layer });
+  const mode = resolvePublishMode({ config, profile, project: layer, env, flag: input.flag });
+  const price = resolvePublishDefaultPrice({ config, profile, project: layer });
   const warnings = mode.downgradedWarning !== undefined ? [mode.downgradedWarning] : [];
 
   return {

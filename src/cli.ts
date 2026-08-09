@@ -40,6 +40,13 @@ function addGlobalFlags(cmd: Command): Command {
     .option('--timeout <ms>', 'request timeout in milliseconds');
 }
 
+function addPolicyProfileFlag(cmd: Command): Command {
+  return cmd.option(
+    '--profile <name>',
+    'read or write a harness policy profile: hermes | openclaw',
+  );
+}
+
 function buildContext(cmd: Command, io: Io): CommandContext {
   const parsed = GlobalOptsSchema.safeParse(cmd.optsWithGlobals());
   if (!parsed.success) {
@@ -184,29 +191,40 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  const config = addGlobalFlags(program.command('config')).description(
+  const config = addPolicyProfileFlag(addGlobalFlags(program.command('config'))).description(
     'Show or change CLI configuration',
   );
   config.action(async function (this: Command) {
     await runCommand('config', this, async (ctx) => {
       const { runConfigList } = await import('./commands/config');
-      return runConfigList(ctx);
+      const o = this.optsWithGlobals();
+      return runConfigList(ctx, {
+        ...(typeof o.profile === 'string' ? { profile: o.profile } : {}),
+      });
     });
   });
-  addGlobalFlags(config.command('get <key>'))
+  addPolicyProfileFlag(addGlobalFlags(config.command('get <key>')))
     .description('Print one effective config value')
     .action(async function (this: Command, key: string) {
       await runCommand('config.get', this, async (ctx) => {
         const { runConfigGet } = await import('./commands/config');
-        return runConfigGet({ key }, ctx);
+        const o = this.optsWithGlobals();
+        return runConfigGet(
+          { key, ...(typeof o.profile === 'string' ? { profile: o.profile } : {}) },
+          ctx,
+        );
       });
     });
-  addGlobalFlags(config.command('set <key> <value>'))
+  addPolicyProfileFlag(addGlobalFlags(config.command('set <key> <value>')))
     .description('Set a config value (decimal USD accepted for spend keys)')
     .action(async function (this: Command, key: string, value: string) {
       await runCommand('config.set', this, async (ctx) => {
         const { runConfigSet } = await import('./commands/config');
-        return runConfigSet({ key, value }, ctx);
+        const o = this.optsWithGlobals();
+        return runConfigSet(
+          { key, value, ...(typeof o.profile === 'string' ? { profile: o.profile } : {}) },
+          ctx,
+        );
       });
     });
 

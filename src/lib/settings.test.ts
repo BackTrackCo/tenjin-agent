@@ -58,6 +58,38 @@ describe('resolvePublishSettings — precedence', () => {
     expect(r.defaultPriceSource).toBe('file');
   });
 
+  it('uses the active harness profile between global and project settings', async () => {
+    await writeFile(
+      join(dataDir, 'config.json'),
+      JSON.stringify({
+        publish: { mode: 'review', defaultPrice: '100000' },
+        policyProfiles: { hermes: { publish: { mode: 'auto', defaultPrice: '250000' } } },
+      }),
+    );
+    const profiled = await resolvePublishSettings(
+      input({ env: { TENJIN_HARNESS: 'hermes' } }),
+      committed,
+    );
+    expect(profiled).toMatchObject({
+      mode: 'auto',
+      modeSource: 'profile',
+      defaultPriceAtomic: '250000',
+      defaultPriceSource: 'profile',
+    });
+
+    await writeProject({ publish: { mode: 'review', defaultPrice: '0.5' } });
+    const project = await resolvePublishSettings(
+      input({ env: { TENJIN_HARNESS: 'hermes' } }),
+      committed,
+    );
+    expect(project).toMatchObject({
+      mode: 'review',
+      modeSource: 'project',
+      defaultPriceAtomic: '500000',
+      defaultPriceSource: 'project',
+    });
+  });
+
   it('project .tenjin.json overrides global config (project source), decimal USD', async () => {
     await writeGlobal({ mode: 'review', defaultPrice: '200000' });
     // .tenjin.json price is DECIMAL USD (human edge, O1); converted to atomic.

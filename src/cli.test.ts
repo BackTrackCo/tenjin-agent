@@ -168,6 +168,27 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  it('accepts --profile before or after a config subcommand', async () => {
+    const setCap = captureIo();
+    const setCode = await main(
+      ['config', 'set', 'maxAutoSpend', '0.25', '--profile', 'hermes', '--json'],
+      setCap.io,
+    );
+    expect(setCode).toBe(0);
+    expect(JSON.parse(setCap.stdout()).data).toMatchObject({ source: 'profile' });
+
+    const getCap = captureIo();
+    const getCode = await main(
+      ['config', '--profile', 'hermes', 'get', 'maxAutoSpend', '--json'],
+      getCap.io,
+    );
+    expect(getCode).toBe(0);
+    expect(JSON.parse(getCap.stdout()).data).toMatchObject({
+      value: { atomic: '250000' },
+      source: 'profile',
+    });
+  });
+
   it('--json suppresses stderr on a TTY for a failing command', async () => {
     const cap = captureIo(true);
     // Deterministic offline failure (unknown command → USAGE), so this exercises

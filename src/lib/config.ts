@@ -35,6 +35,35 @@ const PublishConfigSchema = z.object({
   defaultPrice: atomicString,
 });
 
+/** Harnesses that may select an isolated autonomy policy. */
+export const PolicyProfileNameSchema = z.enum(['hermes', 'openclaw']);
+export type PolicyProfileName = z.infer<typeof PolicyProfileNameSchema>;
+export const POLICY_PROFILE_NAMES = PolicyProfileNameSchema.options;
+
+/**
+ * A harness profile can tune agent autonomy without moving credentials or spend
+ * accounting into a separate silo. Network, telemetry, and `send` settings stay
+ * global on purpose: selecting a harness must never re-point the CLI or enable a
+ * model-facing wallet drain primitive.
+ */
+export const PolicyProfileConfigSchema = z
+  .object({
+    maxAutoSpend: atomicString.optional(),
+    sessionBudget: atomicString.optional(),
+    confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]).optional(),
+    allowlistCreators: z.array(z.string()).optional(),
+    publish: PublishConfigSchema.partial().passthrough().optional(),
+  })
+  .passthrough();
+export type PolicyProfileConfig = z.infer<typeof PolicyProfileConfigSchema>;
+
+const PolicyProfilesSchema = z
+  .object({
+    hermes: PolicyProfileConfigSchema.optional(),
+    openclaw: PolicyProfileConfigSchema.optional(),
+  })
+  .passthrough();
+
 /**
  * What `install` recorded about its OWN targets. `harness` is the explicit
  * `--harness` set of the last install that passed the flag, and it exists so
@@ -78,6 +107,7 @@ export const ConfigSchema = z.object({
   evalCohort: z.boolean(),
   publish: PublishConfigSchema,
   install: InstallConfigSchema,
+  policyProfiles: PolicyProfilesSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -96,6 +126,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: InstallConfigSchema.partial().passthrough().optional(),
+    policyProfiles: PolicyProfilesSchema.optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -125,16 +156,16 @@ export const CONFIG_DEFAULTS: Config = {
   evalCohort: false,
   publish: { mode: 'review', defaultPrice: '100000' },
   install: { harness: [] },
+  policyProfiles: {},
 };
 
 /**
- * Scalar keys `config get/set/list` render one line each. Both nested blocks are
- * excluded: `publish` is addressed by the dotted `publish.mode`/`publish.defaultPrice`
- * keys (see PUBLISH_CONFIG_KEYS), and `install` is a record `install` writes about
- * itself rather than a setting to hand-edit, so neither is ever a bare scalar.
+ * Scalar keys `config get/set/list` render one line each. Nested blocks are
+ * excluded: `publish` is addressed by dotted keys, `install` is managed by the
+ * installer, and `policyProfiles` is selected with `--profile` / TENJIN_HARNESS.
  */
-export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install'>;
-const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install']);
+export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install' | 'policyProfiles'>;
+const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install', 'policyProfiles']);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
@@ -192,10 +223,11 @@ export async function loadConfig(dir: string): Promise<Config> {
       defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
     },
     install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
+    policyProfiles: raw.policyProfiles ?? CONFIG_DEFAULTS.policyProfiles,
   };
 }
 
-export type Provenance = 'default' | 'file' | 'project' | 'env' | 'flag';
+export type Provenance = 'default' | 'file' | 'profile' | 'project' | 'env' | 'flag';
 
 export interface ResolvedSetting<T> {
   value: T;
@@ -222,6 +254,8 @@ export interface PublishModeResolution {
 
 /** Effective value + where it came from, per key. What `config` (bare) renders. */
 export interface EffectiveSettings {
+  /** Selected policy profile, if TENJIN_HARNESS or an explicit caller chose one. */
+  policyProfile?: PolicyProfileName;
   maxAutoSpend: ResolvedSetting<string>;
   sessionBudget: ResolvedSetting<string>;
   confirm: ResolvedSetting<string>;
@@ -246,27 +280,38 @@ export interface ResolveSettingsInput {
   env: NodeJS.ProcessEnv;
   /** The nearest `.tenjin.json` layer, when one was found (see publish-settings). */
   project?: ProjectPublishLayer;
+  /** Explicit selection wins over TENJIN_HARNESS. */
+  profile?: PolicyProfileName;
+}
+
+/** Known profile names only; an unknown environment value fails closed to global policy. */
+export function resolvePolicyProfileName(env: NodeJS.ProcessEnv): PolicyProfileName | undefined {
+  const parsed = PolicyProfileNameSchema.safeParse(env.TENJIN_HARNESS);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
- * Apply precedence flag > env > file > default per key, returning each effective
- * value with its source. In B1 only baseUrl has flag/env overrides
- * (`--base-url`, TENJIN_BASE_URL); the rest resolve file-or-default. B3 adds the
- * publish keys, which additionally fold in the per-project `.tenjin.json` layer.
+ * Apply precedence flag > env > project > profile > file > default per key,
+ * returning each effective value with its source. Only autonomy and publish
+ * fields participate in the profile layer; only publish fields participate in
+ * the project layer. baseUrl retains its flag/env/file/default cascade.
  */
 export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings {
   const { config, flags, env, project } = input;
+  const profile = input.profile ?? resolvePolicyProfileName(env);
+  const policy = profile === undefined ? undefined : config.policyProfiles?.[profile];
   return {
-    maxAutoSpend: fileOrDefault('maxAutoSpend', config),
-    sessionBudget: fileOrDefault('sessionBudget', config),
-    confirm: fileOrDefault('confirm', config),
+    ...(profile !== undefined ? { policyProfile: profile } : {}),
+    maxAutoSpend: profileOrFile('maxAutoSpend', config, policy),
+    sessionBudget: profileOrFile('sessionBudget', config, policy),
+    confirm: profileOrFile('confirm', config, policy),
     sendMaxAmount: resolveSendMaxAmount(config),
-    allowlistCreators: fileOrDefault('allowlistCreators', config),
+    allowlistCreators: profileOrFile('allowlistCreators', config, policy),
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
-    publishMode: resolvePublishMode({ config, project, env }),
-    publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
+    publishMode: resolvePublishMode({ config, profile, project, env }),
+    publishDefaultPrice: resolvePublishDefaultPrice({ config, profile, project }),
   };
 }
 
@@ -286,22 +331,28 @@ function coercePublishMode(raw: string | undefined): PublishMode | undefined {
 }
 
 /**
- * Resolve publish.mode through global file < project `.tenjin.json` < env
- * (TENJIN_PUBLISH_MODE) < flag (`--mode`). Total: an invalid env/flag value is
- * ignored (validation lives at the command edge, like baseUrl). The project
- * layer's `full-auto` is gated on that file being gitignored.
+ * Resolve publish.mode through global file < harness profile < project
+ * `.tenjin.json` < env (TENJIN_PUBLISH_MODE) < flag (`--mode`). Total: an
+ * invalid env/flag value is ignored (validation lives at the command edge, like
+ * baseUrl). The project layer's `full-auto` is gated on that file being
+ * gitignored.
  */
 export function resolvePublishMode(input: {
   config: PartialConfig;
+  profile?: PolicyProfileName;
   project?: ProjectPublishLayer;
   env: NodeJS.ProcessEnv;
   flag?: string;
 }): PublishModeResolution {
-  const { config, project, env, flag } = input;
+  const { config, profile, project, env, flag } = input;
   let winner: PublishModeResolution = { value: CONFIG_DEFAULTS.publish.mode, source: 'default' };
 
   const fromFile = config.publish?.mode;
   if (fromFile !== undefined) winner = { value: fromFile, source: 'file' };
+
+  const fromProfile =
+    profile === undefined ? undefined : config.policyProfiles?.[profile]?.publish?.mode;
+  if (fromProfile !== undefined) winner = { value: fromProfile, source: 'profile' };
 
   if (project !== undefined && project.publish?.mode !== undefined) {
     const fromProject = project.publish.mode;
@@ -321,18 +372,24 @@ export function resolvePublishMode(input: {
   return winner;
 }
 
-/** Resolve publish.defaultPrice (atomic) through global file < project < default. */
+/** Resolve publish.defaultPrice (atomic) through default < file < profile < project. */
 export function resolvePublishDefaultPrice(input: {
   config: PartialConfig;
+  profile?: PolicyProfileName;
   project?: ProjectPublishLayer;
 }): ResolvedSetting<string> {
-  const { config, project } = input;
+  const { config, profile, project } = input;
   let result: ResolvedSetting<string> = {
     value: CONFIG_DEFAULTS.publish.defaultPrice,
     source: 'default',
   };
   if (config.publish?.defaultPrice !== undefined) {
     result = { value: config.publish.defaultPrice, source: 'file' };
+  }
+  const fromProfile =
+    profile === undefined ? undefined : config.policyProfiles?.[profile]?.publish?.defaultPrice;
+  if (fromProfile !== undefined) {
+    result = { value: fromProfile, source: 'profile' };
   }
   if (project?.publish?.defaultPrice !== undefined) {
     result = { value: project.publish.defaultPrice, source: 'project' };
@@ -370,6 +427,20 @@ function fileOrDefault<K extends keyof Config>(
   // type parameter doesn't refine K, so assert the excluded-undefined type.
   if (fromFile !== undefined) return { value: fromFile as Config[K], source: 'file' };
   return { value: CONFIG_DEFAULTS[key], source: 'default' };
+}
+
+type ProfileScalarKey = 'maxAutoSpend' | 'sessionBudget' | 'confirm' | 'allowlistCreators';
+
+function profileOrFile<K extends ProfileScalarKey>(
+  key: K,
+  config: PartialConfig,
+  profile: PolicyProfileConfig | undefined,
+): ResolvedSetting<Config[K]> {
+  const fromProfile = profile?.[key];
+  if (fromProfile !== undefined) {
+    return { value: fromProfile as Config[K], source: 'profile' };
+  }
+  return fileOrDefault(key, config);
 }
 
 function resolveBaseUrl(

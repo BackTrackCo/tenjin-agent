@@ -3,7 +3,10 @@ import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import {
   CONFIG_KEYS,
+  POLICY_PROFILE_NAMES,
   PUBLISH_CONFIG_KEYS,
+  PolicyProfileConfigSchema,
+  PolicyProfileNameSchema,
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
@@ -13,6 +16,8 @@ import {
 import type {
   EffectiveSettings,
   PartialConfig,
+  PolicyProfileConfig,
+  PolicyProfileName,
   Provenance,
   PublishConfigKey,
   PublishMode,
@@ -42,6 +47,12 @@ interface RenderedSetting extends RenderedValue {
 }
 
 const CONFIRM_ABOVE = 'above:';
+const PROFILE_SCALAR_KEYS = [
+  'maxAutoSpend',
+  'sessionBudget',
+  'confirm',
+  'allowlistCreators',
+] as const satisfies readonly ScalarConfigKey[];
 const KEY_WIDTH = Math.max(...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].map((key) => key.length));
 
 /**
@@ -72,8 +83,11 @@ function isPublishKey(key: string): key is PublishConfigKey {
  * defaults-merged config), so a key the user never set reads `default`, not
  * `file`.
  */
-export async function runConfigList(ctx: CommandContext): Promise<CommandResult> {
-  const settings = await resolveFromContext(ctx);
+export async function runConfigList(
+  ctx: CommandContext,
+  options: { profile?: string } = {},
+): Promise<CommandResult> {
+  const settings = await resolveFromContext(ctx, parseOptionalProfile(options.profile));
   const data: Record<string, RenderedSetting> = {};
   const humanLines: string[] = [];
   for (const key of CONFIG_KEYS) {
@@ -91,11 +105,11 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
 
 /** Same per-key shape as list, for one key. Unknown key is a USAGE failure. */
 export async function runConfigGet(
-  { key }: { key: string },
+  { key, profile }: { key: string; profile?: string },
   ctx: CommandContext,
 ): Promise<CommandResult> {
   if (isPublishKey(key)) {
-    const settings = await resolveFromContext(ctx);
+    const settings = await resolveFromContext(ctx, parseOptionalProfile(profile));
     const entry = renderPublishSetting(key, settings);
     return {
       data: { key, ...entry },
@@ -103,7 +117,7 @@ export async function runConfigGet(
     };
   }
   const configKey = assertKey(key);
-  const settings = await resolveFromContext(ctx);
+  const settings = await resolveFromContext(ctx, parseOptionalProfile(profile));
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
   return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
@@ -114,14 +128,26 @@ export async function runConfigGet(
  * provenance stays truthful. The written key now reads `file`.
  */
 export async function runConfigSet(
-  { key, value }: { key: string; value: string },
+  { key, value, profile }: { key: string; value: string; profile?: string },
   ctx: CommandContext,
 ): Promise<CommandResult> {
-  if (isPublishKey(key)) return setPublishKey(key, value, ctx);
+  const selectedProfile = parseOptionalProfile(profile);
+  if (isPublishKey(key)) return setPublishKey(key, value, ctx, selectedProfile);
   const configKey = assertKey(key);
+  if (selectedProfile !== undefined && !isProfileScalarKey(configKey)) {
+    throw profileKeyError(configKey);
+  }
   const stored = parseValue(configKey, value);
-  await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
-  const entry = renderSetting(configKey, stored, 'file');
+  if (selectedProfile === undefined) {
+    await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
+  } else {
+    await persistPolicyProfile(ctx.dataDir, selectedProfile, { [configKey]: stored });
+  }
+  const entry = renderSetting(
+    configKey,
+    stored,
+    selectedProfile === undefined ? 'file' : 'profile',
+  );
   return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
 
@@ -135,17 +161,25 @@ async function setPublishKey(
   key: PublishConfigKey,
   value: string,
   ctx: CommandContext,
+  profile?: PolicyProfileName,
 ): Promise<CommandResult> {
   const entry: RenderedSetting =
     key === 'publish.mode'
-      ? { value: parsePublishMode(value), source: 'file' }
-      : { value: toMoney(parseUsdToAtomic(value)), source: 'file' };
+      ? { value: parsePublishMode(value), source: profile === undefined ? 'file' : 'profile' }
+      : {
+          value: toMoney(parseUsdToAtomic(value)),
+          source: profile === undefined ? 'file' : 'profile',
+        };
   const subkey = key === 'publish.mode' ? 'mode' : 'defaultPrice';
   const stored = key === 'publish.mode' ? (entry.value as string) : (entry.value as Money).atomic;
-  await persist(ctx.dataDir, (existing) => ({
-    ...existing,
-    publish: { ...existing.publish, [subkey]: stored },
-  }));
+  if (profile === undefined) {
+    await persist(ctx.dataDir, (existing) => ({
+      ...existing,
+      publish: { ...existing.publish, [subkey]: stored },
+    }));
+  } else {
+    await persistPolicyProfile(ctx.dataDir, profile, { publish: { [subkey]: stored } });
+  }
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
@@ -187,7 +221,39 @@ export async function persistInstallHarness(
   }));
 }
 
-async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
+/**
+ * Merge a harness policy through the same atomic lock as `config set`. This is
+ * also the installer seam: native integrations can establish autonomy defaults
+ * without touching the global policy used by Codex or Claude.
+ */
+export async function persistPolicyProfile(
+  dir: string,
+  profile: PolicyProfileName,
+  patch: PolicyProfileConfig,
+): Promise<void> {
+  const validated = PolicyProfileConfigSchema.parse(patch);
+  await persist(dir, (existing) => {
+    const current = existing.policyProfiles?.[profile] ?? {};
+    return {
+      ...existing,
+      policyProfiles: {
+        ...existing.policyProfiles,
+        [profile]: {
+          ...current,
+          ...validated,
+          ...(validated.publish !== undefined
+            ? { publish: { ...current.publish, ...validated.publish } }
+            : {}),
+        },
+      },
+    };
+  });
+}
+
+async function resolveFromContext(
+  ctx: CommandContext,
+  profile?: PolicyProfileName,
+): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
   // real `publish` would resolve (project/env included), not a global-only guess.
@@ -197,6 +263,29 @@ async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSetting
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
     project: project?.layer,
+    profile,
+  });
+}
+
+function parseOptionalProfile(value: string | undefined): PolicyProfileName | undefined {
+  if (value === undefined) return undefined;
+  const parsed = PolicyProfileNameSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Unknown policy profile: ${JSON.stringify(value)}`, {
+    fix: `Use one of: ${POLICY_PROFILE_NAMES.join(', ')}.`,
+  });
+}
+
+function isProfileScalarKey(key: ScalarConfigKey): key is (typeof PROFILE_SCALAR_KEYS)[number] {
+  return (PROFILE_SCALAR_KEYS as readonly string[]).includes(key);
+}
+
+function profileKeyError(key: string): CliError {
+  return new CliError('USAGE', `Config key ${JSON.stringify(key)} is global-only`, {
+    fix: `Omit --profile, or use a profile-scoped key: ${[
+      ...PROFILE_SCALAR_KEYS,
+      ...PUBLISH_CONFIG_KEYS,
+    ].join(', ')}.`,
   });
 }
 
