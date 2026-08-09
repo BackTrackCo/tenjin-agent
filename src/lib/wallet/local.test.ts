@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Hex } from 'viem';
@@ -12,7 +13,12 @@ import {
   walletPath,
 } from '../paths';
 import { readWalletRecord, writeWalletRecord } from './store';
-import { createLocalProvider, createLocalWallet, parkOutgoingWallet } from './local';
+import {
+  createLocalProvider,
+  createLocalWallet,
+  parkOutgoingWallet,
+  verifyLocalWallet,
+} from './local';
 import type { ExecFn } from './passphrase';
 import { KNOWN_PASSPHRASE, encryptedRecord, fakeRecord } from './test-support';
 
@@ -330,6 +336,140 @@ describe('createLocalProvider.getSigner', () => {
     });
     const signer = await provider.getSigner();
     expect(signer.address).toBe(privateKeyToAccount(key).address);
+  });
+});
+
+// #70: doctor reported `wallet: ok` for a keystore whose passphrase was gone, and
+// the loss only surfaced at the first signing. `verify` is the read-only, never-
+// prompting answer to "can this wallet actually sign?".
+describe('verifyLocalWallet', () => {
+  it('verifies a keystore the resolved passphrase opens', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key));
+    const v = await verifyLocalWallet(envPass(KNOWN_PASSPHRASE));
+    expect(v.status).toBe('verified');
+    expect(v.detail).toContain('TENJIN_WALLET_PASSPHRASE');
+  });
+
+  it('reports broken, with a fix, when the passphrase does not open it', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key));
+    const v = await verifyLocalWallet(envPass('not the passphrase'));
+    expect(v.status).toBe('broken');
+    expect(v.detail).toContain('cannot be decrypted');
+    expect(v).toHaveProperty('fix');
+  });
+
+  // Neither proven good nor proven bad. Reporting either would be a guess, and
+  // guessing "ok" here is the whole of #70.
+  it('reports unverified when no passphrase is reachable without prompting', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key));
+    const v = await verifyLocalWallet({
+      dir: dataDir,
+      env: {},
+      // A platform with no built-in store: nothing to read, nothing to prompt.
+      passphrase: { platform: 'openbsd' },
+    });
+    expect(v.status).toBe('unverified');
+    expect(v.detail).toContain('without prompting');
+  });
+
+  // doctor is an allowlisted verb an unattended agent runs on its own, so this
+  // must hold even when a TTY is available and a prompt would succeed.
+  it('never prompts, even at a TTY with a working prompt', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key));
+    const prompt = vi.fn(async () => KNOWN_PASSPHRASE);
+    const v = await verifyLocalWallet({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'openbsd', isTTY: true, prompt },
+    });
+    expect(prompt).not.toHaveBeenCalled();
+    expect(v.status).toBe('unverified');
+  });
+
+  it('reports broken when the decrypted key does not derive the stored address', async () => {
+    const key = generatePrivateKey();
+    const otherAddress = privateKeyToAccount(generatePrivateKey()).address;
+    await writeWalletRecord(dataDir, await encryptedRecord(key, KNOWN_PASSPHRASE, otherAddress));
+    const v = await verifyLocalWallet(envPass(KNOWN_PASSPHRASE));
+    expect(v.status).toBe('broken');
+    expect(v.detail).toContain(otherAddress);
+  });
+
+  // The exact state #70 was reported from: a pre-per-address wallet whose shared
+  // keychain slot was clobbered by a later create. The wallet is unopenable and
+  // the address it publishes under can no longer sign.
+  it('names the legacy shared slot when that is the only passphrase and it fails', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key)); // KNOWN_PASSPHRASE
+    const entries = new Map<string, string>([['wallet', 'someone-elses-passphrase']]);
+    const calls: string[] = [];
+    const exec: ExecFn = async (file, args) => {
+      calls.push(args.join(' '));
+      expect(file).toBe('security');
+      if (args[0] !== 'find-generic-password') throw new Error(`unexpected: ${args.join(' ')}`);
+      const v = entries.get(args[args.indexOf('-a') + 1] as string);
+      if (v === undefined) throw new Error('not found');
+      return { stdout: `${v}\n`, stderr: '' };
+    };
+    const v = await verifyLocalWallet({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'darwin', isTTY: false, exec },
+    });
+    expect(v.status).toBe('broken');
+    expect(v.detail).toContain('legacy shared entry');
+    // A diagnostic that re-keys the credential store is not a diagnostic: the
+    // migration stays with the first real signing, which is where the decrypt
+    // that PROVES ownership happens.
+    expect(calls.filter((c) => !c.startsWith('find-generic-password'))).toEqual([]);
+  });
+
+  // Windows keeps a DPAPI-encrypted file per wallet, not a service/account entry,
+  // so the remediation must not send that operator hunting for a keychain item
+  // their machine has never had.
+  it('names the DPAPI file, not a service/account entry, on the win32 legacy path', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key)); // KNOWN_PASSPHRASE
+    // Only the LEGACY shared blob exists, and it holds another wallet's passphrase.
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(passphraseBlobPath(dataDir), 'ciphertext');
+    const exec: ExecFn = async () => ({ stdout: 'someone-elses-passphrase\n', stderr: '' });
+
+    const v = await verifyLocalWallet({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'win32', isTTY: false, exec },
+    });
+    expect(v.status).toBe('broken');
+    expect(v.detail).toContain('legacy shared DPAPI passphrase file');
+    expect(v.detail).not.toContain('service tenjin-cli');
+    expect(v).toHaveProperty('fix');
+    expect((v as { fix: string }).fix).toContain('DPAPI-protected passphrase file');
+  });
+
+  // The deadline belongs to this read-only path and nowhere else: a killed
+  // credential-store WRITE makes resolvePassphraseForCreate fall through to a
+  // different passphrase while the committed value wins later decrypts.
+  it('is the only place in this module that deadlines the store CLIs', async () => {
+    const src = await readFile(fileURLToPath(new URL('./local.ts', import.meta.url)), 'utf8');
+    expect(src.match(/timeoutMs:/g)).toHaveLength(1);
+    const verifyOnward = src.slice(src.indexOf('export async function verifyLocalWallet'));
+    expect(verifyOnward).toContain('timeoutMs:');
+  });
+
+  it('verifies an env key by deriving it, with no keystore involved', async () => {
+    const key = generatePrivateKey();
+    const v = await verifyLocalWallet({
+      dir: dataDir,
+      env: { TENJIN_WALLET_KEY: key },
+      passphrase: { platform: 'openbsd' },
+    });
+    expect(v.status).toBe('verified');
+    expect(v.detail).toContain('TENJIN_WALLET_KEY');
   });
 });
 

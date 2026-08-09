@@ -21,6 +21,7 @@ vi.mock('./lib/skills-source', async (importOriginal) => {
 });
 import { main } from './cli';
 import { resolveSkillsSource } from './lib/skills-source';
+import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import type { Io } from './lib/output';
 
 // The dispatcher runs the update check and the skills self-heal after every
@@ -95,6 +96,20 @@ describe('main', () => {
     expect(help.indexOf('read [options] <resource>')).toBeLessThan(
       help.indexOf('buy [options] <resource>'),
     );
+  });
+
+  // A pointer in help has to work from wherever the reader is standing, which is
+  // their own project and not this package. A repo-relative `docs/...` path reads
+  // as a file they can open and is not one.
+  it('points --allow-free-verbs help at the permissions URL, not a relative path', async () => {
+    const cap = captureIo();
+    expect(await main(['install', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain(PERMISSIONS_DOC_URL);
+    expect(help).not.toMatch(/(?<!\/)docs\/agent-permissions\.md/);
+    // Same tier claim as every other surface, doctor's local check included.
+    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC or move your keys');
+    expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {

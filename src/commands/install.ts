@@ -38,11 +38,11 @@ import {
 import type { PublishMode } from '../lib/config';
 import { persistInstallHarness, persistPublishMode } from './config';
 import { runWalletCreate } from './wallet';
-import { collectDoctorChecks } from './doctor';
+import { collectDoctorChecks, isNoWalletCheck } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { walletFileExists } from '../lib/wallet/store';
-import { recommendedPermissions } from '../lib/permissions';
+import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
@@ -231,11 +231,12 @@ export interface InstallDeps {
 
 /**
  * `tenjin install`: detect the installed harness(es), copy the packaged skills
- * into each one's skills directory, wire the AGENTS.md pointer, run the doctor
- * checks, then ask AT MOST THREE questions (publishing, harness permissions,
- * wallet) and print a short summary. Everything that is not one of those three
- * decisions is display: the security reference material lives in `doctor` and
- * the README, not in the middle of a setup flow.
+ * into each one's skills directory, wire the AGENTS.md pointer, ask AT MOST THREE
+ * questions (publishing, harness permissions, wallet), then run the doctor checks
+ * over the machine those answers just produced and print a short summary.
+ * Everything that is not one of those three decisions is display: the security
+ * reference material lives in docs/agent-permissions.md, not in the middle of a
+ * setup flow.
  *
  * Like every command it is human-first (the global output contract): at a TTY
  * without `--json` it prompts and returns the walkthrough as humanLines, which
@@ -383,16 +384,6 @@ async function installBody(
       ),
     );
   }
-  // The embedded doctor run inspects the same `home` install just wrote into, so
-  // its skill-wiring check reports THIS run's result rather than os.homedir()'s.
-  // `which` goes with it: the check gates its verdicts on harness detection, and a
-  // different probe there would judge directories this run never targeted.
-  const doctorDeps: DoctorDeps = { ...(deps.doctorDeps ?? {}) };
-  doctorDeps.homeDir ??= home;
-  doctorDeps.which ??= which;
-  const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
-  const doctor = await collect(ctx);
-
   // The three decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
@@ -412,6 +403,25 @@ async function installBody(
   const wallet = humanOutput
     ? await resolveWallet(ctx, deps, dryRun || !canPrompt || noWallet)
     : undefined;
+
+  // AFTER all three decisions, never before (#101). The snapshot used to be taken
+  // straight after the skills were written, so a run that created a wallet
+  // reported "No wallet" in both the walkthrough and `data.doctor` — the checks
+  // described a machine that had stopped existing three steps earlier. Collecting
+  // here costs nothing extra (it is still one run) and is what makes the embedded
+  // report describe the install it is reporting on: the wallet just created, and
+  // the config `publish.mode` just written.
+  //
+  // It still inspects the same `home` install wrote into, so its skill-wiring
+  // check reports THIS run's result rather than os.homedir()'s. `which` goes with
+  // it: the check gates its verdicts on harness detection, and a different probe
+  // there would judge directories this run never targeted.
+  const doctorDeps: DoctorDeps = { ...(deps.doctorDeps ?? {}) };
+  doctorDeps.homeDir ??= home;
+  doctorDeps.which ??= which;
+  const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
+  const doctor = await collect(ctx);
+
   if (canPrompt) await (deps.outro ?? clackOutro)('Setup complete.');
 
   const data = {
@@ -475,21 +485,29 @@ interface WalkthroughState {
 }
 
 /**
- * The human surface: anything that genuinely needs attention (a dry-run banner,
- * an overwrite warning, a consent disclosure, a failing check) followed by a
- * summary of at most five lines. On a clean install the summary IS the output.
+ * The human surface: what happened, then what still needs you (#80). The summary
+ * of at most five lines comes FIRST — it used to sit under the warnings, so a
+ * first-time reader met "Some checks need attention" before learning anything had
+ * succeeded and the whole run read as failure-then-success. On a clean install
+ * the summary IS the output.
+ *
+ * The dry-run banner stays on top: it qualifies every line below it, so it is not
+ * an attention item but a statement about what the rest of the output means.
  */
 function buildWalkthrough(io: Io, s: WalkthroughState): string[] {
   const lines: string[] = [];
-  if (s.dryRun) lines.push(paint(io, 'yellow', 'Dry run: nothing was written.'));
-  lines.push(...noticeLines(io, s));
-  if (lines.length > 0) lines.push('');
+  if (s.dryRun) {
+    lines.push(paint(io, 'yellow', 'Dry run: nothing was written.'));
+    lines.push('');
+  }
   lines.push(...summaryLines(io, s));
+  const notices = noticeLines(io, s);
+  if (notices.length > 0) lines.push('', ...notices);
   return lines;
 }
 
 /**
- * Everything above the summary: per-harness warnings, the Codex network rule,
+ * Everything below the summary: per-harness warnings, the Codex network rule,
  * the nudge disclosure and its undo, and any doctor check that is not ok. A
  * green doctor says nothing at all, so a clean run stays five lines.
  */
@@ -540,7 +558,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     // terminal at the moment we tell the operator we left their file alone.
     lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.permissions.warning)}`));
   }
-  lines.push(...doctorNotices(io, s.doctor));
+  lines.push(...doctorNotices(io, s.doctor, s.wallet));
   return lines;
 }
 
@@ -597,13 +615,13 @@ function publishingLine(io: Io, mode: PublishMode): string {
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
   if (p.added.length > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} free tenjin commands added to ${p.path}. Full caveats: tenjin doctor`;
+    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} free tenjin commands added to ${p.path}. Full caveats: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === undefined) {
     return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}`;
   }
   if (p.skipped === 'harness-not-claude') {
-    return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). Run \`tenjin doctor\` for the lines your harness needs.`;
+    return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === 'dry-run') {
     return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
@@ -716,9 +734,23 @@ function defaultConfirm(label: string): Promise<boolean> {
 /**
  * Doctor problems only. A fully green run prints nothing here: the summary is
  * the whole output, and "everything checks out" is what an absent warning means.
+ *
+ * The "no wallet" warn is dropped when the summary already carries it (#80): the
+ * summary's own wallet line says `none` and names the same `tenjin wallet create`,
+ * and someone who only wants `tenjin search` does not need it twice, in yellow,
+ * for a wallet they were just told is optional. Every other wallet warn — a
+ * keystore that will not open, an invalid TENJIN_WALLET_KEY, loose file
+ * permissions — still prints, because nothing else in the output says it.
+ *
+ * Hence `isNoWalletCheck` rather than the check's NAME. `resolveWallet` probes for
+ * a wallet FILE, so it records `none` for a machine whose credential is a broken
+ * env key; matching on the name suppressed doctor's warning about it and left the
+ * run silent about the only wallet state install cannot describe itself.
  */
-function doctorNotices(io: Io, doctor: DoctorChecks): string[] {
-  const problems = doctor.checks.filter((c) => c.status !== 'ok');
+function doctorNotices(io: Io, doctor: DoctorChecks, wallet: WalletOutcome): string[] {
+  const problems = doctor.checks.filter(
+    (c) => c.status !== 'ok' && !(wallet.status === 'none' && isNoWalletCheck(c)),
+  );
   if (problems.length === 0) return [];
   const lines = [paint(io, 'yellow', 'Some checks need attention:')];
   for (const c of problems) {
@@ -817,19 +849,19 @@ function parseModeFlag(value: string): PublishMode {
  * off-machine, `read` saves to the library and can present a cached
  * wallet-derived delegation, and two of the nine rules are `wallet show` /
  * `wallet balance`). What is actually true of the whole tier is that it cannot
- * spend and cannot open the keystore, so that is what the question says.
+ * spend and cannot move your keys, so that is what the question says.
  *
- * The pointer at `tenjin doctor` is how FLAG_CAVEAT's "printed with the rules
- * everywhere they are printed" contract is met at the consent moment. The
- * walkthrough no longer prints the rules or the flag caveat, so the yes/no that
- * replaced them names the one command that prints both, in full, unchanged.
+ * The pointer is how FLAG_CAVEAT reaches the consent moment: the walkthrough
+ * prints neither the rules nor the flag caveat, so the yes/no that replaced them
+ * names where both live in full. It used to point at `tenjin doctor`, which
+ * printed them; doctor now points at the same page (#81).
  */
 export const PERMISSIONS_QUESTION = [
   'Let your agent search tenjin without permission popups?',
   `Adds ${FREE_VERB_RULES.length} free commands to ~/.claude/settings.json.`,
-  'None can spend USDC or open your wallet keystore;',
-  'three send or store data (search, outcome, read).',
-  'Full caveats: tenjin doctor.',
+  'None can spend USDC or move your keys; doctor may check your wallet still opens.',
+  'Three send or store data (search, outcome, read).',
+  `Full caveats: ${PERMISSIONS_DOC_URL}`,
 ].join(' ');
 
 /** Decision 3's literal copy. */

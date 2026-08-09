@@ -54,7 +54,8 @@ Bash(tenjin candidate list:*)
 ```
 
 Those verbs are free in the sense that matters: **they cannot spend and cannot
-open the keystore.** Say it that way rather than "no signing" — `read` may
+move your keys**, and `doctor` may decrypt locally to check the wallet still
+opens. Say it that way rather than "no signing" — `read` may
 present a session key that was already minted (see below), which is a signature,
 just not one that can move money: it is a P-256 delegation, the wrong curve for a
 payment authorization. If asked, say also that `read` **transmits that
