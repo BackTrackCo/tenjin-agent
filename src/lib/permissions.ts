@@ -86,9 +86,10 @@ export interface ExcludedVerb {
  * papered over — `search` POSTs the (generalized, anonymous) question off-machine
  * and records it locally, `outcome` POSTs a report that moves the marketplace's
  * reuse signal (both unauthenticated remote writes), and `read` writes locally,
- * saving a delivered piece to the library. Pre-clearing them is defensible
- * because they cost nothing and cannot reach the key; calling them read-only to
- * justify it would not be.
+ * saving a delivered piece to the library, and `doctor` decrypts the keystore
+ * locally to check it opens. Pre-clearing them is defensible because they cost
+ * nothing and none of it leaves the machine; calling them read-only to justify it
+ * would not be.
  *
  * Rules are PREFIX rules: `Bash(tenjin search:*)` clears commands that start with
  * `tenjin search` and nothing else. The narrow `wallet show` / `wallet balance` /

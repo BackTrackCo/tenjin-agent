@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Hex } from 'viem';
@@ -425,6 +426,39 @@ describe('verifyLocalWallet', () => {
     // migration stays with the first real signing, which is where the decrypt
     // that PROVES ownership happens.
     expect(calls.filter((c) => !c.startsWith('find-generic-password'))).toEqual([]);
+  });
+
+  // Windows keeps a DPAPI-encrypted file per wallet, not a service/account entry,
+  // so the remediation must not send that operator hunting for a keychain item
+  // their machine has never had.
+  it('names the DPAPI file, not a service/account entry, on the win32 legacy path', async () => {
+    const key = generatePrivateKey();
+    await writeWalletRecord(dataDir, await encryptedRecord(key)); // KNOWN_PASSPHRASE
+    // Only the LEGACY shared blob exists, and it holds another wallet's passphrase.
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(passphraseBlobPath(dataDir), 'ciphertext');
+    const exec: ExecFn = async () => ({ stdout: 'someone-elses-passphrase\n', stderr: '' });
+
+    const v = await verifyLocalWallet({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'win32', isTTY: false, exec },
+    });
+    expect(v.status).toBe('broken');
+    expect(v.detail).toContain('legacy shared DPAPI passphrase file');
+    expect(v.detail).not.toContain('service tenjin-cli');
+    expect(v).toHaveProperty('fix');
+    expect((v as { fix: string }).fix).toContain('DPAPI-protected passphrase file');
+  });
+
+  // The deadline belongs to this read-only path and nowhere else: a killed
+  // credential-store WRITE makes resolvePassphraseForCreate fall through to a
+  // different passphrase while the committed value wins later decrypts.
+  it('is the only place in this module that deadlines the store CLIs', async () => {
+    const src = await readFile(fileURLToPath(new URL('./local.ts', import.meta.url)), 'utf8');
+    expect(src.match(/timeoutMs:/g)).toHaveLength(1);
+    const verifyOnward = src.slice(src.indexOf('export async function verifyLocalWallet'));
+    expect(verifyOnward).toContain('timeoutMs:');
   });
 
   it('verifies an env key by deriving it, with no keystore involved', async () => {

@@ -107,6 +107,9 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain(PERMISSIONS_DOC_URL);
     expect(help).not.toMatch(/(?<!\/)docs\/agent-permissions\.md/);
+    // Same tier claim as every other surface, doctor's local check included.
+    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC or move your keys');
+    expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {

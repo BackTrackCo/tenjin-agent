@@ -44,6 +44,9 @@ export interface LocalProviderDeps {
 const isWindows = process.platform === 'win32';
 const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 
+/** How long `verifyLocalWallet` gives a credential-store CLI before giving up. */
+const STORE_READ_TIMEOUT_MS = 5_000;
+
 /**
  * A one-shot decrypt cache. The CLI is a single invocation, so a signer derived
  * once (scrypt is deliberately slow) is reused for the rest of the process.
@@ -55,8 +58,8 @@ const signerCache = new Map<string, PrivateKeyAccount>();
  * The only real B1 provider: a local viem account whose key comes from the env
  * override or the encrypted wallet file. `describe()` returns just the address
  * and posture WITHOUT a passphrase (the address is stored cleartext on purpose);
- * `getSigner()` is the single door to the key material and the only path that
- * decrypts the keystore.
+ * `getSigner()` is the single door to key material a caller can SIGN with.
+ * `verify()` also decrypts, but returns a verdict rather than the key.
  */
 export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
   return {
@@ -105,6 +108,11 @@ export function createLocalProvider(deps: LocalProviderDeps): WalletProvider {
  *
  * scrypt is deliberately slow, which is why this runs only once a passphrase has
  * already been found without a prompt.
+ *
+ * The one caller that deadlines the store CLIs, because it is the one that only
+ * ever READS them: `doctor` runs unattended and a locked keychain would otherwise
+ * hang it forever, while a killed read costs nothing — the entry is untouched and
+ * "unreachable" is already a state this reports.
  */
 export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<WalletVerification> {
   const cred = await loadCredential(deps);
@@ -120,7 +128,13 @@ export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<Wallet
   let resolved: Awaited<ReturnType<typeof resolvePassphrase>>;
   try {
     resolved = await resolvePassphrase(
-      { env: deps.env, dir: deps.dir, ...deps.passphrase, isTTY: false },
+      {
+        env: deps.env,
+        dir: deps.dir,
+        ...deps.passphrase,
+        isTTY: false,
+        timeoutMs: STORE_READ_TIMEOUT_MS,
+      },
       cred.address,
     );
   } catch {
@@ -142,9 +156,8 @@ export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<Wallet
     if (resolved.migrateLegacy !== undefined) {
       return {
         status: 'broken',
-        detail:
-          'the keystore cannot be decrypted: the only stored passphrase is the legacy shared entry (service tenjin-cli, account "wallet"), which does not open it',
-        fix: `That entry likely belongs to a wallet created later. Set TENJIN_WALLET_PASSPHRASE to this wallet's own passphrase, or restore its entry under account ${account}.`,
+        detail: `the keystore cannot be decrypted: the only stored passphrase is ${legacyOrigin(resolved.source)}, which does not open it`,
+        fix: `That passphrase likely belongs to a wallet created later. Set TENJIN_WALLET_PASSPHRASE to this wallet's own passphrase, or restore ${passphraseOrigin(resolved.source, account)}.`,
       };
     }
     // Name the escape that applies to where the passphrase came from, the same
@@ -184,6 +197,13 @@ function passphraseOrigin(source: PassphraseSource, account: string): string {
   if (source === 'prompt') return 'the prompt';
   if (source === 'dpapi') return `the DPAPI-protected passphrase file for ${account}`;
   return `the OS credential store (service tenjin-cli, account ${account})`;
+}
+
+/** The same, for the pre-per-wallet shared slot every backend still reads once. */
+function legacyOrigin(source: PassphraseSource): string {
+  return source === 'dpapi'
+    ? 'the legacy shared DPAPI passphrase file (passphrase.dpapi)'
+    : 'the legacy shared entry (service tenjin-cli, account "wallet")';
 }
 
 /**

@@ -275,6 +275,12 @@ describe('the published docs do not drift from the allowlist constants', () => {
   it('the permissions doc does not call the free set read-only', () => {
     expect(PERMISSIONS_DOC).not.toMatch(/free, read-only verbs/i);
     expect(PERMISSIONS_DOC).toMatch(/None of those can spend, and none can move your keys/i);
+    // Every surface that states the tier also names doctor's local decrypt, or
+    // the tier reads as no key access at all. The skill is here because agents
+    // repeat it to users verbatim.
+    expect(PERMISSIONS_DOC).toMatch(/`tenjin doctor` decrypts\s*locally/i);
+    expect(read('tenjin-search')).toMatch(/`doctor` may decrypt locally/i);
+    expect(README).toMatch(/`doctor`\s*decrypts locally/i);
     expect(PERMISSIONS_DOC).toMatch(/`tenjin search` POSTs[\s\S]{0,120}`tenjin outcome` POSTs/);
   });
 

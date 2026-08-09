@@ -92,6 +92,13 @@ export interface PassphraseDeps {
   isTTY?: boolean;
   /** The store-CLI exec seam; defaults to a real execFile with stdin support. */
   exec?: ExecFn;
+  /**
+   * Deadline for the store CLIs, in ms. Unset means unbounded, which is what
+   * every WRITING caller must stay: see defaultExecFor for why killing a
+   * committed write corrupts a fresh wallet's passphrase. Read-only callers may
+   * set it.
+   */
+  timeoutMs?: number;
   /** The hidden-input prompt seam; defaults to a raw-mode TTY reader. */
   prompt?: PromptFn;
 }
@@ -117,32 +124,38 @@ interface PassphraseStore {
 }
 
 /**
- * How long a credential-store helper gets before it is killed. These are GUI-
- * backed tools: a locked keychain or a stalled Secret Service prompt can block
- * forever, and `doctor` runs unattended. Every caller already treats a failed
- * exec as "no entry", so a timeout degrades to the passphrase being unreachable
- * and the wallet reported present but not verified.
+ * The real executor, optionally deadlined. UNBOUNDED BY DEFAULT, and that is a
+ * correctness requirement rather than caution: killing a WRITE is not the same as
+ * killing a read. `resolvePassphraseForCreate` short-circuits on `store()`
+ * returning false, before its read-back can run, so a keychain write that commits
+ * and is then killed at a deadline reads as "did not stick" — create falls
+ * through to a different prompted passphrase while the committed value wins every
+ * later decrypt, and the brand-new wallet reports the wrong passphrase forever.
+ *
+ * Only a caller that does nothing but READ may pass a deadline (`verifyLocalWallet`
+ * is the one), where a kill is free: the entry is unchanged and an unreachable
+ * passphrase already has a reported state.
  */
-const EXEC_TIMEOUT_MS = 5_000;
-
-const defaultExec: ExecFn = (file, args, stdin) =>
-  new Promise((resolve, reject) => {
-    const child = execFile(
-      file,
-      args,
-      { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS },
-      (err, stdout, stderr) => {
-        if (err) reject(err);
-        else resolve({ stdout, stderr });
-      },
-    );
-    if (stdin !== undefined) {
-      // A child that exits before draining stdin closes the pipe; swallow the
-      // resulting EPIPE so the exec callback surfaces the real exit error instead.
-      child.stdin?.on('error', () => undefined);
-      child.stdin?.end(stdin);
-    }
-  });
+export function defaultExecFor(timeoutMs?: number): ExecFn {
+  return (file, args, stdin) =>
+    new Promise((resolve, reject) => {
+      const child = execFile(
+        file,
+        args,
+        { encoding: 'utf8', ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}) },
+        (err, stdout, stderr) => {
+          if (err) reject(err);
+          else resolve({ stdout, stderr });
+        },
+      );
+      if (stdin !== undefined) {
+        // A child that exits before draining stdin closes the pipe; swallow the
+        // resulting EPIPE so the exec callback surfaces the real exit error instead.
+        child.stdin?.on('error', () => undefined);
+        child.stdin?.end(stdin);
+      }
+    });
+}
 
 /** The durable store for this platform, or null where no built-in one exists. */
 function storeFor(deps: PassphraseDeps): PassphraseStore | null {
@@ -304,7 +317,7 @@ export async function resolvePassphraseForCreate(
  * passphrase never appears in any argv either.
  */
 function keychainStore(deps: PassphraseDeps): PassphraseStore {
-  const exec = deps.exec ?? defaultExec;
+  const exec = deps.exec ?? defaultExecFor(deps.timeoutMs);
   return {
     source: 'keychain',
     async read(account) {
@@ -387,7 +400,7 @@ function powershellArgs(script: string): string[] {
  * the passphrase. Any PowerShell failure degrades.
  */
 function dpapiStore(deps: PassphraseDeps): PassphraseStore {
-  const exec = deps.exec ?? defaultExec;
+  const exec = deps.exec ?? defaultExecFor(deps.timeoutMs);
   const blobPathFor = (account: string): string =>
     account === LEGACY_ACCOUNT
       ? passphraseBlobPath(deps.dir)
@@ -450,7 +463,7 @@ function dpapiStore(deps: PassphraseDeps): PassphraseStore {
  * the next source (env/prompt); nothing is ever written to disk here.
  */
 function secretServiceStore(deps: PassphraseDeps): PassphraseStore {
-  const exec = deps.exec ?? defaultExec;
+  const exec = deps.exec ?? defaultExecFor(deps.timeoutMs);
   return {
     source: 'secret-service',
     async read(account) {

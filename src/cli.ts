@@ -154,7 +154,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       // The absolute URL, like every other pointer: `docs/agent-permissions.md`
       // resolves against the reader's cwd, and an operator running `--help` is in
       // their own project, not in this package.
-      `add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or move your keys, full caveats: ${PERMISSIONS_DOC_URL}`,
+      `add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
     )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
