@@ -274,7 +274,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
   // read-only in order to justify it is not.
   it('the permissions doc does not call the free set read-only', () => {
     expect(PERMISSIONS_DOC).not.toMatch(/free, read-only verbs/i);
-    expect(PERMISSIONS_DOC).toMatch(/None of those can spend, and none can open the keystore/i);
+    expect(PERMISSIONS_DOC).toMatch(/None of those can spend, and none can move your keys/i);
     expect(PERMISSIONS_DOC).toMatch(/`tenjin search` POSTs[\s\S]{0,120}`tenjin outcome` POSTs/);
   });
 

@@ -153,7 +153,7 @@ export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<Wallet
     const escape =
       resolved.source === 'env'
         ? 'TENJIN_WALLET_PASSPHRASE is set but does not open it; set it to the correct passphrase'
-        : `The OS credential store entry (service tenjin-cli, account ${account}) does not open it; set TENJIN_WALLET_PASSPHRASE to the correct passphrase`;
+        : `The passphrase from ${passphraseOrigin(resolved.source, account)} does not open it; set TENJIN_WALLET_PASSPHRASE to the correct passphrase`;
     return {
       status: 'broken',
       detail: `the keystore cannot be decrypted with the passphrase from ${passphraseOrigin(resolved.source, account)}`,
@@ -173,10 +173,16 @@ export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<Wallet
   };
 }
 
-/** Where a resolved passphrase came from, in words an operator can act on. */
+/**
+ * Where a resolved passphrase came from, in words an operator can act on.
+ * Windows stores a per-wallet DPAPI file rather than a service/account entry, so
+ * naming one model for both would send that operator looking for something that
+ * does not exist on their machine.
+ */
 function passphraseOrigin(source: PassphraseSource, account: string): string {
   if (source === 'env') return 'TENJIN_WALLET_PASSPHRASE';
   if (source === 'prompt') return 'the prompt';
+  if (source === 'dpapi') return `the DPAPI-protected passphrase file for ${account}`;
   return `the OS credential store (service tenjin-cli, account ${account})`;
 }
 

@@ -60,15 +60,15 @@ export interface ExcludedVerb {
 }
 
 /**
- * FREE verbs: they CANNOT SPEND AND CANNOT OPEN THE KEYSTORE. That is the whole
+ * FREE verbs: they CANNOT SPEND AND CANNOT MOVE YOUR KEYS. That is the whole
  * definition of this tier, and it is deliberately narrower than the older "no
  * wallet, no signing, no payment" — which stopped being true the moment `read`
  * gained the ability to PRESENT a cached session key. `read` signs, with a P-256
  * delegation loaded from disk; it cannot mint one (that needs the wallet, and its
  * import graph is test-pinned clear of it) and cannot produce the
  * secp256k1/EIP-712 signature a payment authorization needs (wrong curve). Money
- * and key material stay out of reach; a signature as such no longer does, so the
- * tier says what it means.
+ * stays out of reach; a signature as such no longer does, so the tier says what
+ * it means. `doctor` decrypts locally to check the wallet still opens.
  *
  * What the tier does NOT claim, because it is not true: that the read scope
  * limits what a leaked delegation is worth. Scope is enforced only on the request
@@ -145,7 +145,9 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
   {
     rule: 'Bash(tenjin doctor:*)',
     command: 'tenjin doctor',
-    note: 'Read-only local environment and API reachability diagnostics.',
+    note:
+      'Local environment and API reachability diagnostics. Decrypts the wallet ' +
+      'locally to check it still opens; signs nothing and sends nothing.',
   },
   {
     rule: 'Bash(tenjin wallet show:*)',

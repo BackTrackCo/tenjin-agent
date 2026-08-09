@@ -116,12 +116,26 @@ interface PassphraseStore {
   storable?(passphrase: string): boolean;
 }
 
+/**
+ * How long a credential-store helper gets before it is killed. These are GUI-
+ * backed tools: a locked keychain or a stalled Secret Service prompt can block
+ * forever, and `doctor` runs unattended. Every caller already treats a failed
+ * exec as "no entry", so a timeout degrades to the passphrase being unreachable
+ * and the wallet reported present but not verified.
+ */
+const EXEC_TIMEOUT_MS = 5_000;
+
 const defaultExec: ExecFn = (file, args, stdin) =>
   new Promise((resolve, reject) => {
-    const child = execFile(file, args, { encoding: 'utf8' }, (err, stdout, stderr) => {
-      if (err) reject(err);
-      else resolve({ stdout, stderr });
-    });
+    const child = execFile(
+      file,
+      args,
+      { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS },
+      (err, stdout, stderr) => {
+        if (err) reject(err);
+        else resolve({ stdout, stderr });
+      },
+    );
     if (stdin !== undefined) {
       // A child that exits before draining stdin closes the pipe; swallow the
       // resulting EPIPE so the exec callback surfaces the real exit error instead.

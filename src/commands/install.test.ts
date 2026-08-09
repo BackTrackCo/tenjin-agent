@@ -1264,10 +1264,12 @@ describe('runInstall: interactive walkthrough', () => {
   });
 
   it('the consent question says what is true of the tier, and points at the caveats', async () => {
-    // Cannot spend and cannot open the keystore is the honest whole-tier claim;
-    // the three that send or store data are named rather than papered over.
-    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or open your wallet keystore');
-    expect(PERMISSIONS_QUESTION).toContain('three send or store data (search, outcome, read)');
+    // Cannot spend and cannot move your keys is the honest whole-tier claim, and
+    // doctor's local decrypt is named rather than papered over; so are the three
+    // that send or store data.
+    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or move your keys');
+    expect(PERMISSIONS_QUESTION).toContain('doctor may check your wallet still opens');
+    expect(PERMISSIONS_QUESTION).toContain('Three send or store data (search, outcome, read)');
     // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
     // walkthrough prints neither, so the consent moment names where both are, in
     // full. It used to name `tenjin doctor`, which printed them; doctor now

@@ -849,7 +849,7 @@ function parseModeFlag(value: string): PublishMode {
  * off-machine, `read` saves to the library and can present a cached
  * wallet-derived delegation, and two of the nine rules are `wallet show` /
  * `wallet balance`). What is actually true of the whole tier is that it cannot
- * spend and cannot open the keystore, so that is what the question says.
+ * spend and cannot move your keys, so that is what the question says.
  *
  * The pointer is how FLAG_CAVEAT reaches the consent moment: the walkthrough
  * prints neither the rules nor the flag caveat, so the yes/no that replaced them
@@ -859,8 +859,8 @@ function parseModeFlag(value: string): PublishMode {
 export const PERMISSIONS_QUESTION = [
   'Let your agent search tenjin without permission popups?',
   `Adds ${FREE_VERB_RULES.length} free commands to ~/.claude/settings.json.`,
-  'None can spend USDC or open your wallet keystore;',
-  'three send or store data (search, outcome, read).',
+  'None can spend USDC or move your keys; doctor may check your wallet still opens.',
+  'Three send or store data (search, outcome, read).',
   `Full caveats: ${PERMISSIONS_DOC_URL}`,
 ].join(' ');
 

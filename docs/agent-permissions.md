@@ -29,7 +29,8 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those can spend, and none can open the keystore. That is the definition of
+None of those can spend, and none can move your keys; `tenjin doctor` decrypts
+locally to check your wallet still opens. That is the definition of
 this tier, and it is deliberately narrower than "signs nothing": `tenjin read` can
 present a session key that already exists, which is a signature — a P-256
 delegation, the wrong curve to authorize a USDC transfer. It cannot mint one; that
@@ -43,7 +44,7 @@ needs the wallet.
 | `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                      |
 | `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below). |
 | `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.  |
-| `Bash(tenjin doctor:*)`         | Read-only local environment and API reachability diagnostics.                                                                  |
+| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                       |
 | `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                |
 | `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                          |
 | `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.              |
@@ -77,8 +78,9 @@ three. It cannot unlock a keystore and never consults the spend policy.
 you, as one of its up-to-three setup decisions:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
-> `~/.claude/settings.json`. None can spend USDC or open your wallet keystore;
-> three send or store data (search, outcome, read). Full caveats:
+> `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
+> check your wallet still opens. Three send or store data (search, outcome,
+> read). Full caveats:
 > https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
 
 Answer yes and it merges them in. The write is additive only: it appends the rules

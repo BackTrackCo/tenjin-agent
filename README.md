@@ -184,7 +184,8 @@ Bash(tenjin candidate list:*)
 
 Three tiers:
 
-- **The nine free verbs above** cannot spend and cannot open the keystore.
+- **The nine free verbs above** cannot spend and cannot move your keys; `doctor`
+  decrypts locally to check your wallet still opens.
 - **`Bash(tenjin buy:*)`** is a separate opt-in that, on the default config,
   authorizes unattended spending up to your wallet balance.
 - **`Bash(tenjin session start:*)`** is a separate opt-in that spends nothing and
@@ -215,8 +216,9 @@ decision:
    your harness still shows each command for approval"), "Ask me in chat first",
    and "Fully unattended" ("only hard blocks stop it").
 2. **Permissions.** "Let your agent search tenjin without permission popups? Adds
-   9 free commands to `~/.claude/settings.json`. None can spend USDC or open your
-   wallet keystore; three send or store data (search, outcome, read). Full
+   9 free commands to `~/.claude/settings.json`. None can spend USDC or move your
+   keys; doctor may check your wallet still opens. Three send or store data
+   (search, outcome, read). Full
    caveats: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md"
    Yes merges the free-verb allowlist into that file. Claude Code only; other
    harnesses skip it with a note.
