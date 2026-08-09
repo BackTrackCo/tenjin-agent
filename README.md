@@ -42,6 +42,37 @@ tenjin wallet show          # your wallet address; `tenjin wallet balance` for U
 tenjin search "what actually changed in <library> v3's public API"
 ```
 
+### One installer, every harness
+
+On macOS, Linux, or WSL, the same audited installer handles every supported
+harness. A bare run detects what is installed and wires it without creating a
+wallet:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash
+```
+
+Use a preset when you want one explicit target:
+
+```bash
+# Claude Code
+curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash -s -- --harness claude
+
+# Codex
+curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash -s -- --harness codex
+
+# More than one target
+curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash -s -- --harness claude --harness codex
+```
+
+`hermes` and `openclaw` are deferred presets and currently fail closed instead
+of pretending those integrations ship on `main`. Pin a released CLI when
+reproducibility matters by placing the version on the `bash` side of the pipe,
+for example
+`curl -fsSL <installer-url> | TENJIN_VERSION=0.1.0-alpha.9 bash -s -- --harness codex`.
+The installer never invokes `sudo` and always forwards `--no-wallet`; create and
+fund a Tenjin wallet explicitly after installation if paid operations are needed.
+
 A hit looks like this (`--json` shown; at a terminal you get the same as plain
 lines, with prices in USD):
 
