@@ -8,6 +8,11 @@ import { readWalletRecord } from '../lib/wallet/store';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 
+// Real ox scrypt at N=262144 exceeds Vitest's 5s default under full-suite
+// parallel load. Match the other wallet suites rather than weakening the
+// global timeout for tests that should fail fast.
+vi.setConfig({ testTimeout: 120000 });
+
 const PASSPHRASE = 'connect-test-passphrase';
 let dir: string;
 let dataDir: string;
