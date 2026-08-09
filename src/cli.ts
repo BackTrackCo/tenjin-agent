@@ -150,7 +150,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--no-claude-md', 'skip the CLAUDE.md nudge')
     .option(
       '--allow-free-verbs',
-      "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",
+      "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist (the default; the flag states it explicitly); none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",
+    )
+    .option('--no-allow-free-verbs', 'write no harness permission rules at all')
+    .option(
+      '--search-hooks <mode>',
+      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off',
     )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
@@ -158,6 +163,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         // `claudeMd` is tri-state: only forward it when the flag was actually given,
         // so an omitted flag stays undefined (ask interactively, else skip).
         const claudeMdGiven = this.getOptionValueSource('claudeMd') !== 'default';
+        // `allowFreeVerbs` is tri-state for the same reason, but the arms differ:
+        // undefined asks when it can and WRITES when it cannot, so only an explicit
+        // --no-allow-free-verbs suppresses the allowlist.
+        const allowGiven = this.getOptionValueSource('allowFreeVerbs') !== 'default';
         const { runInstall } = await import('./commands/install');
         return runInstall(
           {
@@ -168,7 +177,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
             ...(claudeMdGiven && typeof o.claudeMd === 'boolean' ? { claudeMd: o.claudeMd } : {}),
-            ...(o.allowFreeVerbs === true ? { allowFreeVerbs: true } : {}),
+            ...(allowGiven && typeof o.allowFreeVerbs === 'boolean'
+              ? { allowFreeVerbs: o.allowFreeVerbs }
+              : {}),
+            ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
           },
           ctx,
         );

@@ -6,9 +6,13 @@ import { writeFileAtomic } from './atomic-json';
  * The one place the CLI WRITES a permission grant into a harness's own settings
  * file, so the invariants live here rather than at the call site:
  *
- *  - CONSENT-GATED. Nothing in this module runs unless the operator said yes at
- *    the install prompt or passed `--allow-free-verbs`. It is never reached by a
- *    bare non-interactive run.
+ *  - OPT-OUT, AND DISCLOSED. An interactive install asks; a non-interactive one
+ *    writes the free tier by default, because an unattended agent that gets
+ *    denied is the failure this whole file exists to prevent, and a machine run
+ *    has no one to ask. `--no-allow-free-verbs` refuses it outright, and every
+ *    run that writes says which rules landed, in which file, and how to remove
+ *    them. What keeps that defensible is the next two invariants: the grant is a
+ *    fixed free tier, and it can never widen.
  *  - FREE-TIER ONLY, AND NOT PARAMETERIZED. The rules are the hardcoded
  *    {@link FREE_VERB_RULES} constant and the writer takes no rule argument, so
  *    there is no call path — no flag, no config key, no future caller — that can
@@ -102,6 +106,32 @@ export interface PermissionsResult {
   skipped?: PermissionsSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
+  /**
+   * The exact command that changes this outcome, present on EVERY skipped state.
+   * Same contract as a CliError's `fix`: a machine consumer reading the envelope
+   * gets the remedy as a field, never as prose it has to interpret. The human
+   * walkthrough renders its own wording from `skipped`, so the two never collide.
+   */
+  fix?: string;
+}
+
+/**
+ * The command that turns a skip into a write. Kept beside the reason vocabulary
+ * so a new reason cannot ship without one.
+ */
+function fixFor(reason: PermissionsSkipReason): string {
+  switch (reason) {
+    case 'harness-not-claude':
+      return 'This allowlist is Claude Code only. Run `tenjin doctor` for the lines your harness needs.';
+    case 'not-requested':
+    case 'declined':
+    case 'dry-run':
+      return 'Add them with `tenjin install --allow-free-verbs`.';
+    case 'changed-since-read':
+      return 'Another process changed the file mid-run; re-run `tenjin install`.';
+    default:
+      return 'Fix the reported file, then run `tenjin install --allow-free-verbs`.';
+  }
 }
 
 function skip(
@@ -117,6 +147,7 @@ function skip(
     alreadyPresent: [],
     skipped: reason,
     ...(warning !== undefined ? { warning } : {}),
+    fix: fixFor(reason),
   };
 }
 

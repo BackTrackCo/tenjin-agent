@@ -33,10 +33,12 @@ import {
   CONFIG_DEFAULTS,
   loadRawConfig,
   PublishModeSchema,
+  SearchHookModeSchema,
   parsePublishModeFlag,
+  parseSearchHookModeFlag,
 } from '../lib/config';
-import type { PublishMode } from '../lib/config';
-import { persistInstallHarness, persistPublishMode } from './config';
+import type { PublishMode, SearchHookMode } from '../lib/config';
+import { persistInstallHarness, persistPublishMode, persistSearchHookMode } from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
@@ -50,6 +52,8 @@ import {
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
+import { hooksSkipped, hooksUndo, wireSearchHooks } from '../lib/harness-hooks';
+import type { HooksResult } from '../lib/harness-hooks';
 import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
@@ -70,8 +74,17 @@ const InstallInputSchema = z.object({
    * (--no-claude-md), or undefined (skip). Never a question: the walkthrough is
    * capped at three decisions. */
   claudeMd: z.boolean().optional(),
-  /** Wire the free-verb harness allowlist without asking (`--allow-free-verbs`). */
+  /**
+   * Tri-state, like `claudeMd`. `true` (`--allow-free-verbs`) wires the free-verb
+   * allowlist without asking, which is now also what an unanswered non-interactive
+   * run does, so the flag is kept for compatibility and as an explicit statement of
+   * intent. `false` (`--no-allow-free-verbs`) is the opt-out and is the only way to
+   * get a run that writes no permission rule. `undefined` asks when it can, and
+   * writes when it cannot ask.
+   */
   allowFreeVerbs: z.boolean().optional(),
+  /** The harness search-hook behavior to install (`--search-hooks auto|remind|off`). */
+  searchHooks: z.string().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
 
@@ -92,10 +105,19 @@ interface PublishModeSelection {
   source: PublishModeSource;
 }
 
-/** How the wallet step resolved, so rendering stays separate from prompting. */
+/**
+ * How the wallet step resolved, so rendering stays separate from prompting.
+ *
+ * `declined` and `not-offered` are kept apart deliberately: the first is an
+ * answer, the second is a question that was never put. A machine run has never
+ * created a key and never will, so its envelope has to say that the decision was
+ * skipped rather than leave the reader to infer it from an absent field.
+ */
 interface WalletOutcome {
-  status: 'existing' | 'created' | 'none';
+  status: 'existing' | 'created' | 'declined' | 'not-offered';
   address?: string;
+  /** Why the question was not asked. Only ever set on `not-offered`. */
+  reason?: 'non-interactive' | 'dry-run' | 'flag';
 }
 
 /**
@@ -214,7 +236,9 @@ export interface InstallDeps {
   inspectPermissions?: (
     home: string,
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
-  /** Decision 3: "Create a wallet now?"; defaults to the clack confirm (default yes). */
+  /** Decision 3: the search-hook mode select; defaults to the clack list. */
+  promptSearchHooks?: () => Promise<SearchHookMode | null>;
+  /** Decision 4: "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. Seams so tests never load the renderer. */
   intro?: (message: string) => Promise<void>;
@@ -232,17 +256,25 @@ export interface InstallDeps {
 /**
  * `tenjin install`: detect the installed harness(es), copy the packaged skills
  * into each one's skills directory, wire the AGENTS.md pointer, run the doctor
- * checks, then ask AT MOST THREE questions (publishing, harness permissions,
- * wallet) and print a short summary. Everything that is not one of those three
- * decisions is display: the security reference material lives in `doctor` and
- * the README, not in the middle of a setup flow.
+ * checks, then ask AT MOST FOUR questions (publishing, harness permissions,
+ * search hooks, wallet) and print a short summary. Everything that is not one of
+ * those four decisions is display: the security reference material lives in
+ * `doctor` and the README, not in the middle of a setup flow.
+ *
+ * A NON-INTERACTIVE RUN IS A USABLE INSTALL, not a stripped one. The permission
+ * allowlist and the search hooks are wired by default when there is no one to
+ * ask, because the machine that most needs them is exactly the one running
+ * headless; both are disclosed in the output with their undo, both have an
+ * opt-out flag, and neither can spend or open the keystore. The wallet is the one
+ * step that stays interactive-only: a machine run has never created a key, and
+ * the envelope says so rather than leaving it absent.
  *
  * Like every command it is human-first (the global output contract): at a TTY
  * without `--json` it prompts and returns the walkthrough as humanLines, which
  * the dispatcher prints to stdout with no envelope. With `--json` or piped
- * stdout it returns the envelope, no prompts, no wallet step. Idempotent: a
- * re-run reports up-to-date, never duplicates the AGENTS.md line, and adds no
- * permission rule twice. `--dry-run` writes nothing.
+ * stdout it returns the envelope and asks nothing. Idempotent: a re-run reports
+ * up-to-date, never duplicates the AGENTS.md line, adds no permission rule twice,
+ * and registers no hook twice. `--dry-run` writes nothing.
  */
 export async function runInstall(
   input: InstallInput,
@@ -318,10 +350,14 @@ async function installBody(
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
   const claudeMdFlag = parsed.data.claudeMd;
-  const allowFreeVerbs = parsed.data.allowFreeVerbs === true;
-  // Validate --publish-mode UP FRONT so a bad value fails before any wiring.
+  const allowFreeVerbs = parsed.data.allowFreeVerbs;
+  // Validate the enum flags UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
+  const searchHooksFlag =
+    parsed.data.searchHooks !== undefined
+      ? parseSearchHookModeFlag(parsed.data.searchHooks, '--search-hooks')
+      : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   // An empty or relative HOME (sudo/docker env_reset, systemd units) would make
@@ -353,9 +389,9 @@ async function installBody(
   // Same condition resolvePlans treats as an override, so what gets recorded below is
   // exactly what overrode detection.
   const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
-  // The CLAUDE.md nudge is flag-only now: `--claude-md` writes it, `--no-claude-md`
-  // and an absent flag skip it. It used to be a fourth interactive question, and
-  // the walkthrough's whole point is that there are three.
+  // The CLAUDE.md nudge is flag-only: `--claude-md` writes it, `--no-claude-md`
+  // and an absent flag skip it. It is not a question because it is a preference
+  // with no consequence worth a prompt, unlike the four that are.
   const claudeMdWrite = claudeMdFlag === true;
   const harnesses: HarnessResult[] = [];
   // Unlocked. What makes concurrent writers safe here is the per-file atomic
@@ -393,7 +429,7 @@ async function installBody(
   const collect = deps.collectChecks ?? ((c) => collectDoctorChecks(c, doctorDeps));
   const doctor = await collect(ctx);
 
-  // The three decisions, in order. Each one is skipped (with its own recorded
+  // The four decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
   const publishMode = await underDataDir(ctx.dataDir, () =>
@@ -407,11 +443,14 @@ async function installBody(
     dryRun,
     canPrompt,
   });
+  const hooks = await underDataDir(ctx.dataDir, () =>
+    resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, dryRun, canPrompt }),
+  );
   // The wallet question belongs to the human walkthrough only: a machine run has
-  // never created a key, and that stays true.
-  const wallet = humanOutput
-    ? await resolveWallet(ctx, deps, dryRun || !canPrompt || noWallet)
-    : undefined;
+  // never created a key, and that stays true. It is REPORTED on both paths.
+  const wallet: WalletOutcome = humanOutput
+    ? await resolveWallet(ctx, deps, walletSkip(dryRun, canPrompt, noWallet))
+    : { status: 'not-offered', reason: 'non-interactive' };
   if (canPrompt) await (deps.outro ?? clackOutro)('Setup complete.');
 
   const data = {
@@ -423,13 +462,15 @@ async function installBody(
     // Shipped with the install rather than left for the operator to discover after
     // their first auto-mode denial (#33). Static constants, no config key: see
     // lib/permissions.ts for why this is deliberately not operator-editable state.
-    // `wired` is the outcome of THIS run's optional settings.json write; the three
+    // `wired` is the outcome of THIS run's settings.json write; the three
     // recommendation tiers beside it are unchanged, so a machine consumer that
     // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
     permissions: { ...recommendedPermissions(), wired: permissions },
+    hooks,
+    wallet,
   };
 
-  // Machine path (--json or piped stdout): today's envelope, no wallet step.
+  // Machine path (--json or piped stdout): the envelope, no prompts.
   if (!humanOutput) return { data };
 
   // Human path: the walkthrough as humanLines (the global emitSuccess prints them
@@ -439,10 +480,23 @@ async function installBody(
     harnesses,
     publishMode,
     permissions,
-    wallet: wallet ?? { status: 'none' },
+    hooks,
+    wallet,
     doctor,
   });
   return { data, humanLines };
+}
+
+/** Why the wallet question is not being put, or undefined when it is. */
+function walletSkip(
+  dryRun: boolean,
+  canPrompt: boolean,
+  noWallet: boolean,
+): WalletOutcome['reason'] | undefined {
+  if (dryRun) return 'dry-run';
+  if (noWallet) return 'flag';
+  if (!canPrompt) return 'non-interactive';
+  return undefined;
 }
 
 /**
@@ -470,6 +524,7 @@ interface WalkthroughState {
   harnesses: HarnessResult[];
   publishMode: PublishModeSelection;
   permissions: PermissionsResult;
+  hooks: HooksResult;
   wallet: WalletOutcome;
   doctor: DoctorChecks;
 }
@@ -533,6 +588,32 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     }
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `! ${w}`));
   }
+  // A run that wired permissions without being asked has to say so, and say how to
+  // take it back. This is the disclosure that makes the non-interactive default
+  // defensible: nothing lands silently, whether it was answered or defaulted.
+  if (s.permissions.added.length > 0) {
+    // What landed and how to take it back. NOT the rules themselves: `doctor`
+    // prints those in full with their caveats, and reciting nine lines in the
+    // middle of a setup flow is what the walkthrough was trimmed of. The machine
+    // envelope carries the exact rules in `permissions.wired.added`.
+    lines.push(
+      paint(
+        io,
+        'dim',
+        `${s.permissions.added.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor\`.`,
+      ),
+    );
+    lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
+  }
+  if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
+    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks)));
+    lines.push(
+      paint(io, 'dim', hooksUndo(s.hooks.path ?? '~/.claude/settings.json', s.hooks.scriptsDir)),
+    );
+  }
+  if (s.hooks.warning !== undefined) {
+    lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.hooks.warning)}`));
+  }
   if (s.permissions.warning !== undefined) {
     // Sanitized for the same reason doctorNotices sanitizes `detail`/`fix`: this
     // string embeds a V8 JSON parse error, and V8 quotes the offending input, so
@@ -553,9 +634,49 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
     ...s.harnesses.map((h) => skillsLine(io, h, s.dryRun)),
     publishingLine(io, s.publishMode.value),
     permissionsLine(io, s.permissions),
+    hooksLine(io, s.hooks),
     walletLine(io, s.wallet),
     `${paint(io, 'bold', 'Next:')} tenjin search "${EXAMPLE_QUESTION}"`,
   ];
+}
+
+/** What the hooks do, in one line, at the moment they are written. */
+function hooksDisclosure(h: HooksResult): string {
+  const shared =
+    'A Stop hook reminds you locally when a MISS you searched for is still unpublished; it makes no network call.';
+  if (h.mode === 'remind') {
+    return `The WebSearch hook prints a one-line reminder that Tenjin may have an answer; it sends nothing off-machine. ${shared}`;
+  }
+  return `Before a web search, the WebSearch hook asks tenjin.blog the same question (free and anonymous, 2-second budget) and mentions a tested answer if one exists; the query text leaves the machine. It never blocks or delays the search. ${shared}`;
+}
+
+/**
+ * One line for the harness hooks. A skip is never silent, for the same reason the
+ * permissions line is never silent: the operator would otherwise find out by
+ * noticing that nothing ever happens.
+ */
+function hooksLine(io: Io, h: HooksResult): string {
+  const label = paint(io, 'bold', 'Search hooks:');
+  const wrote = h.added.length + h.updated.length;
+  if (wrote > 0) {
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${wrote} hook(s) registered in ${h.path}. Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+  }
+  if (h.skipped === undefined) {
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}`;
+  }
+  if (h.skipped === 'harness-not-claude') {
+    return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only).`;
+  }
+  if (h.skipped === 'dry-run') {
+    return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
+  }
+  if (h.skipped === 'mode-off' || h.skipped === 'declined') {
+    return `${paint(io, 'dim', '-')} ${label} off. Turn them on: tenjin install --search-hooks auto`;
+  }
+  if (h.skipped === 'changed-since-read') {
+    return `${paint(io, 'yellow', '!')} ${label} ${h.path} changed while it was being updated, so nothing was written. Re-run: tenjin install`;
+  }
+  return `${paint(io, 'yellow', '!')} ${label} ${h.path} was left untouched. Fix it, then: tenjin install`;
 }
 
 function harnessLabel(h: Harness): string {
@@ -608,10 +729,7 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
   if (p.skipped === 'dry-run') {
     return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
   }
-  if (p.skipped === 'declined') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged. Add them anytime: tenjin install --allow-free-verbs`;
-  }
-  if (p.skipped === 'not-requested') {
+  if (p.skipped === 'declined' || p.skipped === 'not-requested') {
     return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
   }
   if (p.skipped === 'changed-since-read') {
@@ -630,6 +748,9 @@ function walletLine(io: Io, w: WalletOutcome): string {
   }
   if (w.status === 'created') {
     return `${paint(io, 'green', '✓')} ${label} ${w.address}. Fund it with a few dollars of USDC on Base, then: tenjin wallet balance`;
+  }
+  if (w.status === 'not-offered') {
+    return `${paint(io, 'dim', '-')} ${label} not offered (${w.reason ?? 'skipped'}); no key was created. Create one with: tenjin wallet create`;
   }
   return `${paint(io, 'dim', '-')} ${label} none. Create one later with: tenjin wallet create`;
 }
@@ -676,13 +797,15 @@ function modeBlurb(v: PublishMode): string {
 }
 
 /**
- * Decision 3, unchanged in behavior: ask only when no wallet exists, and never
- * under `--no-wallet`, `--dry-run`, or a run we cannot prompt in.
+ * The wallet decision, unchanged in behavior: ask only when no wallet exists, and
+ * never under `--no-wallet`, `--dry-run`, or a run we cannot prompt in. What is
+ * new is that a skip is REPORTED as `not-offered` with its reason, so the
+ * envelope distinguishes "said no" from "was never asked".
  */
 async function resolveWallet(
   ctx: CommandContext,
   deps: InstallDeps,
-  skipCreate: boolean,
+  skipReason: WalletOutcome['reason'] | undefined,
 ): Promise<WalletOutcome> {
   const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
   if (exists) {
@@ -691,10 +814,10 @@ async function resolveWallet(
       address: await (deps.walletAddress ?? existingWalletAddress)(ctx),
     };
   }
-  if (skipCreate) return { status: 'none' };
+  if (skipReason !== undefined) return { status: 'not-offered', reason: skipReason };
 
   const confirm = deps.confirmWallet ?? defaultConfirm;
-  if (!(await confirm(WALLET_QUESTION))) return { status: 'none' };
+  if (!(await confirm(WALLET_QUESTION))) return { status: 'declined' };
 
   return { status: 'created', address: await (deps.createWallet ?? defaultCreateWallet)(ctx) };
 }
@@ -832,20 +955,33 @@ export const PERMISSIONS_QUESTION = [
   'Full caveats: tenjin doctor.',
 ].join(' ');
 
-/** Decision 3's literal copy. */
+/** The wallet decision's literal copy. */
 export const WALLET_QUESTION = 'Create a wallet now?';
 
 /**
- * Settle the harness allowlist. The write itself is consent-gated and free-verb
- * only (see lib/harness-permissions.ts); this decides ONLY whether to call it.
- * `--allow-free-verbs` wires it headlessly, an interactive run asks, and a
- * non-interactive run without the flag changes nothing and says so.
+ * Settle the harness allowlist. The write itself is free-verb only and cannot
+ * widen (see lib/harness-permissions.ts); this decides ONLY whether to call it.
+ *
+ * Precedence: `--no-allow-free-verbs` refuses outright, `--allow-free-verbs`
+ * wires it, an interactive run asks, and a NON-INTERACTIVE run wires it. That
+ * last arm is the change #33 was really asking for: the machine most likely to be
+ * denied mid-task is the headless one, and leaving it unwired because nobody was
+ * there to say yes made a bare `tenjin install` produce an install that does not
+ * work. The disclosure and the undo ride the output on both paths.
+ *
+ * The probe runs on EVERY path that might write, including the headless ones.
+ * Nothing left to grant is not a question and not a write: it is the ordinary
+ * state of a re-run, and returning the SNAPSHOT's own result is what makes a
+ * re-run report `alreadyPresent` accurately instead of an empty pair. It also
+ * keeps the consent gate honest, because calling the writer after a zero-pending
+ * probe would re-read the file and silently re-add a rule revoked in between. An
+ * unreadable file is "unknown", never "already allowed", so it falls through.
  */
 async function resolvePermissions(args: {
   plans: HarnessPlan[];
   home: string;
   deps: InstallDeps;
-  flag: boolean;
+  flag: boolean | undefined;
   dryRun: boolean;
   canPrompt: boolean;
 }): Promise<PermissionsResult> {
@@ -858,22 +994,119 @@ async function resolvePermissions(args: {
     return permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude');
   }
   if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
-  if (flag) return wireFreeVerbAllowlist(home);
-  if (!canPrompt) return permissionsSkipped('claude', home, 'not-requested');
+  if (flag === false) return permissionsSkipped('claude', home, 'declined');
 
-  // Nothing left to grant is not a question: every rule already present is the
-  // ordinary state of a re-run. The SNAPSHOT's result is returned rather than
-  // calling the writer again, because a second read would re-add a rule revoked in
-  // between with no prompt. An unreadable file is "unknown", not "already
-  // allowed", so it falls through and still asks.
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home);
   if (probe.satisfied !== undefined) return probe.satisfied;
+
+  if (flag === true || !canPrompt) return wireFreeVerbAllowlist(home);
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(PERMISSIONS_QUESTION))) {
     return permissionsSkipped('claude', home, 'declined');
   }
   return wireFreeVerbAllowlist(home);
+}
+
+// --- Search hooks (decision 3) ----------------------------------------------------
+
+/**
+ * The search-hook question's literal copy. It names both hooks, because they are
+ * installed together and the second one is the surprising half: an operator who
+ * agreed to "check Tenjin before a web search" has not thereby agreed to a
+ * reminder at the end of every turn, so the question says both out loud.
+ */
+export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web searches?';
+
+export const SEARCH_HOOKS_CHOICES = [
+  {
+    value: 'auto',
+    label: 'Yes, check Tenjin first (recommended)',
+    hint: 'before a WebSearch, ask tenjin.blog the same question (free, anonymous, 2s budget) and mention a tested answer; the query text leaves the machine',
+  },
+  {
+    value: 'remind',
+    label: 'Just remind me',
+    hint: 'a one-line reminder, nothing sent off-machine',
+  },
+  { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
+] as const satisfies readonly { value: SearchHookMode; label: string; hint?: string }[];
+
+/**
+ * Settle the harness hooks. Same shape as the allowlist decision and the same
+ * default posture: a flag settles it, an interactive run asks, and a
+ * non-interactive run wires `auto` with the disclosure and undo in its output.
+ *
+ * The chosen mode is PERSISTED to config, so it is the script's behavior from
+ * then on and `tenjin config set hooks.searchMode` is enough to change it later
+ * without re-installing. A `--dry-run` persists nothing, like the publish mode.
+ */
+async function resolveHooks(args: {
+  plans: HarnessPlan[];
+  home: string;
+  ctx: CommandContext;
+  deps: InstallDeps;
+  flag: SearchHookMode | undefined;
+  dryRun: boolean;
+  canPrompt: boolean;
+}): Promise<HooksResult> {
+  const { plans, home, ctx, deps, flag, dryRun, canPrompt } = args;
+  const dataDir = ctx.dataDir;
+  const stored = (await loadRawConfig(dataDir)).hooks?.searchMode;
+
+  if (!plans.some((p) => p.harness === 'claude')) {
+    const harness = plans[0]?.harness ?? 'shared';
+    return hooksSkipped(
+      harness,
+      home,
+      dataDir,
+      flag ?? stored ?? DEFAULT_HOOK_MODE,
+      'harness-not-claude',
+    );
+  }
+
+  const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt);
+  if (dryRun) return hooksSkipped('claude', home, dataDir, mode, 'dry-run');
+  if (mode !== (stored ?? DEFAULT_HOOK_MODE) || stored === undefined) {
+    await persistSearchHookMode(dataDir, mode);
+  }
+  // `off` is a decision not to register anything, so settings.json is not touched
+  // at all. It is NOT the same as an inert script: an operator who later sets the
+  // mode back to `auto` re-runs install, which is what the fix string says.
+  if (mode === 'off') return hooksSkipped('claude', home, dataDir, mode, 'mode-off');
+  return wireSearchHooks({ homeDir: home, dataDir, mode });
+}
+
+/** The stored default for a run that was never asked. */
+const DEFAULT_HOOK_MODE: SearchHookMode = CONFIG_DEFAULTS.hooks.searchMode;
+
+/**
+ * Precedence for the hook mode: `--search-hooks` > the interactive select > an
+ * already-configured mode > the default. A cancelled select keeps whatever is
+ * configured rather than writing something the operator did not choose.
+ */
+async function chooseHookMode(
+  flag: SearchHookMode | undefined,
+  stored: SearchHookMode | undefined,
+  deps: InstallDeps,
+  dryRun: boolean,
+  canPrompt: boolean,
+): Promise<SearchHookMode> {
+  if (flag !== undefined) return flag;
+  if (dryRun || !canPrompt) return stored ?? DEFAULT_HOOK_MODE;
+  const answer = await (deps.promptSearchHooks ?? defaultPromptSearchHooks)();
+  if (answer === null) return stored ?? DEFAULT_HOOK_MODE;
+  // The seam is injectable, so an answer is validated rather than trusted.
+  const parsed = SearchHookModeSchema.safeParse(answer);
+  return parsed.success ? parsed.data : (stored ?? DEFAULT_HOOK_MODE);
+}
+
+function defaultPromptSearchHooks(): Promise<SearchHookMode | null> {
+  return selectOne<SearchHookMode>({
+    message: SEARCH_HOOKS_QUESTION,
+    choices: SEARCH_HOOKS_CHOICES.map((c) => ({ ...c })),
+    initialValue: 'auto',
+  });
 }
 
 // --- Detection + planning --------------------------------------------------------
