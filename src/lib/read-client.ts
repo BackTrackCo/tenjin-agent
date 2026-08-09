@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
-import type { PaymentRequired } from '@x402/core/types';
+import type { PaymentRequired, SettleResponse } from '@x402/core/types';
 import { CliError } from './errors';
 import { rateLimitError } from './agent-api';
 import { httpRequest } from './http';
@@ -119,7 +119,13 @@ const paymentRequiredSchema = z
   .passthrough();
 
 export type ReadResult =
-  | { kind: 'entitled'; body: ReadBody; settlementTxHash?: string }
+  | {
+      kind: 'entitled';
+      body: ReadBody;
+      settlementTxHash?: string;
+      /** Full canonical x402 receipt, retained for the MCP transport metadata. */
+      settlementResponse?: SettleResponse;
+    }
   | {
       kind: 'payment_required';
       paymentRequired: PaymentRequired;
@@ -245,7 +251,14 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     return {
       kind: 'entitled',
       body: parsed.data,
-      ...(settlement !== undefined ? { settlementTxHash: settlement } : {}),
+      ...(settlement !== undefined
+        ? {
+            settlementResponse: settlement,
+            ...(typeof settlement.transaction === 'string'
+              ? { settlementTxHash: settlement.transaction }
+              : {}),
+          }
+        : {}),
     };
   }
 
@@ -331,12 +344,10 @@ function sentUnparsableCard(json: unknown, preview: Preview): boolean {
   return 'card' in json && preview.card === undefined;
 }
 
-function decodeSettlement(header: string | undefined): string | undefined {
+function decodeSettlement(header: string | undefined): SettleResponse | undefined {
   if (header === undefined) return undefined;
   try {
-    const settle = decodePaymentResponseHeader(header);
-    const tx = (settle as { transaction?: unknown }).transaction;
-    return typeof tx === 'string' ? tx : undefined;
+    return decodePaymentResponseHeader(header);
   } catch {
     return undefined;
   }

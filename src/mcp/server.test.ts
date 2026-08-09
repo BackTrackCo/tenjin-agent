@@ -4,6 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { decodePaymentSignatureHeader, encodePaymentResponseHeader } from '@x402/core/http';
+import {
+  MCP_PAYMENT_META_KEY,
+  MCP_PAYMENT_RESPONSE_META_KEY,
+  type PaymentPayload,
+  type SettleResponse,
+} from '@x402/mcp';
 import { buildTenjinMcpServer, type BuildMcpOptions } from './server';
 import {
   buildPaymentRequired,
@@ -25,6 +32,35 @@ afterEach(async () => {
 const BASE = 'https://tenjin.blog';
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 const RESERVATION = 'rsv-test';
+
+// Shape copied from the official @x402/mcp main-branch transport fixtures. The
+// canonical HTTP route still validates the real signature; this mock only pins
+// that the MCP payload reaches it through @x402/core's HTTP codec unchanged.
+function externalPayment(accepted: PaymentPayload['accepted']): PaymentPayload {
+  return {
+    x402Version: 2,
+    accepted,
+    payload: {
+      signature: '0x123',
+      authorization: {
+        from: '0x3333333333333333333333333333333333333333',
+        to: accepted.payTo,
+        value: accepted.amount,
+        validAfter: 0,
+        validBefore: Math.floor(Date.now() / 1000) + 3600,
+        nonce: `0x${'01'.repeat(32)}`,
+      },
+    },
+  };
+}
+
+const SETTLEMENT: SettleResponse = {
+  success: true,
+  transaction: `0x${'ab'.repeat(32)}`,
+  network: 'eip155:8453',
+  payer: '0x3333333333333333333333333333333333333333',
+  amount: '100000',
+};
 
 /** Spin up the server over an in-memory transport, hand back a connected client. */
 async function connect(opts: BuildMcpOptions): Promise<Client> {
@@ -189,6 +225,170 @@ describe('tenjin_buy consent', () => {
     expect(sc.data.entitlement).toBe('purchased');
     // A pure MCP client cannot read the local bodyPath file, so the body is inline.
     expect(sc.data.body).toContain('full body');
+  });
+
+  it('attaches the canonical settlement receipt in integrated mode', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody(), encodePaymentResponseHeader(SETTLEMENT)),
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: {
+        buy: {
+          fetchImpl: fetch,
+          provider: testWalletProvider(),
+          authorizer: fakeAuthorizer('allow'),
+        },
+      },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, yes: true },
+    });
+
+    expect(res._meta?.[MCP_PAYMENT_RESPONSE_META_KEY]).toEqual(SETTLEMENT);
+  });
+
+  it('refuses native x402 metadata in integrated mode before touching the local wallet', async () => {
+    const pr = buildPaymentRequired();
+    const provider = testWalletProvider();
+    const describe = vi.spyOn(provider, 'describe');
+    const client = await connect({ dataDir: dir, deps: { buy: { provider } } });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_ },
+      _meta: { [MCP_PAYMENT_META_KEY]: externalPayment(pr.paymentRequired.accepts[0]!) },
+    });
+
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as ErrorEnvelope).error.code).toBe('USAGE');
+    expect(describe).not.toHaveBeenCalled();
+  });
+});
+
+describe('tenjin_buy external x402 MCP mode', () => {
+  it('returns PaymentRequired in the standard direct dual representation', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external' },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toEqual(pr.paymentRequired);
+    expect((res.content as { text: string }[])[0]?.text).toBe(
+      JSON.stringify(res.structuredContent),
+    );
+    expect(calls.map((call) => call.phase)).toEqual(['plain']);
+  });
+
+  it('forwards the official MCP payment payload to the canonical HTTP route and attaches receipt', async () => {
+    const pr = buildPaymentRequired();
+    const payment = externalPayment(pr.paymentRequired.accepts[0]!);
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody(), encodePaymentResponseHeader(SETTLEMENT)),
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external' },
+      _meta: { [MCP_PAYMENT_META_KEY]: payment },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as SuccessEnvelope).data.body).toContain('full body');
+    expect(res._meta?.[MCP_PAYMENT_RESPONSE_META_KEY]).toEqual(SETTLEMENT);
+    expect(calls.map((call) => call.phase)).toEqual(['plain', 'payment']);
+    expect(decodePaymentSignatureHeader(calls[1]!.headers['payment-signature']!)).toEqual(payment);
+  });
+
+  it('treats malformed payment metadata as unpaid and returns a fresh challenge', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external' },
+      _meta: { [MCP_PAYMENT_META_KEY]: { invalid: 'structure' } },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toEqual(pr.paymentRequired);
+    expect(calls.map((call) => call.phase)).toEqual(['plain']);
+  });
+
+  it('enforces maxPrice before forwarding an external payment', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external', maxPrice: '0.01' },
+      _meta: {
+        [MCP_PAYMENT_META_KEY]: externalPayment(pr.paymentRequired.accepts[0]!),
+      },
+    });
+
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as ErrorEnvelope).error.code).toBe('POLICY_REFUSED');
+    expect(calls.map((call) => call.phase)).toEqual(['plain']);
+  });
+
+  it('never releases paid content without a successful settlement receipt', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external' },
+      _meta: {
+        [MCP_PAYMENT_META_KEY]: externalPayment(pr.paymentRequired.accepts[0]!),
+      },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toMatchObject({
+      x402Version: 2,
+      accepts: pr.paymentRequired.accepts,
+    });
+    expect(JSON.stringify(res)).not.toContain('full body');
   });
 });
 

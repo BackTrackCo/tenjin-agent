@@ -362,6 +362,16 @@ renders the `needs_confirmation` payload as its own confirm UI, then re-calls
 with `yes:true`), and a hard content block is never bypassable. The wallet stays
 local: the key never leaves the machine and appears in no tool result.
 
+`tenjin_buy` has two explicit signer lanes. `paymentMode:"integrated"` is the
+default above: Tenjin's local wallet and spend policy sign the payment. An
+x402-aware MCP client can instead call with `paymentMode:"external"`; the tool
+then returns the standard x402 `PaymentRequired` result and accepts the retry in
+`_meta["x402/payment"]`, using `@x402/mcp` directly. A successful retry includes
+the canonical receipt in `_meta["x402/payment-response"]`. Tenjin's HTTP read
+route remains the verifier and settlement authority in both lanes, preserving
+creator credit, entitlement recording, and purchase attribution. The modes never
+auto-switch, so a request cannot unexpectedly fall through to a second wallet.
+
 **Claude Code**
 
 ```bash

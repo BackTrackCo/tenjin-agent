@@ -37,14 +37,17 @@ importers:
         specifier: ^25
         version: 25.9.5
       '@x402/core':
-        specifier: 2.17.0
-        version: 2.17.0
+        specifier: 2.21.0
+        version: 2.21.0
       '@x402/evm':
-        specifier: 2.17.0
-        version: 2.17.0(typescript@6.0.3)
+        specifier: 2.21.0
+        version: 2.21.0(typescript@6.0.3)
       '@x402/extensions':
-        specifier: 2.17.0
-        version: 2.17.0(typescript@6.0.3)
+        specifier: 2.21.0
+        version: 2.21.0(typescript@6.0.3)
+      '@x402/mcp':
+        specifier: 2.21.0
+        version: 2.21.0
       commander:
         specifier: ^14.0.1
         version: 14.0.3
@@ -826,14 +829,17 @@ packages:
   '@vitest/utils@4.1.10':
     resolution: {integrity: sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA==}
 
-  '@x402/core@2.17.0':
-    resolution: {integrity: sha512-BBooe9Kewl5KLaKadElFwhZzZ+n/X/m2djzGtc7OY51D8fk2vHTVvDZtBFEJYdJxtQoUZMKX73hew0ss81FENQ==}
+  '@x402/core@2.21.0':
+    resolution: {integrity: sha512-0djKE7V5/JKDMrjRe5he3DoMFzlbVnUcvMmLAb2j6OoAJDamupkFh6fFrXeoHwjkBIxOFUzjGI4FVixz2dMxSA==}
 
-  '@x402/evm@2.17.0':
-    resolution: {integrity: sha512-MjeouRdVJ1Y20Ikk03RHlnyOuo2FRkh0Nnrxt8aku2qt5fr5M7U8pUGn5iR6aFfRK3xlh48bp0Kypv1zjKuegw==}
+  '@x402/evm@2.21.0':
+    resolution: {integrity: sha512-VZtPz26IxhfAQbHHmyG7nCY/0jLH9QIgNqRztT1ae93dc9uSGUyn5bofzA3Wxq7lND3WDFir0QAQ2LBqoFeMrg==}
 
-  '@x402/extensions@2.17.0':
-    resolution: {integrity: sha512-oYQPLJkRWiSutEVAsyNxwKh4EyviG//s8Ms7Jwkx4J8csm1gd7TfCQTsLwDmieYA5B2Qp8ajebdTkL+bT9/sQA==}
+  '@x402/extensions@2.21.0':
+    resolution: {integrity: sha512-0cZTRVtnWUUsp9KxBvbMERtLKo+57Ru1IhbAHtpgNdK08/LJWtK6CpqM4wgta8nMPth3jMvB/PdS3OdNaEPaBQ==}
+
+  '@x402/mcp@2.21.0':
+    resolution: {integrity: sha512-UDZyOlW5AhtMFuqlXWUuITEzIiJ4EjyZtafceOapt2XyVWgvpWtCClgxQZk5Nkt0GO1fWnqI56YyYZqCan7dcw==}
 
   abitype@1.2.3:
     resolution: {integrity: sha512-Ofer5QUnuUdTFsBRwARMoWKOH1ND5ehwYhJ3OJ/BQO+StkwQjHw0XyVh4vDttzHB7QOFhPHa/o413PJ82gU/Tg==}
@@ -2458,6 +2464,28 @@ snapshots:
       globby: 11.1.0
       read-yaml-file: 1.1.0
 
+  '@modelcontextprotocol/sdk@1.29.0(zod@3.25.76)':
+    dependencies:
+      '@hono/node-server': 2.0.10(hono@4.12.34)
+      ajv: 8.20.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
+      content-type: 1.0.5
+      cors: 2.8.6
+      cross-spawn: 7.0.6
+      eventsource: 3.0.7
+      eventsource-parser: 3.1.0
+      express: 5.2.1
+      express-rate-limit: 8.6.0(express@5.2.1)
+      hono: 4.12.34
+      jose: 6.2.4
+      json-schema-typed: 8.0.2
+      pkce-challenge: 5.0.1
+      raw-body: 3.0.2
+      zod: 3.25.76
+      zod-to-json-schema: 3.25.2(zod@3.25.76)
+    transitivePeerDependencies:
+      - supports-color
+
   '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 2.0.10(hono@4.12.34)
@@ -2817,13 +2845,13 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  '@x402/core@2.17.0':
+  '@x402/core@2.21.0':
     dependencies:
       zod: 3.25.76
 
-  '@x402/evm@2.17.0(typescript@6.0.3)':
+  '@x402/evm@2.21.0(typescript@6.0.3)':
     dependencies:
-      '@x402/core': 2.17.0
+      '@x402/core': 2.21.0
       viem: 2.55.2(typescript@6.0.3)(zod@3.25.76)
       zod: 3.25.76
     transitivePeerDependencies:
@@ -2831,12 +2859,12 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@x402/extensions@2.17.0(typescript@6.0.3)':
+  '@x402/extensions@2.21.0(typescript@6.0.3)':
     dependencies:
       '@noble/curves': 1.9.1
       '@scure/base': 1.2.6
       '@signinwithethereum/siwe': 4.2.0(viem@2.55.2(typescript@6.0.3)(zod@4.4.3))
-      '@x402/core': 2.17.0
+      '@x402/core': 2.21.0
       ajv: 8.20.0
       jose: 5.10.0
       tweetnacl: 1.0.3
@@ -2847,6 +2875,15 @@ snapshots:
       - ethers
       - typescript
       - utf-8-validate
+
+  '@x402/mcp@2.21.0':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(zod@3.25.76)
+      '@x402/core': 2.21.0
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
 
   abitype@1.2.3(typescript@6.0.3)(zod@3.25.76):
     optionalDependencies:
@@ -4078,6 +4115,10 @@ snapshots:
   ws@8.21.0: {}
 
   yocto-queue@0.1.0: {}
+
+  zod-to-json-schema@3.25.2(zod@3.25.76):
+    dependencies:
+      zod: 3.25.76
 
   zod-to-json-schema@3.25.2(zod@4.4.3):
     dependencies:

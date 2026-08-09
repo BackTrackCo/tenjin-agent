@@ -24,6 +24,7 @@ import {
 } from '../lib/wallet';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
+import type { SettleResponse } from '@x402/core/types';
 
 /**
  * `tenjin buy <resource-url-or-id>`, the paid read. The ordering is the whole
@@ -61,6 +62,8 @@ export interface BuyDeps {
   authorizer?: SpendAuthorizer;
   /** Interactive-confirm seam; defaults to a TTY y/n prompt. */
   confirm?: (prompt: string) => Promise<boolean>;
+  /** MCP adapter seam: expose the canonical receipt without changing CLI output. */
+  onSettlementResponse?: (response: SettleResponse) => void;
 }
 
 export async function runBuy(
@@ -226,6 +229,9 @@ export async function runBuy(
     });
 
     if (paid.kind === 'entitled') {
+      if (paid.settlementResponse !== undefined) {
+        deps.onSettlementResponse?.(paid.settlementResponse);
+      }
       await authorizer.commit(reservationId, payment.amountAtomic);
       return await deliverFresh(
         ctx.dataDir,
