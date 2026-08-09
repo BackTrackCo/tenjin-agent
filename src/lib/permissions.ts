@@ -293,6 +293,20 @@ export const FLAG_CAVEAT: readonly string[] = [
 ];
 
 /**
+ * The delegation summary. One line, mirroring the tenjin-search skill's
+ * "Delegating Tenjin work" block, because the operator reading this block is the
+ * one deciding what a subagent may be handed. `outcome` is in the safe TIER but
+ * not in the delegation set: it reports on the parent's search, so a subagent
+ * running it moves the marketplace signal on a decision it did not make.
+ */
+export const DELEGATION_SUMMARY: readonly string[] = [
+  'Delegating to a read-only subagent? search, inspect, read, doctor, config get, wallet show,',
+  'wallet balance and candidate list are the safe set (outcome stays with whoever ran the search);',
+  'publish, edit, buy, send, candidate add/drop, session start, wallet create, config set and',
+  'install stay in a mutation-capable, human-gated context.',
+];
+
+/**
  * The MCP caveat. `tenjin mcp` is never recommended as a Bash rule, but an
  * operator who registers the server anyway is on a different permission surface
  * (tools, not command strings) where three excluded verbs come back.
@@ -343,6 +357,8 @@ export function renderPermissionsBlock(): string[] {
   lines.push('  PRESENT a cached session key — a wallet-derived credential — to the origin it');
   lines.push('  was minted for. It cannot mint one and cannot sign a payment with it (wrong');
   lines.push('  curve), but treat the file itself as sensitive: its scope is not a bound.');
+  lines.push('');
+  lines.push(...DELEGATION_SUMMARY.map((l) => `  ${l}`));
   lines.push('');
   lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
   lines.push('');
