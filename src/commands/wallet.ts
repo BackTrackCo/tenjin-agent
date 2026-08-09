@@ -38,6 +38,13 @@ export interface WalletCreateOptions {
   replace?: boolean;
   /** Test seam for passphrase resolution (keychain exec, TTY prompt, platform). */
   passphrase?: PassphraseOverrides;
+  /**
+   * The environment TENJIN_WALLET_PASSPHRASE is read from; defaults to
+   * process.env. A seam rather than a global read so a caller (and above all a
+   * test) can settle the passphrase source WITHOUT mutating the real process
+   * environment, which under a parallel runner leaks across whole test files.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runWalletCreate(
@@ -141,10 +148,11 @@ async function createWalletLocked(
   const lockPath = join(dir, 'wallet.create.lock');
   try {
     return await withFileLock(lockPath, async () => {
+      const env = opts.env ?? process.env;
       let source: PassphraseSource = 'env';
       const passphraseFor = async (forAddress: string): Promise<string> => {
         const resolved = await resolvePassphraseForCreate(
-          { env: process.env, dir, ...opts.passphrase },
+          { env, dir, ...opts.passphrase },
           forAddress,
         );
         source = resolved.source;
@@ -159,7 +167,7 @@ async function createWalletLocked(
       if (opts.replace !== true) throw walletExistsError(dir);
       const preserved = await verifyAndPreserveOutgoingWallet({
         dir,
-        env: process.env,
+        env,
         ...(opts.passphrase !== undefined ? { passphrase: opts.passphrase } : {}),
       });
       const prepared = await prepareLocalWallet(passphraseFor);

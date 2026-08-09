@@ -167,6 +167,14 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     collectChecks: async () => okChecks,
     // Never the real keychain. See fakeKeychain.
     walletPassphrase: { platform: 'darwin', isTTY: false, exec: fakeKeychain().exec },
+    // HERMETIC ENVIRONMENT, and it is load-bearing twice over. It keeps an
+    // ambient TENJIN_WALLET_PASSPHRASE in the developer's shell (or leaked by
+    // another test file, since vitest does not restore env stubs between files)
+    // from silently rerouting the passphrase away from the store these tests
+    // assert on. And it means no install test ever has to MUTATE process.env to
+    // control that, which is what made the env case flake under the parallel
+    // runner. Empty PATH is harmless here: `which` is stubbed above.
+    env: {},
     // Every prompt seam is answered in-process, so no test renders a prompt or
     // loads the clack chunk. The defaults are the "changed nothing" answers;
     // decision-specific tests override them.
@@ -2766,25 +2774,41 @@ describe('runInstall: wallet creation is the default', () => {
     expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
   });
 
+  // Through the deps seam, NOT vi.stubEnv: mutating the real process environment
+  // to steer this is what made it flake under the parallel runner, and the
+  // passphrase layer already takes its env as an argument.
   it('uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all', async () => {
     const touched: string[] = [];
     const spyExec: ExecFn = async (file, args) => {
       touched.push(`${file} ${args[0] ?? ''}`);
       throw new Error('no store');
     };
-    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', 'a-passphrase-the-operator-supplied');
-    try {
-      const res = await runInstall(
-        { harness: ['claude'] },
-        makeCtx({ json: true }),
-        deps(realWalletCreate(spyExec)),
-      );
-      expect(walletOf(res.data).status).toBe('created');
-      // The env value settles it, so no credential store is consulted at all.
-      expect(touched).toEqual([]);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        ...realWalletCreate(spyExec),
+        env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
+      }),
+    );
+    expect(walletOf(res.data).status).toBe('created');
+    // The env value settles it, so no credential store is consulted at all.
+    expect(touched).toEqual([]);
+  });
+
+  // The mirror of the case above, and the reason the fixture pins an empty env:
+  // with no passphrase in the environment the store is the only source left, so
+  // an ambient one leaking in from a shell or another file would silently make
+  // the keychain assertions vacuous.
+  it('falls to the OS store when the environment carries no passphrase', async () => {
+    const { exec, entries } = fakeKeychain();
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(exec)),
+    );
+    expect(walletOf(res.data).status).toBe('created');
+    expect(entries.size).toBe(1);
   });
 
   // The one case with no safe answer. No plaintext fallback exists, by design.

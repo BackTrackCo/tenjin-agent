@@ -908,7 +908,8 @@ async function resolveWallet(
 
   try {
     const create =
-      deps.createWallet ?? ((c: CommandContext) => defaultCreateWallet(c, deps.walletPassphrase));
+      deps.createWallet ??
+      ((c: CommandContext) => defaultCreateWallet(c, deps.walletPassphrase, deps.env));
     return { status: 'created', address: await create(ctx) };
   } catch (err) {
     // The one failure with a real remedy: no env passphrase and no OS store, so
@@ -948,8 +949,12 @@ async function existingWalletAddress(ctx: CommandContext): Promise<string> {
 async function defaultCreateWallet(
   ctx: CommandContext,
   passphrase?: PassphraseOverrides,
+  env?: NodeJS.ProcessEnv,
 ): Promise<string> {
-  const result = await runWalletCreate(ctx, passphrase !== undefined ? { passphrase } : {});
+  const result = await runWalletCreate(ctx, {
+    ...(passphrase !== undefined ? { passphrase } : {}),
+    ...(env !== undefined ? { env } : {}),
+  });
   return (result.data as { address: string }).address;
 }
 
