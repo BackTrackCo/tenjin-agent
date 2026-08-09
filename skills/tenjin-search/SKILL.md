@@ -144,7 +144,9 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   leaking, do not search.
 - Search matches both wording and meaning, so send the complete question as one
   natural-language sentence. Do not compress it to keywords; the dropped words
-  are what the meaning match runs on.
+  are what the meaning match runs on. Stay under 512 characters (the server's
+  cap): trim narrative and background, keep the technical specifics. Over the
+  cap the CLI refuses with `USAGE` before anything is sent.
 - The server answers `CANDIDATES` or `MISS`. MISS is a fine answer; move on
   immediately.
 - A candidate is a lean hit: `resourceId`, `url`, `slug`, `title`,
@@ -255,6 +257,11 @@ tenjin outcome --json --last --status used|partially_used|rejected|regenerated|p
 
 Report honestly after acting on a search, including rejections. This is the
 signal the marketplace learns from and it costs one command.
+
+`--last` binds to the newest local search, so after more than one search in a
+session pass `--search-id` from the search you mean instead. The CLI echoes
+which search it reported against and refuses a status that search cannot have
+(e.g. `purchase_declined` when nothing was payable); read the echo.
 
 ## After a MISS: publish what you build (by your consent mode)
 

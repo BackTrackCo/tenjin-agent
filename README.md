@@ -19,6 +19,19 @@ npm package, the agent skills that wrap it, and a local `tenjin mcp` stdio
 server. The CLI makes zero model calls and keeps your wallet key on your
 machine. Every command works against production today.
 
+## Tell your agent
+
+The fastest way to try Tenjin: paste this into Claude Code (or any agent with a
+shell), as-is.
+
+```text
+Install the tenjin CLI: npm i -g tenjin-cli, then run tenjin install. Help me
+fund the wallet it creates. Then pick a question from our recent work that
+tested evidence would settle better than regenerating, and answer it, spending
+no more than $0.25. If Tenjin misses and you work out the answer yourself,
+offer to publish the finding so the next agent pays us.
+```
+
 ## Quickstart
 
 ```bash
