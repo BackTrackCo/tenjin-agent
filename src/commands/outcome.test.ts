@@ -257,6 +257,83 @@ describe('runOutcome, locally incoherent statuses', () => {
     },
   );
 
+  // The aggregate arm, with no --resource to name a candidate: a price the store
+  // cannot read is not evidence the search was free, so it must not combine with
+  // an empty browse tail into a refusal.
+  it('allows purchase_declined when a stored price is unreadable', async () => {
+    await record({
+      decision: 'CANDIDATES',
+      candidates: [{ ...CANDIDATE, price: 'not-a-price' }],
+      paidBrowseCount: 0,
+    });
+    const { fetch, urls } = stub();
+    await runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch });
+    expect(urls).toHaveLength(1);
+  });
+
+  // A paid sibling in the same result does not make a free piece purchasable, so
+  // an explicit --resource the store knows is checked against its OWN price.
+  describe('with --resource naming a candidate the store knows', () => {
+    const MIXED = { decision: 'CANDIDATES', candidates: [FREE_CANDIDATE, CANDIDATE] };
+
+    it('refuses a decline naming the free candidate', async () => {
+      await record(MIXED);
+      const { fetch, urls } = stub();
+      const call = runOutcome(
+        { last: true, status: 'purchase_declined', resource: FREE_CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      await expect(call).rejects.toMatchObject({ code: 'USAGE' });
+      await expect(call).rejects.toThrow(FREE_CANDIDATE.resourceId);
+      expect(urls).toHaveLength(0);
+    });
+
+    it('allows a decline naming the paid candidate in the same search', async () => {
+      await record(MIXED);
+      const { fetch, urls } = stub();
+      await runOutcome(
+        { last: true, status: 'purchase_declined', resource: CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      expect(urls).toHaveLength(1);
+    });
+
+    // Browse pointers are payable and deliberately never stored, so an id the
+    // store does not hold is unknowable, not wrong. It falls back to the search's
+    // aggregate answer rather than being refused for being absent.
+    it('passes through an id the store has never seen', async () => {
+      await record({ paidBrowseCount: 2 });
+      const { fetch, urls } = stub();
+      await runOutcome(
+        {
+          last: true,
+          status: 'purchase_declined',
+          resource: '0197aaaa-bbbb-cccc-dddd-999999999999',
+        },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      expect(urls).toHaveLength(1);
+    });
+
+    it('treats an unreadable stored price as unknown rather than free', async () => {
+      await record({
+        decision: 'CANDIDATES',
+        candidates: [{ ...CANDIDATE, price: '-1' }],
+        paidBrowseCount: 0,
+      });
+      const { fetch, urls } = stub();
+      await runOutcome(
+        { last: true, status: 'purchase_declined', resource: CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      );
+      expect(urls).toHaveLength(1);
+    });
+  });
+
   it('still fails an unknown status as unknown, not as incoherent', async () => {
     await record();
     const { fetch } = stub();

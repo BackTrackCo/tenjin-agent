@@ -44,7 +44,7 @@ export async function runOutcome(
     ...(args.resource !== undefined ? { resourceId: args.resource } : {}),
     ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
   });
-  if (target.stored !== null) assertStatusCoherent(item.status, target.stored);
+  if (target.stored !== null) assertStatusCoherent(item.status, target.stored, item.resourceId);
   const { searchId } = target;
   const question = target.stored !== null ? echoQuestion(target.stored.question) : undefined;
 
@@ -130,16 +130,37 @@ function echoQuestion(question: string): string {
  *                         MISS is a real report and not a mistake (issue #100).
  *   rejected, regenerated always. "Nothing here helped, I wrote it myself" is
  *                         exactly what a MISS deserves to record.
- *   purchase_declined     needs the search to have offered something to buy.
- *                         Declining a purchase nobody offered cannot have
- *                         happened, and that is the shape the dogfooding misfire
- *                         took: a purchase_declined aimed at a bare MISS.
+ *   purchase_declined     needs the search to have offered something to buy, or,
+ *                         when `--resource` names a candidate the store knows,
+ *                         needs THAT candidate to have cost money. Declining a
+ *                         purchase nobody offered cannot have happened, and that
+ *                         is the shape the dogfooding misfire took: a
+ *                         purchase_declined aimed at a bare MISS.
  *
  * Local knowledge only, and fail-open by construction: an unknown is never a
  * refusal. The server owns the checks this cannot make.
  */
-function assertStatusCoherent(status: string, stored: StoredSearch): void {
+function assertStatusCoherent(status: string, stored: StoredSearch, resourceId?: string): void {
   if (status !== 'purchase_declined') return;
+
+  // A named candidate the store knows answers for itself. A piece that was free
+  // is not made purchasable by a paid sibling in the same result, so the specific
+  // claim is checked against the specific price rather than the search's total.
+  const named =
+    resourceId !== undefined
+      ? stored.candidates.find((c) => c.resourceId === resourceId)
+      : undefined;
+  if (named !== undefined) {
+    if (isPaidPrice(named.price) !== false) return;
+    throw new CliError(
+      'USAGE',
+      `Search ${stored.searchId} "${echoQuestion(stored.question)}" listed ${resourceId} at no cost, so purchase_declined cannot describe it.`,
+      {
+        fix: 'A free piece is reported as used, partially_used, rejected or regenerated; pass the --resource you actually declined to buy.',
+      },
+    );
+  }
+
   if (offeredSomethingToBuy(stored) !== false) return;
   throw new CliError(
     'USAGE',
@@ -158,7 +179,9 @@ function assertStatusCoherent(status: string, stored: StoredSearch): void {
  * all-free candidate list might still have sat above a payable browse tail.
  */
 function offeredSomethingToBuy(stored: StoredSearch): boolean | null {
-  if (stored.candidates.some((c) => isPaidPrice(c.price))) return true;
+  if (stored.candidates.some((c) => isPaidPrice(c.price) === true)) return true;
+  // A price the store cannot parse is not evidence that the result was free.
+  if (stored.candidates.some((c) => isPaidPrice(c.price) === null)) return null;
   if (stored.paidBrowseCount === undefined) return null;
   return stored.paidBrowseCount > 0;
 }

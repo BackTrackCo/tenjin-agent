@@ -21,7 +21,12 @@ exactly what a MISS deserves to record.
 
 "Offered something to buy" is priced strictly: a piece priced at zero is
 delivered by `read` with no payment, so an all-free result had no purchase to
-decline however many rows it listed. `search` records how many of a result's
+decline however many rows it listed. When `--resource` names a candidate the
+store knows, that candidate's own price decides, so a decline aimed at a free
+piece is refused even when a paid one sat beside it in the same result; an id the
+store has never seen (a browse pointer, deliberately unrecorded) falls back to
+the search's aggregate answer rather than being refused for being absent.
+`search` records how many of a result's
 browse pointers cost money (the count only, never the pointers, which stay
 unrecorded so `buy <resourceId>` still cannot reach one) so a MISS with a payable
 tail is distinguishable from a free or bare one. Entries written before that

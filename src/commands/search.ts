@@ -106,7 +106,7 @@ export async function runSearch(
     // `read` delivers it for nothing, so there was no purchase to decline. Zero on
     // a CANDIDATES decision, where the contract carries no browse array and the
     // parser drops any that appears.
-    paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price)).length,
+    paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price) === true).length,
   });
 
   // A parked-candidate nudge on stderr (not in the machine JSON), MISS only: a

@@ -1,4 +1,5 @@
 import { CliError } from './errors';
+import { ATOMIC_RE } from './ids';
 import type { Money } from '../schemas';
 
 /** USDC is a 6-decimal token; one dollar is 1_000_000 atomic units. */
@@ -50,15 +51,21 @@ export function atomicToUsd(atomic: string): string {
 }
 
 /**
- * Whether an atomic price would actually cost something. A Tenjin piece may be
- * priced at zero and is then delivered by `read` with no payment at all, so
- * "there is a price field" and "there is a purchase to make" are different
- * questions. Digits-only by schema (ATOMIC_RE), so a positive value is exactly
- * one with a non-zero digit in it; deliberately not BigInt, which would throw on
- * the malformed input this predicate should simply answer "no" to.
+ * Whether an atomic price would actually cost something: true paid, false free,
+ * null when the string is not an atomic amount at all and so cannot answer.
+ *
+ * A Tenjin piece may be priced at zero and is then delivered by `read` with no
+ * payment, so "there is a price field" and "there is a purchase to make" are
+ * different questions. The third state is not decoration: only the wire schema
+ * enforces ATOMIC_RE, and the local search store types `price` as a bare string,
+ * so a hand-edited or half-written entry can hold "-1" or "0.1". Those must not
+ * read as "free", or corrupt local data would start refusing honest reports.
+ * Never throws, which is why the check is a regex and not a BigInt compare.
  */
-export function isPaidPrice(atomic: string): boolean {
-  return /[1-9]/.test(atomic.trim());
+export function isPaidPrice(atomic: string): boolean | null {
+  const trimmed = atomic.trim();
+  if (!ATOMIC_RE.test(trimmed)) return null;
+  return /[1-9]/.test(trimmed);
 }
 
 /** Dual-form money object for machine output. */
