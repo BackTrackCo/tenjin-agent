@@ -145,7 +145,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       '--publish-mode <mode>',
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
-    .option('--no-wallet', 'skip the wallet-setup step of the interactive walkthrough')
+    .option('--no-wallet', 'create no wallet (the default is to create one)')
     .option('--claude-md', 'append the Tenjin search nudge to ~/.claude/CLAUDE.md')
     .option('--no-claude-md', 'skip the CLAUDE.md nudge')
     .option(
@@ -155,8 +155,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--no-allow-free-verbs', 'write no harness permission rules at all')
     .option(
       '--search-hooks <mode>',
-      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off',
+      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.searchMode',
     )
+    .option('--no-hooks', 'register no harness hooks this run (writes no config)')
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
@@ -181,6 +182,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
               ? { allowFreeVerbs: o.allowFreeVerbs }
               : {}),
             ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
+            ...(o.hooks === false ? { noHooks: true } : {}),
           },
           ctx,
         );

@@ -43,7 +43,9 @@ import { runWalletCreate } from './wallet';
 import { collectDoctorChecks } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
+import type { PassphraseOverrides } from '../lib/wallet/local';
 import { walletFileExists } from '../lib/wallet/store';
+import { walletPath } from '../lib/paths';
 import { recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
@@ -85,6 +87,12 @@ const InstallInputSchema = z.object({
   allowFreeVerbs: z.boolean().optional(),
   /** The harness search-hook behavior to install (`--search-hooks auto|remind|off`). */
   searchHooks: z.string().optional(),
+  /**
+   * `--no-hooks`: register no hooks THIS RUN, changing nothing persistent. It is
+   * deliberately not the same as `--search-hooks off`, which is a durable
+   * statement about behavior and writes `hooks.searchMode: off` to config.
+   */
+  noHooks: z.boolean().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
 
@@ -106,18 +114,45 @@ interface PublishModeSelection {
 }
 
 /**
+ * Why no wallet was created, when none was.
+ *
+ * `no-passphrase-store` is the one that matters: this machine has no OS
+ * credential store that would hold a generated passphrase, and no
+ * `TENJIN_WALLET_PASSPHRASE`. There is no fallback here BY DESIGN. A passphrase
+ * written to a plain file beside the keystore it unlocks is not a passphrase, so
+ * the run creates nothing and says so loudly with both remedies.
+ */
+type WalletSkipReason = 'no-passphrase-store' | 'create-failed' | 'dry-run' | 'flag';
+
+/**
  * How the wallet step resolved, so rendering stays separate from prompting.
  *
- * `declined` and `not-offered` are kept apart deliberately: the first is an
- * answer, the second is a question that was never put. A machine run has never
- * created a key and never will, so its envelope has to say that the decision was
- * skipped rather than leave the reader to infer it from an absent field.
+ * `declined` (an answer) and `skipped` (no answer, with a reason) are kept apart
+ * deliberately: an install that could not create a key is a different state from
+ * one the operator told not to, and only the first needs a remedy.
  */
 interface WalletOutcome {
-  status: 'existing' | 'created' | 'declined' | 'not-offered';
+  status: 'existing' | 'created' | 'declined' | 'skipped';
   address?: string;
-  /** Why the question was not asked. Only ever set on `not-offered`. */
-  reason?: 'non-interactive' | 'dry-run' | 'flag';
+  /** Only ever set on `skipped`. */
+  reason?: WalletSkipReason;
+  /** The exact command that changes this outcome, mirroring the CliError contract. */
+  fix?: string;
+  /** The underlying failure, for a `create-failed` skip. */
+  warning?: string;
+}
+
+/** The remedy for each skip, so no skipped state is ever a dead end. */
+function walletFix(reason: WalletSkipReason): string {
+  switch (reason) {
+    case 'no-passphrase-store':
+      return 'No OS credential store is available to hold the wallet passphrase. Set TENJIN_WALLET_PASSPHRASE and re-run `tenjin install`, or run `tenjin wallet create` in a terminal to enter one.';
+    case 'create-failed':
+      return 'Fix the reported problem, then run `tenjin wallet create`.';
+    case 'dry-run':
+    case 'flag':
+      return 'Create one with `tenjin wallet create`.';
+  }
 }
 
 /**
@@ -251,6 +286,13 @@ export interface InstallDeps {
   walletAddress?: (ctx: CommandContext) => Promise<string>;
   /** Create a wallet and return its address. Defaults to runWalletCreate. */
   createWallet?: (ctx: CommandContext) => Promise<string>;
+  /**
+   * Passphrase-resolution seam forwarded to `wallet create` (OS-store exec, TTY
+   * prompt, platform). Tests MUST set it: without it a headless install now
+   * creates a real wallet, and on macOS that writes to the developer's own login
+   * keychain under the `tenjin-cli` service.
+   */
+  walletPassphrase?: PassphraseOverrides;
 }
 
 /**
@@ -349,6 +391,7 @@ async function installBody(
   }
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
+  const noHooks = parsed.data.noHooks === true;
   const claudeMdFlag = parsed.data.claudeMd;
   const allowFreeVerbs = parsed.data.allowFreeVerbs;
   // Validate the enum flags UP FRONT so a bad value fails before any wiring.
@@ -444,13 +487,14 @@ async function installBody(
     canPrompt,
   });
   const hooks = await underDataDir(ctx.dataDir, () =>
-    resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, dryRun, canPrompt }),
+    resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
   );
-  // The wallet question belongs to the human walkthrough only: a machine run has
-  // never created a key, and that stays true. It is REPORTED on both paths.
-  const wallet: WalletOutcome = humanOutput
-    ? await resolveWallet(ctx, deps, walletSkip(dryRun, canPrompt, noWallet))
-    : { status: 'not-offered', reason: 'non-interactive' };
+  // On BOTH paths now: the loop this command sets up needs a key, so a headless
+  // run creates one rather than leaving the operator a setup that stops at the
+  // first buy or publish.
+  const wallet = await underDataDir(ctx.dataDir, () =>
+    resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt),
+  );
   if (canPrompt) await (deps.outro ?? clackOutro)('Setup complete.');
 
   const data = {
@@ -477,6 +521,7 @@ async function installBody(
   // to stdout at a TTY and never an envelope).
   const humanLines = buildWalkthrough(ctx.io, {
     dryRun,
+    dataDir: ctx.dataDir,
     harnesses,
     publishMode,
     permissions,
@@ -487,15 +532,13 @@ async function installBody(
   return { data, humanLines };
 }
 
-/** Why the wallet question is not being put, or undefined when it is. */
-function walletSkip(
-  dryRun: boolean,
-  canPrompt: boolean,
-  noWallet: boolean,
-): WalletOutcome['reason'] | undefined {
+/**
+ * Why no wallet is being created at all, or undefined when one is. Being unable
+ * to prompt is NOT on this list any more: a headless run creates by default.
+ */
+function walletSkip(dryRun: boolean, noWallet: boolean): 'dry-run' | 'flag' | undefined {
   if (dryRun) return 'dry-run';
   if (noWallet) return 'flag';
-  if (!canPrompt) return 'non-interactive';
   return undefined;
 }
 
@@ -521,6 +564,8 @@ const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 
 interface WalkthroughState {
   dryRun: boolean;
+  /** Where the wallet keystore lives, for the create disclosure. */
+  dataDir: string;
   harnesses: HarnessResult[];
   publishMode: PublishModeSelection;
   permissions: PermissionsResult;
@@ -614,6 +659,10 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   if (s.hooks.warning !== undefined) {
     lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.hooks.warning)}`));
   }
+  for (const line of walletDisclosure(s.wallet, s.dataDir)) lines.push(paint(io, 'dim', line));
+  if (s.wallet.warning !== undefined) {
+    lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.wallet.warning)}`));
+  }
   if (s.permissions.warning !== undefined) {
     // Sanitized for the same reason doctorNotices sanitizes `detail`/`fix`: this
     // string embeds a V8 JSON parse error, and V8 quotes the offending input, so
@@ -670,8 +719,11 @@ function hooksLine(io: Io, h: HooksResult): string {
   if (h.skipped === 'dry-run') {
     return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
   }
-  if (h.skipped === 'mode-off' || h.skipped === 'declined') {
-    return `${paint(io, 'dim', '-')} ${label} off. Turn them on: tenjin install --search-hooks auto`;
+  if (h.skipped === 'mode-off') {
+    return `${paint(io, 'dim', '-')} ${label} off (hooks.searchMode). Turn them on: tenjin config set hooks.searchMode auto, then tenjin install`;
+  }
+  if (h.skipped === 'declined') {
+    return `${paint(io, 'dim', '-')} ${label} not registered this run; nothing was configured. Register them: tenjin install`;
   }
   if (h.skipped === 'changed-since-read') {
     return `${paint(io, 'yellow', '!')} ${label} ${h.path} changed while it was being updated, so nothing was written. Re-run: tenjin install`;
@@ -747,12 +799,27 @@ function walletLine(io: Io, w: WalletOutcome): string {
     return `${paint(io, 'green', '✓')} ${label} ${w.address} (existing). Check funds with: tenjin wallet balance`;
   }
   if (w.status === 'created') {
-    return `${paint(io, 'green', '✓')} ${label} ${w.address}. Fund it with a few dollars of USDC on Base, then: tenjin wallet balance`;
+    return `${paint(io, 'green', '✓')} ${label} ${w.address}, holding $0. Fund it with a few dollars of USDC on Base, then: tenjin wallet balance`;
   }
-  if (w.status === 'not-offered') {
-    return `${paint(io, 'dim', '-')} ${label} not offered (${w.reason ?? 'skipped'}); no key was created. Create one with: tenjin wallet create`;
+  if (w.status === 'skipped') {
+    const icon = w.reason === 'no-passphrase-store' || w.reason === 'create-failed' ? '!' : '-';
+    const color = icon === '!' ? 'yellow' : 'dim';
+    return `${paint(io, color, icon)} ${label} none (${w.reason}). ${w.fix}`;
   }
   return `${paint(io, 'dim', '-')} ${label} none. Create one later with: tenjin wallet create`;
+}
+
+/**
+ * What a freshly created wallet means, at the moment it is created. Three things
+ * an operator has to know and would otherwise learn the hard way: it is empty,
+ * only a human can fund it, and where the key lives.
+ */
+function walletDisclosure(w: WalletOutcome, dataDir: string): string[] {
+  if (w.status !== 'created') return [];
+  return [
+    `A wallet was created at ${walletPath(dataDir)}: the key is encrypted at rest (keystore v3, scrypt, mode 0600) and never leaves this machine.`,
+    'It holds $0. Funding it is a human step: send USDC on Base to that address; nothing in this CLI can move money into it.',
+  ];
 }
 
 /** `tenjin-search, tenjin-publish (CLI); tenjin (hosted, zero-install fallback)`. */
@@ -797,15 +864,29 @@ function modeBlurb(v: PublishMode): string {
 }
 
 /**
- * The wallet decision, unchanged in behavior: ask only when no wallet exists, and
- * never under `--no-wallet`, `--dry-run`, or a run we cannot prompt in. What is
- * new is that a skip is REPORTED as `not-offered` with its reason, so the
- * envelope distinguishes "said no" from "was never asked".
+ * The wallet decision. A wallet is now created BY DEFAULT on both paths, because
+ * the loop this command exists to set up does not close without one: `buy` needs
+ * a funded key and publish-on-MISS needs a key to sign the write, so a walletless
+ * install is a setup that stops at the first useful thing the agent tries.
+ *
+ * The headless path is the change. It creates without asking, using the
+ * passphrase policy `resolvePassphraseForCreate` already enforces: an explicit
+ * `TENJIN_WALLET_PASSPHRASE`, else a strong generated passphrase written to the
+ * platform's OS credential store and verified by reading it back. When neither is
+ * available it creates NOTHING and reports `skipped: no-passphrase-store` with
+ * both remedies. There is deliberately no plain-file fallback: a passphrase
+ * sitting next to the keystore it unlocks protects nothing, and an install is
+ * never the right place to invent one.
+ *
+ * A creation failure never fails the install. The skills, hooks and permissions
+ * this run just wired are all useful without a wallet, so the failure is reported
+ * loudly and the command still succeeds.
  */
 async function resolveWallet(
   ctx: CommandContext,
   deps: InstallDeps,
-  skipReason: WalletOutcome['reason'] | undefined,
+  skipReason: 'dry-run' | 'flag' | undefined,
+  canPrompt: boolean,
 ): Promise<WalletOutcome> {
   const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
   if (exists) {
@@ -814,20 +895,61 @@ async function resolveWallet(
       address: await (deps.walletAddress ?? existingWalletAddress)(ctx),
     };
   }
-  if (skipReason !== undefined) return { status: 'not-offered', reason: skipReason };
+  if (skipReason !== undefined) {
+    return { status: 'skipped', reason: skipReason, fix: walletFix(skipReason) };
+  }
 
-  const confirm = deps.confirmWallet ?? defaultConfirm;
-  if (!(await confirm(WALLET_QUESTION))) return { status: 'declined' };
+  // Interactive keeps the question (default yes); headless has nobody to ask and
+  // takes the default rather than treating silence as a no.
+  if (canPrompt) {
+    const confirm = deps.confirmWallet ?? defaultConfirm;
+    if (!(await confirm(WALLET_QUESTION))) return { status: 'declined' };
+  }
 
-  return { status: 'created', address: await (deps.createWallet ?? defaultCreateWallet)(ctx) };
+  try {
+    const create =
+      deps.createWallet ?? ((c: CommandContext) => defaultCreateWallet(c, deps.walletPassphrase));
+    return { status: 'created', address: await create(ctx) };
+  } catch (err) {
+    // The one failure with a real remedy: no env passphrase and no OS store, so
+    // resolvePassphraseForCreate refused rather than encrypt with a passphrase
+    // that has no durable copy. Anything else is reported as itself.
+    const reason: WalletSkipReason = isNoPassphraseError(err)
+      ? 'no-passphrase-store'
+      : 'create-failed';
+    return {
+      status: 'skipped',
+      reason,
+      fix: walletFix(reason),
+      ...(reason === 'create-failed'
+        ? { warning: `The wallet could not be created: ${errorText(err)}` }
+        : {}),
+    };
+  }
+}
+
+/** Is this the passphrase layer refusing because no durable store could serve? */
+function isNoPassphraseError(err: unknown): boolean {
+  return (
+    err instanceof CliError &&
+    err.code === 'USAGE' &&
+    err.message.includes('No wallet passphrase is available')
+  );
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function existingWalletAddress(ctx: CommandContext): Promise<string> {
   return (await describeWallet(resolveWalletProvider(ctx))).address;
 }
 
-async function defaultCreateWallet(ctx: CommandContext): Promise<string> {
-  const result = await runWalletCreate(ctx);
+async function defaultCreateWallet(
+  ctx: CommandContext,
+  passphrase?: PassphraseOverrides,
+): Promise<string> {
+  const result = await runWalletCreate(ctx, passphrase !== undefined ? { passphrase } : {});
   return (result.data as { address: string }).address;
 }
 
@@ -1047,10 +1169,11 @@ async function resolveHooks(args: {
   ctx: CommandContext;
   deps: InstallDeps;
   flag: SearchHookMode | undefined;
+  noHooks: boolean;
   dryRun: boolean;
   canPrompt: boolean;
 }): Promise<HooksResult> {
-  const { plans, home, ctx, deps, flag, dryRun, canPrompt } = args;
+  const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
   const stored = (await loadRawConfig(dataDir)).hooks?.searchMode;
 
@@ -1063,6 +1186,12 @@ async function resolveHooks(args: {
       flag ?? stored ?? DEFAULT_HOOK_MODE,
       'harness-not-claude',
     );
+  }
+  // `--no-hooks` is a decision about THIS RUN and writes no config, so the stored
+  // mode is reported unchanged and a later bare re-run wires them. That is the
+  // difference from `--search-hooks off`, which is a durable statement.
+  if (noHooks) {
+    return hooksSkipped('claude', home, dataDir, stored ?? DEFAULT_HOOK_MODE, 'declined');
   }
 
   const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt);

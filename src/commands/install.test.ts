@@ -69,8 +69,9 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './install';
+import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
+import type { ExecFn } from '../lib/wallet/passphrase';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
 import {
@@ -107,9 +108,55 @@ function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
   };
 }
 
+/** The address the stubbed creator reports; never a real key. */
+const STUB_ADDRESS = '0x00000000000000000000000000000000deadbeef';
+
+/** Opt a test into the REAL `wallet create` path (still on the fake keychain). */
+function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
+  return {
+    createWallet: undefined,
+    walletPassphrase: { platform: 'darwin', isTTY: false, exec: exec ?? fakeKeychain().exec },
+  };
+}
+
 // Default doctor stub: one passing check, no network. Overridden per-test.
 const okChecks: DoctorChecks = {
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
+};
+
+/**
+ * An in-memory stand-in for the macOS login keychain.
+ *
+ * EVERY install test goes through this, and that is a hard safety rule rather
+ * than a convenience: a headless install now CREATES a wallet by default, and
+ * without an injected exec the real `security` binary would write entries into
+ * the developer's own login keychain under the `tenjin-cli` service on every
+ * test run. `platform: 'darwin'` is pinned so the same store is exercised on
+ * Linux CI, and `isTTY: false` keeps the passphrase prompt unreachable.
+ */
+function fakeKeychain(): { exec: ExecFn; entries: Map<string, string> } {
+  const entries = new Map<string, string>();
+  const exec: ExecFn = async (file, args, stdin) => {
+    if (file !== 'security') throw new Error(`install tests must not exec ${file}`);
+    if (args[0] === '-i') {
+      const m = /^add-generic-password -s tenjin-cli -a (\S+) -w '([^']*)'\n$/.exec(String(stdin));
+      if (m === null) throw new Error(`unexpected security -i payload: ${String(stdin)}`);
+      entries.set(m[1] as string, m[2] as string);
+      return { stdout: '', stderr: '' };
+    }
+    if (args[0] === 'find-generic-password') {
+      const value = entries.get(args[args.indexOf('-a') + 1] as string);
+      if (value === undefined) throw new Error('could not be found');
+      return { stdout: `${value}\n`, stderr: '' };
+    }
+    throw new Error(`unexpected security call: ${args.join(' ')}`);
+  };
+  return { exec, entries };
+}
+
+/** A machine with NO usable credential store: every store call fails. */
+const noKeychain: ExecFn = async () => {
+  throw new Error('no credential store here');
 };
 
 function deps(over: Partial<InstallDeps> = {}): InstallDeps {
@@ -118,11 +165,18 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     skillsSourceDir: SKILLS_SRC,
     which: () => false,
     collectChecks: async () => okChecks,
+    // Never the real keychain. See fakeKeychain.
+    walletPassphrase: { platform: 'darwin', isTTY: false, exec: fakeKeychain().exec },
     // Every prompt seam is answered in-process, so no test renders a prompt or
     // loads the clack chunk. The defaults are the "changed nothing" answers;
     // decision-specific tests override them.
     walletExists: async () => false,
     confirmWallet: async () => false,
+    // Stubbed by default so the ~140 tests that are not about the wallet do not
+    // each pay for a real scrypt key derivation. The wallet tests below opt into
+    // the real creator with `realWalletCreate()`, which still goes through the
+    // fake keychain above.
+    createWallet: async () => STUB_ADDRESS,
     promptPublishMode: async () => null,
     promptSearchHooks: async () => null,
     confirmPermissions: async () => false,
@@ -1036,7 +1090,7 @@ describe('runInstall: interactive walkthrough', () => {
   const human = (res: { humanLines?: string[] }): string =>
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
   const walletOf = (d: unknown) =>
-    (d as { wallet: { status: string; address?: string; reason?: string } }).wallet;
+    (d as { wallet: { status: string; address?: string; reason?: string; fix?: string } }).wallet;
 
   // The summary is one line per subject and it closes the output, so it is read
   // off the TAIL: whatever disclosures a given run owed the operator sit above it,
@@ -1222,10 +1276,11 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, confirmWallet: confirm }),
     );
     expect(confirm).not.toHaveBeenCalled();
-    // A question that was never put reads as `not-offered` with its reason, not as
-    // an answer of no. Both say no key was created; only one of them was a choice.
-    expect(human(res)).toContain('Wallet: not offered (flag); no key was created');
-    expect(walletOf(res.data)).toEqual({ status: 'not-offered', reason: 'flag' });
+    // An opt-out is a `skipped` state with its reason and a remedy, not a
+    // `declined` answer: nobody said no, the flag said never ask.
+    expect(human(res)).toContain('Wallet: none (flag)');
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'flag' });
+    expect(walletOf(res.data).fix).toContain('tenjin wallet create');
   });
 
   it('shows an existing wallet address without prompting', async () => {
@@ -1271,7 +1326,9 @@ describe('runInstall: interactive walkthrough', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(permissions).not.toHaveBeenCalled();
     expect(human(res)).toContain('Publishing: review');
-    expect(human(res)).toContain('Wallet: not offered (non-interactive); no key was created');
+    // No prompt, but a wallet all the same: a run nobody can answer takes the
+    // default rather than treating silence as a no.
+    expect(human(res)).toContain(`Wallet: ${STUB_ADDRESS}, holding $0`);
   });
 
   it('a green doctor says nothing; a failure surfaces with its fix', async () => {
@@ -2643,20 +2700,19 @@ describe('runInstall: the wallet decision is visible even when it is skipped', (
   const walletOf = (d: unknown) =>
     (d as { wallet: { status: string; address?: string; reason?: string } }).wallet;
 
-  // A machine run has never created a key. The envelope has to SAY that rather
-  // than omit the field and leave a reader to infer it.
-  it('a machine run reports not-offered with its reason', async () => {
+  // The loop this command sets up needs a key, so the headless path creates one.
+  it('a machine run creates a wallet and reports its address', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    expect(walletOf(res.data)).toEqual({ status: 'not-offered', reason: 'non-interactive' });
+    expect(walletOf(res.data)).toEqual({ status: 'created', address: STUB_ADDRESS });
   });
 
-  it('a dry run reports not-offered too', async () => {
+  it('a dry run creates nothing and says why', async () => {
     const res = await runInstall(
       { harness: ['claude'], dryRun: true },
       makeCtx(),
       deps({ isInteractive: true }),
     );
-    expect(walletOf(res.data)).toEqual({ status: 'not-offered', reason: 'dry-run' });
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'dry-run' });
   });
 
   // Answering no is a decision; it must not read the same as never being asked.
@@ -2680,5 +2736,192 @@ describe('runInstall: the wallet decision is visible even when it is skipped', (
       }),
     );
     expect(walletOf(res.data).status).toBe('existing');
+  });
+});
+
+// --- The wallet is created by default -----------------------------------------------
+
+describe('runInstall: wallet creation is the default', () => {
+  const walletOf = (d: unknown) =>
+    (d as { wallet: { status: string; address?: string; reason?: string; fix?: string } }).wallet;
+  const human = (res: { humanLines?: string[] }): string =>
+    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+  const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+  // The real creator on a fake keychain: this is the path a headless install
+  // actually takes, generated passphrase and scrypt keystore included.
+  it('a non-interactive run really creates one, passphrase in the OS store', async () => {
+    const { exec, entries } = fakeKeychain();
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(exec)),
+    );
+    const wallet = walletOf(res.data);
+    expect(wallet.status).toBe('created');
+    expect(wallet.address).toMatch(ADDRESS_RE);
+    expect(existsSync(join(data, 'wallet.json'))).toBe(true);
+    // Exactly one entry, keyed by the new wallet's own lowercase address.
+    expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
+  });
+
+  it('uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all', async () => {
+    const touched: string[] = [];
+    const spyExec: ExecFn = async (file, args) => {
+      touched.push(`${file} ${args[0] ?? ''}`);
+      throw new Error('no store');
+    };
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', 'a-passphrase-the-operator-supplied');
+    try {
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps(realWalletCreate(spyExec)),
+      );
+      expect(walletOf(res.data).status).toBe('created');
+      // The env value settles it, so no credential store is consulted at all.
+      expect(touched).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // The one case with no safe answer. No plaintext fallback exists, by design.
+  it('creates nothing and skips LOUDLY with no store and no env passphrase', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(noKeychain)),
+    );
+    const wallet = walletOf(res.data);
+    expect(wallet).toMatchObject({ status: 'skipped', reason: 'no-passphrase-store' });
+    expect(wallet.address).toBeUndefined();
+    // Both remedies are named, and neither is "we wrote it to a file".
+    expect(wallet.fix).toContain('TENJIN_WALLET_PASSPHRASE');
+    expect(wallet.fix).toContain('tenjin wallet create');
+    expect(existsSync(join(data, 'wallet.json'))).toBe(false);
+  });
+
+  it('still succeeds, and still wires everything else, when the wallet is skipped', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(noKeychain)),
+    );
+    const d = res.data as {
+      permissions: { wired: { added: string[] } };
+      hooks: { added: string[] };
+    };
+    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+    expect(d.hooks.added).toEqual(['PreToolUse', 'Stop']);
+  });
+
+  it('never writes a passphrase to a plain file', async () => {
+    await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(noKeychain)),
+    );
+    for (const name of await readdir(data)) {
+      expect(name).not.toMatch(/passphrase/i);
+    }
+  });
+
+  it('--no-wallet suppresses it entirely', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], noWallet: true },
+      makeCtx({ json: true }),
+      deps(realWalletCreate()),
+    );
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'flag' });
+    expect(existsSync(join(data, 'wallet.json'))).toBe(false);
+  });
+
+  it('an interactive run still asks, and still defaults to yes', async () => {
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledWith(WALLET_QUESTION);
+    expect(walletOf(res.data).status).toBe('created');
+  });
+
+  it('an interactive no is recorded as declined, not as a skip', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: async () => false }),
+    );
+    expect(walletOf(res.data)).toEqual({ status: 'declined' });
+  });
+
+  it('discloses the empty balance, the human funding step, and where the key lives', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: async () => true }),
+    );
+    const text = human(res);
+    expect(text).toContain('It holds $0.');
+    expect(text).toContain('Funding it is a human step');
+    expect(text).toContain(join(data, 'wallet.json'));
+    expect(text).toContain('encrypted at rest');
+  });
+
+  it('leaves an existing wallet alone and never creates a second', async () => {
+    const create = vi.fn(async () => STUB_ADDRESS);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        walletExists: async () => true,
+        walletAddress: async () => '0x1234567890abcdef1234567890abcdef12345678',
+        createWallet: create,
+      }),
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(walletOf(res.data).status).toBe('existing');
+  });
+
+  // An install is useful without a wallet; a create failure must not undo it.
+  it('reports an unexpected create failure without failing the install', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        createWallet: async () => {
+          throw new Error('disk is full');
+        },
+      }),
+    );
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'create-failed' });
+    expect((res.data as { wallet: { warning?: string } }).wallet.warning).toContain('disk is full');
+  });
+});
+
+describe('runInstall: --no-hooks', () => {
+  const hooksOf = (d: unknown) => (d as { hooks: { skipped?: string; mode: string } }).hooks;
+
+  it('registers nothing and writes no config', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], noHooks: true },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
+    expect((JSON.parse(raw) as { hooks?: unknown }).hooks).toBeUndefined();
+  });
+
+  // The difference from `--search-hooks off`, which IS a durable statement.
+  it('leaves a later bare re-run free to wire them', async () => {
+    await runInstall({ harness: ['claude'], noHooks: true }, makeCtx({ json: true }), deps());
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    expect(hooksOf(res.data).skipped).toBeUndefined();
+    expect(existsSync(join(data, 'hooks'))).toBe(true);
   });
 });
