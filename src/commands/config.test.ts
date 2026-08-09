@@ -56,7 +56,8 @@ describe('runConfigList', () => {
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
     });
-    expect(humanLines).toHaveLength(10);
+    expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
+    expect(humanLines).toHaveLength(11);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
