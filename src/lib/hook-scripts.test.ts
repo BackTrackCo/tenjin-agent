@@ -248,6 +248,21 @@ describe('WebSearch hook: a hit', () => {
   // A double quote inside the title would end the quoted region early and let the
   // rest read as the CLI's own words ('titled "foo". Do X. ""'). The display path
   // renders it as a single quote; the stored projection keeps the title verbatim.
+  // Free comes from the RAW atomic amount, not the rounded display: a 1-atomic
+  // price is paid, and its display keeps the sub-cent digits so it cannot read
+  // as $0.00.
+  it('a sub-cent paid price stays a paid answer at full precision', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: hit(base, { price: '1' }),
+    }));
+    await writeConfig({ baseUrl });
+    const text = injected(await runScript(websearchHookScript(dataDir), webSearchInput('q'))) ?? '';
+    expect(text).toContain('Tenjin lists a paid answer titled');
+    expect(text).toContain('($0.000001)');
+    expect(text).not.toContain('free answer');
+  });
+
   // A genuine "0" survives validation (it is a real atomic amount, unlike the
   // banned laundered zero) and must not be advertised as paid (dogfood finding).
   it('a genuinely free candidate renders as a free answer, not a paid one', async () => {

@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 8;
+export const HOOK_SCRIPT_VERSION = 9;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -311,13 +311,17 @@ async function recordSearch(searchId, question, decision, candidates) {
   }
 }
 
-/** Atomic USDC (6 decimals) as a plain dollar string, or null if it is not one. */
+/**
+ * Atomic USDC (6 decimals) as a plain dollar string, or null if it is not one.
+ * Sub-cent digits are kept (trimmed to at least two decimals), so a 1-atomic
+ * price renders $0.000001 rather than rounding to a $0.00 that reads as free.
+ */
 function usd(atomic) {
   try {
     const n = BigInt(String(atomic));
     if (n < 0n) return null;
-    const cents = (n % 1000000n) / 10000n;
-    return String(n / 1000000n) + '.' + String(cents).padStart(2, '0');
+    const micro = String(n % 1000000n).padStart(6, '0').replace(/0+$/, '');
+    return String(n / 1000000n) + '.' + micro.padEnd(2, '0');
   } catch {
     return null;
   }
@@ -438,9 +442,10 @@ async function main() {
     // the CLI asserting something, and an instruction-shaped title then reads as
     // an instruction. clean() removes control bytes but cannot make prose inert,
     // so the framing does that job instead.
-    // "free" vs "paid" comes from the validated price, so a genuine $0 piece is
-    // not advertised as paid (found in dogfooding).
-    const kind = price === '0.00' ? 'a free answer' : 'a paid answer';
+    // "free" vs "paid" comes from the validated RAW atomic amount, never from the
+    // formatted display string: rounding decides rendering, not business facts,
+    // and a sub-cent paid price must not read as free.
+    const kind = BigInt(c.price) === 0n ? 'a free answer' : 'a paid answer';
     lines.push(
       'Tenjin lists ' + kind + ' titled "' + title + '" ($' + price + '); inspect free: tenjin inspect ' + id,
     );

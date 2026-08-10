@@ -41,8 +41,9 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * The distinction exists because the Stop hook must not treat them alike: an
  * unanswered deliberate search deserves being named on its own, while a batch of
  * hook searches deserves one line the agent can dismiss at a glance. Keeping both
- * in ONE store is what makes the hook's misses reachable by `outcome --last`,
- * `buy <resourceId>`, and the open-loop reminder at all.
+ * in ONE store is what makes the hook's misses reachable by explicit
+ * `outcome --search-id`, `buy <resourceId>`, and the open-loop reminder at all
+ * (`--last` deliberately skips hook entries; see {@link latestSearch}).
  *
  * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
  * source field, and those entries were all explicit searches.
