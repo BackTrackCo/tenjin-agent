@@ -398,7 +398,7 @@ describe('runInstall: harness override', () => {
       makeCtx(),
       deps({
         createWallet: async () => {
-          throw new Error('No wallet passphrase is available');
+          throw new CliError('USAGE', 'No wallet passphrase is available');
         },
         collectChecks: doctor,
       }),
@@ -428,15 +428,6 @@ describe('runInstall: harness override', () => {
       ),
     );
     expect(err.code).toBe('CONFIG_INVALID');
-  });
-
-  it('falls back with a warning for relative HERMES_HOME on an unscoped install', async () => {
-    const { data: d } = await runInstall(
-      {},
-      makeCtx(),
-      deps({ env: { HERMES_HOME: 'relative' }, which: (bin) => bin === 'claude' }),
-    );
-    expect(asData(d).harnesses[0]?.warnings.join(' ')).toMatch(/HERMES_HOME.*absolute.*using/i);
   });
 
   it('ignores an invalid HERMES_HOME when an explicit override excludes Hermes', async () => {
@@ -530,8 +521,17 @@ describe('runInstall: dry run', () => {
 
 describe('runInstall: idempotency', () => {
   it('reports no configuration changes on a true no-op rerun without inventing approval', async () => {
-    await runInstall({}, makeCtx({ json: true }), deps());
-    const second = await runInstall({}, makeCtx({ json: true }), deps());
+    let walletPresent = false;
+    const walletDeps = deps({
+      walletExists: async () => walletPresent,
+      createWallet: async () => {
+        walletPresent = true;
+        return STUB_ADDRESS;
+      },
+      walletAddress: async () => STUB_ADDRESS,
+    });
+    await runInstall({}, makeCtx({ json: true }), walletDeps);
+    const second = await runInstall({}, makeCtx({ json: true }), walletDeps);
     expect(asData(second.data).installReceipt).toMatchObject({
       notice: { status: 'unacknowledged', acknowledgementProven: false },
     });

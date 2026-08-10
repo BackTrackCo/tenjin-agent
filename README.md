@@ -465,7 +465,6 @@ retains the receipt and still records that human acknowledgment was not proven.
 An unrestricted same-OS-user agent can invoke it too, so this is visibility and
 audit state—not a security boundary or proof that the human saw it.
 
-
 ## Skills
 
 Where the three skills land:

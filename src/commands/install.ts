@@ -51,7 +51,6 @@ import {
 } from '../lib/wallet';
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import { walletFileExists } from '../lib/wallet/store';
-import { walletPath } from '../lib/paths';
 import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
@@ -465,7 +464,14 @@ async function installBody(
     );
   }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  const hermesHome = resolveHermesHome(home, env);
+  // A Hermes-specific environment setting must not break an explicit install
+  // that excludes Hermes. Unscoped detection and explicit Hermes installs still
+  // validate it before any write.
+  const considersHermes =
+    parsed.data.harness === undefined ||
+    parsed.data.harness.length === 0 ||
+    parsed.data.harness.includes('hermes');
+  const hermesHome = considersHermes ? resolveHermesHome(home, env) : join(home, '.hermes');
 
   // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
   // without --json and no envelope). `humanOutput` matches that gate so install
