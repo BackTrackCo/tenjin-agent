@@ -52,9 +52,17 @@ tenjin wallet show
 
 The connector reads ClawRouter's canonical
 `~/.openclaw/blockrun/wallet.key`, falling back to `BLOCKRUN_WALLET_KEY` only
-when that file is absent. It never reads, copies, stores, or returns the
-ClawRouter mnemonic or private key; `~/.tenjin/wallet.json` stores only the
-provider name and pinned address.
+when that file is absent. The private key necessarily enters Tenjin process
+memory while connecting and signing. Tenjin does not copy it into Tenjin
+storage or configuration, persist it, log it, return it, or transmit it; only
+the resulting signatures leave the signer. Tenjin never opens the ClawRouter
+mnemonic, and `~/.tenjin/wallet.json` stores only the provider name and pinned
+address.
+
+Those are Tenjin behavior guarantees, not containment from an unrestricted
+agent running as the same OS user that can read the source key. Enforce a
+stronger boundary outside Tenjin—for example with an OS sandbox, separate user,
+hardware/keychain user presence, or an independently constrained signer.
 
 A hit looks like this (`--json` shown; at a terminal you get the same as plain
 lines, with prices in USD):
@@ -637,11 +645,15 @@ approval.
 - `wallet connect clawrouter` is an explicit alternative for people already
   using ClawRouter (including through Hermes). Tenjin follows ClawRouter's own
   EVM precedence—`~/.openclaw/blockrun/wallet.key`, then
-  `BLOCKRUN_WALLET_KEY` only if the file is absent—and never reads the mnemonic.
-  The address is pinned at connect time; any later signer drift is refused until
-  the user explicitly reconnects with `--replace`. Message and typed-data
-  signing work for SIWX, publishing, and x402; raw transaction signing is
-  deliberately disabled, so `tenjin send` is unavailable on this provider.
+  `BLOCKRUN_WALLET_KEY` only if the file is absent. The private key is read into
+  Tenjin process memory to connect and sign but is not copied into Tenjin
+  storage, persisted, logged, returned, or transmitted; the mnemonic is never
+  opened. The address is pinned at connect time; any later signer drift is
+  refused until the user explicitly reconnects with `--replace`. Message and
+  typed-data signing work for SIWX, publishing, and x402; raw transaction
+  signing is deliberately disabled, so `tenjin send` is unavailable on this
+  provider. This does not contain an unrestricted same-OS-user agent; that
+  requires an enforcement boundary outside the Tenjin process.
 - There is exactly **one active wallet**. `wallet create` refuses when one
   exists; the explicit `wallet create --replace` first verifies the outgoing
   wallet's passphrase against its keystore, preserves it under the wallet's own

@@ -8,6 +8,7 @@ import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import {
   commitLocalWallet,
+  CLAWROUTER_CUSTODY,
   createLocalWallet,
   defaultClawRouterWalletPath,
   describeWallet,
@@ -93,11 +94,21 @@ export async function runWalletConnect(
   };
   const switched = await connectClawRouterLocked(ctx.dataDir, record, opts);
   const path = opts.clawrouter?.walletKeyPath ?? defaultClawRouterWalletPath();
+  const custodyLines = [
+    discovered.credentialSource === 'file'
+      ? `Signer source: ${path}`
+      : 'Signer source: BLOCKRUN_WALLET_KEY',
+    'Custody: Tenjin reads the private key into this process to connect and sign; it does not copy it into Tenjin storage, persist it, log it, return it, or transmit it. The mnemonic is never opened.',
+    'Tenjin pinned this address and will refuse to sign if ClawRouter changes wallets.',
+    'Raw transaction signing (`tenjin send`) is disabled for this provider.',
+    'Authority: these are Tenjin behavior guarantees, not containment from an unrestricted agent running as the same OS user. Human acknowledgment is not proven.',
+  ];
   return {
     data: {
       address: record.address,
       provider: 'clawrouter',
       credentialSource: discovered.credentialSource,
+      custody: CLAWROUTER_CUSTODY,
       policyEnforcement: 'client-only',
       connected: !switched.alreadyConnected,
       ...(discovered.credentialSource === 'file' ? { signerPath: path } : {}),
@@ -114,14 +125,10 @@ export async function runWalletConnect(
         : {}),
     },
     humanLines: switched.alreadyConnected
-      ? [`ClawRouter wallet already connected: ${record.address}`]
+      ? [`ClawRouter wallet already connected: ${record.address}`, ...custodyLines]
       : [
           `ClawRouter wallet connected: ${record.address}`,
-          discovered.credentialSource === 'file'
-            ? `Signer source: ${path}`
-            : 'Signer source: BLOCKRUN_WALLET_KEY',
-          'Tenjin pinned this address and will refuse to sign if ClawRouter changes wallets.',
-          'Raw transaction signing (`tenjin send`) is disabled for this provider.',
+          ...custodyLines,
           ...(switched.archivedPath !== undefined
             ? [
                 `Previous wallet record archived at ${switched.archivedPath}; its funds were not moved.`,

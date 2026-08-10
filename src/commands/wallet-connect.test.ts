@@ -56,11 +56,28 @@ describe('runWalletConnect clawrouter', () => {
       provider: 'clawrouter',
       credentialSource: 'file',
       connected: true,
+      custody: {
+        privateKeyAccess: 'read-into-process-memory-at-connect-and-sign',
+        privateKeyCopiedToTenjinStorage: false,
+        privateKeyPersistedByTenjin: false,
+        privateKeyLogged: false,
+        privateKeyReturned: false,
+        privateKeyTransmitted: false,
+        mnemonicAccessed: false,
+        rawTransactionSigning: false,
+        pinnedAddressDriftRefusal: true,
+        humanAcknowledgement: 'not-proven',
+        sameUserUnrestrictedAgentContained: false,
+        enforcementBoundary: 'outside-tenjin-process',
+      },
     });
     expect(record).toMatchObject({ schemaVersion: 3, provider: 'clawrouter' });
     expect(raw).not.toContain(key);
     expect(raw).not.toContain('mnemonic');
     expect((await stat(join(dataDir, 'wallet.json'))).mode & 0o777).toBe(0o600);
+    expect(JSON.stringify(result)).not.toContain(key);
+    expect(result.humanLines?.join('\n')).toMatch(/reads the private key into this process/i);
+    expect(result.humanLines?.join('\n')).toMatch(/human acknowledgment is not proven/i);
   });
 
   it('is idempotent when the same address is already connected', async () => {

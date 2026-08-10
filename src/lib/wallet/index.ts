@@ -11,10 +11,12 @@ import type { WalletDescription, WalletProvider } from './provider';
 
 export * from './provider';
 export {
+  CLAWROUTER_CUSTODY,
   CLAWROUTER_WALLET_ENV,
   createClawRouterProvider,
   defaultClawRouterWalletPath,
   discoverClawRouterWallet,
+  type ClawRouterCustodyFacts,
   type ClawRouterProviderDeps,
 } from './clawrouter';
 export {

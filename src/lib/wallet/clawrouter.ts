@@ -16,6 +16,28 @@ import type {
 
 export const CLAWROUTER_WALLET_ENV = 'BLOCKRUN_WALLET_KEY';
 
+/**
+ * Machine-readable custody facts shared by wallet connect and every stacked
+ * installer. Keep this factual and provider-specific so higher layers surface
+ * one contract instead of maintaining security prose that can drift.
+ */
+export const CLAWROUTER_CUSTODY = {
+  privateKeyAccess: 'read-into-process-memory-at-connect-and-sign',
+  privateKeyCopiedToTenjinStorage: false,
+  privateKeyPersistedByTenjin: false,
+  privateKeyLogged: false,
+  privateKeyReturned: false,
+  privateKeyTransmitted: false,
+  mnemonicAccessed: false,
+  rawTransactionSigning: false,
+  pinnedAddressDriftRefusal: true,
+  humanAcknowledgement: 'not-proven',
+  sameUserUnrestrictedAgentContained: false,
+  enforcementBoundary: 'outside-tenjin-process',
+} as const;
+
+export type ClawRouterCustodyFacts = typeof CLAWROUTER_CUSTODY;
+
 export function defaultClawRouterWalletPath(): string {
   return join(homedir(), '.openclaw', 'blockrun', 'wallet.key');
 }
@@ -103,9 +125,12 @@ export async function discoverClawRouterWallet(
 }
 
 /**
- * A read-only connector to ClawRouter's signer material. It supports the
- * message and typed-data signatures Tenjin needs for SIWX, writes, and x402,
- * but deliberately refuses raw transactions (`tenjin send`).
+ * A local-signing connector to ClawRouter's signer material. The private key
+ * necessarily enters this process to produce the message and typed-data
+ * signatures Tenjin needs for SIWX, writes, and x402. Tenjin does not copy,
+ * persist, log, return, or transmit it and deliberately refuses raw
+ * transactions (`tenjin send`). These are application behavior guarantees, not
+ * containment from an unrestricted agent running as the same OS user.
  */
 export function createClawRouterProvider(
   record: ClawRouterWalletRecord,
