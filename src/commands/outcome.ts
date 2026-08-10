@@ -15,7 +15,10 @@ import type { CommandContext, CommandResult } from '../context';
  * `tenjin outcome --search-id <id> --status <s>`, POST to
  * /api/agent/searches/:id/outcomes, closing the reuse loop (used / partially_used
  * / rejected / regenerated / purchase_declined). The searchId is the capability,
- * so no wallet is needed; `--last` sugar targets the most recent local search.
+ * so no wallet is needed; `--last` sugar targets the most recent DELIBERATE
+ * search — entries the WebSearch hook rode along with are skipped, or every web
+ * search in auto mode would silently re-aim the report (a hook entry is reached
+ * by explicit --search-id, which is what the Stop hook's reminder names).
  *
  * `--last` binds to whatever search ran most recently, which in a multi-search
  * session is often not the one the agent means (issue #100). Two guards, both

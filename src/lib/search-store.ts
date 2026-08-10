@@ -167,9 +167,16 @@ export async function markSearchResolved(
   }
 }
 
+/**
+ * The most recent DELIBERATE search: `--last` means "the search I just ran", and
+ * in auto mode the WebSearch hook prepends a ridealong entry on every web search,
+ * so an unfiltered head would routinely re-target `outcome --last` at a query the
+ * agent never chose to make (found in dogfooding). Hook entries stay reachable by
+ * explicit `--search-id`, which is what the Stop hook's reminder names.
+ */
 export async function latestSearch(dataDir: string): Promise<StoredSearch | null> {
   const searches = await loadSearches(dataDir);
-  return searches[0] ?? null;
+  return searches.find((s) => s.source !== 'websearch-hook') ?? null;
 }
 
 /** The stored candidate for a resourceId across recent searches (newest first). */

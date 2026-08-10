@@ -553,7 +553,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
     .option('--search-id <id>', 'the search to report against')
-    .option('--last', 'target the most recent local search')
+    .option(
+      '--last',
+      'target the most recent tenjin search (entries the WebSearch hook recorded are skipped; use --search-id for those)',
+    )
     .requiredOption(
       '--status <status>',
       'used | partially_used | rejected | regenerated | purchase_declined',

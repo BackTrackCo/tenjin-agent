@@ -175,13 +175,13 @@ endpoint, so `buy <url>` can.
 
 ### `tenjin outcome`
 
-| Flag             | Values                                                           | Default  | Effect                              |
-| ---------------- | ---------------------------------------------------------------- | -------- | ----------------------------------- |
-| `--status`       | `used\|partially_used\|rejected\|regenerated\|purchase_declined` | required | How the search ended                |
-| `--search-id`    | uuid                                                             | none     | The search to report against        |
-| `--last`         | —                                                                | off      | Target the most recent local search |
-| `--resource`     | uuid                                                             | none     | The resourceId the outcome concerns |
-| `--content-hash` | `sha256:<64 hex>`                                                | none     | Hash of the exact body read         |
+| Flag             | Values                                                           | Default  | Effect                                                               |
+| ---------------- | ---------------------------------------------------------------- | -------- | -------------------------------------------------------------------- |
+| `--status`       | `used\|partially_used\|rejected\|regenerated\|purchase_declined` | required | How the search ended                                                 |
+| `--search-id`    | uuid                                                             | none     | The search to report against                                         |
+| `--last`         | —                                                                | off      | Target the most recent `tenjin search` (hook ridealongs are skipped) |
+| `--resource`     | uuid                                                             | none     | The resourceId the outcome concerns                                  |
+| `--content-hash` | `sha256:<64 hex>`                                                | none     | Hash of the exact body read                                          |
 
 ### `tenjin publish [file]`
 

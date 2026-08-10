@@ -41,6 +41,28 @@ describe('search-store', () => {
     expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000002');
   });
 
+  // `--last` means "the search I just ran". In auto mode the WebSearch hook
+  // prepends an entry on EVERY web search, so without the source filter an
+  // `outcome --last` after any web search would report against a ridealong query
+  // the agent never chose (found in dogfooding).
+  it('latestSearch skips hook-sourced entries: --last targets the last deliberate search', async () => {
+    await recordSearch(dir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000003' }));
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000004', source: 'websearch-hook' }),
+    );
+    const latest = await latestSearch(dir);
+    expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000003');
+  });
+
+  it('latestSearch is null when only hook-sourced entries exist', async () => {
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000005', source: 'websearch-hook' }),
+    );
+    expect(await latestSearch(dir)).toBeNull();
+  });
+
   it('resolves a candidate url by resourceId (buy <id>)', async () => {
     await recordSearch(dir, entry());
     const hit = await findStoredCandidate(dir, 'res-1');

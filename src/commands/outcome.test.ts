@@ -452,12 +452,39 @@ describe('runOutcome closes the open loop locally', () => {
 
 // The other meeting point: a search the WebSearch hook recorded is an ordinary
 // store entry, so #106's echo and coherence gate apply to it exactly as they do
-// to a deliberate `tenjin search`, and reporting on it closes the loop.
+// to a deliberate `tenjin search`, and reporting on it closes the loop. Reached
+// by EXPLICIT --search-id only: `--last` skips hook entries, because in auto mode
+// the hook prepends one on every web search and an unfiltered `--last` would
+// re-target the agent's report at a ridealong query it never chose (found in
+// dogfooding; the Stop hook's reminder hands the agent the explicit id).
 describe('runOutcome over a websearch-hook-sourced search', () => {
-  it('echoes it, resolves it, and keeps its source', async () => {
+  it('--last skips it and refuses when no deliberate search exists', async () => {
     await record({ source: 'websearch-hook', question: 'a query the hook rode along with' });
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ last: true, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'SEARCH_NOT_FOUND' });
+    expect(urls).toHaveLength(0);
+  });
+
+  it('--last targets the deliberate search under a newer hook entry', async () => {
+    await record({ question: 'the question the agent actually asked' });
+    await record({
+      source: 'websearch-hook',
+      searchId: '0197aaaa-bbbb-cccc-dddd-222222222222',
+      question: 'a query the hook rode along with',
+    });
     const { fetch } = stub();
     const res = await runOutcome({ last: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({ question: 'the question the agent actually asked' });
+  });
+
+  it('echoes it, resolves it, and keeps its source (by explicit --search-id)', async () => {
+    await record({ source: 'websearch-hook', question: 'a query the hook rode along with' });
+    const { fetch } = stub();
+    const res = await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, makeCtx(), {
       fetchImpl: fetch,
     });
     expect(res.data).toMatchObject({ question: 'a query the hook rode along with' });
@@ -470,7 +497,9 @@ describe('runOutcome over a websearch-hook-sourced search', () => {
     await record({ source: 'websearch-hook', decision: 'MISS', paidBrowseCount: 0 });
     const { fetch, urls } = stub();
     await expect(
-      runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(urls).toHaveLength(0);
   });
@@ -482,7 +511,7 @@ describe('runOutcome over a websearch-hook-sourced search', () => {
   it('fails open on a hook entry with no paidBrowseCount', async () => {
     await record({ source: 'websearch-hook', decision: 'MISS', paidBrowseCount: undefined });
     const { fetch, urls } = stub();
-    const res = await runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), {
+    const res = await runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
       fetchImpl: fetch,
     });
     expect(res.data).toMatchObject({ status: 'purchase_declined' });
