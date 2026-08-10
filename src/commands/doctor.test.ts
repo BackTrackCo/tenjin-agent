@@ -16,6 +16,7 @@ import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import { saveSessionFile } from '../lib/session-key';
 import { sessionPath } from '../lib/paths';
+import { writeInstallReceipt } from '../lib/install-receipt';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 import { wireHermesIntegration } from '../lib/hermes';
@@ -129,6 +130,42 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
+  it('surfaces a pending install receipt without claiming human acknowledgment', async () => {
+    const stored = await writeInstallReceipt(dir, {
+      harnesses: ['hermes'],
+      execution: {
+        surface: 'machine',
+        harnessApprovalMode: 'unknown',
+        humanPresenceProven: false,
+        sameUserUnrestrictedAgentContained: false,
+      },
+      policy: { publishMode: { value: 'auto', source: 'headless-default' } },
+      changedPaths: [],
+      warnings: [],
+      undoCommands: [],
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const check = find((res.data as { checks: CheckResult[] }).checks, 'install notice');
+    expect(check).toMatchObject({
+      status: 'warn',
+      required: false,
+      data: {
+        id: stored.receipt.id,
+        status: 'unacknowledged',
+        humanPresenceProven: false,
+        acknowledgementProven: false,
+      },
+    });
+    expect(check.fix).toContain(`tenjin notice acknowledge ${stored.receipt.id}`);
+    expect(check.fix).toMatch(/not proof/i);
+  });
+
   it('reports a working native Hermes integration separately from portable skills', async () => {
     await wireHermesIntegration({
       hermesHome: join(skillHome, '.hermes'),

@@ -50,6 +50,11 @@ export function updateCheckPath(dir: string = dataDir()): string {
   return join(dir, 'update-check.json');
 }
 
+/** Latest secret-free install receipt and pending human-notice state. */
+export function installReceiptPath(dir: string = dataDir()): string {
+  return join(dir, 'install-receipt.json');
+}
+
 /**
  * Where `install` writes the standalone harness hook scripts. Under the data dir
  * rather than the harness's own config directory: the scripts are ours, a harness

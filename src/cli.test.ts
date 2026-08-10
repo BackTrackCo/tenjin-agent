@@ -22,6 +22,7 @@ vi.mock('./lib/skills-source', async (importOriginal) => {
 import { main } from './cli';
 import { resolveSkillsSource } from './lib/skills-source';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
+import { writeInstallReceipt } from './lib/install-receipt';
 import type { Io } from './lib/output';
 
 // The dispatcher runs the update check and the skills self-heal after every
@@ -123,6 +124,47 @@ describe('main', () => {
     const parsed = JSON.parse(cap.stdout());
     expect(parsed.command).toBe('install');
     expect(parsed.error.code).toBe('USAGE');
+  });
+
+  it('surfaces a pending install notice in machine output without breaking the envelope', async () => {
+    const previous = process.env.TENJIN_DATA_DIR;
+    const isolated = await mkdtemp(join(tmpdir(), 'tenjin-cli-notice-'));
+    process.env.TENJIN_DATA_DIR = isolated;
+    try {
+      const stored = await writeInstallReceipt(isolated, {
+        harnesses: ['hermes'],
+        execution: {
+          surface: 'machine',
+          harnessApprovalMode: 'unknown',
+          humanPresenceProven: false,
+          sameUserUnrestrictedAgentContained: false,
+        },
+        policy: { publishMode: { value: 'auto', source: 'headless-default' } },
+        changedPaths: [],
+        warnings: [],
+        undoCommands: [],
+      });
+      const cap = captureIo(false);
+      expect(await main(['config', 'get', 'baseUrl', '--json'], cap.io)).toBe(0);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.data.pendingInstallNotice).toMatchObject({
+        id: stored.receipt.id,
+        status: 'unacknowledged',
+        humanPresenceProven: false,
+        acknowledgementProven: false,
+      });
+      expect(
+        cap
+          .stdout()
+          .trim()
+          .split('\n')
+          .filter((line) => line.startsWith('{')),
+      ).toHaveLength(1);
+    } finally {
+      if (previous === undefined) delete process.env.TENJIN_DATA_DIR;
+      else process.env.TENJIN_DATA_DIR = previous;
+      await rm(isolated, { recursive: true, force: true });
+    }
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {

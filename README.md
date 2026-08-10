@@ -88,6 +88,7 @@ on Base for gas). Searching and free pieces cost nothing.
 | `tenjin doctor`                                  | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
 | `tenjin config [get\|set]`                       | Spend policy, publish consent, and the hook toggles                                                         |
 | `tenjin wallet [create\|connect\|show\|balance]` | Create a local Base wallet or explicitly connect ClawRouter's signer                                        |
+| `tenjin notice acknowledge <id>`                 | Dismiss a persistent install reminder while retaining its local receipt                                     |
 | `tenjin search "<question>"`                     | Ask for payable candidates or an honest MISS                                                                |
 | `tenjin inspect <url-or-id>`                     | Show a candidate's pre-purchase answer card; never pays                                                     |
 | `tenjin read <url-or-id>`                        | Deliver free, library, or already-owned pieces; exit 3 rather than pay                                      |
@@ -451,6 +452,19 @@ retrieval/publish-back plugin. The one-step ClawRouter form is
 `tenjin install --harness hermes --wallet-provider clawrouter`; Tenjin pins that
 signer without copying it into Tenjin storage. If a Tenjin wallet is already
 active, the explicit provider choice safely archives its record before switching.
+
+Before the first mutation, install writes a conspicuous preflight to stderr even
+for a piped/JSON run, so stdout remains exactly one machine envelope. Every real
+run then writes an owner-only, secret-redacted receipt at
+`~/.tenjin/install-receipt.json` with the selected harness/wallet, exact policy
+values and provenance, changed paths, warnings, and undo commands. The receipt
+starts `unacknowledged`; success, a TTY, or an agent's claim never changes that.
+Later interactive commands and `tenjin doctor` keep surfacing it until a
+separate `tenjin notice acknowledge <id>` dismisses the reminder. That command
+retains the receipt and still records that human acknowledgment was not proven.
+An unrestricted same-OS-user agent can invoke it too, so this is visibility and
+audit state—not a security boundary or proof that the human saw it.
+
 
 ## Skills
 

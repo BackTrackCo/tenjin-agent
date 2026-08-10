@@ -37,6 +37,7 @@ import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
+import { pendingInstallNoticeData, readInstallReceipt } from '../lib/install-receipt';
 import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
 import type { ErrorCode } from '../schemas';
@@ -154,6 +155,7 @@ export async function collectDoctorChecks(
   const built: BuiltCheck[] = [
     checkNode(),
     configCheck,
+    ...(await checkInstallNotice(ctx.dataDir)),
     await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
@@ -205,6 +207,51 @@ export async function runDoctor(
     data: { status: 'pass', checks, permissions: recommendedPermissions() },
     humanLines: [...renderDoctorHuman(ctx.io, checks), '', permissionsPointer()],
   };
+}
+
+async function checkInstallNotice(dataDir: string): Promise<BuiltCheck[]> {
+  try {
+    const stored = await readInstallReceipt(dataDir);
+    if (stored === null) return [];
+    const data = pendingInstallNoticeData(stored);
+    if (stored.receipt.notice.status === 'unacknowledged') {
+      return [
+        {
+          result: {
+            name: 'install notice',
+            status: 'warn',
+            required: false,
+            detail: `Install receipt ${stored.receipt.id} is still unacknowledged at ${stored.path}. Human presence was not proven.`,
+            fix: `Review the receipt, then run \`tenjin notice acknowledge ${stored.receipt.id}\` to dismiss reminders. This is not proof of human acknowledgment.`,
+            data,
+          },
+        },
+      ];
+    }
+    return [
+      {
+        result: {
+          name: 'install notice',
+          status: 'ok',
+          required: false,
+          detail: `Install receipt ${stored.receipt.id} was acknowledged locally; human acknowledgment was not proven.`,
+          data,
+        },
+      },
+    ];
+  } catch (err) {
+    return [
+      {
+        result: {
+          name: 'install notice',
+          status: 'warn',
+          required: false,
+          detail: err instanceof Error ? err.message : 'The install receipt could not be read.',
+          fix: 'Move the invalid install receipt aside, then re-run `tenjin install`.',
+        },
+      },
+    ];
+  }
 }
 
 function checkNode(): BuiltCheck {

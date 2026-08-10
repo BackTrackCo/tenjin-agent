@@ -9,6 +9,7 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { configPath, walletPath } from '../lib/paths';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import {
   deepestExisting,
@@ -42,7 +43,12 @@ import { persistInstallHarness, persistPublishMode, persistSearchHookMode } from
 import { runWalletConnect, runWalletCreate } from './wallet';
 import { collectDoctorChecks, isNoWalletCheck } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
-import { describeWallet, resolveWalletProvider } from '../lib/wallet';
+import {
+  CLAWROUTER_CUSTODY,
+  describeWallet,
+  resolveWalletProvider,
+  type ClawRouterCustodyFacts,
+} from '../lib/wallet';
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import { walletFileExists } from '../lib/wallet/store';
 import { walletPath } from '../lib/paths';
@@ -59,7 +65,12 @@ import type { HooksResult } from '../lib/harness-hooks';
 import { resolveHermesHome, wireHermesIntegration } from '../lib/hermes';
 import type { HermesIntegrationResult } from '../lib/hermes';
 import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
-import { sanitizeForTerminal } from '../lib/output';
+import { emitWriteNotice, sanitizeForTerminal } from '../lib/output';
+import {
+  pendingInstallNoticeData,
+  writeInstallReceipt,
+  type StoredInstallReceipt,
+} from '../lib/install-receipt';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -146,6 +157,16 @@ interface WalletOutcome {
   fix?: string;
   /** The underlying failure, for a `create-failed` skip. */
   warning?: string;
+  credentialSource?: string;
+  signerPath?: string;
+  custody?: ClawRouterCustodyFacts;
+}
+
+interface WalletConnection {
+  address: string;
+  credentialSource?: string;
+  signerPath?: string;
+  custody: ClawRouterCustodyFacts;
 }
 
 /** The remedy for each skip, so no skipped state is ever a dead end. */
@@ -312,7 +333,10 @@ export interface InstallDeps {
   /** Absolute Node executable embedded in the Hermes native plugin. */
   nodeCommand?: string;
   /** Connect an existing external signer. Defaults to runWalletConnect with explicit replacement. */
-  connectWallet?: (ctx: CommandContext, provider: 'clawrouter') => Promise<string>;
+  connectWallet?: (
+    ctx: CommandContext,
+    provider: 'clawrouter',
+  ) => Promise<string | WalletConnection>;
 }
 
 /**
@@ -455,6 +479,15 @@ async function installBody(
   await assertSkillsSource(skillsSource);
 
   const plans = resolvePlans(parsed.data.harness, home, hermesHome, which);
+  emitWriteNotice(
+    ctx.io,
+    installPreflight({
+      dryRun,
+      harnesses: plans.map((plan) => plan.harness),
+      walletProvider,
+      humanOutput,
+    }),
+  );
   // Same condition resolvePlans treats as an override, so what gets recorded below is
   // exactly what overrode detection.
   const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
@@ -567,6 +600,45 @@ async function installBody(
 
   if (canPrompt) await (deps.outro ?? clackOutro)('Setup complete.');
 
+  const receipt = dryRun
+    ? undefined
+    : await underDataDir(ctx.dataDir, () =>
+        writeInstallReceipt(ctx.dataDir, {
+          harnesses: plans.map((plan) => plan.harness),
+          execution: {
+            surface: humanOutput ? 'interactive' : 'machine',
+            harnessApprovalMode: 'unknown',
+            humanPresenceProven: false,
+            sameUserUnrestrictedAgentContained: false,
+          },
+          ...(wallet !== undefined
+            ? {
+                wallet: {
+                  status: wallet.status,
+                  ...(wallet.address !== undefined ? { address: wallet.address } : {}),
+                  ...(wallet.provider !== undefined ? { provider: wallet.provider } : {}),
+                  ...(wallet.credentialSource !== undefined
+                    ? { credentialSource: wallet.credentialSource }
+                    : {}),
+                  ...(wallet.signerPath !== undefined ? { signerPath: wallet.signerPath } : {}),
+                  ...(wallet.custody !== undefined ? { custody: wallet.custody } : {}),
+                },
+              }
+            : {}),
+          policy: receiptPolicy(publishMode),
+          changedPaths: changedInstallPaths({
+            dataDir: ctx.dataDir,
+            harnesses,
+            permissions,
+            publishMode,
+            wallet,
+            explicitHarness,
+          }),
+          warnings: installWarnings(harnesses, permissions, doctor),
+          undoCommands: installUndoCommands(ctx.dataDir, wallet),
+        }),
+      );
+
   const data = {
     dryRun,
     skillsSource,
@@ -582,6 +654,15 @@ async function installBody(
     permissions: { ...recommendedPermissions(), wired: permissions },
     hooks,
     wallet,
+    ...(receipt !== undefined
+      ? {
+          installReceipt: {
+            path: receipt.path,
+            ...receipt.receipt,
+          },
+          pendingInstallNotice: pendingInstallNoticeData(receipt),
+        }
+      : {}),
   };
 
   // Machine path (--json or piped stdout): the envelope, no prompts.
@@ -598,6 +679,7 @@ async function installBody(
     hooks,
     wallet,
     doctor,
+    receipt,
   });
   return { data, humanLines };
 }
@@ -610,6 +692,110 @@ function walletSkip(dryRun: boolean, noWallet: boolean): 'dry-run' | 'flag' | un
   if (dryRun) return 'dry-run';
   if (noWallet) return 'flag';
   return undefined;
+}
+
+function installPreflight(input: {
+  dryRun: boolean;
+  harnesses: Harness[];
+  walletProvider: 'clawrouter' | undefined;
+  humanOutput: boolean;
+}): string {
+  const provider = input.walletProvider ?? 'none explicitly selected';
+  const mode = input.humanOutput ? 'interactive surface' : 'machine/headless surface';
+  const custody =
+    input.walletProvider === 'clawrouter'
+      ? ' The ClawRouter private key will enter Tenjin process memory to connect/sign; it will not be copied into Tenjin storage, persisted, logged, returned, or transmitted, and the mnemonic will not be opened.'
+      : '';
+  return `Tenjin install preflight${input.dryRun ? ' (dry run)' : ''}: harnesses=${input.harnesses.join(',')}; wallet provider=${provider}; ${mode}. Human presence and harness approval mode are not proven. An unrestricted same-OS-user agent cannot be contained by a Tenjin prompt.${custody}`;
+}
+
+function receiptPolicy(publishMode: PublishModeSelection): {
+  publishMode: { value: string; source: string };
+} {
+  return {
+    publishMode: { value: publishMode.value, source: publishMode.source },
+  };
+}
+
+function changedInstallPaths(input: {
+  dataDir: string;
+  harnesses: HarnessResult[];
+  permissions: PermissionsResult;
+  publishMode: PublishModeSelection;
+  wallet: WalletOutcome | undefined;
+  explicitHarness: boolean;
+}): string[] {
+  const paths = new Set<string>();
+  for (const harness of input.harnesses) {
+    for (const skill of harness.skills) {
+      if (skill.status === 'installed' || skill.status === 'updated') {
+        paths.add(join(harness.skillsDir, skill.name));
+      }
+    }
+    if (
+      harness.agentsMd !== undefined &&
+      (harness.agentsMd.status === 'appended' || harness.agentsMd.status === 'updated')
+    ) {
+      paths.add(harness.agentsMd.path);
+    }
+    if (
+      harness.claudeMd !== undefined &&
+      (harness.claudeMd.status === 'written' || harness.claudeMd.status === 'updated')
+    ) {
+      paths.add(harness.claudeMd.path);
+    }
+    if (harness.hermes?.mcp.status === 'installed') paths.add(harness.hermes.mcp.path);
+    if (harness.hermes?.plugin.status === 'installed') paths.add(harness.hermes.plugin.path);
+    if (harness.hermes?.activation.status === 'installed') {
+      paths.add(harness.hermes.activation.path);
+    }
+  }
+  if (input.explicitHarness || ['flag', 'prompt'].includes(input.publishMode.source)) {
+    paths.add(configPath(input.dataDir));
+  }
+  if (input.permissions.added.length > 0 && input.permissions.path !== undefined) {
+    paths.add(input.permissions.path);
+  }
+  if (input.wallet?.status === 'created' || input.wallet?.status === 'connected') {
+    paths.add(walletPath(input.dataDir));
+  }
+  return [...paths].sort();
+}
+
+function installWarnings(
+  harnesses: HarnessResult[],
+  permissions: PermissionsResult,
+  doctor: DoctorChecks,
+): string[] {
+  return [
+    'Human presence and harness approval mode were not proven.',
+    'An unrestricted agent running as the same OS user is outside Tenjin application-level containment.',
+    ...harnesses.flatMap((harness) => harness.warnings),
+    ...(permissions.warning !== undefined ? [permissions.warning] : []),
+    ...doctor.checks
+      .filter((check) => check.status !== 'ok')
+      .map((check) => `${check.name}: ${check.detail}`),
+  ];
+}
+
+function installUndoCommands(dataDir: string, wallet: WalletOutcome | undefined): string[] {
+  const commands = [
+    'tenjin config set maxAutoSpend 0',
+    'tenjin config set sessionBudget 0',
+    'tenjin config set publish.mode review',
+    'tenjin config set hooks.searchMode off',
+    'tenjin config set hooks.stopNag off',
+  ];
+  if (wallet?.status === 'connected' && wallet.address !== undefined) {
+    commands.push(
+      `mv ${shellQuote(walletPath(dataDir))} ${shellQuote(join(dataDir, `wallet.${wallet.address.toLowerCase()}.clawrouter.disconnected.json`))}`,
+    );
+  }
+  return commands;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /**
@@ -642,6 +828,7 @@ interface WalkthroughState {
   hooks: HooksResult;
   wallet: WalletOutcome;
   doctor: DoctorChecks;
+  receipt?: StoredInstallReceipt;
 }
 
 /**
@@ -748,6 +935,25 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     // terminal at the moment we tell the operator we left their file alone.
     lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.permissions.warning)}`));
   }
+  if (s.receipt !== undefined) {
+    lines.push(
+      paint(
+        io,
+        'yellow',
+        `! Human notice remains unacknowledged. Receipt: ${sanitizeForTerminal(s.receipt.path)}`,
+      ),
+      paint(
+        io,
+        'dim',
+        `  Review and dismiss reminders: tenjin notice acknowledge ${s.receipt.receipt.id}`,
+      ),
+      paint(
+        io,
+        'dim',
+        '  This is visibility and audit state, not proof that a human saw or acknowledged the installation.',
+      ),
+    );
+  }
   lines.push(...doctorNotices(io, s.doctor, s.wallet));
   return lines;
 }
@@ -834,6 +1040,12 @@ function skillsLine(io: Io, h: HarnessResult, dryRun: boolean): string {
   const wired: string[] = [];
   if (h.agentsMd !== undefined) wired.push('AGENTS.md nudge');
   if (h.claudeMd !== undefined && h.claudeMd.status !== 'skipped') wired.push('CLAUDE.md nudge');
+  if (h.hermes?.mcp.status !== undefined && h.hermes.mcp.status !== 'conflict') {
+    wired.push('native MCP');
+  }
+  if (h.hermes?.plugin.status !== undefined && h.hermes.plugin.status !== 'conflict') {
+    wired.push('native plugin');
+  }
   const suffix = wired.length > 0 ? ` + ${wired.join(' + ')}` : '';
   const head = `${harnessLabel(h.harness)}: ${h.skills.length} skills ${verb}${suffix}`;
   return `${paint(io, 'green', '✓')} ${paint(io, 'bold', head)} in ${h.skillsDir}. ${skillRoster(h)}.`;
@@ -894,7 +1106,7 @@ function walletLine(io: Io, w: WalletOutcome): string {
     return `${paint(io, color, icon)} ${label} none (${w.reason}). ${w.fix}`;
   }
   if (w.status === 'connected') {
-    return `${paint(io, 'green', '✓')} ${label} ${w.address} (ClawRouter). Tenjin pinned the existing signer; no key was copied.`;
+    return `${paint(io, 'green', '✓')} ${label} ${w.address} (ClawRouter). The key enters Tenjin process memory to connect/sign but is not copied, persisted, logged, returned, or transmitted; the mnemonic is never opened; raw sends are disabled.`;
   }
   return `${paint(io, 'dim', '-')} ${label} none. Create one later with: tenjin wallet create`;
 }
@@ -983,10 +1195,15 @@ async function resolveWallet(
     return { status: 'skipped', reason: skipReason, fix: walletFix(skipReason) };
   }
   if (provider !== undefined) {
+    const connected = await (deps.connectWallet ?? defaultConnectWallet)(ctx, provider);
+    const details: WalletConnection =
+      typeof connected === 'string'
+        ? { address: connected, custody: CLAWROUTER_CUSTODY }
+        : connected;
     return {
       status: 'connected',
       provider,
-      address: await (deps.connectWallet ?? defaultConnectWallet)(ctx, provider),
+      ...details,
     };
   }
   const exists = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
@@ -1056,9 +1273,23 @@ async function defaultCreateWallet(
   return (result.data as { address: string }).address;
 }
 
-async function defaultConnectWallet(ctx: CommandContext, provider: 'clawrouter'): Promise<string> {
+async function defaultConnectWallet(
+  ctx: CommandContext,
+  provider: 'clawrouter',
+): Promise<WalletConnection> {
   const result = await runWalletConnect({ provider }, ctx, { replace: true });
-  return (result.data as { address: string }).address;
+  const data = result.data as {
+    address: string;
+    credentialSource?: string;
+    signerPath?: string;
+    custody: ClawRouterCustodyFacts;
+  };
+  return {
+    address: data.address,
+    custody: data.custody,
+    ...(data.credentialSource !== undefined ? { credentialSource: data.credentialSource } : {}),
+    ...(data.signerPath !== undefined ? { signerPath: data.signerPath } : {}),
+  };
 }
 
 /** The shared confirm, defaulting to YES (setup ergonomics); cancel reads as no. */

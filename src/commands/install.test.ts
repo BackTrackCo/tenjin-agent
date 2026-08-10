@@ -62,6 +62,7 @@ import {
   realpath,
   rm,
   readFile,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -236,6 +237,11 @@ type Data = {
   harnesses: Harnesses;
   doctor: unknown;
   wallet?: { status: string; address?: string; provider?: string };
+  installReceipt?: {
+    path: string;
+    notice: { status: string; acknowledgementProven: boolean };
+    wallet?: { address?: string; provider?: string };
+  };
 };
 
 const asData = (d: unknown) => d as Data;
@@ -310,7 +316,49 @@ describe('runInstall: harness override', () => {
       status: 'connected',
       provider: 'clawrouter',
       address,
+      custody: {
+        privateKeyAccess: 'read-into-process-memory-at-connect-and-sign',
+        humanAcknowledgement: 'not-proven',
+        sameUserUnrestrictedAgentContained: false,
+      },
     });
+    expect(asData(d).installReceipt).toMatchObject({
+      notice: { status: 'unacknowledged', acknowledgementProven: false },
+      wallet: { address, provider: 'clawrouter' },
+    });
+  });
+
+  it('warns before headless mutation and leaves an owner-only secret-free receipt', async () => {
+    const stderr: string[] = [];
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    const errSink = {
+      write: (chunk: string | Uint8Array) => {
+        stderr.push(chunk.toString());
+        return true;
+      },
+    } as unknown as NodeJS.WritableStream;
+    const ctx: CommandContext = {
+      ...makeCtx({ json: true }),
+      io: { stdout: sink, stderr: errSink, isTTY: false },
+    };
+    const result = await runInstall(
+      { harness: ['hermes'], walletProvider: 'clawrouter' },
+      ctx,
+      deps({ connectWallet: async () => '0x0000000000000000000000000000000000000002' }),
+    );
+    const receipt = asData(result.data).installReceipt!;
+    const raw = await readFile(receipt.path, 'utf8');
+
+    expect(stderr.join('')).toMatch(/install preflight/i);
+    expect(stderr.join('')).toMatch(/human presence.*not proven/i);
+    expect(stderr.join('')).toMatch(/private key will enter Tenjin process memory/i);
+    expect((await stat(receipt.path)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(raw)).toMatchObject({
+      execution: { surface: 'machine', humanPresenceProven: false },
+      notice: { status: 'unacknowledged', acknowledgementProven: false },
+      policy: { publishMode: { value: 'auto', source: 'headless-default' } },
+    });
+    expect(raw).not.toContain('0xdeadbeef');
   });
 
   it('rejects contradictory or unsupported wallet-provider options before wiring files', async () => {
@@ -328,6 +376,76 @@ describe('runInstall: harness override', () => {
     );
     expect(unsupported.code).toBe('USAGE');
     expect(existsSync(join(home, '.hermes'))).toBe(false);
+  });
+
+  it('keeps the wallet confirmation on an interactive explicit Hermes install', async () => {
+    const confirm = vi.fn(async () => false);
+    const create = vi.fn(async () => '0x0000000000000000000000000000000000000001');
+    const { data: d } = await runInstall(
+      { harness: ['hermes'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: confirm, createWallet: create }),
+    );
+    expect(confirm).toHaveBeenCalledWith(WALLET_QUESTION);
+    expect(create).not.toHaveBeenCalled();
+    expect(asData(d).wallet).toMatchObject({ status: 'declined' });
+  });
+
+  it('reports a headless wallet-create failure and still completes doctor', async () => {
+    const doctor = vi.fn(async () => okChecks);
+    const { data: d } = await runInstall(
+      { harness: ['hermes'] },
+      makeCtx(),
+      deps({
+        createWallet: async () => {
+          throw new Error('No wallet passphrase is available');
+        },
+        collectChecks: doctor,
+      }),
+    );
+    const out = asData(d);
+    expect(out.wallet).toMatchObject({ status: 'skipped' });
+    expect((out.wallet as { fix?: string }).fix).toContain('TENJIN_WALLET_PASSPHRASE');
+    expect(doctor).toHaveBeenCalledOnce();
+    expect(out.doctor).toMatchObject({ status: 'pass' });
+  });
+
+  it('honors HERMES_HOME and rejects a relative override', async () => {
+    const custom = join(home, 'custom-hermes');
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true },
+      makeCtx(),
+      deps({ env: { HERMES_HOME: custom } }),
+    );
+    expect(asData(d).harnesses[0]?.skillsDir).toBe(join(custom, 'skills'));
+    expect(existsSync(join(custom, 'config.yaml'))).toBe(true);
+
+    const err = await caught(() =>
+      runInstall(
+        { harness: ['hermes'], noWallet: true },
+        makeCtx(),
+        deps({ env: { HERMES_HOME: 'relative' } }),
+      ),
+    );
+    expect(err.code).toBe('CONFIG_INVALID');
+  });
+
+  it('falls back with a warning for relative HERMES_HOME on an unscoped install', async () => {
+    const { data: d } = await runInstall(
+      {},
+      makeCtx(),
+      deps({ env: { HERMES_HOME: 'relative' }, which: (bin) => bin === 'claude' }),
+    );
+    expect(asData(d).harnesses[0]?.warnings.join(' ')).toMatch(/HERMES_HOME.*absolute.*using/i);
+  });
+
+  it('ignores an invalid HERMES_HOME when an explicit override excludes Hermes', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ env: { HERMES_HOME: 'relative' } }),
+    );
+    expect(asData(d).harnesses.map((h) => h.harness)).toEqual(['claude']);
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {
@@ -411,6 +529,17 @@ describe('runInstall: dry run', () => {
 });
 
 describe('runInstall: idempotency', () => {
+  it('reports no configuration changes on a true no-op rerun without inventing approval', async () => {
+    await runInstall({}, makeCtx({ json: true }), deps());
+    const second = await runInstall({}, makeCtx({ json: true }), deps());
+    expect(asData(second.data).installReceipt).toMatchObject({
+      notice: { status: 'unacknowledged', acknowledgementProven: false },
+    });
+    expect(
+      (second.data as { installReceipt: { changedPaths: string[] } }).installReceipt.changedPaths,
+    ).toEqual([]);
+  });
+
   it('re-run reports up-to-date and already-present, with identical files', async () => {
     const first = await runInstall({ harness: ['claude', 'codex'] }, makeCtx(), deps());
     const firstCodex = asData(first.data).harnesses.find((h) => h.harness === 'codex');
@@ -1397,7 +1526,7 @@ describe('runInstall: interactive walkthrough', () => {
   // The summary is one line per subject and it closes the output, so it is read
   // off the TAIL: whatever disclosures a given run owed the operator sit above it,
   // and adding one must not be able to quietly drop a summary line.
-  it('closes with a six-line summary: skills, publishing, permissions, hooks, wallet, next', async () => {
+  it('keeps the six-line summary and follows it with the persistent human notice', async () => {
     // Nothing disclosable: hooks off, permissions declined by the default seam,
     // no nudge. What is left is the summary, which is what this pins.
     const res = await runInstall(
@@ -1406,7 +1535,7 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true }),
     );
     const lines = human(res).split('\n');
-    expect(lines).toHaveLength(6);
+    expect(lines).toHaveLength(10);
     expect(lines[0]).toContain('Claude Code: 3 skills installed');
     expect(lines[0]).toContain('tenjin-search, tenjin-publish (CLI)');
     expect(lines[1]).toContain('Publishing: review');
@@ -1414,6 +1543,9 @@ describe('runInstall: interactive walkthrough', () => {
     expect(lines[3]).toContain('Search hooks:');
     expect(lines[4]).toContain('Wallet:');
     expect(lines[5]).toContain('Next: tenjin search');
+    expect(lines[7]).toContain('Human notice remains unacknowledged');
+    expect(lines[8]).toContain('tenjin notice acknowledge');
+    expect(lines[9]).toContain('not proof');
   });
 
   // Nothing this command writes into the operator's home may land silently, and
@@ -1665,7 +1797,7 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true }),
     );
     expect(human(okRes)).not.toContain('need attention');
-    expect(human(okRes).split('\n')).toHaveLength(6);
+    expect(human(okRes).split('\n')).toHaveLength(10);
 
     const failing: DoctorChecks = {
       checks: [

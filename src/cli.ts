@@ -4,7 +4,12 @@ import pkg from '../package.json';
 import { CliError } from './lib/errors';
 import { dataDir } from './lib/paths';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
-import { defaultIo, emitFailure, emitSuccess } from './lib/output';
+import { defaultIo, emitFailure, emitSuccess, sanitizeForTerminal } from './lib/output';
+import {
+  pendingInstallNoticeData,
+  readInstallReceipt,
+  type StoredInstallReceipt,
+} from './lib/install-receipt';
 import type { Io } from './lib/output';
 import { maybeNudgeUpdate } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
@@ -57,6 +62,21 @@ function buildContext(cmd: Command, io: Io): CommandContext {
   return { flags, dataDir: dataDir(process.env), io };
 }
 
+async function loadPendingInstallNotice(dir: string): Promise<StoredInstallReceipt | null> {
+  try {
+    const stored = await readInstallReceipt(dir);
+    return stored?.receipt.notice.status === 'unacknowledged' ? stored : null;
+  } catch {
+    // A corrupt receipt must not break unrelated commands. `tenjin doctor`
+    // reports the receipt problem through its own diagnostic check.
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
  * Wire the whole command tree. Command bodies are loaded by lazy `import()` at
  * action time so a `doctor`/`config` invocation never parses the wallet module's
@@ -77,8 +97,30 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     const json = cmd.optsWithGlobals().json === true;
     try {
       const ctx = buildContext(cmd, io);
+      const pending =
+        command === 'install' || command === 'notice.acknowledge'
+          ? null
+          : await loadPendingInstallNotice(ctx.dataDir);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
+      const pendingData = pending === null ? undefined : pendingInstallNoticeData(pending);
+      const data =
+        pendingData === undefined
+          ? result.data
+          : isRecord(result.data)
+            ? { ...result.data, pendingInstallNotice: pendingData }
+            : { result: result.data, pendingInstallNotice: pendingData };
+      const humanLines =
+        pending === null
+          ? result.humanLines
+          : [
+              `! Tenjin installation notice is still unacknowledged (${pending.receipt.id}).`,
+              `  Review: ${sanitizeForTerminal(pending.path)}`,
+              `  Dismiss reminders: tenjin notice acknowledge ${pending.receipt.id}`,
+              '  Acknowledgment is local audit state, not proof that a human performed it.',
+              '',
+              ...(result.humanLines ?? []),
+            ];
+      emitSuccess(ctx.io, command, data, humanLines, { json: ctx.flags.json });
     } catch (err) {
       setExit(emitFailure(io, command, err, { json }).exitCode);
     }
@@ -214,6 +256,16 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runCommand('doctor', this, async (ctx) => {
         const { runDoctor } = await import('./commands/doctor');
         return runDoctor(ctx);
+      });
+    });
+
+  const notice = program.command('notice').description('Review or dismiss local Tenjin notices');
+  addGlobalFlags(notice.command('acknowledge <id>'))
+    .description('Dismiss an install reminder while retaining its local receipt')
+    .action(async function (this: Command, id: string) {
+      await runCommand('notice.acknowledge', this, async (ctx) => {
+        const { runNoticeAcknowledge } = await import('./commands/notice');
+        return runNoticeAcknowledge(id, ctx);
       });
     });
 
