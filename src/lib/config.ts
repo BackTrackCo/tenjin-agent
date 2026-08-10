@@ -40,6 +40,25 @@ export const PolicyProfileNameSchema = z.enum(['hermes', 'openclaw']);
 export type PolicyProfileName = z.infer<typeof PolicyProfileNameSchema>;
 export const POLICY_PROFILE_NAMES = PolicyProfileNameSchema.options;
 
+/** Scalar autonomy keys a harness profile may override. Single source of truth. */
+export const PROFILE_SCALAR_KEYS = [
+  'maxAutoSpend',
+  'sessionBudget',
+  'confirm',
+  'allowlistCreators',
+] as const;
+export type ProfileScalarKey = (typeof PROFILE_SCALAR_KEYS)[number];
+
+/** Known config keys that must never be accepted inside a harness profile. */
+const GLOBAL_ONLY_PROFILE_KEYS = [
+  'sendMaxAmount',
+  'baseUrl',
+  'rpcUrl',
+  'evalCohort',
+  'install',
+  'policyProfiles',
+] as const;
+
 /**
  * A harness profile can tune agent autonomy without moving credentials or spend
  * accounting into a separate silo. Network, telemetry, and `send` settings stay
@@ -54,7 +73,17 @@ export const PolicyProfileConfigSchema = z
     allowlistCreators: z.array(z.string()).optional(),
     publish: PublishConfigSchema.partial().passthrough().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((profile, ctx) => {
+    for (const key of GLOBAL_ONLY_PROFILE_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(profile, key)) continue;
+      ctx.addIssue({
+        code: 'custom',
+        path: [key],
+        message: `${key} is global-only and cannot appear in a policy profile`,
+      });
+    }
+  });
 export type PolicyProfileConfig = z.infer<typeof PolicyProfileConfigSchema>;
 
 const PolicyProfilesSchema = z
@@ -290,6 +319,13 @@ export function resolvePolicyProfileName(env: NodeJS.ProcessEnv): PolicyProfileN
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Non-empty invalid env selector, for reporting surfaces that must not hide it. */
+export function unrecognizedPolicyProfileName(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env.TENJIN_HARNESS;
+  if (value === undefined || value.length === 0) return undefined;
+  return PolicyProfileNameSchema.safeParse(value).success ? undefined : value;
+}
+
 /**
  * Apply precedence flag > env > project > profile > file > default per key,
  * returning each effective value with its source. Only autonomy and publish
@@ -428,8 +464,6 @@ function fileOrDefault<K extends keyof Config>(
   if (fromFile !== undefined) return { value: fromFile as Config[K], source: 'file' };
   return { value: CONFIG_DEFAULTS[key], source: 'default' };
 }
-
-type ProfileScalarKey = 'maxAutoSpend' | 'sessionBudget' | 'confirm' | 'allowlistCreators';
 
 function profileOrFile<K extends ProfileScalarKey>(
   key: K,

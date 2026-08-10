@@ -3,16 +3,27 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
-import { RawConfigSchema } from '../lib/config';
+import {
+  runConfigList,
+  runConfigGet,
+  runConfigSet,
+  runConfigUnset,
+  persistPublishMode,
+} from './config';
+import { PROFILE_SCALAR_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
+let previousHarness: string | undefined;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-cfg-cmd-'));
+  previousHarness = process.env.TENJIN_HARNESS;
+  delete process.env.TENJIN_HARNESS;
 });
 afterEach(async () => {
+  if (previousHarness === undefined) delete process.env.TENJIN_HARNESS;
+  else process.env.TENJIN_HARNESS = previousHarness;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -339,6 +350,15 @@ describe('runConfigSet — persistence', () => {
 });
 
 describe('harness policy profiles', () => {
+  it('uses one shared scalar-key set for profile writes', () => {
+    expect(PROFILE_SCALAR_KEYS).toEqual([
+      'maxAutoSpend',
+      'sessionBudget',
+      'confirm',
+      'allowlistCreators',
+    ]);
+  });
+
   it('sets and reads profile-scoped autonomy without changing the global value', async () => {
     await runConfigSet({ key: 'maxAutoSpend', value: '0.1' }, makeCtx());
     const set = await runConfigSet(
@@ -403,6 +423,67 @@ describe('harness policy profiles', () => {
     );
     expect(err.code).toBe('USAGE');
     expect(err.fix).toContain('hermes');
+  });
+
+  it('reports the selected profile on human and machine config output', async () => {
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.25', profile: 'hermes' }, makeCtx());
+    const result = await runConfigGet({ key: 'maxAutoSpend', profile: 'hermes' }, makeCtx());
+    expect(result.data).toMatchObject({ policyProfile: 'hermes', source: 'profile' });
+    expect(result.humanLines?.[0]).toBe('Policy profile: hermes');
+  });
+
+  it('warns when TENJIN_HARNESS names no supported profile', async () => {
+    process.env.TENJIN_HARNESS = 'typo';
+    const result = await runConfigList(makeCtx());
+    expect(result.data).toMatchObject({ unrecognizedPolicyProfile: 'typo' });
+    expect(result.humanLines?.[0]).toMatch(/TENJIN_HARNESS=.*typo.*not recognized/i);
+  });
+
+  it('writes a global value but reports the still-effective env-selected profile value', async () => {
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.25', profile: 'hermes' }, makeCtx());
+    process.env.TENJIN_HARNESS = 'hermes';
+    const result = await runConfigSet({ key: 'maxAutoSpend', value: '0.1' }, makeCtx());
+    expect(result.data).toMatchObject({
+      policyProfile: 'hermes',
+      source: 'profile',
+      value: { atomic: '250000' },
+    });
+    expect(await readRawFile()).toMatchObject({ maxAutoSpend: '100000' });
+  });
+
+  it('unsets a profile scalar so the global value becomes effective', async () => {
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.1' }, makeCtx());
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.25', profile: 'hermes' }, makeCtx());
+    const result = await runConfigUnset({ key: 'maxAutoSpend', profile: 'hermes' }, makeCtx());
+    expect(result.data).toMatchObject({
+      policyProfile: 'hermes',
+      source: 'file',
+      value: { atomic: '100000' },
+    });
+    expect(await readRawFile()).toEqual({
+      maxAutoSpend: '100000',
+      policyProfiles: { hermes: {} },
+    });
+  });
+
+  it('unsets one profile publish field without clobbering its sibling', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto', profile: 'hermes' }, makeCtx());
+    await runConfigSet(
+      { key: 'publish.defaultPrice', value: '0.25', profile: 'hermes' },
+      makeCtx(),
+    );
+    await runConfigUnset({ key: 'publish.mode', profile: 'hermes' }, makeCtx());
+    expect(await readRawFile()).toEqual({
+      policyProfiles: { hermes: { publish: { defaultPrice: '250000' } } },
+    });
+  });
+
+  it('refuses an empty profile creator allowlist because it widens policy', async () => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'allowlistCreators', value: '', profile: 'hermes' }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.fix).toContain('config unset allowlistCreators --profile hermes');
   });
 });
 

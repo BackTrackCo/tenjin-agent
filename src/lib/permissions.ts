@@ -36,10 +36,11 @@
  * it, and `assertOnBaseOrigin` only checks that a resource URL shares an origin
  * with the CONFIGURED base, so an attacker-controlled pair satisfies the pin. No
  * prefix syntax expresses "this verb but not that flag", so the mitigation is
- * disclosure rather than a narrower rule: FLAG_CAVEAT prints alongside the rules
- * on every surface, and the skills tell the agent never to pass `--base-url` on
- * an allowlisted verb. Pinning the paying path to a constant origin instead is
- * the real fix and is an x402/payments-semantics change, tracked separately.
+ * disclosure rather than a narrower rule: FLAG_CAVEAT rides the `--json` payload
+ * and docs/agent-permissions.md, every human surface points at that page, and the
+ * skills tell the agent never to pass `--base-url` on an allowlisted verb. Pinning
+ * the paying path to a constant origin instead is the real fix and is an
+ * x402/payments-semantics change, tracked separately.
  */
 
 /** One pasteable allowlist rule plus why it is safe (or what it costs). */
@@ -59,15 +60,15 @@ export interface ExcludedVerb {
 }
 
 /**
- * FREE verbs: they CANNOT SPEND AND CANNOT OPEN THE KEYSTORE. That is the whole
+ * FREE verbs: they CANNOT SPEND AND CANNOT MOVE YOUR KEYS. That is the whole
  * definition of this tier, and it is deliberately narrower than the older "no
  * wallet, no signing, no payment" — which stopped being true the moment `read`
  * gained the ability to PRESENT a cached session key. `read` signs, with a P-256
  * delegation loaded from disk; it cannot mint one (that needs the wallet, and its
  * import graph is test-pinned clear of it) and cannot produce the
  * secp256k1/EIP-712 signature a payment authorization needs (wrong curve). Money
- * and key material stay out of reach; a signature as such no longer does, so the
- * tier says what it means.
+ * stays out of reach; a signature as such no longer does, so the tier says what
+ * it means. `doctor` decrypts locally to check the wallet still opens.
  *
  * What the tier does NOT claim, because it is not true: that the read scope
  * limits what a leaked delegation is worth. Scope is enforced only on the request
@@ -85,9 +86,10 @@ export interface ExcludedVerb {
  * papered over — `search` POSTs the (generalized, anonymous) question off-machine
  * and records it locally, `outcome` POSTs a report that moves the marketplace's
  * reuse signal (both unauthenticated remote writes), and `read` writes locally,
- * saving a delivered piece to the library. Pre-clearing them is defensible
- * because they cost nothing and cannot reach the key; calling them read-only to
- * justify it would not be.
+ * saving a delivered piece to the library, and `doctor` decrypts the keystore
+ * locally to check it opens. Pre-clearing them is defensible because they cost
+ * nothing and none of it leaves the machine; calling them read-only to justify it
+ * would not be.
  *
  * Rules are PREFIX rules: `Bash(tenjin search:*)` clears commands that start with
  * `tenjin search` and nothing else. The narrow `wallet show` / `wallet balance` /
@@ -144,7 +146,9 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
   {
     rule: 'Bash(tenjin doctor:*)',
     command: 'tenjin doctor',
-    note: 'Read-only local environment and API reachability diagnostics.',
+    note:
+      'Local environment and API reachability diagnostics. Decrypts the wallet ' +
+      'locally to check it still opens; signs nothing and sends nothing.',
   },
   {
     rule: 'Bash(tenjin wallet show:*)',
@@ -289,7 +293,9 @@ export const FLAG_CAVEAT: readonly string[] = [
   'Allowlist these verbs only if you are content for the agent to choose the destination',
   'host, and set the base URL in config instead of letting it be an argument. The skills',
   'tell agents never to pass --base-url on an allowlisted verb, but that is a convention,',
-  'not an enforced boundary.',
+  'not an enforced boundary. TENJIN_HARNESS is a second policy lever: when set in',
+  'the process environment it selects a stored harness profile that can change spend,',
+  'creator-allowlist, confirmation, and publish defaults for every allowed command.',
 ];
 
 /**
@@ -303,6 +309,8 @@ export const MCP_CAVEAT: readonly string[] = [
   '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
   '`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_candidate` as gated',
   'for its add/drop actions. `tenjin_buy` is the same opt-in decision as the buy line above.',
+  'The MCP server process also honors TENJIN_HARNESS; pin or clear that environment value',
+  'when registering the server so a stored autonomous profile is not selected implicitly.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */
@@ -329,36 +337,26 @@ export function recommendedRules(): string[] {
 }
 
 /**
- * The human block both `doctor` and `install` print. Plain lines; the caller
- * decides how (or whether) to paint them.
+ * The permission caveats' one home. `doctor` used to print the whole thing —
+ * nine rules, both opt-in notes, every exclusion, the flag caveat and the MCP
+ * caveat, ~60 lines ahead of the check list it was actually run for. No doctor
+ * command in the wider ecosystem carries security prose, and an operator reading
+ * a wall of it in a terminal cannot paste from it, search it, or link a colleague
+ * to a section. The page can do all three, so it is where the caveats live and
+ * where every human surface points; `--json` still carries them as data
+ * (`recommendedPermissions`), which is what an agent reads.
  */
-export function renderPermissionsBlock(): string[] {
-  const lines: string[] = [
-    'Auto-mode permission allowlist (add these once, then agents stop being denied):',
-  ];
-  for (const e of ALWAYS_SAFE_ALLOWLIST) lines.push(`  ${e.rule}`);
-  lines.push('  Free: cannot spend and cannot open the keystore. Not all read-only, though:');
-  lines.push('  `search` and `outcome` POST to the marketplace (a question, a report),');
-  lines.push('  and `read` saves a delivered piece to your local library. `read` may also');
-  lines.push('  PRESENT a cached session key — a wallet-derived credential — to the origin it');
-  lines.push('  was minted for. It cannot mint one and cannot sign a payment with it (wrong');
-  lines.push('  curve), but treat the file itself as sensitive: its scope is not a bound.');
-  lines.push('');
-  lines.push(...FLAG_CAVEAT.map((l) => `  ${l}`));
-  lines.push('');
-  lines.push('Opt in separately (unattended purchases; unattended keystore access):');
-  for (const e of OPT_IN_ALLOWLIST) {
-    lines.push(`  ${e.rule}`);
-    lines.push(`    ${e.note}`);
-  }
-  lines.push('');
-  lines.push('Never recommended (each one is a human decision):');
-  for (const e of NEVER_ALLOWLISTED) lines.push(`  ${e.command} - ${e.reason}`);
-  lines.push('');
-  lines.push(...MCP_CAVEAT.map((l) => `  ${l}`));
-  lines.push('');
-  lines.push(
-    'Claude Code: add the lines to the "permissions.allow" array in .claude/settings.json.',
+export const PERMISSIONS_DOC_URL =
+  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md';
+
+/**
+ * The single line that replaced the block: what is on the page, and its URL. It
+ * names the counts rather than the rules so the operator knows whether the page
+ * answers their question before they open it.
+ */
+export function permissionsPointer(): string {
+  return (
+    `Auto-mode permission allowlist (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
+    `${OPT_IN_ALLOWLIST.length} opt-ins, the --base-url caveat): ${PERMISSIONS_DOC_URL}`
   );
-  return lines;
 }

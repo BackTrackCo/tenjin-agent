@@ -7,9 +7,9 @@ forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
 behind which verbs are on that list, which two are separate opt-ins, and which are
-never recommended at all. The
-[README](../README.md#auto-mode-permission-allowlist) carries the paste block and
-the three-tier summary.
+never recommended at all, and it is where `tenjin install` and `tenjin doctor`
+send you. The [README](../README.md#auto-mode-permission-allowlist) carries the
+paste block and the three-tier summary.
 
 ## The free tier
 
@@ -29,7 +29,8 @@ Bash(tenjin config get:*)
 Bash(tenjin candidate list:*)
 ```
 
-None of those can spend, and none can open the keystore. That is the definition of
+None of those can spend, and none can move your keys; `tenjin doctor` decrypts
+locally to check your wallet still opens. That is the definition of
 this tier, and it is deliberately narrower than "signs nothing": `tenjin read` can
 present a session key that already exists, which is a signature — a P-256
 delegation, the wrong curve to authorize a USDC transfer. It cannot mint one; that
@@ -43,7 +44,7 @@ needs the wallet.
 | `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                      |
 | `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below). |
 | `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.  |
-| `Bash(tenjin doctor:*)`         | Read-only local environment and API reachability diagnostics.                                                                  |
+| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                       |
 | `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                |
 | `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                          |
 | `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.              |
@@ -77,8 +78,10 @@ three. It cannot unlock a keystore and never consults the spend policy.
 you, as one of its up-to-three setup decisions:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
-> `~/.claude/settings.json`. None can spend USDC or open your wallet keystore;
-> three send or store data (search, outcome, read). Full caveats: tenjin doctor.
+> `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
+> check your wallet still opens. Three send or store data (search, outcome,
+> read). Full caveats:
+> https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
 
 Answer yes and it merges them in. The write is additive only: it appends the rules
 that are missing and never removes, reorders, or rewrites an existing entry or any
@@ -91,9 +94,11 @@ fixed constant, so no flag or config value can widen it to `buy`, `publish`,
 `--json`. Without the flag, a non-interactive install changes nothing and says the
 flag is available.
 
-`tenjin doctor` reprints the full block on every run (including in `doctor --json`
-under `permissions`, on the failure envelope as well as the success one), so an
-agent that just got denied can point you at the exact line.
+`tenjin doctor --json` carries this whole recommendation as data under
+`permissions` — every rule, every per-verb note, both caveats, on the failure
+envelope as well as the success one — so an agent that just got denied can point
+you at the exact line. Its human render is the check list plus one link back
+here.
 
 ## A prefix rule pins the verb, not the flags
 
@@ -110,6 +115,13 @@ disclosed limit: set your base URL in config, and allowlist these verbs only if 
 are content for an agent to be able to choose the destination host. The skills tell
 agents never to pass `--base-url` on an allowlisted verb, but that is a convention
 rather than an enforced boundary.
+
+`TENJIN_HARNESS` is another policy lever outside the verb prefix. When present in
+the CLI process environment it selects a stored harness profile, which can change
+automatic spend, session budget, confirmation, creator allowlisting, and publish
+defaults for every command. Pin or clear it in unattended shells and MCP
+registrations; use `tenjin config --profile <name>` to inspect a profile before
+granting command or tool permissions.
 
 ## Opt-in: purchases
 
@@ -248,6 +260,9 @@ Bash rules do not apply. If you follow the
 `mcp__tenjin__tenjin_wallet` gated, treat `mcp__tenjin__tenjin_candidate` as
 gated for its add/drop actions, and treat `mcp__tenjin__tenjin_buy` as the same
 opt-in decision as the `buy` line above.
+
+The server process also honors `TENJIN_HARNESS`. Pin or clear it in the MCP
+registration so a stored autonomous profile is not selected implicitly.
 
 ## Not the same as `allowlistCreators`
 

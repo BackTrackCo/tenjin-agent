@@ -11,9 +11,10 @@ import {
   MCP_CAVEAT,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
+  PERMISSIONS_DOC_URL,
+  permissionsPointer,
   recommendedPermissions,
   recommendedRules,
-  renderPermissionsBlock,
 } from './permissions';
 
 /** Every verb that must never be pre-cleared, in the form it appears on a command line. */
@@ -189,6 +190,7 @@ describe('the flag surface inside an allowed verb', () => {
   it('ships the flag caveat, because no rule syntax can express the restriction', () => {
     const flags = FLAG_CAVEAT.join(' ');
     expect(flags).toContain('--base-url');
+    expect(flags).toContain('TENJIN_HARNESS');
     expect(flags).toMatch(/pins the VERB, not the flags/i);
     expect(flags).toMatch(/convention, not an enforced boundary/i);
   });
@@ -199,6 +201,7 @@ describe('the flag surface inside an allowed verb', () => {
     expect(mcp).toContain('mcp__tenjin__tenjin_edit');
     expect(mcp).toContain('mcp__tenjin__tenjin_wallet');
     expect(mcp).toContain('mcp__tenjin__tenjin_candidate');
+    expect(mcp).toContain('TENJIN_HARNESS');
   });
 
   it('carries both caveats in the machine payload', () => {
@@ -209,30 +212,6 @@ describe('the flag surface inside an allowed verb', () => {
 });
 
 describe('claims made about the recommended set are true of the code', () => {
-  // search and outcome both POST. Pre-clearing them is defensible; calling them
-  // read-only in order to justify it is not.
-  it('does not call the free set read-only', () => {
-    const block = renderPermissionsBlock().join('\n');
-    expect(block).not.toMatch(/free, read-only verbs/i);
-    expect(block).toContain('Free: cannot spend and cannot open the keystore');
-    expect(block).toMatch(/`search` and `outcome` POST/);
-  });
-
-  // The old definition said "no wallet, no signing, no payment". `read` now signs
-  // (P-256, with a delegation it loaded), so that sentence would be a false claim
-  // printed directly above the lines an operator is told to paste. Pinned as a
-  // negative: the tier is defined by what it CANNOT do, and signing left the list.
-  it('never claims the safe verbs sign nothing', () => {
-    const block = renderPermissionsBlock().join('\n');
-    expect(block).not.toMatch(/no wallet, no signing, no payment/i);
-    // ...and the replacement discloses what read may present, rather than hiding it.
-    expect(block).toMatch(/wallet-derived credential/i);
-    expect(block).toMatch(/wrong curve/i);
-    expect(block).toMatch(/origin it/i);
-    // The block must not offer the scope as the reason the file is safe to hold.
-    expect(block).toMatch(/scope is not a bound/i);
-  });
-
   // `read` is in the ALWAYS-SAFE tier and transmits a wallet-derived credential
   // once a session exists. An operator reading only the tier list would never
   // learn that, so the entry has to say it in as many words.
@@ -273,23 +252,30 @@ describe('claims made about the recommended set are true of the code', () => {
   });
 });
 
-describe('rendered block', () => {
-  const lines = renderPermissionsBlock();
-  const text = lines.join('\n');
+describe('the human pointer that replaced the printed block', () => {
+  const line = permissionsPointer();
 
-  it('prints every recommended rule', () => {
-    for (const rule of recommendedRules()) expect(text).toContain(rule);
+  it('is one line, so it cannot grow back into an essay', () => {
+    expect(line).not.toContain('\n');
   });
 
-  it('prints every exclusion with its reason', () => {
-    for (const e of NEVER_ALLOWLISTED) {
-      expect(text).toContain(e.command);
-      expect(text).toContain(e.reason);
-    }
+  it('carries the URL of the page the caveats live on', () => {
+    expect(line).toContain(PERMISSIONS_DOC_URL);
+    expect(PERMISSIONS_DOC_URL).toMatch(/docs\/agent-permissions\.md$/);
   });
 
-  it('tells the operator where the lines go', () => {
-    expect(text).toContain('.claude/settings.json');
+  // The counts are what tell an operator whether the page answers their question.
+  // Derived, so adding a rule cannot leave the line advertising the old number.
+  it('counts the tiers from the constants rather than hardcoding them', () => {
+    expect(line).toContain(`${ALWAYS_SAFE_ALLOWLIST.length} free verbs`);
+    expect(line).toContain(`${OPT_IN_ALLOWLIST.length} opt-ins`);
+  });
+
+  // The whole point of the split: a rule an operator could paste out of the
+  // terminal is a rule that never got read in context. Names none of them.
+  it('pastes no rule and names no excluded verb', () => {
+    for (const rule of recommendedRules()) expect(line).not.toContain(rule);
+    for (const e of NEVER_ALLOWLISTED) expect(line).not.toContain(e.command);
   });
 });
 

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import pkg from '../package.json';
 import { CliError } from './lib/errors';
 import { dataDir } from './lib/paths';
+import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
 import { maybeNudgeUpdate } from './lib/update-check';
@@ -157,7 +158,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--no-claude-md', 'skip the CLAUDE.md nudge')
     .option(
       '--allow-free-verbs',
-      "add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or open the keystore, see `tenjin doctor` for the caveats",
+      // The absolute URL, like every other pointer: `docs/agent-permissions.md`
+      // resolves against the reader's cwd, and an operator running `--help` is in
+      // their own project, not in this package.
+      `add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
     )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
@@ -223,6 +227,18 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         const o = this.optsWithGlobals();
         return runConfigSet(
           { key, value, ...(typeof o.profile === 'string' ? { profile: o.profile } : {}) },
+          ctx,
+        );
+      });
+    });
+  addPolicyProfileFlag(addGlobalFlags(config.command('unset <key>')))
+    .description('Remove a stored config value so the next policy layer applies')
+    .action(async function (this: Command, key: string) {
+      await runCommand('config.unset', this, async (ctx) => {
+        const { runConfigUnset } = await import('./commands/config');
+        const o = this.optsWithGlobals();
+        return runConfigUnset(
+          { key, ...(typeof o.profile === 'string' ? { profile: o.profile } : {}) },
           ctx,
         );
       });

@@ -50,6 +50,29 @@ describe('loadConfig', () => {
     expect((caught as CliError).code).toBe('CONFIG_INVALID');
     expect((caught as CliError).fix).toBeDefined();
   });
+
+  it.each(['sendMaxAmount', 'baseUrl', 'rpcUrl', 'evalCohort', 'install', 'policyProfiles'])(
+    'rejects global-only %s nested inside a policy profile',
+    async (key) => {
+      await writeFile(
+        configFile(),
+        JSON.stringify({
+          policyProfiles: { hermes: { [key]: key.endsWith('Url') ? 'https://x.example' : '0' } },
+        }),
+      );
+      await expect(loadRawConfig(dir)).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+    },
+  );
+
+  it('preserves unknown future profile keys while rejecting known global-only keys', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ policyProfiles: { hermes: { futurePolicyLever: true } } }),
+    );
+    expect(await loadRawConfig(dir)).toMatchObject({
+      policyProfiles: { hermes: { futurePolicyLever: true } },
+    });
+  });
 });
 
 describe('CONFIG_DEFAULTS.sendMaxAmount placeholder', () => {

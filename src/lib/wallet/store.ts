@@ -39,8 +39,9 @@ export const WALLET_SCHEMA_VERSION = 2;
  * The persisted wallet record (schema v2). The private key is NEVER stored in
  * cleartext: `keystore` is a Keystore v3 document (scrypt + AES-128-CTR) and the
  * key is recovered only by decrypting it with the wallet passphrase. `address`
- * stays top-level in cleartext ON PURPOSE so `show`/`balance`/`doctor` keep
- * working without a passphrase; only signing decrypts. The `provider`
+ * stays top-level in cleartext ON PURPOSE so `show`/`balance` keep working
+ * without a passphrase; signing decrypts, and so does `doctor` when it can reach
+ * a passphrase without prompting. The `provider`
  * discriminator keeps the schema from implying every future wallet embeds a
  * keystore. Validated on read (a corrupt file is WALLET_INVALID_KEY, never a
  * silent partial parse).

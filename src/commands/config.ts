@@ -4,6 +4,7 @@ import { CliError } from '../lib/errors';
 import {
   CONFIG_KEYS,
   POLICY_PROFILE_NAMES,
+  PROFILE_SCALAR_KEYS,
   PUBLISH_CONFIG_KEYS,
   PolicyProfileConfigSchema,
   PolicyProfileNameSchema,
@@ -12,6 +13,7 @@ import {
   SEND_MAX_UNSET,
   loadRawConfig,
   resolveSettings,
+  unrecognizedPolicyProfileName,
 } from '../lib/config';
 import type {
   EffectiveSettings,
@@ -47,12 +49,6 @@ interface RenderedSetting extends RenderedValue {
 }
 
 const CONFIRM_ABOVE = 'above:';
-const PROFILE_SCALAR_KEYS = [
-  'maxAutoSpend',
-  'sessionBudget',
-  'confirm',
-  'allowlistCreators',
-] as const satisfies readonly ScalarConfigKey[];
 const KEY_WIDTH = Math.max(...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].map((key) => key.length));
 
 /**
@@ -88,8 +84,9 @@ export async function runConfigList(
   options: { profile?: string } = {},
 ): Promise<CommandResult> {
   const settings = await resolveFromContext(ctx, parseOptionalProfile(options.profile));
-  const data: Record<string, RenderedSetting> = {};
-  const humanLines: string[] = [];
+  const profile = profileOutput(settings, process.env);
+  const data: Record<string, unknown> = { ...profile.data };
+  const humanLines: string[] = [...profile.humanLines];
   for (const key of CONFIG_KEYS) {
     const entry = renderSetting(key, settings[key].value, settings[key].source);
     data[key] = entry;
@@ -111,15 +108,23 @@ export async function runConfigGet(
   if (isPublishKey(key)) {
     const settings = await resolveFromContext(ctx, parseOptionalProfile(profile));
     const entry = renderPublishSetting(key, settings);
+    const profileOutputValue = profileOutput(settings, process.env);
     return {
-      data: { key, ...entry },
-      humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
+      data: { key, ...entry, ...profileOutputValue.data },
+      humanLines: [
+        ...profileOutputValue.humanLines,
+        withNote(formatLine(key, entry), downgradeNote(key, settings)),
+      ],
     };
   }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx, parseOptionalProfile(profile));
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
-  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
+  const profileOutputValue = profileOutput(settings, process.env);
+  return {
+    data: { key: configKey, ...entry, ...profileOutputValue.data },
+    humanLines: [...profileOutputValue.humanLines, formatLine(configKey, entry)],
+  };
 }
 
 /**
@@ -138,17 +143,110 @@ export async function runConfigSet(
     throw profileKeyError(configKey);
   }
   const stored = parseValue(configKey, value);
+  if (
+    selectedProfile !== undefined &&
+    configKey === 'allowlistCreators' &&
+    Array.isArray(stored) &&
+    stored.length === 0
+  ) {
+    throw new CliError('USAGE', 'An empty profile creator allowlist would disable the gate', {
+      fix: `Run \`tenjin config unset allowlistCreators --profile ${selectedProfile}\` to inherit the global allowlist instead.`,
+    });
+  }
   if (selectedProfile === undefined) {
     await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
   } else {
     await persistPolicyProfile(ctx.dataDir, selectedProfile, { [configKey]: stored });
   }
-  const entry = renderSetting(
-    configKey,
-    stored,
-    selectedProfile === undefined ? 'file' : 'profile',
-  );
-  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
+  const settings = await resolveFromContext(ctx, selectedProfile);
+  const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
+  const profileOutputValue = profileOutput(settings, process.env);
+  return {
+    data: { key: configKey, ...entry, ...profileOutputValue.data },
+    humanLines: [...profileOutputValue.humanLines, formatLine(configKey, entry)],
+  };
+}
+
+/** Remove one stored key so resolution falls through to the next policy layer. */
+export async function runConfigUnset(
+  { key, profile }: { key: string; profile?: string },
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const selectedProfile = parseOptionalProfile(profile);
+  if (isPublishKey(key)) {
+    await unsetPublishKey(key, ctx.dataDir, selectedProfile);
+  } else {
+    const configKey = assertKey(key);
+    if (selectedProfile === undefined) {
+      await persist(ctx.dataDir, (existing) => {
+        const { [configKey]: removed, ...rest } = existing;
+        void removed;
+        return rest;
+      });
+    } else {
+      if (!isProfileScalarKey(configKey)) throw profileKeyError(configKey);
+      await persist(ctx.dataDir, (existing) =>
+        removeProfileKey(existing, selectedProfile, configKey),
+      );
+    }
+  }
+  const settings = await resolveFromContext(ctx, selectedProfile);
+  const entry = isPublishKey(key)
+    ? renderPublishSetting(key, settings)
+    : renderScalarSetting(key, settings);
+  const profileOutputValue = profileOutput(settings, process.env);
+  return {
+    data: { key, ...entry, ...profileOutputValue.data },
+    humanLines: [...profileOutputValue.humanLines, formatLine(key, entry)],
+  };
+}
+
+function renderScalarSetting(key: string, settings: EffectiveSettings): RenderedSetting {
+  const configKey = assertKey(key);
+  return renderSetting(configKey, settings[configKey].value, settings[configKey].source);
+}
+
+function removeProfileKey(
+  existing: PartialConfig,
+  profile: PolicyProfileName,
+  key: (typeof PROFILE_SCALAR_KEYS)[number],
+): PartialConfig {
+  const current = existing.policyProfiles?.[profile];
+  if (current === undefined) return existing;
+  const { [key]: removed, ...nextProfile } = current;
+  void removed;
+  return {
+    ...existing,
+    policyProfiles: { ...existing.policyProfiles, [profile]: nextProfile },
+  };
+}
+
+async function unsetPublishKey(
+  key: PublishConfigKey,
+  dir: string,
+  profile?: PolicyProfileName,
+): Promise<void> {
+  const subkey = key === 'publish.mode' ? 'mode' : 'defaultPrice';
+  await persist(dir, (existing) => {
+    if (profile === undefined) {
+      const current = existing.publish;
+      if (current === undefined) return existing;
+      const { [subkey]: removed, ...publish } = current;
+      void removed;
+      return { ...existing, publish };
+    }
+    const current = existing.policyProfiles?.[profile];
+    if (current?.publish === undefined) return existing;
+    const { [subkey]: removed, ...publish } = current.publish;
+    void removed;
+    return {
+      ...existing,
+      policyProfiles: {
+        ...existing.policyProfiles,
+        [profile]: { ...current, publish },
+      },
+    };
+  });
 }
 
 /**
@@ -180,7 +278,13 @@ async function setPublishKey(
   } else {
     await persistPolicyProfile(ctx.dataDir, profile, { publish: { [subkey]: stored } });
   }
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  const settings = await resolveFromContext(ctx, profile);
+  const effective = renderPublishSetting(key, settings);
+  const profileOutputValue = profileOutput(settings, process.env);
+  return {
+    data: { key, ...effective, ...profileOutputValue.data },
+    humanLines: [...profileOutputValue.humanLines, formatLine(key, effective)],
+  };
 }
 
 function parsePublishMode(value: string): string {
@@ -278,6 +382,27 @@ function parseOptionalProfile(value: string | undefined): PolicyProfileName | un
 
 function isProfileScalarKey(key: ScalarConfigKey): key is (typeof PROFILE_SCALAR_KEYS)[number] {
   return (PROFILE_SCALAR_KEYS as readonly string[]).includes(key);
+}
+
+function profileOutput(
+  settings: EffectiveSettings,
+  env: NodeJS.ProcessEnv,
+): { data: Record<string, unknown>; humanLines: string[] } {
+  const invalid = unrecognizedPolicyProfileName(env);
+  if (invalid !== undefined) {
+    return {
+      data: { unrecognizedPolicyProfile: invalid },
+      humanLines: [
+        `Warning: TENJIN_HARNESS=${JSON.stringify(invalid)} is not recognized; global policy remains active.`,
+      ],
+    };
+  }
+  return settings.policyProfile === undefined
+    ? { data: {}, humanLines: [] }
+    : {
+        data: { policyProfile: settings.policyProfile },
+        humanLines: [`Policy profile: ${settings.policyProfile}`],
+      };
 }
 
 function profileKeyError(key: string): CliError {

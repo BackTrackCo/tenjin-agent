@@ -1,4 +1,5 @@
 import { CliError } from './errors';
+import { ATOMIC_RE } from './ids';
 import type { Money } from '../schemas';
 
 /** USDC is a 6-decimal token; one dollar is 1_000_000 atomic units. */
@@ -47,6 +48,28 @@ export function atomicToUsd(atomic: string): string {
   const whole = value / base;
   const frac = (value % base).toString().padStart(USDC_DECIMALS, '0').replace(/0+$/, '');
   return frac.length > 0 ? `${whole}.${frac}` : whole.toString();
+}
+
+/**
+ * Whether an atomic price would actually cost something: true paid, false free,
+ * null when the string is not an atomic amount at all and so cannot answer.
+ *
+ * A Tenjin piece may be priced at zero and is then delivered by `read` with no
+ * payment, so "there is a price field" and "there is a purchase to make" are
+ * different questions. The third state is not decoration: only the wire schema
+ * enforces ATOMIC_RE, and the local search store types `price` as a bare string,
+ * so a hand-edited or half-written entry can hold "-1" or "0.1". Those must not
+ * read as "free", or corrupt local data would start refusing honest reports.
+ * Never throws, which is why the check is a regex and not a BigInt compare.
+ *
+ * Matched against the RAW string, with no trimming. The contract carries the
+ * canonical form and nothing else, so " 0 " did not come off the wire; padding is
+ * evidence the value was edited, and normalizing it away would launder a corrupt
+ * entry into a confident "free" and hand back the false refusal this avoids.
+ */
+export function isPaidPrice(atomic: string): boolean | null {
+  if (!ATOMIC_RE.test(atomic)) return null;
+  return /[1-9]/.test(atomic);
 }
 
 /** Dual-form money object for machine output. */
