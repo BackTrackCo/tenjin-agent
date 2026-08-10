@@ -109,7 +109,7 @@ export type PromptPublishModeFn = () => Promise<PublishMode | null>;
 /** A yes/no seam, same shape as buy's `confirm`. */
 export type ConfirmFn = (label: string) => Promise<boolean>;
 
-type PublishModeSource = 'flag' | 'existing' | 'prompt' | 'default-skipped';
+type PublishModeSource = 'flag' | 'existing' | 'prompt' | 'headless-default' | 'default-skipped';
 interface PublishModeSelection {
   value: PublishMode;
   source: PublishModeSource;
@@ -1044,6 +1044,15 @@ function doctorNotices(io: Io, doctor: DoctorChecks, wallet: WalletOutcome): str
  */
 const DEFAULT_MODE: PublishMode = CONFIG_DEFAULTS.publish.mode;
 
+/**
+ * What a headless run settles on, and it is the SAME answer the interactive
+ * select recommends (PUBLISH_MODE_CHOICES' initialValue), not the stored default.
+ * That equality is the point: "non-interactive is an interactive all-yes" has to
+ * be true of publishing too, or the sentence is wrong about the one decision
+ * that governs what the agent puts on a public marketplace.
+ */
+const RECOMMENDED_MODE: PublishMode = 'auto';
+
 /** Decision 1's literal copy: one line of consequence per option, `auto` first. */
 export const PUBLISH_MODE_CHOICES = [
   {
@@ -1083,9 +1092,22 @@ async function resolvePublishMode(
     return { value: config.publish.mode, source: 'existing' };
   }
 
-  // `interactive` is the walkthrough gate (already false under --json or off a TTY),
-  // so a machine consumer never sits behind a prompt.
-  if (dryRun || !interactive) return { value: DEFAULT_MODE, source: 'default-skipped' };
+  // A dry run asks nothing and writes nothing, so it reports the untouched
+  // default rather than the mode a real run would settle.
+  if (dryRun) return { value: DEFAULT_MODE, source: 'default-skipped' };
+
+  // `interactive` is the walkthrough gate (already false under --json or off a
+  // TTY), so a machine consumer never sits behind a prompt. It SETTLES the
+  // recommended mode rather than leaving the key unset: every other decision this
+  // command makes headlessly lands on what an interactive yes would have chosen,
+  // and leaving this one alone made a headless install the only path where the
+  // agent's publishing consent silently differed from the one the operator was
+  // shown. An already-configured mode was returned above, so this only ever
+  // writes where nothing was set.
+  if (!interactive) {
+    await persistPublishMode(ctx.dataDir, RECOMMENDED_MODE);
+    return { value: RECOMMENDED_MODE, source: 'headless-default' };
+  }
 
   const answer = await (deps.promptPublishMode ?? defaultPromptPublishMode)();
   if (answer === null) return { value: DEFAULT_MODE, source: 'default-skipped' }; // cancelled: no write
@@ -1194,7 +1216,8 @@ async function resolvePermissions(args: {
  * agreed to "check Tenjin before a web search" has not thereby agreed to a
  * reminder at the end of every turn, so the question says both out loud.
  */
-export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web searches?';
+export const SEARCH_HOOKS_QUESTION =
+  'Let Tenjin ride along with your web searches? (Escape skips, registering nothing)';
 
 export const SEARCH_HOOKS_CHOICES = [
   {
@@ -1251,6 +1274,13 @@ async function resolveHooks(args: {
   }
 
   const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt);
+  // Cancelling the select is a decision NOT to decide, so it behaves exactly like
+  // `--no-hooks`: nothing registered, nothing written. Every other decision in
+  // this walkthrough already treats Escape that way, and this one used to be the
+  // single prompt where backing out still wired and persisted a mode.
+  if (mode === null) {
+    return hooksSkipped('claude', home, dataDir, stored ?? DEFAULT_HOOK_MODE, 'declined');
+  }
   if (dryRun) return hooksSkipped('claude', home, dataDir, mode, 'dry-run');
   if (mode !== (stored ?? DEFAULT_HOOK_MODE) || stored === undefined) {
     await persistSearchHookMode(dataDir, mode);
@@ -1267,8 +1297,12 @@ const DEFAULT_HOOK_MODE: SearchHookMode = CONFIG_DEFAULTS.hooks.searchMode;
 
 /**
  * Precedence for the hook mode: `--search-hooks` > the interactive select > an
- * already-configured mode > the default. A cancelled select keeps whatever is
- * configured rather than writing something the operator did not choose.
+ * already-configured mode > the default.
+ *
+ * NULL means the operator cancelled (Escape, ctrl-C, or an answer the schema does
+ * not recognize). That is not a mode and must not be resolved into one: the
+ * caller treats it as `--no-hooks` for this run, registering nothing and writing
+ * no config, which is what every other cancel in this walkthrough does.
  */
 async function chooseHookMode(
   flag: SearchHookMode | undefined,
@@ -1276,14 +1310,15 @@ async function chooseHookMode(
   deps: InstallDeps,
   dryRun: boolean,
   canPrompt: boolean,
-): Promise<SearchHookMode> {
+): Promise<SearchHookMode | null> {
   if (flag !== undefined) return flag;
   if (dryRun || !canPrompt) return stored ?? DEFAULT_HOOK_MODE;
   const answer = await (deps.promptSearchHooks ?? defaultPromptSearchHooks)();
-  if (answer === null) return stored ?? DEFAULT_HOOK_MODE;
-  // The seam is injectable, so an answer is validated rather than trusted.
+  if (answer === null) return null;
+  // The seam is injectable, so an answer is validated rather than trusted; an
+  // unrecognized one is a cancel, not a write of something unknown.
   const parsed = SearchHookModeSchema.safeParse(answer);
-  return parsed.success ? parsed.data : (stored ?? DEFAULT_HOOK_MODE);
+  return parsed.success ? parsed.data : null;
 }
 
 function defaultPromptSearchHooks(): Promise<SearchHookMode | null> {

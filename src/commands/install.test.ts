@@ -1186,14 +1186,46 @@ describe('runInstall: publish-mode selection', () => {
     expect(await persistedMode()).toBeUndefined();
   });
 
-  it('does not prompt or write on a non-interactive run: the STORED default stays review', async () => {
-    const spy = promptSpy(['auto']);
+  // Headless SETTLES the recommended mode rather than leaving the key unset, so
+  // "non-interactive is an interactive all-yes" is true of publishing too.
+  it('settles and persists the recommended auto on a non-interactive run, with no prompt', async () => {
+    const spy = promptSpy(['review']);
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: false, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'headless-default' });
+    expect(await persistedMode()).toBe('auto');
+  });
+
+  // The headless settle is the SAME answer the interactive select recommends; if
+  // one moves without the other, the parity claim quietly stops being true.
+  it('settles the mode the interactive select recommends', async () => {
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(modeOf(d).value).toBe(PUBLISH_MODE_CHOICES[0].value);
+  });
+
+  it('respects an already-configured mode headlessly, writing nothing new', async () => {
+    await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'existing' });
+    expect(await persistedMode()).toBe('review');
+  });
+
+  it('lets --publish-mode win over the headless settle', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'], publishMode: 'full-auto' },
+      makeCtx(),
+      deps(),
+    );
+    expect(modeOf(d)).toEqual({ value: 'full-auto', source: 'flag' });
+    expect(await persistedMode()).toBe('full-auto');
+  });
+
+  it('a dry run settles nothing and reports the untouched default', async () => {
+    const { data: d } = await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps());
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
@@ -1260,8 +1292,8 @@ describe('runInstall: publish-mode selection', () => {
       deps({ isInteractive: true, promptPublishMode: spy.fn }), // json overrides isInteractive
     );
     expect(spy.calls()).toBe(0);
-    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
-    expect(await persistedMode()).toBeUndefined();
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'headless-default' });
+    expect(await persistedMode()).toBe('auto');
   });
 
   it('--json still honors --publish-mode', async () => {
@@ -1310,7 +1342,11 @@ describe('runInstall: interactive walkthrough', () => {
   // Nothing this command writes into the operator's home may land silently, and
   // that has to hold for the two things a bare run now writes by default.
   it('discloses the hooks it wired and how to take them back', async () => {
-    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
     const text = human(res);
     expect(text).toContain('the WebSearch hook asks tenjin.blog the same question');
     expect(text).toContain('the query text leaves the machine');
@@ -1538,7 +1574,8 @@ describe('runInstall: interactive walkthrough', () => {
     expect(prompt).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(permissions).not.toHaveBeenCalled();
-    expect(human(res)).toContain('Publishing: review');
+    // No prompt possible, so publishing settles the recommended mode too.
+    expect(human(res)).toContain('Publishing: auto');
     // No prompt, but a wallet all the same: a run nobody can answer takes the
     // default rather than treating silence as a no.
     expect(human(res)).toContain(`Wallet: ${STUB_ADDRESS}, holding $0`);
@@ -2875,15 +2912,50 @@ describe('runInstall: search hooks', () => {
     expect(await persistedMode()).toBe('remind');
   });
 
-  it('a cancelled choice keeps the configured mode and writes no new one', async () => {
-    await runInstall({ harness: ['claude'], searchHooks: 'off' }, makeCtx({ json: true }), deps());
+  // Escape at this prompt is the one cancel that used to WRITE: it resolved to
+  // `auto`, registered both hooks and persisted the mode. Every other decision in
+  // the walkthrough treats cancel as a decline, and so does this one now.
+  it('a cancelled choice registers nothing and writes no config', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true, promptSearchHooks: async () => null }),
     );
-    expect(hooksOf(res.data).mode).toBe('off');
-    expect(await persistedMode()).toBe('off');
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(hooksOf(res.data).added).toEqual([]);
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    expect((await settings()).hooks).toBeUndefined();
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('a cancelled choice leaves an already-configured mode alone', async () => {
+    await runInstall(
+      { harness: ['claude'], searchHooks: 'remind' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => null }),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(await persistedMode()).toBe('remind');
+  });
+
+  // Same treatment for an answer the schema does not recognize: a cancel, never a
+  // write of something unknown.
+  it('an unrecognized answer is a cancel, not a write', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        promptSearchHooks: async () => 'sometimes' as never,
+      }),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(await persistedMode()).toBeUndefined();
   });
 
   it('writes nothing under --dry-run and says why', async () => {
