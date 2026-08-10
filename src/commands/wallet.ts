@@ -83,22 +83,15 @@ export async function runWalletConnect(
     });
   }
 
-  // Resolve and validate the new signer before touching the active slot. This
-  // reads wallet.key (or the env fallback), never ClawRouter's mnemonic.
-  const discovered = await discoverClawRouterWallet(opts.clawrouter);
-  const record: ClawRouterWalletRecord = {
-    schemaVersion: WALLET_SCHEMA_VERSION,
-    provider: 'clawrouter',
-    address: discovered.address,
-    connectedAt: new Date().toISOString(),
-  };
-  const switched = await connectClawRouterLocked(ctx.dataDir, record, opts);
+  const switched = await connectClawRouterLocked(ctx.dataDir, opts);
+  const { discovered, record } = switched;
   const path = opts.clawrouter?.walletKeyPath ?? defaultClawRouterWalletPath();
   const custodyLines = [
     discovered.credentialSource === 'file'
       ? `Signer source: ${path}`
       : 'Signer source: BLOCKRUN_WALLET_KEY',
     'Custody: Tenjin reads the private key into this process to connect and sign; it does not copy it into Tenjin storage, persist it, log it, return it, or transmit it. The mnemonic is never opened.',
+    'Source protection: the ClawRouter wallet is externally owned and read-only to Tenjin; connect does not create, chmod, rename, archive, overwrite, or delete it, and does not move funds.',
     'Tenjin pinned this address and will refuse to sign if ClawRouter changes wallets.',
     'Raw transaction signing (`tenjin send`) is disabled for this provider.',
     'Authority: these are Tenjin behavior guarantees, not containment from an unrestricted agent running as the same OS user. Human acknowledgment is not proven.',
@@ -140,9 +133,10 @@ export async function runWalletConnect(
 
 async function connectClawRouterLocked(
   dir: string,
-  record: ClawRouterWalletRecord,
   opts: WalletConnectOptions,
 ): Promise<{
+  discovered: Awaited<ReturnType<typeof discoverClawRouterWallet>>;
+  record: ClawRouterWalletRecord;
   alreadyConnected: boolean;
   archivedPath?: string;
   replacedAddress?: string;
@@ -152,16 +146,27 @@ async function connectClawRouterLocked(
   const lockPath = join(dir, 'wallet.create.lock');
   try {
     return await withFileLock(lockPath, async () => {
+      // Resolve only after this process owns the Tenjin wallet lock. A queued
+      // connect must not pin a signer it observed before another wallet
+      // operation completed. This source is ClawRouter-owned and is only read;
+      // every mutation below is confined to Tenjin's data directory.
+      const discovered = await discoverClawRouterWallet(opts.clawrouter);
+      const record: ClawRouterWalletRecord = {
+        schemaVersion: WALLET_SCHEMA_VERSION,
+        provider: 'clawrouter',
+        address: discovered.address,
+        connectedAt: new Date().toISOString(),
+      };
       const current = await readWalletRecord(dir);
       if (
         current?.provider === 'clawrouter' &&
         current.address.toLowerCase() === record.address.toLowerCase()
       ) {
-        return { alreadyConnected: true };
+        return { discovered, record, alreadyConnected: true };
       }
       if (current === null) {
         await writeWalletRecord(dir, record);
-        return { alreadyConnected: false };
+        return { discovered, record, alreadyConnected: false };
       }
       if (opts.replace !== true) {
         throw new CliError(
@@ -207,6 +212,8 @@ async function connectClawRouterLocked(
         );
       }
       return {
+        discovered,
+        record,
         alreadyConnected: false,
         archivedPath,
         replacedAddress: current.address,

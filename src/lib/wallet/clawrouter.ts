@@ -22,6 +22,10 @@ export const CLAWROUTER_WALLET_ENV = 'BLOCKRUN_WALLET_KEY';
  * one contract instead of maintaining security prose that can drift.
  */
 export const CLAWROUTER_CUSTODY = {
+  sourceOwnedBy: 'clawrouter-user',
+  sourceMutationByTenjin: 'none',
+  sourceDeletedByTenjin: false,
+  connectMovesFunds: false,
   privateKeyAccess: 'read-into-process-memory-at-connect-and-sign',
   privateKeyCopiedToTenjinStorage: false,
   privateKeyPersistedByTenjin: false,
@@ -43,6 +47,11 @@ export function defaultClawRouterWalletPath(): string {
 }
 
 export interface ClawRouterProviderDeps {
+  /**
+   * Deliberately read-only capabilities. The connector has no injected or
+   * imported rename/unlink/write/chmod primitive, so neither connect nor sign
+   * can mutate the ClawRouter-owned source as an incidental code path.
+   */
   env?: NodeJS.ProcessEnv;
   walletKeyPath?: string;
   readFileImpl?: typeof readFile;
