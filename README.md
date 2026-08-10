@@ -61,14 +61,16 @@ curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scrip
 # Codex
 curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash -s -- --harness codex
 
+# Hermes (wallet-neutral; create/fund a Tenjin wallet separately)
+curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash -s -- --harness hermes
+
 # More than one target
 curl -fsSL https://raw.githubusercontent.com/BackTrackCo/tenjin-agent/main/scripts/install.sh | bash -s -- --harness claude --harness codex
 ```
 
-`hermes` and `openclaw` are deferred presets and currently fail closed instead
-of pretending those integrations ship on `main`. Pin a released CLI when
-reproducibility matters by placing the version on the `bash` side of the pipe,
-for example
+`openclaw` is a deferred preset and currently fails closed instead of pretending
+that integration ships. Pin a released CLI when reproducibility matters by
+placing the version on the `bash` side of the pipe, for example
 `curl -fsSL <installer-url> | TENJIN_VERSION=0.1.0-alpha.9 bash -s -- --harness codex`.
 The installer never invokes `sudo` and always forwards `--no-wallet`; create and
 fund a Tenjin wallet explicitly after installation if paid operations are needed.

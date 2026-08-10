@@ -120,6 +120,12 @@ describe.skipIf(process.platform === 'win32')('scripts/install.sh', () => {
     expect(await calls()).toContain('tenjin:install --harness claude --harness codex --no-wallet');
   });
 
+  it('wires Hermes without selecting or creating a wallet', async () => {
+    const result = await run(['--harness', 'hermes']);
+    expect(result.code).toBe(0);
+    expect(await calls()).toContain('tenjin:install --harness hermes --no-wallet');
+  });
+
   it('rejects mixing auto-detection with explicit harness targets', async () => {
     const result = await run(['--harness', 'auto', '--harness', 'codex']);
     expect(result.code).toBe(1);
@@ -131,13 +137,6 @@ describe.skipIf(process.platform === 'win32')('scripts/install.sh', () => {
     const result = await run(['--wallet-provider', 'external']);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('Unknown option: --wallet-provider');
-    await expect(readFile(logPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it('keeps deferred Hermes support fail-closed before npm', async () => {
-    const result = await run(['--harness', 'hermes']);
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain('hermes installation is deferred');
     await expect(readFile(logPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

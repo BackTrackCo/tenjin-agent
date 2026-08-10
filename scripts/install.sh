@@ -17,7 +17,7 @@ usage() {
 Install Tenjin and wire one or more supported agent harnesses.
 
 Usage:
-  install.sh [--harness auto|claude|codex|shared]...
+  install.sh [--harness auto|claude|codex|hermes|shared]...
              [--version <npm-version>]
              [--prefix <absolute-path>]
 
@@ -48,7 +48,7 @@ add_harness() {
       [[ "${#HARNESSES[@]}" -eq 0 ]] || die "--harness auto cannot be combined with explicit harnesses."
       AUTO_HARNESS=1
       ;;
-    claude|codex|shared)
+    claude|codex|hermes|shared)
       [[ "$AUTO_HARNESS" -eq 0 ]] || die "--harness auto cannot be combined with explicit harnesses."
       if [[ "${#HARNESSES[@]}" -gt 0 ]]; then
         for existing in "${HARNESSES[@]}"; do
@@ -58,11 +58,11 @@ add_harness() {
       fi
       HARNESSES+=("$harness")
       ;;
-    hermes|openclaw)
+    openclaw)
       die "$harness installation is deferred and not available in the current CLI. No wallet was changed."
       ;;
     *)
-      die "Unsupported harness: $harness. Use auto, claude, codex, or shared."
+      die "Unsupported harness: $harness. Use auto, claude, codex, hermes, or shared."
       ;;
   esac
 }
