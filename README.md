@@ -683,6 +683,12 @@ approval.
   signing is deliberately disabled, so `tenjin send` is unavailable on this
   provider. This does not contain an unrestricted same-OS-user agent; that
   requires an enforcement boundary outside the Tenjin process.
+  ClawRouter remains the owner of its source wallet: connect, reconnect, normal
+  Tenjin installation, and package upgrades never create, chmod, rename,
+  archive, overwrite, or delete `wallet.key`, and connecting never moves funds.
+  Tenjin archives or replaces only its own `~/.tenjin/wallet.json` provider
+  pointer. If the upstream signer disappears or changes, Tenjin fails closed and
+  keeps the pinned address instead of creating or adopting another wallet.
   For Hermes onboarding, the one-step form is
   `tenjin install --harness hermes --wallet-provider clawrouter`.
 - There is exactly **one active wallet**. `wallet create` refuses when one

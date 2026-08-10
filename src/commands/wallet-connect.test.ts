@@ -45,8 +45,20 @@ function ctx(): CommandContext {
 
 const connectOpts = () => ({ clawrouter: { walletKeyPath: keyPath, env: {} } });
 
+async function sourceSnapshot() {
+  const [bytes, info] = await Promise.all([readFile(keyPath), stat(keyPath)]);
+  return {
+    bytes: bytes.toString('hex'),
+    inode: info.ino,
+    mode: info.mode,
+    size: info.size,
+    mtimeMs: info.mtimeMs,
+  };
+}
+
 describe('runWalletConnect clawrouter', () => {
   it('connects an existing signer without copying its key or mnemonic', async () => {
+    const sourceBefore = await sourceSnapshot();
     const result = await runWalletConnect({ provider: 'clawrouter' }, ctx(), connectOpts());
     const record = await readWalletRecord(dataDir);
     const raw = await readFile(join(dataDir, 'wallet.json'), 'utf8');
@@ -57,6 +69,10 @@ describe('runWalletConnect clawrouter', () => {
       credentialSource: 'file',
       connected: true,
       custody: {
+        sourceOwnedBy: 'clawrouter-user',
+        sourceMutationByTenjin: 'none',
+        sourceDeletedByTenjin: false,
+        connectMovesFunds: false,
         privateKeyAccess: 'read-into-process-memory-at-connect-and-sign',
         privateKeyCopiedToTenjinStorage: false,
         privateKeyPersistedByTenjin: false,
@@ -77,13 +93,55 @@ describe('runWalletConnect clawrouter', () => {
     expect((await stat(join(dataDir, 'wallet.json'))).mode & 0o777).toBe(0o600);
     expect(JSON.stringify(result)).not.toContain(key);
     expect(result.humanLines?.join('\n')).toMatch(/reads the private key into this process/i);
+    expect(result.humanLines?.join('\n')).toMatch(/externally owned and read-only to Tenjin/i);
     expect(result.humanLines?.join('\n')).toMatch(/human acknowledgment is not proven/i);
+    expect(await sourceSnapshot()).toEqual(sourceBefore);
   });
 
   it('is idempotent when the same address is already connected', async () => {
     await runWalletConnect({ provider: 'clawrouter' }, ctx(), connectOpts());
+    const sourceBefore = await sourceSnapshot();
     const result = await runWalletConnect({ provider: 'clawrouter' }, ctx(), connectOpts());
     expect(result.data).toMatchObject({ connected: false });
+    expect(await sourceSnapshot()).toEqual(sourceBefore);
+  });
+
+  it('--replace changes only Tenjin metadata when ClawRouter rotates its signer', async () => {
+    const oldAddress = privateKeyToAccount(key).address;
+    await runWalletConnect({ provider: 'clawrouter' }, ctx(), connectOpts());
+    key = generatePrivateKey();
+    await writeFile(keyPath, `${key}\n`, { mode: 0o600 });
+    const sourceBefore = await sourceSnapshot();
+
+    const result = await runWalletConnect({ provider: 'clawrouter' }, ctx(), {
+      ...connectOpts(),
+      replace: true,
+    });
+
+    expect(result.data).toMatchObject({
+      address: privateKeyToAccount(key).address,
+      provider: 'clawrouter',
+      replaced: { address: oldAddress },
+    });
+    expect(await sourceSnapshot()).toEqual(sourceBefore);
+    await expect(
+      readFile(join(dataDir, `wallet.${oldAddress.toLowerCase()}.json.bak`), 'utf8'),
+    ).resolves.not.toContain(key);
+  });
+
+  it('refuses local --replace without touching the ClawRouter source or pointer', async () => {
+    await runWalletConnect({ provider: 'clawrouter' }, ctx(), connectOpts());
+    const sourceBefore = await sourceSnapshot();
+    const pointerBefore = await readFile(join(dataDir, 'wallet.json'), 'utf8');
+
+    const err = (await runWalletCreate(ctx(), { replace: true }).catch(
+      (cause) => cause,
+    )) as CliError;
+
+    expect(err.code).toBe('REFUSED');
+    expect(err.message).toContain('managed by ClawRouter');
+    expect(await sourceSnapshot()).toEqual(sourceBefore);
+    expect(await readFile(join(dataDir, 'wallet.json'), 'utf8')).toBe(pointerBefore);
   });
 
   it('refuses to displace a local wallet without --replace', async () => {

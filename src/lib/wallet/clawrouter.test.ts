@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -42,6 +42,17 @@ function record(address = privateKeyToAccount(key).address): ClawRouterWalletRec
     provider: 'clawrouter',
     address,
     connectedAt: '2026-08-09T00:00:00.000Z',
+  };
+}
+
+async function sourceSnapshot() {
+  const [bytes, info] = await Promise.all([readFile(keyPath), stat(keyPath)]);
+  return {
+    bytes: bytes.toString('hex'),
+    inode: info.ino,
+    mode: info.mode,
+    size: info.size,
+    mtimeMs: info.mtimeMs,
   };
 }
 
@@ -96,6 +107,7 @@ describe('createClawRouterProvider', () => {
 
   it('signs messages with the connected ClawRouter address', async () => {
     await writeKey();
+    const sourceBefore = await sourceSnapshot();
     const provider = createClawRouterProvider(record(), deps());
     const signer = await provider.getSigner();
     const signature = await signer.signMessage({ message: 'tenjin test' });
@@ -103,16 +115,19 @@ describe('createClawRouterProvider', () => {
     expect(await recoverMessageAddress({ message: 'tenjin test', signature })).toBe(
       privateKeyToAccount(key).address,
     );
+    expect(await sourceSnapshot()).toEqual(sourceBefore);
   });
 
   it('refuses signer drift until the user explicitly reconnects', async () => {
     await writeKey();
     const provider = createClawRouterProvider(record(), deps());
     await writeKey(generatePrivateKey());
+    const sourceBefore = await sourceSnapshot();
 
     const err = (await provider.getSigner().catch((cause) => cause)) as CliError;
     expect(err.code).toBe('REFUSED');
     expect(err.fix).toContain('wallet connect clawrouter --replace');
+    expect(await sourceSnapshot()).toEqual(sourceBefore);
   });
 
   it('refuses raw transactions even when message signing is available', async () => {
@@ -133,6 +148,7 @@ describe('createClawRouterProvider', () => {
       await chmod(keyPath, 0o644);
       const diagnostics = await createClawRouterProvider(record(), deps()).diagnostics();
       expect(diagnostics.warnings.join('\n')).toContain('expected 600');
+      expect((await stat(keyPath)).mode & 0o777).toBe(0o644);
     },
   );
 });
