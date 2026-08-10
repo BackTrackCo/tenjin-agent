@@ -99,5 +99,17 @@ single heuristic the skill's entry gate collapsed to (public, durable, costly to
 reproduce) rather than a list of example categories, and the existing marker-line
 disclosure and undo cover it unchanged.
 
+A headless run also settles `publish.mode: auto`, the same answer the interactive
+select recommends, so "non-interactive is an interactive all-yes" holds for the
+decision that governs what the agent puts on a public marketplace. An
+already-configured mode is respected and `--publish-mode` still wins.
+
+The WebSearch hint quotes the publisher's title and attributes it as
+marketplace-authored data rather than stating it as a claim, because that string
+reaches a trusted context and stripping control bytes cannot make prose inert.
+Cancelling the search-hooks prompt now behaves like `--no-hooks`, registering
+nothing and writing no config, which is what every other cancel in the
+walkthrough already did.
+
 Uninstalling the hooks is still manual (the install output prints the lines to
 remove); an unwire command is deliberately out of scope here.

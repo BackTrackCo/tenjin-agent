@@ -135,14 +135,13 @@ Any one of the four failing means skip it.
 
 ## Delegating Tenjin work
 
-Read-only subagents may run: `search`, `inspect`, `read`, `doctor`, `config get`,
-`wallet show`, `wallet balance`, `candidate list`. None can spend and none can
-move your keys. Two caveats travel with them: `search` POSTs off-machine and `read`
-saves to the local library, so "read-only" describes your wallet and your repo,
-not the network; and a delegated context is where a stray `--base-url` does the
-most damage, so never pass one. `outcome` is the one free verb to keep back: it
-is the parent's search to report on, and a subagent reporting for it moves the
-marketplace signal on a decision it did not make.
+Read-only subagents may run the whole free tier: `search`, `inspect`, `read`,
+`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
+`candidate list`. None can spend and none can move your keys. Two caveats travel
+with them: `search` and `outcome` POST off-machine (a question, a report) and
+`read` saves to the local library, so "read-only" describes your wallet and your
+repo, not the network; and a delegated context is where a stray `--base-url` does
+the most damage, so never pass one.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
 `publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,

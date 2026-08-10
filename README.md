@@ -117,6 +117,10 @@ Every command also takes the three global flags.
 
 ### `tenjin install`
 
+Two families: `--no-*` flags are this-run opt-outs that write no config, while
+`--publish-mode` and `--search-hooks` are provisioning flags that persist their
+value. That is why `--no-hooks` and `--search-hooks off` differ.
+
 | Flag                    | Values                    | Default          | Effect                                                       |
 | ----------------------- | ------------------------- | ---------------- | ------------------------------------------------------------ |
 | `--harness`             | `claude\|codex\|shared`   | auto-detect      | Target one harness, repeatable; the choice is remembered     |
@@ -263,8 +267,10 @@ auto-approve nothing.
 and neither can block, deny, or delay a tool call.
 
 - **PreToolUse on `WebSearch`** asks the marketplace the same question the agent
-  is about to ask the web, with a hard two-second budget, and mentions a tested
-  answer when one exists. The query text leaves the machine. Every search it runs
+  is about to ask the web, on a two-second design budget, and mentions a tested
+  answer when one exists. The hard ceiling is the `timeout: 5` on the hook entry,
+  which the harness enforces by killing the process; the script's own watchdog is
+  an event-loop timer and a blocking read can outlast it. The query text leaves the machine. Every search it runs
   is recorded in the same local store `tenjin search` writes, tagged
   `websearch-hook`, so a hit can be bought and attributed and a miss stays visible
   to the reminder below. A miss, a timeout, a dead network, or anything malformed
@@ -274,7 +280,9 @@ and neither can block, deny, or delay a tool call.
   deliberate `tenjin search` that went unanswered is named on its own line with
   its `searchId`. Searches the WebSearch hook ran are batched into one line, at
   most three, because nobody vetted those questions for the marketplace and only
-  the agent can tell which produced something durable. Each search is raised once.
+  the agent can tell which produced something durable. Each search is raised once
+  per turn-end; two sessions ending at the same instant can name the same loop
+  twice, which costs a duplicate line and is why there is no lock here.
 
 Both are runtime toggles, read from config on every run, so neither needs a
 re-install to change:

@@ -246,14 +246,10 @@ Both are denied, never wrongly allowed:
 
 ## Delegating to a subagent
 
-The free tier is also the answer to "what may a read-only subagent run", with one
-subtraction. These are safe to hand over: `search`, `inspect`, `read`, `doctor`,
-`config get`, `wallet show`, `wallet balance`, `candidate list`. None can spend
-and none can move your keys.
-
-`outcome` is the exception, and it is in the free tier: it reports on the search
-its PARENT ran, so a subagent reporting for it moves the marketplace reuse signal
-on a decision it did not make. Keep it with whoever ran the search.
+The free tier is the answer to "what may a read-only subagent run", with nothing
+subtracted. All nine are safe to hand over: `search`, `inspect`, `read`,
+`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
+`candidate list`. None can spend and none can move your keys.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
 `publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
@@ -262,8 +258,8 @@ delegate publishing what a subagent just derived: bring the finding back and
 publish it from the context that can ask the user.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
-repo, not the network: `search` POSTs off-machine and `read` saves to the local
-library. And a delegated context is where a stray `--base-url` does the most
+repo, not the network: `search` and `outcome` POST off-machine (a question, a
+report) and `read` saves to the local library. And a delegated context is where a stray `--base-url` does the most
 damage, so never pass one.
 
 ## Running the local MCP server instead?

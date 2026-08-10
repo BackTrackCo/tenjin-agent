@@ -352,8 +352,9 @@ export const PERMISSIONS_DOC_URL =
  *
  * Subagent delegation is named here rather than on a second line, because doctor
  * deliberately closes with ONE pointer (#81) and the operator deciding what to
- * hand a subagent is reading exactly this line. The verb split, and why `outcome`
- * is the one free verb held back, live on the page with every other caveat.
+ * hand a subagent is reading exactly this line. The free tier IS the
+ * subagent-safe set, so the counts already answer the question; which verbs stay
+ * human-gated lives on the page with every other caveat.
  */
 export function permissionsPointer(): string {
   return (
