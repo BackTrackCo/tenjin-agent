@@ -82,23 +82,23 @@ on Base for gas). Searching and free pieces cost nothing.
 
 ## Commands
 
-| Command                                         | Purpose                                                                                                     |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `tenjin install`                                | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
-| `tenjin doctor`                                 | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
-| `tenjin config [get\|set]`                      | Spend policy, publish consent, and the hook toggles                                                         |
+| Command                                          | Purpose                                                                                                     |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `tenjin install`                                 | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
+| `tenjin doctor`                                  | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
+| `tenjin config [get\|set]`                       | Spend policy, publish consent, and the hook toggles                                                         |
 | `tenjin wallet [create\|connect\|show\|balance]` | Create a local Base wallet or explicitly connect ClawRouter's signer                                        |
-| `tenjin search "<question>"`                    | Ask for payable candidates or an honest MISS                                                                |
-| `tenjin inspect <url-or-id>`                    | Show a candidate's pre-purchase answer card; never pays                                                     |
-| `tenjin read <url-or-id>`                       | Deliver free, library, or already-owned pieces; exit 3 rather than pay                                      |
-| `tenjin session start`                          | Mint a ≤24h read-scoped session key so `read` can recover owned pieces; spends nothing                      |
-| `tenjin buy <url-or-id>`                        | Entitlement re-check, then x402 exact payment                                                               |
-| `tenjin outcome`                                | Report how a search ended; this is the signal the marketplace learns from                                   |
-| `tenjin publish [file]`                         | Publish Markdown with an optional answer card, gated by a local scan and your consent mode                  |
-| `tenjin edit <postId>`                          | Show one of your posts and its card, or merge-update it                                                     |
-| `tenjin candidate [add\|list\|drop]`            | Park, list, or discard local publish drafts                                                                 |
-| `tenjin send <amount> usdc <to>`                | **Escape hatch:** move USDC on Base out of the agent wallet                                                 |
-| `tenjin mcp`                                    | Local stdio MCP server over the same command cores                                                          |
+| `tenjin search "<question>"`                     | Ask for payable candidates or an honest MISS                                                                |
+| `tenjin inspect <url-or-id>`                     | Show a candidate's pre-purchase answer card; never pays                                                     |
+| `tenjin read <url-or-id>`                        | Deliver free, library, or already-owned pieces; exit 3 rather than pay                                      |
+| `tenjin session start`                           | Mint a ≤24h read-scoped session key so `read` can recover owned pieces; spends nothing                      |
+| `tenjin buy <url-or-id>`                         | Entitlement re-check, then x402 exact payment                                                               |
+| `tenjin outcome`                                 | Report how a search ended; this is the signal the marketplace learns from                                   |
+| `tenjin publish [file]`                          | Publish Markdown with an optional answer card, gated by a local scan and your consent mode                  |
+| `tenjin edit <postId>`                           | Show one of your posts and its card, or merge-update it                                                     |
+| `tenjin candidate [add\|list\|drop]`             | Park, list, or discard local publish drafts                                                                 |
+| `tenjin send <amount> usdc <to>`                 | **Escape hatch:** move USDC on Base out of the agent wallet                                                 |
+| `tenjin mcp`                                     | Local stdio MCP server over the same command cores                                                          |
 
 `read` and `buy` split by whether money can move. `read` tries the local library,
 then an unauthenticated fetch, then one signed GET if a read-scoped session key is
