@@ -290,27 +290,51 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   }
 
   const next = { ...settings, hooks: nextHooks };
-  // Same read-modify-write guard the permission writer takes, and for the same
-  // reason: Claude Code writes this file too, so an interleaved change would be
-  // erased in full rather than merged.
-  const current = await readFile(path, 'utf8').catch(() => null);
-  if (current !== raw) {
-    return refuse(
+  // TWO compares, and both are load-bearing.
+  //
+  // The FIRST is cheap and early: it refuses before a single byte is written, so
+  // the ordinary contended case costs nothing and leaves nothing half-done.
+  const changed = async (): Promise<boolean> =>
+    (await readFile(path, 'utf8').catch(() => null)) !== raw;
+  if (await changed()) return refuseChanged(path, scriptsDir, mode, []);
+
+  // Past the first guard, and still before the entry that points at them, so a
+  // harness never reads an entry naming a file that is not on disk yet.
+  const scripts = await writeScripts(plan, scriptsDir);
+
+  // The SECOND compare sits ADJACENT to the commit, because the writes above are
+  // two read/write/rename sequences wide and this is a whole-file replacement
+  // built from a snapshot taken before them. Claude Code writing settings.json
+  // during that window passed the first compare and would be erased here. The
+  // refusal reports the scripts that WERE refreshed, so the result describes what
+  // actually happened rather than claiming nothing was touched: the bodies are
+  // versioned and idempotent, so a refreshed script with no new entry is inert
+  // and the re-run the fix names simply registers it.
+  if (await changed()) return refuseChanged(path, scriptsDir, mode, scripts);
+  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+  return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+}
+
+/**
+ * The `changed-since-read` refusal, carrying whatever scripts the run had already
+ * refreshed. Nothing about settings.json is written on this path.
+ */
+function refuseChanged(
+  path: string,
+  scriptsDir: string,
+  mode: SearchHookMode,
+  scripts: string[],
+): HooksResult {
+  return {
+    ...refuse(
       path,
       scriptsDir,
       mode,
       'changed-since-read',
       `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
-    );
-  }
-  // PAST the guard, and still before the entry that points at them. Writing the
-  // scripts earlier meant a refusal had already replaced live script bodies that
-  // existing entries were running, while the result said nothing was registered.
-  // Here a refusal has changed nothing at all, and a harness still never reads an
-  // entry naming a file that is not on disk yet.
-  const scripts = await writeScripts(plan, scriptsDir);
-  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+    ),
+    scripts,
+  };
 }
 
 /** Bring each script up to date, returning the ones this run actually wrote. A

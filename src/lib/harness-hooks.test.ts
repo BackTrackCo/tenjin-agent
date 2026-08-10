@@ -5,7 +5,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  * writer landing between this module's settings read and its commit. Inert unless
  * a test sets it, so production carries no test-only branch.
  */
-const fsHooks = vi.hoisted(() => ({ settingsInterleave: '' }));
+const fsHooks = vi.hoisted(() => ({
+  settingsInterleave: '',
+  /** Bytes another writer lands in settings.json the moment a SCRIPT is renamed
+   *  into place, i.e. squarely inside the writeScripts window. */
+  settingsInterleaveOnScriptWrite: '',
+  settingsPath: '',
+}));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -16,6 +22,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         const bytes = fsHooks.settingsInterleave;
         fsHooks.settingsInterleave = '';
         await actual.writeFile(String(args[0]), bytes);
+      }
+      return out;
+    },
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      const out = await actual.rename(...args);
+      if (
+        fsHooks.settingsInterleaveOnScriptWrite !== '' &&
+        String(args[1]).endsWith('.mjs') &&
+        fsHooks.settingsPath !== ''
+      ) {
+        const bytes = fsHooks.settingsInterleaveOnScriptWrite;
+        fsHooks.settingsInterleaveOnScriptWrite = '';
+        await actual.writeFile(fsHooks.settingsPath, bytes);
       }
       return out;
     },
@@ -37,6 +56,9 @@ beforeEach(async () => {
   data = await mkdtemp(join(tmpdir(), 'tenjin-hooks-data-'));
 });
 afterEach(async () => {
+  fsHooks.settingsInterleave = '';
+  fsHooks.settingsInterleaveOnScriptWrite = '';
+  fsHooks.settingsPath = '';
   await rm(home, { recursive: true, force: true });
   await rm(data, { recursive: true, force: true });
 });
@@ -291,6 +313,27 @@ describe('wireSearchHooks: a refusal changes nothing at all', () => {
     expect(result.skipped).toBe('changed-since-read');
     expect(result.scripts).toEqual([]);
     expect(await readFile(scriptPath, 'utf8')).toBe('// an older install wrote this\n');
+  });
+
+  // The window the FIRST compare cannot cover: another writer lands while the
+  // scripts are being written, which is two read/write/rename sequences wide.
+  // Without a compare adjacent to the commit, that edit is erased by a whole-file
+  // replacement built from a snapshot taken before it.
+  it('refuses when settings changes DURING writeScripts, and keeps the concurrent edit', async () => {
+    await writeSettings({ model: 'original' });
+    const theirs = JSON.stringify({ model: 'somebody-elses-edit' }, null, 2);
+    fsHooks.settingsPath = settingsPath();
+    fsHooks.settingsInterleaveOnScriptWrite = theirs;
+
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+
+    expect(result.skipped).toBe('changed-since-read');
+    // The other writer's bytes survive verbatim: nothing was clobbered.
+    expect(await readFile(settingsPath(), 'utf8')).toBe(theirs);
+    // And the report is accurate about the scripts that WERE refreshed, rather
+    // than claiming nothing at all was touched.
+    expect(result.scripts.length).toBeGreaterThan(0);
+    for (const p of result.scripts) expect(existsSync(p)).toBe(true);
   });
 
   it('still refreshes a drifted script when no entry needs registering', async () => {
