@@ -261,6 +261,36 @@ overwritten.
 Note `sessionBudget: 0` means no ceiling, while `maxAutoSpend: 0` means
 auto-approve nothing.
 
+## Client identity
+
+Every request carries the standard `User-Agent` field and nothing else that
+identifies the client:
+
+```http
+User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
+```
+
+If you are an agent that runs the CLI, you can travel in that field too. Export
+`TENJIN_CALLER_USER_AGENT` when you launch it as a subprocess, or pass
+`callerUserAgent` on the shared HTTP options when you embed it. Your products
+follow the CLI's, in your order:
+
+```http
+User-Agent: tenjin-cli/<version> codex/1.2.0 node/24.4.0 (+https://tenjin.blog)
+```
+
+The handoff takes a **product sequence only**: `name` or `name/version`,
+space-separated. Never put a user, wallet, session, hostname, or machine
+identifier in it. Anything that is not a bare product sequence, and anything that
+pushes the composed field past the 512 characters Tenjin accepts, is dropped
+whole: the CLI's own identity is then sent alone, never a truncated version of
+yours. Composition is idempotent, so a value that already contains
+`tenjin-cli/...` (a retry, or a handoff you received and re-exported) never
+duplicates it.
+
+This is self-reported telemetry, used for attribution and measurement. It is
+never authentication, and it decides no entitlement, payment, or spend.
+
 ## Search hooks
 
 `tenjin install` registers two Claude Code hooks and writes their scripts to

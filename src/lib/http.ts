@@ -1,5 +1,5 @@
 import { CliError } from './errors';
-import { TENJIN_USER_AGENT } from './client-meta';
+import { composeUserAgent } from './client-meta';
 
 /**
  * The single JSON client the whole CLI grows on: `doctor` uses it in B1, `search`
@@ -14,22 +14,34 @@ export interface FetchJsonOptions {
   fetchImpl?: typeof fetch;
   /** Optional request headers, merged onto the User-Agent this module always sends. */
   headers?: Record<string, string>;
+  /**
+   * An embedding caller's own product sequence, composed BEHIND the CLI's
+   * identity (see `composeUserAgent`). Absent, the `TENJIN_CALLER_USER_AGENT`
+   * environment variable is used, which is how a subprocess launcher hands off.
+   */
+  callerUserAgent?: string;
 }
 
 /**
  * The one place the identity is written; both transports funnel their Headers
  * through it, so a third entry point cannot ship without it. `.set` on a Headers
  * object is what makes it total: a caller header spelled `User-Agent` in any
- * case lands in the same slot and is overwritten, never duplicated.
+ * case lands in the same slot and is overwritten, never duplicated, so a
+ * call-specific header cannot erase the composed field or add a second one.
  */
-function applyUserAgent(headers: Headers): Headers {
-  headers.set('user-agent', TENJIN_USER_AGENT);
+function applyUserAgent(headers: Headers, callerUserAgent?: string): Headers {
+  headers.set('user-agent', composeUserAgent({ caller: callerUserAgent }));
   return headers;
 }
 
 /** The same write for `fetchJson`'s plain-object headers; Headers.entries() is lowercase-keyed. */
-function withUserAgent(callerHeaders?: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(applyUserAgent(new Headers(callerHeaders ?? {})).entries());
+function withUserAgent(
+  callerHeaders?: Record<string, string>,
+  callerUserAgent?: string,
+): Record<string, string> {
+  return Object.fromEntries(
+    applyUserAgent(new Headers(callerHeaders ?? {}), callerUserAgent).entries(),
+  );
 }
 
 /** A successful 2xx whose body parsed as JSON. */
@@ -112,7 +124,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     try {
       res = await doFetch(url, {
         signal: controller.signal,
-        headers: withUserAgent(opts.headers),
+        headers: withUserAgent(opts.headers, opts.callerUserAgent),
       });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
@@ -192,6 +204,8 @@ export interface HttpRequestOptions {
   method?: 'GET' | 'POST' | 'PUT';
   timeoutMs: number;
   headers?: Record<string, string>;
+  /** An embedding caller's product sequence; see `FetchJsonOptions.callerUserAgent`. */
+  callerUserAgent?: string;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
   jsonBody?: unknown;
   fetchImpl?: typeof fetch;
@@ -249,7 +263,7 @@ function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest 
     if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
     // An `accept`/`content-type` set here wins the slot regardless of how a
     // caller cased its own copy.
-    const headers = Object.fromEntries(applyUserAgent(merged).entries());
+    const headers = Object.fromEntries(applyUserAgent(merged, opts.callerUserAgent).entries());
 
     // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
     // A caller can also pin an unsigned request (blockRedirects) when the
