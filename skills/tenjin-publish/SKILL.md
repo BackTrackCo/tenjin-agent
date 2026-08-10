@@ -105,9 +105,11 @@ edge, and price for the freshness that remains.
   - `scope`: dense and factual: versions, platforms, and the setup the work was
     done on, not a pitch.
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.
-  Keep the free preview minimal, roughly what it answers plus the as-of date: the
-  first ~500 characters become the public excerpt, so lead with the as-of date,
-  versions, and questions answered, and keep the verdict below that fold.
+  Keep the free preview minimal, roughly what it answers plus the as-of date. Set
+  it with `--excerpt` (or frontmatter `excerpt:`, max 500 chars); without one the
+  server derives it from the body's first ~500 characters of prose, so then lead
+  with the as-of date, versions, and questions answered and keep the verdict below
+  that fold.
 
 ## Semantic publish safety (you are the semantic layer)
 

@@ -418,6 +418,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
     .option('--price <usd>', 'post price in decimal USD (defaults to publish.defaultPrice)')
+    .option(
+      '--excerpt <text>',
+      'the public preview text (max 500 chars; default: derived from the body)',
+    )
     .option('--question <text>', 'a question this piece answers (repeatable)', collect, [])
     .option('--task <text>', 'a task this piece supports (repeatable)', collect, [])
     .option('--scope <text>', 'what the piece covers (card scope)')
@@ -442,6 +446,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
+            ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
             ...(Array.isArray(o.question) && o.question.length > 0
               ? { question: o.question as string[] }
               : {}),

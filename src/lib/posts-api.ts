@@ -52,6 +52,13 @@ export interface PostCreateBody {
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
 const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
+/**
+ * The server's `excerpt` bound (pinned against the OpenAPI fixture in
+ * contract.test.ts). Exported so `publish` can refuse an over-long one at its own
+ * edge, before the wallet touch, rather than only here — inside the request
+ * builder, which runs after a signature has already been collected.
+ */
+export const EXCERPT_MAX_LENGTH = 500;
 // A handle the server refuses beyond the charset rule: an address-shaped handle
 // (0x-prefixed) collides with the address form of a creator, and `latest` is the
 // reserved newest-post alias. The full reserved set is server-authoritative — a
@@ -95,8 +102,8 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   // Trimmed to match the server's `z.string().trim()`: sending " x" for a stored
   // "x" would otherwise look like a change on every run and never converge.
   const excerpt = input.excerpt?.trim();
-  if (excerpt !== undefined && excerpt.length > 500) {
-    throw new CliError('USAGE', 'excerpt must be at most 500 characters.');
+  if (excerpt !== undefined && excerpt.length > EXCERPT_MAX_LENGTH) {
+    throw new CliError('USAGE', `excerpt must be at most ${EXCERPT_MAX_LENGTH} characters.`);
   }
   if (input.tags !== undefined) {
     if (input.tags.length > 5) throw new CliError('USAGE', 'at most 5 tags.');
@@ -361,8 +368,8 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
   // Trimmed to match the server's `z.string().trim()`: sending " x" for a stored
   // "x" would otherwise look like a change on every run and never converge.
   const excerpt = input.excerpt?.trim();
-  if (excerpt !== undefined && excerpt.length > 500) {
-    throw new CliError('USAGE', 'excerpt must be at most 500 characters.');
+  if (excerpt !== undefined && excerpt.length > EXCERPT_MAX_LENGTH) {
+    throw new CliError('USAGE', `excerpt must be at most ${EXCERPT_MAX_LENGTH} characters.`);
   }
   if (input.tags !== undefined) {
     if (input.tags.length > 5) throw new CliError('USAGE', 'at most 5 tags.');

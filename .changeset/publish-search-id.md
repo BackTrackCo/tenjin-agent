@@ -60,6 +60,17 @@ a CLI search and a hook search in one session carry the same stamp.
 that exports neither, a search records no session rather than guessing one, and
 falls back to being raised everywhere.
 
+**`tenjin publish --excerpt` sets the public preview.** The excerpt is what every
+non-buyer reads — the 402 preview, the directory feed, search results, RSS, the
+social card — and the server only derives it from the body's leading prose when
+the client sends none. Frontmatter `excerpt:` already reached the wire; the flag
+did not exist, so the one-shot path an agent actually uses had no way to say what
+a stranger sees, and a piece whose answer sat too high leaked its verdict for
+free. `--excerpt` wins over frontmatter, both are refused over the server's
+500-character bound rather than truncated (a silently cut preview is a different
+preview), and the refusal now happens at the command's edge instead of inside the
+request builder, so it costs a message rather than a keystore unlock.
+
 **Two smaller fixes on the same loop.** `tenjin install` now says to restart
 Claude Code when it wires the hooks: harness hooks are read once at session
 start, so an operator who does not restart gets no hook activity at all and

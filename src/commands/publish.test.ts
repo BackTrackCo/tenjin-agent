@@ -46,10 +46,21 @@ function makeCtxCapturingStderr(): { ctx: CommandContext; stderr: () => string }
   };
 }
 
-/** A spy wallet provider counting wallet signatures (the establish popup). */
-function spyProvider(): { provider: WalletProvider; signCount: () => number } {
+/**
+ * A spy wallet provider counting wallet signatures (the establish popup) and,
+ * separately, `getSigner` calls. The two are NOT the same moment: signing is lazy
+ * and happens inside the write, while `getSigner` is the keystore unlock the
+ * command does up front. An edge check that refuses before touching the wallet is
+ * only observable on the second counter.
+ */
+function spyProvider(): {
+  provider: WalletProvider;
+  signCount: () => number;
+  getSignerCount: () => number;
+} {
   const inner = testSigner();
   let n = 0;
+  let unlocks = 0;
   const signer: TenjinSigner = {
     address: inner.address,
     signMessage: (a) => {
@@ -61,6 +72,7 @@ function spyProvider(): { provider: WalletProvider; signCount: () => number } {
   };
   return {
     signCount: () => n,
+    getSignerCount: () => unlocks,
     provider: {
       id: 'local',
       describe: async () => ({
@@ -69,7 +81,10 @@ function spyProvider(): { provider: WalletProvider; signCount: () => number } {
         credentialSource: 'file',
         policyEnforcement: 'client-only',
       }),
-      getSigner: async () => signer,
+      getSigner: async () => {
+        unlocks++;
+        return signer;
+      },
       diagnostics: async () => ({ warnings: [] }),
     },
   };
@@ -1068,5 +1083,111 @@ describe('runPublish — publish <file> --search-id', () => {
       ),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('runPublish — the public preview (--excerpt)', () => {
+  /** A stub server that also captures the parsed request body. */
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  const withFrontmatter = (excerpt: string): string =>
+    ['---', `excerpt: ${excerpt}`, '---', '# The Answer', '', 'A plain body.'].join('\n');
+
+  it('sends an explicit --excerpt as the public preview', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: 'What it answers, as of 2026-08.', mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('What it answers, as of 2026-08.');
+  });
+
+  it('falls back to frontmatter excerpt', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(withFrontmatter('from the frontmatter')), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('from the frontmatter');
+  });
+
+  it('an explicit --excerpt beats the frontmatter one', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(withFrontmatter('from the frontmatter')), {
+        excerpt: 'from the flag',
+        mode: 'auto',
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('from the flag');
+  });
+
+  // Absent, the server derives one from the body's leading prose; sending nothing
+  // is what lets it, so an empty key must not be invented here.
+  it('sends no excerpt at all when neither names one', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()).not.toHaveProperty('excerpt');
+  });
+
+  // REFUSED, never truncated: a silently cut preview is a different preview, and
+  // controlling exactly what a non-buyer reads is the whole point of setting one.
+  it('refuses an over-long excerpt at the edge, before any wallet touch', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, signCount, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { excerpt: 'e'.repeat(501), mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: expect.stringContaining('500') });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+    // The point of the edge check: the request builder catches this too, but only
+    // after the keystore is already open.
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('refuses an over-long frontmatter excerpt the same way', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(withFrontmatter('e'.repeat(501))), { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('keeps one at exactly the bound', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: 'e'.repeat(500), mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(String(body()?.excerpt)).toHaveLength(500);
   });
 });

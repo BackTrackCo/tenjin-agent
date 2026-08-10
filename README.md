@@ -191,6 +191,7 @@ endpoint, so `buy <url>` can.
 | `--search-id`     | uuid                              | none                   | The search this file answers; closes its loop, prefills its question   |
 | `--draft`         | —                                 | off                    | Save privately instead of publishing                                   |
 | `--price`         | decimal USD                       | `publish.defaultPrice` | Post price                                                             |
+| `--excerpt`       | text (≤500 chars)                 | derived from the body  | The public preview a non-buyer reads                                   |
 | `--mode`          | `review\|auto\|full-auto`         | `publish.mode`         | Consent mode for this run                                              |
 | `--yes`           | —                                 | off                    | Clear warning findings and the review confirm                          |
 | `--question`      | text                              | none                   | A question this piece answers, repeatable                              |

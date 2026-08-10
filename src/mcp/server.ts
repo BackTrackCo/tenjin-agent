@@ -154,6 +154,12 @@ const publishInput = {
     ),
   mode: z.string().optional().describe('Consent mode for this run: review | auto | full-auto'),
   price: z.coerce.string().optional().describe('Post price in decimal USD, e.g. "0.10"'),
+  excerpt: z
+    .string()
+    .optional()
+    .describe(
+      'The public preview a non-buyer reads (max 500 chars); omit to let the server derive one from the body',
+    ),
   question: z.array(z.string()).optional().describe('Questions this piece answers'),
   task: z.array(z.string()).optional().describe('Tasks this piece supports'),
   scope: z.string().optional().describe('What the piece covers (card scope)'),

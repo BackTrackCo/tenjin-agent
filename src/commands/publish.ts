@@ -24,6 +24,7 @@ import {
 } from '../lib/card';
 import {
   publishPost,
+  EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
   type PublishInput,
   type PublishStatus,
@@ -66,6 +67,9 @@ export interface PublishArgs {
   mode?: string;
   /** Top-level post price, decimal USD at the edge (O1). */
   price?: string;
+  /** The public preview text; overrides frontmatter `excerpt`. Absent, the server
+   *  derives one from the body's leading prose. */
+  excerpt?: string;
   question?: string[];
   task?: string[];
   scope?: string;
@@ -118,7 +122,7 @@ export async function runPublish(
   const status = resolveStatus(args, frontmatter);
   const title = resolveTitle(frontmatter, body);
   const tags = resolveTags(frontmatter);
-  const excerpt = expectString(frontmatter, 'excerpt');
+  const excerpt = resolveExcerpt(args, frontmatter);
   const handle = expectString(frontmatter, 'handle');
   // A candidate's stored question prefills questionsAnswered, but only as a
   // fallback: an explicit --question OR a frontmatter questionsAnswered still wins.
@@ -520,6 +524,30 @@ function searchPrefillQuestion(search: StoredSearch | null): string | undefined 
   if (search === null) return undefined;
   const question = search.question.trim();
   return question.length > 0 && question.length <= 200 ? question : undefined;
+}
+
+/**
+ * The public preview text: `--excerpt` over frontmatter `excerpt`, or undefined
+ * to let the server derive one from the body's leading prose.
+ *
+ * The bound is checked HERE as well as in the request builder, because the
+ * builder runs after a wallet signature has been collected and this is the edge:
+ * a too-long excerpt should cost a message, not a signing prompt. Refused rather
+ * than truncated — a silently cut preview is a different preview, and the whole
+ * point of setting one is controlling exactly what a non-buyer reads.
+ */
+function resolveExcerpt(args: PublishArgs, frontmatter: Frontmatter): string | undefined {
+  const raw = args.excerpt ?? expectString(frontmatter, 'excerpt');
+  if (raw === undefined) return undefined;
+  const excerpt = raw.trim();
+  if (excerpt.length > EXCERPT_MAX_LENGTH) {
+    throw new CliError(
+      'USAGE',
+      `excerpt must be at most ${EXCERPT_MAX_LENGTH} characters (got ${excerpt.length}).`,
+      { fix: `Shorten it to ${EXCERPT_MAX_LENGTH} characters or fewer.` },
+    );
+  }
+  return excerpt;
 }
 
 function resolveTags(frontmatter: Frontmatter): string[] | undefined {
