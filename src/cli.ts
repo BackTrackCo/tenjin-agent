@@ -1,4 +1,4 @@
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, Option } from 'commander';
 import { z } from 'zod';
 import pkg from '../package.json';
 import { CliError } from './lib/errors';
@@ -147,19 +147,24 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
     .option('--no-wallet', 'create no wallet (the default is to create one)')
-    .option(
-      '--claude-md',
-      'append the Tenjin search nudge to ~/.claude/CLAUDE.md (the default; the flag states it explicitly)',
-    )
+    // The two affirmative flags are pre-default-on compat only: released docs and
+    // the alpha.9 doctor's fix strings name them, so they must parse, but they add
+    // nothing over the default and would only clutter --help. Hidden, not removed.
+    .addOption(new Option('--claude-md', 'compat no-op; the nudge is the default').hideHelp())
     .option('--no-claude-md', 'write no CLAUDE.md nudge')
-    .option(
-      '--allow-free-verbs',
-      // The absolute URL, like every other pointer: `docs/agent-permissions.md`
-      // resolves against the reader's cwd, and an operator running `--help` is in
-      // their own project, not in this package.
-      `add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist (the default; the flag states it explicitly); none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
+    .addOption(
+      new Option(
+        '--allow-free-verbs',
+        // The absolute URL, like every other pointer: `docs/agent-permissions.md`
+        // resolves against the reader's cwd, and an operator running `--help` is in
+        // their own project, not in this package.
+        `compat no-op; the allowlist is the default, full caveats: ${PERMISSIONS_DOC_URL}`,
+      ).hideHelp(),
     )
-    .option('--no-allow-free-verbs', 'write no harness permission rules at all')
+    .option(
+      '--no-allow-free-verbs',
+      `write no harness permission rules at all; the default allowlist is the free tier only: none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
+    )
     .option(
       '--search-hooks <mode>',
       'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.searchMode',

@@ -117,18 +117,21 @@ Every command also takes the three global flags.
 
 ### `tenjin install`
 
-| Flag                    | Values                    | Default          | Effect                                                        |
-| ----------------------- | ------------------------- | ---------------- | ------------------------------------------------------------- |
-| `--harness`             | `claude\|codex\|shared`   | auto-detect      | Target one harness, repeatable; the choice is remembered      |
-| `--dry-run`             | —                         | off              | Print what would change and write nothing                     |
-| `--publish-mode`        | `review\|auto\|full-auto` | ask, else unset  | Set the publish consent mode without asking                   |
-| `--allow-free-verbs`    | —                         | on               | Write the nine free-verb rules into `~/.claude/settings.json` |
-| `--no-allow-free-verbs` | —                         | —                | Write no permission rules at all                              |
-| `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode`  |
-| `--no-hooks`            | —                         | —                | Register no hooks this run; writes no config                  |
-| `--no-wallet`           | —                         | —                | Create no wallet                                              |
-| `--claude-md`           | —                         | on               | Append the one-line search nudge to `~/.claude/CLAUDE.md`     |
-| `--no-claude-md`        | —                         | —                | Write no CLAUDE.md nudge                                      |
+| Flag                    | Values                    | Default          | Effect                                                       |
+| ----------------------- | ------------------------- | ---------------- | ------------------------------------------------------------ |
+| `--harness`             | `claude\|codex\|shared`   | auto-detect      | Target one harness, repeatable; the choice is remembered     |
+| `--dry-run`             | —                         | off              | Print what would change and write nothing                    |
+| `--publish-mode`        | `review\|auto\|full-auto` | ask, else unset  | Set the publish consent mode without asking                  |
+| `--no-allow-free-verbs` | —                         | allowlist on     | Write no permission rules at all                             |
+| `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode` |
+| `--no-hooks`            | —                         | hooks on         | Register no hooks this run; writes no config                 |
+| `--no-wallet`           | —                         | wallet on        | Create no wallet                                             |
+| `--no-claude-md`        | —                         | nudge on         | Write no CLAUDE.md nudge                                     |
+
+A default run writes all four: the allowlist, the hooks, the wallet, and the
+nudge. The flags are the opt-outs. (`--allow-free-verbs` and `--claude-md` still
+parse as no-ops so older docs and scripts keep working; they are hidden from
+`--help`.)
 
 ### `tenjin search <question>`
 
