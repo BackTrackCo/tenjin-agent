@@ -30,6 +30,19 @@ export interface ExternalBuyDeps {
   fetchImpl?: typeof fetch;
 }
 
+/** Payment settled, but local delivery failed. Keep the receipt transportable. */
+export class SettledExternalDeliveryError extends Error {
+  readonly settlementResponse: SettleResponse;
+  readonly deliveryError: unknown;
+
+  constructor(settlementResponse: SettleResponse, deliveryError: unknown) {
+    super('The payment settled, but Tenjin could not save the purchased piece locally.');
+    this.name = 'SettledExternalDeliveryError';
+    this.settlementResponse = settlementResponse;
+    this.deliveryError = deliveryError;
+  }
+}
+
 export type ExternalBuyOutcome =
   | { kind: 'result'; result: CommandResult; settlementResponse?: SettleResponse }
   | { kind: 'payment_required'; paymentRequired: PaymentRequired };
@@ -83,16 +96,27 @@ export async function runExternalBuy(
     });
   }
 
-  const requirement = fresh.paymentRequired.accepts[0];
+  const requirements = fresh.paymentRequired.accepts;
+  const requirement = requirements[0];
   if (requirement === undefined) {
     throw new CliError('PAYMENT_FAILED', 'The 402 advertised no payment requirements.', {
       fix: 'Try another candidate; this resource looks misconfigured.',
     });
   }
-  if (maxPriceAtomic !== undefined && BigInt(requirement.amount) > maxPriceAtomic) {
+  const amountToAuthorize =
+    payment === null
+      ? requirements.slice(1).reduce((lowest, candidate) => {
+          const amount = BigInt(candidate.amount);
+          return amount < lowest ? amount : lowest;
+        }, BigInt(requirement.amount))
+      : BigInt(payment.accepted.amount);
+  if (maxPriceAtomic !== undefined && amountToAuthorize > maxPriceAtomic) {
     throw new CliError('POLICY_REFUSED', 'The current price exceeds maxPrice.', {
       fix: 'Raise maxPrice only after reviewing the fresh price.',
-      details: { currentAtomic: requirement.amount, maxAtomic: maxPriceAtomic.toString() },
+      details: {
+        currentAtomic: amountToAuthorize.toString(),
+        maxAtomic: maxPriceAtomic.toString(),
+      },
     });
   }
 
@@ -132,14 +156,19 @@ export async function runExternalBuy(
     };
   }
 
-  const paidAtomic = BigInt(settlement.amount ?? requirement.amount);
-  const result = await deliverFresh(
-    ctx.dataDir,
-    ref.url,
-    paid.body,
-    'purchased',
-    { paidAtomic, settlementTxHash: settlement.transaction },
-    presentOpts,
-  );
+  const paidAtomic = BigInt(settlement.amount ?? payment.accepted.amount);
+  let result: CommandResult;
+  try {
+    result = await deliverFresh(
+      ctx.dataDir,
+      ref.url,
+      paid.body,
+      'purchased',
+      { paidAtomic, settlementTxHash: settlement.transaction },
+      presentOpts,
+    );
+  } catch (err) {
+    throw new SettledExternalDeliveryError(settlement, err);
+  }
   return { kind: 'result', result, settlementResponse: settlement };
 }

@@ -363,6 +363,79 @@ describe('tenjin_buy external x402 MCP mode', () => {
     expect(calls.map((call) => call.phase)).toEqual(['plain']);
   });
 
+  it('enforces maxPrice against the payment option the external wallet selected', async () => {
+    const pr = buildPaymentRequired();
+    const expensive = { ...pr.paymentRequired.accepts[0]!, amount: '200000' };
+    pr.paymentRequired.accepts.push(expensive);
+    const { fetch, calls } = makeReadServer({ plain: () => reply.paymentRequired(pr) });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external', maxPrice: '0.15' },
+      _meta: { [MCP_PAYMENT_META_KEY]: externalPayment(expensive) },
+    });
+
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as ErrorEnvelope).error.code).toBe('POLICY_REFUSED');
+    expect(calls.map((call) => call.phase)).toEqual(['plain']);
+  });
+
+  it('returns the settlement receipt when local delivery fails after payment', async () => {
+    const pr = buildPaymentRequired();
+    const payment = externalPayment(pr.paymentRequired.accepts[0]!);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody(), encodePaymentResponseHeader(SETTLEMENT)),
+    });
+    await writeFile(join(dir, 'library'), 'blocks the delivery directory');
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external' },
+      _meta: { [MCP_PAYMENT_META_KEY]: payment },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res._meta?.[MCP_PAYMENT_RESPONSE_META_KEY]).toEqual(SETTLEMENT);
+    expect(JSON.stringify(res)).not.toContain('full body');
+  });
+
+  it('records the selected option amount when the receipt omits its optional amount', async () => {
+    const pr = buildPaymentRequired();
+    const selected = { ...pr.paymentRequired.accepts[0]!, amount: '120000' };
+    pr.paymentRequired.accepts.push(selected);
+    const settlement = { ...SETTLEMENT, amount: undefined };
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody(), encodePaymentResponseHeader(settlement)),
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { buy: { fetchImpl: fetch } },
+    });
+
+    const res = await client.callTool({
+      name: 'tenjin_buy',
+      arguments: { ref: URL_, paymentMode: 'external', maxPrice: '0.15' },
+      _meta: { [MCP_PAYMENT_META_KEY]: externalPayment(selected) },
+    });
+
+    expect((res.structuredContent as SuccessEnvelope).data.paid).toMatchObject({
+      atomic: '120000',
+    });
+  });
+
   it('never releases paid content without a successful settlement receipt', async () => {
     const pr = buildPaymentRequired();
     const { fetch } = makeReadServer({

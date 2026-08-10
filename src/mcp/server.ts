@@ -52,7 +52,7 @@ import {
   type WalletCreateOptions,
 } from '../commands/wallet';
 import type { ResolveWalletProviderOptions } from '../lib/wallet';
-import { runExternalBuy } from './external-buy';
+import { runExternalBuy, SettledExternalDeliveryError } from './external-buy';
 
 /**
  * Per-command test-injection seams, threaded into each core's existing third
@@ -439,6 +439,9 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         );
         return attachSettlement(ok('buy', result), settlementResponse);
       } catch (err) {
+        if (err instanceof SettledExternalDeliveryError) {
+          return attachSettlement(fail('buy', err.deliveryError), err.settlementResponse);
+        }
         return fail('buy', err);
       }
     },
