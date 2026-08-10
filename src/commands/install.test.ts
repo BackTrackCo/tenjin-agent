@@ -599,8 +599,8 @@ describe('runInstall: CLAUDE.md nudge', () => {
     expect(existsSync(claudeMdPath())).toBe(false);
   });
 
-  // The walkthrough is capped at three decisions, so the nudge is never a fourth
-  // question: an interactive run without the flag behaves like a headless one.
+  // The nudge is not one of the four decisions: it is a default with an opt-out
+  // flag, so an interactive run without the flag behaves like a headless one.
   it('is never asked about interactively; an absent flag writes it', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('written');
@@ -1971,10 +1971,10 @@ describe('runInstall: permissions decision', () => {
   });
 });
 
-// --- The three decisions, in order, and nothing else ------------------------------
+// --- The four decisions, in order, and nothing else -------------------------------
 
-describe('runInstall: at most three questions', () => {
-  it('asks publishing, then permissions, then wallet, and stops there', async () => {
+describe('runInstall: at most four questions', () => {
+  it('asks publishing, permissions, search hooks, then wallet, and stops there', async () => {
     const asked: string[] = [];
     await runInstall(
       { harness: ['claude'] },
@@ -1989,6 +1989,10 @@ describe('runInstall: at most three questions', () => {
           asked.push('permissions');
           return true;
         },
+        promptSearchHooks: async () => {
+          asked.push('search-hooks');
+          return 'auto';
+        },
         walletExists: async () => false,
         confirmWallet: async () => {
           asked.push('wallet');
@@ -1996,7 +2000,7 @@ describe('runInstall: at most three questions', () => {
         },
       }),
     );
-    expect(asked).toEqual(['publishing', 'permissions', 'wallet']);
+    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet']);
   });
 
   it('asks nothing at all on a machine run', async () => {
@@ -2013,6 +2017,10 @@ describe('runInstall: at most three questions', () => {
         confirmPermissions: async () => {
           asked.push('permissions');
           return true;
+        },
+        promptSearchHooks: async () => {
+          asked.push('search-hooks');
+          return 'auto';
         },
         confirmWallet: async () => {
           asked.push('wallet');

@@ -125,7 +125,7 @@ value. That is why `--no-hooks` and `--search-hooks off` differ.
 | ----------------------- | ------------------------- | ---------------- | ------------------------------------------------------------ |
 | `--harness`             | `claude\|codex\|shared`   | auto-detect      | Target one harness, repeatable; the choice is remembered     |
 | `--dry-run`             | —                         | off              | Print what would change and write nothing                    |
-| `--publish-mode`        | `review\|auto\|full-auto` | ask, else unset  | Set the publish consent mode without asking                  |
+| `--publish-mode`        | `review\|auto\|full-auto` | ask, else `auto` | Set the publish consent mode without asking                  |
 | `--no-allow-free-verbs` | —                         | allowlist on     | Write no permission rules at all                             |
 | `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode` |
 | `--no-hooks`            | —                         | hooks on         | Register no hooks this run; writes no config                 |
@@ -242,20 +242,20 @@ overwritten.
 
 `tenjin config` lists every key with its effective value and where it came from.
 
-| Key                    | Values                    | Default                    | Effect                                                    |
-| ---------------------- | ------------------------- | -------------------------- | --------------------------------------------------------- |
-| `maxAutoSpend`         | decimal USD               | `0`                        | Auto-approve a read up to this amount                     |
-| `sessionBudget`        | decimal USD               | `0` (no ceiling)           | Cap on total auto-spend per session                       |
-| `confirm`              | `always\|above:<usd>`     | `always`                   | When to ask before paying                                 |
-| `sendMaxAmount`        | decimal USD, `0`, `none`  | unset (`send` refuses)     | Hard per-send cap, never bypassed by `--yes`              |
-| `allowlistCreators`    | comma-separated handles   | empty (any)                | Only auto-pay these creators                              |
-| `baseUrl`              | http(s) url               | `https://tenjin.blog`      | Tenjin API base URL                                       |
-| `rpcUrl`               | http(s) url               | `https://mainnet.base.org` | Base RPC endpoint for balance reads                       |
-| `evalCohort`           | `true\|false`             | `false`                    | Opt in to 90-day query retention for retrieval evaluation |
-| `publish.mode`         | `review\|auto\|full-auto` | `review`                   | Publish consent mode                                      |
-| `publish.defaultPrice` | decimal USD               | `0.10`                     | Price used when none is given                             |
-| `hooks.searchMode`     | `auto\|remind\|off`       | `auto`                     | What the harness WebSearch hook does                      |
-| `hooks.stopNag`        | `on\|off`                 | `on`                       | Whether the Stop hook raises an unanswered search         |
+| Key                    | Values                    | Default                                | Effect                                                    |
+| ---------------------- | ------------------------- | -------------------------------------- | --------------------------------------------------------- |
+| `maxAutoSpend`         | decimal USD               | `0`                                    | Auto-approve a read up to this amount                     |
+| `sessionBudget`        | decimal USD               | `0` (no ceiling)                       | Cap on total auto-spend per session                       |
+| `confirm`              | `always\|above:<usd>`     | `always`                               | When to ask before paying                                 |
+| `sendMaxAmount`        | decimal USD, `0`, `none`  | unset (`send` refuses)                 | Hard per-send cap, never bypassed by `--yes`              |
+| `allowlistCreators`    | comma-separated handles   | empty (any)                            | Only auto-pay these creators                              |
+| `baseUrl`              | http(s) url               | `https://tenjin.blog`                  | Tenjin API base URL                                       |
+| `rpcUrl`               | http(s) url               | `https://mainnet.base.org`             | Base RPC endpoint for balance reads                       |
+| `evalCohort`           | `true\|false`             | `false`                                | Opt in to 90-day query retention for retrieval evaluation |
+| `publish.mode`         | `review\|auto\|full-auto` | `review`, but `install` settles `auto` | Publish consent mode                                      |
+| `publish.defaultPrice` | decimal USD               | `0.10`                                 | Price used when none is given                             |
+| `hooks.searchMode`     | `auto\|remind\|off`       | `auto`                                 | What the harness WebSearch hook does                      |
+| `hooks.stopNag`        | `on\|off`                 | `on`                                   | Whether the Stop hook raises an unanswered search         |
 
 Note `sessionBudget: 0` means no ceiling, while `maxAutoSpend: 0` means
 auto-approve nothing.

@@ -723,7 +723,7 @@ function hooksDisclosure(h: HooksResult): string {
   if (h.mode === 'remind') {
     return `The WebSearch hook prints a one-line reminder that Tenjin may have an answer; it sends nothing off-machine. ${shared}`;
   }
-  return `Before a web search, the WebSearch hook asks tenjin.blog the same question (free and anonymous, 2-second budget) and mentions a tested answer if one exists; the query text leaves the machine. It never blocks or delays the search. ${shared}`;
+  return `Before a web search, the WebSearch hook asks tenjin.blog the same question (free and anonymous, ~2s budget, 5s harness kill) and mentions a tested answer if one exists; the query text leaves the machine. It can never block or change the search. ${shared}`;
 }
 
 /**
@@ -1037,7 +1037,9 @@ function doctorNotices(io: Io, doctor: DoctorChecks, wallet: WalletOutcome): str
 
 /**
  * The STORED default: what a non-interactive run, a cancelled question, or a
- * `--dry-run` leaves `publish.mode` at, which is to say unset. It is deliberately
+ * `--dry-run` leaves `publish.mode` at, which is to say unset. A headless run no
+ * longer lands here at all (see RECOMMENDED_MODE); this is the dry-run and
+ * cancelled-select value only. It is deliberately
  * NOT the interactively recommended answer below: recommending `auto` is a thing
  * we do to a human who is looking at the consequence, never a thing that happens
  * to a machine run that was never asked.
@@ -1069,9 +1071,10 @@ export const PUBLISH_MODE_QUESTION = 'When your agent has something worth publis
 /**
  * Resolve (and, for an explicit choice, persist) the publish consent mode at
  * install time. Precedence: `--publish-mode` flag > an already-configured global
- * mode > the interactive select > the untouched default. Only an explicit choice
- * writes: a cancelled select, a non-interactive run, and `--dry-run` all leave
- * `publish.mode` unset so its provenance stays `default`.
+ * mode > the interactive select > the headless settle > the untouched default.
+ * A cancelled select and `--dry-run` write nothing and leave `publish.mode` unset
+ * so its provenance stays `default`; a non-interactive run SETTLES the
+ * recommended mode, which is the one case that writes without being asked.
  */
 async function resolvePublishMode(
   flag: PublishMode | undefined,

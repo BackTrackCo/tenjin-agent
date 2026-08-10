@@ -41,7 +41,8 @@ distinguishable from a skip.
 standalone Node scripts to `~/.tenjin/hooks/` and registers them in
 `~/.claude/settings.json`. A `PreToolUse` hook matched to `WebSearch` (never
 `WebFetch`) asks the marketplace the same question the agent is about to ask the
-web, on a hard two-second budget, and mentions a tested answer with its price and
+web, on a ~2s design budget (the hard bound is the harness's own 5s kill), and
+mentions a tested answer with its price and
 a free `tenjin inspect` command when one exists. A `Stop` hook checks locally,
 with no network call, for a MISS from the last eight hours that nothing has closed
 and reminds you once to publish it back. Both fail open by construction: they emit
