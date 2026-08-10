@@ -188,6 +188,7 @@ endpoint, so `buy <url>` can.
 | Flag              | Values                            | Default                | Effect                                                                 |
 | ----------------- | --------------------------------- | ---------------------- | ---------------------------------------------------------------------- |
 | `--candidate`     | candidate id                      | none                   | Publish a parked draft instead of a file; clears it                    |
+| `--search-id`     | uuid                              | none                   | The search this file answers; closes its loop, prefills its question   |
 | `--draft`         | —                                 | off                    | Save privately instead of publishing                                   |
 | `--price`         | decimal USD                       | `publish.defaultPrice` | Post price                                                             |
 | `--mode`          | `review\|auto\|full-auto`         | `publish.mode`         | Consent mode for this run                                              |

@@ -139,6 +139,12 @@ const outcomeInput = {
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
   candidate: z.string().optional().describe('A parked candidate id to publish instead of a file'),
+  searchId: z
+    .string()
+    .optional()
+    .describe(
+      'The search this file answers; closes its open loop and prefills its question when the draft names none',
+    ),
   draft: z.boolean().optional().describe('Save as a private draft instead of publishing'),
   yes: z
     .boolean()

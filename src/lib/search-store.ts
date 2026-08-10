@@ -61,6 +61,20 @@ const StoredSearchSchema = z.object({
   resolved: z.object({ by: SearchResolutionSchema, at: z.string() }).optional(),
   /** Absent on entries written before sources existed; see {@link SearchSourceSchema}. */
   source: SearchSourceSchema.optional(),
+  /**
+   * The harness session this search was run in, when anything could attribute it.
+   * This ledger is MACHINE-GLOBAL, so without it the Stop hook nags whichever
+   * session happens to stop next about open loops belonging to a sibling session,
+   * which that session cannot act on. The hook scopes on this when both the entry
+   * and the turn-end payload name a session, and stays global otherwise, so an
+   * unstamped entry is still raised everywhere rather than nowhere.
+   *
+   * OPTIONAL and often absent: only the WebSearch hook is handed a session id by
+   * the harness (`session_id` on its stdin payload). A deliberate `tenjin search`
+   * is a Bash subprocess, and the harness exports no session id to those, so it
+   * stamps only when the operator sets TENJIN_SESSION_ID.
+   */
+  sessionId: z.string().optional(),
   // How many of the search's browse pointers cost money, and NOT the pointers
   // themselves: keeping them out of the store is what makes `buy <resourceId>`
   // unable to reach one (see the browse comment in agent-api.ts), and a count

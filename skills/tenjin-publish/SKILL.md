@@ -105,7 +105,9 @@ edge, and price for the freshness that remains.
   - `scope`: dense and factual: versions, platforms, and the setup the work was
     done on, not a pitch.
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.
-  Keep the free preview minimal, roughly what it answers plus the as-of date.
+  Keep the free preview minimal, roughly what it answers plus the as-of date: the
+  first ~500 characters become the public excerpt, so lead with the as-of date,
+  versions, and questions answered, and keep the verdict below that fold.
 
 ## Semantic publish safety (you are the semantic layer)
 
@@ -150,8 +152,12 @@ tempting to rush out.
 ## Publish
 
 ```bash
-tenjin publish <file.md> --json [--draft]
+tenjin publish <file.md> --json [--search-id <id>] [--draft]
 ```
+
+When the piece answers a search that MISSed, pass `--search-id <id>`: it closes
+that open loop and prefills the searched question into the card's
+`questionsAnswered` when the draft names none. A `--draft` leaves the loop open.
 
 Consent follows the configured `publish.mode` (default `review`). The
 redaction/rights scan runs in every mode; no mode ever skips the scan (not even

@@ -724,17 +724,32 @@ describe('runPublish — publish --candidate', () => {
     expect(await readCandidate(dir, id)).not.toBeNull();
   });
 
-  it('--draft combines with --candidate', async () => {
+  // A draft answered nobody, so it is NOT the publish that retires the pen entry:
+  // the draft is still the pending answer and the candidate has to outlive it.
+  it('--draft combines with --candidate, and leaves it parked', async () => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
     const id = await park();
     const { fetch } = stubServer({ ...CREATED, status: 'draft' });
-    const { provider } = spyProvider();
+    const { ctx, stderr } = makeCtxCapturingStderr();
     const res = await runPublish(
       baseArgs(undefined, { candidate: id, draft: true, mode: 'auto' }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
     expect((res.data as { status: string }).status).toBe('draft');
-    expect(await readCandidate(dir, id)).toBeNull();
+    expect(await readCandidate(dir, id)).not.toBeNull();
+    expect((res.data as { candidate: { cleared: boolean } }).candidate.cleared).toBe(false);
+    // A deliberate hold, not a clear that failed: no warning rides with it.
+    expect((res.data as { candidate: { warning?: string } }).candidate.warning).toBeUndefined();
+    expect(stderr()).toContain(`candidate ${id} stays parked`);
+    // Same rule as the --search-id draft gate: the loop stays open too.
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
   it('a malformed or unknown candidate id is USAGE before any wallet touch', async () => {
@@ -858,5 +873,200 @@ describe('runPublish — publish --candidate', () => {
     } finally {
       await chmod(join(dir, 'candidates'), 0o700); // restore so afterEach cleanup works
     }
+  });
+});
+
+describe('runPublish — publish <file> --search-id', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  const QUESTION = 'does ox 0.14 still export Bytes.from';
+
+  /** Seed the local store with the MISS a publish is about to close. */
+  async function seed(question: string = QUESTION): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  /** A stub server that also captures the parsed request body. */
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  function questionsIn(body: Record<string, unknown> | undefined): string[] | undefined {
+    return (body?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
+  }
+
+  // The gap this flag closes: the path the Stop hook and the auto-mode skill
+  // prescribe is a bare file publish, which left the loop open.
+  it('resolves the named search on a successful file publish', async () => {
+    await seed();
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    // --json suppresses the stderr notes, so the receipt is the only signal an
+    // agent gets about whether its loop actually closed.
+    expect((res.data as { search?: unknown }).search).toEqual({ id: SEARCH, closed: true });
+    expect(res.humanLines).toContain(`Closed the loop on search ${SEARCH}.`);
+  });
+
+  it('omits the search field entirely when --search-id was not passed', async () => {
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(res.data).not.toHaveProperty('search');
+  });
+
+  // The entry aged past the store cap or came from another machine: there is no
+  // loop here to close, and that must not cost the caller their publish.
+  it('publishes normally on an unknown search id, resolving nothing', async () => {
+    const { fetch, calls } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(calls).toHaveLength(1);
+    expect((res.data as { status: string }).status).toBe('published');
+    expect(await loadSearches(dir)).toEqual([]);
+    expect(stderr()).toContain(`search ${SEARCH} is not in the local store`);
+    expect((res.data as { search?: unknown }).search).toEqual({ id: SEARCH, closed: false });
+  });
+
+  // A draft parks privately and answers nobody, so the loop is still open.
+  it('leaves the loop open on a --draft publish', async () => {
+    await seed();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, draft: true, mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    expect(stderr()).toContain(`search ${SEARCH} stays open`);
+    expect((res.data as { search?: unknown }).search).toEqual({ id: SEARCH, closed: false });
+  });
+
+  it('leaves the loop open when the publish was refused', async () => {
+    await seed();
+    const { fetch } = stubServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'review' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    ).catch(() => undefined);
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  // The searched phrasing is what the next searcher sends, so it is the right
+  // fallback for the card — behind anything the author wrote themselves.
+  it('prefills questionsAnswered from the stored search question', async () => {
+    await seed();
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual([QUESTION]);
+  });
+
+  it('an explicit --question beats the stored search question', async () => {
+    await seed();
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), {
+        searchId: SEARCH,
+        question: ['flag question'],
+        mode: 'auto',
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual(['flag question']);
+  });
+
+  it('frontmatter questionsAnswered beats the stored search question', async () => {
+    await seed();
+    const doc = await writeDoc(
+      ['---', 'questionsAnswered:', '  - fm question', '---', '# T', '', 'body'].join('\n'),
+    );
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(doc, { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual(['fm question']);
+  });
+
+  // A search question may run to the server's 512, past the card's 200-char item
+  // bound: prefilling it would fail a publish that was otherwise fine.
+  it('skips the prefill when the stored question exceeds the card item bound', async () => {
+    await seed('q'.repeat(201));
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toBeUndefined();
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // A candidate already names the search it answers; two ids is a usage error,
+  // not a silent pick, and it refuses before any wallet touch.
+  it('refuses --search-id together with --candidate', async () => {
+    // A REAL parked candidate, so the only usage error left to catch is the pair
+    // itself and not an unknown-candidate refusal standing in for it.
+    const parked = await createCandidate(dir, {
+      draft: CLEAN,
+      searchId: SEARCH,
+      created: new Date().toISOString(),
+      sourceProject: dir,
+    });
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: parked.id, searchId: SEARCH, mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: expect.stringContaining('not both') });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+  });
+
+  it('refuses a --search-id that is not a uuid', async () => {
+    const { fetch, calls } = stubServer();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { searchId: 'not-a-uuid', mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
   });
 });

@@ -34,6 +34,20 @@ function entry(over: Partial<StoredSearch> = {}): StoredSearch {
 }
 
 describe('search-store', () => {
+  // The Stop hook reads this field to tell one session's open loops from a
+  // sibling's; a schema that dropped it would silently un-scope every nag.
+  it('round-trips a sessionId, and an entry without one still loads', async () => {
+    await recordSearch(dir, entry({ sessionId: 'session-a' }));
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000009', question: 'unstamped' }),
+    );
+    const loaded = await loadSearches(dir);
+    expect(loaded).toHaveLength(2);
+    expect(loaded.find((s) => s.question === 'unstamped')?.sessionId).toBeUndefined();
+    expect(loaded.find((s) => s.sessionId !== undefined)?.sessionId).toBe('session-a');
+  });
+
   it('records newest-first and latestSearch returns the most recent', async () => {
     await recordSearch(dir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000001' }));
     await recordSearch(dir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000002' }));
