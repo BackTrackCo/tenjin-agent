@@ -43,9 +43,11 @@ export type HookEvent = (typeof HOOK_EVENTS)[number];
 export const WEBSEARCH_MATCHER = 'WebSearch';
 
 /**
- * Seconds the harness allows each hook before killing it. Generous next to the
- * scripts' own budgets (2s and 1.5s watchdogs): this is the backstop for a
- * process that never starts, not the ceiling the hooks are designed against.
+ * Seconds the harness allows each hook before killing it, and the HARD bound on
+ * how long either can delay anything. The scripts' own watchdogs (2s and 1.5s)
+ * are the design budget and cover the ordinary case, but they are event-loop
+ * timers: a synchronous read that blocks outlasts them. This kill does not, so it
+ * is the number to quote when the question is "what is the worst case".
  */
 const HOOK_TIMEOUT_SECONDS = 5;
 
@@ -280,18 +282,10 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
     updated.push(spec.event);
   }
 
-  // The scripts land BEFORE the settings entry that points at them, so there is no
-  // window in which a harness reads an entry naming a file that is not there yet.
-  const scripts: string[] = [];
-  for (const spec of plan) {
-    const target = join(scriptsDir, spec.scriptFile);
-    const onDisk = await readFile(target, 'utf8').catch(() => null);
-    if (onDisk === spec.script) continue;
-    await writeFileAtomic(target, spec.script, { mode: 0o755, dirMode: 0o700 });
-    scripts.push(target);
-  }
-
+  // Nothing to register: no guard is involved, so the scripts are simply brought
+  // up to date. This is the path a re-run takes after an upgrade changed a body.
   if (added.length === 0 && updated.length === 0) {
+    const scripts = await writeScripts(plan, scriptsDir);
     return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
   }
 
@@ -309,8 +303,28 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
       `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
     );
   }
+  // PAST the guard, and still before the entry that points at them. Writing the
+  // scripts earlier meant a refusal had already replaced live script bodies that
+  // existing entries were running, while the result said nothing was registered.
+  // Here a refusal has changed nothing at all, and a harness still never reads an
+  // entry naming a file that is not on disk yet.
+  const scripts = await writeScripts(plan, scriptsDir);
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
   return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+}
+
+/** Bring each script up to date, returning the ones this run actually wrote. A
+ *  body that already matches is left alone, so a re-run rewrites nothing. */
+async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<string[]> {
+  const written: string[] = [];
+  for (const spec of plan) {
+    const target = join(scriptsDir, spec.scriptFile);
+    const onDisk = await readFile(target, 'utf8').catch(() => null);
+    if (onDisk === spec.script) continue;
+    await writeFileAtomic(target, spec.script, { mode: 0o755, dirMode: 0o700 });
+    written.push(target);
+  }
+  return written;
 }
 
 function refuse(

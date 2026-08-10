@@ -61,7 +61,12 @@ export function hooksDir(dir: string = dataDir()): string {
 
 /**
  * Which searchIds the Stop hook has already nagged about, so each open loop is
- * raised once and never again.
+ * raised once per turn-end rather than every turn.
+ *
+ * Not atomic, deliberately: two sessions ending at the same instant can both read
+ * this file before either writes, and one loop is then named twice. The cost is a
+ * duplicate line, and taking the search store's lock here would put a
+ * cross-process wait at the end of every turn to buy nothing but tidiness.
  *
  * Its own file, NOT a field in searches.json, and that separation is the whole
  * point: the hook runs outside the CLI with no access to the lock `recordSearch`

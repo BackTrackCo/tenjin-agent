@@ -1,4 +1,26 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/**
+ * Arms the one interleave the filesystem will not produce on demand: another
+ * writer landing between this module's settings read and its commit. Inert unless
+ * a test sets it, so production carries no test-only branch.
+ */
+const fsHooks = vi.hoisted(() => ({ settingsInterleave: '' }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      const out = await actual.readFile(...args);
+      if (fsHooks.settingsInterleave !== '' && String(args[0]).endsWith('settings.json')) {
+        const bytes = fsHooks.settingsInterleave;
+        fsHooks.settingsInterleave = '';
+        await actual.writeFile(String(args[0]), bytes);
+      }
+      return out;
+    },
+  };
+});
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -238,5 +260,49 @@ describe('hooksSkipped', () => {
       expect(result.path, reason).toBe(settingsPath());
     }
     expect(hooksSkipped('codex', home, data, 'auto', 'harness-not-claude').path).toBeUndefined();
+  });
+});
+
+describe('wireSearchHooks: a refusal changes nothing at all', () => {
+  // The scripts used to be written BEFORE the compare-and-swap, so a
+  // `changed-since-read` refusal had already replaced the bodies that existing
+  // entries were running while reporting that nothing was registered.
+  it('does not touch live scripts when the settings guard refuses', async () => {
+    await writeSettings({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'WebSearch',
+            hooks: [{ type: 'command', command: `node /old/${WEBSEARCH_HOOK_FILE}` }],
+          },
+        ],
+      },
+    });
+    // A live script body an existing entry is already running, which a refusal
+    // must leave exactly as it is.
+    const scriptPath = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
+    await mkdir(join(data, 'hooks'), { recursive: true });
+    await writeFile(scriptPath, '// an older install wrote this\n');
+
+    // Another writer lands the instant the read returns.
+    fsHooks.settingsInterleave = JSON.stringify({ model: 'somebody-elses-edit' }, null, 2);
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+
+    expect(result.skipped).toBe('changed-since-read');
+    expect(result.scripts).toEqual([]);
+    expect(await readFile(scriptPath, 'utf8')).toBe('// an older install wrote this\n');
+  });
+
+  it('still refreshes a drifted script when no entry needs registering', async () => {
+    // The other path: nothing to add or update in settings, so no guard applies
+    // and a stale script body is simply brought up to date.
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const scriptPath = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
+    await writeFile(scriptPath, '// stale\n');
+
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    expect(result.added).toEqual([]);
+    expect(result.scripts).toEqual([scriptPath]);
+    expect(await readFile(scriptPath, 'utf8')).not.toBe('// stale\n');
   });
 });
