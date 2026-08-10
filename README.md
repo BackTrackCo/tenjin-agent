@@ -59,6 +59,22 @@ the resulting signatures leave the signer. Tenjin never opens the ClawRouter
 mnemonic, and `~/.tenjin/wallet.json` stores only the provider name and pinned
 address.
 
+When this provider is active and no Tenjin read-spend guardrail has been set,
+Tenjin also reads ClawRouter's `~/.openclaw/blockrun/spending.json` limits as its
+defaults: `perRequest`, rolling `hourly`, rolling `daily`, and `session`. The
+file and its history are never modified. Tenjin records its own reservations
+and purchases in `~/.tenjin/spend.json`, so these are matching limits, **not one
+aggregate budget across both applications**. Missing, empty, malformed, or
+unrepresentable ClawRouter limits fall back to confirmation for every Tenjin
+purchase.
+
+Setting any Tenjin read-spend key (`maxAutoSpend`, `sessionBudget`, `confirm`,
+or `allowlistCreators`) selects a separate Tenjin policy as a whole; it is never
+silently mixed with inherited limits. `tenjin config` marks inherited values as
+`(clawrouter)`. This is application-level enforcement: an unrestricted
+same-user/YOLO agent can edit either application's files, so notices and receipts
+improve visibility but cannot prove a human saw them.
+
 Those are Tenjin behavior guarantees, not containment from an unrestricted
 agent running as the same OS user that can read the source key. Enforce a
 stronger boundary outside Tenjin—for example with an OS sandbox, separate user,
@@ -634,7 +650,9 @@ approval.
 ## Safety model
 
 - Default maximum automatic spend is **zero**. Nothing pays without explicit
-  approval or an explicitly configured policy.
+  approval or an explicitly configured policy. The exception is an explicitly
+  connected ClawRouter provider with configured spending limits: those limits
+  become Tenjin's read-only defaults as described below.
 - A Tenjin-created key is generated locally and stored **encrypted at rest** in
   `~/.tenjin/wallet.json` (Keystore v3, scrypt), mode `0600`. The plaintext key
   is never written to disk. The wallet address stays readable, so `show` and

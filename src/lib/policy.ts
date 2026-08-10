@@ -16,6 +16,11 @@ export interface SpendPolicy {
   maxAutoSpendAtomic: bigint;
   /** Rolling local ceiling on cumulative session spend. 0 = disabled (no ceiling). */
   sessionBudgetAtomic: bigint;
+  /** Optional hard limits inherited read-only from ClawRouter. Undefined means
+   * no limit; these are still client-only and use Tenjin's separate ledger. */
+  perRequestLimitAtomic?: bigint;
+  hourlyBudgetAtomic?: bigint;
+  dailyBudgetAtomic?: bigint;
   /** When a human confirmation is requested. */
   confirm: ConfirmPolicy;
   /** Creators (handle or 0x-address, lowercased) auto-payment is restricted to.
@@ -32,6 +37,8 @@ export interface SpendRequest {
   maxPriceAtomic?: bigint;
   /** Cumulative spend already recorded in this rolling session window. */
   sessionSpentAtomic: bigint;
+  hourlySpentAtomic?: bigint;
+  dailySpentAtomic?: bigint;
 }
 
 /**
@@ -46,6 +53,9 @@ export type PolicyReason =
   | 'within_policy'
   | 'price_cap_exceeded'
   | 'not_allowlisted'
+  | 'per_request_limit_exceeded'
+  | 'hourly_budget_exceeded'
+  | 'daily_budget_exceeded'
   | 'session_budget_exceeded'
   | 'above_auto_spend'
   | 'confirm_always'
@@ -85,6 +95,39 @@ export function evaluateSpendPolicy(policy: SpendPolicy, req: SpendRequest): Pol
         decision: 'deny',
         reason: 'not_allowlisted',
         message: `Creator "${req.creator}" is not in allowlistCreators.`,
+      };
+    }
+  }
+
+  if (
+    policy.perRequestLimitAtomic !== undefined &&
+    req.amountAtomic > policy.perRequestLimitAtomic
+  ) {
+    return {
+      decision: 'deny',
+      reason: 'per_request_limit_exceeded',
+      message: `Price ${req.amountAtomic} exceeds the per-request limit ${policy.perRequestLimitAtomic}.`,
+    };
+  }
+
+  if (policy.hourlyBudgetAtomic !== undefined) {
+    const projected = (req.hourlySpentAtomic ?? 0n) + req.amountAtomic;
+    if (projected > policy.hourlyBudgetAtomic) {
+      return {
+        decision: 'deny',
+        reason: 'hourly_budget_exceeded',
+        message: `This spend would bring the rolling hourly total to ${projected}, over the hourly budget ${policy.hourlyBudgetAtomic}.`,
+      };
+    }
+  }
+
+  if (policy.dailyBudgetAtomic !== undefined) {
+    const projected = (req.dailySpentAtomic ?? 0n) + req.amountAtomic;
+    if (projected > policy.dailyBudgetAtomic) {
+      return {
+        decision: 'deny',
+        reason: 'daily_budget_exceeded',
+        message: `This spend would bring the rolling daily total to ${projected}, over the daily budget ${policy.dailyBudgetAtomic}.`,
       };
     }
   }

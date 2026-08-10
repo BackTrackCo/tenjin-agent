@@ -257,7 +257,7 @@ export async function loadConfig(dir: string): Promise<Config> {
   };
 }
 
-export type Provenance = 'default' | 'file' | 'project' | 'env' | 'flag';
+export type Provenance = 'default' | 'file' | 'project' | 'env' | 'flag' | 'clawrouter';
 
 export interface ResolvedSetting<T> {
   value: T;

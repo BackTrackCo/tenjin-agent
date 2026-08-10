@@ -134,6 +134,14 @@ does not put a human on every purchase once the agent can pass `--yes`.
 
 Walking the defaults:
 
+For a Tenjin-created wallet, the list below is literal. For an explicitly
+connected ClawRouter wallet, Tenjin instead inherits configured `perRequest`,
+rolling `hourly`, rolling `daily`, and `session` limits read-only from
+`~/.openclaw/blockrun/spending.json` until any Tenjin read-spend key is set.
+Tenjin has its own ledger, so this does not create an aggregate budget with
+ClawRouter. Setting one Tenjin read-spend key selects the separate Tenjin policy
+as a whole; inherited and explicit limits are never silently mixed.
+
 - `allowlistCreators` is empty, so the creator gate is off.
 - `maxAutoSpend` is `0` and `confirm` is `always`, which together only ask for a
   confirmation that `--yes` satisfies.

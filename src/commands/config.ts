@@ -11,7 +11,6 @@ import {
   loadRawConfig,
   parseSearchHookModeFlag,
   parseStopNagFlag,
-  resolveSettings,
 } from '../lib/config';
 import type {
   EffectiveSettings,
@@ -25,6 +24,7 @@ import type {
 } from '../lib/config';
 import type { HarnessTarget } from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
+import { resolveEffectiveSpendSettingsForContext } from '../lib/spend-settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -245,16 +245,10 @@ export async function persistInstallHarness(
 }
 
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
-  const config = await loadRawConfig(ctx.dataDir);
   // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
   // real `publish` would resolve (project/env included), not a global-only guess.
   const project = await loadProjectConfig(process.cwd());
-  return resolveSettings({
-    config,
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-    project: project?.layer,
-  });
+  return resolveEffectiveSpendSettingsForContext(ctx, project?.layer);
 }
 
 function assertKey(key: string): ScalarConfigKey {

@@ -77,16 +77,35 @@ const ReservationSchema = z.object({
 });
 type Reservation = z.infer<typeof ReservationSchema>;
 
-const LedgerSchema = z.object({
+const SpendEventSchema = z.object({
+  amountAtomic: z.string().regex(/^\d+$/),
+  atMs: z.number(),
+});
+type SpendEvent = z.infer<typeof SpendEventSchema>;
+
+const LedgerV2Schema = z.object({
   schemaVersion: z.literal(2),
   windowStartMs: z.number(),
   committedAtomic: z.string().regex(/^\d+$/),
   reservations: z.array(ReservationSchema),
 });
+const LedgerSchema = z.object({
+  schemaVersion: z.literal(3),
+  windowStartMs: z.number(),
+  committedAtomic: z.string().regex(/^\d+$/),
+  history: z.array(SpendEventSchema),
+  reservations: z.array(ReservationSchema),
+});
 type Ledger = z.infer<typeof LedgerSchema>;
 
 function emptyLedger(nowMs: number): Ledger {
-  return { schemaVersion: 2, windowStartMs: nowMs, committedAtomic: '0', reservations: [] };
+  return {
+    schemaVersion: 3,
+    windowStartMs: nowMs,
+    committedAtomic: '0',
+    history: [],
+    reservations: [],
+  };
 }
 
 export interface LocalSpendAuthorizerDeps {
@@ -119,6 +138,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     if (ledger === null || nowMs - ledger.windowStartMs >= windowMs) return emptyLedger(nowMs);
     return {
       ...ledger,
+      history: ledger.history.filter((event) => nowMs - event.atMs < DEFAULT_WINDOW_MS),
       reservations: ledger.reservations.filter((r) => nowMs - r.atMs < RESERVATION_TTL_MS),
     };
   };
@@ -128,6 +148,21 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
       (sum, r) => sum + BigInt(r.amountAtomic),
       BigInt(ledger.committedAtomic),
     );
+
+  const spentSince = (ledger: Ledger, nowMs: number, periodMs: number): bigint => {
+    const cutoff = nowMs - periodMs;
+    const committed = ledger.history
+      .filter((event) => event.atMs > cutoff)
+      .reduce((sum, event) => sum + BigInt(event.amountAtomic), 0n);
+    return ledger.reservations
+      .filter((reservation) => reservation.atMs > cutoff)
+      .reduce((sum, reservation) => sum + BigInt(reservation.amountAtomic), committed);
+  };
+
+  const hasHardBudget = (): boolean =>
+    deps.policy.sessionBudgetAtomic > 0n ||
+    deps.policy.hourlyBudgetAtomic !== undefined ||
+    deps.policy.dailyBudgetAtomic !== undefined;
 
   const persist = async (ledger: Ledger): Promise<void> => {
     await writeFileAtomic(path, `${JSON.stringify(ledger, null, 2)}\n`, {
@@ -153,13 +188,15 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
   return {
     policyEnforcement: 'client-only',
     async authorize(req: SpendRequest): Promise<SpendAuthorization> {
-      return withLedger(async (ledger) => {
+      return withLedger(async (ledger, nowMs) => {
         const sessionSpentAtomic = spentOf(ledger);
         const evaluation = evaluateSpendPolicy(deps.policy, {
           amountAtomic: req.amountAtomic,
           creator: req.creator,
           ...(req.maxPriceAtomic !== undefined ? { maxPriceAtomic: req.maxPriceAtomic } : {}),
           sessionSpentAtomic,
+          hourlySpentAtomic: spentSince(ledger, nowMs, 3_600_000),
+          dailySpentAtomic: spentSince(ledger, nowMs, DEFAULT_WINDOW_MS),
         });
         const base: SpendAuthorization = {
           ...evaluation,
@@ -170,13 +207,13 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         };
         // Reserve budget atomically only when a spend may proceed AND a ceiling is
         // in force; a denied spend or a disabled budget needs no reservation.
-        if (evaluation.decision === 'deny' || deps.policy.sessionBudgetAtomic === 0n) {
+        if (evaluation.decision === 'deny' || !hasHardBudget()) {
           return base;
         }
         const reservation: Reservation = {
           id: randomUUID(),
           amountAtomic: req.amountAtomic.toString(),
-          atMs: now(),
+          atMs: nowMs,
         };
         await persist({ ...ledger, reservations: [...ledger.reservations, reservation] });
         return { ...base, reservationId: reservation.id };
@@ -185,7 +222,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async commit(reservationId: string | undefined, amountAtomic: bigint): Promise<void> {
       // No reservation id means no budget ceiling was in force at authorize
       // time; the settled spend still counts against any FUTURE budget window.
-      await withLedger(async (ledger) => {
+      await withLedger(async (ledger, nowMs) => {
         const reservation =
           reservationId !== undefined
             ? ledger.reservations.find((r) => r.id === reservationId)
@@ -194,6 +231,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
         await persist({
           ...ledger,
           committedAtomic: (BigInt(ledger.committedAtomic) + settled).toString(),
+          history: [...ledger.history, { amountAtomic: settled.toString(), atMs: nowMs }],
           reservations:
             reservationId !== undefined
               ? ledger.reservations.filter((r) => r.id !== reservationId)
@@ -244,6 +282,15 @@ async function readLedger(path: string): Promise<LedgerRead> {
   }
   const parsed = LedgerSchema.safeParse(json);
   if (parsed.success) return { ledger: parsed.data };
+  const legacy = LedgerV2Schema.safeParse(json);
+  if (legacy.success) {
+    const v2 = legacy.data;
+    const history: SpendEvent[] =
+      BigInt(v2.committedAtomic) > 0n
+        ? [{ amountAtomic: v2.committedAtomic, atMs: v2.windowStartMs }]
+        : [];
+    return { ledger: { ...v2, schemaVersion: 3, history } };
+  }
   const issue = parsed.error.issues[0];
   const field = issue?.path.join('.');
   const message = issue?.message ?? 'schema mismatch';

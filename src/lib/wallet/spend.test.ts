@@ -197,7 +197,7 @@ describe('createLocalSpendAuthorizer', () => {
     if (state.kind === 'ok') expect(state.file).toEqual(session);
 
     const ledger: unknown = JSON.parse(await readFile(spendLedgerPath(dir), 'utf8'));
-    expect(ledger).toMatchObject({ schemaVersion: 2, committedAtomic: '300000' });
+    expect(ledger).toMatchObject({ schemaVersion: 3, committedAtomic: '300000' });
   });
 
   it('reports an unreadable ledger ONCE and restarts the window (fail-open)', async () => {
@@ -253,5 +253,47 @@ describe('createLocalSpendAuthorizer', () => {
     const next = await on.authorize({ amountAtomic: 300_000n, creator: 'iris' });
     expect(next.sessionSpentAtomic).toBe(300_000n);
     expect(next.decision).toBe('deny');
+  });
+
+  it('tracks rolling hourly and daily spend, including pending reservations', async () => {
+    let now = 1_000_000_000_000;
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ hourlyBudgetAtomic: 500_000n, dailyBudgetAtomic: 900_000n }),
+      now: () => now,
+    });
+    const first = await auth.authorize({ amountAtomic: 400_000n, creator: 'iris' });
+    expect(first.reservationId).toBeTypeOf('string');
+    const pendingDeny = await auth.authorize({ amountAtomic: 200_000n, creator: 'iris' });
+    expect(pendingDeny.reason).toBe('hourly_budget_exceeded');
+    await auth.commit(first.reservationId, 400_000n);
+
+    now += 3_600_001;
+    const afterHour = await auth.authorize({ amountAtomic: 500_000n, creator: 'iris' });
+    expect(afterHour.decision).not.toBe('deny');
+    await auth.commit(afterHour.reservationId, 500_000n);
+    now += 3_600_001;
+    const dailyDeny = await auth.authorize({ amountAtomic: 1n, creator: 'iris' });
+    expect(dailyDeny.reason).toBe('daily_budget_exceeded');
+  });
+
+  it('conservatively migrates v2 committed spend into rolling history', async () => {
+    const now = 1_000_000_000_000;
+    await writeFile(
+      spendLedgerPath(dir),
+      JSON.stringify({
+        schemaVersion: 2,
+        windowStartMs: now - 1_000,
+        committedAtomic: '400000',
+        reservations: [],
+      }),
+    );
+    const auth = createLocalSpendAuthorizer({
+      dir,
+      policy: policy({ hourlyBudgetAtomic: 500_000n }),
+      now: () => now,
+    });
+    const denied = await auth.authorize({ amountAtomic: 100_001n, creator: 'iris' });
+    expect(denied.reason).toBe('hourly_budget_exceeded');
   });
 });

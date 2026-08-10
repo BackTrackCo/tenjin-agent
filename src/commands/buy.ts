@@ -1,7 +1,7 @@
 import { CliError } from '../lib/errors';
 import { promptYesNo } from '../lib/prompt';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
-import { resolveContextSettings } from '../lib/settings';
+import { resolveSpendContextSettings } from '../lib/spend-settings';
 import { resolveResourceRef } from '../lib/resource-ref';
 import { findSearchForResource } from '../lib/search-store';
 import { fetchRead, type Preview } from '../lib/read-client';
@@ -22,7 +22,7 @@ import {
   type TenjinSigner,
   type WalletProvider,
 } from '../lib/wallet';
-import { sanitizeForTerminal } from '../lib/output';
+import { emitNotice, sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -68,7 +68,7 @@ export async function runBuy(
   ctx: CommandContext,
   deps: BuyDeps = {},
 ): Promise<CommandResult> {
-  const settings = await resolveContextSettings(ctx);
+  const settings = await resolveSpendContextSettings(ctx);
   const sectionsBudget = parseSectionsBudget(args.sections);
   const maxPriceAtomic =
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
@@ -187,6 +187,9 @@ export async function runBuy(
 
   // 4. Genuinely unentitled: spend policy, provider-side, on the FRESH amount,
   //    BEFORE any payment. A proceeding decision reserves budget atomically.
+  for (const warning of settings.spendPolicyWarnings) {
+    emitNotice(ctx.io, warning, { json: ctx.flags.json });
+  }
   const authorizer = resolveSpendAuthorizer(
     ctx,
     settings.policy,
@@ -300,6 +303,10 @@ function policyFix(reason: string): string {
       return 'Add the creator to allowlistCreators, or clear the allowlist.';
     case 'session_budget_exceeded':
       return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
+    case 'per_request_limit_exceeded':
+    case 'hourly_budget_exceeded':
+    case 'daily_budget_exceeded':
+      return 'This limit was inherited read-only from ClawRouter. Adjust ClawRouter spending limits, or set a separate Tenjin spend policy with `tenjin config set`.';
     default:
       return 'Adjust your spend policy with `tenjin config set`.';
   }
