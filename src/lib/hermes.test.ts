@@ -5,9 +5,13 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  HERMES_PLUGIN_MANIFEST,
+  HERMES_WEB_SEARCH_TOOL,
   hermesConfigPath,
   hermesPluginDir,
+  readHermesIntegrationStatus,
   resolveHermesHome,
+  resolveHermesHomeLenient,
   wireHermesIntegration,
   wireHermesMcp,
 } from './hermes';
@@ -36,6 +40,16 @@ describe('resolveHermesHome', () => {
 
   it('rejects a relative HERMES_HOME before any write', () => {
     expect(() => resolveHermesHome(home, { HERMES_HOME: 'relative/hermes' })).toThrow(CliError);
+  });
+
+  // Doctor is the command you reach for when something is already broken, so a
+  // stray env var belonging to another tool must not take it down before a single
+  // check runs. Only a run that explicitly targeted Hermes gets the refusal.
+  it('the lenient resolver warns and falls back instead of throwing', () => {
+    const resolved = resolveHermesHomeLenient(home, { HERMES_HOME: 'relative/hermes' });
+    expect(resolved.home).toBe(join(home, '.hermes'));
+    expect(resolved.warning).toContain('relative/hermes');
+    expect(resolveHermesHomeLenient(home, {}).warning).toBeUndefined();
   });
 });
 
@@ -95,10 +109,62 @@ describe('wireHermesMcp', () => {
     expect((await wireHermesMcp(home, false, '/opt/tenjin')).status).toBe('conflict');
     expect(await readFile(hermesConfigPath(home), 'utf8')).toBe(yaml);
   });
+
+  // `command` is `process.argv[1]`, so an nvm switch, a pnpm-vs-npm global, or a
+  // project-local install re-points on the next run. Nothing covered re-point at
+  // all before: the preservation test above only exercised first insertion.
+  describe('re-pointing an entry this CLI owns', () => {
+    it('replaces the block in place instead of stacking marker comments', async () => {
+      await wireHermesMcp(home, false, '/old/tenjin');
+      expect((await wireHermesMcp(home, false, '/new/tenjin')).status).toBe('installed');
+      const text = await readFile(hermesConfigPath(home), 'utf8');
+      expect(text.match(/tenjin-cli:hermes-mcp/g)).toHaveLength(1);
+      expect(text.match(/ {2}tenjin:/g)).toHaveLength(1);
+      expect(text).toContain('command: "/new/tenjin"');
+      expect(text).not.toContain('/old/tenjin');
+    });
+
+    it('leaves a following comment and blank line where the operator put them', async () => {
+      await writeFile(
+        hermesConfigPath(home),
+        [
+          'mcp_servers:',
+          '  # tenjin-cli:hermes-mcp',
+          '  tenjin:',
+          '    command: "/old/tenjin"',
+          '    args: ["mcp"]',
+          '',
+          '  # the notes app, no colon in this line',
+          '  notes:',
+          '    command: "notes-mcp"',
+          '',
+        ].join('\n'),
+      );
+      await wireHermesMcp(home, false, '/new/tenjin');
+      const text = await readFile(hermesConfigPath(home), 'utf8');
+      expect(text).toContain('  # the notes app, no colon in this line\n  notes:');
+      expect(text).toContain('command: "notes-mcp"');
+      expect(text.match(/tenjin-cli:hermes-mcp/g)).toHaveLength(1);
+      // The whole diff is the one command line.
+      expect(text.split('\n').filter((l) => l.includes('/old/tenjin'))).toEqual([]);
+      expect(text.split('\n')).toHaveLength(10);
+    });
+
+    it('re-pointing back to the same command is a no-op', async () => {
+      await wireHermesMcp(home, false, '/opt/tenjin');
+      const before = await readFile(hermesConfigPath(home), 'utf8');
+      expect((await wireHermesMcp(home, false, '/opt/tenjin')).status).toBe('up-to-date');
+      expect(await readFile(hermesConfigPath(home), 'utf8')).toBe(before);
+    });
+  });
 });
 
 describe('wireHermesIntegration', () => {
-  const commands = { tenjinCommand: '/opt/tenjin', nodeCommand: process.execPath };
+  const commands = {
+    tenjinCommand: '/opt/tenjin',
+    nodeCommand: process.execPath,
+    hooks: { enabled: true },
+  };
 
   it('writes a native plugin, shared scripts, MCP config, and explicit activation', async () => {
     const result = await wireHermesIntegration({
@@ -191,6 +257,96 @@ describe('wireHermesIntegration', () => {
     expect(text).not.toContain('enabled:');
   });
 
+  // Nothing in the suite asserted the manifest before, and the Python probe builds
+  // its own Ctx, so the whole feature could be dead on a real machine with every
+  // test green. Pinned against `hermes_cli/plugins.py`, which parses
+  // `provides_hooks` and defaults `kind` to `standalone`.
+  it('pins the manifest to the fields the Hermes loader parses', async () => {
+    await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+    });
+    const manifest = await readFile(join(hermesPluginDir(home), 'plugin.yaml'), 'utf8');
+    expect(manifest).toBe(HERMES_PLUGIN_MANIFEST);
+    expect(manifest).toContain('kind: standalone');
+    expect(manifest).toContain('provides_hooks:\n  - pre_tool_call');
+    expect(manifest).toContain('  - transform_tool_result');
+    expect(manifest).toContain('  - transform_llm_output');
+  });
+
+  // A wrong tool identifier fails exactly the way a wrong manifest field would:
+  // the callbacks register, never match, and the suite stays green.
+  it('observes the tool Hermes actually names, and nothing else', async () => {
+    await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+    });
+    expect(HERMES_WEB_SEARCH_TOOL).toBe('web_search');
+    const pluginPath = join(hermesPluginDir(home), '__init__.py');
+    expect(await readFile(pluginPath, 'utf8')).toContain('tool_name != "web_search"');
+    const probe = [
+      'import importlib.util, json, sys',
+      'spec = importlib.util.spec_from_file_location("tenjin_plugin", sys.argv[1])',
+      'mod = importlib.util.module_from_spec(spec)',
+      'spec.loader.exec_module(mod)',
+      'hooks = {}',
+      'class Ctx:',
+      '    def register_hook(self, name, callback): hooks[name] = callback',
+      'mod.register(Ctx())',
+      'mod._run = lambda script, payload, timeout: "listing"',
+      // Hermes injects extra kwargs (telemetry_schema_version, task_id, ...), so the
+      // callbacks have to tolerate them rather than only the documented names.
+      'hooks["pre_tool_call"](tool_name="WebSearch", args={"query": "q"}, tool_call_id="c1", telemetry_schema_version=1)',
+      'other = hooks["transform_tool_result"](tool_name="WebSearch", result="r", tool_call_id="c1", task_id="t")',
+      'hooks["pre_tool_call"](tool_name="web_search", args={"query": "q"}, tool_call_id="c2", turn_id="t1", telemetry_schema_version=1)',
+      'mine = hooks["transform_tool_result"](tool_name="web_search", result="r", tool_call_id="c2", duration_ms=3, status="ok")',
+      'print(json.dumps({"other": other, "mine": mine}))',
+    ].join('\n');
+    const { stdout } = await execFileAsync('python3', ['-c', probe, pluginPath]);
+    expect(JSON.parse(stdout)).toEqual({
+      other: null,
+      mine: 'r\n\n--- Tenjin marketplace context ---\nlisting\n--- end Tenjin context ---',
+    });
+  });
+
+  // The README's `--no-hooks` row promises "writes no config", and the Claude path
+  // honors it by writing no scripts at all. This path used to write both scripts
+  // and the whole plugin anyway, withholding only the `plugins.enabled` line.
+  it('writes no hook code at all when the hooks decision said no', async () => {
+    const result = await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+      hooks: { enabled: false, fix: 'Enable them with `tenjin config set hooks.searchMode auto`.' },
+    });
+    expect(result.plugin.status).toBe('disabled');
+    expect(result.plugin.scriptPaths).toEqual([]);
+    expect(result.activation.status).toBe('disabled');
+    // The warning names the blocker that has to move, not the command just run.
+    expect(result.plugin.warning).toContain('hooks.searchMode auto');
+    await expect(
+      readFile(join(hermesPluginDir(home), '__init__.py'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      readFile(join(hermesPluginDir(home), 'plugin.yaml'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      readFile(join(dataDir, 'hooks', 'tenjin-websearch.mjs'), 'utf8'),
+    ).rejects.toThrow();
+    await expect(readFile(join(dataDir, 'hooks', 'tenjin-stop.mjs'), 'utf8')).rejects.toThrow();
+    // The MCP entry is a server registration, not a hook, so it is still written.
+    expect(result.mcp.status).toBe('installed');
+    expect(await readFile(hermesConfigPath(home), 'utf8')).not.toContain('plugins:');
+  });
+
   it('writes nothing on dry-run', async () => {
     const result = await wireHermesIntegration({
       hermesHome: home,
@@ -202,8 +358,75 @@ describe('wireHermesIntegration', () => {
     expect(result.mcp.status).toBe('would-install');
     expect(result.plugin.status).toBe('would-install');
     expect(result.activation.status).toBe('would-install');
+    // The envelope has to report what WOULD be written; an empty list under-reported
+    // the two scripts a real run creates.
+    expect(result.plugin.scriptPaths).toEqual([
+      join(dataDir, 'hooks', 'tenjin-websearch.mjs'),
+      join(dataDir, 'hooks', 'tenjin-stop.mjs'),
+    ]);
     await expect(readFile(hermesConfigPath(home), 'utf8')).rejects.toMatchObject({
       code: 'ENOENT',
+    });
+  });
+});
+
+describe('readHermesIntegrationStatus', () => {
+  const commands = {
+    tenjinCommand: process.execPath,
+    nodeCommand: process.execPath,
+    hooks: { enabled: true },
+  };
+
+  it('a fully wired home reads back green', async () => {
+    await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+    });
+    expect(await readHermesIntegrationStatus(home)).toMatchObject({
+      mcp: 'configured',
+      plugin: 'installed',
+      activation: 'enabled',
+      mcpCommand: process.execPath,
+    });
+  });
+
+  // `command` is `process.argv[1]`, so an `npx`/`pnpm dlx` run bakes a cache path
+  // that can be pruned later. Deriving the verdict from the marker and a regex
+  // alone reported Hermes green while Hermes silently failed to start the server.
+  it('a baked command that no longer exists is stale, not configured', async () => {
+    await wireHermesMcp(home, false, join(home, 'pruned', 'npx-cache', 'tenjin'));
+    const status = await readHermesIntegrationStatus(home);
+    expect(status.mcp).toBe('stale');
+    expect(status.mcpCommand).toContain('npx-cache');
+  });
+
+  // Doctor used to model activation more narrowly than the installer's planner, so
+  // it called `not-enabled` on shapes `planPluginEnable` refuses, and its fix string
+  // sent the operator into a conflict it had not predicted. One classifier now.
+  it('reports the conflict the installer would raise, not a false not-enabled', async () => {
+    await writeFile(hermesConfigPath(home), 'plugins:\n  enabled: [other]\n');
+    expect((await readHermesIntegrationStatus(home)).activation).toBe('conflict');
+    expect(
+      (
+        await wireHermesIntegration({
+          hermesHome: home,
+          dataDir,
+          dryRun: false,
+          explicit: true,
+          ...commands,
+        })
+      ).activation.status,
+    ).toBe('conflict');
+  });
+
+  it('an untouched home is missing across the board', async () => {
+    expect(await readHermesIntegrationStatus(join(home, 'nothing'))).toMatchObject({
+      mcp: 'missing',
+      plugin: 'missing',
+      activation: 'not-enabled',
     });
   });
 });

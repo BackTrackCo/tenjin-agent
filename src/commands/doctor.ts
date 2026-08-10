@@ -22,7 +22,7 @@ import {
   readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
-import { readHermesIntegrationStatus, resolveHermesHome } from '../lib/hermes';
+import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
 import type {
   DirState,
   HarnessTarget,
@@ -38,7 +38,7 @@ import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
-import type { PartialConfig } from '../lib/config';
+import type { PartialConfig, SearchHookMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -149,7 +149,14 @@ export async function collectDoctorChecks(
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
-  const hermesHome = deps.hermesHome ?? resolveHermesHome(home, env);
+  // NEVER the strict resolver here. Doctor is the command you reach for when
+  // something is already broken, so a stray relative HERMES_HOME must not abort it
+  // before a single check runs: it warns on the Hermes check and falls back.
+  const hermesTarget =
+    deps.hermesHome === undefined
+      ? resolveHermesHomeLenient(home, env)
+      : { home: deps.hermesHome, warning: undefined };
+  const hermesHome = hermesTarget.home;
 
   const built: BuiltCheck[] = [
     checkNode(),
@@ -161,7 +168,14 @@ export async function collectDoctorChecks(
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
 
-  const hermes = await checkHermes(home, hermesHome, which, requested);
+  const hermes = await checkHermes({
+    home,
+    hermesHome,
+    which,
+    requested,
+    searchMode: config.hooks?.searchMode,
+    homeWarning: hermesTarget.warning,
+  });
   if (hermes !== null) built.push(hermes);
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -387,10 +401,10 @@ async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
-  skillsSourceDir?: string,
-  hermesHome?: string,
+  skillsSourceDir: string | undefined,
+  hermesHome: string,
 ): Promise<BuiltCheck> {
-  const resolvedHermesHome = hermesHome ?? join(home, '.hermes');
+  const resolvedHermesHome = hermesHome;
   const present = detectHarnesses(home, which, resolvedHermesHome);
   const wiring = await readAllWiring(home, resolvedHermesHome);
   const data = {
@@ -503,19 +517,25 @@ async function checkSkills(
 }
 
 /** Native Hermes wiring is a separate warn-level check from portable skills. */
-async function checkHermes(
-  home: string,
-  hermesHome: string,
-  which: (bin: string) => boolean,
-  requested: readonly HarnessTarget[],
-): Promise<BuiltCheck | null> {
+async function checkHermes(args: {
+  home: string;
+  hermesHome: string;
+  which: (bin: string) => boolean;
+  requested: readonly HarnessTarget[];
+  searchMode?: SearchHookMode;
+  homeWarning?: string;
+}): Promise<BuiltCheck | null> {
+  const { home, hermesHome, which, requested, searchMode, homeWarning } = args;
   const inPlay =
     requested.includes('hermes') || harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0;
   if (!inPlay) return null;
-  const status = await readHermesIntegrationStatus(hermesHome);
+  const status = {
+    ...(await readHermesIntegrationStatus(hermesHome)),
+    ...(homeWarning !== undefined ? { homeWarning } : {}),
+  };
   const ok =
     status.mcp === 'configured' && status.plugin === 'installed' && status.activation === 'enabled';
-  if (ok) {
+  if (ok && homeWarning === undefined) {
     return {
       result: {
         name: 'hermes',
@@ -527,16 +547,29 @@ async function checkHermes(
     };
   }
   const problems: string[] = [];
-  if (status.mcp !== 'configured') problems.push(`MCP ${status.mcp}`);
+  if (status.mcp === 'stale') {
+    problems.push(`MCP command missing (${status.mcpCommand ?? 'unknown'})`);
+  } else if (status.mcp !== 'configured') problems.push(`MCP ${status.mcp}`);
   if (status.plugin !== 'installed') problems.push(`plugin ${status.plugin}`);
-  if (status.activation !== 'enabled') problems.push(`plugin ${status.activation}`);
+  // Named `activation`, not a second `plugin`: "plugin missing, plugin not-enabled"
+  // read as one subject twice.
+  if (status.activation !== 'enabled') problems.push(`activation ${status.activation}`);
+  if (homeWarning !== undefined) problems.push('HERMES_HOME ignored');
   return {
     result: {
       name: 'hermes',
       status: 'warn',
       required: false,
-      detail: `Hermes Tenjin integration incomplete in ${hermesHome}: ${problems.join(', ')}`,
-      fix: 'tenjin install --harness hermes',
+      detail: `Hermes Tenjin integration incomplete in ${hermesHome}: ${problems.join(', ')}${
+        homeWarning === undefined ? '' : `. ${homeWarning}`
+      }`,
+      // `tenjin install --harness hermes` alone is a dead end when the stored mode
+      // is `off`: it re-runs, withholds the hook code by design, and prints the same
+      // warning forever. Name the blocker that actually has to move first.
+      fix:
+        searchMode === 'off'
+          ? 'tenjin config set hooks.searchMode auto && tenjin install --harness hermes'
+          : 'tenjin install --harness hermes',
       data: status,
     },
   };
@@ -642,7 +675,7 @@ function hostedHere(w: HarnessWiring): boolean {
  * the directories detection picks, so a problem in ~/.agents/skills on a
  * Claude-only machine needs `--harness shared` spelled out.
  */
-function fixFor(home: string, dirs: HarnessWiring[], hermesHome?: string): string {
+function fixFor(home: string, dirs: HarnessWiring[], hermesHome: string): string {
   const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir, hermesHome)))];
   return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
 }

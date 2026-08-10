@@ -56,7 +56,7 @@ import {
 import type { PermissionsResult } from '../lib/harness-permissions';
 import { hooksSkipped, hooksUndo, wireSearchHooks } from '../lib/harness-hooks';
 import type { HooksResult } from '../lib/harness-hooks';
-import { resolveHermesHome, wireHermesIntegration } from '../lib/hermes';
+import { resolveHermesHome, resolveHermesHomeLenient, wireHermesIntegration } from '../lib/hermes';
 import type { HermesIntegrationResult } from '../lib/hermes';
 import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
@@ -431,7 +431,14 @@ async function installBody(
     );
   }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  const hermesHome = resolveHermesHome(home, env);
+  // A relative HERMES_HOME is only fatal when the operator asked for Hermes. On any
+  // other run it is a stray env var belonging to something else, and taking the
+  // whole install down over it punishes the wrong machine.
+  const targetsHermes = parsed.data.harness?.includes('hermes') === true;
+  const hermesTarget = targetsHermes
+    ? { home: resolveHermesHome(home, env), warning: undefined }
+    : resolveHermesHomeLenient(home, env);
+  const hermesHome = hermesTarget.home;
 
   // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
   // without --json and no envelope). `humanOutput` matches that gate so install
@@ -515,12 +522,12 @@ async function installBody(
       tenjinCommand,
       nodeCommand,
       dryRun,
-      explicit:
-        explicitHarness &&
-        parsed.data.harness?.includes('hermes') === true &&
-        !noHooks &&
-        hooks.mode !== 'off' &&
-        hooks.skipped !== 'declined',
+      // Activation consent: the operator named Hermes on the command line.
+      explicit: explicitHarness && targetsHermes,
+      // Write consent, read off the SAME hooks decision that gates Claude's
+      // settings.json. `--no-hooks` promises "writes no config" in the README, and
+      // it used to write both scripts and the whole plugin here anyway.
+      hooks: { enabled: hermesHooksEnabled(hooks), fix: hooks.fix },
     });
     for (const part of [
       hermesResult.hermes.mcp,
@@ -529,6 +536,7 @@ async function installBody(
     ]) {
       if (part.warning !== undefined) hermesResult.warnings.push(part.warning);
     }
+    if (hermesTarget.warning !== undefined) hermesResult.warnings.push(hermesTarget.warning);
   }
   // On BOTH paths now: the loop this command sets up needs a key, so a headless
   // run creates one rather than leaving the operator a setup that stops at the
@@ -1361,6 +1369,22 @@ async function resolveHooks(args: {
   return wireSearchHooks({ homeDir: home, dataDir, mode });
 }
 
+/**
+ * Whether THIS run may write Hermes hook code, read off the single hooks decision
+ * so the native path can never be more permissive than Claude's.
+ *
+ * Only the three reasons that are an operator choice withhold it. A Claude
+ * settings.json that could not be read or parsed is a Claude problem: on a machine
+ * running both, it must not silently cancel the Hermes wiring as well.
+ */
+function hermesHooksEnabled(hooks: HooksResult): boolean {
+  return (
+    hooks.skipped !== 'declined' &&
+    hooks.skipped !== 'mode-off' &&
+    hooks.skipped !== 'harness-not-claude'
+  );
+}
+
 /** The stored default for a run that was never asked. */
 const DEFAULT_HOOK_MODE: SearchHookMode = CONFIG_DEFAULTS.hooks.searchMode;
 
@@ -1430,8 +1454,8 @@ function resolvePlans(
 
   const plans: HarnessPlan[] = [];
   // Same two probes doctor's skills check gates its per-directory verdicts on.
-  const claudeBy = harnessDetectedBy(home, 'claude', which);
-  const codexBy = harnessDetectedBy(home, 'codex', which);
+  const claudeBy = harnessDetectedBy(home, 'claude', which, hermesHome);
+  const codexBy = harnessDetectedBy(home, 'codex', which, hermesHome);
   const hermesBy = harnessDetectedBy(home, 'hermes', which, hermesHome);
   if (claudeBy.length > 0) plans.push(planFor('claude', claudeBy, true, home, hermesHome));
   if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home, hermesHome));

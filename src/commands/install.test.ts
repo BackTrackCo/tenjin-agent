@@ -226,7 +226,7 @@ type Harnesses = Array<{
   notes: string[];
   hermes?: {
     mcp: { status: string };
-    plugin: { status: string };
+    plugin: { status: string; scriptPaths: string[] };
     activation: { status: string };
   };
 }>;
@@ -283,6 +283,40 @@ describe('runInstall: harness override', () => {
     expect(await readFile(join(home, '.hermes', 'config.yaml'), 'utf8')).toContain(
       'enabled:\n    - tenjin',
     );
+  });
+
+  // The README's `--no-hooks` row says "Register no hooks this run; writes no
+  // config", and the Claude path honors it by writing no scripts at all. This path
+  // used to write both shared scripts AND the whole plugin, withholding only the
+  // `plugins.enabled` line, then tell the operator to re-run the command they had
+  // just run.
+  it('--no-hooks writes no Hermes hook code, only the MCP entry', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true, noHooks: true },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.hermes?.mcp.status).toBe('installed');
+    expect(h.hermes?.plugin.status).toBe('disabled');
+    expect(h.hermes?.plugin.scriptPaths).toEqual([]);
+    expect(h.hermes?.activation.status).toBe('disabled');
+    await expect(
+      readFile(join(home, '.hermes', 'plugins', 'tenjin', '__init__.py'), 'utf8'),
+    ).rejects.toThrow();
+    await expect(readFile(join(data, 'hooks', 'tenjin-websearch.mjs'), 'utf8')).rejects.toThrow();
+  });
+
+  it('a stored searchMode of off withholds the plugin and names the real blocker', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true, searchHooks: 'off' },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.hermes?.plugin.status).toBe('disabled');
+    // Not "re-run `tenjin install --harness hermes`", which loops forever.
+    expect(h.warnings.join(' ')).toContain('hooks.searchMode auto');
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {

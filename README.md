@@ -268,8 +268,13 @@ registers them in `settings.json`; Hermes calls the same scripts through a nativ
 plugin under `~/.hermes/plugins/tenjin`. The scripts do not boot the CLI, and
 neither adapter can block, deny, or modify a tool call. The pre-search hook runs
 before the search it rides on, so it can delay one, bounded by its ~2s fetch
-budget and the 5s Claude harness kill below (the Hermes adapter adds its own
-three-second subprocess timeout).
+budget and the 5s Claude harness kill below. The Hermes adapter adds its own
+subprocess timeouts: 3s on the pre-search call, 2s on the publish-back call.
+
+`--no-hooks` and `--search-hooks off` withhold the Hermes plugin exactly as they
+withhold Claude's `settings.json` entries: no scripts, no plugin, no activation.
+The `mcp_servers.tenjin` entry is a server registration rather than a hook, so it
+is still written.
 
 - **PreToolUse on `WebSearch`** asks the marketplace the same question the agent
   is about to ask the web and mentions a tested answer when one exists. It cannot

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { CliError } from './errors';
@@ -7,6 +7,40 @@ import { writeSharedHookScripts } from './harness-hooks';
 
 export const HERMES_MCP_MARKER = 'tenjin-cli:hermes-mcp';
 export const HERMES_PLUGIN_NAME = 'tenjin';
+
+/**
+ * The Hermes tool this plugin observes. Getting this string wrong fails silently:
+ * the callbacks register, never match, and the suite stays green. Pinned against
+ * `tools/web_tools.py`, where `WEB_SEARCH_SCHEMA["name"] == "web_search"`.
+ */
+export const HERMES_WEB_SEARCH_TOOL = 'web_search';
+
+/**
+ * `~/.hermes/plugins/<name>/plugin.yaml`, pinned against the loader rather than
+ * against the manifests Hermes ships.
+ *
+ * `hermes_cli/plugins.py::_parse_manifest` reads `data.get("provides_hooks", [])`;
+ * the `hooks:` key used by the in-repo example plugins is silently dropped by that
+ * same parser, so this emits the field the loader can actually consume. `kind`
+ * defaults to `standalone` and is spelled out because the default is not
+ * documented in the manifest examples. None of it is load-bearing: hooks are
+ * registered by `register(ctx)` calling `ctx.register_hook`, which is checked
+ * against a module-level VALID_HOOKS set and never against the manifest. The
+ * manifest is what `hermes plugins list` shows the operator, so it still has to be
+ * true. See {@link https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/plugins.py}.
+ */
+export const HERMES_PLUGIN_MANIFEST = [
+  'name: tenjin',
+  'version: "1.0.0"',
+  'description: "Check Tenjin before Hermes web searches and surface unresolved searches at turn end."',
+  'author: "Tenjin"',
+  'kind: standalone',
+  'provides_hooks:',
+  '  - pre_tool_call',
+  '  - transform_tool_result',
+  '  - transform_llm_output',
+  '',
+].join('\n');
 
 export type HermesWriteStatus =
   'installed' | 'up-to-date' | 'would-install' | 'disabled' | 'conflict';
@@ -27,19 +61,54 @@ export interface HermesIntegrationResult {
 
 export interface HermesIntegrationStatus {
   home: string;
-  mcp: 'configured' | 'missing' | 'conflict';
+  /** `stale` means the marker and shape are ours but the baked command no longer exists. */
+  mcp: 'configured' | 'stale' | 'missing' | 'conflict';
   plugin: 'installed' | 'missing' | 'partial';
   activation: 'enabled' | 'disabled' | 'not-enabled' | 'conflict';
+  /** The command Hermes would run, when one could be parsed out of a managed entry. */
+  mcpCommand?: string;
+  /** Set when a relative HERMES_HOME was ignored in favor of the default. */
+  homeWarning?: string;
 }
 
-/** Hermes honors HERMES_HOME; reject a relative override before writing anywhere. */
+export interface HermesHomeResolution {
+  home: string;
+  /** Present when HERMES_HOME was unusable and `~/.hermes` was used instead. */
+  warning?: string;
+}
+
+const RELATIVE_HERMES_HOME_FIX =
+  'Set HERMES_HOME to an absolute directory, or unset it to use ~/.hermes.';
+
+/**
+ * Hermes honors HERMES_HOME; reject a relative override before writing anywhere.
+ * Use this ONLY where the operator explicitly targeted Hermes, so the refusal is
+ * about the thing they asked for. Every other caller wants
+ * {@link resolveHermesHomeLenient}: a stray relative value in the environment is
+ * not a reason to take down a command that was never going to touch Hermes.
+ */
 export function resolveHermesHome(home: string, env: NodeJS.ProcessEnv): string {
+  const resolved = resolveHermesHomeLenient(home, env);
+  if (resolved.warning !== undefined) {
+    throw new CliError('CONFIG_INVALID', 'HERMES_HOME must be an absolute path', {
+      fix: RELATIVE_HERMES_HOME_FIX,
+    });
+  }
+  return resolved.home;
+}
+
+/** The same resolution, downgraded to a warning plus the `~/.hermes` fallback. */
+export function resolveHermesHomeLenient(
+  home: string,
+  env: NodeJS.ProcessEnv,
+): HermesHomeResolution {
   const configured = env.HERMES_HOME?.trim();
-  if (configured === undefined || configured.length === 0) return join(home, '.hermes');
-  if (isAbsolute(configured)) return configured;
-  throw new CliError('CONFIG_INVALID', 'HERMES_HOME must be an absolute path', {
-    fix: 'Set HERMES_HOME to an absolute directory, or unset it to use ~/.hermes.',
-  });
+  if (configured === undefined || configured.length === 0) return { home: join(home, '.hermes') };
+  if (isAbsolute(configured)) return { home: configured };
+  return {
+    home: join(home, '.hermes'),
+    warning: `HERMES_HOME is set to a relative path (${configured}) and was ignored; using ~/.hermes. ${RELATIVE_HERMES_HOME_FIX}`,
+  };
 }
 
 export function hermesSkillsDir(hermesHome: string): string {
@@ -62,18 +131,24 @@ export async function readHermesIntegrationStatus(
   const lines = config === null ? [] : normalizedLines(config);
   const mcpRoot = rootIndexes(lines, 'mcp_servers')[0];
   let mcp: HermesIntegrationStatus['mcp'] = 'missing';
+  let mcpCommand: string | undefined;
   if (mcpRoot !== undefined) {
     const end = topLevelEnd(lines, mcpRoot + 1);
     const tenjin = lines.findIndex(
       (line, i) => i > mcpRoot && i < end && /^ {2}tenjin:\s*(?:#.*)?$/.test(line),
     );
     if (tenjin >= 0) {
-      const childEnd = siblingEnd(lines, tenjin + 1, end, 2);
+      const childEnd = blockEnd(lines, tenjin + 1, end, 2);
       const managed = lines[tenjin - 1]?.trim() === `# ${HERMES_MCP_MARKER}`;
+      mcpCommand = managed
+        ? managedMcpCommand(lines.slice(tenjin, childEnd).join('\n'))
+        : undefined;
+      // A managed entry whose baked command has since been deleted is worse than a
+      // missing one: Hermes fails to start the server and doctor would otherwise
+      // report green. `command` is `process.argv[1]`, so an npx/dlx cache path or a
+      // node version switch makes this an ordinary outcome, not an exotic one.
       mcp =
-        managed && managedMcpCommand(lines.slice(tenjin, childEnd).join('\n'))
-          ? 'configured'
-          : 'conflict';
+        mcpCommand === undefined ? 'conflict' : (await exists(mcpCommand)) ? 'configured' : 'stale';
     }
   }
   const pluginPath = join(hermesPluginDir(hermesHome), '__init__.py');
@@ -89,21 +164,39 @@ export async function readHermesIntegrationStatus(
         ? 'missing'
         : 'partial';
   const lists = inspectPluginLists(config);
-  const activation = lists.disabled
+  // The conflict verdict comes from the WRITER's planner, not a second, narrower
+  // model of the same YAML. Doctor used to call `not-enabled` on shapes the
+  // installer then refused (an inline `plugins.enabled: [x]`, for one), so its fix
+  // string sent the operator into a conflict it had not predicted.
+  const activation: HermesIntegrationStatus['activation'] = lists.disabled
     ? 'disabled'
     : lists.enabled
       ? 'enabled'
-      : rootIndexes(lines, 'plugins').length > 1 ||
-          lines.some((line) => /^plugins\s*:\s*\S/.test(line))
+      : planPluginEnable(config).kind === 'conflict'
         ? 'conflict'
         : 'not-enabled';
-  return { home: hermesHome, mcp, plugin, activation };
+  return {
+    home: hermesHome,
+    mcp,
+    plugin,
+    activation,
+    ...(mcpCommand !== undefined ? { mcpCommand } : {}),
+  };
 }
 
 /**
- * Install Hermes' native plugin and additive MCP entry. The plugin is enabled only
- * when Hermes was explicitly named: auto-detection may put inert files on disk,
- * but never opts the operator into executing third-party code.
+ * Install Hermes' native plugin and additive MCP entry.
+ *
+ * TWO independent decisions gate this, and folding them together is the bug this
+ * signature exists to prevent. `hooks` is whether the operator consented to hook
+ * code at all this run: it is the SAME decision that gates Claude's settings.json
+ * write, so `--no-hooks` must leave the scripts and the plugin unwritten here too,
+ * exactly as the README's row promises. `explicit` is narrower and is only about
+ * ACTIVATION: auto-detection may put inert files on disk, but never opts the
+ * operator into executing third-party code.
+ *
+ * The MCP entry is deliberately outside both. It is a server registration, not a
+ * hook, and it is what `--no-hooks` users still want.
  */
 export async function wireHermesIntegration(opts: {
   hermesHome: string;
@@ -112,15 +205,30 @@ export async function wireHermesIntegration(opts: {
   nodeCommand: string;
   dryRun: boolean;
   explicit: boolean;
+  hooks: { enabled: boolean; fix?: string };
 }): Promise<HermesIntegrationResult> {
-  const { hermesHome, dataDir, tenjinCommand, nodeCommand, dryRun, explicit } = opts;
+  const { hermesHome, dataDir, tenjinCommand, nodeCommand, dryRun, explicit, hooks } = opts;
   const mcp = await wireHermesMcp(hermesHome, dryRun, tenjinCommand);
+  const websearchPath = join(dataDir, 'hooks', 'tenjin-websearch.mjs');
+  const stopPath = join(dataDir, 'hooks', 'tenjin-stop.mjs');
+  if (!hooks.enabled) {
+    const pluginDir = hermesPluginDir(hermesHome);
+    return {
+      home: hermesHome,
+      explicit,
+      mcp,
+      plugin: {
+        path: join(pluginDir, '__init__.py'),
+        manifestPath: join(pluginDir, 'plugin.yaml'),
+        status: 'disabled',
+        scriptPaths: [],
+        warning: `No Hermes hook code was written this run.${hooks.fix === undefined ? '' : ` ${hooks.fix}`}`,
+      },
+      activation: { path: hermesConfigPath(hermesHome), status: 'disabled' },
+    };
+  }
   const shared = dryRun
-    ? {
-        written: [] as string[],
-        websearchPath: join(dataDir, 'hooks', 'tenjin-websearch.mjs'),
-        stopPath: join(dataDir, 'hooks', 'tenjin-stop.mjs'),
-      }
+    ? { written: [websearchPath, stopPath], websearchPath, stopPath }
     : await writeSharedHookScripts(dataDir);
   const plugin = await wireHermesPlugin({
     hermesHome,
@@ -161,17 +269,7 @@ async function wireHermesPlugin(opts: {
   const path = join(dir, '__init__.py');
   const manifestPath = join(dir, 'plugin.yaml');
   const source = hermesPluginSource(opts.nodeCommand, opts.websearchPath, opts.stopPath);
-  const manifest = [
-    'name: tenjin',
-    'version: "1.0.0"',
-    'description: "Check Tenjin before Hermes web searches and surface unresolved searches at turn end."',
-    'author: "Tenjin"',
-    'hooks:',
-    '  - pre_tool_call',
-    '  - transform_tool_result',
-    '  - transform_llm_output',
-    '',
-  ].join('\n');
+  const manifest = HERMES_PLUGIN_MANIFEST;
   const currentSource = await readOptional(path);
   const currentManifest = await readOptional(manifestPath);
   if (currentSource === source && currentManifest === manifest) {
@@ -249,7 +347,7 @@ function planHermesMcp(existing: string | null, command: string): TextPlan {
     return conflict('config.yaml uses an unsupported inline mcp_servers.tenjin value');
   }
   if (tenjin >= 0) {
-    const childEnd = siblingEnd(lines, tenjin + 1, end, 2);
+    const childEnd = blockEnd(lines, tenjin + 1, end, 2);
     const block = lines.slice(tenjin, childEnd).join('\n');
     const managed = lines[tenjin - 1]?.trim() === `# ${HERMES_MCP_MARKER}`;
     const current = managed ? managedMcpCommand(block) : undefined;
@@ -257,7 +355,11 @@ function planHermesMcp(existing: string | null, command: string): TextPlan {
     if (current === undefined) {
       return conflict('config.yaml already defines mcp_servers.tenjin; it was left untouched');
     }
-    const next = [...lines.slice(0, tenjin), mcpEntry(command), ...lines.slice(childEnd)].join(
+    // Splice FROM the marker, because `mcpEntry` re-emits it: starting at `tenjin`
+    // left the old marker in place and appended a second one on every re-point.
+    // `command` is `process.argv[1]`, so an nvm switch or a pnpm-vs-npm global
+    // makes re-pointing routine rather than rare.
+    const next = [...lines.slice(0, tenjin - 1), mcpEntry(command), ...lines.slice(childEnd)].join(
       '\n',
     );
     return { kind: 'write', content: withFinalNewline(next) };
@@ -299,7 +401,7 @@ function planPluginEnable(existing: string | null): Exclude<TextPlan, { kind: 's
     ].join('\n');
     return { kind: 'write', content: withFinalNewline(next) };
   }
-  const listEnd = siblingEnd(lines, enabled + 1, end, 2);
+  const listEnd = blockEnd(lines, enabled + 1, end, 2);
   const entries = lines
     .slice(enabled + 1, listEnd)
     .filter((line) => line.trim() && !/^\s*#/.test(line));
@@ -332,7 +434,7 @@ function inspectPluginLists(existing: string | null): { enabled: boolean; disabl
       (line, i) => i > root && i < end && new RegExp(`^ {2}${key}:\\s*(?:#.*)?$`).test(line),
     );
     if (start < 0) return false;
-    const stop = siblingEnd(lines, start + 1, end, 2);
+    const stop = blockEnd(lines, start + 1, end, 2);
     return lines
       .slice(start + 1, stop)
       .some((line) => /^ {4}-\s+["']?tenjin["']?\s*(?:#.*)?$/.test(line));
@@ -394,7 +496,7 @@ def _prune(now):
 
 
 def _pre_tool_call(tool_name="", args=None, **kwargs):
-    if tool_name != "web_search" or not isinstance(args, dict):
+    if tool_name != ${JSON.stringify(HERMES_WEB_SEARCH_TOOL)} or not isinstance(args, dict):
         return None
     context = _run(WEBSEARCH_SCRIPT, {"tool_name": tool_name, "args": args}, 3.0)
     if context:
@@ -406,7 +508,7 @@ def _pre_tool_call(tool_name="", args=None, **kwargs):
 
 
 def _transform_tool_result(tool_name="", result=None, **kwargs):
-    if tool_name != "web_search" or not isinstance(result, str):
+    if tool_name != ${JSON.stringify(HERMES_WEB_SEARCH_TOOL)} or not isinstance(result, str):
         return None
     with _LOCK:
         item = _HINTS.pop(_key(kwargs), None)
@@ -475,10 +577,33 @@ function topLevelEnd(lines: string[], start: number): number {
   return lines.length;
 }
 
-function siblingEnd(lines: string[], start: number, limit: number, indent: number): number {
-  const sibling = new RegExp(`^ {${indent}}\\S[^:]*:\\s*`);
-  for (let i = start; i < limit; i += 1) if (sibling.test(lines[i] ?? '')) return i;
-  return limit;
+/**
+ * One past the last line that belongs to the mapping opened at `start - 1`.
+ *
+ * Membership is INDENT, not a sibling-key regex: the old probe (`^ {2}\S[^:]*:`)
+ * only recognized a sibling that contained a colon, so a plain comment written for
+ * the next server counted as part of this block and a re-point splice deleted it.
+ * Blank lines and comments are ambiguous by nature, so they belong only when a
+ * deeper line still follows; trailing ones stay with whatever comes next.
+ */
+function blockEnd(lines: string[], start: number, limit: number, indent: number): number {
+  let end = start;
+  for (let i = start; i < limit; i += 1) {
+    const line = lines[i] ?? '';
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (line.length - line.trimStart().length <= indent) return end;
+    end = i + 1;
+  }
+  return end;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function supportedChildren(lines: string[], start: number, end: number): boolean {

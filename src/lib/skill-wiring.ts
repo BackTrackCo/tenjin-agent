@@ -44,7 +44,14 @@ export interface HarnessWiring {
   state: DirState;
 }
 
-export function skillsDirsFor(home: string, hermesHome = join(home, '.hermes')): string[] {
+/**
+ * `hermesHome` is REQUIRED on every function in this module, and deliberately has
+ * no `join(home, '.hermes')` default. A default made a wrong value invisible at
+ * the call site: `skill-heal` forgot the argument and, under a custom HERMES_HOME,
+ * silently stopped covering the Hermes skills directory. A missing argument is now
+ * a compile error instead of a directory nobody notices going unhealed.
+ */
+export function skillsDirsFor(home: string, hermesHome: string): string[] {
   return [
     join(home, '.claude', 'skills'),
     join(home, '.agents', 'skills'),
@@ -63,11 +70,7 @@ export const HARNESS_TARGETS = ['claude', 'codex', 'hermes', 'shared'] as const;
 export type HarnessTarget = (typeof HARNESS_TARGETS)[number];
 
 /** The skills directory a target writes to. `codex` and `shared` share ~/.agents/skills. */
-export function harnessTargetDir(
-  home: string,
-  harness: HarnessTarget,
-  hermesHome = join(home, '.hermes'),
-): string {
+export function harnessTargetDir(home: string, harness: HarnessTarget, hermesHome: string): string {
   if (harness === 'claude') return join(home, '.claude', 'skills');
   if (harness === 'hermes') return join(hermesHome, 'skills');
   return join(home, '.agents', 'skills');
@@ -78,11 +81,7 @@ export function harnessTargetDir(
  * ~/.agents/skills by default, so a bare `tenjin install` cannot clear a problem
  * found there.
  */
-export function harnessFlagFor(
-  home: string,
-  dir: string,
-  hermesHome = join(home, '.hermes'),
-): string {
+export function harnessFlagFor(home: string, dir: string, hermesHome: string): string {
   if (dir === join(home, '.claude', 'skills')) return 'claude';
   if (dir === join(hermesHome, 'skills')) return 'hermes';
   return 'shared';
@@ -101,7 +100,7 @@ export function harnessDetectedBy(
   home: string,
   harness: DetectableHarness,
   which: (bin: string) => boolean,
-  hermesHome = join(home, '.hermes'),
+  hermesHome: string,
 ): string[] {
   const reasons: string[] = [];
   const harnessHome = harness === 'hermes' ? hermesHome : join(home, `.${harness}`);
@@ -122,11 +121,11 @@ export interface HarnessPresence {
 export function detectHarnesses(
   home: string,
   which: (bin: string) => boolean,
-  hermesHome = join(home, '.hermes'),
+  hermesHome: string,
 ): HarnessPresence {
   return {
-    claude: harnessDetectedBy(home, 'claude', which).length > 0,
-    codex: harnessDetectedBy(home, 'codex', which).length > 0,
+    claude: harnessDetectedBy(home, 'claude', which, hermesHome).length > 0,
+    codex: harnessDetectedBy(home, 'codex', which, hermesHome).length > 0,
     hermes: harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0,
   };
 }
@@ -142,7 +141,7 @@ export function harnessReads(
   home: string,
   dir: string,
   present: HarnessPresence,
-  hermesHome = join(home, '.hermes'),
+  hermesHome: string,
 ): boolean {
   const target = harnessFlagFor(home, dir, hermesHome);
   if (target === 'claude') return present.claude;
@@ -160,7 +159,7 @@ export function harnessRequested(
   home: string,
   dir: string,
   requested: readonly HarnessTarget[],
-  hermesHome = join(home, '.hermes'),
+  hermesHome: string,
 ): boolean {
   return requested.some((h) => harnessTargetDir(home, h, hermesHome) === dir);
 }
@@ -175,7 +174,7 @@ export function harnessInPlay(
   dir: string,
   present: HarnessPresence,
   requested: readonly HarnessTarget[],
-  hermesHome = join(home, '.hermes'),
+  hermesHome: string,
 ): boolean {
   return (
     harnessReads(home, dir, present, hermesHome) ||
@@ -219,10 +218,7 @@ export async function readHarnessWiring(dir: string): Promise<HarnessWiring> {
   return { dir, exists, skills, state: classify(skills) };
 }
 
-export async function readAllWiring(
-  home: string,
-  hermesHome = join(home, '.hermes'),
-): Promise<HarnessWiring[]> {
+export async function readAllWiring(home: string, hermesHome: string): Promise<HarnessWiring[]> {
   const out: HarnessWiring[] = [];
   for (const dir of skillsDirsFor(home, hermesHome)) out.push(await readHarnessWiring(dir));
   return out;

@@ -73,8 +73,8 @@ function heal(io: Io, env: NodeJS.ProcessEnv = {}): Promise<void> {
   return healWiredSkills({ io, env, homeDir: home, skillsSourceDir: SKILLS_SRC });
 }
 
-const claudeDir = (): string => skillsDirsFor(home)[0]!;
-const sharedDir = (): string => skillsDirsFor(home)[1]!;
+const claudeDir = (): string => skillsDirsFor(home, join(home, '.hermes'))[0]!;
+const sharedDir = (): string => skillsDirsFor(home, join(home, '.hermes'))[1]!;
 
 /** What an older build left behind: our frontmatter, someone else's body. */
 const stale = (name: string): string =>

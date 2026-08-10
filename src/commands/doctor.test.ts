@@ -131,12 +131,15 @@ async function writeWallet(mode: number): Promise<void> {
 describe('runDoctor — passing outcomes', () => {
   it('reports a working native Hermes integration separately from portable skills', async () => {
     await wireHermesIntegration({
+      // A path that EXISTS: doctor now stats the baked command, because an
+      // `npx`/`dlx` cache path can be pruned out from under a green check.
       hermesHome: join(skillHome, '.hermes'),
       dataDir: dir,
-      tenjinCommand: '/opt/tenjin',
+      tenjinCommand: process.execPath,
       nodeCommand: process.execPath,
       dryRun: false,
       explicit: true,
+      hooks: { enabled: true },
     });
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -149,6 +152,73 @@ describe('runDoctor — passing outcomes', () => {
     const checks = (res.data as { checks: CheckResult[] }).checks;
     expect(find(checks, 'hermes')).toMatchObject({ status: 'ok', required: false });
     expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
+  });
+
+  // Flagged and still live at review time: doctor called the STRICT resolver
+  // unconditionally, so a stray relative HERMES_HOME belonging to some other tool
+  // returned CONFIG_INVALID and ran zero checks on a Claude-only machine. Doctor is
+  // the command you reach for when something is already broken.
+  it('a relative HERMES_HOME warns and falls back instead of aborting every check', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: { HERMES_HOME: 'relative/hermes' },
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(checks.length).toBeGreaterThan(1);
+    expect(find(checks, 'node').status).toBe('ok');
+  });
+
+  it('a baked MCP command that no longer exists warns instead of reading green', async () => {
+    const hermesHome = join(skillHome, '.hermes');
+    await wireHermesIntegration({
+      hermesHome,
+      dataDir: dir,
+      tenjinCommand: join(skillHome, 'pruned-npx-cache', 'tenjin'),
+      nodeCommand: process.execPath,
+      dryRun: false,
+      explicit: true,
+      hooks: { enabled: true },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
+    expect(hermes.status).toBe('warn');
+    expect(hermes.detail).toContain('MCP command missing');
+    // One subject per problem: "plugin missing, plugin not-enabled" read as one
+    // thing twice.
+    expect(hermes.detail).not.toContain('plugin plugin');
+  });
+
+  // `tenjin install --harness hermes` alone is a dead end with the mode stored off:
+  // it re-runs, withholds the hook code by design, and prints the same warning
+  // forever. The `native-harness` fix string in this same PR already names the
+  // config command; doctor has to as well.
+  it('names the config command when the stored searchMode is what blocks the plugin', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { searchMode: 'off' } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
+    expect(hermes.status).toBe('warn');
+    expect(hermes.fix).toContain('tenjin config set hooks.searchMode auto');
   });
 
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
