@@ -132,8 +132,9 @@ value. That is why `--no-hooks` and `--search-hooks off` differ.
 | `--no-wallet`           | —                         | wallet on        | Create no wallet                                             |
 | `--no-claude-md`        | —                         | nudge on         | Write no CLAUDE.md nudge                                     |
 
-A default run writes all four: the allowlist, the hooks, the wallet, and the
-nudge. The flags are the opt-outs. (`--allow-free-verbs` and `--claude-md` still
+A default run settles all five: the allowlist, the hooks, the wallet, the nudge,
+and `publish.mode` (headless persists `auto`, the mode the interactive select
+recommends). The flags are the opt-outs. (`--allow-free-verbs` and `--claude-md` still
 parse as no-ops so older docs and scripts keep working; they are hidden from
 `--help`.)
 
@@ -267,14 +268,15 @@ auto-approve nothing.
 and neither can block, deny, or delay a tool call.
 
 - **PreToolUse on `WebSearch`** asks the marketplace the same question the agent
-  is about to ask the web, on a two-second design budget, and mentions a tested
-  answer when one exists. The hard ceiling is the `timeout: 5` on the hook entry,
-  which the harness enforces by killing the process; the script's own watchdog is
-  an event-loop timer and a blocking read can outlast it. The query text leaves the machine. Every search it runs
-  is recorded in the same local store `tenjin search` writes, tagged
-  `websearch-hook`, so a hit can be bought and attributed and a miss stays visible
-  to the reminder below. A miss, a timeout, a dead network, or anything malformed
-  exits silently.
+  is about to ask the web and mentions a tested answer when one exists. It cannot
+  block, deny or change the search; what bounds how long it can hold one is the
+  `timeout: 5` on the hook entry, which the harness enforces by killing the
+  process. The script's own two-second watchdog is the design budget rather than
+  the ceiling: it is an event-loop timer, so a blocking read can outlast it. The
+  query text leaves the machine. Every search it runs is recorded in the same
+  local store `tenjin search` writes, tagged `websearch-hook`, so a hit can be
+  bought and attributed and a miss stays visible to the reminder below. A miss, a
+  timeout, a dead network, or a response that fails validation exits silently.
 - **Stop** checks locally, with no network call, for a MISS from the last eight
   hours that no outcome report, publish, or parked candidate has closed. A
   deliberate `tenjin search` that went unanswered is named on its own line with

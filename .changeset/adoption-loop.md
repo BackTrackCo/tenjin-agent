@@ -45,10 +45,15 @@ web, on a ~2s design budget (the hard bound is the harness's own 5s kill), and
 mentions a tested answer with its price and
 a free `tenjin inspect` command when one exists. A `Stop` hook checks locally,
 with no network call, for a MISS from the last eight hours that nothing has closed
-and reminds you once to publish it back. Both fail open by construction: they emit
-`additionalContext` and never a `permissionDecision`, so neither can block, deny,
-or modify a tool call, and a miss, a timeout, a dead network, a malformed payload
-or an unreadable config all exit 0 with nothing on stdout. They are standalone
+and reminds you once per turn-end to publish it back. Both fail open by
+construction: they emit `additionalContext` and never a `permissionDecision`, so
+neither can block, deny, or modify a tool call, and a miss, a timeout, a dead
+network, an unreadable config, or a response that fails validation all exit 0 with
+nothing on stdout. The response boundary DROPS rather than repairs: a wrong
+`schemaVersion`, a non-uuid searchId or resourceId, an unrecognized decision, an
+off-origin or over-length url, a non-string title, or a price that is not an
+atomic amount takes the candidate (or the whole record) out rather than being
+coerced into a usable-looking value. They are standalone
 scripts rather than a CLI subcommand so a hook on the critical path never pays for
 a CLI boot, and they read `baseUrl` and `hooks.searchMode` from config on every
 run, so `tenjin config set hooks.searchMode off` disarms them immediately with no
@@ -74,7 +79,9 @@ equally worth an agent's attention. A deliberate search nobody answered is named
 on its own line with its `searchId`. Searches the WebSearch hook ran are batched
 into one line, at most three, since nobody vetted those questions for the
 marketplace and only the agent can tell which produced something durable. The
-hook never makes that judgment. Each search is raised once either way.
+hook never makes that judgment. Each search is raised once per turn-end either
+way; two sessions ending at the same instant can name one loop twice, which costs
+a duplicate line and is why there is no lock.
 
 **An unmet question stays visible.** Every fresh MISS now says so: one stderr line
 for a human and a `publishBack` field carrying the `searchId` and both closing

@@ -1036,13 +1036,12 @@ function doctorNotices(io: Io, doctor: DoctorChecks, wallet: WalletOutcome): str
 // --- Publish-mode selection (D38 setup) ------------------------------------------
 
 /**
- * The STORED default: what a non-interactive run, a cancelled question, or a
- * `--dry-run` leaves `publish.mode` at, which is to say unset. A headless run no
- * longer lands here at all (see RECOMMENDED_MODE); this is the dry-run and
- * cancelled-select value only. It is deliberately
- * NOT the interactively recommended answer below: recommending `auto` is a thing
- * we do to a human who is looking at the consequence, never a thing that happens
- * to a machine run that was never asked.
+ * The STORED default: what a `--dry-run` or a cancelled question leaves
+ * `publish.mode` at, which is to say unset. A NON-INTERACTIVE run no longer lands
+ * here; it settles RECOMMENDED_MODE below, because leaving the key unset made a
+ * headless install the one path where the agent's publishing consent silently
+ * differed from what the operator would have been shown. This value is now the
+ * "nobody chose anything and nothing was written" answer only.
  */
 const DEFAULT_MODE: PublishMode = CONFIG_DEFAULTS.publish.mode;
 
