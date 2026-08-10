@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 5;
+export const HOOK_SCRIPT_VERSION = 6;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -60,6 +60,9 @@ const MAX_WEAK_LOOPS = 3;
 /** Candidates the WebSearch hook asks for, and mentions. Two lines is the cap the
  *  hint has to live inside; asking for more would only be thrown away. */
 const SEARCH_LIMIT = 2;
+/** The canonical bound agent-api.ts puts on a browse/candidate url. Over it the
+ *  candidate is dropped, never clipped: a clipped url is a different url. */
+const BROWSE_URL_MAX = 512;
 /**
  * How long the WebSearch hook waits for the search store's lock before giving up
  * on recording. Far below the CLI's own 5s: recording is best-effort bookkeeping
@@ -356,15 +359,22 @@ async function main() {
   // origin baseUrl names, so the response is untrusted input, and the fields it
   // carries are ACTIONABLE: a resourceId is interpolated into a command the agent
   // is invited to run, and a url is a payable pointer a later \`buy\` resolves.
-  // Nothing here is coerced or truncated into a usable-looking value; a field
-  // that does not match its shape drops its candidate, and a bad searchId or
-  // decision drops the whole response. Truncating an id or a url does not shorten
-  // it, it invents a DIFFERENT one that still looks legitimate.
+  // IT DROPS, IT NEVER REPAIRS. Nothing here is coerced, truncated or defaulted
+  // into a usable-looking value: a field that does not match its shape drops its
+  // candidate, and a bad schemaVersion, searchId or decision drops the whole
+  // response. Repairing an actionable field does not recover it, it invents a
+  // DIFFERENT one that still looks legitimate: a clipped url is a different
+  // pointer, a defaulted price is a different amount, a stringified title is text
+  // nobody wrote. The only shortening left is the display title, which is not
+  // actionable. Mirrors searchResponseSchema in src/lib/agent-api.ts.
+  if (body.schemaVersion !== 2) return quiet();
   if (!UUID_RE.test(String(body.searchId))) return quiet();
   if (body.decision !== 'CANDIDATES' && body.decision !== 'MISS') return quiet();
   const decision = body.decision;
-  // Capped BEFORE anything is examined, so a ten-thousand-candidate response
-  // costs the same as a two-candidate one in both work and stored bytes.
+  // Sliced after parsing, so this caps PROJECTION AND STORAGE, not the download
+  // or the JSON parse: those already happened, bounded by the fetch timeout. What
+  // it buys is that a ten-thousand-candidate response cannot put ten thousand
+  // entries in searches.json or ten thousand lines in the hint.
   const candidates = (Array.isArray(body.candidates) ? body.candidates : []).slice(
     0,
     ${SEARCH_LIMIT},
@@ -376,15 +386,29 @@ async function main() {
   for (const c of candidates) {
     if (!isRecord(c)) continue;
     if (typeof c.resourceId !== 'string' || !UUID_RE.test(c.resourceId)) continue;
-    if (typeof c.url !== 'string' || !sameOrigin(c.url, url)) continue;
+    // Same origin AND within the canonical bound. Over-length is REJECTED rather
+    // than sliced for the same reason an id is: a clipped url is not a shorter
+    // url, it is a different one that still looks payable.
+    if (typeof c.url !== 'string' || c.url.length > ${BROWSE_URL_MAX} || !sameOrigin(c.url, url)) {
+      continue;
+    }
+    // A title that is not a string is not stringified into one. \`String(x)\` on an
+    // object yields '[object Object]', which is display text nobody wrote.
+    if (typeof c.title !== 'string') continue;
+    // A price that is not atomic DROPS the candidate; it is never laundered to
+    // '0'. Zero is a real, meaningful price here (a free piece \`read\` delivers
+    // without paying), so writing it over a malformed one manufactures local
+    // business state: lib/money.ts's isPaidPrice deliberately answers "unknown"
+    // for a non-atomic string precisely so \`outcome\` does not refuse an honest
+    // purchase_declined, and a laundered zero would turn that into a confident
+    // "free" and defeat it. Advertising the candidate at $0.00 would be the same
+    // lie on the display side.
+    if (typeof c.price !== 'string' || !ATOMIC_RE.test(c.price)) continue;
     stored.push({
       resourceId: c.resourceId,
       url: c.url,
       title: clean(c.title, 200),
-      // Atomic or nothing: a price that is not a plain integer string is not
-      // rendered as money anywhere, and storing the raw value would put an
-      // arbitrary string where the CLI's own readers expect an amount.
-      price: typeof c.price === 'string' && ATOMIC_RE.test(c.price) ? c.price : '0',
+      price: c.price,
     });
   }
   // BEFORE any emit, because emit exits the process. A MISS recorded here is what

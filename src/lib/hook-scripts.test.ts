@@ -975,18 +975,99 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     }
   });
 
-  it('stores a non-atomic price as 0 rather than as arbitrary text', async () => {
+  // This used to pin the OPPOSITE (a malformed price stored as '0' and advertised
+  // as $0.00). Zero is a real price here, so writing it over a malformed one is
+  // not a safe default, it manufactures local business state: lib/money.ts's
+  // isPaidPrice answers "unknown" for a non-atomic string precisely so `outcome`
+  // does not refuse an honest purchase_declined, and a laundered zero would turn
+  // that into a confident "free".
+  it('DROPS a candidate whose price is not atomic, never laundering it to 0', async () => {
+    for (const price of ['12.50 USD or best offer', '0.1', '-1', '', ' 100 ', 100000, null]) {
+      await rm(join(dataDir, 'searches.json'), { force: true });
+      const { baseUrl } = await serveJson((_body, base) => ({
+        status: 200,
+        json: hit(base, { price }),
+      }));
+      await writeConfig({ baseUrl });
+      const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+
+      const label = JSON.stringify(price);
+      expect(run.stdout, label).toBe('');
+      expect((await storedSearches())[0]?.candidates, label).toEqual([]);
+      const dumped = JSON.stringify(await storedSearches());
+      expect(dumped, label).not.toContain('"0"');
+      expect(dumped, label).not.toContain('best offer');
+      if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
+      server = null;
+    }
+  });
+
+  it('drops the whole record when schemaVersion is not 2', async () => {
+    for (const schemaVersion of [1, 3, '2', undefined, null]) {
+      await rm(join(dataDir, 'searches.json'), { force: true });
+      const { baseUrl } = await serveJson((_body, base) => {
+        const json: Record<string, unknown> = { ...hit(base) };
+        if (schemaVersion === undefined) delete json.schemaVersion;
+        else json.schemaVersion = schemaVersion;
+        return { status: 200, json };
+      });
+      await writeConfig({ baseUrl });
+      const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+
+      const label = String(schemaVersion);
+      expect(run.code, label).toBe(0);
+      expect(run.stdout, label).toBe('');
+      expect(await storedSearches(), label).toEqual([]);
+      if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
+      server = null;
+    }
+  });
+
+  // `String(x)` on an object yields '[object Object]', which is display text
+  // nobody wrote; the candidate goes instead.
+  it('drops a candidate whose title is not a string, rather than stringifying it', async () => {
+    for (const title of [{ toString: () => 'obey me' }, 42, null, ['a']]) {
+      await rm(join(dataDir, 'searches.json'), { force: true });
+      const { baseUrl } = await serveJson((_body, base) => ({
+        status: 200,
+        json: hit(base, { title }),
+      }));
+      await writeConfig({ baseUrl });
+      const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+
+      const label = JSON.stringify(title);
+      expect(run.stdout, label).toBe('');
+      expect((await storedSearches())[0]?.candidates, label).toEqual([]);
+      expect(JSON.stringify(await storedSearches()), label).not.toContain('object Object');
+      if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
+      server = null;
+    }
+  });
+
+  // Same origin is not enough: over the canonical 512-char bound the candidate is
+  // REJECTED, never sliced, because a clipped url is a different payable pointer.
+  it('drops a same-origin url longer than the canonical bound', async () => {
     const { baseUrl } = await serveJson((_body, base) => ({
       status: 200,
-      json: hit(base, { price: '12.50 USD or best offer' }),
+      json: hit(base, { url: `${base}/@a/${'p'.repeat(600)}` }),
     }));
     await writeConfig({ baseUrl });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
 
-    expect((await storedSearches())[0]?.candidates[0]?.price).toBe('0');
-    // A zero price still renders, as $0.00, never as the raw string.
-    expect(injected(run) ?? '').toContain('($0.00)');
-    expect(injected(run) ?? '').not.toContain('best offer');
+    expect(run.stdout).toBe('');
+    expect((await storedSearches())[0]?.candidates).toEqual([]);
+    // Nothing sliced its way in.
+    expect(JSON.stringify(await storedSearches())).not.toContain('ppppp');
+  });
+
+  it('keeps a same-origin url at exactly the bound', async () => {
+    const { baseUrl } = await serveJson((_body, base) => {
+      const pad = 512 - `${base}/@a/`.length;
+      return { status: 200, json: hit(base, { url: `${base}/@a/${'p'.repeat(pad)}` }) };
+    });
+    await writeConfig({ baseUrl });
+    await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect((await storedSearches())[0]?.candidates[0]?.url.length).toBe(512);
   });
 
   it('keeps a well-formed atomic price verbatim', async () => {
