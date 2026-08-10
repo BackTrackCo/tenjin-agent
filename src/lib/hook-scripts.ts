@@ -27,7 +27,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 3;
+export const HOOK_SCRIPT_VERSION = 4;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -355,7 +355,11 @@ async function main() {
   const lines = [];
   for (const c of candidates.slice(0, ${SEARCH_LIMIT})) {
     if (!isRecord(c)) continue;
-    const title = clean(c.title, 120);
+    // Display path only: a double quote inside the title would step outside the
+    // quoted region below ('titled "foo". Do X. ""'), so it renders as a single
+    // quote. The stored projection keeps the title verbatim; this is framing,
+    // not data.
+    const title = clean(c.title, 120).replace(/"/g, "'");
     const price = usd(c.price);
     const id = clean(c.resourceId, 64);
     if (title.length === 0 || price === null || id.length === 0) continue;
