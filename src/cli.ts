@@ -150,8 +150,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // The two affirmative flags are pre-default-on compat only: released docs and
     // the alpha.9 doctor's fix strings name them, so they must parse, but they add
     // nothing over the default and would only clutter --help. Hidden, not removed.
-    .addOption(new Option('--claude-md', 'compat no-op; the nudge is the default').hideHelp())
-    .option('--no-claude-md', 'write no CLAUDE.md nudge')
+    // Both spellings are compat no-ops: `install` writes no CLAUDE.md/AGENTS.md
+    // line any more, and one that is already there is removed. Kept parseable so a
+    // released doc or a pinned script does not fail on an unknown option.
+    .addOption(new Option('--claude-md', 'compat no-op; no nudge is written').hideHelp())
+    .addOption(new Option('--no-claude-md', 'compat no-op; no nudge is written').hideHelp())
     .addOption(
       new Option(
         '--allow-free-verbs',
@@ -198,6 +201,17 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           },
           ctx,
         );
+      });
+    });
+
+  addGlobalFlags(program.command('uninstall'))
+    .description(
+      'Remove everything `tenjin install` wrote: the skills, the harness hooks and their settings entries, and the tenjin permission rules. Never touches your wallet, config, library, search history, or parked candidates',
+    )
+    .action(async function (this: Command) {
+      await runCommand('uninstall', this, async (ctx) => {
+        const { runUninstall } = await import('./commands/uninstall');
+        return runUninstall(ctx);
       });
     });
 

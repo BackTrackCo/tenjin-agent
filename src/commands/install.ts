@@ -8,14 +8,8 @@ import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
-import { writeFileAtomic } from '../lib/atomic-json';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
-import {
-  deepestExisting,
-  installSkill,
-  resolveThroughLink,
-  wrapWriteError,
-} from '../lib/skill-writer';
+import { installSkill } from '../lib/skill-writer';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
@@ -55,6 +49,7 @@ import {
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
 import { hooksSkipped, hooksUndo, wireSearchHooks } from '../lib/harness-hooks';
+import { removeMarkerLines } from '../lib/uninstall';
 import type { HooksResult } from '../lib/harness-hooks';
 import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
@@ -73,13 +68,14 @@ const InstallInputSchema = z.object({
   publishMode: z.string().optional(),
   noWallet: z.boolean().optional(),
   /**
-   * The ~/.claude/CLAUDE.md nudge: `false` (`--no-claude-md`) suppresses it,
-   * `true` (`--claude-md`) states the default explicitly, and `undefined` writes
-   * it. Never a question, just a default with an opt-out.
+   * ACCEPTED AND IGNORED. `install` writes no CLAUDE.md/AGENTS.md line any more —
+   * a skill's own frontmatter description is the trigger surface the harness reads
+   * at session start, so the line only duplicated it. Both spellings still parse so
+   * a script or a released doc that passes one does not fail; neither does anything.
    */
   claudeMd: z.boolean().optional(),
   /**
-   * Tri-state, like `claudeMd`. `true` (`--allow-free-verbs`) wires the free-verb
+   * Tri-state. `true` (`--allow-free-verbs`) wires the free-verb
    * allowlist without asking, which is now also what an unanswered non-interactive
    * run does, so the flag is kept for compatibility and as an explicit statement of
    * intent. `false` (`--no-allow-free-verbs`) is the opt-out and is the only way to
@@ -158,52 +154,6 @@ function walletFix(reason: WalletSkipReason): string {
 }
 
 /**
- * The one line `install` keeps in an AGENTS.md (and, opt-in, in a CLAUDE.md) so the
- * harness reads it as global guidance, not the raw ~/.agents/skills scan. It is an
- * instinct nudge: run a free `tenjin search` before regenerating public research,
- * then a pointer to where the skills live. The HTML-comment marker keeps re-runs
- * idempotent: a matching line is left untouched, a drifted line (an older install's
- * copy) is rewritten in place, and an absent line is appended, so we never duplicate.
- */
-const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
-
-/**
- * The instinct nudge line, pointed at `skillsDir`. One line: the marker, the
- * gate, the disclosure, then where the skills live.
- *
- * The gate is ONE heuristic (public + durable + costly to reproduce), matching
- * the collapsed entry gate in the tenjin-search skill. It used to list example
- * categories instead, which read as a checklist to work through at exactly the
- * moment the agent should be deciding in a second. The two must stay in sync:
- * this line is what a harness reads when the skill is not in play.
- */
-function nudgeLine(skillsDir: string): string {
-  return `${SKILLS_MARKER} Tenjin: when a question is public, durable, and costly to reproduce, run 'tenjin search "<question>" --json' before regenerating the answer; it is free and anonymous, but the generalized question text leaves the machine, so strip private identifiers. Skills (tenjin-search, tenjin-publish, tenjin) are installed at ${skillsDir}; read the relevant SKILL.md before using the CLI.`;
-}
-
-/**
- * Upsert the marker line into a file's text. Finds the existing marker line by its
- * marker prefix (not exact text) so an older install's drifted copy is recognized:
- * a matching line is `none`, a drifted line is `replace`d in place, an absent marker
- * is `append`ed. `content` is the text to write (null when nothing changes).
- */
-function upsertMarkerLine(
-  existing: string | null,
-  line: string,
-): { content: string | null; change: 'append' | 'replace' | 'none' } {
-  const text = existing ?? '';
-  if (!text.includes(SKILLS_MARKER)) {
-    const prefix = text.length === 0 || text.endsWith('\n') ? '' : '\n';
-    return { content: `${text}${prefix}${line}\n`, change: 'append' };
-  }
-  const lines = text.split('\n');
-  const idx = lines.findIndex((l) => l.includes(SKILLS_MARKER));
-  if (lines[idx] === line) return { content: null, change: 'none' };
-  lines[idx] = line;
-  return { content: lines.join('\n'), change: 'replace' };
-}
-
-/**
  * The Codex config.toml rule the user must add by hand. We PRINT it, never edit
  * config.toml: Codex's default workspace-write sandbox blocks network, which would
  * make every paid x402 call fail (or prompt) until this is set.
@@ -221,16 +171,6 @@ interface SkillResult {
   /** Will a harness surface it to the model after this run? On a --dry-run nothing is
    * written, so it answers for the packaged copy that would land. */
   modelInvocable: boolean;
-}
-
-interface AgentsMdResult {
-  path: string;
-  status: 'appended' | 'already-present' | 'updated' | 'would-append' | 'would-update';
-}
-
-interface ClaudeMdResult {
-  path: string;
-  status: 'written' | 'up-to-date' | 'updated' | 'skipped' | 'would-write' | 'would-update';
 }
 
 interface HarnessResult {
@@ -251,8 +191,6 @@ interface HarnessResult {
    * rather than a second run finding our own mirror. This is what gates the notice.
    */
   hostedArrivedFirst: boolean;
-  agentsMd?: AgentsMdResult;
-  claudeMd?: ClaudeMdResult;
   codexNetworkRule?: string;
   notes: string[];
   warnings: string[];
@@ -399,7 +337,6 @@ async function installBody(
   const dryRun = parsed.data.dryRun === true;
   const noWallet = parsed.data.noWallet === true;
   const noHooks = parsed.data.noHooks === true;
-  const claudeMdFlag = parsed.data.claudeMd;
   const allowFreeVerbs = parsed.data.allowFreeVerbs;
   // Validate the enum flags UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
@@ -441,11 +378,6 @@ async function installBody(
   const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
   // The CLAUDE.md nudge is written BY DEFAULT, on both paths, only
   // `--no-claude-md` suppresses it. Codex already got the same line in its
-  // AGENTS.md by default, so leaving Claude Code's copy behind a flag meant the
-  // harness most people run was the one that never learned to search first. It is
-  // still not a question: it is one idempotent marker line whose disclosure and
-  // undo ride the output, which is a smaller consequence than the four decisions.
-  const claudeMdWrite = claudeMdFlag !== false;
   const harnesses: HarnessResult[] = [];
   // Unlocked. What makes concurrent writers safe here is the per-file atomic
   // rename, not serialization: the rm-then-write this used to be had two runs
@@ -455,7 +387,7 @@ async function installBody(
   // paths through the same writer.
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun, claudeMdWrite));
+    harnesses.push(await applyPlan(plan, skillsSource, dryRun));
   }
   await assertSkillsLanded(plans, dryRun);
   if (!dryRun) markPhase('wired');
@@ -472,6 +404,14 @@ async function installBody(
       ),
     );
   }
+  // One-time cleanup of the pointer line older versions wrote into the operator's
+  // CLAUDE.md / AGENTS.md. `install` writes no such line now: a skill's own
+  // frontmatter description is the trigger surface the harness loads at session
+  // start, so the line only duplicated it. Removing it here is what gets the
+  // footprint off machines that already have one, since most people re-run
+  // `install` far more often than they would run a cleanup command.
+  const pointerCleanup = dryRun ? [] : await removeMarkerLines(home);
+
   // The four decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
@@ -520,6 +460,10 @@ async function installBody(
     dryRun,
     skillsSource,
     harnesses,
+    // One-time cleanup, reported because it edits a file the operator owns. Older
+    // versions wrote a pointer line into CLAUDE.md/AGENTS.md; nothing writes one
+    // now, so an install that finds one removes it and says which file it touched.
+    pointerCleanup,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
     // Shipped with the install rather than left for the operator to discover after
@@ -539,6 +483,7 @@ async function installBody(
   // Human path: the walkthrough as humanLines (the global emitSuccess prints them
   // to stdout at a TTY and never an envelope).
   const humanLines = buildWalkthrough(ctx.io, {
+    pointerCleanup,
     dryRun,
     dataDir: ctx.dataDir,
     harnesses,
@@ -583,6 +528,9 @@ const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 
 interface WalkthroughState {
   dryRun: boolean;
+  /** Legacy pointer files this run cleaned; disclosed because they are the
+   *  operator's own notes and we edited them. */
+  pointerCleanup: string[];
   /** Where the wallet keystore lives, for the create disclosure. */
   dataDir: string;
   harnesses: HarnessResult[];
@@ -634,31 +582,18 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
         ),
       );
     }
-    // When a nudge line was actually written or refreshed, disclose what it does
-    // (question text leaves the machine) and how to undo it. This makes a re-run
-    // that silently upgrades an older pointer line visible, not just the first write.
-    const nudgePaths = nudgeFilesTouched(h);
-    if (nudgePaths.length > 0) {
-      lines.push(
-        paint(
-          io,
-          'dim',
-          'The nudge tells agents to run a free anonymous `tenjin search` before regenerating research; the generalized question text is sent to tenjin.blog.',
-        ),
-      );
-      lines.push(
-        paint(
-          io,
-          'dim',
-          `Undo anytime: delete the ${SKILLS_MARKER} line from ${nudgePaths.join(' and ')}.`,
-        ),
-      );
-    }
     if (h.codexNetworkRule !== undefined) {
       lines.push(paint(io, 'dim', 'Codex blocks network by default; add to ~/.codex/config.toml:'));
       for (const rl of h.codexNetworkRule.split('\n')) lines.push(paint(io, 'dim', `  ${rl}`));
     }
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `! ${w}`));
+  }
+  // Not dim: we edited a file the operator writes their own notes in, and a line
+  // saying so is the only way they learn it happened.
+  if (s.pointerCleanup.length > 0) {
+    lines.push(
+      `Removed the old Tenjin pointer line from ${s.pointerCleanup.join(' and ')}; the skills carry their own triggers now.`,
+    );
   }
   // A run that wired permissions without being asked has to say so, and say how to
   // take it back. This is the disclosure that makes the non-interactive default
@@ -778,11 +713,7 @@ function harnessLabel(h: Harness): string {
 function skillsLine(io: Io, h: HarnessResult, dryRun: boolean): string {
   const changed = h.skills.some((s) => s.status !== 'up-to-date');
   const verb = dryRun ? 'would install' : changed ? 'installed' : 'up to date';
-  const wired: string[] = [];
-  if (h.agentsMd !== undefined) wired.push('AGENTS.md nudge');
-  if (h.claudeMd !== undefined && h.claudeMd.status !== 'skipped') wired.push('CLAUDE.md nudge');
-  const suffix = wired.length > 0 ? ` + ${wired.join(' + ')}` : '';
-  const head = `${harnessLabel(h.harness)}: ${h.skills.length} skills ${verb}${suffix}`;
+  const head = `${harnessLabel(h.harness)}: ${h.skills.length} skills ${verb}`;
   return `${paint(io, 'green', '✓')} ${paint(io, 'bold', head)} in ${h.skillsDir}. ${skillRoster(h)}.`;
 }
 
@@ -864,28 +795,6 @@ function skillRoster(h: HarnessResult): string {
   if (cli.length > 0) parts.push(`${cli.join(', ')} (CLI)`);
   if (hosted.length > 0) parts.push(`${hosted.join(', ')} (hosted, zero-install fallback)`);
   return parts.join('; ');
-}
-
-/**
- * The nudge files whose marker line this run wrote or refreshed (append/update, and
- * their dry-run would-* previews). An untouched line (already-present / up-to-date)
- * or a skipped CLAUDE.md is not included, so the disclosure only fires on a change.
- */
-function nudgeFilesTouched(h: HarnessResult): string[] {
-  const paths: string[] = [];
-  if (
-    h.agentsMd !== undefined &&
-    ['appended', 'updated', 'would-append', 'would-update'].includes(h.agentsMd.status)
-  ) {
-    paths.push(h.agentsMd.path);
-  }
-  if (
-    h.claudeMd !== undefined &&
-    ['written', 'updated', 'would-write', 'would-update'].includes(h.claudeMd.status)
-  ) {
-    paths.push(h.claudeMd.path);
-  }
-  return paths;
 }
 
 /** The single line of consequence attached to a mode, wherever it is shown. */
@@ -1422,7 +1331,6 @@ async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
   dryRun: boolean,
-  claudeMdWrite: boolean,
 ): Promise<HarnessResult> {
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
@@ -1460,35 +1368,8 @@ async function applyPlan(
     warnings,
   };
 
-  if (plan.wiresAgentsMd) {
-    result.agentsMd = await wireAgentsMd(plan, dryRun);
-    result.codexNetworkRule = CODEX_NETWORK_RULE;
-  } else if (plan.harness === 'claude') {
-    result.claudeMd = await wireClaudeMd(plan, dryRun, claudeMdWrite);
-  }
+  if (plan.wiresAgentsMd) result.codexNetworkRule = CODEX_NETWORK_RULE;
   return result;
-}
-
-/**
- * Write the nudge line into ~/.claude/CLAUDE.md when opted in. Creates the file if
- * absent, rewrites a drifted marker line in place, and leaves a matching line alone.
- * `skipped` means the user opted out (or was never asked).
- */
-async function wireClaudeMd(
-  plan: HarnessPlan,
-  dryRun: boolean,
-  write: boolean,
-): Promise<ClaudeMdResult> {
-  const path = join(plan.home, '.claude', 'CLAUDE.md');
-  if (!write) return { path, status: 'skipped' };
-
-  const probe = await probeMarkerText(path);
-  const { content, change } = upsertMarkerLine(probe.text, nudgeLine(plan.skillsDir));
-  if (change === 'none') return { path, status: 'up-to-date' };
-  const writeTo = await prepareMarkerWrite(path, probe);
-  if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
-  if (change === 'append') return { path, status: dryRun ? 'would-write' : 'written' };
-  return { path, status: dryRun ? 'would-update' : 'updated' };
 }
 
 function notesFor(plan: HarnessPlan, hostedArrivedFirst: boolean): string[] {
@@ -1561,140 +1442,6 @@ async function assertSkillsLanded(plans: HarnessPlan[], dryRun: boolean): Promis
     // directory that was fine.
     fix: `Check that you can write to the skills directory (\`ls -ld ${dirname(missing[0] ?? '')}\`), then re-run \`tenjin install\`.`,
   });
-}
-
-/**
- * Ensure the AGENTS.md pointer line is present exactly once. Append-once is GLOBAL
- * across both locations Codex/harnesses read (~/.agents/AGENTS.md and Codex's own
- * ~/.codex/AGENTS.md): if either already carries the marker we stop, so a pointer
- * already in ~/.codex/AGENTS.md is never duplicated into a later-created
- * ~/.agents/AGENTS.md. When neither has it, target selection follows what Codex
- * actually reads: prefer an existing ~/.agents/AGENTS.md, else an existing
- * ~/.codex/AGENTS.md, else create the one whose home dir exists, else fall back to
- * ~/.agents/AGENTS.md alongside the shared skills.
- */
-async function wireAgentsMd(plan: HarnessPlan, dryRun: boolean): Promise<AgentsMdResult> {
-  const shared = join(plan.home, '.agents', 'AGENTS.md');
-  const codex = join(plan.home, '.codex', 'AGENTS.md');
-  const line = nudgeLine(plan.skillsDir);
-
-  // If either file Codex reads already carries the marker, that file owns the line:
-  // refresh it in place when an older install's text drifted, else leave it. This
-  // keeps append-once global while still upgrading a stale line. Probed LAZILY,
-  // returning as soon as an owner is found: with the marker already in
-  // ~/.agents/AGENTS.md (the steady state of a re-run), a broken ~/.codex/AGENTS.md
-  // this run would never write must not fail the install. A probe can only fail the
-  // run outright on an UNREADABLE candidate (see probeMarkerText for why); a
-  // not-regular one fails only if it ends up the chosen path.
-  const probes = new Map<string, MarkerProbe>();
-  for (const path of [shared, codex]) {
-    const probe = await probeMarkerText(path);
-    probes.set(path, probe);
-    if (probe.text?.includes(SKILLS_MARKER) === true) {
-      return upsertAgentsMd(path, probe, line, dryRun);
-    }
-  }
-
-  const chosen = chooseAgentsMdPath(plan.home);
-  // Non-null: chooseAgentsMdPath only ever returns shared or codex, both probed.
-  return upsertAgentsMd(chosen, probes.get(chosen)!, line, dryRun);
-}
-
-async function upsertAgentsMd(
-  path: string,
-  probe: MarkerProbe,
-  line: string,
-  dryRun: boolean,
-): Promise<AgentsMdResult> {
-  const { content, change } = upsertMarkerLine(probe.text, line);
-  if (change === 'none') return { path, status: 'already-present' };
-  const writeTo = await prepareMarkerWrite(path, probe);
-  if (!dryRun && content !== null) await writeMarkerFile(path, writeTo, content);
-  if (change === 'append') return { path, status: dryRun ? 'would-append' : 'appended' };
-  return { path, status: dryRun ? 'would-update' : 'updated' };
-}
-
-/**
- * The write-side contract both nudge writers share, in ONE place so a refactor
- * cannot half-drop it: refuse a non-regular chosen path and resolve through a
- * link, BOTH unconditionally (dry runs included), so a dry run can never report
- * would-append where the real run refuses. Returns the resolved target for the
- * real write. Safe after the change-none early return: a not-regular probe has
- * null text, which can never produce `none`.
- */
-async function prepareMarkerWrite(declared: string, probe: MarkerProbe): Promise<string> {
-  assertRegularMarker(declared, probe);
-  return resolveThroughLink(declared, 'the Tenjin pointer');
-}
-
-/**
- * The nudge files (AGENTS.md, CLAUDE.md) are the other two files install writes
- * into the operator's home, so the skill files' rules apply for the same reasons:
- * read through the guarded descriptor (a FIFO at the path must not hang install,
- * and an unreadable file is a typed error, not a raw errno), and write through a
- * symlink (committing with `rename` over a dotfiles-managed link would replace
- * the link with a regular file and strand its target).
- */
-async function probeMarkerText(declared: string): Promise<MarkerProbe> {
-  // `open` follows symlinks, so a dangling link reads as absent here; the
-  // reachability check in the upserts fails it, on dry runs too, naming the link.
-  const read = await readSkillFile(declared);
-  if (read.kind === 'absent') return { text: null, notRegular: false };
-  if (read.kind === 'ok') return { text: read.bytes.toString('utf8'), notRegular: false };
-  // Not-regular is recorded, not thrown: a directory or FIFO cannot carry the
-  // marker, so it only fails a path this run selects to write (assertRegularMarker,
-  // in the upserts). Unreadable stays a hard failure even for a mere candidate: a
-  // file we cannot read could own the marker (skipping it appends a duplicate into
-  // the other file) or hold the operator's notes (writing over it clobbers them).
-  if (read.kind === 'not-regular') return { text: null, notRegular: true };
-  throw wrapWriteError(read.err, declared, 'the Tenjin pointer', declared, {
-    verb: 'read',
-    expected: ': the pointer lands in a regular markdown file',
-  });
-}
-
-interface MarkerProbe {
-  text: string | null;
-  notRegular: boolean;
-}
-
-/** The write-path half of {@link probeMarkerText}'s not-regular rule: fails the
- * path this run selects, dry runs included, so a dry run cannot promise a write
- * the real run refuses. */
-function assertRegularMarker(declared: string, probe: MarkerProbe): void {
-  if (!probe.notRegular) return;
-  throw new CliError(
-    'INTERNAL',
-    `${declared} is not a regular file, so the Tenjin pointer was not written.`,
-    {
-      fix: `Check what is there (\`ls -l ${declared}\`) and remove or replace it, then re-run \`tenjin install\`.`,
-    },
-  );
-}
-
-/** See {@link probeMarkerText}; the write half of the same contract. `writeTo` is
- * the link-resolved target the caller obtained from `resolveThroughLink`. */
-async function writeMarkerFile(declared: string, writeTo: string, content: string): Promise<void> {
-  try {
-    await writeFileAtomic(writeTo, content);
-  } catch (err) {
-    throw wrapWriteError(
-      err,
-      declared,
-      'the Tenjin pointer',
-      await deepestExisting(dirname(writeTo)),
-      { expected: ': the pointer lands in a regular markdown file' },
-    );
-  }
-}
-
-function chooseAgentsMdPath(home: string): string {
-  const shared = join(home, '.agents', 'AGENTS.md');
-  const codex = join(home, '.codex', 'AGENTS.md');
-  if (existsSync(shared)) return shared;
-  if (existsSync(codex)) return codex;
-  if (existsSync(join(home, '.codex'))) return codex;
-  return shared;
 }
 
 // --- Human rendering -------------------------------------------------------------
