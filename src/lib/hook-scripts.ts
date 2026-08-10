@@ -7,7 +7,8 @@
  *  - A hook runs on the harness's critical path. Booting the CLI means commander,
  *    zod, and the config loader before a single byte of useful work; these scripts
  *    import nothing but `node:fs` and start in milliseconds, which is what lets the
- *    WebSearch hook hold a hard two-second budget and the Stop hook a silent one.
+ *    WebSearch hook hold a ~2s design budget and the Stop hook a silent one. The
+ *    hard ceiling on either is the harness's own `timeout` kill, not this.
  *  - They do not depend on `tenjin` being on PATH, on a global install location,
  *    or on a dist layout that an upgrade could move underneath them. The only
  *    thing baked in is the data directory; everything else is read at run time.
@@ -27,15 +28,16 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 4;
+export const HOOK_SCRIPT_VERSION = 5;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
 
 /**
  * How long the WebSearch hook waits for the marketplace before giving up. A hook
- * that is slower than the search it is trying to save is a net loss, so this is a
- * hard ceiling and a timeout is an ordinary silent outcome, not an error.
+ * that is slower than the search it is trying to save is a net loss. This bounds
+ * the FETCH; the process's own hard ceiling is the harness `timeout` kill on the
+ * settings.json entry. A timeout here is an ordinary silent outcome, not an error.
  */
 const SEARCH_TIMEOUT_MS = 2000;
 /** Backstop for a socket that ignores the abort: the process leaves either way. */
@@ -160,6 +162,29 @@ function saveSearches(searches) {
     mode: 0o644,
   });
   renameSync(tmp, SEARCH_STORE);
+}
+
+/**
+ * The two shapes the CLI's own boundary enforces (src/lib/ids.ts). Duplicated as
+ * literals because this script cannot import them; they are format constants, not
+ * policy, so a drift here is a test failure rather than a widened grant.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ATOMIC_RE = /^\\d{1,39}$/;
+
+/**
+ * Does \`candidate\` sit on the same origin the request went to? The CLI refuses a
+ * whole response whose candidate points elsewhere, because that url is what a
+ * later \`buy\` would pay. Here the candidate is simply dropped: the hook is
+ * advisory, and losing one hint beats recording a payable pointer at an origin
+ * the operator never configured.
+ */
+function sameOrigin(candidate, requestUrl) {
+  try {
+    return new URL(candidate).origin === requestUrl.origin;
+  } catch {
+    return false;
+  }
 }
 
 /** Strip control characters and cap: server text lands in a model's context. */
@@ -326,24 +351,40 @@ async function main() {
   if (res.status !== 200) return quiet();
   const body = await res.json();
   if (!isRecord(body)) return quiet();
-  const decision = body.decision === 'CANDIDATES' ? 'CANDIDATES' : 'MISS';
-  const candidates = Array.isArray(body.candidates) ? body.candidates : [];
+
+  // FAIL-CLOSED, mirroring src/lib/agent-api.ts. This script talks to whatever
+  // origin baseUrl names, so the response is untrusted input, and the fields it
+  // carries are ACTIONABLE: a resourceId is interpolated into a command the agent
+  // is invited to run, and a url is a payable pointer a later \`buy\` resolves.
+  // Nothing here is coerced or truncated into a usable-looking value; a field
+  // that does not match its shape drops its candidate, and a bad searchId or
+  // decision drops the whole response. Truncating an id or a url does not shorten
+  // it, it invents a DIFFERENT one that still looks legitimate.
+  if (!UUID_RE.test(String(body.searchId))) return quiet();
+  if (body.decision !== 'CANDIDATES' && body.decision !== 'MISS') return quiet();
+  const decision = body.decision;
+  // Capped BEFORE anything is examined, so a ten-thousand-candidate response
+  // costs the same as a two-candidate one in both work and stored bytes.
+  const candidates = (Array.isArray(body.candidates) ? body.candidates : []).slice(
+    0,
+    ${SEARCH_LIMIT},
+  );
 
   // Store the LEAN projection the CLI stores, so \`buy <resourceId>\` can resolve
   // the payable read URL from an entry this hook wrote.
   const stored = [];
   for (const c of candidates) {
     if (!isRecord(c)) continue;
-    if (typeof c.resourceId !== 'string' || typeof c.url !== 'string') continue;
-    // Every server-sourced string is bounded, not just the display one: a hostile
-    // base URL (or a compromised server) would otherwise bloat searches.json by
-    // whatever it puts in an id or a price. The url keeps the schema's own 512
-    // bound, since a clipped url is a different url rather than a shorter one.
+    if (typeof c.resourceId !== 'string' || !UUID_RE.test(c.resourceId)) continue;
+    if (typeof c.url !== 'string' || !sameOrigin(c.url, url)) continue;
     stored.push({
-      resourceId: clean(c.resourceId, 64),
-      url: c.url.slice(0, 512),
+      resourceId: c.resourceId,
+      url: c.url,
       title: clean(c.title, 200),
-      price: typeof c.price === 'string' ? clean(c.price, 32) : '0',
+      // Atomic or nothing: a price that is not a plain integer string is not
+      // rendered as money anywhere, and storing the raw value would put an
+      // arbitrary string where the CLI's own readers expect an amount.
+      price: typeof c.price === 'string' && ATOMIC_RE.test(c.price) ? c.price : '0',
     });
   }
   // BEFORE any emit, because emit exits the process. A MISS recorded here is what
@@ -352,17 +393,17 @@ async function main() {
 
   if (decision !== 'CANDIDATES') return quiet();
 
+  // The DISPLAY path reads the validated projection, never the raw response, so
+  // an id that failed validation cannot reach the hint even if the loops drift.
   const lines = [];
-  for (const c of candidates.slice(0, ${SEARCH_LIMIT})) {
-    if (!isRecord(c)) continue;
-    // Display path only: a double quote inside the title would step outside the
-    // quoted region below ('titled "foo". Do X. ""'), so it renders as a single
-    // quote. The stored projection keeps the title verbatim; this is framing,
-    // not data.
+  for (const c of stored) {
+    // A double quote inside the title would step outside the quoted region below
+    // ('titled "foo". Do X. ""'), so it renders as a single quote. The stored
+    // projection keeps the title verbatim; this is framing, not data.
     const title = clean(c.title, 120).replace(/"/g, "'");
     const price = usd(c.price);
-    const id = clean(c.resourceId, 64);
-    if (title.length === 0 || price === null || id.length === 0) continue;
+    const id = c.resourceId;
+    if (title.length === 0 || price === null) continue;
     // QUOTED, and framed as a listing rather than a claim. The title is written
     // by whoever published the piece, so it is marketplace data arriving in a
     // trusted context; an unquoted "Tenjin has a tested answer: <title>" reads as
