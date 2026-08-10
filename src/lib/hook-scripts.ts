@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 6;
+export const HOOK_SCRIPT_VERSION = 7;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -434,8 +434,11 @@ async function main() {
     // the CLI asserting something, and an instruction-shaped title then reads as
     // an instruction. clean() removes control bytes but cannot make prose inert,
     // so the framing does that job instead.
+    // "free" vs "paid" comes from the validated price, so a genuine $0 piece is
+    // not advertised as paid (found in dogfooding).
+    const kind = price === '0.00' ? 'a free answer' : 'a paid answer';
     lines.push(
-      'Tenjin lists a paid answer titled "' + title + '" ($' + price + '); inspect free: tenjin inspect ' + id,
+      'Tenjin lists ' + kind + ' titled "' + title + '" ($' + price + '); inspect free: tenjin inspect ' + id,
     );
   }
   if (lines.length === 0) return quiet();
