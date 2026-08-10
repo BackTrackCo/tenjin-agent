@@ -302,14 +302,16 @@ pricing rules; never publish bare.
   pass FIRST (statement-level classification, competitor-reconstruction check,
   title/answer-card leak check) — the CLI scan is lexical and you are the only
   semantic reviewer on these paths; that skill also states why a MISS is never
-  a safety signal. Any doubt parks the draft as a
-  candidate instead of publishing. When the pass is clean, build the answer
-  card and run `tenjin publish <finding.md> --json --search-id <id>` directly.
+  a safety signal. Privacy/rights doubt parks the draft as a candidate instead
+  of publishing; quality doubt does not — in auto you surface it to the user,
+  in full-auto you hedge it in the piece and publish. When the pass is clean,
+  build the answer card and run `tenjin publish <finding.md> --json --search-id
+  <id>` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
   re-run with `--yes` on a yes. Otherwise park as a candidate when the publish
   cannot proceed at all: a hard block, or no wallet. Then tell the user what was
-  published, with the URL.
+  published, with the URL — and name the candidate id for anything you parked.
 
 `--search-id` is what closes the loop: it marks the search resolved so the
 open-loop reminder stops raising it, and prefills the searched question into the
