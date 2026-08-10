@@ -50,7 +50,9 @@ import {
   type ClawRouterCustodyFacts,
 } from '../lib/wallet';
 import type { PassphraseOverrides } from '../lib/wallet/local';
+import type { ClawRouterPolicyDeps } from '../lib/wallet/clawrouter-policy';
 import { walletFileExists } from '../lib/wallet/store';
+import { resolveSpendContextSettings, type SpendResolvedSettings } from '../lib/spend-settings';
 import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions';
 import {
   FREE_VERB_RULES,
@@ -336,6 +338,8 @@ export interface InstallDeps {
     ctx: CommandContext,
     provider: 'clawrouter',
   ) => Promise<string | WalletConnection>;
+  /** Read-only ClawRouter spending-policy seam; production uses the canonical path. */
+  clawrouterPolicy?: ClawRouterPolicyDeps;
 }
 
 /**
@@ -585,6 +589,9 @@ async function installBody(
   const wallet = await underDataDir(ctx.dataDir, () =>
     resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt, walletProvider),
   );
+  const spendSettings = dryRun
+    ? undefined
+    : await resolveSpendContextSettings(ctx, { clawrouterPolicy: deps.clawrouterPolicy });
 
   // AFTER all four decisions, never before (#101). The snapshot used to be taken
   // straight after the skills were written, so a run that created a wallet
@@ -631,7 +638,7 @@ async function installBody(
                 },
               }
             : {}),
-          policy: receiptPolicy(publishMode),
+          policy: receiptPolicy(publishMode, spendSettings),
           changedPaths: changedInstallPaths({
             dataDir: ctx.dataDir,
             harnesses,
@@ -640,7 +647,12 @@ async function installBody(
             wallet,
             explicitHarness,
           }),
-          warnings: installWarnings(harnesses, permissions, doctor),
+          warnings: installWarnings(
+            harnesses,
+            permissions,
+            doctor,
+            spendSettings?.spendPolicyWarnings ?? [],
+          ),
           undoCommands: installUndoCommands(ctx.dataDir, wallet),
         }),
       );
@@ -710,16 +722,55 @@ function installPreflight(input: {
   const mode = input.humanOutput ? 'interactive surface' : 'machine/headless surface';
   const custody =
     input.walletProvider === 'clawrouter'
-      ? ' The ClawRouter private key will enter Tenjin process memory to connect/sign; it will not be copied into Tenjin storage, persisted, logged, returned, or transmitted, and the mnemonic will not be opened.'
+      ? ' The ClawRouter private key will enter Tenjin process memory to connect/sign; it will not be copied into Tenjin storage, persisted, logged, returned, or transmitted, and the mnemonic will not be opened. ClawRouter spending limits will be read-only defaults unless a separate Tenjin spend policy is configured; Tenjin keeps a separate ledger, so the budgets are not aggregate.'
       : '';
   return `Tenjin install preflight${input.dryRun ? ' (dry run)' : ''}: harnesses=${input.harnesses.join(',')}; wallet provider=${provider}; ${mode}. Human presence and harness approval mode are not proven. An unrestricted same-OS-user agent cannot be contained by a Tenjin prompt.${custody}`;
 }
 
-function receiptPolicy(publishMode: PublishModeSelection): {
+function receiptPolicy(
+  publishMode: PublishModeSelection,
+  spend: SpendResolvedSettings | undefined,
+): {
   publishMode: { value: string; source: string };
+  spend?: {
+    source: 'tenjin' | 'clawrouter' | 'safe-fallback';
+    externalPolicyPath?: string;
+    externalPolicyMutationByTenjin: 'none';
+    ledger: 'separate-tenjin';
+    aggregateWithClawRouter: false;
+    perRequestAtomic?: string;
+    hourlyAtomic?: string;
+    dailyAtomic?: string;
+    sessionAtomic?: string;
+  };
 } {
   return {
     publishMode: { value: publishMode.value, source: publishMode.source },
+    ...(spend !== undefined
+      ? {
+          spend: {
+            source: spend.spendPolicySource,
+            ...(spend.clawRouterPolicyPath !== undefined
+              ? { externalPolicyPath: spend.clawRouterPolicyPath }
+              : {}),
+            externalPolicyMutationByTenjin: 'none',
+            ledger: 'separate-tenjin',
+            aggregateWithClawRouter: false,
+            ...(spend.policy.perRequestLimitAtomic !== undefined
+              ? { perRequestAtomic: spend.policy.perRequestLimitAtomic.toString() }
+              : {}),
+            ...(spend.policy.hourlyBudgetAtomic !== undefined
+              ? { hourlyAtomic: spend.policy.hourlyBudgetAtomic.toString() }
+              : {}),
+            ...(spend.policy.dailyBudgetAtomic !== undefined
+              ? { dailyAtomic: spend.policy.dailyBudgetAtomic.toString() }
+              : {}),
+            ...(spend.policy.sessionBudgetAtomic > 0n
+              ? { sessionAtomic: spend.policy.sessionBudgetAtomic.toString() }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -772,10 +823,12 @@ function installWarnings(
   harnesses: HarnessResult[],
   permissions: PermissionsResult,
   doctor: DoctorChecks,
+  spendPolicyWarnings: string[],
 ): string[] {
   return [
     'Human presence and harness approval mode were not proven.',
     'An unrestricted agent running as the same OS user is outside Tenjin application-level containment.',
+    ...spendPolicyWarnings,
     ...harnesses.flatMap((harness) => harness.warnings),
     ...(permissions.warning !== undefined ? [permissions.warning] : []),
     ...doctor.checks

@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadProjectConfig, resolvePublishSettings } from './settings';
+import { resolveSpendContextSettings } from './spend-settings';
 import { CliError } from './errors';
+import type { CommandContext } from '../context';
 
 const run = promisify(execFile);
 
@@ -26,6 +28,78 @@ async function writeGlobal(publish: Record<string, unknown>): Promise<void> {
 async function writeProject(json: unknown, dir = projectDir): Promise<void> {
   await writeFile(join(dir, '.tenjin.json'), JSON.stringify(json));
 }
+
+function context(): CommandContext {
+  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+  return {
+    dataDir,
+    flags: { json: false, timeout: 10_000 },
+    io: { stdout: sink(), stderr: sink(), isTTY: false },
+  };
+}
+
+async function connectClawRouter(): Promise<void> {
+  await writeFile(
+    join(dataDir, 'wallet.json'),
+    JSON.stringify({
+      schemaVersion: 3,
+      provider: 'clawrouter',
+      address: `0x${'ab'.repeat(20)}`,
+      connectedAt: '2026-08-09T00:00:00.000Z',
+    }),
+  );
+}
+
+describe('resolveContextSettings — ClawRouter policy defaults', () => {
+  it('inherits all configured limits read-only and auto-allows only within them', async () => {
+    await connectClawRouter();
+    const spendingPath = join(projectDir, 'spending.json');
+    await writeFile(
+      spendingPath,
+      JSON.stringify({ limits: { perRequest: 0.25, hourly: 1, daily: 5, session: 2 } }),
+    );
+    const resolved = await resolveSpendContextSettings(context(), {
+      clawrouterPolicy: { path: spendingPath },
+    });
+    expect(resolved.spendPolicySource).toBe('clawrouter');
+    expect(resolved.policy).toMatchObject({
+      maxAutoSpendAtomic: 250_000n,
+      perRequestLimitAtomic: 250_000n,
+      hourlyBudgetAtomic: 1_000_000n,
+      dailyBudgetAtomic: 5_000_000n,
+      sessionBudgetAtomic: 2_000_000n,
+      confirm: { mode: 'above', thresholdAtomic: 250_000n },
+    });
+    expect(resolved.spendPolicyWarnings[0]).toContain('not an aggregate budget');
+  });
+
+  it('honors any explicit Tenjin spend setting as a separate whole policy', async () => {
+    await connectClawRouter();
+    const spendingPath = join(projectDir, 'spending.json');
+    await writeFile(spendingPath, JSON.stringify({ limits: { perRequest: 0.01, daily: 1 } }));
+    await writeFile(
+      join(dataDir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '500000', confirm: 'above:500000' }),
+    );
+    const resolved = await resolveSpendContextSettings(context(), {
+      clawrouterPolicy: { path: spendingPath },
+    });
+    expect(resolved.spendPolicySource).toBe('tenjin');
+    expect(resolved.policy.maxAutoSpendAtomic).toBe(500_000n);
+    expect(resolved.policy.perRequestLimitAtomic).toBeUndefined();
+    expect(resolved.policy.dailyBudgetAtomic).toBeUndefined();
+  });
+
+  it('requires confirmation when ClawRouter has no usable configured limits', async () => {
+    await connectClawRouter();
+    const resolved = await resolveSpendContextSettings(context(), {
+      clawrouterPolicy: { path: join(projectDir, 'missing-spending.json') },
+    });
+    expect(resolved.spendPolicySource).toBe('safe-fallback');
+    expect(resolved.policy.maxAutoSpendAtomic).toBe(0n);
+    expect(resolved.policy.confirm).toEqual({ mode: 'always' });
+  });
+});
 
 /** A git-check-ignore seam with a fixed answer, so precedence tests are offline. */
 const ignored = { isGitignored: async () => true };

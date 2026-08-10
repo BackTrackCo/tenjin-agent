@@ -28,6 +28,15 @@ const input = () => ({
   },
   policy: {
     publishMode: { value: 'auto', source: 'profile:hermes' },
+    spend: {
+      source: 'clawrouter' as const,
+      externalPolicyPath: '/tmp/.openclaw/blockrun/spending.json',
+      externalPolicyMutationByTenjin: 'none' as const,
+      ledger: 'separate-tenjin' as const,
+      aggregateWithClawRouter: false as const,
+      perRequestAtomic: '250000',
+      dailyAtomic: '5000000',
+    },
   },
   changedPaths: ['/tmp/config.yaml'],
   warnings: [
@@ -51,6 +60,12 @@ describe('install receipt', () => {
     expect(raw).not.toContain('super-secret');
     expect(raw).toContain('[REDACTED_PRIVATE_KEY]');
     expect(raw).toContain('BLOCKRUN_WALLET_KEY=[REDACTED]');
+    expect(stored.receipt.policy.spend).toMatchObject({
+      source: 'clawrouter',
+      externalPolicyMutationByTenjin: 'none',
+      ledger: 'separate-tenjin',
+      aggregateWithClawRouter: false,
+    });
     await expect(readInstallReceipt(dir)).resolves.toEqual(stored);
   });
 

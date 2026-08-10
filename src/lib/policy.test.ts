@@ -92,6 +92,40 @@ describe('evaluateSpendPolicy, sessionBudget', () => {
   });
 });
 
+describe('evaluateSpendPolicy, ClawRouter-compatible hard limits', () => {
+  it('enforces per-request, rolling hourly, and rolling daily limits as hard denials', () => {
+    expect(
+      evaluateSpendPolicy(policy({ perRequestLimitAtomic: 99n }), req({ amountAtomic: 100n }))
+        .reason,
+    ).toBe('per_request_limit_exceeded');
+    expect(
+      evaluateSpendPolicy(
+        policy({ hourlyBudgetAtomic: 500n }),
+        req({ amountAtomic: 101n, hourlySpentAtomic: 400n }),
+      ).reason,
+    ).toBe('hourly_budget_exceeded');
+    expect(
+      evaluateSpendPolicy(
+        policy({ dailyBudgetAtomic: 500n }),
+        req({ amountAtomic: 101n, dailySpentAtomic: 400n }),
+      ).reason,
+    ).toBe('daily_budget_exceeded');
+  });
+
+  it('allows exact boundaries and applies hard limits before confirmation', () => {
+    const r = evaluateSpendPolicy(
+      policy({
+        perRequestLimitAtomic: 100n,
+        hourlyBudgetAtomic: 500n,
+        dailyBudgetAtomic: 1_000n,
+        confirm: { mode: 'always' },
+      }),
+      req({ amountAtomic: 100n, hourlySpentAtomic: 400n, dailySpentAtomic: 900n }),
+    );
+    expect(r.reason).toBe('confirm_always');
+  });
+});
+
 describe('evaluateSpendPolicy, maxAutoSpend + confirm', () => {
   it('default posture (maxAutoSpend 0, confirm always) requires confirmation for any spend', () => {
     const r = evaluateSpendPolicy(

@@ -8,6 +8,10 @@ import { CliError } from './errors';
 import { installReceiptPath } from './paths';
 
 const CustodyFactsSchema = z.object({
+  sourceOwnedBy: z.literal('clawrouter-user'),
+  sourceMutationByTenjin: z.literal('none'),
+  sourceDeletedByTenjin: z.literal(false),
+  connectMovesFunds: z.literal(false),
   privateKeyAccess: z.literal('read-into-process-memory-at-connect-and-sign'),
   privateKeyCopiedToTenjinStorage: z.literal(false),
   privateKeyPersistedByTenjin: z.literal(false),
@@ -48,6 +52,19 @@ export const InstallReceiptSchema = z.object({
     .optional(),
   policy: z.object({
     publishMode: PolicyValueSchema,
+    spend: z
+      .object({
+        source: z.enum(['tenjin', 'clawrouter', 'safe-fallback']),
+        externalPolicyPath: z.string().optional(),
+        externalPolicyMutationByTenjin: z.literal('none'),
+        ledger: z.literal('separate-tenjin'),
+        aggregateWithClawRouter: z.literal(false),
+        perRequestAtomic: z.string().optional(),
+        hourlyAtomic: z.string().optional(),
+        dailyAtomic: z.string().optional(),
+        sessionAtomic: z.string().optional(),
+      })
+      .optional(),
   }),
   changedPaths: z.array(z.string()),
   warnings: z.array(z.string()),
