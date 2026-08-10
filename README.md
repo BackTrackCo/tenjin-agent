@@ -121,16 +121,16 @@ Two families: `--no-*` flags are this-run opt-outs that write no config, while
 `--publish-mode` and `--search-hooks` are provisioning flags that persist their
 value. That is why `--no-hooks` and `--search-hooks off` differ.
 
-| Flag                    | Values                    | Default          | Effect                                                       |
-| ----------------------- | ------------------------- | ---------------- | ------------------------------------------------------------ |
-| `--harness`             | `claude\|codex\|shared`   | auto-detect      | Target one harness, repeatable; the choice is remembered     |
-| `--dry-run`             | —                         | off              | Print what would change and write nothing                    |
-| `--publish-mode`        | `review\|auto\|full-auto` | ask, else `auto` | Set the publish consent mode without asking                  |
-| `--no-allow-free-verbs` | —                         | allowlist on     | Write no permission rules at all                             |
-| `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode` |
-| `--no-hooks`            | —                         | hooks on         | Register no hooks this run; writes no config                 |
-| `--no-wallet`           | —                         | wallet on        | Create no wallet                                             |
-| `--no-claude-md`        | —                         | nudge on         | Write no CLAUDE.md nudge                                     |
+| Flag                    | Values                          | Default          | Effect                                                       |
+| ----------------------- | ------------------------------- | ---------------- | ------------------------------------------------------------ |
+| `--harness`             | `claude\|codex\|hermes\|shared` | auto-detect      | Target one harness, repeatable; the choice is remembered     |
+| `--dry-run`             | —                               | off              | Print what would change and write nothing                    |
+| `--publish-mode`        | `review\|auto\|full-auto`       | ask, else `auto` | Set the publish consent mode without asking                  |
+| `--no-allow-free-verbs` | —                               | allowlist on     | Write no permission rules at all                             |
+| `--search-hooks`        | `auto\|remind\|off`             | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode` |
+| `--no-hooks`            | —                               | hooks on         | Register no hooks this run; writes no config                 |
+| `--no-wallet`           | —                               | wallet on        | Create no wallet                                             |
+| `--no-claude-md`        | —                               | nudge on         | Write no CLAUDE.md nudge                                     |
 
 A default run settles all five: the allowlist, the hooks, the wallet, the nudge,
 and `publish.mode` (headless persists `auto`, the mode the interactive select
@@ -263,11 +263,13 @@ auto-approve nothing.
 
 ## Search hooks
 
-`tenjin install` registers two Claude Code hooks and writes their scripts to
-`~/.tenjin/hooks/`. Both are standalone Node scripts: they do not boot the CLI,
-and neither can block, deny, or modify a tool call. The PreToolUse hook runs
+`tenjin install` writes two standalone scripts to `~/.tenjin/hooks/`. Claude Code
+registers them in `settings.json`; Hermes calls the same scripts through a native
+plugin under `~/.hermes/plugins/tenjin`. The scripts do not boot the CLI, and
+neither adapter can block, deny, or modify a tool call. The pre-search hook runs
 before the search it rides on, so it can delay one, bounded by its ~2s fetch
-budget and the 5s harness kill below.
+budget and the 5s Claude harness kill below (the Hermes adapter adds its own
+three-second subprocess timeout).
 
 - **PreToolUse on `WebSearch`** asks the marketplace the same question the agent
   is about to ask the web and mentions a tested answer when one exists. It cannot
@@ -435,10 +437,21 @@ Where the three skills land:
   network_access = true
   ```
 
+- **Hermes Agent** (`~/.hermes` present, or explicitly selected):
+  `~/.hermes/skills/`. Install also adds an additive `mcp_servers.tenjin` entry
+  and a native plugin that uses Hermes' `pre_tool_call`, `transform_tool_result`,
+  and `transform_llm_output` hooks. Retrieval context is attached to the
+  `web_search` result and unresolved searches are raised at turn end. The plugin
+  reuses the same bounded, fail-open search/store/nag scripts as Claude Code; it
+  does not copy wallet state or add a harness-specific policy profile. Automatic
+  detection leaves plugin code inert. `tenjin install --harness hermes` is the
+  explicit activation step, and an existing `plugins.disabled: [tenjin]` choice
+  is never overridden. `HERMES_HOME` is honored when it is absolute.
+
 - **Nothing detected**: the installer falls back to `~/.agents/skills/`, so a
   harness installed later still finds the skills.
 
-Both harnesses get the same one-line pointer as global guidance: Codex in its
+Claude Code and Codex get the same one-line pointer as global guidance: Codex in its
 AGENTS.md, Claude Code in `~/.claude/CLAUDE.md`. It carries one heuristic (public,
 durable, costly to reproduce, so search before regenerating), the disclosure that
 the generalized question text leaves the machine, and where the skills live. It is

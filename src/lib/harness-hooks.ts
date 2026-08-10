@@ -53,6 +53,7 @@ const HOOK_TIMEOUT_SECONDS = 5;
 
 export type HooksSkipReason =
   | 'harness-not-claude'
+  | 'native-harness'
   | 'mode-off'
   | 'declined'
   | 'dry-run'
@@ -143,6 +144,8 @@ function fixFor(reason: HooksSkipReason): string {
   switch (reason) {
     case 'harness-not-claude':
       return 'Hooks are wired for Claude Code only. Re-run `tenjin install --harness claude` on a machine with Claude Code.';
+    case 'native-harness':
+      return "Hermes uses Tenjin's native plugin adapter; change behavior with `tenjin config set hooks.searchMode <auto|remind|off>`.";
     case 'mode-off':
       return 'Enable them with `tenjin config set hooks.searchMode auto`, then re-run `tenjin install`.';
     case 'declined':
@@ -213,6 +216,28 @@ function specs(dataDir: string): HookSpec[] {
     },
     { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir) },
   ];
+}
+
+/**
+ * Bring the shared standalone search and publish-back scripts up to date without
+ * registering Claude settings. Native harness adapters (currently Hermes) call
+ * these same bodies with their own envelope, so validation and local state never
+ * fork into a second implementation.
+ */
+export async function writeSharedHookScripts(dataDir: string): Promise<{
+  scriptsDir: string;
+  written: string[];
+  websearchPath: string;
+  stopPath: string;
+}> {
+  const scriptsDir = hooksDir(dataDir);
+  const written = await writeScripts(specs(dataDir), scriptsDir);
+  return {
+    scriptsDir,
+    written,
+    websearchPath: join(scriptsDir, WEBSEARCH_HOOK_FILE),
+    stopPath: join(scriptsDir, STOP_HOOK_FILE),
+  };
 }
 
 export interface WireHooksOptions {

@@ -224,6 +224,11 @@ type Harnesses = Array<{
   codexNetworkRule?: string;
   warnings: string[];
   notes: string[];
+  hermes?: {
+    mcp: { status: string };
+    plugin: { status: string };
+    activation: { status: string };
+  };
 }>;
 type Data = { dryRun: boolean; skillsSource: string; harnesses: Harnesses; doctor: unknown };
 
@@ -260,6 +265,24 @@ describe('runInstall: harness override', () => {
   it('dedupes codex + shared onto the one ~/.agents/skills target', async () => {
     const { data: d } = await runInstall({ harness: ['codex', 'shared'] }, makeCtx(), deps());
     expect(asData(d).harnesses).toHaveLength(1);
+  });
+
+  it('installs and activates the native Hermes plugin when explicitly requested', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.harness).toBe('hermes');
+    expect(h.skillsDir).toBe(join(home, '.hermes', 'skills'));
+    expect(h.agentsMd).toBeUndefined();
+    expect(h.hermes?.mcp.status).toBe('installed');
+    expect(h.hermes?.plugin.status).toBe('installed');
+    expect(h.hermes?.activation.status).toBe('installed');
+    expect(await readFile(join(home, '.hermes', 'config.yaml'), 'utf8')).toContain(
+      'enabled:\n    - tenjin',
+    );
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {

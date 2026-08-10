@@ -92,6 +92,7 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node
 import { join } from 'node:path';
 
 const DATA_DIR = ${JSON.stringify(dataDir)};
+const IS_HERMES = process.argv.includes('--hermes');
 
 // The DESIGN budget, not the hard bound. This is an event-loop timer, so it fires
 // only when the loop is free: a synchronous read that blocks (a FIFO at the config
@@ -207,7 +208,10 @@ function clean(value, max) {
  */
 function emit(hookEventName, additionalContext) {
   try {
-    writeFileSync(1, JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext } }));
+    const output = IS_HERMES
+      ? { context: additionalContext }
+      : { hookSpecificOutput: { hookEventName, additionalContext } };
+    writeFileSync(1, JSON.stringify(output));
   } catch {
     // A closed or full stdout is not this hook's problem to report.
   }
@@ -328,8 +332,11 @@ async function main() {
   if (!isRecord(input)) return quiet();
   // Defense in depth behind the settings.json matcher: this hook is for WebSearch
   // and nothing else, and it must never fire on WebFetch.
-  if (input.tool_name !== 'WebSearch') return quiet();
-  const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
+  const expectedTool = IS_HERMES ? 'web_search' : 'WebSearch';
+  if (input.tool_name !== expectedTool) return quiet();
+  const toolInput = IS_HERMES
+    ? (isRecord(input.args) ? input.args : {})
+    : (isRecord(input.tool_input) ? input.tool_input : {});
   const question = typeof toolInput.query === 'string' ? toolInput.query.trim() : '';
   // 512 is the server's question cap; a longer query is not truncated into a
   // different question, it is simply not looked up.

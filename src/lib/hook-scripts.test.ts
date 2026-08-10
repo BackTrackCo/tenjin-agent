@@ -42,12 +42,12 @@ interface HookRun {
 }
 
 /** Write the script and run it exactly as a harness would: stdin in, stdout out. */
-async function runScript(source: string, stdin: string): Promise<HookRun> {
+async function runScript(source: string, stdin: string, args: string[] = []): Promise<HookRun> {
   const path = join(scriptDir, `hook-${Math.random().toString(36).slice(2)}.mjs`);
   await writeFile(path, source, { mode: 0o755 });
   const started = Date.now();
   return await new Promise<HookRun>((resolve, reject) => {
-    const child = spawn(process.execPath, [path], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c) => (stdout += String(c)));
@@ -386,6 +386,18 @@ describe('WebSearch hook: it fires on WebSearch and nothing else', () => {
 });
 
 describe('WebSearch hook: modes', () => {
+  it('uses Hermes web_search input and emits its native context envelope', async () => {
+    await writeConfig({ hooks: { searchMode: 'remind' } });
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
+      ['--hermes'],
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(JSON.parse(run.stdout)).toEqual({ context: REMIND_LINE });
+  });
+
   it('remind emits the static line and sends nothing', async () => {
     const { baseUrl, hits } = await serveJson((_body, base) => ({
       status: 200,

@@ -18,6 +18,7 @@ import { saveSessionFile } from '../lib/session-key';
 import { sessionPath } from '../lib/paths';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
+import { wireHermesIntegration } from '../lib/hermes';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -128,6 +129,28 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
+  it('reports a working native Hermes integration separately from portable skills', async () => {
+    await wireHermesIntegration({
+      hermesHome: join(skillHome, '.hermes'),
+      dataDir: dir,
+      tenjinCommand: '/opt/tenjin',
+      nodeCommand: process.execPath,
+      dryRun: false,
+      explicit: true,
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(find(checks, 'hermes')).toMatchObject({ status: 'ok', required: false });
+    expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
+  });
+
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,

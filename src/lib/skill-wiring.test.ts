@@ -125,10 +125,11 @@ describe('harnessFlagFor', () => {
 });
 
 describe('skillsDirsFor', () => {
-  it('covers Claude Code and the shared Agent Skills location, in install order', () => {
+  it('covers Claude Code, shared Agent Skills, and Hermes in install order', () => {
     expect(skillsDirsFor(home)).toEqual([
       join(home, '.claude', 'skills'),
       join(home, '.agents', 'skills'),
+      join(home, '.hermes', 'skills'),
     ]);
   });
 });
@@ -200,6 +201,18 @@ describe('readAllWiring', () => {
 });
 
 describe('harness detection', () => {
+  it('does not confuse a standalone React Native hermes binary for Hermes Agent', () => {
+    expect(harnessDetectedBy(home, 'hermes', (bin) => bin === 'hermes')).toEqual([]);
+  });
+
+  it('detects Hermes Agent from its home and records the binary only as corroboration', async () => {
+    await mkdir(join(home, '.hermes'));
+    expect(harnessDetectedBy(home, 'hermes', (bin) => bin === 'hermes')).toEqual([
+      'home-dir',
+      'binary',
+    ]);
+  });
+
   const noBinaries = (): boolean => false;
 
   it('names both probes: the home dir and the binary', async () => {
@@ -214,7 +227,7 @@ describe('harness detection', () => {
     await mkdir(join(home, '.claude'), { recursive: true });
 
     const claudeOnly = detectHarnesses(home, noBinaries);
-    expect(claudeOnly).toEqual({ claude: true, codex: false });
+    expect(claudeOnly).toEqual({ claude: true, codex: false, hermes: false });
     expect(harnessReads(home, claudeDir, claudeOnly)).toBe(true);
     // The leftover-mirror case: nothing here reads ~/.agents/skills.
     expect(harnessReads(home, sharedDir, claudeOnly)).toBe(false);
@@ -226,7 +239,7 @@ describe('harness detection', () => {
   it('with NO harness detected the shared dir is still judged: it is the fallback target', () => {
     const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
     const none = detectHarnesses(home, noBinaries);
-    expect(none).toEqual({ claude: false, codex: false });
+    expect(none).toEqual({ claude: false, codex: false, hermes: false });
     expect(harnessReads(home, claudeDir, none)).toBe(false);
     expect(harnessReads(home, sharedDir, none)).toBe(true);
   });

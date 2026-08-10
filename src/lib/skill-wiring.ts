@@ -44,8 +44,12 @@ export interface HarnessWiring {
   state: DirState;
 }
 
-export function skillsDirsFor(home: string): string[] {
-  return [join(home, '.claude', 'skills'), join(home, '.agents', 'skills')];
+export function skillsDirsFor(home: string, hermesHome = join(home, '.hermes')): string[] {
+  return [
+    join(home, '.claude', 'skills'),
+    join(home, '.agents', 'skills'),
+    join(hermesHome, 'skills'),
+  ];
 }
 
 /**
@@ -55,12 +59,18 @@ export function skillsDirsFor(home: string): string[] {
  * with, and a second copy of that mapping is exactly the drift this module exists to
  * prevent.
  */
-export const HARNESS_TARGETS = ['claude', 'codex', 'shared'] as const;
+export const HARNESS_TARGETS = ['claude', 'codex', 'hermes', 'shared'] as const;
 export type HarnessTarget = (typeof HARNESS_TARGETS)[number];
 
 /** The skills directory a target writes to. `codex` and `shared` share ~/.agents/skills. */
-export function harnessTargetDir(home: string, harness: HarnessTarget): string {
-  return harness === 'claude' ? join(home, '.claude', 'skills') : join(home, '.agents', 'skills');
+export function harnessTargetDir(
+  home: string,
+  harness: HarnessTarget,
+  hermesHome = join(home, '.hermes'),
+): string {
+  if (harness === 'claude') return join(home, '.claude', 'skills');
+  if (harness === 'hermes') return join(hermesHome, 'skills');
+  return join(home, '.agents', 'skills');
 }
 
 /**
@@ -68,8 +78,14 @@ export function harnessTargetDir(home: string, harness: HarnessTarget): string {
  * ~/.agents/skills by default, so a bare `tenjin install` cannot clear a problem
  * found there.
  */
-export function harnessFlagFor(home: string, dir: string): string {
-  return dir === join(home, '.claude', 'skills') ? 'claude' : 'shared';
+export function harnessFlagFor(
+  home: string,
+  dir: string,
+  hermesHome = join(home, '.hermes'),
+): string {
+  if (dir === join(home, '.claude', 'skills')) return 'claude';
+  if (dir === join(hermesHome, 'skills')) return 'hermes';
+  return 'shared';
 }
 
 /** The harnesses `install` probes for. `shared` is a fallback target, never detected. */
@@ -85,22 +101,33 @@ export function harnessDetectedBy(
   home: string,
   harness: DetectableHarness,
   which: (bin: string) => boolean,
+  hermesHome = join(home, '.hermes'),
 ): string[] {
   const reasons: string[] = [];
-  if (existsSync(join(home, `.${harness}`))) reasons.push('home-dir');
-  if (which(harness)) reasons.push('binary');
+  const harnessHome = harness === 'hermes' ? hermesHome : join(home, `.${harness}`);
+  const hasHome = existsSync(harnessHome);
+  if (hasHome) reasons.push('home-dir');
+  // A common JavaScript engine binary is also named `hermes`; unlike Claude and
+  // Codex it is not sufficient evidence on its own. Pair it with Hermes' home.
+  if (which(harness) && (harness !== 'hermes' || hasHome)) reasons.push('binary');
   return reasons;
 }
 
 export interface HarnessPresence {
   claude: boolean;
   codex: boolean;
+  hermes: boolean;
 }
 
-export function detectHarnesses(home: string, which: (bin: string) => boolean): HarnessPresence {
+export function detectHarnesses(
+  home: string,
+  which: (bin: string) => boolean,
+  hermesHome = join(home, '.hermes'),
+): HarnessPresence {
   return {
     claude: harnessDetectedBy(home, 'claude', which).length > 0,
     codex: harnessDetectedBy(home, 'codex', which).length > 0,
+    hermes: harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0,
   };
 }
 
@@ -111,8 +138,16 @@ export function detectHarnesses(home: string, which: (bin: string) => boolean): 
  * shared directory is still in play, because that is the fallback target `install`
  * writes to, so a half-written fallback install is still reported.
  */
-export function harnessReads(home: string, dir: string, present: HarnessPresence): boolean {
-  return harnessFlagFor(home, dir) === 'claude' ? present.claude : present.codex || !present.claude;
+export function harnessReads(
+  home: string,
+  dir: string,
+  present: HarnessPresence,
+  hermesHome = join(home, '.hermes'),
+): boolean {
+  const target = harnessFlagFor(home, dir, hermesHome);
+  if (target === 'claude') return present.claude;
+  if (target === 'hermes') return present.hermes;
+  return present.codex || (!present.claude && !present.hermes);
 }
 
 /**
@@ -125,8 +160,9 @@ export function harnessRequested(
   home: string,
   dir: string,
   requested: readonly HarnessTarget[],
+  hermesHome = join(home, '.hermes'),
 ): boolean {
-  return requested.some((h) => harnessTargetDir(home, h) === dir);
+  return requested.some((h) => harnessTargetDir(home, h, hermesHome) === dir);
 }
 
 /**
@@ -139,8 +175,12 @@ export function harnessInPlay(
   dir: string,
   present: HarnessPresence,
   requested: readonly HarnessTarget[],
+  hermesHome = join(home, '.hermes'),
 ): boolean {
-  return harnessReads(home, dir, present) || harnessRequested(home, dir, requested);
+  return (
+    harnessReads(home, dir, present, hermesHome) ||
+    harnessRequested(home, dir, requested, hermesHome)
+  );
 }
 
 /**
@@ -179,9 +219,12 @@ export async function readHarnessWiring(dir: string): Promise<HarnessWiring> {
   return { dir, exists, skills, state: classify(skills) };
 }
 
-export async function readAllWiring(home: string): Promise<HarnessWiring[]> {
+export async function readAllWiring(
+  home: string,
+  hermesHome = join(home, '.hermes'),
+): Promise<HarnessWiring[]> {
   const out: HarnessWiring[] = [];
-  for (const dir of skillsDirsFor(home)) out.push(await readHarnessWiring(dir));
+  for (const dir of skillsDirsFor(home, hermesHome)) out.push(await readHarnessWiring(dir));
   return out;
 }
 

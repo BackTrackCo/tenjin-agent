@@ -56,6 +56,8 @@ import {
 import type { PermissionsResult } from '../lib/harness-permissions';
 import { hooksSkipped, hooksUndo, wireSearchHooks } from '../lib/harness-hooks';
 import type { HooksResult } from '../lib/harness-hooks';
+import { resolveHermesHome, wireHermesIntegration } from '../lib/hermes';
+import type { HermesIntegrationResult } from '../lib/hermes';
 import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
@@ -256,6 +258,8 @@ interface HarnessResult {
   codexNetworkRule?: string;
   notes: string[];
   warnings: string[];
+  /** Native Hermes MCP/plugin wiring; present only for the Hermes target. */
+  hermes?: HermesIntegrationResult;
 }
 
 export interface InstallDeps {
@@ -301,6 +305,10 @@ export interface InstallDeps {
    * keychain under the `tenjin-cli` service.
    */
   walletPassphrase?: PassphraseOverrides;
+  /** Absolute CLI entrypoint embedded in Hermes' MCP config. */
+  tenjinCommand?: string;
+  /** Absolute Node executable embedded in the Hermes native plugin. */
+  nodeCommand?: string;
 }
 
 /**
@@ -423,6 +431,7 @@ async function installBody(
     );
   }
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const hermesHome = resolveHermesHome(home, env);
 
   // Human-first is the global output rule (emitSuccess renders humanLines at a TTY
   // without --json and no envelope). `humanOutput` matches that gate so install
@@ -435,7 +444,7 @@ async function installBody(
     deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
   await assertSkillsSource(skillsSource);
 
-  const plans = resolvePlans(parsed.data.harness, home, which);
+  const plans = resolvePlans(parsed.data.harness, home, hermesHome, which);
   // Same condition resolvePlans treats as an override, so what gets recorded below is
   // exactly what overrode detection.
   const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
@@ -489,6 +498,38 @@ async function installBody(
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
   );
+  const hermesResult = harnesses.find((result) => result.harness === 'hermes');
+  if (hermesResult !== undefined) {
+    const tenjinCommand = deps.tenjinCommand ?? process.argv[1];
+    const nodeCommand = deps.nodeCommand ?? process.execPath;
+    if (tenjinCommand === undefined || !isAbsolute(tenjinCommand) || !isAbsolute(nodeCommand)) {
+      throw new CliError(
+        'INTERNAL',
+        'Hermes integration requires absolute Tenjin and Node executable paths.',
+        { fix: 'Run `tenjin install --harness hermes` through the installed Tenjin CLI.' },
+      );
+    }
+    hermesResult.hermes = await wireHermesIntegration({
+      hermesHome,
+      dataDir: ctx.dataDir,
+      tenjinCommand,
+      nodeCommand,
+      dryRun,
+      explicit:
+        explicitHarness &&
+        parsed.data.harness?.includes('hermes') === true &&
+        !noHooks &&
+        hooks.mode !== 'off' &&
+        hooks.skipped !== 'declined',
+    });
+    for (const part of [
+      hermesResult.hermes.mcp,
+      hermesResult.hermes.plugin,
+      hermesResult.hermes.activation,
+    ]) {
+      if (part.warning !== undefined) hermesResult.warnings.push(part.warning);
+    }
+  }
   // On BOTH paths now: the loop this command sets up needs a key, so a headless
   // run creates one rather than leaving the operator a setup that stops at the
   // first buy or publish.
@@ -743,6 +784,9 @@ function hooksLine(io: Io, h: HooksResult): string {
   if (h.skipped === 'harness-not-claude') {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only).`;
   }
+  if (h.skipped === 'native-harness') {
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode through the native Hermes plugin. Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+  }
   if (h.skipped === 'dry-run') {
     return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
   }
@@ -759,7 +803,13 @@ function hooksLine(io: Io, h: HooksResult): string {
 }
 
 function harnessLabel(h: Harness): string {
-  return h === 'claude' ? 'Claude Code' : h === 'codex' ? 'Codex' : 'Agent Skills';
+  return h === 'claude'
+    ? 'Claude Code'
+    : h === 'codex'
+      ? 'Codex'
+      : h === 'hermes'
+        ? 'Hermes'
+        : 'Agent Skills';
 }
 
 /**
@@ -1192,7 +1242,8 @@ async function resolvePermissions(args: {
   // Agent Skills location gate permissions elsewhere, so there is nothing here to
   // write for them, and guessing at another harness's config would be the kind of
   // uninvited write this whole module is careful about.
-  if (!plans.some((p) => p.harness === 'claude')) {
+  const hasClaude = plans.some((p) => p.harness === 'claude');
+  if (!hasClaude) {
     return permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude');
   }
   if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
@@ -1257,8 +1308,10 @@ async function resolveHooks(args: {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
   const stored = (await loadRawConfig(dataDir)).hooks?.searchMode;
+  const hasClaude = plans.some((p) => p.harness === 'claude');
+  const hasHermes = plans.some((p) => p.harness === 'hermes');
 
-  if (!plans.some((p) => p.harness === 'claude')) {
+  if (!hasClaude && !hasHermes) {
     const harness = plans[0]?.harness ?? 'shared';
     return hooksSkipped(
       harness,
@@ -1272,7 +1325,13 @@ async function resolveHooks(args: {
   // mode is reported unchanged and a later bare re-run wires them. That is the
   // difference from `--search-hooks off`, which is a durable statement.
   if (noHooks) {
-    return hooksSkipped('claude', home, dataDir, stored ?? DEFAULT_HOOK_MODE, 'declined');
+    return hooksSkipped(
+      hasHermes ? 'hermes' : 'claude',
+      home,
+      dataDir,
+      stored ?? DEFAULT_HOOK_MODE,
+      'declined',
+    );
   }
 
   const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt);
@@ -1281,16 +1340,24 @@ async function resolveHooks(args: {
   // this walkthrough already treats Escape that way, and this one used to be the
   // single prompt where backing out still wired and persisted a mode.
   if (mode === null) {
-    return hooksSkipped('claude', home, dataDir, stored ?? DEFAULT_HOOK_MODE, 'declined');
+    return hooksSkipped(
+      hasHermes ? 'hermes' : 'claude',
+      home,
+      dataDir,
+      stored ?? DEFAULT_HOOK_MODE,
+      'declined',
+    );
   }
-  if (dryRun) return hooksSkipped('claude', home, dataDir, mode, 'dry-run');
+  const resultHarness = hasHermes && !hasClaude ? 'hermes' : 'claude';
+  if (dryRun) return hooksSkipped(resultHarness, home, dataDir, mode, 'dry-run');
   if (mode !== (stored ?? DEFAULT_HOOK_MODE) || stored === undefined) {
     await persistSearchHookMode(dataDir, mode);
   }
   // `off` is a decision not to register anything, so settings.json is not touched
   // at all. It is NOT the same as an inert script: an operator who later sets the
   // mode back to `auto` re-runs install, which is what the fix string says.
-  if (mode === 'off') return hooksSkipped('claude', home, dataDir, mode, 'mode-off');
+  if (mode === 'off') return hooksSkipped(resultHarness, home, dataDir, mode, 'mode-off');
+  if (!hasClaude) return hooksSkipped('hermes', home, dataDir, mode, 'native-harness');
   return wireSearchHooks({ homeDir: home, dataDir, mode });
 }
 
@@ -1351,10 +1418,13 @@ interface HarnessPlan {
 function resolvePlans(
   override: string[] | undefined,
   home: string,
+  hermesHome: string,
   which: (bin: string) => boolean,
 ): HarnessPlan[] {
   if (override !== undefined && override.length > 0) {
-    const plans = override.map((v) => planFor(validateHarness(v), ['override'], true, home));
+    const plans = override.map((v) =>
+      planFor(validateHarness(v), ['override'], true, home, hermesHome),
+    );
     return dedupeBySkillsDir(plans);
   }
 
@@ -1362,12 +1432,14 @@ function resolvePlans(
   // Same two probes doctor's skills check gates its per-directory verdicts on.
   const claudeBy = harnessDetectedBy(home, 'claude', which);
   const codexBy = harnessDetectedBy(home, 'codex', which);
-  if (claudeBy.length > 0) plans.push(planFor('claude', claudeBy, true, home));
-  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home));
+  const hermesBy = harnessDetectedBy(home, 'hermes', which, hermesHome);
+  if (claudeBy.length > 0) plans.push(planFor('claude', claudeBy, true, home, hermesHome));
+  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home, hermesHome));
+  if (hermesBy.length > 0) plans.push(planFor('hermes', hermesBy, true, home, hermesHome));
   if (plans.length === 0) {
     // Nothing detected: the shared Agent Skills location is the fallback target, so
     // a harness installed later still finds the skills.
-    plans.push(planFor('shared', ['fallback'], false, home));
+    plans.push(planFor('shared', ['fallback'], false, home, hermesHome));
   }
   return dedupeBySkillsDir(plans);
 }
@@ -1377,9 +1449,17 @@ function planFor(
   detectedBy: string[],
   detected: boolean,
   home: string,
+  hermesHome: string,
 ): HarnessPlan {
-  const skillsDir = harnessTargetDir(home, harness);
-  return { harness, detected, detectedBy, skillsDir, wiresAgentsMd: harness !== 'claude', home };
+  const skillsDir = harnessTargetDir(home, harness, hermesHome);
+  return {
+    harness,
+    detected,
+    detectedBy,
+    skillsDir,
+    wiresAgentsMd: harness !== 'claude' && harness !== 'hermes',
+    home,
+  };
 }
 
 function dedupeBySkillsDir(plans: HarnessPlan[]): HarnessPlan[] {
