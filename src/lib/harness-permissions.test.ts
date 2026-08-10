@@ -377,8 +377,30 @@ describe('permissionsSkipped', () => {
       added: [],
       alreadyPresent: [],
       skipped: 'declined',
+      // Every skipped state names the command that changes it, so a machine
+      // consumer reads the remedy as a field rather than parsing prose.
+      fix: 'Add them with `tenjin install --allow-free-verbs`.',
     });
     expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  it('carries a fix on every skip reason there is', async () => {
+    const reasons = [
+      'harness-not-claude',
+      'not-requested',
+      'declined',
+      'dry-run',
+      'unresolvable',
+      'unreadable',
+      'unparsable',
+      'unexpected-shape',
+      'changed-since-read',
+    ] as const;
+    for (const reason of reasons) {
+      const result = permissionsSkipped('claude', home, reason);
+      expect(result.fix, reason).toBeTruthy();
+      expect(result.fix, reason).toMatch(/tenjin (install|doctor)/);
+    }
   });
 
   it('names no path for a harness that has no such file', () => {

@@ -36,6 +36,53 @@ const PublishConfigSchema = z.object({
 });
 
 /**
+ * What the harness WebSearch hook does when the agent is about to search the web
+ * (see lib/hook-scripts.ts). `auto` asks Tenjin first and mentions a tested
+ * answer when one exists, `remind` says the marketplace is there without sending
+ * the query anywhere, `off` leaves the installed hook inert.
+ */
+export const SearchHookModeSchema = z.enum(['auto', 'remind', 'off']);
+export type SearchHookMode = z.infer<typeof SearchHookModeSchema>;
+
+/**
+ * Validate a search-hook mode at a command edge (`--search-hooks`), the same way
+ * publish-mode values are validated: an unrecognized value is USAGE, never a
+ * silent fallback to the default.
+ */
+export function parseSearchHookModeFlag(value: string, flagName: string): SearchHookMode {
+  const parsed = SearchHookModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "auto", "remind", or "off".',
+  });
+}
+
+/** Whether the Stop hook may raise an open loop at the end of a turn. */
+export const StopNagModeSchema = z.enum(['on', 'off']);
+export type StopNagMode = z.infer<typeof StopNagModeSchema>;
+
+export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
+  const parsed = StopNagModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
+/**
+ * The harness-hook block. BOTH keys are read by the installed scripts at run
+ * time, which is what makes them runtime toggles rather than install-time
+ * choices: `tenjin config set hooks.searchMode off` or `hooks.stopNag off`
+ * silences a hook immediately, with no re-install and nothing to unwire. The
+ * scripts stay registered and no-op, which is also what lets turning one back on
+ * be a single `config set`.
+ */
+const HooksConfigSchema = z.object({
+  searchMode: SearchHookModeSchema,
+  stopNag: StopNagModeSchema,
+});
+
+/**
  * What `install` recorded about its OWN targets. `harness` is the explicit
  * `--harness` set of the last install that passed the flag, and it exists so
  * `doctor` keeps judging a directory the user named by hand: detection cannot see a
@@ -78,6 +125,7 @@ export const ConfigSchema = z.object({
   evalCohort: z.boolean(),
   publish: PublishConfigSchema,
   install: InstallConfigSchema,
+  hooks: HooksConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -96,6 +144,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: InstallConfigSchema.partial().passthrough().optional(),
+    hooks: HooksConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -125,16 +174,21 @@ export const CONFIG_DEFAULTS: Config = {
   evalCohort: false,
   publish: { mode: 'review', defaultPrice: '100000' },
   install: { harness: [] },
+  // `auto` is the default because the hook exists to be useful without being
+  // asked for; the disclosure and the undo ride the install output, and `off`
+  // leaves the installed script inert without touching settings.json.
+  hooks: { searchMode: 'auto', stopNag: 'on' },
 };
 
 /**
- * Scalar keys `config get/set/list` render one line each. Both nested blocks are
- * excluded: `publish` is addressed by the dotted `publish.mode`/`publish.defaultPrice`
- * keys (see PUBLISH_CONFIG_KEYS), and `install` is a record `install` writes about
- * itself rather than a setting to hand-edit, so neither is ever a bare scalar.
+ * Scalar keys `config get/set/list` render one line each. The nested blocks are
+ * excluded: `publish` and `hooks` are addressed by their dotted keys (see
+ * PUBLISH_CONFIG_KEYS / HOOKS_CONFIG_KEYS), and `install` is a record `install`
+ * writes about itself rather than a setting to hand-edit, so none is ever a bare
+ * scalar.
  */
-export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install'>;
-const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install']);
+export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install' | 'hooks'>;
+const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install', 'hooks']);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
@@ -142,6 +196,10 @@ export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>)
 /** The dotted keys `config get/set` accept for the nested publish block. */
 export const PUBLISH_CONFIG_KEYS = ['publish.mode', 'publish.defaultPrice'] as const;
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
+
+/** The dotted keys `config get/set` accept for the nested hooks block. */
+export const HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.stopNag'] as const;
+export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
 
 /**
  * Read and validate config.json WITHOUT applying defaults, so provenance can
@@ -192,6 +250,10 @@ export async function loadConfig(dir: string): Promise<Config> {
       defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
     },
     install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
+    hooks: {
+      searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
+      stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
+    },
   };
 }
 
@@ -232,6 +294,8 @@ export interface EffectiveSettings {
   evalCohort: ResolvedSetting<boolean>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
+  hooksSearchMode: ResolvedSetting<SearchHookMode>;
+  hooksStopNag: ResolvedSetting<StopNagMode>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -267,7 +331,24 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     evalCohort: fileOrDefault('evalCohort', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
+    hooksSearchMode: resolveHooksSearchMode(config),
+    hooksStopNag: resolveHooksStopNag(config),
   };
+}
+
+/** hooks.stopNag: file or default, same shape as hooks.searchMode. */
+function resolveHooksStopNag(config: PartialConfig): ResolvedSetting<StopNagMode> {
+  const fromFile = config.hooks?.stopNag;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.stopNag, source: 'default' };
+}
+
+/** hooks.searchMode: file or default. No env, flag, or project layer, because the
+ *  installed hook script reads the global file directly and has no CLI edge. */
+function resolveHooksSearchMode(config: PartialConfig): ResolvedSetting<SearchHookMode> {
+  const fromFile = config.hooks?.searchMode;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.searchMode, source: 'default' };
 }
 
 /**

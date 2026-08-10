@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOutcome } from './outcome';
-import { recordSearch, type StoredSearch } from '../lib/search-store';
+import { loadSearches, recordSearch, type StoredSearch } from '../lib/search-store';
 import type { CommandContext } from '../context';
 
 let dir: string;
@@ -404,5 +404,117 @@ describe('runOutcome, locally incoherent statuses', () => {
     await expect(
       runOutcome({ last: true, status: 'loved-it' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toThrow('Invalid outcome status');
+  });
+});
+
+// Our half of the merge: reporting an outcome is one of the three things that
+// closes an open loop, so the Stop hook stops raising the search afterwards.
+describe('runOutcome closes the open loop locally', () => {
+  it('marks the search resolved, so the Stop hook stops raising it', async () => {
+    await record();
+    const { fetch } = stub();
+    await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('marks the right search when --last resolved the target', async () => {
+    await record();
+    const { fetch } = stub();
+    await runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  // The mark is local bookkeeping for a nudge; a search this machine never
+  // recorded still reports fine.
+  it('reports normally for a searchId with no local record', async () => {
+    const { fetch } = stub();
+    const res = await runOutcome({ searchId: LOOKUP, status: 'used' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({ searchId: LOOKUP, status: 'used' });
+    expect(await loadSearches(dir)).toEqual([]);
+  });
+
+  // Where the two halves of this merge actually meet: #106 refuses an incoherent
+  // outcome BEFORE the request, so there is no report and the loop must stay open
+  // for the Stop hook to raise. Marking on a refusal would silence a reminder for
+  // a report that never happened.
+  it('leaves the loop open when the coherence gate refused the report', async () => {
+    await record({ decision: 'MISS', paidBrowseCount: 0 });
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+});
+
+// The other meeting point: a search the WebSearch hook recorded is an ordinary
+// store entry, so #106's echo and coherence gate apply to it exactly as they do
+// to a deliberate `tenjin search`, and reporting on it closes the loop. Reached
+// by EXPLICIT --search-id only: `--last` skips hook entries, because in auto mode
+// the hook prepends one on every web search and an unfiltered `--last` would
+// re-target the agent's report at a ridealong query it never chose (found in
+// dogfooding; the Stop hook's reminder hands the agent the explicit id).
+describe('runOutcome over a websearch-hook-sourced search', () => {
+  it('--last skips it and refuses when no deliberate search exists', async () => {
+    await record({ source: 'websearch-hook', question: 'a query the hook rode along with' });
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ last: true, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'SEARCH_NOT_FOUND' });
+    expect(urls).toHaveLength(0);
+  });
+
+  it('--last targets the deliberate search under a newer hook entry', async () => {
+    await record({ question: 'the question the agent actually asked' });
+    await record({
+      source: 'websearch-hook',
+      searchId: '0197aaaa-bbbb-cccc-dddd-222222222222',
+      question: 'a query the hook rode along with',
+    });
+    const { fetch } = stub();
+    const res = await runOutcome({ last: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({ question: 'the question the agent actually asked' });
+  });
+
+  it('echoes it, resolves it, and keeps its source (by explicit --search-id)', async () => {
+    await record({ source: 'websearch-hook', question: 'a query the hook rode along with' });
+    const { fetch } = stub();
+    const res = await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({ question: 'a query the hook rode along with' });
+    const [stored] = await loadSearches(dir);
+    expect(stored?.resolved?.by).toBe('outcome');
+    expect(stored?.source).toBe('websearch-hook');
+  });
+
+  it('refuses purchase_declined on one that offered nothing to buy', async () => {
+    await record({ source: 'websearch-hook', decision: 'MISS', paidBrowseCount: 0 });
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  // The hook does not record `paidBrowseCount` (it would need a third mirrored
+  // copy of the price predicate in a standalone script). Absent reads as unknown,
+  // which is #106's documented fail-open: an honest report is never refused on a
+  // guess. Pinned so a later change to the hook's writer is a deliberate one.
+  it('fails open on a hook entry with no paidBrowseCount', async () => {
+    await record({ source: 'websearch-hook', decision: 'MISS', paidBrowseCount: undefined });
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({ status: 'purchase_declined' });
+    expect(urls).toHaveLength(1);
   });
 });

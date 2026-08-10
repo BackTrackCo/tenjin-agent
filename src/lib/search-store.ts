@@ -22,12 +22,45 @@ const StoredCandidateSchema = z.object({
 });
 export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
 
+/**
+ * What closed an open loop. A MISS the agent acted on ends in exactly one of
+ * these three, and the Stop hook stays quiet once any of them is recorded:
+ * `outcome` (the loop was reported), `publish` (the answer went back to the
+ * marketplace), `candidate` (the draft was parked to publish later).
+ */
+export const SearchResolutionSchema = z.enum(['outcome', 'publish', 'candidate']);
+export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
+
+/**
+ * Who ran the search. `cli` is a deliberate `tenjin search`: the agent decided
+ * the question was worth looking up, so an unanswered one is a strong signal.
+ * `websearch-hook` is the PreToolUse hook riding along with a WebSearch the agent
+ * was going to run anyway, which is a much weaker signal, because nobody judged
+ * the question suitable for the marketplace before it was sent.
+ *
+ * The distinction exists because the Stop hook must not treat them alike: an
+ * unanswered deliberate search deserves being named on its own, while a batch of
+ * hook searches deserves one line the agent can dismiss at a glance. Keeping both
+ * in ONE store is what makes the hook's misses reachable by explicit
+ * `outcome --search-id`, `buy <resourceId>`, and the open-loop reminder at all
+ * (`--last` deliberately skips hook entries; see {@link latestSearch}).
+ *
+ * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
+ * source field, and those entries were all explicit searches.
+ */
+export const SearchSourceSchema = z.enum(['cli', 'websearch-hook']);
+export type SearchSource = z.infer<typeof SearchSourceSchema>;
+
 const StoredSearchSchema = z.object({
   searchId: z.string(),
   at: z.string(),
   question: z.string(),
   decision: z.string(),
   candidates: z.array(StoredCandidateSchema),
+  /** Absent until something closes the loop; see {@link markSearchResolved}. */
+  resolved: z.object({ by: SearchResolutionSchema, at: z.string() }).optional(),
+  /** Absent on entries written before sources existed; see {@link SearchSourceSchema}. */
+  source: SearchSourceSchema.optional(),
   // How many of the search's browse pointers cost money, and NOT the pointers
   // themselves: keeping them out of the store is what makes `buy <resourceId>`
   // unable to reach one (see the browse comment in agent-api.ts), and a count
@@ -46,8 +79,23 @@ const StoreSchema = z.object({
   searches: z.array(StoredSearchSchema),
 });
 
-function storePath(dataDir: string): string {
+/**
+ * The store and its lock. Both paths are EXPORTED because the installed hook
+ * scripts write this same file from outside the CLI process: they cannot import
+ * this module, so they reimplement the lock protocol against this exact path.
+ * Two writers of one file must at least agree on where the mutex lives, and a
+ * test pins the script's protocol against this one.
+ */
+export function searchStorePath(dataDir: string): string {
   return join(dataDir, 'searches.json');
+}
+
+export function searchStoreLockPath(dataDir: string): string {
+  return `${searchStorePath(dataDir)}.lock`;
+}
+
+function storePath(dataDir: string): string {
+  return searchStorePath(dataDir);
 }
 
 export async function loadSearches(dataDir: string): Promise<StoredSearch[]> {
@@ -86,9 +134,50 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
   });
 }
 
+/**
+ * Record that something closed the loop on `searchId`, so the Stop hook stops
+ * raising it. Best-effort in both directions and it NEVER throws: an unknown id
+ * (the search aged past MAX_ENTRIES, or came from another machine) writes
+ * nothing, and a failure to persist costs one stale nag rather than the command
+ * the caller actually ran. The FIRST resolution wins, so a publish after an
+ * outcome report does not rewrite who closed it.
+ */
+export async function markSearchResolved(
+  dataDir: string,
+  searchId: string,
+  by: SearchResolution,
+  at: string = new Date().toISOString(),
+): Promise<void> {
+  try {
+    const lockPath = `${storePath(dataDir)}.lock`;
+    await withFileLock(lockPath, async () => {
+      const existing = await loadSearches(dataDir);
+      const target = existing.find((s) => s.searchId === searchId);
+      if (target === undefined || target.resolved !== undefined) return;
+      const searches = existing.map((s) =>
+        s.searchId === searchId ? { ...s, resolved: { by, at } } : s,
+      );
+      await writeFileAtomic(
+        storePath(dataDir),
+        `${JSON.stringify({ schemaVersion: 1, searches }, null, 2)}\n`,
+        { mode: 0o644, dirMode: 0o700 },
+      );
+    });
+  } catch {
+    // Bookkeeping for a hook nudge. It must never fail the verb that ran.
+  }
+}
+
+/**
+ * The most recent DELIBERATE search: `--last` means "the search I just ran", and
+ * in auto mode the WebSearch hook prepends a ridealong entry on every web search,
+ * so an unfiltered head would routinely re-target `outcome --last` at a query the
+ * agent never chose to make (found in dogfooding). Hook entries stay reachable by
+ * explicit `--search-id`, which is what the Stop hook's reminder names.
+ */
 export async function latestSearch(dataDir: string): Promise<StoredSearch | null> {
   const searches = await loadSearches(dataDir);
-  return searches[0] ?? null;
+  return searches.find((s) => s.source !== 'websearch-hook') ?? null;
 }
 
 /** The stored candidate for a resourceId across recent searches (newest first). */

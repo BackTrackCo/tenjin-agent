@@ -101,7 +101,7 @@ describe('main', () => {
   // A pointer in help has to work from wherever the reader is standing, which is
   // their own project and not this package. A repo-relative `docs/...` path reads
   // as a file they can open and is not one.
-  it('points --allow-free-verbs help at the permissions URL, not a relative path', async () => {
+  it('points the allowlist help at the permissions URL, not a relative path', async () => {
     const cap = captureIo();
     expect(await main(['install', '--help'], cap.io)).toBe(0);
     const help = cap.stdout();

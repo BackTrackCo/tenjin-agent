@@ -349,10 +349,16 @@ export const PERMISSIONS_DOC_URL =
  * The single line that replaced the block: what is on the page, and its URL. It
  * names the counts rather than the rules so the operator knows whether the page
  * answers their question before they open it.
+ *
+ * Subagent delegation is named here rather than on a second line, because doctor
+ * deliberately closes with ONE pointer (#81) and the operator deciding what to
+ * hand a subagent is reading exactly this line. The free tier IS the
+ * subagent-safe set, so the counts already answer the question; which verbs stay
+ * human-gated lives on the page with every other caveat.
  */
 export function permissionsPointer(): string {
   return (
-    `Auto-mode permission allowlist (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
+    `Auto-mode permission allowlist and subagent delegation (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
     `${OPT_IN_ALLOWLIST.length} opt-ins, the --base-url caveat): ${PERMISSIONS_DOC_URL}`
   );
 }

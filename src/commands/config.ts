@@ -3,20 +3,25 @@ import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import {
   CONFIG_KEYS,
+  HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
   loadRawConfig,
+  parseSearchHookModeFlag,
+  parseStopNagFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
   EffectiveSettings,
+  HooksConfigKey,
   PartialConfig,
   Provenance,
   PublishConfigKey,
   PublishMode,
   ScalarConfigKey,
+  SearchHookMode,
 } from '../lib/config';
 import type { HarnessTarget } from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
@@ -42,7 +47,9 @@ interface RenderedSetting extends RenderedValue {
 }
 
 const CONFIRM_ABOVE = 'above:';
-const KEY_WIDTH = Math.max(...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].map((key) => key.length));
+const KEY_WIDTH = Math.max(
+  ...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS].map((key) => key.length),
+);
 
 /**
  * A one-line human description per key, appended (dim) to the bare `config`
@@ -60,10 +67,17 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   evalCohort: 'opt in to the search evaluation cohort',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
+  'hooks.searchMode':
+    'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.stopNag': 'end-of-turn reminder about searches nothing answered yet',
 };
 
 function isPublishKey(key: string): key is PublishConfigKey {
   return (PUBLISH_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isHooksKey(key: string): key is HooksConfigKey {
+  return (HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
 }
 
 /**
@@ -86,6 +100,11 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(describedLine(key, entry, downgradeNote(key, settings)));
   }
+  for (const key of HOOKS_CONFIG_KEYS) {
+    const entry = renderHooksSetting(key, settings);
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -101,6 +120,10 @@ export async function runConfigGet(
       data: { key, ...entry },
       humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
     };
+  }
+  if (isHooksKey(key)) {
+    const entry = renderHooksSetting(key, await resolveFromContext(ctx));
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
@@ -118,6 +141,7 @@ export async function runConfigSet(
   ctx: CommandContext,
 ): Promise<CommandResult> {
   if (isPublishKey(key)) return setPublishKey(key, value, ctx);
+  if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
@@ -149,6 +173,28 @@ async function setPublishKey(
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
+/**
+ * `config set hooks.searchMode`. Merged into the nested hooks block through the
+ * same locked read-modify-write every other set uses, so a subkey a newer CLI
+ * wrote survives. The installed hook script reads this file on every run, so the
+ * new mode takes effect immediately with no re-install.
+ */
+async function setHooksKey(
+  key: HooksConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const subkey = key === 'hooks.searchMode' ? 'searchMode' : 'stopNag';
+  const parsed =
+    key === 'hooks.searchMode' ? parseSearchHookModeFlag(value, key) : parseStopNagFlag(value, key);
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, [subkey]: parsed },
+  }));
+  const entry: RenderedSetting = { value: parsed, source: 'file' };
+  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+}
+
 function parsePublishMode(value: string): string {
   const parsed = PublishModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
@@ -167,6 +213,17 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   await persist(dir, (existing) => ({
     ...existing,
     publish: { ...existing.publish, mode },
+  }));
+}
+
+/**
+ * Persist `hooks.searchMode` through the same locked merge-write, for `install`'s
+ * hook decision. The mode is already a validated SearchHookMode.
+ */
+export async function persistSearchHookMode(dir: string, mode: SearchHookMode): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, searchMode: mode },
   }));
 }
 
@@ -203,7 +260,7 @@ async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSetting
 function assertKey(key: string): ScalarConfigKey {
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS].join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS].join(', ')}.`,
   });
 }
 
@@ -228,6 +285,12 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
     value: toMoney(settings.publishDefaultPrice.value),
     source: settings.publishDefaultPrice.source,
   };
+}
+
+/** The list/get shape for a hooks key: a plain enum string either way. */
+function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
+  const resolved = key === 'hooks.searchMode' ? settings.hooksSearchMode : settings.hooksStopNag;
+  return { value: resolved.value, source: resolved.source };
 }
 
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {

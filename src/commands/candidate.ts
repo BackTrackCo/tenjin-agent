@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { createCandidate, dropCandidate, listCandidates } from '../lib/candidate-store';
 import { UUID_RE } from '../lib/ids';
+import { markSearchResolved } from '../lib/search-store';
 import { sanitizeForTerminal } from '../lib/output';
 import { pathExists } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
@@ -68,6 +69,11 @@ export async function runCandidateAdd(
     created,
     sourceProject,
   });
+
+  // Parking IS closing the loop: the answer exists, it is just not published yet,
+  // and `candidate list` is the surface that keeps it visible from here on. The
+  // Stop hook stops raising this search.
+  await markSearchResolved(ctx.dataDir, args.searchId, 'candidate', created);
 
   return {
     data: {

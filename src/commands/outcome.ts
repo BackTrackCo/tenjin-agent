@@ -1,7 +1,12 @@
 import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
-import { latestSearch, loadSearches, type StoredSearch } from '../lib/search-store';
+import {
+  latestSearch,
+  loadSearches,
+  markSearchResolved,
+  type StoredSearch,
+} from '../lib/search-store';
 import { isPaidPrice } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -10,7 +15,10 @@ import type { CommandContext, CommandResult } from '../context';
  * `tenjin outcome --search-id <id> --status <s>`, POST to
  * /api/agent/searches/:id/outcomes, closing the reuse loop (used / partially_used
  * / rejected / regenerated / purchase_declined). The searchId is the capability,
- * so no wallet is needed; `--last` sugar targets the most recent local search.
+ * so no wallet is needed; `--last` sugar targets the most recent DELIBERATE
+ * search — entries the WebSearch hook rode along with are skipped, or every web
+ * search in auto mode would silently re-aim the report (a hook entry is reached
+ * by explicit --search-id, which is what the Stop hook's reminder names).
  *
  * `--last` binds to whatever search ran most recently, which in a multi-search
  * session is often not the one the agent means (issue #100). Two guards, both
@@ -55,6 +63,11 @@ export async function runOutcome(
     timeoutMs: ctx.flags.timeout,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
+
+  // The loop is closed, so the Stop hook has nothing left to raise about it.
+  // AFTER the post, so a refused or failed report leaves the loop open. Local
+  // bookkeeping only, and it never throws: see markSearchResolved.
+  await markSearchResolved(ctx.dataDir, searchId, 'outcome');
 
   // The question rides both renderings, so the misfire this guards against is
   // visible whether a human is reading the line or an agent is reading the JSON.

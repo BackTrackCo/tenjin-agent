@@ -7,6 +7,7 @@ import {
   findStoredCandidate,
   latestSearch,
   loadSearches,
+  markSearchResolved,
   recordSearch,
   type StoredSearch,
 } from './search-store';
@@ -38,6 +39,28 @@ describe('search-store', () => {
     await recordSearch(dir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000002' }));
     const latest = await latestSearch(dir);
     expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000002');
+  });
+
+  // `--last` means "the search I just ran". In auto mode the WebSearch hook
+  // prepends an entry on EVERY web search, so without the source filter an
+  // `outcome --last` after any web search would report against a ridealong query
+  // the agent never chose (found in dogfooding).
+  it('latestSearch skips hook-sourced entries: --last targets the last deliberate search', async () => {
+    await recordSearch(dir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000003' }));
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000004', source: 'websearch-hook' }),
+    );
+    const latest = await latestSearch(dir);
+    expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000003');
+  });
+
+  it('latestSearch is null when only hook-sourced entries exist', async () => {
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000005', source: 'websearch-hook' }),
+    );
+    expect(await latestSearch(dir)).toBeNull();
   });
 
   it('resolves a candidate url by resourceId (buy <id>)', async () => {
@@ -84,5 +107,52 @@ describe('search-store', () => {
   it('reads empty (never throws) on a corrupt store', async () => {
     await writeFile(join(dir, 'searches.json'), 'not json', 'utf8');
     expect(await loadSearches(dir)).toEqual([]);
+  });
+});
+
+describe('markSearchResolved', () => {
+  const ID = '0197aaaa-bbbb-cccc-dddd-000000000001';
+
+  it('records who closed the loop, leaving everything else alone', async () => {
+    await recordSearch(dir, entry({ decision: 'MISS' }));
+    await markSearchResolved(dir, ID, 'publish', '2026-08-09T10:00:00.000Z');
+
+    const [stored] = await loadSearches(dir);
+    expect(stored?.resolved).toEqual({ by: 'publish', at: '2026-08-09T10:00:00.000Z' });
+    expect(stored?.question).toBe(entry().question);
+    expect(stored?.candidates).toEqual(entry().candidates);
+  });
+
+  // A publish after an outcome report is still one closed loop; rewriting who
+  // closed it would lose the fact that the reuse signal was already sent.
+  it('keeps the first resolution and ignores later ones', async () => {
+    await recordSearch(dir, entry());
+    await markSearchResolved(dir, ID, 'outcome', '2026-08-09T10:00:00.000Z');
+    await markSearchResolved(dir, ID, 'publish', '2026-08-09T11:00:00.000Z');
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('touches nothing for a searchId this machine never recorded', async () => {
+    await recordSearch(dir, entry());
+    await markSearchResolved(dir, '0197aaaa-bbbb-cccc-dddd-000000000099', 'outcome');
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  // It is bookkeeping for a hook nudge, so it may never fail the verb that ran.
+  it('never throws, even with no store and no data dir', async () => {
+    await rm(dir, { recursive: true, force: true });
+    await expect(markSearchResolved(dir, ID, 'candidate')).resolves.toBeUndefined();
+  });
+
+  it('leaves a corrupt store readable-as-empty rather than throwing', async () => {
+    await writeFile(join(dir, 'searches.json'), 'not json', 'utf8');
+    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBeUndefined();
+    expect(await loadSearches(dir)).toEqual([]);
+  });
+
+  it('round-trips through the schema, so a resolved entry still loads', async () => {
+    await recordSearch(dir, entry());
+    await markSearchResolved(dir, ID, 'candidate');
+    expect(await latestSearch(dir)).toMatchObject({ searchId: ID, resolved: { by: 'candidate' } });
   });
 });

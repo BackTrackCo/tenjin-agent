@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCandidateAdd, runCandidateDrop, runCandidateList } from './candidate';
 import { createCandidate, listCandidates } from '../lib/candidate-store';
+import { loadSearches, recordSearch } from '../lib/search-store';
 import { main } from '../cli';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
@@ -244,5 +245,31 @@ describe('candidate via main (one JSON object per invocation)', () => {
     const parsed = JSON.parse(cap.stdout());
     expect(parsed.ok).toBe(false);
     expect(parsed.error.code).toBe('USAGE');
+  });
+});
+
+describe('runCandidateAdd closes the open loop locally', () => {
+  // Parking is not publishing, but it IS closing the loop: the answer exists and
+  // `candidate list` keeps it visible, so the Stop hook has nothing left to say.
+  it('marks the search it was parked against as resolved', async () => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
+    const file = join(dir, 'draft.md');
+    await writeFile(file, '# hi\n', 'utf8');
+    await runCandidateAdd({ file, searchId: LOOKUP }, makeCtx(), { cwd: dir });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('candidate');
+  });
+
+  it('parks fine when the search is not in the local store', async () => {
+    const file = join(dir, 'draft.md');
+    await writeFile(file, '# hi\n', 'utf8');
+    const res = await runCandidateAdd({ file, searchId: LOOKUP }, makeCtx(), { cwd: dir });
+    expect((res.data as { searchId: string }).searchId).toBe(LOOKUP);
+    expect(await listCandidates(dir)).toHaveLength(1);
   });
 });

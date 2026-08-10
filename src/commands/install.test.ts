@@ -69,8 +69,9 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES } from './install';
+import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
+import type { ExecFn } from '../lib/wallet/passphrase';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import {
@@ -86,6 +87,8 @@ import type { CommandContext, GlobalFlags } from '../context';
 // source (not a fixture) also proves the copy lands byte-identical content.
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 const MARKER = 'tenjin-cli:skills';
+/** The full marker as it appears in the undo line the walkthrough prints. */
+const MARKER_COMMENT = `<!-- ${MARKER} -->`;
 
 let home: string;
 let data: string;
@@ -107,9 +110,55 @@ function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
   };
 }
 
+/** The address the stubbed creator reports; never a real key. */
+const STUB_ADDRESS = '0x00000000000000000000000000000000deadbeef';
+
+/** Opt a test into the REAL `wallet create` path (still on the fake keychain). */
+function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
+  return {
+    createWallet: undefined,
+    walletPassphrase: { platform: 'darwin', isTTY: false, exec: exec ?? fakeKeychain().exec },
+  };
+}
+
 // Default doctor stub: one passing check, no network. Overridden per-test.
 const okChecks: DoctorChecks = {
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
+};
+
+/**
+ * An in-memory stand-in for the macOS login keychain.
+ *
+ * EVERY install test goes through this, and that is a hard safety rule rather
+ * than a convenience: a headless install now CREATES a wallet by default, and
+ * without an injected exec the real `security` binary would write entries into
+ * the developer's own login keychain under the `tenjin-cli` service on every
+ * test run. `platform: 'darwin'` is pinned so the same store is exercised on
+ * Linux CI, and `isTTY: false` keeps the passphrase prompt unreachable.
+ */
+function fakeKeychain(): { exec: ExecFn; entries: Map<string, string> } {
+  const entries = new Map<string, string>();
+  const exec: ExecFn = async (file, args, stdin) => {
+    if (file !== 'security') throw new Error(`install tests must not exec ${file}`);
+    if (args[0] === '-i') {
+      const m = /^add-generic-password -s tenjin-cli -a (\S+) -w '([^']*)'\n$/.exec(String(stdin));
+      if (m === null) throw new Error(`unexpected security -i payload: ${String(stdin)}`);
+      entries.set(m[1] as string, m[2] as string);
+      return { stdout: '', stderr: '' };
+    }
+    if (args[0] === 'find-generic-password') {
+      const value = entries.get(args[args.indexOf('-a') + 1] as string);
+      if (value === undefined) throw new Error('could not be found');
+      return { stdout: `${value}\n`, stderr: '' };
+    }
+    throw new Error(`unexpected security call: ${args.join(' ')}`);
+  };
+  return { exec, entries };
+}
+
+/** A machine with NO usable credential store: every store call fails. */
+const noKeychain: ExecFn = async () => {
+  throw new Error('no credential store here');
 };
 
 function deps(over: Partial<InstallDeps> = {}): InstallDeps {
@@ -118,12 +167,28 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     skillsSourceDir: SKILLS_SRC,
     which: () => false,
     collectChecks: async () => okChecks,
+    // Never the real keychain. See fakeKeychain.
+    walletPassphrase: { platform: 'darwin', isTTY: false, exec: fakeKeychain().exec },
+    // HERMETIC ENVIRONMENT, and it is load-bearing twice over. It keeps an
+    // ambient TENJIN_WALLET_PASSPHRASE in the developer's shell (or leaked by
+    // another test file, since vitest does not restore env stubs between files)
+    // from silently rerouting the passphrase away from the store these tests
+    // assert on. And it means no install test ever has to MUTATE process.env to
+    // control that, which is what made the env case flake under the parallel
+    // runner. Empty PATH is harmless here: `which` is stubbed above.
+    env: {},
     // Every prompt seam is answered in-process, so no test renders a prompt or
     // loads the clack chunk. The defaults are the "changed nothing" answers;
     // decision-specific tests override them.
     walletExists: async () => false,
     confirmWallet: async () => false,
+    // Stubbed by default so the ~140 tests that are not about the wallet do not
+    // each pay for a real scrypt key derivation. The wallet tests below opt into
+    // the real creator with `realWalletCreate()`, which still goes through the
+    // fake keychain above.
+    createWallet: async () => STUB_ADDRESS,
     promptPublishMode: async () => null,
+    promptSearchHooks: async () => null,
     confirmPermissions: async () => false,
     intro: async () => {},
     outro: async () => {},
@@ -387,8 +452,10 @@ describe('runInstall: AGENTS.md instinct nudge', () => {
     await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
     expect(agents).toContain(`'tenjin search "<question>" --json'`);
-    expect(agents).toContain('before regenerating public research');
-    expect(agents).toContain('sends the generalized question text to tenjin.blog');
+    // ONE heuristic, matching the tenjin-search skill's collapsed entry gate, not
+    // a list of example categories to work through.
+    expect(agents).toContain('when a question is public, durable, and costly to reproduce');
+    expect(agents).toContain('the generalized question text leaves the machine');
     expect(agents).toContain(join(home, '.agents', 'skills'));
     expect(agents).not.toContain('—'); // no em dashes
   });
@@ -463,10 +530,12 @@ describe('runInstall: CLAUDE.md nudge', () => {
   });
   const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
 
-  it('skips CLAUDE.md by default on a non-interactive run (no flag, no file)', async () => {
+  // Codex's AGENTS.md already got this line by default, so leaving Claude Code's
+  // copy behind a flag left the most-used harness the one that never learned it.
+  it('writes CLAUDE.md by default on a non-interactive run, with no flag', async () => {
     const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
-    expect(existsSync(claudeMdPath())).toBe(false);
+    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
+    expect(existsSync(claudeMdPath())).toBe(true);
   });
 
   it('--claude-md writes the nudge pointing at ~/.claude/skills', async () => {
@@ -478,7 +547,7 @@ describe('runInstall: CLAUDE.md nudge', () => {
     expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
     const md = await readFile(claudeMdPath(), 'utf8');
     expect(md).toContain(`'tenjin search "<question>" --json'`);
-    expect(md).toContain('sends the generalized question text to tenjin.blog');
+    expect(md).toContain('the generalized question text leaves the machine');
     expect(md).toContain(join(home, '.claude', 'skills'));
     expect(md.split(MARKER).length - 1).toBe(1);
   });
@@ -530,12 +599,12 @@ describe('runInstall: CLAUDE.md nudge', () => {
     expect(existsSync(claudeMdPath())).toBe(false);
   });
 
-  // The walkthrough is capped at three decisions, so the nudge is never a fourth
-  // question: an interactive run without the flag behaves like a headless one.
-  it('is never asked about interactively; an absent flag skips it', async () => {
+  // The nudge is not one of the four decisions: it is a default with an opt-out
+  // flag, so an interactive run without the flag behaves like a headless one.
+  it('is never asked about interactively; an absent flag writes it', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('skipped');
-    expect(existsSync(claudeMdPath())).toBe(false);
+    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('written');
+    expect(existsSync(claudeMdPath())).toBe(true);
   });
 
   it('--claude-md writes it on an interactive run too', async () => {
@@ -1117,14 +1186,46 @@ describe('runInstall: publish-mode selection', () => {
     expect(await persistedMode()).toBeUndefined();
   });
 
-  it('does not prompt or write on a non-interactive run: the STORED default stays review', async () => {
-    const spy = promptSpy(['auto']);
+  // Headless SETTLES the recommended mode rather than leaving the key unset, so
+  // "non-interactive is an interactive all-yes" is true of publishing too.
+  it('settles and persists the recommended auto on a non-interactive run, with no prompt', async () => {
+    const spy = promptSpy(['review']);
     const { data: d } = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: false, promptPublishMode: spy.fn }),
     );
     expect(spy.calls()).toBe(0);
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'headless-default' });
+    expect(await persistedMode()).toBe('auto');
+  });
+
+  // The headless settle is the SAME answer the interactive select recommends; if
+  // one moves without the other, the parity claim quietly stops being true.
+  it('settles the mode the interactive select recommends', async () => {
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(modeOf(d).value).toBe(PUBLISH_MODE_CHOICES[0].value);
+  });
+
+  it('respects an already-configured mode headlessly, writing nothing new', async () => {
+    await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
+    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(modeOf(d)).toEqual({ value: 'review', source: 'existing' });
+    expect(await persistedMode()).toBe('review');
+  });
+
+  it('lets --publish-mode win over the headless settle', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['claude'], publishMode: 'full-auto' },
+      makeCtx(),
+      deps(),
+    );
+    expect(modeOf(d)).toEqual({ value: 'full-auto', source: 'flag' });
+    expect(await persistedMode()).toBe('full-auto');
+  });
+
+  it('a dry run settles nothing and reports the untouched default', async () => {
+    const { data: d } = await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps());
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
@@ -1191,8 +1292,8 @@ describe('runInstall: publish-mode selection', () => {
       deps({ isInteractive: true, promptPublishMode: spy.fn }), // json overrides isInteractive
     );
     expect(spy.calls()).toBe(0);
-    expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
-    expect(await persistedMode()).toBeUndefined();
+    expect(modeOf(d)).toEqual({ value: 'auto', source: 'headless-default' });
+    expect(await persistedMode()).toBe('auto');
   });
 
   it('--json still honors --publish-mode', async () => {
@@ -1213,17 +1314,74 @@ describe('runInstall: interactive walkthrough', () => {
   // dispatcher prints them at a TTY). Read them here, ANSI-stripped.
   const human = (res: { humanLines?: string[] }): string =>
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+  const walletOf = (d: unknown) =>
+    (d as { wallet: { status: string; address?: string; reason?: string; fix?: string } }).wallet;
 
-  it('is a five-line summary on a clean install: skills, publishing, permissions, wallet, next', async () => {
-    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+  // The summary is one line per subject and it closes the output, so it is read
+  // off the TAIL: whatever disclosures a given run owed the operator sit above it,
+  // and adding one must not be able to quietly drop a summary line.
+  it('closes with a six-line summary: skills, publishing, permissions, hooks, wallet, next', async () => {
+    // Nothing disclosable: hooks off, permissions declined by the default seam,
+    // no nudge. What is left is the summary, which is what this pins.
+    const res = await runInstall(
+      { harness: ['claude'], searchHooks: 'off', claudeMd: false },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
     const lines = human(res).split('\n');
-    expect(lines).toHaveLength(5);
+    expect(lines).toHaveLength(6);
     expect(lines[0]).toContain('Claude Code: 3 skills installed');
     expect(lines[0]).toContain('tenjin-search, tenjin-publish (CLI)');
     expect(lines[1]).toContain('Publishing: review');
     expect(lines[2]).toContain('Permissions:');
-    expect(lines[3]).toContain('Wallet:');
-    expect(lines[4]).toContain('Next: tenjin search');
+    expect(lines[3]).toContain('Search hooks:');
+    expect(lines[4]).toContain('Wallet:');
+    expect(lines[5]).toContain('Next: tenjin search');
+  });
+
+  // Nothing this command writes into the operator's home may land silently, and
+  // that has to hold for the two things a bare run now writes by default.
+  it('discloses the hooks it wired and how to take them back', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain('the WebSearch hook asks tenjin.blog the same question');
+    expect(text).toContain('the query text leaves the machine');
+    expect(text).toContain('tenjin config set hooks.searchMode off');
+    expect(text).toContain(join(data, 'hooks'));
+  });
+
+  // The disclosure names the count, the file and the undo. It does NOT recite the
+  // nine rules: that block is `doctor`'s, and the machine envelope carries them.
+  // The nudge is written by default now, so its existing disclosure block has to
+  // fire on a bare run rather than only behind the flag it used to need.
+  it('discloses the CLAUDE.md nudge it wrote by default, and how to take it back', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const text = human(res);
+    expect(text).toContain('The nudge tells agents to run a free anonymous `tenjin search`');
+    expect(text).toContain(
+      `Undo anytime: delete the ${MARKER_COMMENT} line from ${join(home, '.claude', 'CLAUDE.md')}`,
+    );
+    // And the summary names it among what was wired.
+    expect(text).toContain('CLAUDE.md nudge');
+  });
+
+  it('discloses the permission rules it wired and how to take them back', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: async () => true }),
+    );
+    const text = human(res);
+    expect(text).toContain(
+      `${FREE_VERB_RULES.length} free tenjin commands were allowed in ${claudeSettingsPath(home)}`,
+    );
+    expect(text).toContain('None can spend USDC or open your wallet keystore');
+    expect(text).toContain(`Undo anytime: remove those lines from ${claudeSettingsPath(home)}`);
+    for (const rule of FREE_VERB_RULES) expect(text).not.toContain(rule);
   });
 
   it('no longer prints the allowlist block or the security essays that went with it', async () => {
@@ -1367,7 +1525,11 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, confirmWallet: confirm }),
     );
     expect(confirm).not.toHaveBeenCalled();
-    expect(human(res)).toContain('Create one later with: tenjin wallet create');
+    // An opt-out is a `skipped` state with its reason and a remedy, not a
+    // `declined` answer: nobody said no, the flag said never ask.
+    expect(human(res)).toContain('Wallet: none (flag)');
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'flag' });
+    expect(walletOf(res.data).fix).toContain('tenjin wallet create');
   });
 
   it('shows an existing wallet address without prompting', async () => {
@@ -1412,18 +1574,21 @@ describe('runInstall: interactive walkthrough', () => {
     expect(prompt).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(permissions).not.toHaveBeenCalled();
-    expect(human(res)).toContain('Publishing: review');
-    expect(human(res)).toContain('Create one later with: tenjin wallet create');
+    // No prompt possible, so publishing settles the recommended mode too.
+    expect(human(res)).toContain('Publishing: auto');
+    // No prompt, but a wallet all the same: a run nobody can answer takes the
+    // default rather than treating silence as a no.
+    expect(human(res)).toContain(`Wallet: ${STUB_ADDRESS}, holding $0`);
   });
 
   it('a green doctor says nothing; a failure surfaces with its fix', async () => {
     const okRes = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], searchHooks: 'off', claudeMd: false },
       makeCtx(),
       deps({ isInteractive: true }),
     );
     expect(human(okRes)).not.toContain('need attention');
-    expect(human(okRes).split('\n')).toHaveLength(5);
+    expect(human(okRes).split('\n')).toHaveLength(6);
 
     const failing: DoctorChecks = {
       checks: [
@@ -1471,6 +1636,7 @@ describe('runInstall: permissions decision', () => {
         alreadyPresent: string[];
         skipped?: string;
         warning?: string;
+        fix?: string;
       };
     };
   };
@@ -1547,10 +1713,55 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
   });
 
-  it('a non-interactive run without the flag changes nothing and notes the flag', async () => {
+  // The inversion #33 was really asking for: the machine most likely to be denied
+  // mid-task is the headless one, and there is nobody there to say yes.
+  it('a non-interactive run wires the allowlist by default, with no flag', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    expect(wiredOf(res.data)).toMatchObject({ skipped: 'not-requested', added: [] });
+    expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
+    expect(wiredOf(res.data).skipped).toBeUndefined();
+    expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('--no-allow-free-verbs is the opt-out and writes nothing', async () => {
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false },
+      makeCtx({ json: true }),
+      deps({ confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'declined', added: [] });
     expect(await allowList()).toBeUndefined();
+  });
+
+  // Every skipped state names the command that changes it, the same contract a
+  // CliError's `fix` carries, so a machine consumer never has to parse prose.
+  it('carries a fix string on every skipped permissions state', async () => {
+    const declined = await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(wiredOf(declined.data).fix).toContain('tenjin install --allow-free-verbs');
+
+    const dry = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(wiredOf(dry.data).fix).toContain('tenjin install --allow-free-verbs');
+
+    const codex = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
+    expect(wiredOf(codex.data).fix).toContain('tenjin doctor');
+  });
+
+  // The old headless arm returned an empty pair whatever the file held, so a
+  // re-run against an already-permissioned home reported nothing at all.
+  it('reports alreadyPresent accurately on a headless re-run', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    expect(wiredOf(res.data).added).toEqual([]);
+    expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
   });
 
   it('is idempotent: a second run adds nothing and reports already-present', async () => {
@@ -1760,10 +1971,10 @@ describe('runInstall: permissions decision', () => {
   });
 });
 
-// --- The three decisions, in order, and nothing else ------------------------------
+// --- The four decisions, in order, and nothing else -------------------------------
 
-describe('runInstall: at most three questions', () => {
-  it('asks publishing, then permissions, then wallet, and stops there', async () => {
+describe('runInstall: at most four questions', () => {
+  it('asks publishing, permissions, search hooks, then wallet, and stops there', async () => {
     const asked: string[] = [];
     await runInstall(
       { harness: ['claude'] },
@@ -1778,6 +1989,10 @@ describe('runInstall: at most three questions', () => {
           asked.push('permissions');
           return true;
         },
+        promptSearchHooks: async () => {
+          asked.push('search-hooks');
+          return 'auto';
+        },
         walletExists: async () => false,
         confirmWallet: async () => {
           asked.push('wallet');
@@ -1785,7 +2000,7 @@ describe('runInstall: at most three questions', () => {
         },
       }),
     );
-    expect(asked).toEqual(['publishing', 'permissions', 'wallet']);
+    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet']);
   });
 
   it('asks nothing at all on a machine run', async () => {
@@ -1802,6 +2017,10 @@ describe('runInstall: at most three questions', () => {
         confirmPermissions: async () => {
           asked.push('permissions');
           return true;
+        },
+        promptSearchHooks: async () => {
+          asked.push('search-hooks');
+          return 'auto';
         },
         confirmWallet: async () => {
           asked.push('wallet');
@@ -2595,5 +2814,423 @@ describe('runInstall: the skill-directory write', () => {
     }
     expect(written.join('')).toContain('half-written');
     expect(exits).toEqual([130]);
+  });
+});
+
+// --- Decision 3: the harness search hooks ------------------------------------------
+
+describe('runInstall: search hooks', () => {
+  type HooksData = {
+    hooks: {
+      harness: string;
+      path?: string;
+      scriptsDir: string;
+      mode: string;
+      added: string[];
+      alreadyPresent: string[];
+      updated: string[];
+      scripts: string[];
+      skipped?: string;
+      fix?: string;
+    };
+  };
+  const hooksOf = (d: unknown) => (d as HooksData).hooks;
+
+  async function settings(): Promise<Record<string, unknown>> {
+    const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
+    return raw === null ? {} : (JSON.parse(raw) as Record<string, unknown>);
+  }
+  async function persistedMode(): Promise<string | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    return (JSON.parse(raw) as { hooks?: { searchMode?: string } }).hooks?.searchMode;
+  }
+
+  // A bare headless install is the one that most needs the hooks, and it is the
+  // one that used to get the least.
+  it('a non-interactive run wires both hooks and writes both scripts', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const h = hooksOf(res.data);
+
+    expect(h.skipped).toBeUndefined();
+    expect(h.mode).toBe('auto');
+    expect(h.added).toEqual(['PreToolUse', 'Stop']);
+    expect(h.scriptsDir).toBe(join(data, 'hooks'));
+    expect(h.scripts).toHaveLength(2);
+    expect(existsSync(join(data, 'hooks', 'tenjin-websearch.mjs'))).toBe(true);
+    expect(existsSync(join(data, 'hooks', 'tenjin-stop.mjs'))).toBe(true);
+
+    const hooks = (await settings()).hooks as Record<string, { matcher?: string }[]>;
+    expect(hooks.PreToolUse?.[0]?.matcher).toBe('WebSearch');
+    expect(hooks.Stop).toHaveLength(1);
+    expect(await persistedMode()).toBe('auto');
+  });
+
+  it('--search-hooks off registers nothing and persists the choice', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], searchHooks: 'off' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(hooksOf(res.data)).toMatchObject({ skipped: 'mode-off', mode: 'off', added: [] });
+    expect((await settings()).hooks).toBeUndefined();
+    expect(await persistedMode()).toBe('off');
+    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.searchMode auto');
+  });
+
+  it('--search-hooks remind wires the hooks in remind mode', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], searchHooks: 'remind' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(hooksOf(res.data).mode).toBe('remind');
+    expect(hooksOf(res.data).added).toEqual(['PreToolUse', 'Stop']);
+    expect(await persistedMode()).toBe('remind');
+  });
+
+  it('rejects an unknown --search-hooks value as USAGE, before anything is written', async () => {
+    const err = await caught(() =>
+      runInstall(
+        { harness: ['claude'], searchHooks: 'sometimes' },
+        makeCtx({ json: true }),
+        deps(),
+      ),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.fix).toContain('auto');
+  });
+
+  it('is idempotent: a second run registers nothing and reports already-present', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const h = hooksOf(res.data);
+    expect(h.added).toEqual([]);
+    expect(h.alreadyPresent).toEqual(['PreToolUse', 'Stop']);
+    expect(h.scripts).toEqual([]);
+  });
+
+  it('honors the interactive choice and persists it', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
+    );
+    expect(hooksOf(res.data).mode).toBe('remind');
+    expect(await persistedMode()).toBe('remind');
+  });
+
+  // Escape at this prompt is the one cancel that used to WRITE: it resolved to
+  // `auto`, registered both hooks and persisted the mode. Every other decision in
+  // the walkthrough treats cancel as a decline, and so does this one now.
+  it('a cancelled choice registers nothing and writes no config', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => null }),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(hooksOf(res.data).added).toEqual([]);
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    expect((await settings()).hooks).toBeUndefined();
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('a cancelled choice leaves an already-configured mode alone', async () => {
+    await runInstall(
+      { harness: ['claude'], searchHooks: 'remind' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => null }),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(await persistedMode()).toBe('remind');
+  });
+
+  // Same treatment for an answer the schema does not recognize: a cancel, never a
+  // write of something unknown.
+  it('an unrecognized answer is a cancel, not a write', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        promptSearchHooks: async () => 'sometimes' as never,
+      }),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('writes nothing under --dry-run and says why', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(hooksOf(res.data).skipped).toBe('dry-run');
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    expect((await settings()).hooks).toBeUndefined();
+    expect(await persistedMode()).toBeUndefined();
+  });
+
+  it('is not wired for a Codex-only install, and names no Claude settings file', async () => {
+    const res = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
+    const h = hooksOf(res.data);
+    expect(h.skipped).toBe('harness-not-claude');
+    expect(h.path).toBeUndefined();
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+  });
+});
+
+// --- The wallet step's skipped decision --------------------------------------------
+
+describe('runInstall: the wallet decision is visible even when it is skipped', () => {
+  const walletOf = (d: unknown) =>
+    (d as { wallet: { status: string; address?: string; reason?: string } }).wallet;
+
+  // The loop this command sets up needs a key, so the headless path creates one.
+  it('a machine run creates a wallet and reports its address', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    expect(walletOf(res.data)).toEqual({ status: 'created', address: STUB_ADDRESS });
+  });
+
+  it('a dry run creates nothing and says why', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'dry-run' });
+  });
+
+  // Answering no is a decision; it must not read the same as never being asked.
+  it('declining is distinguishable from never being asked', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: async () => false }),
+    );
+    expect(walletOf(res.data)).toEqual({ status: 'declined' });
+  });
+
+  it('an existing wallet is reported on the machine path as it is on the human one', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        walletExists: async () => true,
+        walletAddress: async () => '0x1234567890abcdef1234567890abcdef12345678',
+      }),
+    );
+    expect(walletOf(res.data).status).toBe('existing');
+  });
+});
+
+// --- The wallet is created by default -----------------------------------------------
+
+describe('runInstall: wallet creation is the default', () => {
+  const walletOf = (d: unknown) =>
+    (d as { wallet: { status: string; address?: string; reason?: string; fix?: string } }).wallet;
+  const human = (res: { humanLines?: string[] }): string =>
+    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+  const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+  // The real creator on a fake keychain: this is the path a headless install
+  // actually takes, generated passphrase and scrypt keystore included.
+  it('a non-interactive run really creates one, passphrase in the OS store', async () => {
+    const { exec, entries } = fakeKeychain();
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(exec)),
+    );
+    const wallet = walletOf(res.data);
+    expect(wallet.status).toBe('created');
+    expect(wallet.address).toMatch(ADDRESS_RE);
+    expect(existsSync(join(data, 'wallet.json'))).toBe(true);
+    // Exactly one entry, keyed by the new wallet's own lowercase address.
+    expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
+  });
+
+  // Through the deps seam, NOT vi.stubEnv: mutating the real process environment
+  // to steer this is what made it flake under the parallel runner, and the
+  // passphrase layer already takes its env as an argument.
+  it('uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all', async () => {
+    const touched: string[] = [];
+    const spyExec: ExecFn = async (file, args) => {
+      touched.push(`${file} ${args[0] ?? ''}`);
+      throw new Error('no store');
+    };
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        ...realWalletCreate(spyExec),
+        env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
+      }),
+    );
+    expect(walletOf(res.data).status).toBe('created');
+    // The env value settles it, so no credential store is consulted at all.
+    expect(touched).toEqual([]);
+  });
+
+  // The mirror of the case above, and the reason the fixture pins an empty env:
+  // with no passphrase in the environment the store is the only source left, so
+  // an ambient one leaking in from a shell or another file would silently make
+  // the keychain assertions vacuous.
+  it('falls to the OS store when the environment carries no passphrase', async () => {
+    const { exec, entries } = fakeKeychain();
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(exec)),
+    );
+    expect(walletOf(res.data).status).toBe('created');
+    expect(entries.size).toBe(1);
+  });
+
+  // The one case with no safe answer. No plaintext fallback exists, by design.
+  it('creates nothing and skips LOUDLY with no store and no env passphrase', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(noKeychain)),
+    );
+    const wallet = walletOf(res.data);
+    expect(wallet).toMatchObject({ status: 'skipped', reason: 'no-passphrase-store' });
+    expect(wallet.address).toBeUndefined();
+    // Both remedies are named, and neither is "we wrote it to a file".
+    expect(wallet.fix).toContain('TENJIN_WALLET_PASSPHRASE');
+    expect(wallet.fix).toContain('tenjin wallet create');
+    expect(existsSync(join(data, 'wallet.json'))).toBe(false);
+  });
+
+  it('still succeeds, and still wires everything else, when the wallet is skipped', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(noKeychain)),
+    );
+    const d = res.data as {
+      permissions: { wired: { added: string[] } };
+      hooks: { added: string[] };
+    };
+    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+    expect(d.hooks.added).toEqual(['PreToolUse', 'Stop']);
+  });
+
+  it('never writes a passphrase to a plain file', async () => {
+    await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps(realWalletCreate(noKeychain)),
+    );
+    for (const name of await readdir(data)) {
+      expect(name).not.toMatch(/passphrase/i);
+    }
+  });
+
+  it('--no-wallet suppresses it entirely', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], noWallet: true },
+      makeCtx({ json: true }),
+      deps(realWalletCreate()),
+    );
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'flag' });
+    expect(existsSync(join(data, 'wallet.json'))).toBe(false);
+  });
+
+  it('an interactive run still asks, and still defaults to yes', async () => {
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: confirm }),
+    );
+    expect(confirm).toHaveBeenCalledWith(WALLET_QUESTION);
+    expect(walletOf(res.data).status).toBe('created');
+  });
+
+  it('an interactive no is recorded as declined, not as a skip', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: async () => false }),
+    );
+    expect(walletOf(res.data)).toEqual({ status: 'declined' });
+  });
+
+  it('discloses the empty balance, the human funding step, and where the key lives', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmWallet: async () => true }),
+    );
+    const text = human(res);
+    expect(text).toContain('It holds $0.');
+    expect(text).toContain('Funding it is a human step');
+    expect(text).toContain(join(data, 'wallet.json'));
+    expect(text).toContain('encrypted at rest');
+  });
+
+  it('leaves an existing wallet alone and never creates a second', async () => {
+    const create = vi.fn(async () => STUB_ADDRESS);
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        walletExists: async () => true,
+        walletAddress: async () => '0x1234567890abcdef1234567890abcdef12345678',
+        createWallet: create,
+      }),
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(walletOf(res.data).status).toBe('existing');
+  });
+
+  // An install is useful without a wallet; a create failure must not undo it.
+  it('reports an unexpected create failure without failing the install', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx({ json: true }),
+      deps({
+        createWallet: async () => {
+          throw new Error('disk is full');
+        },
+      }),
+    );
+    expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'create-failed' });
+    expect((res.data as { wallet: { warning?: string } }).wallet.warning).toContain('disk is full');
+  });
+});
+
+describe('runInstall: --no-hooks', () => {
+  const hooksOf = (d: unknown) => (d as { hooks: { skipped?: string; mode: string } }).hooks;
+
+  it('registers nothing and writes no config', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], noHooks: true },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(hooksOf(res.data).skipped).toBe('declined');
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
+    expect((JSON.parse(raw) as { hooks?: unknown }).hooks).toBeUndefined();
+  });
+
+  // The difference from `--search-hooks off`, which IS a durable statement.
+  it('leaves a later bare re-run free to wire them', async () => {
+    await runInstall({ harness: ['claude'], noHooks: true }, makeCtx({ json: true }), deps());
+    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    expect(hooksOf(res.data).skipped).toBeUndefined();
+    expect(existsSync(join(data, 'hooks'))).toBe(true);
   });
 });

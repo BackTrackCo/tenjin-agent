@@ -80,6 +80,14 @@ export class LockTimeoutError extends Error {
  * directory and lose its update. A crashed holder's lock is recovered by hand (the
  * timeout error names the path); the pid+acquiredAt meta exists only to make that
  * manual call diagnosable. Always released in the finally.
+ *
+ * ⚠ MIRRORED, MUST UPDATE TOGETHER. The generated WebSearch hook script in
+ * lib/hook-scripts.ts (`withStoreLock`) reimplements this protocol byte for byte,
+ * because it runs as a standalone .mjs outside the CLI and cannot import this
+ * module, yet writes the same searches.json. If you change what the lock IS
+ * (directory vs file), where it lives, or the no-stale-steal rule, change it
+ * there too. Two writers of one file that disagree about the mutex have no mutex.
+ * lib/hook-scripts.test.ts pins the two together and fails loudly on drift.
  */
 export async function withFileLock<T>(
   lockPath: string,

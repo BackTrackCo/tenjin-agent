@@ -1,4 +1,4 @@
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, Option } from 'commander';
 import { z } from 'zod';
 import pkg from '../package.json';
 import { CliError } from './lib/errors';
@@ -146,22 +146,40 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       '--publish-mode <mode>',
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
-    .option('--no-wallet', 'skip the wallet-setup step of the interactive walkthrough')
-    .option('--claude-md', 'append the Tenjin search nudge to ~/.claude/CLAUDE.md')
-    .option('--no-claude-md', 'skip the CLAUDE.md nudge')
-    .option(
-      '--allow-free-verbs',
-      // The absolute URL, like every other pointer: `docs/agent-permissions.md`
-      // resolves against the reader's cwd, and an operator running `--help` is in
-      // their own project, not in this package.
-      `add the free Tenjin commands to Claude Code's ~/.claude/settings.json allowlist without asking; none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
+    .option('--no-wallet', 'create no wallet (the default is to create one)')
+    // The two affirmative flags are pre-default-on compat only: released docs and
+    // the alpha.9 doctor's fix strings name them, so they must parse, but they add
+    // nothing over the default and would only clutter --help. Hidden, not removed.
+    .addOption(new Option('--claude-md', 'compat no-op; the nudge is the default').hideHelp())
+    .option('--no-claude-md', 'write no CLAUDE.md nudge')
+    .addOption(
+      new Option(
+        '--allow-free-verbs',
+        // The absolute URL, like every other pointer: `docs/agent-permissions.md`
+        // resolves against the reader's cwd, and an operator running `--help` is in
+        // their own project, not in this package.
+        `compat no-op; the allowlist is the default, full caveats: ${PERMISSIONS_DOC_URL}`,
+      ).hideHelp(),
     )
+    .option(
+      '--no-allow-free-verbs',
+      `write no harness permission rules at all; the default allowlist is the free tier only: none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
+    )
+    .option(
+      '--search-hooks <mode>',
+      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.searchMode',
+    )
+    .option('--no-hooks', 'register no harness hooks this run (writes no config)')
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
         // `claudeMd` is tri-state: only forward it when the flag was actually given,
         // so an omitted flag stays undefined (ask interactively, else skip).
         const claudeMdGiven = this.getOptionValueSource('claudeMd') !== 'default';
+        // `allowFreeVerbs` is tri-state for the same reason, but the arms differ:
+        // undefined asks when it can and WRITES when it cannot, so only an explicit
+        // --no-allow-free-verbs suppresses the allowlist.
+        const allowGiven = this.getOptionValueSource('allowFreeVerbs') !== 'default';
         const { runInstall } = await import('./commands/install');
         return runInstall(
           {
@@ -172,7 +190,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
             ...(claudeMdGiven && typeof o.claudeMd === 'boolean' ? { claudeMd: o.claudeMd } : {}),
-            ...(o.allowFreeVerbs === true ? { allowFreeVerbs: true } : {}),
+            ...(allowGiven && typeof o.allowFreeVerbs === 'boolean'
+              ? { allowFreeVerbs: o.allowFreeVerbs }
+              : {}),
+            ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
+            ...(o.hooks === false ? { noHooks: true } : {}),
           },
           ctx,
         );
@@ -531,7 +553,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
     .option('--search-id <id>', 'the search to report against')
-    .option('--last', 'target the most recent local search')
+    .option(
+      '--last',
+      'target the most recent tenjin search (entries the WebSearch hook recorded are skipped; use --search-id for those)',
+    )
     .requiredOption(
       '--status <status>',
       'used | partially_used | rejected | regenerated | purchase_declined',

@@ -319,6 +319,54 @@ describe('runSearch — parked-candidate nudge', () => {
     await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).not.toContain('parked');
   });
+
+  // The parked nudge is silent when the pen is empty, which is exactly the state
+  // of a first-time MISS: the moment the demand is freshest and nobody is told.
+  describe('publish-back on a fresh MISS', () => {
+    it('names the searchId and both ways to close the loop, on stderr', async () => {
+      const { fetch } = stub(miss);
+      const { ctx, stderr } = ctxCapturingStderr();
+      await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      expect(stderr()).toContain('if you solve it, publish it back');
+      expect(stderr()).toContain(`tenjin candidate add <file.md> --search-id ${miss.searchId}`);
+    });
+
+    it('fires with an empty candidate pen, where the parked nudge says nothing', async () => {
+      const { fetch } = stub(miss);
+      const { ctx, stderr } = ctxCapturingStderr();
+      await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      expect(stderr()).not.toContain('parked');
+      expect(stderr()).toContain('publish it back');
+    });
+
+    it('carries a publishBack hint in the machine envelope', async () => {
+      const { fetch } = stub(miss);
+      const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+      const data = res.data as { decision: string; publishBack?: Record<string, string> };
+      expect(data.publishBack).toEqual({
+        searchId: miss.searchId,
+        reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
+        publish: 'tenjin publish <file.md> --json',
+        park: `tenjin candidate add <file.md> --search-id ${miss.searchId} --json`,
+      });
+    });
+
+    // The envelope is the server's response verbatim everywhere else, so the one
+    // CLI-owned key must not leak onto the path the contract describes.
+    it('adds nothing at all to a CANDIDATES envelope', async () => {
+      const { fetch } = stub(CANDIDATES);
+      const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+      expect(res.data).not.toHaveProperty('publishBack');
+      expect(res.data).toEqual(CANDIDATES);
+    });
+
+    it('says nothing on a HIT, on stderr either', async () => {
+      const { fetch } = stub(CANDIDATES);
+      const { ctx, stderr } = ctxCapturingStderr();
+      await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      expect(stderr()).not.toContain('publish it back');
+    });
+  });
 });
 
 describe('evalCohort threading', () => {

@@ -74,8 +74,8 @@ three. It cannot unlock a keystore and never consults the spend policy.
 
 ## Getting the rules onto your machine
 
-`tenjin install` offers to write the nine rules into `~/.claude/settings.json` for
-you, as one of its up-to-three setup decisions:
+`tenjin install` writes the nine rules into `~/.claude/settings.json` for you. It
+is one of the four setup decisions, and at a terminal it asks:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
 > `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
@@ -90,9 +90,12 @@ reported and left exactly as it is, never repaired. The rules it may write are a
 fixed constant, so no flag or config value can widen it to `buy`, `publish`,
 `session start`, or a blanket `Bash(tenjin:*)`.
 
-`tenjin install --allow-free-verbs` does the same write headlessly, including under
-`--json`. Without the flag, a non-interactive install changes nothing and says the
-flag is available.
+A non-interactive install (piped, or under `--json`) does the same write BY
+DEFAULT, with no flag: the machine most likely to be denied mid-task is the
+headless one, and there is nobody there to answer. `--no-allow-free-verbs` opts
+out; `--allow-free-verbs` states the default explicitly. Every run that writes
+reports how many rules landed, in which file, and that deleting those lines undoes
+it.
 
 `tenjin doctor --json` carries this whole recommendation as data under
 `permissions` — every rule, every per-verb note, both caveats, on the failure
@@ -243,6 +246,24 @@ Both are denied, never wrongly allowed:
   it without also covering `config set`, so use `tenjin config get <key>`.
 - Group-level flag forms like `tenjin wallet --json show` are not covered, so put
   global flags after the leaf verb (`tenjin wallet show --json`).
+
+## Delegating to a subagent
+
+The free tier is the answer to "what may a read-only subagent run", with nothing
+subtracted. All nine are safe to hand over: `search`, `inspect`, `read`,
+`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
+`candidate list`. None can spend and none can move your keys.
+
+Everything that mutates stays in a mutation-capable, human-gated context:
+`publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
+`session start`, `wallet create`, `config set`, `install`. In particular, do not
+delegate publishing what a subagent just derived: bring the finding back and
+publish it from the context that can ask the user.
+
+Two caveats travel with the safe set. "Read-only" describes your wallet and your
+repo, not the network: `search` and `outcome` POST off-machine (a question, a
+report) and `read` saves to the local library. And a delegated context is where a stray `--base-url` does the most
+damage, so never pass one.
 
 ## Running the local MCP server instead?
 

@@ -51,6 +51,34 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
+ * Where `install` writes the standalone harness hook scripts. Under the data dir
+ * rather than the harness's own config directory: the scripts are ours, a harness
+ * only ever holds the path to them, and one location serves every harness.
+ */
+export function hooksDir(dir: string = dataDir()): string {
+  return join(dir, 'hooks');
+}
+
+/**
+ * Which searchIds the Stop hook has already nagged about, so each open loop is
+ * raised once per turn-end rather than every turn.
+ *
+ * Not atomic, deliberately: two sessions ending at the same instant can both read
+ * this file before either writes, and one loop is then named twice. The cost is a
+ * duplicate line, and taking the search store's lock here would put a
+ * cross-process wait at the end of every turn to buy nothing but tidiness.
+ *
+ * Its own file, NOT a field in searches.json, and that separation is the whole
+ * point: the hook runs outside the CLI with no access to the lock `recordSearch`
+ * takes, so a hook writing searches.json could erase a search landing at the same
+ * moment. Nothing but the hook writes this file, and losing it costs one repeated
+ * nag rather than a lost search.
+ */
+export function nagStatePath(dir: string = dataDir()): string {
+  return join(dir, 'hook-nags.json');
+}
+
+/**
  * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
  * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
  * New writes go to the per-wallet path below; this one is only read as a

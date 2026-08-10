@@ -10,9 +10,14 @@ import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin search "<question>"`, one POST to /api/agent/search. Prints the compact
- * CANDIDATES/MISS response verbatim (spec 10), and records the searchId +
- * candidates locally so `outcome --last` and `buy <resourceId>` can use them. No
- * wallet, no signing: search is anonymous.
+ * CANDIDATES/MISS response (spec 10) and records the searchId + candidates
+ * locally so `outcome --last` and `buy <resourceId>` can use them. No wallet, no
+ * signing: search is anonymous.
+ *
+ * The machine envelope is the server's response verbatim plus exactly one
+ * CLI-owned key, `publishBack`, and only on a MISS. It carries no server data: it
+ * is the local searchId and the two commands that close the loop, which is
+ * information the CLI owns and the contract does not describe.
  *
  * Search is the breadth step: a candidate is a lean hit (identity, price,
  * freshness, why it matched), and the full answer card comes from `tenjin inspect`,
@@ -94,6 +99,10 @@ export async function runSearch(
     at: new Date().toISOString(),
     question: request.question,
     decision: response.decision,
+    // A deliberate search, as opposed to one the WebSearch hook rode along with.
+    // The Stop hook nags on the two differently, so the tag has to be written
+    // here rather than inferred later from anything.
+    source: 'cli',
     candidates: candidates.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
@@ -113,7 +122,10 @@ export async function runSearch(
   // MISS is the moment to publish the answer you are about to derive, and stale
   // drafts should not rot unseen. A HIT is not a publish moment, and hot search
   // paths should not get advisory noise every call. One line, only when parked.
-  if (response.decision === 'MISS') await emitCandidateNudge(ctx);
+  if (response.decision === 'MISS') {
+    ctx.io.stderr.write(`${publishBackLine(response.searchId)}\n`);
+    await emitCandidateNudge(ctx);
+  }
 
   // A MISS may carry up to 3 browse pointers from the broad corpus. They are
   // pointers, NOT candidates: rendered as ONE hint line with no scores and no
@@ -183,7 +195,38 @@ export async function runSearch(
           ...truncatedHint,
         ];
 
-  return { data: response, humanLines };
+  // The one CLI-owned field in this envelope. Everything else is the server's
+  // response verbatim (spec 10), so the addition is namespaced under a key the
+  // contract does not define and is present ONLY on a MISS: a MISS is the moment
+  // the demand this searcher just expressed can still be met, and the searchId is
+  // what ties the answer they are about to derive back to it. A CANDIDATES
+  // response is byte-identical to what it was.
+  const data =
+    response.decision === 'MISS'
+      ? { ...response, publishBack: publishBackHint(response.searchId) }
+      : response;
+
+  return { data, humanLines };
+}
+
+/** The publish-back hint, as machine fields rather than prose to re-parse. */
+function publishBackHint(searchId: string): {
+  searchId: string;
+  reason: string;
+  publish: string;
+  park: string;
+} {
+  return {
+    searchId,
+    reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
+    publish: 'tenjin publish <file.md> --json',
+    park: `tenjin candidate add <file.md> --search-id ${searchId} --json`,
+  };
+}
+
+/** The same hint as one stderr line for a human. */
+function publishBackLine(searchId: string): string {
+  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish) or park it: tenjin candidate add <file.md> --search-id ${searchId}`;
 }
 
 const STALE_MS = 7 * 24 * 60 * 60 * 1000;
