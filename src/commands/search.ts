@@ -219,15 +219,21 @@ export async function runSearch(
  * The session to stamp this search with, so the Stop hook can tell one session's
  * open loops from a sibling's, or undefined when nothing can say.
  *
- * TENJIN_SESSION_ID is the ONLY source here, and it is deliberately not a guess
- * at a harness variable: Claude Code hands its `session_id` to hook scripts on
- * stdin and exports NO session id to Bash subprocesses, which is what a
- * `tenjin search` runs as. So this is usually undefined, and undefined is the
- * safe answer — the hook raises an unstamped entry in every session rather than
- * in none.
+ * Two sources, in precedence order. TENJIN_SESSION_ID is the explicit operator
+ * override and wins. CLAUDE_CODE_SESSION_ID is what Claude Code exports to Bash
+ * tool subprocesses, which is what a `tenjin search` runs as; its value is the
+ * same `session_id` the hook scripts are handed on stdin, so a CLI search and a
+ * WebSearch-hook search in one session stamp identically. It is verified against
+ * a live session rather than documented, hence the fallback rather than a
+ * requirement: on a harness that does not export it this stays undefined, and
+ * undefined is the safe answer — the hook raises an unstamped entry in every
+ * session rather than in none.
  */
 function readSessionId(env: NodeJS.ProcessEnv): string | undefined {
-  const raw = env.TENJIN_SESSION_ID;
+  return firstNonEmpty(env.TENJIN_SESSION_ID) ?? firstNonEmpty(env.CLAUDE_CODE_SESSION_ID);
+}
+
+function firstNonEmpty(raw: string | undefined): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : undefined;

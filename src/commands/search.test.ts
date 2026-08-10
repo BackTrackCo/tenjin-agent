@@ -95,9 +95,8 @@ describe('runSearch', () => {
     expect((await latestSearch(dir))?.sessionId).toBe('session-a');
   });
 
-  // Claude Code exports no session id to Bash subprocesses (it rides hook stdin
-  // only), so this is the usual case. Unstamped means the reminder is raised in
-  // every session rather than in none.
+  // A harness that exports neither variable. Unstamped means the reminder is
+  // raised in every session rather than in none.
   it('records no session when the environment names none', async () => {
     const { fetch } = stub(CANDIDATES);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch, env: {} });
@@ -111,6 +110,37 @@ describe('runSearch', () => {
       env: { TENJIN_SESSION_ID: '   ' },
     });
     expect((await latestSearch(dir))?.sessionId).toBeUndefined();
+  });
+
+  // The ambient harness variable: the same value the hook scripts are handed on
+  // stdin, so a CLI search and a hook search in one session stamp identically.
+  it('stamps the session from CLAUDE_CODE_SESSION_ID when it is set', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { CLAUDE_CODE_SESSION_ID: 'harness-session' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('harness-session');
+  });
+
+  // Explicit operator override beats the ambient one.
+  it('prefers TENJIN_SESSION_ID over CLAUDE_CODE_SESSION_ID', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: 'operator', CLAUDE_CODE_SESSION_ID: 'harness-session' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('operator');
+  });
+
+  // A blank override falls THROUGH to the harness value rather than blanking it.
+  it('falls back to CLAUDE_CODE_SESSION_ID when TENJIN_SESSION_ID is blank', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: '  ', CLAUDE_CODE_SESSION_ID: 'harness-session' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('harness-session');
   });
 
   // The candidate line prices in dollars, like the browse hint below it: a human

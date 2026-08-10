@@ -52,10 +52,24 @@ attribute is still raised in every session, so a loop can never go invisible in
 all of them at once, and a payload that is malformed or names no session falls
 back to exactly the old machine-global behavior.
 
-Only the WebSearch hook can stamp reliably, because the harness hands a session
-id to hook scripts on stdin and exports none to Bash subprocesses, which is what
-a deliberate `tenjin search` runs as. That path stamps only when the operator
-exports `TENJIN_SESSION_ID`, and records nothing rather than guessing otherwise.
+Both recorders stamp. The WebSearch hook reads the `session_id` the harness puts
+on its stdin, and a deliberate `tenjin search` reads the same value from
+`CLAUDE_CODE_SESSION_ID`, which Claude Code exports to Bash tool subprocesses, so
+a CLI search and a hook search in one session carry the same stamp.
+`TENJIN_SESSION_ID` overrides it for anyone wiring this up by hand. On a harness
+that exports neither, a search records no session rather than guessing one, and
+falls back to being raised everywhere.
+
+**Two smaller fixes on the same loop.** `tenjin install` now says to restart
+Claude Code when it wires the hooks: harness hooks are read once at session
+start, so an operator who does not restart gets no hook activity at all and
+nothing telling them why. And `tenjin doctor` stops warning about an expired
+session key. A delegation lives 24 hours by construction, so a spent one is
+designed decay, not a fault, and warning on it left a permanent yellow on any
+machine that had ever run `tenjin session start`. Expiry and a scope that does
+not cover reading now report `ok` and name the verb that re-mints, the same
+posture an absent or pre-origin cache already had. A file whose expiry cannot be
+parsed is a different thing and still warns.
 
 The `tenjin-publish` skill's draft rules now say where the free/paid fold falls: a
 piece whose Answer section sat too high leaked its verdict into the public

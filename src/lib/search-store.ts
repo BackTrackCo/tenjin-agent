@@ -69,10 +69,11 @@ const StoredSearchSchema = z.object({
    * and the turn-end payload name a session, and stays global otherwise, so an
    * unstamped entry is still raised everywhere rather than nowhere.
    *
-   * OPTIONAL and often absent: only the WebSearch hook is handed a session id by
-   * the harness (`session_id` on its stdin payload). A deliberate `tenjin search`
-   * is a Bash subprocess, and the harness exports no session id to those, so it
-   * stamps only when the operator sets TENJIN_SESSION_ID.
+   * OPTIONAL: the WebSearch hook is handed one by the harness (`session_id` on
+   * its stdin payload), and a deliberate `tenjin search` reads the same value
+   * from CLAUDE_CODE_SESSION_ID (or an operator's TENJIN_SESSION_ID). Absent on
+   * entries written before this field existed, and on any harness that exports
+   * neither.
    */
   sessionId: z.string().optional(),
   // How many of the search's browse pointers cost money, and NOT the pointers
