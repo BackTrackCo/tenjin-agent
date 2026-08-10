@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 7;
+export const HOOK_SCRIPT_VERSION = 8;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -60,8 +60,10 @@ const MAX_WEAK_LOOPS = 3;
 /** Candidates the WebSearch hook asks for, and mentions. Two lines is the cap the
  *  hint has to live inside; asking for more would only be thrown away. */
 const SEARCH_LIMIT = 2;
-/** The canonical bound agent-api.ts puts on a browse/candidate url. Over it the
- *  candidate is dropped, never clipped: a clipped url is a different url. */
+/** agent-api.ts's searchBrowseSchema owns this bound; candidate urls are a bare
+ *  string there, so the hook ADOPTS the browse bound for its own persisted
+ *  candidate projection. Over it the candidate is dropped, never clipped: a
+ *  clipped url is a different url. */
 const BROWSE_URL_MAX = 512;
 /**
  * How long the WebSearch hook waits for the search store's lock before giving up
@@ -368,7 +370,9 @@ async function main() {
   // nobody wrote. The only shortening left is the display title, which is not
   // actionable. Mirrors searchResponseSchema in src/lib/agent-api.ts.
   if (body.schemaVersion !== 2) return quiet();
-  if (!UUID_RE.test(String(body.searchId))) return quiet();
+  // typeof BEFORE the regex: String() would stringify ["<uuid>"] into a passing
+  // uuid, emitting a hint whose searchId the store then refuses to record.
+  if (typeof body.searchId !== 'string' || !UUID_RE.test(body.searchId)) return quiet();
   if (body.decision !== 'CANDIDATES' && body.decision !== 'MISS') return quiet();
   const decision = body.decision;
   // Sliced after parsing, so this caps PROJECTION AND STORAGE, not the download

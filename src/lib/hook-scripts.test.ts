@@ -911,7 +911,17 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
   });
 
   it('drops the whole record when the searchId is not a uuid', async () => {
-    for (const searchId of ['not-a-uuid', 'x'.repeat(5000), 42, null]) {
+    // The array and object cases are the typeof guard: String(['<uuid>']) IS the
+    // uuid, so a regex alone would emit a hint whose searchId the store then
+    // refuses to record — a pointer into nothing.
+    for (const searchId of [
+      'not-a-uuid',
+      'x'.repeat(5000),
+      42,
+      null,
+      [SEARCH_ID],
+      { id: SEARCH_ID },
+    ]) {
       await rm(join(dataDir, 'searches.json'), { force: true });
       const { baseUrl } = await serveJson((_body, base) => ({
         status: 200,

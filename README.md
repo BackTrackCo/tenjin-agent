@@ -265,7 +265,9 @@ auto-approve nothing.
 
 `tenjin install` registers two Claude Code hooks and writes their scripts to
 `~/.tenjin/hooks/`. Both are standalone Node scripts: they do not boot the CLI,
-and neither can block, deny, or delay a tool call.
+and neither can block, deny, or modify a tool call. The PreToolUse hook runs
+before the search it rides on, so it can delay one, bounded by its ~2s fetch
+budget and the 5s harness kill below.
 
 - **PreToolUse on `WebSearch`** asks the marketplace the same question the agent
   is about to ask the web and mentions a tested answer when one exists. It cannot
