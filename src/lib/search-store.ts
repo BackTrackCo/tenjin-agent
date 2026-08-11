@@ -150,25 +150,40 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
 }
 
 /**
+ * What a {@link markSearchResolved} call actually did. Returned rather than
+ * swallowed because a caller may REPORT the close to its own user, and "I tried"
+ * is not "it happened": a lock timeout or an unwritable store still leaves the
+ * loop open and the reminder due, so a receipt claiming otherwise would be a
+ * confident lie. `already-resolved` is a success for anyone asking about the
+ * LOOP (something closed it), and a no-op for anyone asking about this call.
+ */
+export type ResolutionOutcome = 'resolved' | 'already-resolved' | 'not-found' | 'failed';
+
+/**
  * Record that something closed the loop on `searchId`, so the Stop hook stops
- * raising it. Best-effort in both directions and it NEVER throws: an unknown id
- * (the search aged past MAX_ENTRIES, or came from another machine) writes
- * nothing, and a failure to persist costs one stale nag rather than the command
- * the caller actually ran. The FIRST resolution wins, so a publish after an
- * outcome report does not rewrite who closed it.
+ * raising it. Best-effort and it NEVER throws: an unknown id (the search aged
+ * past MAX_ENTRIES, or came from another machine) writes nothing, and a failure
+ * to persist costs one stale nag rather than the command the caller actually
+ * ran. The FIRST resolution wins, so a publish after an outcome report does not
+ * rewrite who closed it.
  */
 export async function markSearchResolved(
   dataDir: string,
   searchId: string,
   by: SearchResolution,
   at: string = new Date().toISOString(),
-): Promise<void> {
+): Promise<ResolutionOutcome> {
   try {
     const lockPath = `${storePath(dataDir)}.lock`;
+    let outcome: ResolutionOutcome = 'not-found';
     await withFileLock(lockPath, async () => {
       const existing = await loadSearches(dataDir);
       const target = existing.find((s) => s.searchId === searchId);
-      if (target === undefined || target.resolved !== undefined) return;
+      if (target === undefined) return;
+      if (target.resolved !== undefined) {
+        outcome = 'already-resolved';
+        return;
+      }
       const searches = existing.map((s) =>
         s.searchId === searchId ? { ...s, resolved: { by, at } } : s,
       );
@@ -177,9 +192,13 @@ export async function markSearchResolved(
         `${JSON.stringify({ schemaVersion: 1, searches }, null, 2)}\n`,
         { mode: 0o644, dirMode: 0o700 },
       );
+      outcome = 'resolved';
     });
+    return outcome;
   } catch {
-    // Bookkeeping for a hook nudge. It must never fail the verb that ran.
+    // Bookkeeping for a hook nudge. It must never fail the verb that ran — but
+    // the caller is told, so nothing reports a close that did not happen.
+    return 'failed';
   }
 }
 

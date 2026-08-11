@@ -16,9 +16,13 @@ otherwise fine. `--search-id` with `--candidate` is a usage error (the candidate
 already carries its own searchId), a malformed id refuses before any wallet touch,
 and an id the local store does not know still publishes and says so. What happened
 is reported in both registers: a stderr line for a human, and a
-`search: { id, closed }` field on the JSON receipt, because `--json` suppresses
-the stderr notes and an agent that named a search could otherwise not tell a
-closed loop from an open one.
+`search: { id, closed, prefill }` field on the JSON receipt, because `--json`
+suppresses the stderr notes and an agent that named a search could otherwise not
+tell a closed loop from an open one, nor learn that its question was too long to
+become a card entry. `closed` reports the OUTCOME of the local write rather than
+the intent to make it: the store update is best-effort and never throws, so a
+lock it could not take comes back as `closed: false` and a line naming the
+command that closes the loop by hand.
 
 A `--draft` now parks privately on BOTH paths and closes nothing. It leaves the
 named search open, and — this is a behavior change — it also leaves a
@@ -70,6 +74,25 @@ free. `--excerpt` wins over frontmatter, both are refused over the server's
 500-character bound rather than truncated (a silently cut preview is a different
 preview), and the refusal now happens at the command's edge instead of inside the
 request builder, so it costs a message rather than a keystore unlock.
+
+Every free-text field that ships is stripped of control bytes, escape sequences
+and bidi overrides. None of it is necessarily typed by the person publishing: a
+card question can be prefilled from a stored search, and the title, excerpt,
+tags and every card field can arrive over MCP from an agent that read them off a
+fetched page. `trim()` removes neither a CSI sequence nor a right-to-left
+override, so without this a payload rides into the marketplace and renders in
+every future reader's terminal. The strip lives in the two request builders that
+`publish` and `edit` share, so it covers both commands and both MCP tools by
+construction rather than by each flag remembering, and it runs before the length
+bounds, since the stripped text is what the bound has to describe. The post BODY
+is deliberately left alone: that is the author's own markdown, and rewriting it
+is a content change nobody asked for. Ordinary unicode, including emoji ZWJ
+sequences, is untouched.
+
+The MCP `tenjin_publish` tool now forwards `searchId` and `excerpt` to the
+command core. The tool advertised both, because the input schema is type-checked
+against the argument type, but the handler that builds the call never passed
+them, so an agent setting either over MCP had it silently dropped.
 
 **Two smaller fixes on the same loop.** `tenjin install` now says to restart
 Claude Code when it wires the hooks: harness hooks are read once at session
