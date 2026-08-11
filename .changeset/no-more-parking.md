@@ -28,7 +28,10 @@ stderr and keep working for one release; the notice names both real options
 (publish it, or close the loop). `candidate list` is deliberately quiet, because
 it is the surface an operator needs to see and empty a pen they already have, and
 publishing an existing candidate keeps working until removal. The notice is
-stderr-only, so a `--json` envelope is byte-identical to before.
+stderr-only, so a `--json` envelope is byte-identical to before. The removal
+itself — every candidate verb, the store, and each leftover mention — is tracked
+in issue #133 and ships next release; residual pen files on disk are operator
+property and will not be deleted.
 
 `tenjin uninstall`'s kept-items list drops the "parked candidates" phrasing for
 wording that does not imply an ongoing feature, while still promising the same
