@@ -288,8 +288,9 @@ the resolved `publish.mode`. The tenjin-publish skill owns the mechanics, so on
 any path that publishes, invoke it first and follow its draft, sanitize, and
 pricing rules; never publish bare.
 
-- **review** (the default): draft the piece, then run `tenjin publish --json` (no
-  `--yes`). It exits 3 with the `needs_confirmation` payload; render THAT
+- **review** (the default): draft the piece, then run `tenjin publish
+  <finding.md> --json --search-id <id>` (no `--yes`). It exits 3 with the
+  `needs_confirmation` payload; render THAT
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
   only on an explicit yes. Park it as a candidate (`tenjin candidate add
   <finding.md> --search-id <id> --question "<the question you looked up>"
@@ -303,12 +304,17 @@ pricing rules; never publish bare.
   semantic reviewer on these paths; that skill also states why a MISS is never
   a safety signal. Any doubt parks the draft as a
   candidate instead of publishing. When the pass is clean, build the answer
-  card and run `tenjin publish --json` directly.
+  card and run `tenjin publish <finding.md> --json --search-id <id>` directly.
   In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
   re-run with `--yes` on a yes. Otherwise park as a candidate when the publish
   cannot proceed at all: a hard block, or no wallet. Then tell the user what was
   published, with the URL.
+
+`--search-id` is what closes the loop: it marks the search resolved so the
+open-loop reminder stops raising it, and prefills the searched question into the
+card's `questionsAnswered` when the draft names none. A `--draft` publish parks
+privately and leaves the loop open.
 
 Candidates are local files that never upload on their own; `tenjin candidate
 list --json` shows the pen, and a later `tenjin publish --candidate <id> --json` sends one

@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 9;
+export const HOOK_SCRIPT_VERSION = 11;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -127,6 +127,18 @@ function readJsonFile(path) {
 
 function isRecord(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The harness session this event belongs to, or null when the payload does not
+ * name one. \`session_id\` is the documented field on every hook input, and null
+ * is a first-class answer: the search ledger is machine-global, so a null here
+ * means "do not scope", never "scope to nothing".
+ */
+function sessionIdOf(input) {
+  if (!isRecord(input)) return null;
+  const id = input.session_id;
+  return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
 /**
@@ -288,7 +300,7 @@ async function withStoreLock(fn) {
  * Best-effort in every direction, and it NEVER throws: a failed record costs one
  * reminder, while a hook that fails costs the WebSearch.
  */
-async function recordSearch(searchId, question, decision, candidates) {
+async function recordSearch(searchId, question, decision, candidates, sessionId) {
   if (typeof searchId !== 'string' || searchId.length === 0) return;
   try {
     mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
@@ -296,6 +308,10 @@ async function recordSearch(searchId, question, decision, candidates) {
       const existing = loadSearches().filter(
         (s) => !isRecord(s) || s.searchId !== searchId,
       );
+      // The session stamp is what later lets the Stop hook raise this loop in the
+      // session that opened it and nowhere else. Omitted rather than written
+      // empty when the payload did not name one: absent means "every session",
+      // which is the safe direction for a reminder.
       const entry = {
         searchId,
         at: new Date().toISOString(),
@@ -303,6 +319,7 @@ async function recordSearch(searchId, question, decision, candidates) {
         decision,
         candidates,
         source: 'websearch-hook',
+        ...(sessionId !== null ? { sessionId } : {}),
       };
       saveSearches([entry, ...existing].slice(0, ${STORE_MAX_ENTRIES}));
     });
@@ -421,7 +438,7 @@ async function main() {
   }
   // BEFORE any emit, because emit exits the process. A MISS recorded here is what
   // the Stop hook later finds; a HIT is what a purchase attributes back to.
-  await recordSearch(body.searchId, question, decision, stored);
+  await recordSearch(body.searchId, question, decision, stored, sessionIdOf(input));
 
   if (decision !== 'CANDIDATES') return quiet();
 
@@ -504,15 +521,20 @@ function saveNags(nagged) {
   renameSync(tmp, NAGS_PATH);
 }
 
-/** One line per deliberate search nobody had answered, naming its searchId. */
+/**
+ * One line per deliberate search nobody had answered, naming its searchId. The
+ * publish arm is QUALIFIED: this line lands in a model's context at every turn
+ * end, and an unqualified "publish it back" nags just as hard on a question about
+ * private infrastructure as on a durable public finding.
+ */
 function strongLine(s) {
   const id = clean(s.searchId, 64);
   return (
     "Open Tenjin loop: you searched '" +
     clean(s.question, 160) +
-    "' and got a MISS. If you solved it, publish it back (tenjin publish, searchId " +
+    "' and got a MISS. If you solved it with a public, reusable, rights-clean finding, publish it back: tenjin publish <file> --search-id " +
     id +
-    ') or park it: tenjin candidate add <file> --search-id ' +
+    '. Otherwise park it: tenjin candidate add <file> --search-id ' +
     id +
     '.'
   );
@@ -528,14 +550,38 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    '. If any produced a durable public finding, publish it back (tenjin publish, searchId) or park it: tenjin candidate add <file> --search-id <id>.'
+    '. If any produced a durable public finding, publish it back: tenjin publish <file> --search-id <id>, or park it: tenjin candidate add <file> --search-id <id>.'
   );
 }
 
+/**
+ * Is this entry this session's business?
+ *
+ * SCOPED WHEN KNOWN, GLOBAL WHEN NOT. The ledger is machine-global, so without
+ * this the next session to stop is nagged about a sibling session's open loops,
+ * which it did not open and cannot close. An entry stamped with a DIFFERENT
+ * session is skipped AND left unnagged, so the session that owns it still gets
+ * its reminder. An unstamped entry (an older CLI wrote it, or nothing could
+ * attribute the search) is raised in every session, so scoping can never make a
+ * loop invisible in all of them at once.
+ */
+function ownedByThisSession(entry, sessionId) {
+  if (sessionId === null) return true;
+  const stamp = typeof entry.sessionId === 'string' ? entry.sessionId : '';
+  return stamp === '' || stamp === sessionId;
+}
+
 async function main() {
-  // The payload is not needed (the check is entirely local), but a hook that
-  // leaves stdin unread can make the writer's pipe block, so drain it first.
-  await readStdin();
+  // Draining stdin is mandatory regardless: a hook that leaves it unread can make
+  // the writer's pipe block. The payload is parsed for ONE field, the session id,
+  // and tolerantly — a shape this hook does not recognize costs the scoping, not
+  // the reminder.
+  let sessionId = null;
+  try {
+    sessionId = sessionIdOf(JSON.parse(await readStdin()));
+  } catch {
+    // Unparseable stdin: fall back to machine-global behavior.
+  }
   if (readConfig().stopNag === 'off') return quiet();
 
   const searches = loadSearches();
@@ -549,6 +595,9 @@ async function main() {
     if (typeof s.searchId !== 'string' || typeof s.question !== 'string') continue;
     if (s.resolved !== undefined && s.resolved !== null) continue;
     if (nagged[s.searchId] !== undefined) continue;
+    // BEFORE the nag record is written below: a skipped entry must stay unnagged
+    // so its own session still raises it.
+    if (!ownedByThisSession(s, sessionId)) continue;
     const at = Date.parse(String(s.at));
     if (!Number.isFinite(at) || now - at > ${OPEN_LOOP_WINDOW_MS} || at > now) continue;
     // An entry with no source predates sources, and those were all deliberate.

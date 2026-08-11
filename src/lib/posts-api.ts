@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { httpRequest, type HttpResponse, type HttpResult } from './http';
 import { rateLimitError } from './agent-api';
+import { sanitizeWireText } from './output';
 import { trimSlash } from './url';
 import type { ResourceCardInput } from './card';
 import type { WriteAuth } from './session-key';
@@ -52,6 +53,13 @@ export interface PostCreateBody {
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
 const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
+/**
+ * The server's `excerpt` bound (pinned against the OpenAPI fixture in
+ * contract.test.ts). Exported so `publish` can refuse an over-long one at its own
+ * edge, before the wallet touch, rather than only here — inside the request
+ * builder, which runs after a signature has already been collected.
+ */
+export const EXCERPT_MAX_LENGTH = 500;
 // A handle the server refuses beyond the charset rule: an address-shaped handle
 // (0x-prefixed) collides with the address form of a creator, and `latest` is the
 // reserved newest-post alias. The full reserved set is server-authoritative — a
@@ -64,9 +72,63 @@ const RESERVED_HANDLES = new Set(['latest']);
  * non-draft publish requires a title AND body; a draft needs at least one of the
  * two (an all-empty draft is refused, matching the server's superRefine).
  */
+/**
+ * Strip control bytes, escape sequences and bidi overrides from every free-text
+ * field that ships, in ONE place: both body builders run it, so `publish`,
+ * `edit`, and every MCP call through them are covered by construction rather
+ * than by each flag remembering.
+ *
+ * It runs BEFORE the length bounds below, because the sanitized text is what is
+ * sent and measuring the raw string would refuse a field that fits once its
+ * control bytes are gone.
+ *
+ * Deliberately NOT applied to `bodyMd`. The body is the author's own markdown
+ * document; rewriting it is a content change nobody asked for, and unlike a
+ * title or a card field it is not a single-line value rendered into somebody
+ * else's UI. Enum and timestamp fields pass through untouched in practice, since
+ * a valid one contains nothing to strip.
+ */
+function sanitizeCard<T extends object>(card: T): T {
+  // `null` is a CLEAR on the update path and must survive as itself; only real
+  // strings are rewritten, and non-text fields (numbers, enums, timestamps) are
+  // copied through untouched.
+  const TEXT_KEYS = [
+    'mediaType',
+    'scope',
+    'exclusions',
+    'provenanceSummary',
+    'methodologySummary',
+    'maintenanceCadence',
+    'estimatedPaidInputCost',
+  ];
+  const LIST_KEYS = ['questionsAnswered', 'tasksSupported'];
+  const out: Record<string, unknown> = { ...(card as Record<string, unknown>) };
+  for (const key of TEXT_KEYS) {
+    const v = out[key];
+    if (typeof v === 'string') out[key] = sanitizeWireText(v);
+  }
+  for (const key of LIST_KEYS) {
+    const v = out[key];
+    if (Array.isArray(v))
+      out[key] = v.map((i) => (typeof i === 'string' ? sanitizeWireText(i) : i));
+  }
+  const applies = out.appliesTo;
+  if (applies !== null && typeof applies === 'object' && !Array.isArray(applies)) {
+    out.appliesTo = Object.fromEntries(
+      Object.entries(applies as Record<string, unknown>).map(([k, values]) => [
+        sanitizeWireText(k),
+        Array.isArray(values)
+          ? values.map((i) => (typeof i === 'string' ? sanitizeWireText(i) : i))
+          : values,
+      ]),
+    );
+  }
+  return out as T;
+}
+
 export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   const isDraft = input.status === 'draft';
-  const title = input.title?.trim();
+  const title = input.title === undefined ? undefined : sanitizeWireText(input.title);
   const bodyMd = input.bodyMd;
   const hasTitle = title !== undefined && title.length > 0;
   const hasBody = bodyMd !== undefined && bodyMd.trim().length > 0;
@@ -94,13 +156,14 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   }
   // Trimmed to match the server's `z.string().trim()`: sending " x" for a stored
   // "x" would otherwise look like a change on every run and never converge.
-  const excerpt = input.excerpt?.trim();
-  if (excerpt !== undefined && excerpt.length > 500) {
-    throw new CliError('USAGE', 'excerpt must be at most 500 characters.');
+  const excerpt = input.excerpt === undefined ? undefined : sanitizeWireText(input.excerpt);
+  if (excerpt !== undefined && excerpt.length > EXCERPT_MAX_LENGTH) {
+    throw new CliError('USAGE', `excerpt must be at most ${EXCERPT_MAX_LENGTH} characters.`);
   }
-  if (input.tags !== undefined) {
-    if (input.tags.length > 5) throw new CliError('USAGE', 'at most 5 tags.');
-    for (const tag of input.tags) {
+  const tags = input.tags?.map(sanitizeWireText);
+  if (tags !== undefined) {
+    if (tags.length > 5) throw new CliError('USAGE', 'at most 5 tags.');
+    for (const tag of tags) {
       if (tag.length === 0 || tag.length > 50) {
         throw new CliError('USAGE', 'each tag is 1 to 50 characters.');
       }
@@ -128,11 +191,11 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     ...(title !== undefined && title.length > 0 ? { title } : {}),
     ...(bodyMd !== undefined ? { bodyMd } : {}),
     ...(excerpt !== undefined ? { excerpt } : {}),
-    ...(input.tags !== undefined && input.tags.length > 0 ? { tags: input.tags } : {}),
+    ...(tags !== undefined && tags.length > 0 ? { tags } : {}),
     ...(input.priceAtomic !== undefined ? { price: input.priceAtomic } : {}),
     ...(input.handle !== undefined ? { handle: input.handle } : {}),
     status: input.status,
-    ...(input.resource !== undefined ? { resource: input.resource } : {}),
+    ...(input.resource !== undefined ? { resource: sanitizeCard(input.resource) } : {}),
   };
 }
 
@@ -339,7 +402,7 @@ export interface PostUpdateBody {
  * as USAGE. `handle` is create-only and has no PostUpdate counterpart.
  */
 export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
-  const title = input.title?.trim();
+  const title = input.title === undefined ? undefined : sanitizeWireText(input.title);
   if (input.title !== undefined && (title === undefined || title.length === 0)) {
     throw new CliError('USAGE', 'title cannot be empty.', {
       fix: 'Pass a title, or omit --title to keep the stored one.',
@@ -360,13 +423,14 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
   }
   // Trimmed to match the server's `z.string().trim()`: sending " x" for a stored
   // "x" would otherwise look like a change on every run and never converge.
-  const excerpt = input.excerpt?.trim();
-  if (excerpt !== undefined && excerpt.length > 500) {
-    throw new CliError('USAGE', 'excerpt must be at most 500 characters.');
+  const excerpt = input.excerpt === undefined ? undefined : sanitizeWireText(input.excerpt);
+  if (excerpt !== undefined && excerpt.length > EXCERPT_MAX_LENGTH) {
+    throw new CliError('USAGE', `excerpt must be at most ${EXCERPT_MAX_LENGTH} characters.`);
   }
-  if (input.tags !== undefined) {
-    if (input.tags.length > 5) throw new CliError('USAGE', 'at most 5 tags.');
-    for (const tag of input.tags) {
+  const tags = input.tags?.map(sanitizeWireText);
+  if (tags !== undefined) {
+    if (tags.length > 5) throw new CliError('USAGE', 'at most 5 tags.');
+    for (const tag of tags) {
       if (tag.length === 0 || tag.length > 50) {
         throw new CliError('USAGE', 'each tag is 1 to 50 characters.');
       }
@@ -382,10 +446,10 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
     ...(title !== undefined ? { title } : {}),
     ...(input.bodyMd !== undefined ? { bodyMd: input.bodyMd } : {}),
     ...(excerpt !== undefined ? { excerpt } : {}),
-    ...(input.tags !== undefined ? { tags: input.tags } : {}),
+    ...(tags !== undefined ? { tags } : {}),
     ...(input.priceAtomic !== undefined ? { price: input.priceAtomic } : {}),
     ...(input.status !== undefined ? { status: input.status } : {}),
-    ...(input.resource !== undefined ? { resource: input.resource } : {}),
+    ...(input.resource !== undefined ? { resource: sanitizeCard(input.resource) } : {}),
   };
   // An empty PUT would burn a nonce to change nothing; the caller is expected to
   // route "no change flags" to the read path instead.

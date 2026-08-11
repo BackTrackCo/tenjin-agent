@@ -84,6 +84,65 @@ describe('runSearch', () => {
     expect(latest?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
   });
 
+  // The Stop hook scopes its nag on this, so a session that set the variable
+  // stops hearing about a sibling session's open loops.
+  it('stamps the session from TENJIN_SESSION_ID when it is set', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: 'session-a' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('session-a');
+  });
+
+  // A harness that exports neither variable. Unstamped means the reminder is
+  // raised in every session rather than in none.
+  it('records no session when the environment names none', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch, env: {} });
+    expect((await latestSearch(dir))?.sessionId).toBeUndefined();
+  });
+
+  it('ignores a blank TENJIN_SESSION_ID rather than stamping an empty session', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: '   ' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBeUndefined();
+  });
+
+  // The ambient harness variable: the same value the hook scripts are handed on
+  // stdin, so a CLI search and a hook search in one session stamp identically.
+  it('stamps the session from CLAUDE_CODE_SESSION_ID when it is set', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { CLAUDE_CODE_SESSION_ID: 'harness-session' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('harness-session');
+  });
+
+  // Explicit operator override beats the ambient one.
+  it('prefers TENJIN_SESSION_ID over CLAUDE_CODE_SESSION_ID', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: 'operator', CLAUDE_CODE_SESSION_ID: 'harness-session' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('operator');
+  });
+
+  // A blank override falls THROUGH to the harness value rather than blanking it.
+  it('falls back to CLAUDE_CODE_SESSION_ID when TENJIN_SESSION_ID is blank', async () => {
+    const { fetch } = stub(CANDIDATES);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: '  ', CLAUDE_CODE_SESSION_ID: 'harness-session' },
+    });
+    expect((await latestSearch(dir))?.sessionId).toBe('harness-session');
+  });
+
   // The candidate line prices in dollars, like the browse hint below it: a human
   // reading a price has to be able to compare it to `--max-price 0.10` without
   // dividing by a million. Two decimals, so a dime is "0.10" and not "0.1".
@@ -346,9 +405,21 @@ describe('runSearch — parked-candidate nudge', () => {
       expect(data.publishBack).toEqual({
         searchId: miss.searchId,
         reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
-        publish: 'tenjin publish <file.md> --json',
+        publish: `tenjin publish <file.md> --json --search-id ${miss.searchId}`,
         park: `tenjin candidate add <file.md> --search-id ${miss.searchId} --json`,
       });
+    });
+
+    // Both arms are commands to run verbatim; a publish arm without the id closes
+    // nothing, which is the loop this hint exists to close.
+    it('names the searchId in BOTH arms of the hint, and on the stderr line', async () => {
+      const { fetch } = stub(miss);
+      const { ctx, stderr } = ctxCapturingStderr();
+      const res = await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      const hint = (res.data as { publishBack: { publish: string; park: string } }).publishBack;
+      expect(hint.publish).toContain(`--search-id ${miss.searchId}`);
+      expect(hint.park).toContain(`--search-id ${miss.searchId}`);
+      expect(stderr()).toContain(`tenjin publish <file.md> --search-id ${miss.searchId}`);
     });
 
     // The envelope is the server's response verbatim everywhere else, so the one

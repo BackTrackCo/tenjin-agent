@@ -139,6 +139,12 @@ const outcomeInput = {
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
   candidate: z.string().optional().describe('A parked candidate id to publish instead of a file'),
+  searchId: z
+    .string()
+    .optional()
+    .describe(
+      'The search this file answers; closes its open loop and prefills its question when the draft names none',
+    ),
   draft: z.boolean().optional().describe('Save as a private draft instead of publishing'),
   yes: z
     .boolean()
@@ -148,6 +154,12 @@ const publishInput = {
     ),
   mode: z.string().optional().describe('Consent mode for this run: review | auto | full-auto'),
   price: z.coerce.string().optional().describe('Post price in decimal USD, e.g. "0.10"'),
+  excerpt: z
+    .string()
+    .optional()
+    .describe(
+      'The public preview a non-buyer reads (max 500 chars); omit to let the server derive one from the body',
+    ),
   question: z.array(z.string()).optional().describe('Questions this piece answers'),
   task: z.array(z.string()).optional().describe('Tasks this piece supports'),
   scope: z.string().optional().describe('What the piece covers (card scope)'),
@@ -422,10 +434,12 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
             ...(args.candidate !== undefined ? { candidate: args.candidate } : {}),
+            ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),
             ...(args.mode !== undefined ? { mode: args.mode } : {}),
             ...(args.price !== undefined ? { price: args.price } : {}),
+            ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
             ...(args.question !== undefined ? { question: args.question } : {}),
             ...(args.task !== undefined ? { task: args.task } : {}),
             ...(args.scope !== undefined ? { scope: args.scope } : {}),

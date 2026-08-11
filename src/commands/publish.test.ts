@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
 import { createCandidate, readCandidate } from '../lib/candidate-store';
-import { loadSearches, recordSearch } from '../lib/search-store';
+import { loadSearches, recordSearch, searchStoreLockPath } from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -46,10 +46,21 @@ function makeCtxCapturingStderr(): { ctx: CommandContext; stderr: () => string }
   };
 }
 
-/** A spy wallet provider counting wallet signatures (the establish popup). */
-function spyProvider(): { provider: WalletProvider; signCount: () => number } {
+/**
+ * A spy wallet provider counting wallet signatures (the establish popup) and,
+ * separately, `getSigner` calls. The two are NOT the same moment: signing is lazy
+ * and happens inside the write, while `getSigner` is the keystore unlock the
+ * command does up front. An edge check that refuses before touching the wallet is
+ * only observable on the second counter.
+ */
+function spyProvider(): {
+  provider: WalletProvider;
+  signCount: () => number;
+  getSignerCount: () => number;
+} {
   const inner = testSigner();
   let n = 0;
+  let unlocks = 0;
   const signer: TenjinSigner = {
     address: inner.address,
     signMessage: (a) => {
@@ -61,6 +72,7 @@ function spyProvider(): { provider: WalletProvider; signCount: () => number } {
   };
   return {
     signCount: () => n,
+    getSignerCount: () => unlocks,
     provider: {
       id: 'local',
       describe: async () => ({
@@ -69,7 +81,10 @@ function spyProvider(): { provider: WalletProvider; signCount: () => number } {
         credentialSource: 'file',
         policyEnforcement: 'client-only',
       }),
-      getSigner: async () => signer,
+      getSigner: async () => {
+        unlocks++;
+        return signer;
+      },
       diagnostics: async () => ({ warnings: [] }),
     },
   };
@@ -724,17 +739,32 @@ describe('runPublish — publish --candidate', () => {
     expect(await readCandidate(dir, id)).not.toBeNull();
   });
 
-  it('--draft combines with --candidate', async () => {
+  // A draft answered nobody, so it is NOT the publish that retires the pen entry:
+  // the draft is still the pending answer and the candidate has to outlive it.
+  it('--draft combines with --candidate, and leaves it parked', async () => {
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
     const id = await park();
     const { fetch } = stubServer({ ...CREATED, status: 'draft' });
-    const { provider } = spyProvider();
+    const { ctx, stderr } = makeCtxCapturingStderr();
     const res = await runPublish(
       baseArgs(undefined, { candidate: id, draft: true, mode: 'auto' }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
     expect((res.data as { status: string }).status).toBe('draft');
-    expect(await readCandidate(dir, id)).toBeNull();
+    expect(await readCandidate(dir, id)).not.toBeNull();
+    expect((res.data as { candidate: { cleared: boolean } }).candidate.cleared).toBe(false);
+    // A deliberate hold, not a clear that failed: no warning rides with it.
+    expect((res.data as { candidate: { warning?: string } }).candidate.warning).toBeUndefined();
+    expect(stderr()).toContain(`candidate ${id} stays parked`);
+    // Same rule as the --search-id draft gate: the loop stays open too.
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
   it('a malformed or unknown candidate id is USAGE before any wallet touch', async () => {
@@ -859,4 +889,598 @@ describe('runPublish — publish --candidate', () => {
       await chmod(join(dir, 'candidates'), 0o700); // restore so afterEach cleanup works
     }
   });
+});
+
+describe('runPublish — publish <file> --search-id', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  const QUESTION = 'does ox 0.14 still export Bytes.from';
+
+  /** Seed the local store with the MISS a publish is about to close. */
+  async function seed(question: string = QUESTION): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  /** A stub server that also captures the parsed request body. */
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  function questionsIn(body: Record<string, unknown> | undefined): string[] | undefined {
+    return (body?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
+  }
+
+  // The gap this flag closes: the path the Stop hook and the auto-mode skill
+  // prescribe is a bare file publish, which left the loop open.
+  it('resolves the named search on a successful file publish', async () => {
+    await seed();
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    // --json suppresses the stderr notes, so the receipt is the only signal an
+    // agent gets about whether its loop actually closed.
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: true,
+      prefill: 'applied',
+    });
+    expect(res.humanLines).toContain(`Closed the loop on search ${SEARCH}.`);
+  });
+
+  it('omits the search field entirely when --search-id was not passed', async () => {
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(res.data).not.toHaveProperty('search');
+  });
+
+  // The entry aged past the store cap or came from another machine: there is no
+  // loop here to close, and that must not cost the caller their publish.
+  it('publishes normally on an unknown search id, resolving nothing', async () => {
+    const { fetch, calls } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(calls).toHaveLength(1);
+    expect((res.data as { status: string }).status).toBe('published');
+    expect(await loadSearches(dir)).toEqual([]);
+    expect(stderr()).toContain(`search ${SEARCH} is not in the local store`);
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: false,
+      prefill: 'none',
+    });
+  });
+
+  // A draft parks privately and answers nobody, so the loop is still open.
+  it('leaves the loop open on a --draft publish', async () => {
+    await seed();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, draft: true, mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    expect(stderr()).toContain(`search ${SEARCH} stays open`);
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: false,
+      prefill: 'applied',
+    });
+  });
+
+  it('leaves the loop open when the publish was refused', async () => {
+    await seed();
+    const { fetch } = stubServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'review' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    ).catch(() => undefined);
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  // The searched phrasing is what the next searcher sends, so it is the right
+  // fallback for the card — behind anything the author wrote themselves.
+  it('prefills questionsAnswered from the stored search question', async () => {
+    await seed();
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual([QUESTION]);
+  });
+
+  it('an explicit --question beats the stored search question', async () => {
+    await seed();
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), {
+        searchId: SEARCH,
+        question: ['flag question'],
+        mode: 'auto',
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual(['flag question']);
+  });
+
+  it('frontmatter questionsAnswered beats the stored search question', async () => {
+    await seed();
+    const doc = await writeDoc(
+      ['---', 'questionsAnswered:', '  - fm question', '---', '# T', '', 'body'].join('\n'),
+    );
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(doc, { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual(['fm question']);
+  });
+
+  // A search question may run to the server's 512, past the card's 200-char item
+  // bound: prefilling it would fail a publish that was otherwise fine.
+  it('skips the prefill when the stored question exceeds the card item bound', async () => {
+    await seed('q'.repeat(201));
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toBeUndefined();
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // A candidate already names the search it answers; two ids is a usage error,
+  // not a silent pick, and it refuses before any wallet touch.
+  it('refuses --search-id together with --candidate', async () => {
+    // A REAL parked candidate, so the only usage error left to catch is the pair
+    // itself and not an unknown-candidate refusal standing in for it.
+    const parked = await createCandidate(dir, {
+      draft: CLEAN,
+      searchId: SEARCH,
+      created: new Date().toISOString(),
+      sourceProject: dir,
+    });
+    const { fetch, calls } = stubServer();
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(undefined, { candidate: parked.id, searchId: SEARCH, mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: expect.stringContaining('not both') });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+  });
+
+  it('refuses a --search-id that is not a uuid', async () => {
+    const { fetch, calls } = stubServer();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { searchId: 'not-a-uuid', mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('runPublish — the public preview (--excerpt)', () => {
+  /** A stub server that also captures the parsed request body. */
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  const withFrontmatter = (excerpt: string): string =>
+    ['---', `excerpt: ${excerpt}`, '---', '# The Answer', '', 'A plain body.'].join('\n');
+
+  it('sends an explicit --excerpt as the public preview', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: 'What it answers, as of 2026-08.', mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('What it answers, as of 2026-08.');
+  });
+
+  it('falls back to frontmatter excerpt', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(withFrontmatter('from the frontmatter')), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('from the frontmatter');
+  });
+
+  it('an explicit --excerpt beats the frontmatter one', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(withFrontmatter('from the frontmatter')), {
+        excerpt: 'from the flag',
+        mode: 'auto',
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('from the flag');
+  });
+
+  // Absent, the server derives one from the body's leading prose; sending nothing
+  // is what lets it, so an empty key must not be invented here.
+  it('sends no excerpt at all when neither names one', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()).not.toHaveProperty('excerpt');
+  });
+
+  // REFUSED, never truncated: a silently cut preview is a different preview, and
+  // controlling exactly what a non-buyer reads is the whole point of setting one.
+  it('refuses an over-long excerpt at the edge, before any wallet touch', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, signCount, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { excerpt: 'e'.repeat(501), mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: expect.stringContaining('500') });
+    expect(calls).toHaveLength(0);
+    expect(signCount()).toBe(0);
+    // The point of the edge check: the request builder catches this too, but only
+    // after the keystore is already open.
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('refuses an over-long frontmatter excerpt the same way', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(withFrontmatter('e'.repeat(501))), { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('keeps one at exactly the bound', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: 'e'.repeat(500), mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(String(body()?.excerpt)).toHaveLength(500);
+  });
+});
+
+describe('runPublish — public card text is sanitized', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  // A CSI sequence and an RTL override: `trim()` removes neither, and both ride
+  // into text every future buyer reads.
+  const CSI = '\x1b[31mred\x1b[0m';
+  const RTL = 'safe‮txet dekcirt';
+
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  const questionsIn = (b: Record<string, unknown> | undefined): string[] | undefined =>
+    (b?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
+
+  async function seed(question: string): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  it('strips a CSI sequence from the prefilled question', async () => {
+    await seed(CSI);
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual(['red']);
+  });
+
+  it('strips a bidi override from the prefilled question', async () => {
+    await seed(RTL);
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())?.[0]).not.toContain('‮');
+    expect(questionsIn(body())?.[0]).toContain('safe');
+  });
+
+  it('strips a CSI sequence from the excerpt', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: CSI, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('red');
+  });
+
+  it('strips a bidi override from the excerpt', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: RTL, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(String(body()?.excerpt)).not.toContain('‮');
+  });
+
+  // Ordinary unicode is not collateral damage: an emoji ZWJ sequence and
+  // non-latin script survive byte-identical.
+  it('keeps ordinary unicode, including emoji ZWJ sequences', async () => {
+    const { fetch, body } = bodyServer();
+    const text = 'ハンドブック 👩‍💻 — café';
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: text, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe(text);
+  });
+
+  // Single-line fields: a newline folds to a space rather than vanishing, which
+  // would run the words on either side of it together.
+  it('folds a newline in the excerpt to a space', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: 'first line\nsecond line', mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('first line second line');
+  });
+});
+
+describe('runPublish — the dropped prefill is reported', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+
+  async function seed(question: string): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  // --json suppresses stderr, so the receipt has to carry it too: otherwise the
+  // card just comes back without the question the caller asked for.
+  it('says so on stderr AND on the receipt when the question is too long', async () => {
+    await seed('q'.repeat(201));
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(stderr()).toContain('longer than 200 characters');
+    expect((res.data as { search: { prefill: string } }).search.prefill).toBe('dropped-too-long');
+  });
+
+  it('reports prefill none when the draft named its own questions', async () => {
+    await seed('a short question');
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, question: ['mine'], mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { search: { prefill: string } }).search.prefill).toBe('none');
+    expect(stderr()).not.toContain('longer than');
+  });
+});
+
+// Every agent-supplied field that ships, driven through one payload. The strip
+// lives in the shared wire builder, so this covers `edit` and both MCP tools by
+// construction — but the fields are enumerated here because a NEW card field
+// added without a strip is exactly the regression this catches.
+describe('runPublish — every wire field is stripped, not just the two', () => {
+  const CSI = '\x1b[31mred\x1b[0m';
+  const RTL = 'a‮tricked';
+
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_u: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  /** Publish with `payload` in every text field, and hand back what went out. */
+  async function publishWith(payload: string): Promise<Record<string, unknown>> {
+    const doc = ['---', `title: ${payload}`, `tags: [${payload}]`, '---', '# H', '', 'body'].join(
+      '\n',
+    );
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(doc), {
+        mode: 'auto',
+        excerpt: payload,
+        question: [payload],
+        task: [payload],
+        scope: payload,
+        exclusions: payload,
+        provenance: payload,
+        methodology: payload,
+        appliesTo: [`products=${payload}`],
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    return body() ?? {};
+  }
+
+  /** Every string that reached the wire, flattened. */
+  function wireStrings(sent: Record<string, unknown>): string[] {
+    const card = (sent.resource ?? {}) as Record<string, unknown>;
+    const out: string[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === 'string') out.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v !== null && typeof v === 'object')
+        Object.entries(v).forEach(([k, x]) => {
+          out.push(k);
+          walk(x);
+        });
+    };
+    for (const key of ['title', 'excerpt', 'tags']) walk(sent[key]);
+    walk(card);
+    return out;
+  }
+
+  it('strips a CSI sequence from every field, card included', async () => {
+    const sent = await publishWith(CSI);
+    // The payload landed everywhere it could, so the assertion is meaningful.
+    expect(sent.title).toBe('red');
+    expect(sent.excerpt).toBe('red');
+    expect(sent.tags).toEqual(['red']);
+    const card = sent.resource as Record<string, unknown>;
+    expect(card.questionsAnswered).toEqual(['red']);
+    expect(card.tasksSupported).toEqual(['red']);
+    expect(card.scope).toBe('red');
+    expect(card.exclusions).toBe('red');
+    expect(card.provenanceSummary).toBe('red');
+    expect(card.methodologySummary).toBe('red');
+    expect(card.appliesTo).toEqual({ products: ['red'] });
+    for (const s of wireStrings(sent)) expect(s).not.toContain('\x1b');
+  });
+
+  it('strips a bidi override from every field, card included', async () => {
+    const sent = await publishWith(RTL);
+    for (const s of wireStrings(sent)) expect(s).not.toContain('‮');
+    expect(sent.title).toBe('atricked');
+  });
+
+  // The body is the author's document and is deliberately NOT rewritten.
+  it('leaves bodyMd alone', async () => {
+    const doc = `# Title\n\nA line with ${CSI} in it.\n`;
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(doc), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(String(body()?.bodyMd)).toContain('\x1b[31m');
+  });
+});
+
+// The money bug: `closed` must describe what the local write DID, not what it
+// tried to do. `markSearchResolved` swallows its failures by design, so without
+// this the receipt can go back to claiming a close that never landed — and an
+// agent that believes a paid loop closed does not publish it again, or does.
+describe('runPublish — a search the store could not close reports closed:false', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+
+  it('reports closed:false and names the recovery when the store lock is held', async () => {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
+    // A lock nobody releases: the resolve cannot land. Held for the whole
+    // publish, so the failure is the real one rather than a stubbed return.
+    await mkdir(searchStoreLockPath(dir), { recursive: true });
+    const { fetch, calls } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    try {
+      const res = await runPublish(
+        baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+        ctx,
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      );
+      // The publish itself still succeeded: bookkeeping never fails the write.
+      expect(calls).toHaveLength(1);
+      expect((res.data as { status: string }).status).toBe('published');
+      expect((res.data as { search: { closed: boolean } }).search.closed).toBe(false);
+      expect(stderr()).toContain('could not be updated');
+      expect(stderr()).toContain(`tenjin outcome --search-id ${SEARCH}`);
+      // And the loop really is still open, so the reminder is right to fire.
+      expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    } finally {
+      await rm(searchStoreLockPath(dir), { recursive: true, force: true });
+    }
+  }, 15_000);
 });

@@ -2866,6 +2866,30 @@ describe('runInstall: search hooks', () => {
     expect(await persistedMode()).toBe('auto');
   });
 
+  // settings.json hooks load at session start, so an operator who does not
+  // restart gets zero hook activity and nothing telling them why.
+  it('tells the operator to restart, but only when hooks were actually wired', async () => {
+    const human = (res: { humanLines?: string[] }): string =>
+      (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+
+    // The flag settles the hooks without a prompt; isInteractive is only what
+    // makes install return the walkthrough as humanLines at all.
+    const wired = await runInstall(
+      { harness: ['claude'], searchHooks: 'auto' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(human(wired)).toContain('Restart Claude Code');
+    expect(human(wired)).toContain('read once at session start');
+
+    const off = await runInstall(
+      { harness: ['claude'], searchHooks: 'off' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(human(off)).not.toContain('Restart Claude Code');
+  });
+
   it('--search-hooks off registers nothing and persists the choice', async () => {
     const res = await runInstall(
       { harness: ['claude'], searchHooks: 'off' },
