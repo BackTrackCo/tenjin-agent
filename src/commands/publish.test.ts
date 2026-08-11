@@ -1346,3 +1346,101 @@ describe('runPublish — the dropped prefill is reported', () => {
     expect(stderr()).not.toContain('longer than');
   });
 });
+
+// Every agent-supplied field that ships, driven through one payload. The strip
+// lives in the shared wire builder, so this covers `edit` and both MCP tools by
+// construction — but the fields are enumerated here because a NEW card field
+// added without a strip is exactly the regression this catches.
+describe('runPublish — every wire field is stripped, not just the two', () => {
+  const CSI = '\x1b[31mred\x1b[0m';
+  const RTL = 'a‮tricked';
+
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_u: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  /** Publish with `payload` in every text field, and hand back what went out. */
+  async function publishWith(payload: string): Promise<Record<string, unknown>> {
+    const doc = ['---', `title: ${payload}`, `tags: [${payload}]`, '---', '# H', '', 'body'].join(
+      '\n',
+    );
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(doc), {
+        mode: 'auto',
+        excerpt: payload,
+        question: [payload],
+        task: [payload],
+        scope: payload,
+        exclusions: payload,
+        provenance: payload,
+        methodology: payload,
+        appliesTo: [`products=${payload}`],
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    return body() ?? {};
+  }
+
+  /** Every string that reached the wire, flattened. */
+  function wireStrings(sent: Record<string, unknown>): string[] {
+    const card = (sent.resource ?? {}) as Record<string, unknown>;
+    const out: string[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === 'string') out.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v !== null && typeof v === 'object')
+        Object.entries(v).forEach(([k, x]) => {
+          out.push(k);
+          walk(x);
+        });
+    };
+    for (const key of ['title', 'excerpt', 'tags']) walk(sent[key]);
+    walk(card);
+    return out;
+  }
+
+  it('strips a CSI sequence from every field, card included', async () => {
+    const sent = await publishWith(CSI);
+    // The payload landed everywhere it could, so the assertion is meaningful.
+    expect(sent.title).toBe('red');
+    expect(sent.excerpt).toBe('red');
+    expect(sent.tags).toEqual(['red']);
+    const card = sent.resource as Record<string, unknown>;
+    expect(card.questionsAnswered).toEqual(['red']);
+    expect(card.tasksSupported).toEqual(['red']);
+    expect(card.scope).toBe('red');
+    expect(card.exclusions).toBe('red');
+    expect(card.provenanceSummary).toBe('red');
+    expect(card.methodologySummary).toBe('red');
+    expect(card.appliesTo).toEqual({ products: ['red'] });
+    for (const s of wireStrings(sent)) expect(s).not.toContain('\x1b');
+  });
+
+  it('strips a bidi override from every field, card included', async () => {
+    const sent = await publishWith(RTL);
+    for (const s of wireStrings(sent)) expect(s).not.toContain('‮');
+    expect(sent.title).toBe('atricked');
+  });
+
+  // The body is the author's document and is deliberately NOT rewritten.
+  it('leaves bodyMd alone', async () => {
+    const doc = `# Title\n\nA line with ${CSI} in it.\n`;
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(doc), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(String(body()?.bodyMd)).toContain('\x1b[31m');
+  });
+});

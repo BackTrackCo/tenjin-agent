@@ -10,7 +10,7 @@ import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
-import { sanitizeForTerminal } from '../lib/output';
+import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';
 import { trimSlash } from '../lib/url';
 import {
   deriveCard,
@@ -559,28 +559,8 @@ const CARD_QUESTION_MAX = 200;
  * the next searcher matches against.
  */
 function cardQuestion(raw: string): string | undefined {
-  const question = sanitizeCardText(raw);
+  const question = sanitizeWireText(raw);
   return question.length > 0 && question.length <= CARD_QUESTION_MAX ? question : undefined;
-}
-
-/**
- * Strip control and direction-spoofing codepoints from text that becomes PUBLIC
- * card content.
- *
- * Neither of these fields is typed by the person publishing: the question comes
- * from a stored search (the agent's own query text, which may itself have come
- * from a fetched page) and the excerpt can arrive over MCP. `trim()` removes
- * neither a CSI sequence nor an RTL override, so both would ride into an
- * excerpt every future buyer reads and every terminal renders.
- *
- * `sanitizeForTerminal` owns the hard part and is reused rather than reimplemented
- * (it REMOVES C0/C1, escape sequences, the UAX#9 bidi set and the tag block, while
- * keeping ordinary unicode and emoji ZWJ sequences intact). The one thing added
- * here is folding newlines and tabs to a space FIRST: these are single-line
- * fields, and a bare strip would join the words on either side of a newline.
- */
-function sanitizeCardText(raw: string): string {
-  return sanitizeForTerminal(raw.replace(/[\r\n\t]+/g, ' ')).trim();
 }
 
 /**
@@ -591,15 +571,14 @@ function sanitizeCardText(raw: string): string {
  * builder runs after a wallet signature has been collected and this is the edge:
  * a too-long excerpt should cost a message, not a signing prompt. Refused rather
  * than truncated — a silently cut preview is a different preview, and the whole
- * point of setting one is controlling exactly what a non-buyer reads.
+ * point of setting one is controlling exactly what a non-buyer reads. Sanitized
+ * before the bound for the same reason the builder is: the stripped text is what
+ * ships, so it is what the length has to describe.
  */
 function resolveExcerpt(args: PublishArgs, frontmatter: Frontmatter): string | undefined {
   const raw = args.excerpt ?? expectString(frontmatter, 'excerpt');
   if (raw === undefined) return undefined;
-  // Sanitized BEFORE the bound is checked, because the sanitized text is what
-  // ships: measuring the raw string would refuse an excerpt that fits once its
-  // control bytes are gone.
-  const excerpt = sanitizeCardText(raw);
+  const excerpt = sanitizeWireText(raw);
   if (excerpt.length > EXCERPT_MAX_LENGTH) {
     throw new CliError(
       'USAGE',

@@ -75,12 +75,19 @@ free. `--excerpt` wins over frontmatter, both are refused over the server's
 preview), and the refusal now happens at the command's edge instead of inside the
 request builder, so it costs a message rather than a keystore unlock.
 
-Both the excerpt and the prefilled question are stripped of control bytes,
-escape sequences and bidi overrides before they ship. Neither is typed by the
-person publishing — the question comes from a stored search and the excerpt can
-arrive over MCP — and `trim()` removes neither a CSI sequence nor an RTL
-override, so both would otherwise ride into text every future buyer reads.
-Ordinary unicode, including emoji ZWJ sequences, is left alone.
+Every free-text field that ships is stripped of control bytes, escape sequences
+and bidi overrides. None of it is necessarily typed by the person publishing: a
+card question can be prefilled from a stored search, and the title, excerpt,
+tags and every card field can arrive over MCP from an agent that read them off a
+fetched page. `trim()` removes neither a CSI sequence nor a right-to-left
+override, so without this a payload rides into the marketplace and renders in
+every future reader's terminal. The strip lives in the two request builders that
+`publish` and `edit` share, so it covers both commands and both MCP tools by
+construction rather than by each flag remembering, and it runs before the length
+bounds, since the stripped text is what the bound has to describe. The post BODY
+is deliberately left alone: that is the author's own markdown, and rewriting it
+is a content change nobody asked for. Ordinary unicode, including emoji ZWJ
+sequences, is untouched.
 
 The MCP `tenjin_publish` tool now forwards `searchId` and `excerpt` to the
 command core. The tool advertised both, because the input schema is type-checked
