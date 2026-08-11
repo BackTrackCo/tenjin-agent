@@ -845,7 +845,7 @@ function walletDisclosure(w: WalletOutcome, dataDir: string): string[] {
   if (w.status !== 'created') return [];
   return [
     `A wallet was created at ${walletPath(dataDir)}: the key is encrypted at rest (keystore v3, scrypt, mode 0600) and never leaves this machine.`,
-    'It holds $0. Funding it is a human step: send USDC on Base to that address; nothing in this CLI can move money into it.',
+    'It holds $0. Funding it is a human step: run `tenjin fund` (card checkout via Coinbase, opened in your browser), or send USDC on Base to that address.',
   ];
 }
 

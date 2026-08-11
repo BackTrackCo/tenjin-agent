@@ -99,6 +99,18 @@ describe('buildTenjinMcpServer, tool surface', () => {
     expect(schema).toContain('show');
     expect(schema).not.toContain('send');
   });
+
+  // `tenjin fund` is the human-invoked funds-in counterpart: it opens a card
+  // checkout in a browser, which no model-facing surface may trigger. Same
+  // narrow-toolset pin as send.
+  it('never exposes the funds-in fund verb (no tool, no wallet action)', async () => {
+    const client = await connect({ dataDir: dir });
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).not.toContain('tenjin_fund');
+    const wallet = tools.find((t) => t.name === 'tenjin_wallet');
+    const schema = JSON.stringify(wallet?.inputSchema ?? {});
+    expect(schema).not.toContain('fund');
+  });
 });
 
 describe('tenjin_search', () => {

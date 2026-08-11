@@ -951,7 +951,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
         status: 'warn',
         required: false,
         detail: 'Wallet USDC balance is 0',
-        fix: 'Send USDC on Base. $5 covers ~50 typical resources.',
+        fix: 'Fund it with `tenjin fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
       };
     }
     const money = toMoney(balance.toString());
