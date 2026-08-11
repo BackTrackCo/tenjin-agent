@@ -163,7 +163,7 @@ describe('wireHermesIntegration', () => {
   const commands = {
     tenjinCommand: '/opt/tenjin',
     nodeCommand: process.execPath,
-    hooks: { enabled: true },
+    hooks: { enabled: true, mode: 'auto' as const },
   };
 
   it('writes a native plugin, shared scripts, MCP config, and explicit activation', async () => {
@@ -257,10 +257,9 @@ describe('wireHermesIntegration', () => {
     expect(text).not.toContain('enabled:');
   });
 
-  // Nothing in the suite asserted the manifest before, and the Python probe builds
-  // its own Ctx, so the whole feature could be dead on a real machine with every
-  // test green. Pinned against `hermes_cli/plugins.py`, which parses
-  // `provides_hooks` and defaults `kind` to `standalone`.
+  // The Python probe below builds its own Ctx, so no test can notice a manifest
+  // Hermes would not read: pin it here instead. Against `hermes_cli/plugins.py`,
+  // which parses `provides_hooks` and defaults `kind` to `standalone`.
   it('pins the manifest to the fields the Hermes loader parses', async () => {
     await wireHermesIntegration({
       hermesHome: home,
@@ -316,8 +315,8 @@ describe('wireHermesIntegration', () => {
   });
 
   // The README's `--no-hooks` row promises "writes no config", and the Claude path
-  // honors it by writing no scripts at all. This path used to write both scripts
-  // and the whole plugin anyway, withholding only the `plugins.enabled` line.
+  // honors it by writing no scripts at all. Withholding only the `plugins.enabled`
+  // line would leave hook code on disk that the operator never consented to.
   it('writes no hook code at all when the hooks decision said no', async () => {
     const result = await wireHermesIntegration({
       hermesHome: home,
@@ -325,11 +324,17 @@ describe('wireHermesIntegration', () => {
       dryRun: false,
       explicit: true,
       ...commands,
-      hooks: { enabled: false, fix: 'Enable them with `tenjin config set hooks.searchMode auto`.' },
+      hooks: {
+        enabled: false,
+        mode: 'auto',
+        fix: 'Enable them with `tenjin config set hooks.searchMode auto`.',
+      },
     });
-    expect(result.plugin.status).toBe('disabled');
+    // `skipped` is about THIS RUN. `disabled` is a claim about the target, and on a
+    // re-run over a working install it would be a false one.
+    expect(result.plugin.status).toBe('skipped');
     expect(result.plugin.scriptPaths).toEqual([]);
-    expect(result.activation.status).toBe('disabled');
+    expect(result.activation.status).toBe('skipped');
     // The warning names the blocker that has to move, not the command just run.
     expect(result.plugin.warning).toContain('hooks.searchMode auto');
     await expect(
@@ -358,8 +363,8 @@ describe('wireHermesIntegration', () => {
     expect(result.mcp.status).toBe('would-install');
     expect(result.plugin.status).toBe('would-install');
     expect(result.activation.status).toBe('would-install');
-    // The envelope has to report what WOULD be written; an empty list under-reported
-    // the two scripts a real run creates.
+    // The envelope has to report what WOULD be written, which is the two scripts a
+    // real run creates.
     expect(result.plugin.scriptPaths).toEqual([
       join(dataDir, 'hooks', 'tenjin-websearch.mjs'),
       join(dataDir, 'hooks', 'tenjin-stop.mjs'),
@@ -374,7 +379,7 @@ describe('readHermesIntegrationStatus', () => {
   const commands = {
     tenjinCommand: process.execPath,
     nodeCommand: process.execPath,
-    hooks: { enabled: true },
+    hooks: { enabled: true, mode: 'auto' as const },
   };
 
   it('a fully wired home reads back green', async () => {
@@ -403,9 +408,9 @@ describe('readHermesIntegrationStatus', () => {
     expect(status.mcpCommand).toContain('npx-cache');
   });
 
-  // Doctor used to model activation more narrowly than the installer's planner, so
-  // it called `not-enabled` on shapes `planPluginEnable` refuses, and its fix string
-  // sent the operator into a conflict it had not predicted. One classifier now.
+  // One classifier for both sides. A reader more permissive than the writer calls
+  // `not-enabled` on a shape `planPluginEnable` refuses, and its fix string then
+  // sends the operator into a conflict it did not predict.
   it('reports the conflict the installer would raise, not a false not-enabled', async () => {
     await writeFile(hermesConfigPath(home), 'plugins:\n  enabled: [other]\n');
     expect((await readHermesIntegrationStatus(home)).activation).toBe('conflict');
@@ -428,5 +433,77 @@ describe('readHermesIntegrationStatus', () => {
       plugin: 'missing',
       activation: 'not-enabled',
     });
+  });
+});
+
+// An agent reads install's JSON. Saying `disabled` about a plugin that is on disk
+// and enabled makes it conclude the retrieval reflex is off while it is running,
+// which is the one way a status field can be wrong without anything misbehaving.
+describe('withholding a write does not misreport the machine', () => {
+  const commands = {
+    tenjinCommand: process.execPath,
+    nodeCommand: process.execPath,
+  };
+
+  it('a --no-hooks re-run reports skipped and names the surviving plugin', async () => {
+    await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+      hooks: { enabled: true, mode: 'auto' },
+    });
+    const again = await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+      hooks: { enabled: false, mode: 'auto', fix: 'Wire them with `tenjin install`.' },
+    });
+    expect(again.plugin.status).toBe('skipped');
+    expect(again.activation.status).toBe('skipped');
+    expect(again.plugin.warning).toContain('still in');
+    expect(again.plugin.warning).toContain('keeps running');
+    // Install's envelope and doctor's now describe the same machine.
+    expect(await readHermesIntegrationStatus(home)).toMatchObject({
+      plugin: 'installed',
+      activation: 'enabled',
+    });
+  });
+
+  it('with the mode stored off the surviving plugin is named as inert, not running', async () => {
+    await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+      hooks: { enabled: true, mode: 'auto' },
+    });
+    const again = await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+      hooks: { enabled: false, mode: 'off' },
+    });
+    expect(again.plugin.warning).toContain('inert');
+    expect(again.plugin.warning).not.toContain('keeps running');
+  });
+
+  it('says nothing about a survivor when there is none', async () => {
+    const result = await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+      hooks: { enabled: false, mode: 'auto' },
+    });
+    expect(result.plugin.status).toBe('skipped');
+    expect(result.plugin.warning).not.toContain('still in');
   });
 });

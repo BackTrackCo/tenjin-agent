@@ -4,6 +4,7 @@ import { writeFileAtomic } from './atomic-json';
 import { CliError } from './errors';
 import { hasCode } from './errno';
 import { writeSharedHookScripts } from './harness-hooks';
+import type { SearchHookMode } from './config';
 
 export const HERMES_MCP_MARKER = 'tenjin-cli:hermes-mcp';
 export const HERMES_PLUGIN_NAME = 'tenjin';
@@ -42,8 +43,20 @@ export const HERMES_PLUGIN_MANIFEST = [
   '',
 ].join('\n');
 
+/**
+ * An ACTION this run took, never a claim about the machine.
+ *
+ * `skipped` and `disabled` are the pair to keep apart. `disabled` is a statement
+ * about the target: the operator's `plugins.disabled` entry was honored, or
+ * auto-detection left the code inert. `skipped` is a statement about this run
+ * only: the hooks decision withheld the write, and whatever an earlier run put on
+ * disk is still there and still whatever it already was. A `--no-hooks` re-run
+ * over a working install reports `skipped` while `doctor` reports the plugin
+ * installed and enabled, and both are true; reporting `disabled` there told an
+ * agent the plugin was off while it was running.
+ */
 export type HermesWriteStatus =
-  'installed' | 'up-to-date' | 'would-install' | 'disabled' | 'conflict';
+  'installed' | 'up-to-date' | 'would-install' | 'disabled' | 'skipped' | 'conflict';
 
 export interface HermesWriteResult {
   path: string;
@@ -164,10 +177,10 @@ export async function readHermesIntegrationStatus(
         ? 'missing'
         : 'partial';
   const lists = inspectPluginLists(config);
-  // The conflict verdict comes from the WRITER's planner, not a second, narrower
-  // model of the same YAML. Doctor used to call `not-enabled` on shapes the
-  // installer then refused (an inline `plugins.enabled: [x]`, for one), so its fix
-  // string sent the operator into a conflict it had not predicted.
+  // The conflict verdict comes from the WRITER's planner, never a second model of
+  // the same YAML. A reader that is more permissive than the writer (an inline
+  // `plugins.enabled: [x]` reading `not-enabled`) hands out a fix that walks
+  // straight into a refusal.
   const activation: HermesIntegrationStatus['activation'] = lists.disabled
     ? 'disabled'
     : lists.enabled
@@ -205,7 +218,7 @@ export async function wireHermesIntegration(opts: {
   nodeCommand: string;
   dryRun: boolean;
   explicit: boolean;
-  hooks: { enabled: boolean; fix?: string };
+  hooks: { enabled: boolean; fix?: string; mode: SearchHookMode };
 }): Promise<HermesIntegrationResult> {
   const { hermesHome, dataDir, tenjinCommand, nodeCommand, dryRun, explicit, hooks } = opts;
   const mcp = await wireHermesMcp(hermesHome, dryRun, tenjinCommand);
@@ -220,11 +233,13 @@ export async function wireHermesIntegration(opts: {
       plugin: {
         path: join(pluginDir, '__init__.py'),
         manifestPath: join(pluginDir, 'plugin.yaml'),
-        status: 'disabled',
+        status: 'skipped',
         scriptPaths: [],
-        warning: `No Hermes hook code was written this run.${hooks.fix === undefined ? '' : ` ${hooks.fix}`}`,
+        warning: `No Hermes hook code was written this run.${
+          hooks.fix === undefined ? '' : ` ${hooks.fix}`
+        }${await survivingPluginNote(hermesHome, hooks.mode)}`,
       },
-      activation: { path: hermesConfigPath(hermesHome), status: 'disabled' },
+      activation: { path: hermesConfigPath(hermesHome), status: 'skipped' },
     };
   }
   const shared = dryRun
@@ -240,6 +255,23 @@ export async function wireHermesIntegration(opts: {
   });
   const activation = await wireHermesPluginActivation(hermesHome, dryRun, explicit);
   return { home: hermesHome, explicit, mcp, plugin, activation };
+}
+
+/**
+ * What an earlier run left behind, when this run wrote nothing.
+ *
+ * Withholding the write is not an uninstall, so the warning has to say what is
+ * still on the machine or an agent reads `skipped` as "off". Whether it still
+ * RUNS is a separate question: the generated scripts read `hooks.searchMode` on
+ * every invocation, so an enabled plugin is inert while the stored mode is `off`.
+ */
+async function survivingPluginNote(hermesHome: string, mode: SearchHookMode): Promise<string> {
+  const existing = await readHermesIntegrationStatus(hermesHome);
+  if (existing.plugin !== 'installed' || existing.activation !== 'enabled') return '';
+  const where = `An enabled plugin from an earlier run is still in ${hermesPluginDir(hermesHome)}`;
+  return mode === 'off'
+    ? ` ${where}; it stays inert while \`hooks.searchMode\` is off.`
+    : ` ${where} and keeps running; this run opted out of writing, not out of the plugin. Remove it with \`tenjin config set hooks.searchMode off\`.`;
 }
 
 export async function wireHermesMcp(
@@ -356,7 +388,7 @@ function planHermesMcp(existing: string | null, command: string): TextPlan {
       return conflict('config.yaml already defines mcp_servers.tenjin; it was left untouched');
     }
     // Splice FROM the marker, because `mcpEntry` re-emits it: starting at `tenjin`
-    // left the old marker in place and appended a second one on every re-point.
+    // would leave the old marker in place and stack a second one every re-point.
     // `command` is `process.argv[1]`, so an nvm switch or a pnpm-vs-npm global
     // makes re-pointing routine rather than rare.
     const next = [...lines.slice(0, tenjin - 1), mcpEntry(command), ...lines.slice(childEnd)].join(
@@ -580,11 +612,11 @@ function topLevelEnd(lines: string[], start: number): number {
 /**
  * One past the last line that belongs to the mapping opened at `start - 1`.
  *
- * Membership is INDENT, not a sibling-key regex: the old probe (`^ {2}\S[^:]*:`)
- * only recognized a sibling that contained a colon, so a plain comment written for
- * the next server counted as part of this block and a re-point splice deleted it.
- * Blank lines and comments are ambiguous by nature, so they belong only when a
- * deeper line still follows; trailing ones stay with whatever comes next.
+ * Membership is INDENT, never a sibling-key regex. A probe keyed on a colon does
+ * not recognize a plain comment as a sibling, which silently makes the next key's
+ * comment part of THIS block, and a re-point splice then deletes it. Blank lines
+ * and comments are ambiguous by nature, so they belong only when a deeper line
+ * still follows; trailing ones stay with whatever comes next.
  */
 function blockEnd(lines: string[], start: number, limit: number, indent: number): number {
   let end = start;

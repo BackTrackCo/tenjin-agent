@@ -46,10 +46,10 @@ export interface HarnessWiring {
 
 /**
  * `hermesHome` is REQUIRED on every function in this module, and deliberately has
- * no `join(home, '.hermes')` default. A default made a wrong value invisible at
- * the call site: `skill-heal` forgot the argument and, under a custom HERMES_HOME,
- * silently stopped covering the Hermes skills directory. A missing argument is now
- * a compile error instead of a directory nobody notices going unhealed.
+ * no `join(home, '.hermes')` default. A default makes a wrong value invisible at
+ * the call site, and the failure it hides is silent: an unattended caller that
+ * omits it (`skill-heal`) simply stops covering the Hermes skills directory under
+ * a custom HERMES_HOME. A missing argument is a compile error instead.
  */
 export function skillsDirsFor(home: string, hermesHome: string): string[] {
   return [

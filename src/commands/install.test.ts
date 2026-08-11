@@ -286,10 +286,9 @@ describe('runInstall: harness override', () => {
   });
 
   // The README's `--no-hooks` row says "Register no hooks this run; writes no
-  // config", and the Claude path honors it by writing no scripts at all. This path
-  // used to write both shared scripts AND the whole plugin, withholding only the
-  // `plugins.enabled` line, then tell the operator to re-run the command they had
-  // just run.
+  // config", and the Claude path honors it by writing no scripts at all. Anything
+  // less here (withholding only the `plugins.enabled` line) leaves hook code on
+  // disk and then names a fix that cannot move the blocker.
   it('--no-hooks writes no Hermes hook code, only the MCP entry', async () => {
     const { data: d } = await runInstall(
       { harness: ['hermes'], noWallet: true, noHooks: true },
@@ -298,9 +297,9 @@ describe('runInstall: harness override', () => {
     );
     const h = asData(d).harnesses[0]!;
     expect(h.hermes?.mcp.status).toBe('installed');
-    expect(h.hermes?.plugin.status).toBe('disabled');
+    expect(h.hermes?.plugin.status).toBe('skipped');
     expect(h.hermes?.plugin.scriptPaths).toEqual([]);
-    expect(h.hermes?.activation.status).toBe('disabled');
+    expect(h.hermes?.activation.status).toBe('skipped');
     await expect(
       readFile(join(home, '.hermes', 'plugins', 'tenjin', '__init__.py'), 'utf8'),
     ).rejects.toThrow();
@@ -314,7 +313,7 @@ describe('runInstall: harness override', () => {
       deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
     );
     const h = asData(d).harnesses[0]!;
-    expect(h.hermes?.plugin.status).toBe('disabled');
+    expect(h.hermes?.plugin.status).toBe('skipped');
     // Not "re-run `tenjin install --harness hermes`", which loops forever.
     expect(h.warnings.join(' ')).toContain('hooks.searchMode auto');
   });

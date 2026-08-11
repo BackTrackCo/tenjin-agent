@@ -525,9 +525,9 @@ async function installBody(
       // Activation consent: the operator named Hermes on the command line.
       explicit: explicitHarness && targetsHermes,
       // Write consent, read off the SAME hooks decision that gates Claude's
-      // settings.json. `--no-hooks` promises "writes no config" in the README, and
-      // it used to write both scripts and the whole plugin here anyway.
-      hooks: { enabled: hermesHooksEnabled(hooks), fix: hooks.fix },
+      // settings.json, because `--no-hooks` promises "writes no config" in the
+      // README and that promise cannot hold on only one of the two harnesses.
+      hooks: { enabled: hermesHooksEnabled(hooks), fix: hooks.fix, mode: hooks.mode },
     });
     for (const part of [
       hermesResult.hermes.mcp,

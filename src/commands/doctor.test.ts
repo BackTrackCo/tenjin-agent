@@ -139,7 +139,7 @@ describe('runDoctor — passing outcomes', () => {
       nodeCommand: process.execPath,
       dryRun: false,
       explicit: true,
-      hooks: { enabled: true },
+      hooks: { enabled: true, mode: 'auto' },
     });
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -154,10 +154,10 @@ describe('runDoctor — passing outcomes', () => {
     expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
   });
 
-  // Flagged and still live at review time: doctor called the STRICT resolver
-  // unconditionally, so a stray relative HERMES_HOME belonging to some other tool
-  // returned CONFIG_INVALID and ran zero checks on a Claude-only machine. Doctor is
-  // the command you reach for when something is already broken.
+  // Doctor is the command you reach for when something is already broken, so the
+  // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
+  // some other tool would return CONFIG_INVALID and run zero checks on a machine
+  // with no Hermes at all.
   it('a relative HERMES_HOME warns and falls back instead of aborting every check', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -181,7 +181,7 @@ describe('runDoctor — passing outcomes', () => {
       nodeCommand: process.execPath,
       dryRun: false,
       explicit: true,
-      hooks: { enabled: true },
+      hooks: { enabled: true, mode: 'auto' },
     });
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -194,8 +194,8 @@ describe('runDoctor — passing outcomes', () => {
     const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
     expect(hermes.status).toBe('warn');
     expect(hermes.detail).toContain('MCP command missing');
-    // One subject per problem: "plugin missing, plugin not-enabled" read as one
-    // thing twice.
+    // One subject per problem: prefixing the activation with `plugin` too reads as
+    // one subject named twice.
     expect(hermes.detail).not.toContain('plugin plugin');
   });
 
