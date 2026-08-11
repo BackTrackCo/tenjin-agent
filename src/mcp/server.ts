@@ -434,10 +434,12 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
             ...(args.candidate !== undefined ? { candidate: args.candidate } : {}),
+            ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),
             ...(args.mode !== undefined ? { mode: args.mode } : {}),
             ...(args.price !== undefined ? { price: args.price } : {}),
+            ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
             ...(args.question !== undefined ? { question: args.question } : {}),
             ...(args.task !== undefined ? { task: args.task } : {}),
             ...(args.scope !== undefined ? { scope: args.scope } : {}),

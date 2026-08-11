@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   loadSearches,
   markSearchResolved,
   recordSearch,
+  searchStoreLockPath,
   type StoredSearch,
 } from './search-store';
 
@@ -153,16 +154,48 @@ describe('markSearchResolved', () => {
   });
 
   // It is bookkeeping for a hook nudge, so it may never fail the verb that ran.
+  // It still SAYS what happened, so a caller that reports the close does not
+  // report one that did not land.
   it('never throws, even with no store and no data dir', async () => {
     await rm(dir, { recursive: true, force: true });
-    await expect(markSearchResolved(dir, ID, 'candidate')).resolves.toBeUndefined();
+    await expect(markSearchResolved(dir, ID, 'candidate')).resolves.toBe('failed');
   });
 
   it('leaves a corrupt store readable-as-empty rather than throwing', async () => {
     await writeFile(join(dir, 'searches.json'), 'not json', 'utf8');
-    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBeUndefined();
+    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBe('not-found');
     expect(await loadSearches(dir)).toEqual([]);
   });
+
+  // The four outcomes, so a caller can tell "the loop is closed" from "I could
+  // not close it" — the distinction publish's receipt is built on.
+  it('reports resolved, then already-resolved, and never rewrites the first closer', async () => {
+    await recordSearch(dir, entry());
+    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBe('resolved');
+    await expect(markSearchResolved(dir, ID, 'publish')).resolves.toBe('already-resolved');
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('reports not-found for an id the store does not carry', async () => {
+    await recordSearch(dir, entry());
+    await expect(
+      markSearchResolved(dir, '0197ffff-ffff-4fff-8fff-ffffffffffff', 'publish'),
+    ).resolves.toBe('not-found');
+  });
+
+  // A lock nobody releases: the write cannot happen, and the caller is told so
+  // rather than being handed a silent success. Slow by construction (the lock
+  // timeout is 5s), which is why it is the only test that waits.
+  it('reports failed when the store lock cannot be taken', async () => {
+    await recordSearch(dir, entry());
+    await mkdir(searchStoreLockPath(dir), { recursive: true });
+    try {
+      await expect(markSearchResolved(dir, ID, 'publish')).resolves.toBe('failed');
+      expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    } finally {
+      await rm(searchStoreLockPath(dir), { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it('round-trips through the schema, so a resolved entry still loads', async () => {
     await recordSearch(dir, entry());
