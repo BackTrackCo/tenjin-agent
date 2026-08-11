@@ -129,13 +129,24 @@ export async function runPublish(
   // A `--search-id` publish gets the same prefill from the search's own question,
   // which is the phrasing the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  const prefillQuestion = candidate?.meta.question ?? searchPrefillQuestion(storedSearch);
-  if (
-    prefillQuestion !== undefined &&
-    cardFlags.question === undefined &&
-    frontmatter.questionsAnswered === undefined
-  ) {
-    cardFlags.question = [prefillQuestion];
+  const wanted = candidate?.meta.question ?? storedSearch?.question;
+  const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
+  const roomForPrefill =
+    cardFlags.question === undefined && frontmatter.questionsAnswered === undefined;
+  if (prefillQuestion !== undefined && roomForPrefill) cardFlags.question = [prefillQuestion];
+  // A prefill that was WANTED, had room, and was dropped anyway is the one case a
+  // caller cannot infer: the card simply comes back without the question it asked
+  // for. Reported on both surfaces, because --json never sees the stderr line.
+  const prefill: PrefillOutcome =
+    wanted === undefined || !roomForPrefill
+      ? 'none'
+      : prefillQuestion !== undefined
+        ? 'applied'
+        : 'dropped-too-long';
+  if (prefill === 'dropped-too-long') {
+    ctx.io.stderr.write(
+      `The searched question is longer than ${CARD_QUESTION_MAX} characters, so it was not added to the answer card; pass --question to set a shorter one.\n`,
+    );
   }
   const card = deriveCard(frontmatter, cardFlags);
 
@@ -277,7 +288,7 @@ export async function runPublish(
       await markSearchResolved(ctx.dataDir, candidate.meta.searchId, 'publish');
     }
   } else if (args.searchId !== undefined) {
-    searchInfo = await closeNamedSearch(ctx, args.searchId, storedSearch, parksPrivately);
+    searchInfo = await closeNamedSearch(ctx, args.searchId, storedSearch, parksPrivately, prefill);
   }
   return receipt(result, runtime.baseUrl, candidateInfo, searchInfo);
 }
@@ -297,7 +308,15 @@ interface CandidateReceipt {
 interface SearchReceipt {
   id: string;
   closed: boolean;
+  prefill: PrefillOutcome;
 }
+
+/**
+ * What became of the searched question as a card entry. `none` covers both "no
+ * stored question" and "the draft named its own", which are the cases where
+ * nothing was expected; `dropped-too-long` is the one a caller has to be told.
+ */
+type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
 
 /**
  * A draft leaves the candidate exactly where it was. The answer is still pending,
@@ -357,24 +376,38 @@ function validateSearchId(args: PublishArgs): void {
  *
  * `closed: true` describes the LOOP, not this call: `markSearchResolved` keeps
  * the first resolution, so a search an `outcome` already closed reports closed
- * here too, which is what the caller is actually asking about.
+ * here too, which is what the caller is actually asking about. It reports the
+ * OUTCOME of the write rather than the intent to write, so a swallowed lock
+ * timeout comes back as `closed: false` and a stderr line instead of a receipt
+ * claiming a close that never landed.
  */
 async function closeNamedSearch(
   ctx: CommandContext,
   searchId: string,
   stored: StoredSearch | null,
   parksPrivately: boolean,
+  prefill: PrefillOutcome,
 ): Promise<SearchReceipt> {
-  if (parksPrivately) {
-    ctx.io.stderr.write(`Saved as a draft, so search ${searchId} stays open.\n`);
-    return { id: searchId, closed: false };
-  }
+  const open = (reason: string): SearchReceipt => {
+    ctx.io.stderr.write(`${reason}\n`);
+    return { id: searchId, closed: false, prefill };
+  };
+  if (parksPrivately) return open(`Saved as a draft, so search ${searchId} stays open.`);
   if (stored === null) {
-    ctx.io.stderr.write(`Published, but search ${searchId} is not in the local store.\n`);
-    return { id: searchId, closed: false };
+    return open(`Published, but search ${searchId} is not in the local store.`);
   }
-  await markSearchResolved(ctx.dataDir, searchId, 'publish');
-  return { id: searchId, closed: true };
+  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish');
+  if (outcome === 'failed') {
+    return open(
+      `Published, but the local record for search ${searchId} could not be updated, so the open-loop reminder may repeat. Close it with \`tenjin outcome --search-id ${searchId} --status used\`.`,
+    );
+  }
+  // `not-found` here means the entry was evicted between the read above and this
+  // write: nothing was closed, so nothing claims to have been.
+  if (outcome === 'not-found') {
+    return open(`Published, but search ${searchId} is no longer in the local store.`);
+  }
+  return { id: searchId, closed: true, prefill };
 }
 
 /**
@@ -513,17 +546,41 @@ function resolveTitle(frontmatter: Frontmatter, body: string): string | undefine
   return h1?.text;
 }
 
+/** The server's per-item bound on `questionsAnswered` (mirrored by deriveCard). */
+const CARD_QUESTION_MAX = 200;
+
 /**
- * The named search's question as a card prefill, or undefined. Dropped over the
- * card's 200-character item bound — `candidate add` caps its own question there
- * at park time, but a search question is bounded by the server's 512, and a
- * prefill that fails card validation would turn a publish that was fine into a
- * usage error the caller never asked for.
+ * A stored question as a card entry, or undefined when it cannot be one.
+ *
+ * Dropped rather than cut over the item bound: a search question may run to the
+ * server's 512, and a prefill that fails card validation would turn a publish
+ * that was fine into a usage error the caller never asked for. Truncating is
+ * worse still — half a question is a different question, and this text is what
+ * the next searcher matches against.
  */
-function searchPrefillQuestion(search: StoredSearch | null): string | undefined {
-  if (search === null) return undefined;
-  const question = search.question.trim();
-  return question.length > 0 && question.length <= 200 ? question : undefined;
+function cardQuestion(raw: string): string | undefined {
+  const question = sanitizeCardText(raw);
+  return question.length > 0 && question.length <= CARD_QUESTION_MAX ? question : undefined;
+}
+
+/**
+ * Strip control and direction-spoofing codepoints from text that becomes PUBLIC
+ * card content.
+ *
+ * Neither of these fields is typed by the person publishing: the question comes
+ * from a stored search (the agent's own query text, which may itself have come
+ * from a fetched page) and the excerpt can arrive over MCP. `trim()` removes
+ * neither a CSI sequence nor an RTL override, so both would ride into an
+ * excerpt every future buyer reads and every terminal renders.
+ *
+ * `sanitizeForTerminal` owns the hard part and is reused rather than reimplemented
+ * (it REMOVES C0/C1, escape sequences, the UAX#9 bidi set and the tag block, while
+ * keeping ordinary unicode and emoji ZWJ sequences intact). The one thing added
+ * here is folding newlines and tabs to a space FIRST: these are single-line
+ * fields, and a bare strip would join the words on either side of a newline.
+ */
+function sanitizeCardText(raw: string): string {
+  return sanitizeForTerminal(raw.replace(/[\r\n\t]+/g, ' ')).trim();
 }
 
 /**
@@ -539,7 +596,10 @@ function searchPrefillQuestion(search: StoredSearch | null): string | undefined 
 function resolveExcerpt(args: PublishArgs, frontmatter: Frontmatter): string | undefined {
   const raw = args.excerpt ?? expectString(frontmatter, 'excerpt');
   if (raw === undefined) return undefined;
-  const excerpt = raw.trim();
+  // Sanitized BEFORE the bound is checked, because the sanitized text is what
+  // ships: measuring the raw string would refuse an excerpt that fits once its
+  // control bytes are gone.
+  const excerpt = sanitizeCardText(raw);
   if (excerpt.length > EXCERPT_MAX_LENGTH) {
     throw new CliError(
       'USAGE',

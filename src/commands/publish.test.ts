@@ -936,7 +936,11 @@ describe('runPublish — publish <file> --search-id', () => {
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
     // --json suppresses the stderr notes, so the receipt is the only signal an
     // agent gets about whether its loop actually closed.
-    expect((res.data as { search?: unknown }).search).toEqual({ id: SEARCH, closed: true });
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: true,
+      prefill: 'applied',
+    });
     expect(res.humanLines).toContain(`Closed the loop on search ${SEARCH}.`);
   });
 
@@ -964,7 +968,11 @@ describe('runPublish — publish <file> --search-id', () => {
     expect((res.data as { status: string }).status).toBe('published');
     expect(await loadSearches(dir)).toEqual([]);
     expect(stderr()).toContain(`search ${SEARCH} is not in the local store`);
-    expect((res.data as { search?: unknown }).search).toEqual({ id: SEARCH, closed: false });
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: false,
+      prefill: 'none',
+    });
   });
 
   // A draft parks privately and answers nobody, so the loop is still open.
@@ -979,7 +987,11 @@ describe('runPublish — publish <file> --search-id', () => {
     );
     expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
     expect(stderr()).toContain(`search ${SEARCH} stays open`);
-    expect((res.data as { search?: unknown }).search).toEqual({ id: SEARCH, closed: false });
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: false,
+      prefill: 'applied',
+    });
   });
 
   it('leaves the loop open when the publish was refused', async () => {
@@ -1189,5 +1201,148 @@ describe('runPublish — the public preview (--excerpt)', () => {
       hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
     expect(String(body()?.excerpt)).toHaveLength(500);
+  });
+});
+
+describe('runPublish — public card text is sanitized', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  // A CSI sequence and an RTL override: `trim()` removes neither, and both ride
+  // into text every future buyer reads.
+  const CSI = '\x1b[31mred\x1b[0m';
+  const RTL = 'safe‮txet dekcirt';
+
+  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+    let captured: Record<string, unknown> | undefined;
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(JSON.stringify(CREATED), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, body: () => captured };
+  }
+
+  const questionsIn = (b: Record<string, unknown> | undefined): string[] | undefined =>
+    (b?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
+
+  async function seed(question: string): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  it('strips a CSI sequence from the prefilled question', async () => {
+    await seed(CSI);
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())).toEqual(['red']);
+  });
+
+  it('strips a bidi override from the prefilled question', async () => {
+    await seed(RTL);
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(questionsIn(body())?.[0]).not.toContain('‮');
+    expect(questionsIn(body())?.[0]).toContain('safe');
+  });
+
+  it('strips a CSI sequence from the excerpt', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: CSI, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('red');
+  });
+
+  it('strips a bidi override from the excerpt', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: RTL, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(String(body()?.excerpt)).not.toContain('‮');
+  });
+
+  // Ordinary unicode is not collateral damage: an emoji ZWJ sequence and
+  // non-latin script survive byte-identical.
+  it('keeps ordinary unicode, including emoji ZWJ sequences', async () => {
+    const { fetch, body } = bodyServer();
+    const text = 'ハンドブック 👩‍💻 — café';
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: text, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe(text);
+  });
+
+  // Single-line fields: a newline folds to a space rather than vanishing, which
+  // would run the words on either side of it together.
+  it('folds a newline in the excerpt to a space', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { excerpt: 'first line\nsecond line', mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.excerpt).toBe('first line second line');
+  });
+});
+
+describe('runPublish — the dropped prefill is reported', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+
+  async function seed(question: string): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  // --json suppresses stderr, so the receipt has to carry it too: otherwise the
+  // card just comes back without the question the caller asked for.
+  it('says so on stderr AND on the receipt when the question is too long', async () => {
+    await seed('q'.repeat(201));
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(stderr()).toContain('longer than 200 characters');
+    expect((res.data as { search: { prefill: string } }).search.prefill).toBe('dropped-too-long');
+  });
+
+  it('reports prefill none when the draft named its own questions', async () => {
+    await seed('a short question');
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, question: ['mine'], mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { search: { prefill: string } }).search.prefill).toBe('none');
+    expect(stderr()).not.toContain('longer than');
   });
 });
