@@ -264,6 +264,8 @@ export async function wireHermesIntegration(opts: {
  * still on the machine or an agent reads `skipped` as "off". Whether it still
  * RUNS is a separate question: the generated scripts read `hooks.searchMode` on
  * every invocation, so an enabled plugin is inert while the stored mode is `off`.
+ * Inert is the strongest thing on offer: no command in this CLI deletes the plugin
+ * directory or the `plugins.enabled` entry, so the note must not promise removal.
  */
 async function survivingPluginNote(hermesHome: string, mode: SearchHookMode): Promise<string> {
   const existing = await readHermesIntegrationStatus(hermesHome);
@@ -271,7 +273,7 @@ async function survivingPluginNote(hermesHome: string, mode: SearchHookMode): Pr
   const where = `An enabled plugin from an earlier run is still in ${hermesPluginDir(hermesHome)}`;
   return mode === 'off'
     ? ` ${where}; it stays inert while \`hooks.searchMode\` is off.`
-    : ` ${where} and keeps running; this run opted out of writing, not out of the plugin. Remove it with \`tenjin config set hooks.searchMode off\`.`;
+    : ` ${where} and keeps running; this run opted out of writing, not out of the plugin. Make it inert with \`tenjin config set hooks.searchMode off\`.`;
 }
 
 export async function wireHermesMcp(

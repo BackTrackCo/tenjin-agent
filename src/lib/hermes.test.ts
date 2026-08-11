@@ -466,6 +466,10 @@ describe('withholding a write does not misreport the machine', () => {
     expect(again.activation.status).toBe('skipped');
     expect(again.plugin.warning).toContain('still in');
     expect(again.plugin.warning).toContain('keeps running');
+    // Inert is the strongest thing on offer: no command deletes the plugin dir or
+    // the `plugins.enabled` entry, so the note must not promise removal.
+    expect(again.plugin.warning).toContain('Make it inert with');
+    expect(again.plugin.warning).not.toMatch(/\bRemove it\b|\buninstall\b/i);
     // Install's envelope and doctor's now describe the same machine.
     expect(await readHermesIntegrationStatus(home)).toMatchObject({
       plugin: 'installed',
