@@ -179,6 +179,27 @@ export function sanitizeForTerminal(text: string): string {
   );
 }
 
+/**
+ * The same strip, for text that ships to OTHER PEOPLE rather than to this
+ * terminal: a post's title, its public excerpt, and every free-text field of the
+ * answer card a buyer reads before paying.
+ *
+ * The threat is the same one {@link sanitizeForTerminal} closes, one hop further
+ * out. None of this text is necessarily typed by the person publishing: a card
+ * question can be prefilled from a stored search, and every field can arrive over
+ * MCP from an agent that read them off a fetched page. `trim()` removes neither a
+ * CSI sequence nor a right-to-left override, so without this a payload rides into
+ * the marketplace and renders in every future reader's terminal.
+ *
+ * Newlines and tabs fold to a single space FIRST, because these are all
+ * single-line display fields and a bare strip would join the words on either side
+ * of a line break into one. NOT for the post BODY: that is the author's document,
+ * markdown and all, and rewriting it is not this function's business.
+ */
+export function sanitizeWireText(text: string): string {
+  return sanitizeForTerminal(text.replace(/[\r\n\t]+/g, ' ')).trim();
+}
+
 /** CliError passes through; every other thrown value becomes an INTERNAL CliError. */
 export function normalizeError(err: unknown): CliError {
   if (err instanceof CliError) return err;
