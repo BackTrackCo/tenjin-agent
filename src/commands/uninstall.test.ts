@@ -195,6 +195,32 @@ describe('runUninstall — ownership gates', () => {
   });
 });
 
+describe('runUninstall — operator files in our directories', () => {
+  // The data-loss shape this repo already unlearned on the write side: our file
+  // is ours, the directory it sits in is not.
+  it('removes SKILL.md but keeps an operator file beside it, and the directory', async () => {
+    const skillDir = await seedSkill('.claude/skills', 'tenjin-search');
+    const notes = join(skillDir, 'notes.md');
+    await writeFile(notes, '# my own notes\n');
+
+    const { report } = await run();
+
+    expect(existsSync(join(skillDir, 'SKILL.md'))).toBe(false);
+    expect(existsSync(notes)).toBe(true);
+    expect(await readFile(notes, 'utf8')).toBe('# my own notes\n');
+    expect(existsSync(skillDir)).toBe(true);
+    // Still reported as removed: our file is gone, which is what the caller asked.
+    expect(report.skills).toEqual([skillDir]);
+  });
+
+  it('removes the directory when our file was the only thing in it', async () => {
+    const skillDir = await seedSkill('.claude/skills', 'tenjin-publish');
+    const { report } = await run();
+    expect(existsSync(skillDir)).toBe(false);
+    expect(report.skills).toEqual([skillDir]);
+  });
+});
+
 describe('runUninstall — legacy pointer line', () => {
   it('removes the marker line and preserves the operator’s own text', async () => {
     const path = join(home, '.claude', 'CLAUDE.md');
@@ -206,6 +232,31 @@ describe('runUninstall — legacy pointer line', () => {
     expect(after).not.toContain(MARKER);
     expect(after).toContain('# Notes');
     expect(after).toContain('keep me');
+  });
+
+  // The marker only ever began a line. A user quoting it inside their own
+  // sentence keeps that sentence.
+  it('keeps a line that merely mentions the marker mid-sentence', async () => {
+    const path = join(home, '.claude', 'CLAUDE.md');
+    await mkdir(join(home, '.claude'), { recursive: true });
+    const prose = `I removed the ${MARKER} line by hand last week.`;
+    await writeFile(path, `${prose}\n`);
+    const { report } = await run();
+    expect(report.markers).toEqual([]);
+    expect(await readFile(path, 'utf8')).toBe(`${prose}\n`);
+  });
+
+  it('removes a line that starts with the marker, keeping the rest', async () => {
+    const path = join(home, '.claude', 'CLAUDE.md');
+    await mkdir(join(home, '.claude'), { recursive: true });
+    const prose = `Note: the ${MARKER} token is what install used to write.`;
+    await writeFile(path, `# Notes\n${MARKER} Tenjin: search first\n${prose}\n`);
+    const { report } = await run();
+    expect(report.markers).toEqual([path]);
+    const after = await readFile(path, 'utf8');
+    expect(after).toContain('# Notes');
+    expect(after).toContain(prose);
+    expect(after).not.toContain(`${MARKER} Tenjin: search first`);
   });
 
   it('finds a drifted line by its marker, not by exact text', async () => {

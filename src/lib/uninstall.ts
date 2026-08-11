@@ -234,7 +234,9 @@ export async function removeHookScripts(dataDir: string): Promise<{
   const removed: string[] = [];
   for (const file of [WEBSEARCH_HOOK_FILE, STOP_HOOK_FILE]) {
     const path = join(dir, file);
-    if (lstatSync(path, { throwIfNoEntry: false }) === undefined) continue;
+    // isFile, not mere existence: a directory parked at a script path would make
+    // the non-recursive `rm` throw EISDIR and abort the uninstall halfway.
+    if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
     await rm(path, { force: true });
     removed.push(path);
   }
@@ -253,12 +255,20 @@ export async function removeHookScripts(dataDir: string): Promise<{
 }
 
 /**
- * Remove the skill directories we installed, in every harness location.
+ * Remove the skills we installed, in every harness location.
  *
- * Ours means the SKILL.md frontmatter still claims the name we wrote, which is
- * the rule `skill-heal` already uses to decide it may rewrite a file. A skill
- * someone replaced with their own is not ours to delete just for sitting at our
- * path, and neither is a directory reached through a symlink.
+ * REMOVES THE FILE WE SHIPPED, NOT THE DIRECTORY IT SITS IN. Everything else in
+ * that directory belongs to the operator — notes, a local override, anything
+ * they put beside our file — and a recursive delete of a directory we only
+ * partly own is the data-loss shape this repo already unlearned once on the
+ * write side (see lib/skill-writer.ts: "Only the files this package SHIPS are
+ * read and written"). So: unlink `SKILL.md`, then remove the directory only if
+ * nothing is left in it, exactly as `removeHookScripts` does one function up.
+ *
+ * Ours means the SKILL.md frontmatter still claims the name we wrote, the rule
+ * `skill-heal` uses to decide it may rewrite a file. A skill someone replaced
+ * with their own is not ours to delete just for sitting at our path, and neither
+ * is a directory reached through a symlink.
  */
 export async function removeSkills(homeDir: string): Promise<string[]> {
   const removed: string[] = [];
@@ -273,7 +283,14 @@ export async function removeSkills(homeDir: string): Promise<string[]> {
       const read = await readSkillFile(path);
       if (read.kind !== 'ok') continue;
       if (skillFrontmatterName(read.bytes.toString('utf8')) !== name) continue;
-      await rm(skillDir, { recursive: true, force: true });
+      await rm(path, { force: true });
+      // Only when OUR file was the only thing in there. An operator file keeps
+      // both itself and the directory; `rmdir` refuses a non-empty one anyway,
+      // so the check and the call agree even if something lands in between.
+      const rest = await readdir(skillDir).catch(() => null);
+      if (rest !== null && rest.length === 0) {
+        await rmdir(skillDir).catch(() => undefined);
+      }
       removed.push(skillDir);
     }
   }
@@ -297,8 +314,11 @@ export async function removeMarkerLines(homeDir: string): Promise<string[]> {
     const read = await readSkillFile(path);
     if (read.kind !== 'ok') continue;
     const text = read.bytes.toString('utf8');
-    if (!text.includes(SKILLS_MARKER)) continue;
-    const kept = text.split('\n').filter((l) => !l.includes(SKILLS_MARKER));
+    if (!text.split('\n').some((l) => l.startsWith(SKILLS_MARKER))) continue;
+    // ANCHORED to the start of the line, which is the only way install ever
+    // wrote it. `includes` would take a whole line of the operator's own prose
+    // for quoting the marker inside a sentence or a code fence.
+    const kept = text.split('\n').filter((l) => !l.startsWith(SKILLS_MARKER));
     const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
     // A file that held nothing but our line is emptied rather than deleted:
     // install created it in that case, but the operator may have pointed a

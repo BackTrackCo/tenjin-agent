@@ -22,7 +22,9 @@ path, reusing the rules the writers already use — a hook entry is ours when it
 command names one of our script filenames, a skill is ours when its frontmatter
 still claims our name, a rule is ours when it is one we wrote — so another tool's
 hook, someone else's skill at our path, and a rule you added yourself all survive,
-in their original positions. It never touches the wallet, the config, the library,
+in their original positions. It removes the FILES it shipped rather than the
+directories they sit in: a note you left beside a SKILL.md survives, and keeps its
+directory, because a directory we only partly own is not ours to delete. It never touches the wallet, the config, the library,
 the search ledger, or parked candidates, and it prints that list on every run
 including the one that finds nothing: the boundary is the reassurance people are
 looking for when they reach for an uninstaller. Idempotent on a half-installed,
