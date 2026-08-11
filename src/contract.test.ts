@@ -101,7 +101,10 @@ const BROWSE_REQUIRED = ['creator', 'price', 'resourceId', 'title', 'url'];
 
 function assertAgentPaths(doc: unknown): void {
   expect(get(doc, 'paths', '/api/agent/search', 'post', 'operationId')).toBe('agentSearch');
-  expect(get(doc, 'paths', '/api/agent/searches/{id}/outcomes', 'post', 'operationId')).toBe(
+  // tenjin#616 dropped the `/agent` prefix from the outcomes path. The prefixed
+  // spelling survives as an undocumented alias for one deprecation window, so
+  // pinning the documented path is what keeps the CLI on the surviving one.
+  expect(get(doc, 'paths', '/api/searches/{id}/outcomes', 'post', 'operationId')).toBe(
     'agentSearchOutcomes',
   );
 }
@@ -152,7 +155,7 @@ function assertOutcomeStatusEnum(doc: unknown): void {
 }
 
 describe('contract fixture pins the agent endpoints', () => {
-  it('declares POST /api/agent/search and /api/agent/searches/{id}/outcomes', () => {
+  it('declares POST /api/agent/search and /api/searches/{id}/outcomes', () => {
     assertAgentPaths(fixtureDoc);
   });
 });

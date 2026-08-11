@@ -1398,7 +1398,7 @@
         }
       }
     },
-    "/api/agent/searches/{id}/outcomes": {
+    "/api/searches/{id}/outcomes": {
       "parameters": [
         {
           "name": "id",
@@ -3953,7 +3953,7 @@
           "searchId": {
             "type": "string",
             "format": "uuid",
-            "description": "The correlation capability — post it to /api/agent/searches/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Search-Id on a later buy to link that purchase to this search (nulled with the telemetry at 90 days)."
+            "description": "The correlation capability — post it to /api/searches/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Search-Id on a later buy to link that purchase to this search (nulled with the telemetry at 90 days)."
           },
           "decision": {
             "type": "string",
