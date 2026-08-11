@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
 import { createCandidate, readCandidate } from '../lib/candidate-store';
-import { loadSearches, recordSearch } from '../lib/search-store';
+import { loadSearches, recordSearch, searchStoreLockPath } from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -1443,4 +1443,44 @@ describe('runPublish — every wire field is stripped, not just the two', () => 
     );
     expect(String(body()?.bodyMd)).toContain('\x1b[31m');
   });
+});
+
+// The money bug: `closed` must describe what the local write DID, not what it
+// tried to do. `markSearchResolved` swallows its failures by design, so without
+// this the receipt can go back to claiming a close that never landed — and an
+// agent that believes a paid loop closed does not publish it again, or does.
+describe('runPublish — a search the store could not close reports closed:false', () => {
+  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+
+  it('reports closed:false and names the recovery when the store lock is held', async () => {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question: 'a question nobody had answered',
+      decision: 'MISS',
+      candidates: [],
+    });
+    // A lock nobody releases: the resolve cannot land. Held for the whole
+    // publish, so the failure is the real one rather than a stubbed return.
+    await mkdir(searchStoreLockPath(dir), { recursive: true });
+    const { fetch, calls } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    try {
+      const res = await runPublish(
+        baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+        ctx,
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      );
+      // The publish itself still succeeded: bookkeeping never fails the write.
+      expect(calls).toHaveLength(1);
+      expect((res.data as { status: string }).status).toBe('published');
+      expect((res.data as { search: { closed: boolean } }).search.closed).toBe(false);
+      expect(stderr()).toContain('could not be updated');
+      expect(stderr()).toContain(`tenjin outcome --search-id ${SEARCH}`);
+      // And the loop really is still open, so the reminder is right to fire.
+      expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    } finally {
+      await rm(searchStoreLockPath(dir), { recursive: true, force: true });
+    }
+  }, 15_000);
 });
