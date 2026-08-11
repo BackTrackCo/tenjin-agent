@@ -192,13 +192,22 @@ describe('runCandidateDrop', () => {
 });
 
 describe('candidate via main (one JSON object per invocation)', () => {
-  function captureIo(): { io: Io; stdout: () => string } {
+  // The two streams are captured SEPARATELY, which is the whole point of the
+  // "exactly one envelope" assertions below: an advisory that leaked onto stdout
+  // would break the one-JSON-object contract, and a merged buffer could not tell
+  // the difference.
+  function captureIo(): { io: Io; stdout: () => string; stderr: () => string } {
     const out: string[] = [];
-    const mk = () =>
+    const err: string[] = [];
+    const mk = (sink: string[]) =>
       ({
-        write: (c: string | Uint8Array) => (out.push(c.toString()), true),
+        write: (c: string | Uint8Array) => (sink.push(c.toString()), true),
       }) as unknown as NodeJS.WritableStream;
-    return { io: { stdout: mk(), stderr: mk(), isTTY: false }, stdout: () => out.join('') };
+    return {
+      io: { stdout: mk(out), stderr: mk(err), isTTY: false },
+      stdout: () => out.join(''),
+      stderr: () => err.join(''),
+    };
   }
 
   // HOME goes with the data dir: the dispatcher heals the wired skills after every
@@ -222,6 +231,9 @@ describe('candidate via main (one JSON object per invocation)', () => {
     const cap = captureIo();
     const code = await main(['candidate', 'add', file, '--search-id', LOOKUP, '--json'], cap.io);
     expect(code).toBe(0);
+    // The deprecation rides stderr, so the envelope on stdout is untouched.
+    expect(cap.stderr()).toContain('parking is going away');
+    expect(cap.stderr()).toContain('tenjin outcome --search-id <id> --status regenerated');
     const parsed = JSON.parse(cap.stdout());
     expect(parsed).toMatchObject({ ok: true, command: 'candidate.add' });
     expect(await listCandidates(dir)).toHaveLength(1);
@@ -271,5 +283,53 @@ describe('runCandidateAdd closes the open loop locally', () => {
     const res = await runCandidateAdd({ file, searchId: LOOKUP }, makeCtx(), { cwd: dir });
     expect((res.data as { searchId: string }).searchId).toBe(LOOKUP);
     expect(await listCandidates(dir)).toHaveLength(1);
+  });
+});
+
+// One release where parking still works and already says it is going away, so a
+// populated pen stays reachable while nothing new is encouraged into it.
+describe('candidate add/drop — deprecation', () => {
+  function capture(): { ctx: CommandContext; stderr: () => string } {
+    const chunks: string[] = [];
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    const err = {
+      write: (c: string) => (chunks.push(String(c)), true),
+    } as unknown as NodeJS.WritableStream;
+    return {
+      stderr: () => chunks.join(''),
+      ctx: {
+        flags: { json: true, timeout: 5000 },
+        dataDir: dir,
+        io: { stdout: sink(), stderr: err, isTTY: false },
+      },
+    };
+  }
+
+  it('warns on add, and still parks the draft', async () => {
+    const file = join(dir, 'draft.md');
+    await writeFile(file, '# Draft\n');
+    const cap = capture();
+    const res = await runCandidateAdd({ file, searchId: LOOKUP }, cap.ctx);
+    expect(cap.stderr()).toContain('parking is going away');
+    // Still functional this release: the id comes back and the pen has it.
+    expect((res.data as { id: string }).id).toBeTruthy();
+    expect(await listCandidates(dir)).toHaveLength(1);
+  });
+
+  it('warns on drop, and still drops', async () => {
+    const file = join(dir, 'draft.md');
+    await writeFile(file, '# Draft\n');
+    const added = await runCandidateAdd({ file, searchId: LOOKUP }, capture().ctx);
+    const cap = capture();
+    await runCandidateDrop({ id: (added.data as { id: string }).id }, cap.ctx);
+    expect(cap.stderr()).toContain('parking is going away');
+    expect(await listCandidates(dir)).toHaveLength(0);
+  });
+
+  // `list` is the surface an operator needs to empty a pen they already have.
+  it('does NOT warn on list', async () => {
+    const cap = capture();
+    await runCandidateList(cap.ctx);
+    expect(cap.stderr()).toBe('');
   });
 });

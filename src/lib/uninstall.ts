@@ -26,9 +26,10 @@ import {
  * somebody else and is left alone.
  *
  * WHAT IS NEVER TOUCHED: the wallet, the config, the library receipts, the
- * search ledger, and parked candidates. Those are the operator's property and
- * their loss is unrecoverable (a wallet holds funds; a candidate is unpublished
- * work). `install` did not create them, so uninstall does not remove them, and
+ * search ledger, and any drafts parked while the pen existed. Those are the
+ * operator's property and
+ * their loss is unrecoverable (a wallet holds funds; a parked draft is
+ * unpublished work). `install` did not create them, so uninstall does not remove them, and
  * the command says so in its own output rather than leaving it to the docs.
  *
  * SETTINGS.JSON IS EDITED IN ONE PASS. Hooks and permission rules live in the
@@ -72,7 +73,7 @@ export const KEPT_ITEMS: readonly string[] = [
   'config (config.json)',
   'library receipts and purchased pieces',
   'search history (searches.json)',
-  'parked candidates',
+  'any drafts you parked while the candidate pen existed',
 ];
 
 /** The legacy pointer line `install` used to write into CLAUDE.md / AGENTS.md. */

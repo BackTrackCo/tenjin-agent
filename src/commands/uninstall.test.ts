@@ -150,7 +150,7 @@ describe('runUninstall — a fully installed machine', () => {
     expect(report.kept.length).toBeGreaterThan(0);
     expect(text).toContain('Kept (uninstall never touches these)');
     expect(text).toContain('wallet');
-    expect(text).toContain('parked candidates');
+    expect(text).toContain('drafts you parked');
   });
 });
 

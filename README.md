@@ -148,7 +148,7 @@ hook entry pointing at another tool's script, and a permission rule we did not
 write are all left alone.
 
 It never touches your **wallet**, **config**, **library**, **search history**, or
-**parked candidates**, and it prints that list every run. Safe to run twice, or on
+**any drafts you parked**, and it prints that list every run. Safe to run twice, or on
 a machine that never installed: it reports what it found and exits 0.
 
 ### `tenjin search <question>`
@@ -244,6 +244,12 @@ overwritten.
 
 ### `tenjin candidate add <file>`, `tenjin wallet create`, `tenjin send`
 
+`candidate add` and `candidate drop` are **deprecated** and print a notice: a
+publish decision is made once, so the answer to "not now" is to close the loop
+(`tenjin outcome --search-id <id> --status regenerated`), not to file the draft
+somewhere nobody returns to. Both still work this release, and `candidate list`
+keeps working so an existing pen stays reachable.
+
 | Flag          | Values | Default  | Effect                                                   | Command         |
 | ------------- | ------ | -------- | -------------------------------------------------------- | --------------- |
 | `--search-id` | uuid   | required | The search whose unmet demand this draft answers         | `candidate add` |
@@ -295,7 +301,7 @@ budget and the 5s harness kill below.
   bought and attributed and a miss stays visible to the reminder below. A miss, a
   timeout, a dead network, or a response that fails validation exits silently.
 - **Stop** checks locally, with no network call, for a MISS from the last eight
-  hours that no outcome report, publish, or parked candidate has closed. A
+  hours that no outcome report or publish has closed. A
   deliberate `tenjin search` that went unanswered is named on its own line with
   its `searchId`. Searches the WebSearch hook ran are batched into one line, at
   most three, because nobody vetted those questions for the marketplace and only

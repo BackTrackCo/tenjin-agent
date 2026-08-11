@@ -310,7 +310,7 @@ describe('runSearch', () => {
   });
 });
 
-describe('runSearch — parked-candidate nudge', () => {
+describe('runSearch — the MISS stderr surface', () => {
   const miss = {
     schemaVersion: 2,
     searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
@@ -345,57 +345,31 @@ describe('runSearch — parked-candidate nudge', () => {
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
-  it('emits one stderr line when candidates are parked (none stale)', async () => {
-    await park(daysAgo(1));
-    await park(daysAgo(2));
-    const { fetch } = stub(miss);
-    const { ctx, stderr } = ctxCapturingStderr();
-    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
-    expect(stderr()).toContain('2 candidate(s) parked (0 stale >7d) - tenjin candidate list');
-  });
-
-  it('counts the stale (>7d) candidates', async () => {
+  // A search no longer says anything about drafts waiting somewhere. A reminder
+  // that re-raises work nobody chose to come back to is the repeat-nag class this
+  // CLI stopped emitting, so a full pen changes nothing about the output.
+  it('says nothing about parked drafts, however many are in the pen', async () => {
     await park(daysAgo(1));
     await park(daysAgo(8));
     await park(daysAgo(30));
     const { fetch } = stub(miss);
     const { ctx, stderr } = ctxCapturingStderr();
     await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
-    expect(stderr()).toContain('3 candidate(s) parked (2 stale >7d)');
-  });
-
-  it('is silent when nothing is parked', async () => {
-    const { fetch } = stub(miss);
-    const { ctx, stderr } = ctxCapturingStderr();
-    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).not.toContain('parked');
+    expect(stderr()).not.toContain('candidate list');
   });
 
-  it('does NOT nudge on a HIT, even with candidates parked (MISS-only)', async () => {
-    await park(daysAgo(1));
-    const { fetch } = stub(CANDIDATES);
-    const { ctx, stderr } = ctxCapturingStderr();
-    await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
-    expect(stderr()).not.toContain('parked');
-  });
-
-  // The parked nudge is silent when the pen is empty, which is exactly the state
-  // of a first-time MISS: the moment the demand is freshest and nobody is told.
   describe('publish-back on a fresh MISS', () => {
-    it('names the searchId and both ways to close the loop, on stderr', async () => {
+    it('names the searchId, the publish arm, and the decline arm, on stderr', async () => {
       const { fetch } = stub(miss);
       const { ctx, stderr } = ctxCapturingStderr();
       await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
       expect(stderr()).toContain('if you solve it, publish it back');
-      expect(stderr()).toContain(`tenjin candidate add <file.md> --search-id ${miss.searchId}`);
-    });
-
-    it('fires with an empty candidate pen, where the parked nudge says nothing', async () => {
-      const { fetch } = stub(miss);
-      const { ctx, stderr } = ctxCapturingStderr();
-      await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
-      expect(stderr()).not.toContain('parked');
-      expect(stderr()).toContain('publish it back');
+      // The second arm CLOSES the loop; it does not save anything for later.
+      expect(stderr()).toContain(
+        `tenjin outcome --search-id ${miss.searchId} --status regenerated`,
+      );
+      expect(stderr()).not.toContain('candidate add');
     });
 
     it('carries a publishBack hint in the machine envelope', async () => {
@@ -406,7 +380,7 @@ describe('runSearch — parked-candidate nudge', () => {
         searchId: miss.searchId,
         reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
         publish: `tenjin publish <file.md> --json --search-id ${miss.searchId}`,
-        park: `tenjin candidate add <file.md> --search-id ${miss.searchId} --json`,
+        decline: `tenjin outcome --search-id ${miss.searchId} --status regenerated --json`,
       });
     });
 
@@ -416,9 +390,9 @@ describe('runSearch — parked-candidate nudge', () => {
       const { fetch } = stub(miss);
       const { ctx, stderr } = ctxCapturingStderr();
       const res = await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
-      const hint = (res.data as { publishBack: { publish: string; park: string } }).publishBack;
+      const hint = (res.data as { publishBack: { publish: string; decline: string } }).publishBack;
       expect(hint.publish).toContain(`--search-id ${miss.searchId}`);
-      expect(hint.park).toContain(`--search-id ${miss.searchId}`);
+      expect(hint.decline).toContain(`--search-id ${miss.searchId}`);
       expect(stderr()).toContain(`tenjin publish <file.md> --search-id ${miss.searchId}`);
     });
 

@@ -4,7 +4,7 @@ import { CliError } from '../lib/errors';
 import { createCandidate, dropCandidate, listCandidates } from '../lib/candidate-store';
 import { UUID_RE } from '../lib/ids';
 import { markSearchResolved } from '../lib/search-store';
-import { sanitizeForTerminal } from '../lib/output';
+import { emitWriteNotice, sanitizeForTerminal } from '../lib/output';
 import { pathExists } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -15,6 +15,21 @@ import type { CommandContext, CommandResult } from '../context';
  * D38 consent scan. This module owns the command surface; lib/candidate-store.ts
  * owns the on-disk custody (0700 dirs, 0600 files, atomic meta commit).
  */
+
+/**
+ * The one release in which parking still works and already says it will not.
+ *
+ * The pen was a place to put an answer nobody had decided to publish, which in
+ * practice meant a backlog nobody returned to: a draft parked "for later" is
+ * indistinguishable from work that never happened, and the reminder that would
+ * have resurfaced it is exactly the repeat-nag this CLI stopped emitting. The
+ * decision is ephemeral now — publish it, or close the loop and let it go.
+ *
+ * Written to stderr, never the envelope, so a `--json` consumer's data shape is
+ * untouched by a deprecation notice.
+ */
+const DEPRECATION =
+  'Deprecated: parking is going away. Publish the piece (`tenjin publish <file.md> --search-id <id>`) or close the loop (`tenjin outcome --search-id <id> --status regenerated`); this command still works this release.';
 
 export interface CandidateAddArgs {
   file: string;
@@ -34,6 +49,7 @@ export async function runCandidateAdd(
   ctx: CommandContext,
   deps: CandidateDeps = {},
 ): Promise<CommandResult> {
+  emitWriteNotice(ctx.io, DEPRECATION);
   if (!UUID_RE.test(args.searchId)) {
     throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
       fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
@@ -122,6 +138,7 @@ export async function runCandidateDrop(
   args: { id: string },
   ctx: CommandContext,
 ): Promise<CommandResult> {
+  emitWriteNotice(ctx.io, DEPRECATION);
   const dropped = await dropCandidate(ctx.dataDir, args.id);
   if (!dropped) {
     throw new CliError('USAGE', `No candidate with id ${JSON.stringify(args.id)}.`, {
