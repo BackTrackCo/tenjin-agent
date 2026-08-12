@@ -134,6 +134,9 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     shouldWait && startBalance !== undefined
       ? await pollForFunds(ctx, desc, rpcUrl, startBalance, opts)
       : undefined;
+  if (funded !== undefined) {
+    emitWriteNotice(ctx.io, 'USDC arrived - you can close the checkout tab.');
+  }
   const pollStatus: FundPollStatus = !shouldWait
     ? 'skipped'
     : startBalance === undefined

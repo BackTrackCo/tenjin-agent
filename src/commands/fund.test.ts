@@ -191,6 +191,9 @@ describe('runFund', () => {
     expect(printedBeforePoll).toContain(CHECKOUT);
     expect(printedBeforePoll).toContain(address);
     expect(printedBeforePoll).toContain('expires in ~5 minutes');
+    // The close-the-tab notice rides arrival only: after the poll, not before.
+    expect(printedBeforePoll).not.toContain('close the checkout tab');
+    expect(stderr.join('')).toContain('USDC arrived - you can close the checkout tab.');
   });
 
   it('waits by default at a TTY and returns immediately when piped', async () => {
