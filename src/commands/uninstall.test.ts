@@ -156,6 +156,44 @@ describe('runUninstall — a fully installed machine', () => {
   });
 });
 
+describe('runUninstall — rules a prior version wrote', () => {
+  // install is append-only, so a rule retired from the recommended set survives
+  // on every machine that ever had it. uninstall is the reverse of install, and
+  // that includes reversing versions of install the operator ran before.
+  it('reclaims the retired candidate allow-rule an older install left behind', async () => {
+    const path = claudeSettingsPath(home);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        permissions: {
+          allow: [...FREE_VERB_RULES, 'Bash(tenjin candidate list:*)', 'Bash(ls:*)'],
+        },
+      }),
+    );
+
+    const { report } = await run();
+
+    expect(report.settings.rules).toContain('Bash(tenjin candidate list:*)');
+    const after = JSON.parse(await readFile(path, 'utf8')) as {
+      permissions: { allow: string[] };
+    };
+    // Only the operator's own rule is left.
+    expect(after.permissions.allow).toEqual(['Bash(ls:*)']);
+  });
+
+  it('leaves an unrelated tenjin-shaped rule the CLI never wrote', async () => {
+    const path = claudeSettingsPath(home);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(path, JSON.stringify({ permissions: { allow: ['Bash(tenjin publish:*)'] } }));
+    await run();
+    const after = JSON.parse(await readFile(path, 'utf8')) as {
+      permissions: { allow: string[] };
+    };
+    expect(after.permissions.allow).toEqual(['Bash(tenjin publish:*)']);
+  });
+});
+
 describe('runUninstall — ownership gates', () => {
   // Somebody else's skill is not ours to delete just for sitting at our path.
   it('leaves a skill directory whose frontmatter names something else', async () => {

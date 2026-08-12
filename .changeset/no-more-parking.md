@@ -13,9 +13,12 @@ it.
 Removed: `tenjin candidate add`, `list`, and `drop`; the `tenjin publish
 --candidate` path; the local candidate store; the `tenjin_candidate` MCP tool;
 and the `Bash(tenjin candidate list:*)` line from the recommended free-verb
-allowlist, which is now eight rules rather than nine. A re-run of `tenjin install`
-does not remove an allowlist line an earlier version wrote, because install only
-ever appends — delete that line by hand if you want it gone.
+allowlist, which is now eight rules rather than nine. If an earlier version wrote
+that rule into your `~/.claude/settings.json`, the next `tenjin install` removes
+it and says so: a grant for a command that no longer exists is bloat we created,
+so clearing it is our job rather than yours. `tenjin uninstall` reclaims it too.
+Nothing else in that file is touched — rules you added yourself, other keys, and
+their order all survive.
 
 The Stop hook's open-loop reminder and the MISS `publishBack` hint keep the shape
 they took when parking was deprecated: publish it back, or close the loop with

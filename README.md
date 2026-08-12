@@ -146,8 +146,9 @@ checked before every removal — a skill whose frontmatter names something else,
 hook entry pointing at another tool's script, and a permission rule we did not
 write are all left alone.
 
-It never touches your **wallet**, **config**, **library**, **search history**, or
-**any drafts you parked**, and it prints that list every run. Safe to run twice, or on
+It never touches anything under `~/.tenjin` — your **wallet**, **config**,
+**library** and **search history**, plus anything an older version left in
+`~/.tenjin/candidates` — and it prints that list every run. Safe to run twice, or on
 a machine that never installed: it reports what it found and exits 0.
 
 ### `tenjin search <question>`

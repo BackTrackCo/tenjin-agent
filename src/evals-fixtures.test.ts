@@ -104,9 +104,9 @@ const RETIRED_VERBS: ReadonlyArray<{ verb: string; replacement: string }> = [
 const RETIRED_EXEMPT = /eval-lookup-recall/g;
 
 interface Registry {
-  /** Top-level verbs: `search`, `publish`, `candidate`. */
+  /** Top-level verbs: `search`, `publish`, `wallet`. */
   verbs: Set<string>;
-  /** Two-word forms: `candidate add`, `config set`. */
+  /** Two-word forms: `wallet show`, `config set`. */
   pairs: Set<string>;
   /** Verbs that own subcommands, so a bare first word proves nothing. */
   parents: Set<string>;
@@ -125,7 +125,7 @@ function registry(): Registry {
   return reg;
 }
 
-// Only backtick-quoted invocations: `tenjin search`, `tenjin candidate add`. The
+// Only backtick-quoted invocations: `tenjin search`, `tenjin wallet show`. The
 // leading backtick is what keeps prose like "the tenjin repo" out of the match.
 function quotedInvocations(text: string): string[] {
   return [...text.matchAll(/`tenjin ((?:[a-z][a-z0-9-]*)(?: [a-z][a-z0-9-]*)?)/g)].flatMap((m) =>
@@ -245,8 +245,8 @@ describe('eval fixtures', () => {
     for (const { label, text } of SOURCES) {
       for (const invocation of quotedInvocations(text)) {
         const verb = invocation.split(' ')[0] ?? invocation;
-        // A verb that owns subcommands proves nothing on its own: `candidate`
-        // is registered whether or not `candidate frobnicate` is, so a two-word
+        // A verb that owns subcommands proves nothing on its own: `wallet`
+        // is registered whether or not `wallet frobnicate` is, so a two-word
         // form has to match as a pair rather than falling back to the first
         // word. The bare group name is still a legitimate thing for prose to
         // name, so it passes on its own.
