@@ -116,6 +116,17 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'the search locally.',
   },
   {
+    rule: 'Bash(tenjin fund:*)',
+    command: 'tenjin fund',
+    note:
+      'Owner call (2026-08-12): free on both surfaces, because the command just opens the ' +
+      'fund modal. Minting moves no money: the destination is server-pinned to the wallet ' +
+      'that signed, the CLI refuses any checkout host but pay.coinbase.com, and payment ' +
+      'happens behind Coinbase\u2019s own human gate. The usual --base-url caveat does not ' +
+      'apply: fund is pinned to the production origin and takes no override from flag, ' +
+      'env, or config.',
+  },
+  {
     rule: 'Bash(tenjin inspect:*)',
     command: 'tenjin inspect',
     note: 'Free pre-purchase card and preview. Never signs, never pays, never saves.',

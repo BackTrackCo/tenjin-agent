@@ -43,6 +43,7 @@ Say which line to add and let the operator add it:
 
 ```
 Bash(tenjin search:*)
+Bash(tenjin fund:*)
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)
@@ -264,6 +265,9 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 - The body is saved to `~/.tenjin/library/`; stdout gets the path and a heading
   outline, not the body. Use `--sections <budget>` or `--print-body` as needed.
   `tenjin read` shares the same delivery output and the same two flags.
+- Out of USDC? `tenjin fund [amountUsd]` mints a Coinbase checkout link, but only
+  the human can pay it. Minting is not funding: hand over the link the command
+  prints, then confirm with `tenjin wallet balance`.
 
 ## Report the outcome (always)
 
