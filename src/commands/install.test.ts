@@ -219,7 +219,6 @@ type Harnesses = Array<{
   }>;
   hostedPreexisting: boolean;
   hostedArrivedFirst: boolean;
-  agentsMd?: { path: string; status: string };
   claudeMd?: { path: string; status: string };
   codexNetworkRule?: string;
   warnings: string[];
@@ -243,7 +242,6 @@ describe('runInstall: harness override', () => {
     expect(h.harness).toBe('claude');
     expect(h.detectedBy).toEqual(['override']);
     expect(h.skillsDir).toBe(join(home, '.claude', 'skills'));
-    expect(h.agentsMd).toBeUndefined();
     expect(h.codexNetworkRule).toBeUndefined();
     expect(h.skills.map((s) => s.status)).toEqual(SKILL_NAMES.map(() => 'installed'));
     for (const name of SKILL_NAMES) {
@@ -251,13 +249,11 @@ describe('runInstall: harness override', () => {
     }
   });
 
-  it('installs Codex to ~/.agents/skills, wires AGENTS.md, and carries the config.toml rule', async () => {
+  it('installs Codex to ~/.agents/skills and carries the config.toml rule', async () => {
     const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     const h = asData(d).harnesses[0]!;
     expect(h.harness).toBe('codex');
     expect(h.skillsDir).toBe(join(home, '.agents', 'skills'));
-    expect(h.agentsMd?.status).toBe('appended');
-    expect(h.agentsMd?.path).toBe(join(home, '.agents', 'AGENTS.md'));
     expect(h.codexNetworkRule).toBe('[sandbox_workspace_write]\nnetwork_access = true');
     expect(existsSync(join(home, '.agents', 'skills', 'tenjin', 'SKILL.md'))).toBe(true);
   });
@@ -276,7 +272,6 @@ describe('runInstall: harness override', () => {
     const h = asData(d).harnesses[0]!;
     expect(h.harness).toBe('hermes');
     expect(h.skillsDir).toBe(join(home, '.hermes', 'skills'));
-    expect(h.agentsMd).toBeUndefined();
     expect(h.hermes?.mcp.status).toBe('installed');
     expect(h.hermes?.plugin.status).toBe('installed');
     expect(h.hermes?.activation.status).toBe('installed');
@@ -380,8 +375,6 @@ describe('runInstall: dry run', () => {
     for (const h of out.harnesses) {
       expect(h.skills.every((s) => s.status === 'would-install')).toBe(true);
     }
-    const codex = out.harnesses.find((h) => h.harness === 'codex');
-    expect(codex?.agentsMd?.status).toBe('would-append');
     // Nothing on disk.
     expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false);
@@ -391,9 +384,7 @@ describe('runInstall: dry run', () => {
 
 describe('runInstall: idempotency', () => {
   it('re-run reports up-to-date and already-present, with identical files', async () => {
-    const first = await runInstall({ harness: ['claude', 'codex'] }, makeCtx(), deps());
-    const firstCodex = asData(first.data).harnesses.find((h) => h.harness === 'codex');
-    expect(firstCodex?.agentsMd?.status).toBe('appended');
+    await runInstall({ harness: ['claude', 'codex'] }, makeCtx(), deps());
 
     const before = await readFile(join(home, '.claude', 'skills', 'tenjin', 'SKILL.md'), 'utf8');
 
@@ -402,318 +393,8 @@ describe('runInstall: idempotency', () => {
     for (const h of out.harnesses) {
       expect(h.skills.every((s) => s.status === 'up-to-date')).toBe(true);
     }
-    const codex = out.harnesses.find((h) => h.harness === 'codex');
-    expect(codex?.agentsMd?.status).toBe('already-present');
-
     const after = await readFile(join(home, '.claude', 'skills', 'tenjin', 'SKILL.md'), 'utf8');
     expect(after).toBe(before);
-  });
-
-  it('appends the AGENTS.md pointer line exactly once across re-runs', async () => {
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    const count = agents.split(MARKER).length - 1;
-    expect(count).toBe(1);
-  });
-
-  it('preserves pre-existing AGENTS.md content when appending', async () => {
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), '# My notes\n');
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(agents.startsWith('# My notes\n')).toBe(true);
-    expect(agents.split(MARKER).length - 1).toBe(1);
-  });
-
-  // The nudge writers follow the same rule as the skill files: a dotfiles-managed
-  // AGENTS.md is written THROUGH its link. Committing with `rename` on the link's
-  // path would replace the link with a regular file and strand its target.
-  it('writes through a symlinked AGENTS.md, keeping the link and updating its target', async () => {
-    if (process.platform === 'win32') return;
-    const managed = join(home, 'dotfiles', 'AGENTS.md');
-    await mkdir(dirname(managed), { recursive: true });
-    await writeFile(managed, '# My notes\n');
-    await mkdir(join(home, '.agents'), { recursive: true });
-    const link = join(home, '.agents', 'AGENTS.md');
-    await symlink(managed, link);
-
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    const text = await readFile(managed, 'utf8');
-    expect(text.startsWith('# My notes\n')).toBe(true);
-    expect(text.split(MARKER).length - 1).toBe(1);
-  });
-
-  // A directory (or any non-regular file) at the AGENTS.md path is a typed error
-  // naming the path, not a raw EISDIR under INTERNAL. On the dry run too, so a
-  // dry run cannot promise would-append where the real run refuses.
-  it('fails a non-regular AGENTS.md with a typed error instead of a raw errno', async () => {
-    await mkdir(join(home, '.agents', 'AGENTS.md'), { recursive: true });
-    for (const dryRun of [true, false]) {
-      const err = (await runInstall({ harness: ['codex'], dryRun }, makeCtx(), deps()).catch(
-        (e) => e,
-      )) as CliError;
-      expect(err).toBeInstanceOf(CliError);
-      expect(err.message).toContain('not a regular file');
-      expect(err.message).not.toContain('EISDIR');
-      expect(err.fix).toContain('ls -l');
-    }
-  });
-
-  // The probe is lazy: once ~/.agents/AGENTS.md owns the marker (the steady state
-  // of a re-run), a broken ~/.codex/AGENTS.md this run would never write must not
-  // fail the install.
-  it('ignores a broken ~/.codex/AGENTS.md when the shared file already owns the marker', async () => {
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    await mkdir(join(home, '.codex', 'AGENTS.md'), { recursive: true });
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
-  });
-
-  // A directory cannot carry the marker, so it only fails the run when it is the
-  // path selected for the write; here the shared file is chosen and the broken
-  // codex candidate is irrelevant even with no owner yet.
-  it('appends to the shared file despite a non-regular ~/.codex/AGENTS.md', async () => {
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), '# My notes\n');
-    await mkdir(join(home, '.codex', 'AGENTS.md'), { recursive: true });
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('appended');
-    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(agents.split(MARKER).length - 1).toBe(1);
-  });
-
-  // Dry-run parity, same contract the skill path pins for its broken links: a
-  // dangling AGENTS.md link fails the dry run too, never reporting would-append
-  // where the real run refuses.
-  it('fails a dangling AGENTS.md link on --dry-run too, matching the real run', async () => {
-    if (process.platform === 'win32') return;
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await symlink(join(home, 'nowhere', 'AGENTS.md'), join(home, '.agents', 'AGENTS.md'));
-    for (const dryRun of [true, false]) {
-      const err = (await runInstall({ harness: ['codex'], dryRun }, makeCtx(), deps()).catch(
-        (e) => e,
-      )) as CliError;
-      expect(err).toBeInstanceOf(CliError);
-      expect(err.message).toContain('broken symlink');
-    }
-  });
-});
-
-describe('runInstall: AGENTS.md instinct nudge', () => {
-  const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /somewhere (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
-
-  it('appends a search-first nudge that points at the skills dir', async () => {
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(agents).toContain(`'tenjin search "<question>" --json'`);
-    // ONE heuristic, matching the tenjin-search skill's collapsed entry gate, not
-    // a list of example categories to work through.
-    expect(agents).toContain('when a question is public, durable, and costly to reproduce');
-    expect(agents).toContain('the generalized question text leaves the machine');
-    expect(agents).toContain(join(home, '.agents', 'skills'));
-    expect(agents).not.toContain('—'); // no em dashes
-  });
-
-  it('replaces an older marker line in place instead of appending a duplicate', async () => {
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), `# notes\n${OLD_LINE}\nmore\n`);
-
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const h = asData(d).harnesses[0]!;
-    expect(h.agentsMd?.status).toBe('updated');
-
-    const agents = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(agents.split(MARKER).length - 1).toBe(1); // still exactly one marker
-    expect(agents).not.toContain('installed at /somewhere'); // old text gone
-    expect(agents).toContain(`'tenjin search "<question>" --json'`); // new text in
-    expect(agents.startsWith('# notes\n')).toBe(true); // surrounding lines preserved
-    expect(agents.trimEnd().endsWith('more')).toBe(true);
-  });
-
-  it('leaves a matching nudge line untouched (already-present)', async () => {
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const before = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
-    expect(await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8')).toBe(before);
-  });
-
-  it('dry-run over a drifted line reports would-update and writes nothing', async () => {
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), `${OLD_LINE}\n`);
-    const { data: d } = await runInstall({ harness: ['codex'], dryRun: true }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('would-update');
-    expect(await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8')).toBe(`${OLD_LINE}\n`);
-  });
-});
-
-describe('runInstall: CLAUDE.md nudge', () => {
-  const claudeMdPath = () => join(home, '.claude', 'CLAUDE.md');
-
-  // Same contract as the symlinked AGENTS.md: written through the link.
-  it('writes through a symlinked CLAUDE.md, keeping the link and updating its target', async () => {
-    if (process.platform === 'win32') return;
-    const managed = join(home, 'dotfiles', 'CLAUDE.md');
-    await mkdir(dirname(managed), { recursive: true });
-    await writeFile(managed, '# Mine\n');
-    await mkdir(join(home, '.claude'), { recursive: true });
-    await symlink(managed, claudeMdPath());
-
-    await runInstall({ harness: ['claude'], claudeMd: true }, makeCtx(), deps());
-    expect((await lstat(claudeMdPath())).isSymbolicLink()).toBe(true);
-    const text = await readFile(managed, 'utf8');
-    expect(text.startsWith('# Mine\n')).toBe(true);
-    expect(text.split(MARKER).length - 1).toBe(1);
-  });
-
-  // The CLAUDE.md twin of the dangling AGENTS.md pin: dry run and real run must
-  // fail identically, never would-write on a link the real run refuses.
-  it('fails a dangling CLAUDE.md link on --dry-run too, matching the real run', async () => {
-    if (process.platform === 'win32') return;
-    await mkdir(join(home, '.claude'), { recursive: true });
-    await symlink(join(home, 'nowhere', 'CLAUDE.md'), claudeMdPath());
-    for (const dryRun of [true, false]) {
-      const err = (await runInstall(
-        { harness: ['claude'], claudeMd: true, dryRun },
-        makeCtx(),
-        deps(),
-      ).catch((e) => e)) as CliError;
-      expect(err).toBeInstanceOf(CliError);
-      expect(err.message).toContain('broken symlink');
-    }
-  });
-  const OLD_LINE = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
-
-  // Codex's AGENTS.md already got this line by default, so leaving Claude Code's
-  // copy behind a flag left the most-used harness the one that never learned it.
-  it('writes CLAUDE.md by default on a non-interactive run, with no flag', async () => {
-    const { data: d } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
-    expect(existsSync(claudeMdPath())).toBe(true);
-  });
-
-  it('--claude-md writes the nudge pointing at ~/.claude/skills', async () => {
-    const { data: d } = await runInstall(
-      { harness: ['claude'], claudeMd: true },
-      makeCtx(),
-      deps(),
-    );
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('written');
-    const md = await readFile(claudeMdPath(), 'utf8');
-    expect(md).toContain(`'tenjin search "<question>" --json'`);
-    expect(md).toContain('the generalized question text leaves the machine');
-    expect(md).toContain(join(home, '.claude', 'skills'));
-    expect(md.split(MARKER).length - 1).toBe(1);
-  });
-
-  it('re-running --claude-md is idempotent (up-to-date, file unchanged)', async () => {
-    await runInstall({ harness: ['claude'], claudeMd: true }, makeCtx(), deps());
-    const before = await readFile(claudeMdPath(), 'utf8');
-    const { data: d } = await runInstall(
-      { harness: ['claude'], claudeMd: true },
-      makeCtx(),
-      deps(),
-    );
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('up-to-date');
-    expect(await readFile(claudeMdPath(), 'utf8')).toBe(before);
-  });
-
-  it('replaces an older marker line in CLAUDE.md in place', async () => {
-    await mkdir(join(home, '.claude'), { recursive: true });
-    await writeFile(claudeMdPath(), `# my rules\n${OLD_LINE}\n`);
-    const { data: d } = await runInstall(
-      { harness: ['claude'], claudeMd: true },
-      makeCtx(),
-      deps(),
-    );
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('updated');
-    const md = await readFile(claudeMdPath(), 'utf8');
-    expect(md.split(MARKER).length - 1).toBe(1);
-    expect(md).not.toContain('installed at /old');
-    expect(md.startsWith('# my rules\n')).toBe(true);
-  });
-
-  it('--dry-run with --claude-md is would-write and writes nothing', async () => {
-    const { data: d } = await runInstall(
-      { harness: ['claude'], claudeMd: true, dryRun: true },
-      makeCtx(),
-      deps(),
-    );
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('would-write');
-    expect(existsSync(claudeMdPath())).toBe(false);
-  });
-
-  it('--no-claude-md skips, interactive or not', async () => {
-    const { data: d } = await runInstall(
-      { harness: ['claude'], claudeMd: false },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
-    expect(asData(d).harnesses[0]!.claudeMd?.status).toBe('skipped');
-    expect(existsSync(claudeMdPath())).toBe(false);
-  });
-
-  // The nudge is not one of the four decisions: it is a default with an opt-out
-  // flag, so an interactive run without the flag behaves like a headless one.
-  it('is never asked about interactively; an absent flag writes it', async () => {
-    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('written');
-    expect(existsSync(claudeMdPath())).toBe(true);
-  });
-
-  it('--claude-md writes it on an interactive run too', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], claudeMd: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
-    expect(asData(res.data).harnesses[0]!.claudeMd?.status).toBe('written');
-    expect(existsSync(claudeMdPath())).toBe(true);
-  });
-});
-
-describe('runInstall: nudge disclosure + undo hint in the walkthrough', () => {
-  const human = (res: { humanLines?: string[] }): string =>
-    (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
-
-  it('discloses what a freshly written AGENTS.md nudge does + how to undo it', async () => {
-    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
-    const text = human(res);
-    expect(text).toContain('the generalized question text is sent to tenjin.blog');
-    expect(text).toContain('Undo anytime: delete the');
-    expect(text).toContain(join(home, '.agents', 'AGENTS.md'));
-  });
-
-  it('discloses + undo for a CLAUDE.md nudge written by --claude-md', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], claudeMd: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
-    const text = human(res);
-    expect(text).toContain('CLAUDE.md nudge');
-    expect(text).toContain('the generalized question text is sent to tenjin.blog');
-    expect(text).toContain(join(home, '.claude', 'CLAUDE.md'));
-  });
-
-  it('does NOT disclose on an untouched re-run (already-present)', async () => {
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
-    const text = human(res);
-    expect(text).not.toContain('Undo anytime');
-    expect(text).not.toContain('the generalized question text is sent to tenjin.blog');
-  });
-
-  it('discloses a silent in-place upgrade of an older AGENTS.md pointer line', async () => {
-    const OLD = `<!-- tenjin-cli:skills --> Tenjin agent skills are installed at /old (tenjin-search, tenjin-publish, tenjin). Read the relevant SKILL.md before using the tenjin CLI.`;
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), `${OLD}\n`);
-    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
-    const text = human(res);
-    expect(text).toContain('Undo anytime');
-    expect(text).toContain('the generalized question text is sent to tenjin.blog');
   });
 });
 
@@ -796,60 +477,6 @@ describe('runInstall: binary skill assets', () => {
     } finally {
       await rm(src, { recursive: true, force: true });
     }
-  });
-});
-
-describe('runInstall: Codex AGENTS.md target', () => {
-  it('writes to ~/.codex/AGENTS.md when the codex home exists and ~/.agents/AGENTS.md does not', async () => {
-    await mkdir(join(home, '.codex'), { recursive: true });
-
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const h = asData(d).harnesses[0]!;
-    expect(h.agentsMd?.path).toBe(join(home, '.codex', 'AGENTS.md'));
-    expect(h.agentsMd?.status).toBe('appended');
-    const codexAgents = await readFile(join(home, '.codex', 'AGENTS.md'), 'utf8');
-    expect(codexAgents.split(MARKER).length - 1).toBe(1);
-    // The shared file was never touched.
-    expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
-
-    // Re-run dedupes in ~/.codex/AGENTS.md.
-    const again = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect(asData(again.data).harnesses[0]!.agentsMd?.status).toBe('already-present');
-    const after = await readFile(join(home, '.codex', 'AGENTS.md'), 'utf8');
-    expect(after.split(MARKER).length - 1).toBe(1);
-  });
-
-  it('prefers an existing ~/.agents/AGENTS.md over ~/.codex/AGENTS.md', async () => {
-    await mkdir(join(home, '.codex'), { recursive: true });
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), '# shared\n');
-
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    const h = asData(d).harnesses[0]!;
-    expect(h.agentsMd?.path).toBe(join(home, '.agents', 'AGENTS.md'));
-    expect(existsSync(join(home, '.codex', 'AGENTS.md'))).toBe(false);
-    const shared = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(shared.startsWith('# shared\n')).toBe(true);
-    expect(shared.split(MARKER).length - 1).toBe(1);
-  });
-
-  it('does not duplicate the pointer across locations: a marker in ~/.codex stops a later ~/.agents append', async () => {
-    // First install with only ~/.codex present lands the marker there.
-    await mkdir(join(home, '.codex'), { recursive: true });
-    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect(existsSync(join(home, '.codex', 'AGENTS.md'))).toBe(true);
-
-    // Now ~/.agents/AGENTS.md appears (empty). The global append-once check must
-    // see the marker already in ~/.codex and NOT append a second copy anywhere.
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(join(home, '.agents', 'AGENTS.md'), '# later\n');
-    const { data: d } = await runInstall({ harness: ['codex'] }, makeCtx(), deps());
-    expect(asData(d).harnesses[0]!.agentsMd?.status).toBe('already-present');
-
-    const shared = await readFile(join(home, '.agents', 'AGENTS.md'), 'utf8');
-    expect(shared.split(MARKER).length - 1).toBe(0);
-    const codex = await readFile(join(home, '.codex', 'AGENTS.md'), 'utf8');
-    expect(codex.split(MARKER).length - 1).toBe(1);
   });
 });
 
@@ -1414,15 +1041,30 @@ describe('runInstall: interactive walkthrough', () => {
   // nine rules: that block is `doctor`'s, and the machine envelope carries them.
   // The nudge is written by default now, so its existing disclosure block has to
   // fire on a bare run rather than only behind the flag it used to need.
-  it('discloses the CLAUDE.md nudge it wrote by default, and how to take it back', async () => {
+  // The footprint is gone: a harness already loads every skill's frontmatter
+  // description at session start, so the pointer line only duplicated it.
+  it('writes no CLAUDE.md at all, and says nothing about a nudge', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    expect(existsSync(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
     const text = human(res);
-    expect(text).toContain('The nudge tells agents to run a free anonymous `tenjin search`');
-    expect(text).toContain(
-      `Undo anytime: delete the ${MARKER_COMMENT} line from ${join(home, '.claude', 'CLAUDE.md')}`,
-    );
-    // And the summary names it among what was wired.
-    expect(text).toContain('CLAUDE.md nudge');
+    expect(text).not.toContain('nudge');
+    expect(text).not.toContain(MARKER_COMMENT);
+  });
+
+  // One-time cleanup for the machines that already carry one. It edits a file the
+  // operator writes their own notes in, so it has to be disclosed.
+  it('removes a legacy pointer line and reports which file it cleaned', async () => {
+    const claudeMd = join(home, '.claude', 'CLAUDE.md');
+    await mkdir(dirname(claudeMd), { recursive: true });
+    await writeFile(claudeMd, `# My notes\n${MARKER_COMMENT} Tenjin: old text\n## More notes\n`);
+
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const after = await readFile(claudeMd, 'utf8');
+    expect(after).not.toContain(MARKER_COMMENT);
+    // Everything around it survives, byte for byte.
+    expect(after).toContain('# My notes');
+    expect(after).toContain('## More notes');
+    expect(human(res)).toContain(`Removed the old Tenjin pointer line from ${claudeMd}`);
   });
 
   it('discloses the permission rules it wired and how to take them back', async () => {
