@@ -63,14 +63,13 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string; detail
 type SuccessEnvelope = { ok: true; command: string; data: Record<string, unknown> };
 
 describe('buildTenjinMcpServer, tool surface', () => {
-  it('exposes exactly the eight Tenjin tools', async () => {
+  it('exposes exactly the seven Tenjin tools', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'tenjin_buy',
-        'tenjin_candidate',
         'tenjin_edit',
         'tenjin_inspect',
         'tenjin_search',

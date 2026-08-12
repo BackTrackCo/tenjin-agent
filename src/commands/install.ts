@@ -644,6 +644,13 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
       `Removed the old Tenjin pointer line from ${s.pointerCleanup.join(' and ')}; the skills carry their own triggers now.`,
     );
   }
+  // Same reason as the pointer line above: we edited the operator's settings.json
+  // to REMOVE something, and the only way they learn it happened is a line here.
+  if (s.permissions.removed.length > 0) {
+    lines.push(
+      `Removed ${s.permissions.removed.length} permission rule(s) an older tenjin left in ${s.permissions.path ?? 'your settings'} for commands that no longer exist.`,
+    );
+  }
   // A run that wired permissions without being asked has to say so, and say how to
   // take it back. This is the disclosure that makes the non-interactive default
   // defensible: nothing lands silently, whether it was answered or defaulted.
@@ -1175,6 +1182,10 @@ async function resolvePermissions(args: {
 
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home);
   if (probe.satisfied !== undefined) return probe.satisfied;
+  // Nothing to GRANT, but something of ours to retract: an older version's rule
+  // for a command that no longer exists. That needs no consent — it only ever
+  // removes a rule this CLI wrote — so it runs without the prompt.
+  if (probe.pending !== null && probe.pending.length === 0) return wireFreeVerbAllowlist(home);
 
   if (flag === true || !canPrompt) return wireFreeVerbAllowlist(home);
 

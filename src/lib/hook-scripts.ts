@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 12;
+export const HOOK_SCRIPT_VERSION = 13;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -533,6 +533,10 @@ function saveNags(nagged) {
  * publish arm is QUALIFIED: this line lands in a model's context at every turn
  * end, and an unqualified "publish it back" nags just as hard on a question about
  * private infrastructure as on a durable public finding.
+ *
+ * The second arm is DECLINE, not park. Nothing is stored to come back to, so the
+ * honest close is to say the loop ended; that is also what stops this line from
+ * being raised again, which a saved draft never did.
  */
 function strongLine(s) {
   const id = clean(s.searchId, 64);
@@ -541,9 +545,9 @@ function strongLine(s) {
     clean(s.question, 160) +
     "' and got a MISS. If you solved it with a public, reusable, rights-clean finding, publish it back: tenjin publish <file> --search-id " +
     id +
-    '. Otherwise park it: tenjin candidate add <file> --search-id ' +
+    '. If you will not, close it: tenjin outcome --search-id ' +
     id +
-    '.'
+    ' --status regenerated.'
   );
 }
 
@@ -557,7 +561,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    '. If any produced a durable public finding, publish it back: tenjin publish <file> --search-id <id>, or park it: tenjin candidate add <file> --search-id <id>.'
+    '. If any produced a durable public finding, publish it back: tenjin publish <file> --search-id <id>. Otherwise close them: tenjin outcome --search-id <id> --status regenerated.'
   );
 }
 
