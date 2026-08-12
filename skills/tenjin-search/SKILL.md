@@ -50,6 +50,7 @@ Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
 Bash(tenjin wallet balance:*)
 Bash(tenjin config get:*)
+Bash(tenjin candidate list:*)
 ```
 
 Those verbs are free in the sense that matters: **they cannot spend and cannot
@@ -135,16 +136,16 @@ Any one of the four failing means skip it.
 ## Delegating Tenjin work
 
 Read-only subagents may run the whole free tier: `search`, `inspect`, `read`,
-`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`. None can
-spend and none can move your keys. Two caveats travel
+`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
+`candidate list`. None can spend and none can move your keys. Two caveats travel
 with them: `search` and `outcome` POST off-machine (a question, a report) and
 `read` saves to the local library, so "read-only" describes your wallet and your
 repo, not the network; and a delegated context is where a stray `--base-url` does
 the most damage, so never pass one.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
-`publish`, `edit`, `buy`, `send`, `session start`, `wallet create`,
-`config set`, `install`. Do not hand a subagent
+`publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
+`session start`, `wallet create`, `config set`, `install`. Do not hand a subagent
 the job of publishing what it just derived: bring the finding back and publish it
 from the context that can ask the user.
 
@@ -293,17 +294,18 @@ pricing rules; never publish bare.
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
   only on an explicit yes. A "not now" is final: close the loop (`tenjin outcome
   --search-id <id> --status regenerated`) and move on, saving nothing. This is
-  the same run-then-render sequence the
-  tenjin-publish skill uses: never ask a generic "publish?" before running, or
-  the `--yes` re-run would clear WARN findings (PII, wallet addresses) the user
-  never saw.
+  the same run-then-render sequence the tenjin-publish skill uses: never ask a
+  generic "publish?" before running, or the `--yes` re-run would clear WARN
+  findings (PII, wallet addresses) the user never saw.
 - **auto / full-auto**: run the tenjin-publish skill's semantic publish-safety
   pass FIRST (statement-level classification, competitor-reconstruction check,
   title/answer-card leak check) — the CLI scan is lexical and you are the only
   semantic reviewer on these paths; that skill also states why a MISS is never
-  a safety signal. Doubt means do not publish and save nothing. When the pass is
-  clean, build the answer card and run `tenjin publish <finding.md> --json
-  --search-id <id>` directly.
+  a safety signal. Privacy/rights doubt means do not publish and save nothing;
+  quality doubt does not — in auto you ask the user (through the harness's own
+  question UI when it has one, so they click), in full-auto you hedge it in the
+  piece and publish. When the pass is clean, build the answer card and run
+  `tenjin publish <finding.md> --json --search-id <id>` directly.
   In auto, a clearable warning is not a silent stop: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
   re-run with `--yes` on a yes. When the publish cannot proceed at all — a hard
@@ -332,5 +334,5 @@ of its entries: that exact phrasing is what the next searcher sends.
   just completed.
 - A derived answer that leans on private context (the source project's
   architecture, metrics, roadmap, or implementation order — Tenjin's own
-  included) is candidate-pen material, not publish material, whatever the scan
-  says (the tenjin-publish semantic pass is the gate on auto/full-auto paths).
+  included) is not publish material, whatever the scan says (the tenjin-publish
+  semantic pass is the gate on auto/full-auto paths).
