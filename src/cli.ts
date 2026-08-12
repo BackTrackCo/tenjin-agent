@@ -410,10 +410,18 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       '--candidate <id>',
       'publish a parked candidate by id instead of a file (clears it on success)',
     )
+    .option(
+      '--search-id <id>',
+      'the search this file answers (closes its open loop, and prefills its question)',
+    )
     .option('--draft', 'save as a private draft instead of publishing')
     .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
     .option('--price <usd>', 'post price in decimal USD (defaults to publish.defaultPrice)')
+    .option(
+      '--excerpt <text>',
+      'the public preview text (max 500 chars; default: derived from the body)',
+    )
     .option('--question <text>', 'a question this piece answers (repeatable)', collect, [])
     .option('--task <text>', 'a task this piece supports (repeatable)', collect, [])
     .option('--scope <text>', 'what the piece covers (card scope)')
@@ -433,10 +441,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           {
             ...(typeof file === 'string' ? { file } : {}),
             ...(typeof o.candidate === 'string' ? { candidate: o.candidate } : {}),
+            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.draft === true ? { draft: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
+            ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
             ...(Array.isArray(o.question) && o.question.length > 0
               ? { question: o.question as string[] }
               : {}),

@@ -1611,7 +1611,10 @@ describe('runDoctor — session key', () => {
     expect(rendered).not.toContain(String((file.privateKeyJwk as { d?: string }).d));
   });
 
-  it('warns (never fails) on an expired session, with the fix that renews it', async () => {
+  // 24h expiry is designed decay, not a fault. Warning on it made every machine
+  // that ever ran `tenjin session start` permanently yellow for working as
+  // intended, so a spent key reads as ok and names the verb that re-mints it.
+  it('reports an expired session as ok, naming the verb that re-mints', async () => {
     const { file } = await testSessionKey({ exp: new Date(Date.now() - 1000).toISOString() });
     await saveSessionFile(dir, file);
     const res = await runDoctor(ctxFor(), {
@@ -1621,10 +1624,31 @@ describe('runDoctor — session key', () => {
     });
     const data = res.data as { status: string; checks: CheckResult[] };
     const check = find(data.checks, 'session');
-    expect(check.status).toBe('warn');
+    expect(check.status).toBe('ok');
     expect(check.required).toBe(false);
+    expect(check.detail).toContain('normal after 24h');
+    expect(check.detail).toContain('tenjin session start --scope read');
+    // No `fix` on an ok check: the command rides the detail, as `absent` and
+    // `outdated` already do.
+    expect(check.fix).toBeUndefined();
+    expect(data.status).toBe('pass');
+  });
+
+  // Decay is ok; a file whose expiry cannot be READ is not — that is malformed,
+  // not spent, and it must not be laundered through the friendly branch.
+  it('still warns when the expiry does not parse', async () => {
+    const { file } = await testSessionKey({ exp: 'whenever' });
+    await saveSessionFile(dir, file);
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    const check = find(data.checks, 'session');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('unparseable expiry');
     expect(check.fix).toBe('tenjin session start --scope read');
-    // A stale session is never an exit-code event.
     expect(data.status).toBe('pass');
   });
 
@@ -1669,16 +1693,24 @@ describe('runDoctor — session key', () => {
     expect(check.detail).toContain('could not be parsed');
   });
 
+  // Both directions off ONE file, so the clock is provably what decides: expiry
+  // is no longer a status change, so the detail is what has to carry it.
   it('uses the injected clock, so expiry is decided rather than observed', async () => {
     const { file } = await testSessionKey();
     await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-      now: () => Date.parse(file.exp) + 1,
-    });
-    expect(find((res.data as { checks: CheckResult[] }).checks, 'session').status).toBe('warn');
+    const detailAt = async (now: () => number): Promise<string> => {
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        env: {},
+        fetchImpl: healthyFetch,
+        now,
+      });
+      return find((res.data as { checks: CheckResult[] }).checks, 'session').detail;
+    };
+    expect(await detailAt(() => Date.parse(file.exp) + 1)).toContain('normal after 24h');
+    expect(await detailAt(() => Date.parse(file.exp) - 3_600_000)).toContain(
+      `Session key ${file.address}`,
+    );
   });
 });
 

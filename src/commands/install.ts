@@ -731,6 +731,13 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     lines.push(
       paint(io, 'dim', hooksUndo(s.hooks.path ?? '~/.claude/settings.json', s.hooks.scriptsDir)),
     );
+    // NOT dim, unlike the disclosure above it: settings.json hooks are read once
+    // at session start, so an operator who does not restart gets no hook activity
+    // at all and nothing telling them why. That silence is the whole reason this
+    // line exists, so it must not read as fine print.
+    lines.push(
+      `${paint(io, 'bold', 'Restart Claude Code')} to load them; hooks are read once at session start.`,
+    );
   }
   if (s.hooks.warning !== undefined) {
     lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(s.hooks.warning)}`));

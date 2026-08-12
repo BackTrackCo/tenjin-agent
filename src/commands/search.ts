@@ -41,6 +41,8 @@ export interface SearchArgs {
 
 export interface SearchDeps {
   fetchImpl?: typeof fetch;
+  /** Environment seam (TENJIN_SESSION_ID); defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runSearch(
@@ -57,6 +59,7 @@ export async function runSearch(
     input.appliesTo = parseAppliesTo(args.appliesTo);
   }
 
+  const sessionId = readSessionId(deps.env ?? process.env);
   const request = buildSearchRequest(input);
   const response = await postSearch(request, {
     baseUrl: settings.baseUrl,
@@ -103,6 +106,9 @@ export async function runSearch(
     // The Stop hook nags on the two differently, so the tag has to be written
     // here rather than inferred later from anything.
     source: 'cli',
+    // Usually absent; see readSessionId. An unstamped entry is raised in every
+    // session, which is the safe direction for a reminder.
+    ...(sessionId !== undefined ? { sessionId } : {}),
     candidates: candidates.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
@@ -209,6 +215,30 @@ export async function runSearch(
   return { data, humanLines };
 }
 
+/**
+ * The session to stamp this search with, so the Stop hook can tell one session's
+ * open loops from a sibling's, or undefined when nothing can say.
+ *
+ * Two sources, in precedence order. TENJIN_SESSION_ID is the explicit operator
+ * override and wins. CLAUDE_CODE_SESSION_ID is what Claude Code exports to Bash
+ * tool subprocesses, which is what a `tenjin search` runs as; its value is the
+ * same `session_id` the hook scripts are handed on stdin, so a CLI search and a
+ * WebSearch-hook search in one session stamp identically. It is verified against
+ * a live session rather than documented, hence the fallback rather than a
+ * requirement: on a harness that does not export it this stays undefined, and
+ * undefined is the safe answer — the hook raises an unstamped entry in every
+ * session rather than in none.
+ */
+function readSessionId(env: NodeJS.ProcessEnv): string | undefined {
+  return firstNonEmpty(env.TENJIN_SESSION_ID) ?? firstNonEmpty(env.CLAUDE_CODE_SESSION_ID);
+}
+
+function firstNonEmpty(raw: string | undefined): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 /** The publish-back hint, as machine fields rather than prose to re-parse. */
 function publishBackHint(searchId: string): {
   searchId: string;
@@ -219,14 +249,16 @@ function publishBackHint(searchId: string): {
   return {
     searchId,
     reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
-    publish: 'tenjin publish <file.md> --json',
+    // Both arms carry the searchId, because both are commands to run verbatim and
+    // a publish without it leaves this very loop open (see publish's --search-id).
+    publish: `tenjin publish <file.md> --json --search-id ${searchId}`,
     park: `tenjin candidate add <file.md> --search-id ${searchId} --json`,
   };
 }
 
 /** The same hint as one stderr line for a human. */
 function publishBackLine(searchId: string): string {
-  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish) or park it: tenjin candidate add <file.md> --search-id ${searchId}`;
+  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish <file.md> --search-id ${searchId}) or park it: tenjin candidate add <file.md> --search-id ${searchId}`;
 }
 
 const STALE_MS = 7 * 24 * 60 * 60 * 1000;
