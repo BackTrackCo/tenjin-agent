@@ -62,15 +62,21 @@ export const FREE_VERB_RULES: readonly string[] = [
 ];
 
 /**
- * Rules a PRIOR version wrote into `permissions.allow` and this one no longer
- * recommends. Read ONLY by `uninstall`, never by the writer.
+ * Rules a PRIOR version of this writer put in `permissions.allow` and this one
+ * no longer recommends. BOTH paths read it: `install` removes them on its next
+ * run, `uninstall` reclaims them as its own. NEITHER path ever writes one — the
+ * writable set is {@link FREE_VERB_RULES} and this list is disjoint from it, so
+ * a retired rule can only ever be deleted, never re-added. A test pins that
+ * disjointness, because the day the two overlap is the day install starts
+ * re-adding a grant for a command that does not exist.
  *
- * `install` is append-only and its writable set is {@link FREE_VERB_RULES}, so a
- * rule dropped from that constant becomes invisible to every later version: the
- * operator keeps an allow-rule for a command that no longer exists, and
- * `uninstall` — whose whole contract is being the reverse of install — walks
- * past it because it is no longer "ours". It IS ours; we wrote it. Anything
- * retired from the free tier belongs here so the reversal stays complete.
+ * Why it has to exist at all: a rule dropped from FREE_VERB_RULES is otherwise
+ * invisible to every later version. The operator keeps an allow-line for a
+ * command that no longer exists, `install` walks past it because it is not in
+ * the set it writes, and `uninstall` walks past it because it is no longer
+ * "ours". It IS ours — we wrote it — and a user who updates and re-runs
+ * `install` should end up with exactly the current tier and nothing we left
+ * behind. Anything retired from the free tier belongs here.
  *
  * `Bash(tenjin candidate list:*)` is the first entry: the candidate pen was
  * removed, and machines installed before that still carry its rule.

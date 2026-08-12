@@ -123,6 +123,28 @@ describe('wireFreeVerbAllowlist: sweeping what an older version wrote', () => {
     expect(after.permissions.allow.sort()).toEqual([...FREE_VERB_RULES].sort());
   });
 
+  // The upgrade is a one-time event: the second run after it must be silent, or
+  // every later install reports a reclaim it did not perform.
+  it('is idempotent: the run after the sweep reports nothing and rewrites nothing', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      settingsPath(),
+      JSON.stringify({
+        permissions: { allow: [...FREE_VERB_RULES, 'Bash(tenjin candidate list:*)'] },
+      }),
+    );
+    const first = await wireFreeVerbAllowlist(home);
+    expect(first.removed).toEqual(['Bash(tenjin candidate list:*)']);
+    const afterFirst = await readFile(settingsPath(), 'utf8');
+
+    const second = await wireFreeVerbAllowlist(home);
+    expect(second.removed).toEqual([]);
+    expect(second.added).toEqual([]);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(afterFirst);
+    // And the probe agrees there is nothing left to do.
+    expect((await inspectFreeVerbRules(home)).satisfied).toBeDefined();
+  });
+
   // A current machine re-running install must still be a no-op.
   it('changes nothing when there is no residue', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
@@ -167,9 +189,11 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
     ]);
   });
 
-  // The legacy set exists for uninstall to reclaim; if it ever leaked into the
-  // writer, install would start re-adding a rule for a command that is gone.
-  it('never writes a retired rule: the legacy set is disjoint and unwritten', () => {
+  // Both install and uninstall now DELETE these; neither may ever write one. The
+  // disjointness is what guarantees that: if the two sets overlapped, install
+  // would re-add a grant for a command that no longer exists on the same pass
+  // that is supposed to be clearing it.
+  it('never writes a retired rule: the legacy set is disjoint from the writable one', () => {
     for (const rule of LEGACY_FREE_VERB_RULES) {
       expect(FREE_VERB_RULES).not.toContain(rule);
     }
