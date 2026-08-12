@@ -13,7 +13,7 @@ paste block and the three-tier summary.
 
 ## The free tier
 
-The free tier is eight rules for the `permissions.allow` array of Claude Code's
+The free tier is nine rules for the `permissions.allow` array of Claude Code's
 `~/.claude/settings.json`. `tenjin install` can write them for you; see
 [Getting the rules onto your machine](#getting-the-rules-onto-your-machine).
 
@@ -74,7 +74,7 @@ three. It cannot unlock a keystore and never consults the spend policy.
 
 ## Getting the rules onto your machine
 
-`tenjin install` writes the eight rules into `~/.claude/settings.json` for you. It
+`tenjin install` writes the nine rules into `~/.claude/settings.json` for you. It
 is one of the four setup decisions, and at a terminal it asks:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
@@ -263,9 +263,10 @@ Both are denied, never wrongly allowed:
 ## Delegating to a subagent
 
 The free tier is the answer to "what may a read-only subagent run", with nothing
-subtracted. All eight are safe to hand over: `search`, `inspect`, `read`,
-`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
-None can spend and none can move your keys.
+subtracted. All nine are safe to hand over: `search`, `fund`, `inspect`, `read`,
+`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`.
+None can spend and none can move your keys; `fund` mints a checkout link only a
+human can pay.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
 `publish`, `edit`, `buy`, `send`,

@@ -377,7 +377,7 @@ Bash(tenjin config get:*)
 
 Three tiers:
 
-- **The eight free verbs above** cannot spend and cannot move your keys; `doctor`
+- **The nine free verbs above** cannot spend and cannot move your keys; `doctor`
   decrypts locally to check your wallet still opens.
 - **`Bash(tenjin buy:*)`** is a separate opt-in that, on the default config,
   authorizes unattended spending up to your wallet balance.
