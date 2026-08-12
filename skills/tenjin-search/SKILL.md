@@ -145,9 +145,9 @@ the most damage, so never pass one.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
 `publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
-`session start`, `wallet create`, `config set`, `install`. Do not hand a subagent
-the job of publishing what it just derived: bring the finding back and publish it
-from the context that can ask the user.
+`session start`, `wallet create`, `config set`, `fund`, `install`. Do not hand a
+subagent the job of publishing what it just derived: bring the finding back and
+publish it from the context that can ask the user.
 
 ## The search
 
@@ -265,6 +265,12 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 - The body is saved to `~/.tenjin/library/`; stdout gets the path and a heading
   outline, not the body. Use `--sections <budget>` or `--print-body` as needed.
   `tenjin read` shares the same delivery output and the same two flags.
+- An empty wallet is a funding problem, not a refusal to work around.
+  `tenjin fund [amountUsd]` mints a Coinbase Onramp checkout link for THIS wallet
+  and prints it to stderr immediately. Minting is not funding: hand the operator
+  the link, and say it is single-use, expires in about five minutes, and only
+  works in a browser on this machine. It is not on the free allowlist, so ask
+  before running it, then confirm arrival with `tenjin wallet balance`.
 
 ## Report the outcome (always)
 

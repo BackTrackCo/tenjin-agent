@@ -181,6 +181,21 @@ endpoint, so `buy <url>` can.
 | `--max-price`  | decimal USD | none    | Hard price cap; never bypassed by `--yes`       | buy      |
 | `--yes`        | —           | off     | Clear the interactive confirm only, not the cap | buy      |
 
+### `tenjin fund [amountUsd]`
+
+| Flag        | Values | Default       | Effect                                            |
+| ----------- | ------ | ------------- | ------------------------------------------------- |
+| `--no-open` | —      | open at a TTY | Print the checkout link without opening a browser |
+| `--no-wait` | —      | wait at a TTY | Return once the link is issued instead of polling |
+
+Both default to off when stdout is not a TTY, so a piped or `--json` run neither
+opens a browser nor blocks. The link itself goes to stderr the moment it is minted,
+whatever the surface: it is single-use and expires in about five minutes, so it
+cannot wait for the stdout envelope, which is written only after the poll.
+`pollStatus` on that envelope says which outcome you got (`skipped`,
+`unavailable`, `timed-out`, `arrived`) rather than collapsing three of them into
+`funded: false`.
+
 ### `tenjin session start`
 
 | Flag      | Values | Default | Effect                                        |

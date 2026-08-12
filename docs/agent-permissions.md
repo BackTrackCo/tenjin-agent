@@ -184,19 +184,36 @@ which origin, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                                             | Why it stays a human decision                                                        |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
-| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                       |
-| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
-| `tenjin wallet create`                           | Creates the payment credential.                                                      |
-| `tenjin config set`                              | It can widen the agent's own spend policy.                                           |
-| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.             |
-| `tenjin install`                                 | Writes into harness config and skills directories.                                   |
-| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                  |
+| Verb                                             | Why it stays a human decision                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below.  |
+| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                        |
+| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.           |
+| `tenjin wallet create`                           | Creates the payment credential.                                                       |
+| `tenjin config set`                              | It can widen the agent's own spend policy.                                            |
+| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.              |
+| `tenjin fund`                                    | Signs with your wallet key, and a prefix rule clears `--base-url` with it. See below. |
+| `tenjin install`                                 | Writes into harness config and skills directories.                                    |
+| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                   |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+### `tenjin fund`, free over MCP and human-gated over Bash
+
+The asymmetry is deliberate, and it is about flags rather than about funding.
+Minting a checkout link moves no money: the destination is pinned server-side to
+the wallet that signed the request, so a link an agent mints can only ever fund
+your own wallet, and the payment itself happens on `pay.coinbase.com` behind
+Coinbase's own human gate. That is why `tenjin_fund` is an MCP tool, where the
+whole input surface is one optional dollar amount.
+
+`Bash(tenjin fund:*)` is a wider grant than that tool, because a prefix rule
+pins the verb and not the flags: it also clears `--base-url`, and `fund` signs a
+SIWX proof bound to whatever host that flag names. A mint against a host an agent
+chose is a wallet signature you did not intend to make, which is the same reason
+`session start` is opt-in rather than safe. Allowlist the verb only if you are
+content for the agent to choose that host.
 
 ### `tenjin send`, the escape hatch
 
@@ -256,9 +273,9 @@ subtracted. All nine are safe to hand over: `search`, `inspect`, `read`,
 
 Everything that mutates stays in a mutation-capable, human-gated context:
 `publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
-`session start`, `wallet create`, `config set`, `install`. In particular, do not
-delegate publishing what a subagent just derived: bring the finding back and
-publish it from the context that can ask the user.
+`session start`, `wallet create`, `config set`, `fund`, `install`. In particular,
+do not delegate publishing what a subagent just derived: bring the finding back
+and publish it from the context that can ask the user.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
 repo, not the network: `search` and `outcome` POST off-machine (a question, a

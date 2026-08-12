@@ -256,7 +256,13 @@ const walletInput = {
 
 // The tool takes ONLY the preset amount: the browser open, the balance poll,
 // and the test seams are CLI-side concerns (a stdio server may be headless and
-// a tool call must not block for minutes), hard-pinned off at the call site.
+// a tool call must not block for minutes), pinned off at the call site.
+//
+// It also takes no `--base-url` equivalent, which is what makes this narrower
+// than a `Bash(tenjin fund:*)` allowlist rule and is why the Bash verb stays a
+// human decision (lib/permissions.ts NEVER_ALLOWLISTED): a prefix rule pins the
+// verb, not the flags, and a mint against an attacker-named host is a wallet
+// signature the operator did not intend to make.
 const fundInput = {
   amountUsd: z
     .string()
@@ -603,9 +609,13 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         runFund(ctx, {
           ...deps.fund,
           ...(args.amountUsd !== undefined ? { amountUsd: args.amountUsd } : {}),
-          // Pinned LAST so nothing re-enables them on this surface: no browser
-          // open from a possibly-headless stdio server, no minutes-long poll
-          // inside a tool call.
+          // Pinned LAST so no injected dep re-enables them on this surface: no
+          // browser open from a possibly-headless stdio server, no minutes-long
+          // poll inside a tool call. `runFund` also defaults both off when
+          // stdout is not a TTY, which it never is here (sinkIo) — these lines
+          // are the explicit belt to that braces, and a test asserts the two
+          // values actually reach `runFund` rather than inferring it from
+          // behaviour the TTY default would produce anyway.
           open: false,
           wait: false,
         }),

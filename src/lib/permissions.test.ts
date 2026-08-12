@@ -26,6 +26,7 @@ const FORBIDDEN_VERBS = [
   'tenjin config set',
   'tenjin candidate add',
   'tenjin candidate drop',
+  'tenjin fund',
   'tenjin install',
   'tenjin mcp',
 ];

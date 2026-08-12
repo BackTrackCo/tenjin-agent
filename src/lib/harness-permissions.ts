@@ -67,6 +67,7 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
   'tenjin edit',
   'tenjin session',
   'tenjin send',
+  'tenjin fund',
   'tenjin config set',
   'tenjin wallet create',
   'tenjin mcp',

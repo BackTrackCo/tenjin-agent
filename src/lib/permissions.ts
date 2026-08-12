@@ -265,6 +265,15 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason: 'Writes or discards local drafts; `candidate list` is the read-only half.',
   },
   {
+    command: 'tenjin fund',
+    reason:
+      'Mints a Coinbase Onramp checkout link signed by your wallet key. Minting moves no ' +
+      'money and the destination is pinned server-side to your own address, which is why the ' +
+      'MCP tool exposes it — but that tool takes only an amount, while a Bash prefix rule also ' +
+      'clears `--base-url`, and a mint against a host an agent chose is a wallet signature you ' +
+      'did not intend to make.',
+  },
+  {
     command: 'tenjin install',
     reason: 'Writes into harness config and skills directories.',
   },

@@ -4,7 +4,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+
+// The real core still runs; the wrapper only records the OPTIONS it was handed,
+// which is the one place the `open: false` / `wait: false` pins are observable.
+// Asserting on behaviour instead would pass with either line deleted, since the
+// MCP context is never a TTY and `runFund` defaults both off there anyway.
+vi.mock('../commands/fund', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../commands/fund')>();
+  return { ...actual, runFund: vi.fn(actual.runFund) };
+});
+
+// No RPC from this suite. Unmocked, the baseline balance read would make the
+// no-poll assertion depend on network reachability and pass offline for the
+// wrong reason, which is the direction that ships the bug.
+vi.mock('../lib/usdc', () => ({
+  USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  USDC_DECIMALS: 6,
+  getUsdcBalance: vi.fn(),
+}));
+
 import { buildTenjinMcpServer, type BuildMcpOptions } from './server';
+import { runFund } from '../commands/fund';
+import { getUsdcBalance } from '../lib/usdc';
 import {
   buildPaymentRequired,
   makeReadServer,
@@ -18,6 +39,8 @@ import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-mcp-'));
+  vi.mocked(runFund).mockClear();
+  vi.mocked(getUsdcBalance).mockClear();
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -609,10 +632,29 @@ describe('tenjin_fund', () => {
     expect(sc.data.checkoutUrl).toBe(CHECKOUT);
     expect(sc.data.opened).toBe(false);
     expect(sc.data.funded).toBe(false);
+    expect(sc.data.pollStatus).toBe('skipped');
     expect(calls[0]!.body).toMatchObject({ mode: 'onramp', presetAmount: 5 });
-    // The open/wait pins hold even against an injected opener: a headless stdio
-    // server must never pop a browser or block a tool call on the balance poll.
     expect(openUrl).not.toHaveBeenCalled();
+    expect(getUsdcBalance).not.toHaveBeenCalled();
+  });
+
+  it('pins open and wait off in the options it hands the core, not just in what happens', async () => {
+    const { fetchImpl } = mintServer();
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      // Deliberately hostile deps: a caller (or a future edit) trying to turn
+      // the browser open and the poll back ON for the MCP surface. The call-site
+      // pins are spread LAST, so both must lose.
+      deps: {
+        fund: { provider: testWalletProvider(), fetchImpl, open: true, wait: true },
+      },
+    });
+    await client.callTool({ name: 'tenjin_fund', arguments: {} });
+
+    const passed = vi.mocked(runFund).mock.calls;
+    expect(passed).toHaveLength(1);
+    expect(passed[0]![1]).toMatchObject({ open: false, wait: false });
   });
 
   it('relays a coded refusal (region gate) as the failure envelope', async () => {

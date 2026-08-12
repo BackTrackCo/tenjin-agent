@@ -3,8 +3,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { Address } from 'viem';
 import { CliError } from '../lib/errors';
+import { SESSION_CHAIN_ID } from '../lib/session-key';
 import type { CommandContext } from '../context';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 
@@ -23,26 +25,43 @@ const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
 
 let tmp: string;
 let dataDir: string;
+/** Every advisory line one run wrote to stderr, in order. */
+let stderr: string[];
+
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), 'tenjin-fund-'));
   dataDir = join(tmp, '.tenjin');
+  stderr = [];
   mockedBalance.mockReset();
 });
 afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-function makeCtx(overrides: { isTTY?: boolean } = {}): CommandContext {
+function makeCtx(overrides: { isTTY?: boolean; json?: boolean } = {}): CommandContext {
   const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+  const errStream = {
+    write: (chunk: string) => {
+      stderr.push(chunk);
+      return true;
+    },
+  } as unknown as NodeJS.WritableStream;
   return {
-    flags: { json: true, timeout: 10000 },
+    flags: { json: overrides.json ?? true, timeout: 10000 },
     dataDir,
-    io: { stdout: sink, stderr: sink, isTTY: overrides.isTTY ?? false },
+    io: { stdout: sink, stderr: errStream, isTTY: overrides.isTTY ?? false },
   };
 }
 
-/** A provider around a real in-memory key, so buildSiwxHeader signs for real. */
-function fakeProvider(): { provider: WalletProvider; address: Address } {
+/**
+ * A provider around a real in-memory key, so buildSiwxHeader signs for real.
+ * `casing` forces the store's laxer shape (it accepts any hex casing) so the
+ * checksum normalization the route requires is testable.
+ */
+function fakeProvider(casing: 'checksum' | 'lower' = 'checksum'): {
+  provider: WalletProvider;
+  address: Address;
+} {
   const account = privateKeyToAccount(generatePrivateKey());
   const signer: TenjinSigner = {
     address: account.address,
@@ -53,7 +72,7 @@ function fakeProvider(): { provider: WalletProvider; address: Address } {
   const provider: WalletProvider = {
     id: 'fake',
     describe: async () => ({
-      address: account.address,
+      address: casing === 'lower' ? (account.address.toLowerCase() as Address) : account.address,
       provider: 'fake',
       credentialSource: 'remote',
       policyEnforcement: 'provider',
@@ -103,10 +122,94 @@ describe('runFund', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
-    expect(calls[0]!.headers['sign-in-with-x']).toBeDefined();
     expect(calls[0]!.body).toEqual({ mode: 'onramp', address });
-    expect(res.data).toMatchObject({ address, checkoutUrl: CHECKOUT, funded: false });
+    expect(res.data).toMatchObject({
+      address,
+      checkoutUrl: CHECKOUT,
+      funded: false,
+      pollStatus: 'skipped',
+    });
     expect(mockedBalance).not.toHaveBeenCalled();
+
+    // What the route's withAuth actually checks, not merely that a header exists:
+    // a proof bound to another domain, chain, or key would pass a defined-check.
+    const proof = parseSIWxHeader(calls[0]!.headers['sign-in-with-x']!) as Record<string, unknown>;
+    expect(proof.domain).toBe('tenjin.blog');
+    expect(proof.chainId).toBe(SESSION_CHAIN_ID);
+    expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
+  });
+
+  it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {
+    const { provider, address } = fakeProvider('lower');
+    const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
+    const res = await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
+
+    // The route parses this with strict EIP-55; the local store does not, so an
+    // imported wallet file would otherwise earn an unactionable 400.
+    expect(calls[0]!.body).toEqual({ mode: 'onramp', address });
+    expect(res.data).toMatchObject({ address });
+  });
+
+  it('prints the checkout link on stderr even when piped with --json, before any wait', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValueOnce(0n).mockResolvedValueOnce(5000n);
+    // Snapshot stderr at the moment the poll first sleeps: the link must already
+    // be out. Without it a piped caller learns the URL only from the envelope,
+    // which is written after the poll and therefore after the ~5 min expiry.
+    let printedBeforePoll = '';
+    const sleep = async (): Promise<void> => {
+      if (printedBeforePoll === '') printedBeforePoll = stderr.join('');
+    };
+    const res = await runFund(makeCtx({ isTTY: false, json: true }), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      open: false,
+      wait: true,
+      sleep,
+      pollIntervalMs: 1,
+      pollTimeoutMs: 60000,
+    });
+
+    expect(res.data).toMatchObject({ pollStatus: 'arrived' });
+    expect(printedBeforePoll).toContain(CHECKOUT);
+    expect(printedBeforePoll).toContain(address);
+    expect(printedBeforePoll).toContain('expires in ~5 minutes');
+  });
+
+  it('waits by default at a TTY and returns immediately when piped', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(1000n);
+
+    // Piped: no baseline read at all, so nothing can block on a dead link.
+    const piped = await runFund(makeCtx({ isTTY: false }), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      open: false,
+    });
+    expect(piped.data).toMatchObject({ funded: false, pollStatus: 'skipped' });
+    expect(mockedBalance).not.toHaveBeenCalled();
+
+    // TTY: the baseline is read and the poll runs, with no explicit `wait`.
+    mockedBalance.mockResolvedValueOnce(1000n).mockResolvedValueOnce(9000n);
+    const tty = await runFund(makeCtx({ isTTY: true }), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      open: false,
+      sleep: async () => {},
+      pollIntervalMs: 1,
+      pollTimeoutMs: 60000,
+    });
+    expect(tty.data).toMatchObject({ funded: true, pollStatus: 'arrived' });
+  });
+
+  it('maps a rejected proof (401) to a local fix, not "retry"', async () => {
+    const { provider } = fakeProvider();
+    const { fetchImpl } = stubFetch(401, { error: { code: 'unauthorized' } });
+    const err = await catchCliError(
+      runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.fix).toContain('clock');
   });
 
   it('forwards a positive amount as presetAmount', async () => {
@@ -223,7 +326,7 @@ describe('runFund', () => {
       .mockResolvedValueOnce(250000n) // first poll: nothing yet
       .mockResolvedValueOnce(5250000n); // second poll: landed
     const sleep = vi.fn(async () => {});
-    const res = await runFund(makeCtx(), {
+    const res = await runFund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
@@ -233,36 +336,57 @@ describe('runFund', () => {
     });
     expect(res.data).toMatchObject({
       funded: true,
+      pollStatus: 'arrived',
       balance: { atomic: '5250000', usd: '5.25' },
     });
     expect(sleep).toHaveBeenCalledTimes(2);
     expect(res.humanLines?.join(' ')).toContain('5.25');
   });
 
-  it('times out cleanly as a non-error when nothing arrives', async () => {
+  it('times out cleanly as a non-error after polling to the deadline', async () => {
     const { provider } = fakeProvider();
     mockedBalance.mockResolvedValue(0n);
-    const res = await runFund(makeCtx(), {
-      provider,
-      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
-      open: false,
-      sleep: async () => {},
-      pollIntervalMs: 1,
-      pollTimeoutMs: 0,
-    });
-    expect(res.data).toMatchObject({ funded: false });
-    expect(res.humanLines?.join(' ')).toContain('tenjin wallet balance');
+    // A real clock, advanced only by the injected sleep, so the loop runs its
+    // iterations and THEN expires; `pollTimeoutMs: 0` alone would exit on entry
+    // and never exercise a poll at all.
+    vi.useFakeTimers();
+    try {
+      const sleep = vi.fn(async (ms: number) => {
+        vi.advanceTimersByTime(ms);
+      });
+      const res = await runFund(makeCtx({ isTTY: true }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+        open: false,
+        sleep,
+        pollIntervalMs: 10,
+        pollTimeoutMs: 30,
+      });
+      expect(sleep).toHaveBeenCalledTimes(3);
+      expect(mockedBalance).toHaveBeenCalledTimes(4); // one baseline + three polls
+      expect(res.data).toMatchObject({ funded: false, pollStatus: 'timed-out' });
+      expect(res.humanLines?.join(' ')).toContain('tenjin wallet balance');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('skips polling when the baseline read fails, instead of blocking funding', async () => {
     const { provider } = fakeProvider();
     mockedBalance.mockRejectedValue(new Error('rpc down'));
-    const res = await runFund(makeCtx(), {
+    const res = await runFund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
     });
-    expect(res.data).toMatchObject({ funded: false, checkoutUrl: CHECKOUT });
+    // `unavailable`, NOT `skipped`: the run meant to wait and could not check,
+    // which is a different fact from --no-wait and from a real timeout.
+    expect(res.data).toMatchObject({
+      funded: false,
+      pollStatus: 'unavailable',
+      checkoutUrl: CHECKOUT,
+    });
+    expect(res.humanLines?.join(' ')).toContain('Could not read the balance');
     expect(mockedBalance).toHaveBeenCalledTimes(1);
   });
 });
