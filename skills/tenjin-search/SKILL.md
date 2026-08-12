@@ -292,36 +292,33 @@ pricing rules; never publish bare.
   <finding.md> --json --search-id <id>` (no `--yes`). It exits 3 with the
   `needs_confirmation` payload; render THAT
   payload's findings and price as the one-click yes/no, and re-run with `--yes`
-  only on an explicit yes. Park it as a candidate (`tenjin candidate add
-  <finding.md> --search-id <id> --question "<the question you looked up>"
-  --json`) only on "not now". This is the same run-then-render sequence the
-  tenjin-publish skill uses: never ask a generic "publish?" before running, or
-  the `--yes` re-run would clear WARN findings (PII, wallet addresses) the user
-  never saw.
+  only on an explicit yes. A "not now" is final: close the loop (`tenjin outcome
+  --search-id <id> --status regenerated`) and move on, saving nothing. This is
+  the same run-then-render sequence the tenjin-publish skill uses: never ask a
+  generic "publish?" before running, or the `--yes` re-run would clear WARN
+  findings (PII, wallet addresses) the user never saw.
 - **auto / full-auto**: run the tenjin-publish skill's semantic publish-safety
   pass FIRST (statement-level classification, competitor-reconstruction check,
   title/answer-card leak check) — the CLI scan is lexical and you are the only
   semantic reviewer on these paths; that skill also states why a MISS is never
-  a safety signal. Any doubt parks the draft as a
-  candidate instead of publishing. When the pass is clean, build the answer
-  card and run `tenjin publish <finding.md> --json --search-id <id>` directly.
-  In auto, a clearable warning does NOT park silently: the CLI exits 3 with the
+  a safety signal. Privacy/rights doubt means do not publish and save nothing;
+  quality doubt does not — in auto you ask the user (through the harness's own
+  question UI when it has one, so they click), in full-auto you hedge it in the
+  piece and publish. When the pass is clean, build the answer card and run
+  `tenjin publish <finding.md> --json --search-id <id>` directly.
+  In auto, a clearable warning is not a silent stop: the CLI exits 3 with the
   `needs_confirmation` payload, which you render as the same one-click yes/no and
-  re-run with `--yes` on a yes. Otherwise park as a candidate when the publish
-  cannot proceed at all: a hard block, or no wallet. Then tell the user what was
-  published, with the URL.
+  re-run with `--yes` on a yes. When the publish cannot proceed at all — a hard
+  block, or no wallet — say so and leave the draft file where it is. Either way,
+  close the loop and tell the user what was published, with the URL.
 
 `--search-id` is what closes the loop: it marks the search resolved so the
 open-loop reminder stops raising it, and prefills the searched question into the
-card's `questionsAnswered` when the draft names none. A `--draft` publish parks
-privately and leaves the loop open.
+card's `questionsAnswered` when the draft names none. A `--draft` publish saves a
+private draft and leaves the loop open.
 
-Candidates are local files that never upload on their own; `tenjin candidate
-list --json` shows the pen, and a later `tenjin publish --candidate <id> --json` sends one
-through the same consent scan. Publish falls back to the stored `--question` for
-the card's `questionsAnswered`, but only when the draft names none, so whenever
-you write the card yourself include the question you looked up as one of its
-entries: that exact phrasing is what the next searcher sends.
+Whenever you write the card yourself, include the question you looked up as one
+of its entries: that exact phrasing is what the next searcher sends.
 
 ## Safety
 
@@ -337,5 +334,5 @@ entries: that exact phrasing is what the next searcher sends.
   just completed.
 - A derived answer that leans on private context (the source project's
   architecture, metrics, roadmap, or implementation order — Tenjin's own
-  included) is candidate-pen material, not publish material, whatever the scan
-  says (the tenjin-publish semantic pass is the gate on auto/full-auto paths).
+  included) is not publish material, whatever the scan says (the tenjin-publish
+  semantic pass is the gate on auto/full-auto paths).
