@@ -19,6 +19,7 @@ The free tier is nine rules for the `permissions.allow` array of Claude Code's
 
 ```
 Bash(tenjin search:*)
+Bash(tenjin fund:*)
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)
@@ -38,17 +39,18 @@ needs the wallet.
 
 ### What each verb actually does
 
-| Rule                            | Why it is safe to pre-clear                                                                                                    |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.              |
-| `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                      |
-| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below). |
-| `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.  |
-| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                       |
-| `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                |
-| `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                          |
-| `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.              |
-| `Bash(tenjin candidate list:*)` | Lists local parked drafts. Candidates are local files; nothing uploads.                                                        |
+| Rule                            | Why it is safe to pre-clear                                                                                                        |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.                  |
+| `Bash(tenjin fund:*)`           | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, origin-pinned (no `--base-url`). |
+| `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                          |
+| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below).     |
+| `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.      |
+| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                           |
+| `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                    |
+| `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                              |
+| `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.                  |
+| `Bash(tenjin candidate list:*)` | Lists local parked drafts. Candidates are local files; nothing uploads.                                                            |
 
 `tenjin doctor --json` emits the same per-verb notes under `permissions`, so an
 agent can read them without this page.
@@ -77,7 +79,7 @@ three. It cannot unlock a keystore and never consults the spend policy.
 `tenjin install` writes the nine rules into `~/.claude/settings.json` for you. It
 is one of the four setup decisions, and at a terminal it asks:
 
-> Let your agent search tenjin without permission popups? Adds 9 free commands to
+> Let your agent search tenjin without permission popups? Adds 10 free commands to
 > `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
 > check your wallet still opens. Three send or store data (search, outcome,
 > read). Full caveats:
@@ -184,36 +186,33 @@ which origin, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                                             | Why it stays a human decision                                                         |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below.  |
-| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                        |
-| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.           |
-| `tenjin wallet create`                           | Creates the payment credential.                                                       |
-| `tenjin config set`                              | It can widen the agent's own spend policy.                                            |
-| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.              |
-| `tenjin fund`                                    | Signs with your wallet key, and a prefix rule clears `--base-url` with it. See below. |
-| `tenjin install`                                 | Writes into harness config and skills directories.                                    |
-| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                   |
+| Verb                                             | Why it stays a human decision                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
+| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                       |
+| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
+| `tenjin wallet create`                           | Creates the payment credential.                                                      |
+| `tenjin config set`                              | It can widen the agent's own spend policy.                                           |
+| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.             |
+| `tenjin install`                                 | Writes into harness config and skills directories.                                   |
+| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                  |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
 
-### `tenjin fund`, free over MCP and human-gated over Bash
+### `tenjin fund`, free on both surfaces
 
-The asymmetry is deliberate, and it is about flags rather than about funding.
-Minting a checkout link moves no money: the destination is pinned server-side to
-the wallet that signed the request, so a link an agent mints can only ever fund
-your own wallet, and the payment itself happens on `pay.coinbase.com` behind
-Coinbase's own human gate. That is why `tenjin_fund` is an MCP tool, where the
-whole input surface is one optional dollar amount.
-
-`Bash(tenjin fund:*)` is a wider grant than that tool, because a prefix rule
-pins the verb and not the flags: it also clears `--base-url`, and `fund` signs a
-SIWX proof bound to whatever host that flag names. A mint against a host an agent
-chose is a wallet signature you did not intend to make, which is the same reason
-`session start` is opt-in rather than safe. Allowlist the verb only if you are
-content for the agent to choose that host.
+Free by owner decision (2026-08-12), because on either surface the command just
+opens the fund modal. Minting a checkout link moves no money: the destination is
+pinned server-side to the wallet that signed the request, so a link an agent
+mints can only ever fund your own wallet, the CLI refuses any checkout host but
+`pay.coinbase.com`, and the payment itself happens behind Coinbase's own human
+gate. The `--base-url` caveat that qualifies every other prefix rule does not
+apply here: `fund` is pinned to the production origin and takes no override from
+the flag, the environment, or config, so an allowlisted invocation cannot steer
+where the wallet's SIWX proof goes. That pin is what separates `fund` from
+`session start` (unattended keystore access, override surface intact), which
+stays opt-in.
 
 ### `tenjin send`, the escape hatch
 

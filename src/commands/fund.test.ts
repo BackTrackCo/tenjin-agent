@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -139,6 +139,23 @@ describe('runFund', () => {
     expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
   });
 
+  it('ignores every base-url override: the mint is pinned to production', async () => {
+    const { provider } = fakeProvider();
+    const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
+    const ctx = makeCtx();
+    // Hostile overrides on both surfaces a caller controls: the global flag and
+    // the config file. Neither may steer where the wallet's SIWX proof goes.
+    (ctx.flags as { baseUrl?: string }).baseUrl = 'https://evil.example';
+    await mkdir(ctx.dataDir, { recursive: true });
+    await writeFile(
+      join(ctx.dataDir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://evil.example' }),
+    );
+    await runFund(ctx, { provider, fetchImpl, wait: false, open: false });
+
+    expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+  });
+
   it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {
     const { provider, address } = fakeProvider('lower');
     const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
@@ -256,7 +273,7 @@ describe('runFund', () => {
     expect(err.exitCode).toBe(3);
   });
 
-  it('maps 429 to RATE_LIMITED and 503 to API_UNREACHABLE with the canonical-baseUrl fix', async () => {
+  it('maps 429 to RATE_LIMITED and 503 to API_UNREACHABLE', async () => {
     const { provider } = fakeProvider();
     const limited = await catchCliError(
       runFund(makeCtx(), {
@@ -277,7 +294,7 @@ describe('runFund', () => {
       }),
     );
     expect(unconfigured.code).toBe('API_UNREACHABLE');
-    expect(unconfigured.fix).toContain('tenjin.blog');
+    expect(unconfigured.fix).toContain('Retry');
   });
 
   it('maps a transport failure to NETWORK_ERROR', async () => {

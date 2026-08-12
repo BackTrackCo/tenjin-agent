@@ -116,6 +116,17 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'the search locally.',
   },
   {
+    rule: 'Bash(tenjin fund:*)',
+    command: 'tenjin fund',
+    note:
+      'Owner call (2026-08-12): free on both surfaces, because the command just opens the ' +
+      'fund modal. Minting moves no money: the destination is server-pinned to the wallet ' +
+      'that signed, the CLI refuses any checkout host but pay.coinbase.com, and payment ' +
+      'happens behind Coinbase\u2019s own human gate. The usual --base-url caveat does not ' +
+      'apply: fund is pinned to the production origin and takes no override from flag, ' +
+      'env, or config.',
+  },
+  {
     rule: 'Bash(tenjin inspect:*)',
     command: 'tenjin inspect',
     note: 'Free pre-purchase card and preview. Never signs, never pays, never saves.',
@@ -263,15 +274,6 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   {
     command: 'tenjin candidate add / tenjin candidate drop',
     reason: 'Writes or discards local drafts; `candidate list` is the read-only half.',
-  },
-  {
-    command: 'tenjin fund',
-    reason:
-      'Mints a Coinbase Onramp checkout link signed by your wallet key. Minting moves no ' +
-      'money and the destination is pinned server-side to your own address, which is why the ' +
-      'MCP tool exposes it — but that tool takes only an amount, while a Bash prefix rule also ' +
-      'clears `--base-url`, and a mint against a host an agent chose is a wallet signature you ' +
-      'did not intend to make.',
   },
   {
     command: 'tenjin install',

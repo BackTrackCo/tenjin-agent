@@ -189,12 +189,10 @@ endpoint, so `buy <url>` can.
 | `--no-wait` | —      | wait at a TTY | Return once the link is issued instead of polling |
 
 Both default to off when stdout is not a TTY, so a piped or `--json` run neither
-opens a browser nor blocks. The link itself goes to stderr the moment it is minted,
-whatever the surface: it is single-use and expires in about five minutes, so it
-cannot wait for the stdout envelope, which is written only after the poll.
-`pollStatus` on that envelope says which outcome you got (`skipped`,
-`unavailable`, `timed-out`, `arrived`) rather than collapsing three of them into
-`funded: false`.
+opens a browser nor blocks. The checkout link goes to stderr as soon as it is
+minted, on every surface, because it is single-use and expires in about five
+minutes. `pollStatus` in the envelope reports the outcome: `skipped`,
+`unavailable`, `timed-out`, or `arrived`.
 
 ### `tenjin session start`
 
@@ -370,6 +368,7 @@ array of `~/.claude/settings.json`:
 
 ```
 Bash(tenjin search:*)
+Bash(tenjin fund:*)
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)
@@ -417,7 +416,7 @@ decision:
    still shows each command for approval"), "Ask me in chat first", and "Fully
    unattended" ("only hard blocks stop it").
 2. **Permissions.** "Let your agent search tenjin without permission popups? Adds
-   9 free commands to `~/.claude/settings.json`. None can spend USDC or move your
+   10 free commands to `~/.claude/settings.json`. None can spend USDC or move your
    keys; doctor may check your wallet still opens. Three send or store data
    (search, outcome, read). Full
    caveats: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md"

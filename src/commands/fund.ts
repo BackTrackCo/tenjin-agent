@@ -29,6 +29,13 @@ import type { CommandContext, CommandResult } from '../context';
 
 /** The only host a minted checkout URL may point at; anything else is refused unopened. */
 const CHECKOUT_HOST = 'pay.coinbase.com';
+/**
+ * fund talks to production, full stop (owner decision, 2026-08-12): the mint
+ * signs with the wallet key, so this path takes no override -- not `--base-url`,
+ * not the env, not config. Cutting the surface entirely is what lets the verb
+ * sit in the free allowlist tier with nothing to caveat.
+ */
+const FUND_ORIGIN = 'https://tenjin.blog';
 /** Matches the server's presetAmount bound (app/api/cdp/session bodySchema). */
 const MAX_PRESET_USD = 100_000;
 const POLL_INTERVAL_MS = 5_000;
@@ -66,12 +73,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   const signer = await provider.getSigner();
 
   const config = await loadRawConfig(ctx.dataDir);
-  const settings = resolveSettings({
-    config,
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-  });
-  const baseUrl = settings.baseUrl.value.replace(/\/$/, '');
+  const settings = resolveSettings({ config, flags: {}, env: process.env });
+  const baseUrl = FUND_ORIGIN;
   const rpcUrl = settings.rpcUrl.value;
 
   // Waiting is an INTERACTIVE posture: a human is standing at the terminal with
@@ -99,7 +102,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   const res = await httpRequest(`${baseUrl}/api/cdp/session`, request);
   if (!res.ok) {
     throw fetchFailureToCliError(res, {
-      fix: 'Check your network and baseUrl, then retry.',
+      fix: 'Check your network, then retry.',
     });
   }
   const url = checkoutUrlFrom(res.status, res.json);
@@ -224,10 +227,10 @@ function checkoutUrlFrom(status: number, json: unknown): string {
     throw new CliError('REFUSED', 'Coinbase Onramp is not available in your region.');
   }
   // A rejected proof is a local condition ("retry" never fixes it): the signed
-  // window is clock-relative and its domain is whatever baseUrl this run used.
+  // window is clock-relative, and the domain is always the pinned production origin.
   if (status === 401) {
     throw new CliError('REFUSED', 'The funding endpoint rejected the signed proof.', {
-      fix: 'Check this machine’s clock, and that the `baseUrl` config names the deployment you meant.',
+      fix: 'Check this machine’s clock, then retry.',
     });
   }
   if (status === 429) {
@@ -236,9 +239,13 @@ function checkoutUrlFrom(status: number, json: unknown): string {
     });
   }
   if (status === 503) {
-    throw new CliError('API_UNREACHABLE', 'This deployment has no Coinbase Onramp configured.', {
-      fix: 'Use the canonical baseUrl (https://tenjin.blog).',
-    });
+    throw new CliError(
+      'API_UNREACHABLE',
+      'Production has no Coinbase Onramp configured right now.',
+      {
+        fix: 'Retry later.',
+      },
+    );
   }
   throw new CliError(
     'API_UNREACHABLE',
