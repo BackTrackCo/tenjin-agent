@@ -270,8 +270,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  // Funds-IN via Coinbase Onramp: human-invoked only (it opens a card checkout
-  // in a browser), so like `send` it stays off the MCP toolset, pinned by test.
+  // Funds-IN via Coinbase Onramp. Unlike `send`, this IS also an MCP tool
+  // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
+  // checkout page. The browser open and balance poll below are CLI-only.
   addGlobalFlags(program.command('fund [amountUsd]'))
     .description(
       'Fund THIS wallet by card via Coinbase Onramp: mint a checkout link bound to this machine, open it in the browser, and wait for the USDC to land on Base',

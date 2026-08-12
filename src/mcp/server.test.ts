@@ -61,7 +61,7 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string; detail
 type SuccessEnvelope = { ok: true; command: string; data: Record<string, unknown> };
 
 describe('buildTenjinMcpServer, tool surface', () => {
-  it('exposes exactly the eight Tenjin tools', async () => {
+  it('exposes exactly the nine Tenjin tools', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -70,6 +70,7 @@ describe('buildTenjinMcpServer, tool surface', () => {
         'tenjin_buy',
         'tenjin_candidate',
         'tenjin_edit',
+        'tenjin_fund',
         'tenjin_inspect',
         'tenjin_search',
         'tenjin_outcome',
@@ -98,18 +99,6 @@ describe('buildTenjinMcpServer, tool surface', () => {
     const schema = JSON.stringify(wallet?.inputSchema ?? {});
     expect(schema).toContain('show');
     expect(schema).not.toContain('send');
-  });
-
-  // `tenjin fund` is the human-invoked funds-in counterpart: it opens a card
-  // checkout in a browser, which no model-facing surface may trigger. Same
-  // narrow-toolset pin as send.
-  it('never exposes the funds-in fund verb (no tool, no wallet action)', async () => {
-    const client = await connect({ dataDir: dir });
-    const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name)).not.toContain('tenjin_fund');
-    const wallet = tools.find((t) => t.name === 'tenjin_wallet');
-    const schema = JSON.stringify(wallet?.inputSchema ?? {});
-    expect(schema).not.toContain('fund');
   });
 });
 
@@ -498,5 +487,64 @@ describe('MCP adapter never writes to real stdout', () => {
       spy.mockRestore();
     }
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('tenjin_fund', () => {
+  const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
+
+  function mintServer(status = 200, json: unknown = { url: CHECKOUT }) {
+    const calls: { url: string; body: unknown }[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify(json), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  it('mints and returns the checkout URL for the human, without opening or waiting', async () => {
+    const { fetchImpl, calls } = mintServer();
+    const openUrl = vi.fn(async () => true);
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { fund: { provider: testWalletProvider(), fetchImpl, openUrl } },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_fund',
+      arguments: { amountUsd: '5' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as SuccessEnvelope;
+    expect(sc.data.checkoutUrl).toBe(CHECKOUT);
+    expect(sc.data.opened).toBe(false);
+    expect(sc.data.funded).toBe(false);
+    expect(calls[0]!.body).toMatchObject({ mode: 'onramp', presetAmount: 5 });
+    // The open/wait pins hold even against an injected opener: a headless stdio
+    // server must never pop a browser or block a tool call on the balance poll.
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it('relays a coded refusal (region gate) as the failure envelope', async () => {
+    const { fetchImpl } = mintServer(403, {
+      error: { code: 'region_not_supported', message: 'no' },
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { fund: { provider: testWalletProvider(), fetchImpl } },
+    });
+    const res = await client.callTool({ name: 'tenjin_fund', arguments: {} });
+
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as ErrorEnvelope;
+    expect(sc.error.code).toBe('REFUSED');
   });
 });

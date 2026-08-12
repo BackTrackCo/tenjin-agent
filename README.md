@@ -559,11 +559,13 @@ server the CLI ships (see [Local stdio MCP server](#local-stdio-mcp-server)).
 
 `tenjin mcp` runs a local MCP server over stdio backed by the same command cores
 as the CLI (`search`, `inspect`, `buy`, `outcome`, `publish`, `edit`,
-`candidate`, and `wallet`), in-process, no shelling out. It exposes eight tools
-(`tenjin_search`, `tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`,
-`tenjin_publish`, `tenjin_edit`, `tenjin_candidate`, `tenjin_wallet`), each
-returning the machine JSON envelope as `structuredContent` with a short text
-summary. The consent gates carry over exactly: the spend policy gates
+`candidate`, `wallet`, and `fund`), in-process, no shelling out. It exposes nine
+tools (`tenjin_search`, `tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`,
+`tenjin_publish`, `tenjin_edit`, `tenjin_candidate`, `tenjin_wallet`,
+`tenjin_fund`), each returning the machine JSON envelope as `structuredContent`
+with a short text summary. `tenjin_fund` only mints the checkout link and hands
+it back for the human to open and pay on Coinbase's page; it never opens a
+browser or blocks on the balance poll. The consent gates carry over exactly: the spend policy gates
 `tenjin_buy`, `publish.mode` gates `tenjin_publish` and `tenjin_edit` (the client
 renders the `needs_confirmation` payload as its own confirm UI, then re-calls
 with `yes:true`), and a hard content block is never bypassable. The wallet stays

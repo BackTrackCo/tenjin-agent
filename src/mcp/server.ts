@@ -44,6 +44,7 @@ import {
   runWalletShow,
   type WalletCreateOptions,
 } from '../commands/wallet';
+import { runFund, type FundOptions } from '../commands/fund';
 import type { ResolveWalletProviderOptions } from '../lib/wallet';
 
 /**
@@ -59,6 +60,7 @@ export interface McpCommandDeps {
   edit?: EditDeps;
   candidate?: CandidateDeps;
   wallet?: ResolveWalletProviderOptions & WalletCreateOptions;
+  fund?: FundOptions;
 }
 
 export interface BuildMcpOptions {
@@ -232,10 +234,23 @@ const candidateInput = {
 // DELIBERATELY EXCLUDED from this toolset, as an action here and as a tool of
 // its own: the MCP surface stays narrower than the CLI (spec 10's narrow-toolset
 // rule; MCP agents discover and pay under policy, they never export a wallet or
-// move funds out of it). Do not add a send tool or action.
+// move funds out of it). Do not add a send tool or action. `fund` is different
+// in kind and IS a tool: minting moves nothing, the destination is pinned to
+// this wallet server-side, and the human gate (paying on pay.coinbase.com) is
+// enforced by Coinbase, not by a harness dialog.
 const walletInput = {
   action: z.enum(['show', 'balance', 'create']).describe('show | balance | create'),
 } satisfies Record<'action', z.ZodTypeAny>;
+
+// The tool takes ONLY the preset amount: the browser open, the balance poll,
+// and the test seams are CLI-side concerns (a stdio server may be headless and
+// a tool call must not block for minutes), hard-pinned off at the call site.
+const fundInput = {
+  amountUsd: z
+    .string()
+    .optional()
+    .describe('optional USD preset for the checkout, e.g. "5" (Coinbase clamps to its own floor)'),
+} satisfies Record<'amountUsd', z.ZodTypeAny>;
 
 /**
  * Build the local Tenjin MCP server with every tool registered against the CLI
@@ -553,6 +568,34 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         if (args.action === 'balance') return runWalletBalance(ctx, deps.wallet);
         return runWalletShow(ctx, deps.wallet);
       }),
+  );
+
+  server.registerTool(
+    'tenjin_fund',
+    {
+      title: 'Mint a card-funding checkout link',
+      description:
+        'Mint a Coinbase Onramp checkout link that card-funds THIS wallet (the server refuses any ' +
+        'other destination). Minting moves no money: funds move only when the HUMAN opens the link ' +
+        'and completes payment on pay.coinbase.com, so always hand the returned checkoutUrl to the ' +
+        'user and never treat minting as funding. The link is single-use, expires in ~5 minutes, ' +
+        'works only from this machine’s network, and completing it requires a Coinbase ' +
+        'account. Confirm arrival afterwards with tenjin_wallet action:balance.',
+      inputSchema: fundInput,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async (args) =>
+      runCore('fund', (ctx) =>
+        runFund(ctx, {
+          ...deps.fund,
+          ...(args.amountUsd !== undefined ? { amountUsd: args.amountUsd } : {}),
+          // Pinned LAST so nothing re-enables them on this surface: no browser
+          // open from a possibly-headless stdio server, no minutes-long poll
+          // inside a tool call.
+          open: false,
+          wait: false,
+        }),
+      ),
   );
 
   return server;
