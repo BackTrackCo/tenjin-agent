@@ -206,7 +206,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('uninstall'))
     .description(
-      'Remove everything `tenjin install` wrote: the skills, the harness hooks and their settings entries, and the tenjin permission rules. Never touches your wallet, config, library, search history, or parked candidates',
+      'Remove everything `tenjin install` wrote: the skills, the harness hooks and their settings entries, and the tenjin permission rules. Nothing under ~/.tenjin is touched',
     )
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
@@ -444,11 +444,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('publish [file]'))
     .description(
-      'Publish a Markdown file (or a parked --candidate) as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
-    )
-    .option(
-      '--candidate <id>',
-      'publish a parked candidate by id instead of a file (clears it on success)',
+      'Publish a Markdown file as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
     )
     .option(
       '--search-id <id>',
@@ -480,7 +476,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
-            ...(typeof o.candidate === 'string' ? { candidate: o.candidate } : {}),
             ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.draft === true ? { draft: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
@@ -627,51 +622,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           },
           ctx,
         );
-      });
-    });
-
-  // Group-level flags so `tenjin candidate --json list` parses like the wallet
-  // group. Appended after the existing groups to keep merge friction with the
-  // parallel publish work minimal.
-  const candidate = addGlobalFlags(
-    program
-      .command('candidate')
-      .description(
-        'Manage local publish candidates (parked drafts; nothing uploads until publish)',
-      ),
-  );
-  addGlobalFlags(candidate.command('add <file>'))
-    .description('Park a Markdown draft as a publish candidate, tied to a search')
-    .requiredOption('--search-id <id>', 'the search whose unmet demand this draft answers')
-    .option('--question <q>', 'the question this draft answers')
-    .action(async function (this: Command, file: string) {
-      await runCommand('candidate.add', this, async (ctx) => {
-        const o = this.opts();
-        const { runCandidateAdd } = await import('./commands/candidate');
-        return runCandidateAdd(
-          {
-            file,
-            searchId: String(o.searchId),
-            ...(typeof o.question === 'string' ? { question: o.question } : {}),
-          },
-          ctx,
-        );
-      });
-    });
-  addGlobalFlags(candidate.command('list'))
-    .description('List pending candidates, newest first')
-    .action(async function (this: Command) {
-      await runCommand('candidate.list', this, async (ctx) => {
-        const { runCandidateList } = await import('./commands/candidate');
-        return runCandidateList(ctx);
-      });
-    });
-  addGlobalFlags(candidate.command('drop <id>'))
-    .description('Discard a pending candidate (never auto-deleted)')
-    .action(async function (this: Command, id: string) {
-      await runCommand('candidate.drop', this, async (ctx) => {
-        const { runCandidateDrop } = await import('./commands/candidate');
-        return runCandidateDrop({ id }, ctx);
       });
     });
 

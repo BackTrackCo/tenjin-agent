@@ -1,5 +1,5 @@
 // The local stdio MCP server. It exposes the SAME command cores the CLI runs
-// (search, inspect, buy, outcome, publish, candidate, wallet) to an MCP client,
+// (search, inspect, buy, outcome, publish, wallet) to an MCP client,
 // in-process — no shelling out and no second implementation of the consent gates.
 //
 // Each tool builds a fresh CommandContext, calls the core in a try/catch, and
@@ -20,7 +20,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
-import { CliError } from '../lib/errors';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { buildFailureEnvelope, buildSuccessEnvelope, normalizeError } from '../lib/output';
 import type { Io } from '../lib/output';
@@ -31,13 +30,6 @@ import { runBuy, type BuyArgs, type BuyDeps } from '../commands/buy';
 import { runOutcome, type OutcomeArgs, type OutcomeDeps } from '../commands/outcome';
 import { runPublish, type PublishArgs, type PublishDeps } from '../commands/publish';
 import { runEdit, type EditArgs, type EditDeps } from '../commands/edit';
-import {
-  runCandidateAdd,
-  runCandidateDrop,
-  runCandidateList,
-  type CandidateAddArgs,
-  type CandidateDeps,
-} from '../commands/candidate';
 import {
   runWalletBalance,
   runWalletCreate,
@@ -58,13 +50,12 @@ export interface McpCommandDeps {
   outcome?: OutcomeDeps;
   publish?: PublishDeps;
   edit?: EditDeps;
-  candidate?: CandidateDeps;
   wallet?: ResolveWalletProviderOptions & WalletCreateOptions;
   fund?: FundOptions;
 }
 
 export interface BuildMcpOptions {
-  /** Data dir for wallet/library/candidate custody; defaults to TENJIN_DATA_DIR else ~/.tenjin. */
+  /** Data dir for wallet and library custody; defaults to TENJIN_DATA_DIR else ~/.tenjin. */
   dataDir?: string;
   /** Base URL + request timeout; json is forced true (the MCP surface is machine-only). */
   flags?: Partial<GlobalFlags>;
@@ -140,7 +131,6 @@ const outcomeInput = {
 
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
-  candidate: z.string().optional().describe('A parked candidate id to publish instead of a file'),
   searchId: z
     .string()
     .optional()
@@ -218,27 +208,6 @@ const editInput = {
         'supersedesPostId, questionsAnswered, tasksSupported, appliesTo',
     ),
 } satisfies Record<keyof EditArgs, z.ZodTypeAny>;
-
-// candidate is one tool over three actions; guard each action's arg set against
-// its core. add -> CandidateAddArgs, drop -> runCandidateDrop's params, list none.
-const candidateAddInput = {
-  file: z.string().optional().describe('add: path to the Markdown draft to park'),
-  searchId: z
-    .string()
-    .optional()
-    .describe('add: the searchId whose unmet demand this draft answers'),
-  question: z.string().optional().describe('add: the question this draft answers'),
-} satisfies Record<keyof CandidateAddArgs, z.ZodTypeAny>;
-
-const candidateDropInput = {
-  id: z.string().optional().describe('drop: the candidate id to discard'),
-} satisfies Record<keyof Parameters<typeof runCandidateDrop>[0], z.ZodTypeAny>;
-
-const candidateInput = {
-  action: z.enum(['add', 'list', 'drop']).describe('add | list | drop'),
-  ...candidateAddInput,
-  ...candidateDropInput,
-};
 
 // The wallet cores take no args beyond the action discriminator.
 //
@@ -440,7 +409,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Publish a piece',
       description:
-        'Publish a Markdown file (or a parked candidate) as a paid or free piece with an optional ' +
+        'Publish a Markdown file as a paid or free piece with an optional ' +
         'answer card. Gated by a deterministic local scan and your publish.mode consent: in review ' +
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
         'price, findings, card, target) for you to show the user before re-calling with yes:true. A ' +
@@ -454,7 +423,6 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         runPublish(
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
-            ...(args.candidate !== undefined ? { candidate: args.candidate } : {}),
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),
@@ -526,48 +494,6 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
           deps.edit,
         ),
       ),
-  );
-
-  server.registerTool(
-    'tenjin_candidate',
-    {
-      title: 'Manage publish candidates',
-      description:
-        'Manage local publish candidates: parked Markdown drafts that never upload on their own. ' +
-        'action:add parks a file tied to a searchId; action:list shows pending candidates; ' +
-        'action:drop discards one. Nothing reaches the network until a later tenjin_publish, under ' +
-        'the same scan and consent gates.',
-      inputSchema: candidateInput,
-      annotations: { readOnlyHint: false, openWorldHint: false },
-    },
-    async (args) =>
-      runCore(`candidate.${args.action}`, (ctx) => {
-        if (args.action === 'add') {
-          if (args.file === undefined || args.searchId === undefined) {
-            throw new CliError('USAGE', 'candidate add needs both file and searchId.', {
-              fix: 'Pass file (a Markdown path) and searchId (from a prior search).',
-            });
-          }
-          return runCandidateAdd(
-            {
-              file: args.file,
-              searchId: args.searchId,
-              ...(args.question !== undefined ? { question: args.question } : {}),
-            },
-            ctx,
-            deps.candidate,
-          );
-        }
-        if (args.action === 'drop') {
-          if (args.id === undefined) {
-            throw new CliError('USAGE', 'candidate drop needs an id.', {
-              fix: 'Pass the id of a candidate from `candidate list`.',
-            });
-          }
-          return runCandidateDrop({ id: args.id }, ctx);
-        }
-        return runCandidateList(ctx, deps.candidate);
-      }),
   );
 
   server.registerTool(

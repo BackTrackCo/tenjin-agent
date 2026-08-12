@@ -408,7 +408,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
   it('no page calls the free tier read-only or says it cannot touch your wallet', () => {
     // The tier claim lib/permissions.ts refuses. "read-only" survives elsewhere
     // in both files as an honest description of ONE verb (`config get`,
-    // `candidate list`), so this pins the tier-level phrasings only.
+    // `wallet balance`), so this pins the tier-level phrasings only.
     for (const text of [README, PERMISSIONS_DOC]) {
       expect(text).not.toMatch(/\d+ read-only commands/i);
       expect(text).not.toMatch(/free,? read-only verbs/i);

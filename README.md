@@ -63,7 +63,7 @@ on Base for gas). Searching and free pieces cost nothing.
 | Command                                 | Purpose                                                                                                     |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `tenjin install`                        | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
-| `tenjin uninstall`                      | Remove everything install wrote; never the wallet, config, library, searches, or candidates                 |
+| `tenjin uninstall`                      | Remove everything install wrote; nothing under `~/.tenjin` is touched                                       |
 | `tenjin doctor`                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
 | `tenjin config [get\|set]`              | Spend policy, publish consent, and the hook toggles                                                         |
 | `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                                                         |
@@ -75,7 +75,6 @@ on Base for gas). Searching and free pieces cost nothing.
 | `tenjin outcome`                        | Report how a search ended; this is the signal the marketplace learns from                                   |
 | `tenjin publish [file]`                 | Publish Markdown with an optional answer card, gated by a local scan and your consent mode                  |
 | `tenjin edit <postId>`                  | Show one of your posts and its card, or merge-update it                                                     |
-| `tenjin candidate [add\|list\|drop]`    | Park, list, or discard local publish drafts                                                                 |
 | `tenjin fund [amountUsd]`               | Card-fund THIS wallet via Coinbase Onramp: prints and opens a checkout link, then waits for the USDC        |
 | `tenjin send <amount> usdc <to>`        | **Escape hatch:** move USDC on Base out of the agent wallet                                                 |
 | `tenjin mcp`                            | Local stdio MCP server over the same command cores                                                          |
@@ -148,8 +147,9 @@ checked before every removal — a skill whose frontmatter names something else,
 hook entry pointing at another tool's script, and a permission rule we did not
 write are all left alone.
 
-It never touches your **wallet**, **config**, **library**, **search history**, or
-**parked candidates**, and it prints that list every run. Safe to run twice, or on
+It never touches anything under `~/.tenjin` — your **wallet**, **config**,
+**library** and **search history**, plus anything an older version left in
+`~/.tenjin/candidates` — and it prints that list every run. Safe to run twice, or on
 a machine that never installed: it reports what it found and exits 0.
 
 ### `tenjin search <question>`
@@ -214,7 +214,6 @@ minutes. `pollStatus` in the envelope reports the outcome: `skipped`,
 
 | Flag              | Values                            | Default                | Effect                                                                 |
 | ----------------- | --------------------------------- | ---------------------- | ---------------------------------------------------------------------- |
-| `--candidate`     | candidate id                      | none                   | Publish a parked draft instead of a file; clears it                    |
 | `--search-id`     | uuid                              | none                   | The search this file answers; closes its loop, prefills its question   |
 | `--draft`         | —                                 | off                    | Save privately instead of publishing                                   |
 | `--price`         | decimal USD                       | `publish.defaultPrice` | Post price                                                             |
@@ -256,17 +255,15 @@ so an omitted field is kept. It takes every card flag `publish` takes
 guard (the API offers no `If-Match`), so a web-panel edit landing in between can be
 overwritten.
 
-### `tenjin candidate add <file>`, `tenjin wallet create`, `tenjin send`
+### `tenjin wallet create`, `tenjin send`
 
-| Flag          | Values | Default  | Effect                                                   | Command         |
-| ------------- | ------ | -------- | -------------------------------------------------------- | --------------- |
-| `--search-id` | uuid   | required | The search whose unmet demand this draft answers         | `candidate add` |
-| `--question`  | text   | none     | The question the draft answers, ≤200 characters          | `candidate add` |
-| `--replace`   | —      | off      | Archive the existing wallet first, then create a new one | `wallet create` |
-| `--yes`       | —      | off      | Skip the confirm; required to send when not at a TTY     | `send`          |
+| Flag        | Values | Default | Effect                                                   | Command         |
+| ----------- | ------ | ------- | -------------------------------------------------------- | --------------- |
+| `--replace` | —      | off     | Archive the existing wallet first, then create a new one | `wallet create` |
+| `--yes`     | —      | off     | Skip the confirm; required to send when not at a TTY     | `send`          |
 
-`doctor`, `inspect`, `config`, `wallet show`, `wallet balance`, `candidate list`,
-`candidate drop` and `mcp` take only the global flags.
+`doctor`, `inspect`, `config`, `wallet show`, `wallet balance` and `mcp` take
+only the global flags.
 
 ## Configuration
 
@@ -309,7 +306,7 @@ budget and the 5s harness kill below.
   bought and attributed and a miss stays visible to the reminder below. A miss, a
   timeout, a dead network, or a response that fails validation exits silently.
 - **Stop** checks locally, with no network call, for a MISS from the last eight
-  hours that no outcome report, publish, or parked candidate has closed. A
+  hours that no outcome report or publish has closed. A
   deliberate `tenjin search` that went unanswered is named on its own line with
   its `searchId`. Searches the WebSearch hook ran are batched into one line, at
   most three, because nobody vetted those questions for the marketplace and only
@@ -376,12 +373,11 @@ Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
 Bash(tenjin wallet balance:*)
 Bash(tenjin config get:*)
-Bash(tenjin candidate list:*)
 ```
 
 Three tiers:
 
-- **The nine free verbs above** cannot spend and cannot move your keys; `doctor`
+- **The eight free verbs above** cannot spend and cannot move your keys; `doctor`
   decrypts locally to check your wallet still opens.
 - **`Bash(tenjin buy:*)`** is a separate opt-in that, on the default config,
   authorizes unattended spending up to your wallet balance.
@@ -416,7 +412,7 @@ decision:
    still shows each command for approval"), "Ask me in chat first", and "Fully
    unattended" ("only hard blocks stop it").
 2. **Permissions.** "Let your agent search tenjin without permission popups? Adds
-   10 free commands to `~/.claude/settings.json`. None can spend USDC or move your
+   9 free commands to `~/.claude/settings.json`. None can spend USDC or move your
    keys; doctor may check your wallet still opens. Three send or store data
    (search, outcome, read). Full
    caveats: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md"
@@ -586,13 +582,11 @@ server the CLI ships (see [Local stdio MCP server](#local-stdio-mcp-server)).
 
 `tenjin mcp` runs a local MCP server over stdio backed by the same command cores
 as the CLI (`search`, `inspect`, `buy`, `outcome`, `publish`, `edit`,
-`candidate`, `wallet`, and `fund`), in-process, no shelling out. It exposes nine
-tools (`tenjin_search`, `tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`,
-`tenjin_publish`, `tenjin_edit`, `tenjin_candidate`, `tenjin_wallet`,
-`tenjin_fund`), each returning the machine JSON envelope as `structuredContent`
-with a short text summary. `tenjin_fund` only mints the checkout link and hands
-it back for the human to open and pay on Coinbase's page; it never opens a
-browser or blocks on the balance poll. The consent gates carry over exactly: the spend policy gates
+`wallet`, and `fund`), in-process, no shelling out. It exposes eight tools
+(`tenjin_search`, `tenjin_inspect`, `tenjin_buy`, `tenjin_outcome`,
+`tenjin_publish`, `tenjin_edit`, `tenjin_wallet`, `tenjin_fund`), each
+returning the machine JSON envelope as `structuredContent` with a short text
+summary. The consent gates carry over exactly: the spend policy gates
 `tenjin_buy`, `publish.mode` gates `tenjin_publish` and `tenjin_edit` (the client
 renders the `needs_confirmation` payload as its own confirm UI, then re-calls
 with `yes:true`), and a hard content block is never bypassable. The wallet stays

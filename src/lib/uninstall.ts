@@ -2,7 +2,7 @@ import { lstat, readFile, readdir, rm, rmdir, realpath } from 'node:fs/promises'
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
-import { claudeSettingsPath, FREE_VERB_RULES } from './harness-permissions';
+import { claudeSettingsPath, FREE_VERB_RULES, LEGACY_FREE_VERB_RULES } from './harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
 import { hooksDir } from './paths';
 import { resolveThroughLink } from './skill-writer';
@@ -25,11 +25,12 @@ import {
  * rules we wrote. Anything that merely sits at one of our paths belongs to
  * somebody else and is left alone.
  *
- * WHAT IS NEVER TOUCHED: the wallet, the config, the library receipts, the
- * search ledger, and parked candidates. Those are the operator's property and
- * their loss is unrecoverable (a wallet holds funds; a candidate is unpublished
- * work). `install` did not create them, so uninstall does not remove them, and
- * the command says so in its own output rather than leaving it to the docs.
+ * WHAT IS NEVER TOUCHED: anything under the data dir. The wallet, the config,
+ * the library receipts, the search ledger, and whatever an older version left
+ * in `candidates/` are all the operator's property, and their loss is
+ * unrecoverable (a wallet holds funds). `install` did not create them, so
+ * uninstall does not remove them, and the command says so in its own output
+ * rather than leaving it to the docs.
  *
  * SETTINGS.JSON IS EDITED IN ONE PASS. Hooks and permission rules live in the
  * same file, so removing them separately would mean two whole-file
@@ -66,13 +67,19 @@ export type SettingsSkipReason =
   | 'unexpected-shape'
   | 'changed-since-read';
 
-/** What uninstall deliberately leaves behind, named in the output every run. */
+/**
+ * What uninstall deliberately leaves behind, named in the output every run.
+ *
+ * Stated as ONE rule rather than an inventory: everything under the data dir is
+ * the operator's, so a list that has to be edited every time a file is added or
+ * retired is a list that will eventually be wrong. `candidates/` is named
+ * explicitly because it is the one directory nothing writes any more — an older
+ * version's parked drafts are still sitting there, and someone who wants them
+ * needs the path.
+ */
 export const KEPT_ITEMS: readonly string[] = [
-  'wallet (wallet.json and its OS passphrase entry)',
-  'config (config.json)',
-  'library receipts and purchased pieces',
-  'search history (searches.json)',
-  'parked candidates',
+  'everything under ~/.tenjin: your wallet, config, library, and search history',
+  'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
 ];
 
 /** The legacy pointer line `install` used to write into CLAUDE.md / AGENTS.md. */
@@ -187,7 +194,10 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
 
   const permissions = settings.permissions;
   if (isPlainObject(permissions) && Array.isArray(permissions.allow)) {
-    const ours = new Set<string>(FREE_VERB_RULES);
+    // What THIS version writes, plus what any prior version wrote. A rule we
+    // retired is still a rule we put there, and leaving it behind would strand a
+    // dead allow-line for a command that no longer exists.
+    const ours = new Set<string>([...FREE_VERB_RULES, ...LEGACY_FREE_VERB_RULES]);
     const kept = permissions.allow.filter((r) => !(typeof r === 'string' && ours.has(r)));
     if (kept.length !== permissions.allow.length) {
       for (const rule of permissions.allow) {

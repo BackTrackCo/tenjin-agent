@@ -3,7 +3,6 @@ import { formatUsdDisplay, isPaidPrice, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
-import { listCandidates } from '../lib/candidate-store';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -124,13 +123,12 @@ export async function runSearch(
     paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price) === true).length,
   });
 
-  // A parked-candidate nudge on stderr (not in the machine JSON), MISS only: a
-  // MISS is the moment to publish the answer you are about to derive, and stale
-  // drafts should not rot unseen. A HIT is not a publish moment, and hot search
-  // paths should not get advisory noise every call. One line, only when parked.
+  // One stderr line on a MISS (never in the machine JSON): a MISS is the moment
+  // to publish the answer you are about to derive. There is deliberately no
+  // second line about drafts waiting somewhere — a reminder that re-raises work
+  // nobody chose to come back to is the class this CLI stopped emitting.
   if (response.decision === 'MISS') {
     ctx.io.stderr.write(`${publishBackLine(response.searchId)}\n`);
-    await emitCandidateNudge(ctx);
   }
 
   // A MISS may carry up to 3 browse pointers from the broad corpus. They are
@@ -244,35 +242,23 @@ function publishBackHint(searchId: string): {
   searchId: string;
   reason: string;
   publish: string;
-  park: string;
+  decline: string;
 } {
   return {
     searchId,
     reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
     // Both arms carry the searchId, because both are commands to run verbatim and
     // a publish without it leaves this very loop open (see publish's --search-id).
+    // The second arm is DECLINE, not park: nothing is saved to come back to, and
+    // reporting the outcome is what closes the loop so it never raises again.
     publish: `tenjin publish <file.md> --json --search-id ${searchId}`,
-    park: `tenjin candidate add <file.md> --search-id ${searchId} --json`,
+    decline: `tenjin outcome --search-id ${searchId} --status regenerated --json`,
   };
 }
 
 /** The same hint as one stderr line for a human. */
 function publishBackLine(searchId: string): string {
-  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish <file.md> --search-id ${searchId}) or park it: tenjin candidate add <file.md> --search-id ${searchId}`;
-}
-
-const STALE_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** One stderr line naming parked candidates (and how many are stale >7d), so a
- *  search is a reminder to publish/tidy the local pen. Silent when none parked. */
-async function emitCandidateNudge(ctx: CommandContext): Promise<void> {
-  const records = await listCandidates(ctx.dataDir);
-  if (records.length === 0) return;
-  const now = Date.now();
-  const stale = records.filter((r) => now - Date.parse(r.meta.created) > STALE_MS).length;
-  ctx.io.stderr.write(
-    `${records.length} candidate(s) parked (${stale} stale >7d) - tenjin candidate list\n`,
-  );
+  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish <file.md> --search-id ${searchId}); if you will not, close the loop: tenjin outcome --search-id ${searchId} --status regenerated`;
 }
 
 function parseLimit(raw: string): number {
