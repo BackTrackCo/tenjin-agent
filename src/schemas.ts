@@ -50,6 +50,10 @@ export const ErrorCodeSchema = z.enum([
   // A send that reverted or produced no receipt AFTER the human approved it and
   // it was broadcast (exit 4), same post-decision class as PAYMENT_FAILED.
   'SEND_FAILED',
+  // `tenjin update`: the npm install it spawned exited nonzero or never started.
+  // Exit 1, not the post-decision class: nothing is half-written that the
+  // operator must reconcile, and the old build keeps running.
+  'UPDATE_FAILED',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 

@@ -73,7 +73,7 @@ describe('maybeNudgeUpdate', () => {
     expect(cap.stderr()).toContain(
       'tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)',
     );
-    expect(cap.stderr()).toContain('npm i -g tenjin-cli@alpha');
+    expect(cap.stderr()).toContain('Update: run tenjin update');
     // The command's own surface is untouched: nothing on stdout, ever.
     expect(cap.stdout()).toBe('');
   });
@@ -91,7 +91,7 @@ describe('maybeNudgeUpdate', () => {
       currentVersion: '1.0.0',
     });
     expect(cap.stderr()).toContain('tenjin-cli 1.1.0 is available (you have 1.0.0)');
-    expect(cap.stderr()).toContain('npm i -g tenjin-cli\n');
+    expect(cap.stderr()).toContain('Update: run tenjin update\n');
     expect(cap.stderr()).not.toContain('@alpha');
   });
 

@@ -79,9 +79,7 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     const nowMs = (deps.now ?? Date.now)();
     const current = deps.currentVersion ?? pkg.version;
     const path = updateCheckPath(deps.dir);
-    // A prerelease build follows the prerelease tag: telling an alpha user about a
-    // stable release they cannot get from `@alpha` would be noise, not news.
-    const tag = parseVersion(current)?.alpha !== null ? 'alpha' : 'latest';
+    const tag = channelTag(current);
 
     // Only this tag's entry answers this binary's question; the other channel's
     // is neither used nor disturbed.
@@ -89,7 +87,9 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     const entry = cached?.tags[tag];
     const fresh = entry !== undefined && nowMs - entry.checkedAtMs < CHECK_INTERVAL_MS;
 
-    const latest = fresh ? entry.latest : await fetchLatest(deps, tag);
+    const latest = fresh
+      ? entry.latest
+      : await fetchDistTag(tag, { fetchImpl: deps.fetchImpl, timeoutMs: FETCH_TIMEOUT_MS });
     if (latest === null) return; // asked and learned nothing: cache nothing either
 
     // Once a day means once a day, not once per FETCH: a fresh cache would
@@ -125,13 +125,12 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     }
     if (!due) return;
 
-    // `@alpha` only when the newer version IS a prerelease: on the stable channel
-    // a bare install is what gets you the version just named. isNewer already
-    // proved this parses.
-    const target = parseVersion(latest)?.alpha === null ? 'tenjin-cli' : 'tenjin-cli@alpha';
+    // Named as the command, not the npm invocation it wraps: `update` prints the
+    // right instructions itself for an install npm cannot replace (a source
+    // checkout, a pnpm/bun/yarn global), so this line is correct everywhere.
     emitNotice(
       deps.io,
-      `tenjin-cli ${latest} is available (you have ${current}). Update: npm i -g ${target}`,
+      `tenjin-cli ${latest} is available (you have ${current}). Update: run tenjin update`,
       { json: deps.json },
     );
   } catch {
@@ -141,17 +140,32 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
 }
 
 /**
+ * Which dist-tag this build follows. A prerelease build follows the prerelease
+ * tag: telling an alpha user about a stable release they cannot get from
+ * `@alpha` would be noise, not news. Shared with `tenjin update`, so the nudge
+ * and the command can never disagree about the channel.
+ */
+export function channelTag(version: string): 'alpha' | 'latest' {
+  return parseVersion(version)?.alpha !== null ? 'alpha' : 'latest';
+}
+
+/**
  * Ask the registry which version `tag` is on. Returns null for every failure
  * there is, INCLUDING a response that arrives too late — the AbortSignal is what
  * bounds the delay a finished command can suffer. Nothing is written here: a
  * failed check caches nothing, so the next command retries rather than going
- * quiet for 24h over one dropped packet.
+ * quiet for 24h over one dropped packet. The nudge passes its own short budget;
+ * `tenjin update` passes the run's request timeout, because there the fetch IS
+ * the command rather than a stowaway on someone else's exit path.
  */
-async function fetchLatest(deps: UpdateCheckDeps, tag: string): Promise<string | null> {
-  const doFetch = deps.fetchImpl ?? fetch;
+export async function fetchDistTag(
+  tag: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs: number },
+): Promise<string | null> {
+  const doFetch = opts.fetchImpl ?? fetch;
   let json: unknown;
   try {
-    const res = await doFetch(DIST_TAGS_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const res = await doFetch(DIST_TAGS_URL, { signal: AbortSignal.timeout(opts.timeoutMs) });
     if (!res.ok) return null;
     json = await res.json();
   } catch {
@@ -210,9 +224,11 @@ function parseVersion(raw: string): Version | null {
 /**
  * Is `candidate` newer than `current`? An unparseable version on EITHER side is
  * "not newer": the registry is untrusted input, and the failure mode of guessing
- * is nagging every single command with a line the user cannot act on.
+ * is nagging every single command with a line the user cannot act on. A true
+ * return therefore also certifies that BOTH sides parse, which is what lets
+ * `tenjin update` splice the candidate into an npm argv without re-validating.
  */
-function isNewer(candidate: string, current: string): boolean {
+export function isNewer(candidate: string, current: string): boolean {
   const a = parseVersion(candidate);
   const b = parseVersion(current);
   if (a === null || b === null) return false;

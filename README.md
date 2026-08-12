@@ -65,6 +65,7 @@ on Base for gas). Searching and free pieces cost nothing.
 | `tenjin install`                        | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
 | `tenjin uninstall`                      | Remove everything install wrote; nothing under `~/.tenjin` is touched                                       |
 | `tenjin doctor`                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
+| `tenjin update [--check]`               | Update the CLI to the newest version on its release channel; `--check` only reports                         |
 | `tenjin config [get\|set]`              | Spend policy, publish consent, and the hook toggles                                                         |
 | `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                                                         |
 | `tenjin search "<question>"`            | Ask for payable candidates or an honest MISS                                                                |
