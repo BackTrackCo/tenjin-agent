@@ -33,7 +33,7 @@ import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
-import { isSessionPresentable, readSessionFile } from '../lib/session-present';
+import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import type { PartialConfig } from '../lib/config';
@@ -639,9 +639,12 @@ const POSTURE: Record<DirState, string> = {
  * The delegated session key `tenjin read` presents to recover a piece this wallet
  * already owns (`tenjin session start --scope read` mints it). Never required and
  * never a fail — `read` works without one — so ABSENT is `ok`: the normal
- * posture, not a defect.
+ * posture, not a defect. So are the states that are ordinary decay rather than
+ * damage: an older CLI's file, a spent 24h expiry, a scope that does not cover
+ * reading. One command re-mints all of them, and a check that yellowed on them
+ * would be permanently yellow on any machine that ever minted a key.
  *
- * Everything else warns, and the states are kept apart on purpose. A 0600 file
+ * A genuine fault still warns, and the states are kept apart on purpose. A 0600 file
  * that is now group-readable, or one whose contents no longer parse, is a TAMPER
  * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
  * and collapses them to "no session", which is the right instruction for a caller
@@ -732,11 +735,41 @@ async function checkSession(
       data,
     );
   }
-  if (!isSessionPresentable(file, now(), 'read', origin)) {
+  // Expiry and scope are DESIGNED DECAY, not faults. A delegation lives 24h by
+  // construction, so warning on a spent one made every machine that ever ran
+  // `tenjin session start` permanently yellow for behaving exactly as intended —
+  // the same permanent-warning trap `outdated` above was already pulled out of.
+  // Both are re-minted by the one command named in the detail. An expiry that
+  // does not PARSE is a different thing and stays a warning: that is a malformed
+  // file, not a spent one.
+  if (!Number.isFinite(Date.parse(file.exp))) {
     return warn(
-      `Session key for ${file.address} is expired or out of scope (scope ${file.scope}, exp ${file.exp})`,
+      `Session key for ${file.address} carries an unparseable expiry (exp ${file.exp})`,
       data,
     );
+  }
+  if (!scopeSatisfies(file.scope, 'read')) {
+    return {
+      result: {
+        name: 'session',
+        status: 'ok',
+        required: false,
+        detail: `Session key has scope ${file.scope}, which does not cover reading; \`tenjin session start --scope read\` mints one that does`,
+        data,
+      },
+    };
+  }
+  if (!isSessionPresentable(file, now(), 'read', origin)) {
+    return {
+      result: {
+        name: 'session',
+        status: 'ok',
+        required: false,
+        detail:
+          'Session key expired (normal after 24h); mint one with `tenjin session start --scope read` when you want free re-reads of owned pieces',
+        data,
+      },
+    };
   }
   return {
     result: {

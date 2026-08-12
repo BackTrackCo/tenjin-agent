@@ -63,6 +63,7 @@ on Base for gas). Searching and free pieces cost nothing.
 | Command                                 | Purpose                                                                                                     |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `tenjin install`                        | Wire the harness skills, hooks and permissions, settle the setup decisions, then run doctor over the result |
+| `tenjin uninstall`                      | Remove everything install wrote; never the wallet, config, library, searches, or candidates                 |
 | `tenjin doctor`                         | Environment, API reachability, contract, skill-wiring, and wallet checks                                    |
 | `tenjin config [get\|set]`              | Spend policy, publish consent, and the hook toggles                                                         |
 | `tenjin wallet [create\|show\|balance]` | Local Base wallet; the key never leaves the machine                                                         |
@@ -131,13 +132,25 @@ value. That is why `--no-hooks` and `--search-hooks off` differ.
 | `--search-hooks`        | `auto\|remind\|off`       | ask, else `auto` | Register the hooks in this mode; persists `hooks.searchMode` |
 | `--no-hooks`            | —                         | hooks on         | Register no hooks this run; writes no config                 |
 | `--no-wallet`           | —                         | wallet on        | Create no wallet                                             |
-| `--no-claude-md`        | —                         | nudge on         | Write no CLAUDE.md nudge                                     |
 
-A default run settles all five: the allowlist, the hooks, the wallet, the nudge,
+A default run settles all four: the allowlist, the hooks, the wallet,
 and `publish.mode` (headless persists `auto`, the mode the interactive select
-recommends). The flags are the opt-outs. (`--allow-free-verbs` and `--claude-md` still
-parse as no-ops so older docs and scripts keep working; they are hidden from
-`--help`.)
+recommends). The flags are the opt-outs. (`--allow-free-verbs`, `--claude-md` and
+`--no-claude-md` still parse as no-ops so older docs and scripts keep working; they
+are hidden from `--help`.)
+
+### `tenjin uninstall`
+
+Removes exactly what `install` wrote and nothing else: the skills, the hook
+scripts, our hook entries and permission rules in `~/.claude/settings.json`, and
+the pointer line older versions left in `CLAUDE.md`/`AGENTS.md`. Ownership is
+checked before every removal — a skill whose frontmatter names something else, a
+hook entry pointing at another tool's script, and a permission rule we did not
+write are all left alone.
+
+It never touches your **wallet**, **config**, **library**, **search history**, or
+**parked candidates**, and it prints that list every run. Safe to run twice, or on
+a machine that never installed: it reports what it found and exits 0.
 
 ### `tenjin search <question>`
 
@@ -189,8 +202,10 @@ endpoint, so `buy <url>` can.
 | Flag              | Values                            | Default                | Effect                                                                 |
 | ----------------- | --------------------------------- | ---------------------- | ---------------------------------------------------------------------- |
 | `--candidate`     | candidate id                      | none                   | Publish a parked draft instead of a file; clears it                    |
+| `--search-id`     | uuid                              | none                   | The search this file answers; closes its loop, prefills its question   |
 | `--draft`         | —                                 | off                    | Save privately instead of publishing                                   |
 | `--price`         | decimal USD                       | `publish.defaultPrice` | Post price                                                             |
+| `--excerpt`       | text (≤500 chars)                 | derived from the body  | The public preview a non-buyer reads                                   |
 | `--mode`          | `review\|auto\|full-auto`         | `publish.mode`         | Consent mode for this run                                              |
 | `--yes`           | —                                 | off                    | Clear warning findings and the review confirm                          |
 | `--question`      | text                              | none                   | A question this piece answers, repeatable                              |
@@ -400,9 +415,9 @@ decision:
 A run with nobody to ask still produces a working install. Everything is on by
 default on both paths, each with an opt-out flag: the permission allowlist
 (`--no-allow-free-verbs`), the search hooks (`--no-hooks`, or `--search-hooks
-off` to make it durable), the one-line search nudge in `~/.claude/CLAUDE.md`
-(`--no-claude-md`), and the wallet (`--no-wallet`). Everything written is
-disclosed in the output with its undo.
+off` to make it durable), and the wallet (`--no-wallet`). Everything written is
+disclosed in the output with its undo, and `tenjin uninstall` reverses all of it
+in one command.
 
 The wallet is created headlessly too, because `buy` and publishing back after a
 MISS both need one and a walletless install stops at the first useful thing an
@@ -439,12 +454,10 @@ Where the three skills land:
 - **Nothing detected**: the installer falls back to `~/.agents/skills/`, so a
   harness installed later still finds the skills.
 
-Both harnesses get the same one-line pointer as global guidance: Codex in its
-AGENTS.md, Claude Code in `~/.claude/CLAUDE.md`. It carries one heuristic (public,
-durable, costly to reproduce, so search before regenerating), the disclosure that
-the generalized question text leaves the machine, and where the skills live. It is
-marked with an HTML comment, so a re-run refreshes a drifted copy in place and
-never duplicates it; deleting that line is the undo.
+`install` writes nothing into your `CLAUDE.md` or `AGENTS.md`. A harness loads
+every skill's frontmatter description at session start, so that is already the
+trigger surface, and a pointer line only duplicated it. Earlier versions did write
+one; an install that finds it removes it and says so.
 
 The three skills:
 

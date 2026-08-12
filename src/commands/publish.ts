@@ -5,12 +5,12 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
-import { markSearchResolved } from '../lib/search-store';
+import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
 import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
-import { sanitizeForTerminal } from '../lib/output';
+import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';
 import { trimSlash } from '../lib/url';
 import {
   deriveCard,
@@ -24,6 +24,7 @@ import {
 } from '../lib/card';
 import {
   publishPost,
+  EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
   type PublishInput,
   type PublishStatus,
@@ -57,12 +58,18 @@ export interface PublishArgs {
   file?: string;
   /** A parked candidate id to publish (its draft.md); mutually exclusive with <file>. */
   candidate?: string;
+  /** The search this publish answers; closes its open loop. Not with --candidate,
+   *  which carries its own searchId. */
+  searchId?: string;
   draft?: boolean;
   yes?: boolean;
   /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
   mode?: string;
   /** Top-level post price, decimal USD at the edge (O1). */
   price?: string;
+  /** The public preview text; overrides frontmatter `excerpt`. Absent, the server
+   *  derives one from the body's leading prose. */
+  excerpt?: string;
   question?: string[];
   task?: string[];
   scope?: string;
@@ -98,26 +105,48 @@ export async function runPublish(
   // typo like `--mode Review` must never be silently dropped onto a looser mode
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
+  validateSearchId(args);
 
   // The content comes from EITHER a <file> or a parked --candidate, never both,
   // never neither. A candidate resolves to its draft.md (and prefills its question).
   const { raw, candidate } = await resolveSource(args, ctx.dataDir);
+  // Read the named search ONCE, here: it prefills the card's question below, and
+  // whether it was found decides what the post-publish close reports. Local read,
+  // and a missing store reads as no entry rather than failing the publish.
+  const storedSearch =
+    args.searchId !== undefined
+      ? ((await loadSearches(ctx.dataDir)).find((s) => s.searchId === args.searchId) ?? null)
+      : null;
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
   const title = resolveTitle(frontmatter, body);
   const tags = resolveTags(frontmatter);
-  const excerpt = expectString(frontmatter, 'excerpt');
+  const excerpt = resolveExcerpt(args, frontmatter);
   const handle = expectString(frontmatter, 'handle');
   // A candidate's stored question prefills questionsAnswered, but only as a
   // fallback: an explicit --question OR a frontmatter questionsAnswered still wins.
+  // A `--search-id` publish gets the same prefill from the search's own question,
+  // which is the phrasing the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  if (
-    candidate?.meta.question !== undefined &&
-    cardFlags.question === undefined &&
-    frontmatter.questionsAnswered === undefined
-  ) {
-    cardFlags.question = [candidate.meta.question];
+  const wanted = candidate?.meta.question ?? storedSearch?.question;
+  const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
+  const roomForPrefill =
+    cardFlags.question === undefined && frontmatter.questionsAnswered === undefined;
+  if (prefillQuestion !== undefined && roomForPrefill) cardFlags.question = [prefillQuestion];
+  // A prefill that was WANTED, had room, and was dropped anyway is the one case a
+  // caller cannot infer: the card simply comes back without the question it asked
+  // for. Reported on both surfaces, because --json never sees the stderr line.
+  const prefill: PrefillOutcome =
+    wanted === undefined || !roomForPrefill
+      ? 'none'
+      : prefillQuestion !== undefined
+        ? 'applied'
+        : 'dropped-too-long';
+  if (prefill === 'dropped-too-long') {
+    ctx.io.stderr.write(
+      `The searched question is longer than ${CARD_QUESTION_MAX} characters, so it was not added to the answer card; pass --question to set a shorter one.\n`,
+    );
   }
   const card = deriveCard(frontmatter, cardFlags);
 
@@ -233,27 +262,70 @@ export async function runPublish(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
+  // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
+  // candidate and closes no loop on EITHER path: the draft is still the pending
+  // answer, and the later real publish is what resolves both.
+  const parksPrivately = status === 'draft';
+
   // ONLY on a successful publish is the candidate cleared from the pending store
   // (a refusal or a write failure left it parked, above). The clear is BEST-EFFORT:
   // the piece is already published, so a failing drop must NOT report the publish as
   // failed — that would invite a retry and double-publish. Keep ok:true, report
   // cleared:false with a warning, and let the human drop it manually.
   const candidateInfo =
-    candidate !== undefined ? await clearPublishedCandidate(ctx, candidate.id) : undefined;
-  // The strongest way to close a loop: the answer is on the marketplace. Only a
-  // candidate publish can name the search it answers, so a bare file publish
-  // leaves the loop open and the Stop hook keeps the reminder. Local bookkeeping,
-  // best-effort, never throws.
+    candidate === undefined
+      ? undefined
+      : parksPrivately
+        ? keepParkedCandidate(ctx, candidate.id)
+        : await clearPublishedCandidate(ctx, candidate.id);
+  // The strongest way to close a loop: the answer is on the marketplace. A
+  // candidate carries the search it answers; a file publish names it with
+  // `--search-id`, and without either the loop stays open and the Stop hook keeps
+  // the reminder. Local bookkeeping, best-effort, never throws.
+  let searchInfo: SearchReceipt | undefined;
   if (candidate !== undefined) {
-    await markSearchResolved(ctx.dataDir, candidate.meta.searchId, 'publish');
+    if (!parksPrivately) {
+      await markSearchResolved(ctx.dataDir, candidate.meta.searchId, 'publish');
+    }
+  } else if (args.searchId !== undefined) {
+    searchInfo = await closeNamedSearch(ctx, args.searchId, storedSearch, parksPrivately, prefill);
   }
-  return receipt(result, runtime.baseUrl, candidateInfo);
+  return receipt(result, runtime.baseUrl, candidateInfo, searchInfo);
 }
 
 interface CandidateReceipt {
   id: string;
   cleared: boolean;
   warning?: string;
+}
+
+/**
+ * What `--search-id` did, as a machine field. `--json` suppresses every stderr
+ * note below, so without this an agent that named a search had no way to learn
+ * whether its loop actually closed — the same silent-flag failure the draft note
+ * fixes for a human.
+ */
+interface SearchReceipt {
+  id: string;
+  closed: boolean;
+  prefill: PrefillOutcome;
+}
+
+/**
+ * What became of the searched question as a card entry. `none` covers both "no
+ * stored question" and "the draft named its own", which are the cases where
+ * nothing was expected; `dropped-too-long` is the one a caller has to be told.
+ */
+type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
+
+/**
+ * A draft leaves the candidate exactly where it was. The answer is still pending,
+ * and the pen is what keeps it visible; `cleared: false` with no `warning` is a
+ * deliberate hold, where a warning beside it would mean a clear that failed.
+ */
+function keepParkedCandidate(ctx: CommandContext, id: string): CandidateReceipt {
+  ctx.io.stderr.write(`Saved as a draft, so candidate ${id} stays parked.\n`);
+  return { id, cleared: false };
 }
 
 async function clearPublishedCandidate(ctx: CommandContext, id: string): Promise<CandidateReceipt> {
@@ -272,6 +344,70 @@ async function clearPublishedCandidate(ctx: CommandContext, id: string): Promise
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * `--search-id` at the edge: the same uuid shape `candidate add` enforces, and
+ * never alongside `--candidate`, which already carries the search it answers.
+ * Refusing the pair beats silently picking one of two ids.
+ */
+function validateSearchId(args: PublishArgs): void {
+  if (args.searchId === undefined) return;
+  if (args.candidate !== undefined) {
+    throw new CliError('USAGE', 'Pass EITHER --search-id or --candidate, not both.', {
+      fix: 'A candidate already names the search it answers; drop --search-id.',
+    });
+  }
+  if (!UUID_RE.test(args.searchId)) {
+    throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
+      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
+    });
+  }
+}
+
+/**
+ * Close the loop a `--search-id` file publish named, and say what happened in
+ * both registers: a stderr line for a human, the returned receipt for `--json`.
+ *
+ * Two outcomes close nothing, and neither is an error — the piece is already
+ * published, and bookkeeping never fails the write that ran. A `--draft` parks
+ * privately and answers nobody, and an unknown id (aged out of the local store,
+ * or from another machine) has no loop here to close.
+ *
+ * `closed: true` describes the LOOP, not this call: `markSearchResolved` keeps
+ * the first resolution, so a search an `outcome` already closed reports closed
+ * here too, which is what the caller is actually asking about. It reports the
+ * OUTCOME of the write rather than the intent to write, so a swallowed lock
+ * timeout comes back as `closed: false` and a stderr line instead of a receipt
+ * claiming a close that never landed.
+ */
+async function closeNamedSearch(
+  ctx: CommandContext,
+  searchId: string,
+  stored: StoredSearch | null,
+  parksPrivately: boolean,
+  prefill: PrefillOutcome,
+): Promise<SearchReceipt> {
+  const open = (reason: string): SearchReceipt => {
+    ctx.io.stderr.write(`${reason}\n`);
+    return { id: searchId, closed: false, prefill };
+  };
+  if (parksPrivately) return open(`Saved as a draft, so search ${searchId} stays open.`);
+  if (stored === null) {
+    return open(`Published, but search ${searchId} is not in the local store.`);
+  }
+  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish');
+  if (outcome === 'failed') {
+    return open(
+      `Published, but the local record for search ${searchId} could not be updated, so the open-loop reminder may repeat. Close it with \`tenjin outcome --search-id ${searchId} --status used\`.`,
+    );
+  }
+  // `not-found` here means the entry was evicted between the read above and this
+  // write: nothing was closed, so nothing claims to have been.
+  if (outcome === 'not-found') {
+    return open(`Published, but search ${searchId} is no longer in the local store.`);
+  }
+  return { id: searchId, closed: true, prefill };
 }
 
 /**
@@ -330,6 +466,7 @@ function receipt(
   result: Awaited<ReturnType<typeof publishPost>>,
   baseUrl: string,
   candidateInfo?: CandidateReceipt,
+  searchInfo?: SearchReceipt,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
@@ -347,6 +484,7 @@ function receipt(
         ? `Answer card not search-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
     ...(candidateInfo?.cleared === true ? [`Cleared candidate ${candidateInfo.id}.`] : []),
+    ...(searchInfo?.closed === true ? [`Closed the loop on search ${searchInfo.id}.`] : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -359,6 +497,7 @@ function receipt(
       missing,
       deskUrl,
       ...(candidateInfo !== undefined ? { candidate: candidateInfo } : {}),
+      ...(searchInfo !== undefined ? { search: searchInfo } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,
@@ -405,6 +544,49 @@ function resolveTitle(frontmatter: Frontmatter, body: string): string | undefine
   const headings = headingOutline(body);
   const h1 = headings.find((h) => h.level === 1) ?? headings[0];
   return h1?.text;
+}
+
+/** The server's per-item bound on `questionsAnswered` (mirrored by deriveCard). */
+const CARD_QUESTION_MAX = 200;
+
+/**
+ * A stored question as a card entry, or undefined when it cannot be one.
+ *
+ * Dropped rather than cut over the item bound: a search question may run to the
+ * server's 512, and a prefill that fails card validation would turn a publish
+ * that was fine into a usage error the caller never asked for. Truncating is
+ * worse still — half a question is a different question, and this text is what
+ * the next searcher matches against.
+ */
+function cardQuestion(raw: string): string | undefined {
+  const question = sanitizeWireText(raw);
+  return question.length > 0 && question.length <= CARD_QUESTION_MAX ? question : undefined;
+}
+
+/**
+ * The public preview text: `--excerpt` over frontmatter `excerpt`, or undefined
+ * to let the server derive one from the body's leading prose.
+ *
+ * The bound is checked HERE as well as in the request builder, because the
+ * builder runs after a wallet signature has been collected and this is the edge:
+ * a too-long excerpt should cost a message, not a signing prompt. Refused rather
+ * than truncated — a silently cut preview is a different preview, and the whole
+ * point of setting one is controlling exactly what a non-buyer reads. Sanitized
+ * before the bound for the same reason the builder is: the stripped text is what
+ * ships, so it is what the length has to describe.
+ */
+function resolveExcerpt(args: PublishArgs, frontmatter: Frontmatter): string | undefined {
+  const raw = args.excerpt ?? expectString(frontmatter, 'excerpt');
+  if (raw === undefined) return undefined;
+  const excerpt = sanitizeWireText(raw);
+  if (excerpt.length > EXCERPT_MAX_LENGTH) {
+    throw new CliError(
+      'USAGE',
+      `excerpt must be at most ${EXCERPT_MAX_LENGTH} characters (got ${excerpt.length}).`,
+      { fix: `Shorten it to ${EXCERPT_MAX_LENGTH} characters or fewer.` },
+    );
+  }
+  return excerpt;
 }
 
 function resolveTags(frontmatter: Frontmatter): string[] | undefined {

@@ -12,6 +12,7 @@ import {
   reply,
   testWalletProvider,
 } from '../lib/read-test-utils';
+import { loadSearches, recordSearch } from '../lib/search-store';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 
 let dir: string;
@@ -25,6 +26,7 @@ afterEach(async () => {
 const BASE = 'https://tenjin.blog';
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 const RESERVATION = 'rsv-test';
+const SEARCH_ID = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
 
 /** Spin up the server over an in-memory transport, hand back a connected client. */
 async function connect(opts: BuildMcpOptions): Promise<Client> {
@@ -222,6 +224,87 @@ describe('tenjin_publish consent', () => {
     expect(details.findings).toBeDefined();
     expect(details.card).toBeDefined();
     expect(details.target).toBeDefined();
+  });
+
+  // The two flags the tool ADVERTISES have to reach the core. The `satisfies`
+  // constraint on publishInput forces the schema to list them; it cannot force the
+  // handler to forward them, and both were silently dropped.
+  it('forwards searchId and excerpt through to the wire', async () => {
+    const file = join(dir, 'clean.md');
+    await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
+    await recordSearch(dir, {
+      searchId: SEARCH_ID,
+      at: new Date().toISOString(),
+      question: 'what the search asked',
+      decision: 'MISS',
+      candidates: [],
+    });
+
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_u: string | URL, init?: RequestInit) => {
+      body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      return new Response(
+        JSON.stringify({
+          id: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          slug: 's',
+          title: 'Caching notes',
+          status: 'published',
+          price: '100000',
+          url: `${BASE}/a/iris/s`,
+          tags: [],
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: {
+        publish: {
+          cwd: dir,
+          env: {},
+          fetchImpl,
+          provider: testWalletProvider(),
+          useSession: false,
+        },
+      },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_publish',
+      arguments: {
+        file,
+        mode: 'auto',
+        excerpt: 'a deliberate public preview',
+        searchId: SEARCH_ID,
+      },
+    });
+
+    expect(res.isError).toBeFalsy();
+    // The excerpt reached the POST body rather than being derived from the body.
+    expect(body?.excerpt).toBe('a deliberate public preview');
+    // And the searchId did its job: the loop is reported closed on the receipt.
+    const sc = res.structuredContent as { data: { search?: { id: string; closed: boolean } } };
+    expect(sc.data.search).toMatchObject({ id: SEARCH_ID, closed: true });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // The same edge check the CLI applies, over MCP: an agent-supplied id is not a
+  // trusted one, and it must fail before any wallet touch.
+  it('refuses a malformed searchId with USAGE, like the CLI', async () => {
+    const file = join(dir, 'clean.md');
+    await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { publish: { cwd: dir, env: {} } },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_publish',
+      arguments: { file, mode: 'auto', searchId: 'not-a-uuid' },
+    });
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as ErrorEnvelope).error.code).toBe('USAGE');
   });
 
   it('a block-severity scan finding hard-blocks even with yes:true', async () => {
