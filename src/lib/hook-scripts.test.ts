@@ -492,17 +492,20 @@ describe('Stop hook: open-loop collection', () => {
     const text = injected(run) ?? '';
     expect(text).toContain(`you searched '${OPEN_MISS.question}' and got a MISS`);
     expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
-    expect(text).toContain(`tenjin candidate add <file> --search-id ${OPEN_MISS.searchId}`);
+    // The second arm CLOSES the loop rather than saving the work for later.
+    expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
+    expect(text).not.toContain('candidate add');
     expect(JSON.parse(run.stdout)).toHaveProperty('hookSpecificOutput.hookEventName', 'Stop');
   });
 
   // The nag cannot tell a public finding from a private one, so it must not ask
   // for a bare publish: this line reaches a model's context at every turn end.
-  it('qualifies the publish arm and offers parking as the other', async () => {
+  it('qualifies the publish arm and offers closing the loop as the other', async () => {
     await seedSearches([OPEN_MISS]);
     const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
     expect(text).toContain('public, reusable, rights-clean finding');
-    expect(text).toContain('Otherwise park it');
+    expect(text).toContain('If you will not, close it');
+    expect(text).not.toContain('park');
     expect(text.split('\n')).toHaveLength(1);
   });
 
@@ -842,6 +845,8 @@ describe('Stop hook: the two kinds of open loop', () => {
     expect(text).toContain('a web query 2');
     expect(text).toContain('If any produced a durable public finding');
     expect(text).toContain('tenjin publish <file> --search-id <id>');
+    expect(text).toContain('tenjin outcome --search-id <id> --status regenerated');
+    expect(text).not.toContain('candidate add');
     expect(text).not.toContain('Open Tenjin loop');
   });
 

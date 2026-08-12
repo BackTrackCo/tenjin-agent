@@ -23,10 +23,14 @@ const StoredCandidateSchema = z.object({
 export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
 
 /**
- * What closed an open loop. A MISS the agent acted on ends in exactly one of
- * these three, and the Stop hook stays quiet once any of them is recorded:
- * `outcome` (the loop was reported), `publish` (the answer went back to the
- * marketplace), `candidate` (the draft was parked to publish later).
+ * What closed an open loop. The Stop hook stays quiet once any of these is
+ * recorded: `outcome` (the loop was reported) or `publish` (the answer went back
+ * to the marketplace).
+ *
+ * `candidate` is RETAINED but never written. It is what the removed candidate
+ * pen recorded, and an older `searches.json` still carries it; dropping the
+ * member would make those entries fail to parse and read as an empty store,
+ * which would resurrect loops their owner already closed.
  */
 export const SearchResolutionSchema = z.enum(['outcome', 'publish', 'candidate']);
 export type SearchResolution = z.infer<typeof SearchResolutionSchema>;

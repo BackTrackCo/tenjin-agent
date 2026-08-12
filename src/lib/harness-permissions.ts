@@ -19,9 +19,16 @@ import { writeFileAtomic } from './atomic-json';
  *    make it write `buy`, `publish`, `session start`, `send`, `config set`,
  *    `wallet create`, `mcp`, `install`, or a broad `Bash(tenjin:*)`. A CLI that
  *    could widen its own permission grant is exactly what this shape rules out.
- *  - ADDITIVE ONLY. Existing entries and every other key in the file are copied
- *    through verbatim, in their original order; missing rules are appended. A
- *    re-run adds nothing and reports what was already present.
+ *  - ADDITIVE, PLUS ONE RETRACTION THAT IS STILL OURS. Every other key in the
+ *    file, and every allow-rule we did not write, is copied through verbatim in
+ *    its original order; missing rules are appended. The single exception is
+ *    {@link LEGACY_FREE_VERB_RULES}: a rule an EARLIER version of this same
+ *    writer put there and this one no longer recommends. Leaving it would mean
+ *    a user who updates and re-runs `install` keeps a grant for a command that
+ *    no longer exists, which is bloat we created and only we can clear. It
+ *    widens nothing — the set is disjoint from what we write, a test pins that
+ *    — and every removal is reported like every addition. A re-run on a current
+ *    machine still changes nothing.
  *  - NEVER CLOBBERS. A settings file we cannot parse, or whose `permissions` /
  *    `permissions.allow` is not the shape we expect, is left untouched and
  *    reported as skipped. We do not "repair" someone's hand-edited config.
@@ -52,8 +59,29 @@ export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin wallet show:*)',
   'Bash(tenjin wallet balance:*)',
   'Bash(tenjin config get:*)',
-  'Bash(tenjin candidate list:*)',
 ];
+
+/**
+ * Rules a PRIOR version of this writer put in `permissions.allow` and this one
+ * no longer recommends. BOTH paths read it: `install` removes them on its next
+ * run, `uninstall` reclaims them as its own. NEITHER path ever writes one — the
+ * writable set is {@link FREE_VERB_RULES} and this list is disjoint from it, so
+ * a retired rule can only ever be deleted, never re-added. A test pins that
+ * disjointness, because the day the two overlap is the day install starts
+ * re-adding a grant for a command that does not exist.
+ *
+ * Why it has to exist at all: a rule dropped from FREE_VERB_RULES is otherwise
+ * invisible to every later version. The operator keeps an allow-line for a
+ * command that no longer exists, `install` walks past it because it is not in
+ * the set it writes, and `uninstall` walks past it because it is no longer
+ * "ours". It IS ours — we wrote it — and a user who updates and re-runs
+ * `install` should end up with exactly the current tier and nothing we left
+ * behind. Anything retired from the free tier belongs here.
+ *
+ * `Bash(tenjin candidate list:*)` is the first entry: the candidate pen was
+ * removed, and machines installed before that still carry its rule.
+ */
+export const LEGACY_FREE_VERB_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
 
 /**
  * Verb fragments that must never appear in {@link FREE_VERB_RULES}. Asserted by
@@ -71,8 +99,6 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
   'tenjin wallet create',
   'tenjin mcp',
   'tenjin install',
-  'tenjin candidate add',
-  'tenjin candidate drop',
   'Bash(tenjin:*)',
 ];
 
@@ -103,6 +129,12 @@ export interface PermissionsResult {
   path?: string;
   added: string[];
   alreadyPresent: string[];
+  /**
+   * Rules an EARLIER version of this writer wrote and this one retired, removed
+   * on this run. Almost always empty; non-empty exactly once, on the first
+   * install after an update that retired something.
+   */
+  removed: string[];
   skipped?: PermissionsSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
@@ -144,6 +176,7 @@ function skip(
     harness,
     ...(path !== undefined ? { path } : {}),
     added: [],
+    removed: [],
     alreadyPresent: [],
     skipped: reason,
     ...(warning !== undefined ? { warning } : {}),
@@ -176,14 +209,22 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
   const found = await inspectAllowlist(homeDir);
   if ('result' in found) return found.result;
   const { path, raw, settings, permissions, allow, added, alreadyPresent } = found;
-  if (added.length === 0) return { harness: 'claude', path, added: [], alreadyPresent };
+  // Rules an earlier version of this writer left behind. Swept on the same pass
+  // that appends, so one `tenjin install` after an update leaves a settings.json
+  // with exactly the current tier in it and no residue from the last one.
+  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  const removed = allow.filter((r): r is string => typeof r === 'string' && retired.has(r));
+  if (added.length === 0 && removed.length === 0) {
+    return { harness: 'claude', path, added: [], alreadyPresent, removed: [] };
+  }
 
   // Object spreads keep the original key order and land the rebuilt `permissions`
-  // in the slot it already occupied, so a diff of the file is the appended rules
-  // and nothing else.
+  // in the slot it already occupied, so a diff of the file is the appended rules,
+  // the retired ones dropped, and nothing else.
+  const kept = allow.filter((r) => !(typeof r === 'string' && retired.has(r)));
   const next = {
     ...settings,
-    permissions: { ...permissions, allow: [...allow, ...added] },
+    permissions: { ...permissions, allow: [...kept, ...added] },
   };
   // This is a whole-file read-modify-write, so a change landing between the read
   // and the rename would be erased in full, including keys that have nothing to do
@@ -201,7 +242,7 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
     );
   }
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness: 'claude', path, added, alreadyPresent };
+  return { harness: 'claude', path, added, alreadyPresent, removed };
 }
 
 /**
@@ -213,6 +254,13 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
  *
  * `pending` is null when the file cannot be understood; that is "unknown", never
  * "already allowed", and the caller must still ask.
+ *
+ * `satisfied` is returned ONLY when there is nothing to add AND nothing retired
+ * to sweep. A machine that already carries every current rule plus one an older
+ * version wrote is NOT satisfied: reporting it as such would short-circuit the
+ * writer and strand exactly the rule the sweep exists to clear. `pending` stays
+ * empty there, so the caller can tell "nothing to grant, but work to do" from
+ * "something to grant" and skip the consent prompt for a run that only removes.
  */
 export async function inspectFreeVerbRules(
   homeDir: string,
@@ -220,6 +268,8 @@ export async function inspectFreeVerbRules(
   const found = await inspectAllowlist(homeDir);
   if ('result' in found) return { pending: null };
   if (found.added.length > 0) return { pending: found.added };
+  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  if (found.allow.some((r) => typeof r === 'string' && retired.has(r))) return { pending: [] };
   return {
     pending: [],
     satisfied: {
@@ -227,6 +277,7 @@ export async function inspectFreeVerbRules(
       path: found.path,
       added: [],
       alreadyPresent: found.alreadyPresent,
+      removed: [],
     },
   };
 }

@@ -13,7 +13,7 @@ paste block and the three-tier summary.
 
 ## The free tier
 
-The free tier is nine rules for the `permissions.allow` array of Claude Code's
+The free tier is eight rules for the `permissions.allow` array of Claude Code's
 `~/.claude/settings.json`. `tenjin install` can write them for you; see
 [Getting the rules onto your machine](#getting-the-rules-onto-your-machine).
 
@@ -26,7 +26,6 @@ Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
 Bash(tenjin wallet balance:*)
 Bash(tenjin config get:*)
-Bash(tenjin candidate list:*)
 ```
 
 None of those can spend, and none can move your keys; `tenjin doctor` decrypts
@@ -48,7 +47,6 @@ needs the wallet.
 | `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                |
 | `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                          |
 | `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.              |
-| `Bash(tenjin candidate list:*)` | Lists local parked drafts. Candidates are local files; nothing uploads.                                                        |
 
 `tenjin doctor --json` emits the same per-verb notes under `permissions`, so an
 agent can read them without this page.
@@ -74,10 +72,10 @@ three. It cannot unlock a keystore and never consults the spend policy.
 
 ## Getting the rules onto your machine
 
-`tenjin install` writes the nine rules into `~/.claude/settings.json` for you. It
+`tenjin install` writes the eight rules into `~/.claude/settings.json` for you. It
 is one of the four setup decisions, and at a terminal it asks:
 
-> Let your agent search tenjin without permission popups? Adds 9 free commands to
+> Let your agent search tenjin without permission popups? Adds 8 free commands to
 > `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
 > check your wallet still opens. Three send or store data (search, outcome,
 > read). Full caveats:
@@ -184,16 +182,15 @@ which origin, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                                             | Why it stays a human decision                                                        |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `tenjin send`                                    | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
-| `tenjin publish`                                 | Puts your content on a public marketplace under your identity.                       |
-| `tenjin edit`                                    | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
-| `tenjin wallet create`                           | Creates the payment credential.                                                      |
-| `tenjin config set`                              | It can widen the agent's own spend policy.                                           |
-| `tenjin candidate add` / `tenjin candidate drop` | Writes or discards local drafts; `candidate list` is the read-only half.             |
-| `tenjin install`                                 | Writes into harness config and skills directories.                                   |
-| `tenjin mcp`                                     | It re-exposes every command core, so clearing it clears everything.                  |
+| Verb                   | Why it stays a human decision                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------ |
+| `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
+| `tenjin publish`       | Puts your content on a public marketplace under your identity.                       |
+| `tenjin edit`          | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
+| `tenjin wallet create` | Creates the payment credential.                                                      |
+| `tenjin config set`    | It can widen the agent's own spend policy.                                           |
+| `tenjin install`       | Writes into harness config and skills directories.                                   |
+| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                  |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
@@ -250,12 +247,12 @@ Both are denied, never wrongly allowed:
 ## Delegating to a subagent
 
 The free tier is the answer to "what may a read-only subagent run", with nothing
-subtracted. All nine are safe to hand over: `search`, `inspect`, `read`,
+subtracted. All eight are safe to hand over: `search`, `inspect`, `read`,
 `outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
-`candidate list`. None can spend and none can move your keys.
+None can spend and none can move your keys.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
-`publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
+`publish`, `edit`, `buy`, `send`,
 `session start`, `wallet create`, `config set`, `install`. In particular, do not
 delegate publishing what a subagent just derived: bring the finding back and
 publish it from the context that can ask the user.
@@ -271,9 +268,8 @@ That is a different permission surface: the harness gates tools there, and these
 Bash rules do not apply. If you follow the
 [MCP section](../README.md#local-stdio-mcp-server) as well, leave
 `mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and
-`mcp__tenjin__tenjin_wallet` gated, treat `mcp__tenjin__tenjin_candidate` as
-gated for its add/drop actions, and treat `mcp__tenjin__tenjin_buy` as the same
-opt-in decision as the `buy` line above.
+`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_buy` as the
+same opt-in decision as the `buy` line above.
 
 ## Not the same as `allowlistCreators`
 

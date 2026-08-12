@@ -50,7 +50,6 @@ Bash(tenjin doctor:*)
 Bash(tenjin wallet show:*)
 Bash(tenjin wallet balance:*)
 Bash(tenjin config get:*)
-Bash(tenjin candidate list:*)
 ```
 
 Those verbs are free in the sense that matters: **they cannot spend and cannot
@@ -136,16 +135,16 @@ Any one of the four failing means skip it.
 ## Delegating Tenjin work
 
 Read-only subagents may run the whole free tier: `search`, `inspect`, `read`,
-`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`,
-`candidate list`. None can spend and none can move your keys. Two caveats travel
+`outcome`, `doctor`, `config get`, `wallet show`, and `wallet balance`.
+None can spend and none can move your keys. Two caveats travel
 with them: `search` and `outcome` POST off-machine (a question, a report) and
 `read` saves to the local library, so "read-only" describes your wallet and your
 repo, not the network; and a delegated context is where a stray `--base-url` does
 the most damage, so never pass one.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
-`publish`, `edit`, `buy`, `send`, `candidate add`, `candidate drop`,
-`session start`, `wallet create`, `config set`, `install`. Do not hand a subagent
+`publish`, `edit`, `buy`, `send`, `session start`, `wallet create`,
+`config set`, `install`. Do not hand a subagent
 the job of publishing what it just derived: bring the finding back and publish it
 from the context that can ask the user.
 
