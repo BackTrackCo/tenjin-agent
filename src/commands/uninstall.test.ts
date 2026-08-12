@@ -128,7 +128,7 @@ describe('runUninstall — a fully installed machine', () => {
     expect(after.env).toEqual({ FOO: '1' });
   });
 
-  it('never touches the wallet, config, library, searches or candidates', async () => {
+  it('never touches anything under the data dir', async () => {
     await seedSettings();
     await seedHookScripts();
     const keep = {
@@ -150,7 +150,9 @@ describe('runUninstall — a fully installed machine', () => {
     expect(report.kept.length).toBeGreaterThan(0);
     expect(text).toContain('Kept (uninstall never touches these)');
     expect(text).toContain('wallet');
-    expect(text).toContain('drafts you parked');
+    // The pen is gone as a feature, but an older version's files are still the
+    // operator's, so the promise names that path explicitly.
+    expect(text).toContain('~/.tenjin/candidates');
   });
 });
 

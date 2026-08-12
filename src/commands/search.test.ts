@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
 import { latestSearch } from '../lib/search-store';
-import { createCandidate } from '../lib/candidate-store';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -334,29 +334,25 @@ describe('runSearch — the MISS stderr surface', () => {
     };
   }
 
-  async function park(created: string): Promise<void> {
-    await createCandidate(dir, {
-      draft: '# d\n',
-      searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      created,
-      sourceProject: dir,
-    });
-  }
+  // An older version's pen is still on disk, because uninstall and upgrade both
+  // leave operator data alone. Nothing reads it: a search neither counts it nor
+  // mentions it, which is the whole of the "leave it, stop reading it" decision.
+  it('ignores residual ~/.tenjin/candidates data left by an older version', async () => {
+    const pen = join(dir, 'candidates', '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    await mkdir(pen, { recursive: true });
+    await writeFile(join(pen, 'draft.md'), '# an old parked draft\n');
+    await writeFile(
+      join(pen, 'meta.json'),
+      JSON.stringify({ searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }),
+    );
 
-  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
-
-  // A search no longer says anything about drafts waiting somewhere. A reminder
-  // that re-raises work nobody chose to come back to is the repeat-nag class this
-  // CLI stopped emitting, so a full pen changes nothing about the output.
-  it('says nothing about parked drafts, however many are in the pen', async () => {
-    await park(daysAgo(1));
-    await park(daysAgo(8));
-    await park(daysAgo(30));
     const { fetch } = stub(miss);
     const { ctx, stderr } = ctxCapturingStderr();
     await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
     expect(stderr()).not.toContain('parked');
-    expect(stderr()).not.toContain('candidate list');
+    expect(stderr()).not.toContain('candidate');
+    // And it is still there afterwards: nothing cleans it up either.
+    expect(existsSync(join(pen, 'draft.md'))).toBe(true);
   });
 
   describe('publish-back on a fresh MISS', () => {

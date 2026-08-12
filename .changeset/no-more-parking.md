@@ -2,37 +2,30 @@
 'tenjin-cli': minor
 ---
 
-Stop the CLI recommending a holding pen nobody comes back to.
+Remove the candidate pen. Implements #133.
 
-A publish decision is made once. The skills stopped teaching parking in the same
-release as this change, and these are the CLI strings that were still saying the
-opposite at the same moment: an agent that read the skill ("never park") and then
-read the MISS output or the turn-end nag ("park it") got two shipped surfaces
-disagreeing on the exact decision the skill governs. They now agree, and both
-land together.
+A publish decision is made once. Parking a draft "for later" turned that into a
+backlog nobody returned to, and the reminder that would have resurfaced it is the
+repeat-nag class this CLI stopped emitting — so rather than warn about the pen for
+a release, it is gone now, in the same release as the skills that stopped teaching
+it.
 
-The Stop hook's open-loop reminder and the MISS `publishBack` hint (its JSON arm
-and its stderr twin) drop the park arm for a DECLINE arm: `tenjin outcome
---search-id <id> --status regenerated`. That is the honest close — nothing is
-saved to return to — and it is also what marks the search resolved, so the
-reminder never raises it again, which a parked draft never did. The
-`publishBack` object's `park` key becomes `decline`. `HOOK_SCRIPT_VERSION` goes
-to 12, so a `tenjin install` re-run refreshes the scripts.
+Removed: `tenjin candidate add`, `list`, and `drop`; the `tenjin publish
+--candidate` path; the local candidate store; the `tenjin_candidate` MCP tool;
+and the `Bash(tenjin candidate list:*)` line from the recommended free-verb
+allowlist, which is now eight rules rather than nine. A re-run of `tenjin install`
+does not remove an allowlist line an earlier version wrote, because install only
+ever appends — delete that line by hand if you want it gone.
 
-`tenjin search` no longer prints the "N candidate(s) parked (M stale >7d)" line
-on a MISS. A reminder that re-raises work nobody chose to come back to is the
-repeat-nag class this CLI stopped emitting, and it was firing on every MISS.
+The Stop hook's open-loop reminder and the MISS `publishBack` hint keep the shape
+they took when parking was deprecated: publish it back, or close the loop with
+`tenjin outcome --search-id <id> --status regenerated`. Nothing is saved to come
+back to, and the outcome report is what marks the search resolved so the reminder
+never raises it again.
 
-`tenjin candidate add` and `tenjin candidate drop` print a deprecation notice on
-stderr and keep working for one release; the notice names both real options
-(publish it, or close the loop). `candidate list` is deliberately quiet, because
-it is the surface an operator needs to see and empty a pen they already have, and
-publishing an existing candidate keeps working until removal. The notice is
-stderr-only, so a `--json` envelope is byte-identical to before. The removal
-itself — every candidate verb, the store, and each leftover mention — is tracked
-in issue #133 and ships next release; residual pen files on disk are operator
-property and will not be deleted.
-
-`tenjin uninstall`'s kept-items list drops the "parked candidates" phrasing for
-wording that does not imply an ongoing feature, while still promising the same
-thing: whatever you parked is still yours and uninstall will not touch it.
+**Anything already in `~/.tenjin/candidates/` is left exactly where it is.** It is
+your content, so nothing deletes it and `tenjin uninstall` will not either — but
+nothing reads it any more, so a draft you want is a file to open at
+`~/.tenjin/candidates/<id>/draft.md` and publish with `tenjin publish <file.md>`.
+The `candidate` resolution value stays parseable in the search ledger so an older
+`searches.json` still loads; nothing writes it now.

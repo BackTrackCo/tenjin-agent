@@ -93,7 +93,7 @@ export interface ExcludedVerb {
  *
  * Rules are PREFIX rules: `Bash(tenjin search:*)` clears commands that start with
  * `tenjin search` and nothing else. The narrow `wallet show` / `wallet balance` /
- * `config get` / `candidate list` forms are deliberate: a `Bash(tenjin wallet:*)`
+ * The `config get` form is deliberate: a `Bash(tenjin wallet:*)`
  * or `Bash(tenjin config:*)` rule would silently swallow `wallet create` and
  * `config set`, and `config set` can raise the spend caps.
  *
@@ -167,11 +167,6 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'Reads one effective config value. `config set` is excluded on purpose. ' +
       'Note `config get rpcUrl` returns your RPC URL, which commonly embeds a ' +
       'provider API key: no wallet secret, but a credential-adjacent read.',
-  },
-  {
-    rule: 'Bash(tenjin candidate list:*)',
-    command: 'tenjin candidate list',
-    note: 'Lists local parked drafts. Candidates are local files; nothing uploads.',
   },
 ];
 
@@ -261,10 +256,6 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
       'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy.',
   },
   {
-    command: 'tenjin candidate add / tenjin candidate drop',
-    reason: 'Writes or discards local drafts; `candidate list` is the read-only half.',
-  },
-  {
     command: 'tenjin install',
     reason: 'Writes into harness config and skills directories.',
   },
@@ -305,8 +296,8 @@ export const MCP_CAVEAT: readonly string[] = [
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
   '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
-  '`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_candidate` as gated',
-  'for its add/drop actions. `tenjin_buy` is the same opt-in decision as the buy line above.',
+  '`mcp__tenjin__tenjin_wallet` gated. `tenjin_buy` is the same opt-in decision as the',
+  'buy line above.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */

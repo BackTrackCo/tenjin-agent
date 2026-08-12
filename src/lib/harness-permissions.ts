@@ -52,7 +52,6 @@ export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin wallet show:*)',
   'Bash(tenjin wallet balance:*)',
   'Bash(tenjin config get:*)',
-  'Bash(tenjin candidate list:*)',
 ];
 
 /**
@@ -71,8 +70,6 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
   'tenjin wallet create',
   'tenjin mcp',
   'tenjin install',
-  'tenjin candidate add',
-  'tenjin candidate drop',
   'Bash(tenjin:*)',
 ];
 

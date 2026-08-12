@@ -68,7 +68,7 @@ const allowOf = (s: Record<string, unknown>): unknown[] =>
   (s.permissions as { allow: unknown[] }).allow;
 
 describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
-  it('is exactly the nine free-verb rules, in the README/doctor order', () => {
+  it('is exactly the eight free-verb rules, in the README/doctor order', () => {
     expect([...FREE_VERB_RULES]).toEqual([
       'Bash(tenjin search:*)',
       'Bash(tenjin inspect:*)',
@@ -78,7 +78,6 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
       'Bash(tenjin wallet show:*)',
       'Bash(tenjin wallet balance:*)',
       'Bash(tenjin config get:*)',
-      'Bash(tenjin candidate list:*)',
     ]);
   });
 

@@ -4,7 +4,6 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
-import { readCandidate, dropCandidate, type CandidateRecord } from '../lib/candidate-store';
 import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
 import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
@@ -41,7 +40,7 @@ import { describeWallet, resolveWalletProvider, type WalletProvider } from '../l
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin publish <file.md>` (or `--candidate <id>`): read the Markdown, parse
+ * `tenjin publish <file.md>`: read the Markdown, parse
  * frontmatter for post + answer-card fields, run the deterministic scan (every
  * mode), gate on the D38
  * consent cascade, then write via the session key (minted on first use) or the
@@ -54,12 +53,9 @@ import type { CommandContext, CommandResult } from '../context';
  */
 
 export interface PublishArgs {
-  /** The Markdown file to publish; mutually exclusive with --candidate. */
+  /** The Markdown file to publish. */
   file?: string;
-  /** A parked candidate id to publish (its draft.md); mutually exclusive with <file>. */
-  candidate?: string;
-  /** The search this publish answers; closes its open loop. Not with --candidate,
-   *  which carries its own searchId. */
+  /** The search this publish answers; closes its open loop. */
   searchId?: string;
   draft?: boolean;
   yes?: boolean;
@@ -107,9 +103,7 @@ export async function runPublish(
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
   validateSearchId(args);
 
-  // The content comes from EITHER a <file> or a parked --candidate, never both,
-  // never neither. A candidate resolves to its draft.md (and prefills its question).
-  const { raw, candidate } = await resolveSource(args, ctx.dataDir);
+  const raw = await readSource(args);
   // Read the named search ONCE, here: it prefills the card's question below, and
   // whether it was found decides what the post-publish close reports. Local read,
   // and a missing store reads as no entry rather than failing the publish.
@@ -124,12 +118,11 @@ export async function runPublish(
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
   const handle = expectString(frontmatter, 'handle');
-  // A candidate's stored question prefills questionsAnswered, but only as a
-  // fallback: an explicit --question OR a frontmatter questionsAnswered still wins.
-  // A `--search-id` publish gets the same prefill from the search's own question,
-  // which is the phrasing the next searcher will send.
+  // The named search's question prefills questionsAnswered, but only as a
+  // fallback: an explicit --question OR a frontmatter questionsAnswered still
+  // wins. That phrasing is what the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  const wanted = candidate?.meta.question ?? storedSearch?.question;
+  const wanted = storedSearch?.question;
   const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
   const roomForPrefill =
     cardFlags.question === undefined && frontmatter.questionsAnswered === undefined;
@@ -178,15 +171,9 @@ export async function runPublish(
   // read, best-effort): a draft quoting its own project's repo/org warns as a
   // private-by-default reference (open-questions publishing-safety check-set).
   // Markers derive from the DRAFT's project, not the shell's cwd (review r5): a
-  // file publish walks up from the file's own directory, and a parked candidate
-  // uses the source project recorded in its meta at park time — the pen lives
-  // under ~/.tenjin, so the process cwd is unrelated to the draft on both paths.
-  const markerRoot =
-    candidate !== undefined
-      ? candidate.meta.sourceProject
-      : args.file !== undefined
-        ? dirname(resolve(cwd, args.file))
-        : cwd;
+  // file publish walks up from the file's own directory, so the process cwd is
+  // unrelated to where the draft actually lives.
+  const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
   const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
   const findings = dedupeFindings([
     ...scan(raw, scanContext),
@@ -263,40 +250,15 @@ export async function runPublish(
   });
 
   // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
-  // candidate and closes no loop on EITHER path: the draft is still the pending
-  // answer, and the later real publish is what resolves both.
+  // loop: the draft is still the pending answer, and the later real publish is
+  // what resolves it.
   const parksPrivately = status === 'draft';
 
-  // ONLY on a successful publish is the candidate cleared from the pending store
-  // (a refusal or a write failure left it parked, above). The clear is BEST-EFFORT:
-  // the piece is already published, so a failing drop must NOT report the publish as
-  // failed — that would invite a retry and double-publish. Keep ok:true, report
-  // cleared:false with a warning, and let the human drop it manually.
-  const candidateInfo =
-    candidate === undefined
-      ? undefined
-      : parksPrivately
-        ? keepParkedCandidate(ctx, candidate.id)
-        : await clearPublishedCandidate(ctx, candidate.id);
-  // The strongest way to close a loop: the answer is on the marketplace. A
-  // candidate carries the search it answers; a file publish names it with
-  // `--search-id`, and without either the loop stays open and the Stop hook keeps
-  // the reminder. Local bookkeeping, best-effort, never throws.
   let searchInfo: SearchReceipt | undefined;
-  if (candidate !== undefined) {
-    if (!parksPrivately) {
-      await markSearchResolved(ctx.dataDir, candidate.meta.searchId, 'publish');
-    }
-  } else if (args.searchId !== undefined) {
+  if (args.searchId !== undefined) {
     searchInfo = await closeNamedSearch(ctx, args.searchId, storedSearch, parksPrivately, prefill);
   }
-  return receipt(result, runtime.baseUrl, candidateInfo, searchInfo);
-}
-
-interface CandidateReceipt {
-  id: string;
-  cleared: boolean;
-  warning?: string;
+  return receipt(result, runtime.baseUrl, searchInfo);
 }
 
 /**
@@ -319,45 +281,11 @@ interface SearchReceipt {
 type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
 
 /**
- * A draft leaves the candidate exactly where it was. The answer is still pending,
- * and the pen is what keeps it visible; `cleared: false` with no `warning` is a
- * deliberate hold, where a warning beside it would mean a clear that failed.
- */
-function keepParkedCandidate(ctx: CommandContext, id: string): CandidateReceipt {
-  ctx.io.stderr.write(`Saved as a draft, so candidate ${id} stays parked.\n`);
-  return { id, cleared: false };
-}
-
-async function clearPublishedCandidate(ctx: CommandContext, id: string): Promise<CandidateReceipt> {
-  try {
-    if (await dropCandidate(ctx.dataDir, id)) return { id, cleared: true };
-    // The dir was already gone (a concurrent drop): nothing to clear, not an error.
-    const warning = `Published, but candidate ${id} was already gone; nothing to clear.`;
-    ctx.io.stderr.write(`${warning}\n`);
-    return { id, cleared: false, warning };
-  } catch (err) {
-    const warning = `Published successfully, but could not clear candidate ${id}: ${errorMessage(err)}. Remove it with \`tenjin candidate drop ${id}\`.`;
-    ctx.io.stderr.write(`${warning}\n`);
-    return { id, cleared: false, warning };
-  }
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * `--search-id` at the edge: the same uuid shape `candidate add` enforces, and
- * never alongside `--candidate`, which already carries the search it answers.
- * Refusing the pair beats silently picking one of two ids.
+ * `--search-id` at the edge: a uuid, refused before any wallet touch so a typo
+ * costs a message rather than a signing prompt.
  */
 function validateSearchId(args: PublishArgs): void {
   if (args.searchId === undefined) return;
-  if (args.candidate !== undefined) {
-    throw new CliError('USAGE', 'Pass EITHER --search-id or --candidate, not both.', {
-      fix: 'A candidate already names the search it answers; drop --search-id.',
-    });
-  }
   if (!UUID_RE.test(args.searchId)) {
     throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
       fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
@@ -410,62 +338,19 @@ async function closeNamedSearch(
   return { id: searchId, closed: true, prefill };
 }
 
-/**
- * Resolve the publish source: a <file>, or a --candidate's draft.md, exclusively.
- * Both or neither is USAGE, and a malformed/unknown candidate id is USAGE before
- * any wallet touch — the whole point of parking it locally is to fail cheap here.
- */
-async function resolveSource(
-  args: PublishArgs,
-  dataDir: string,
-): Promise<{ raw: string; candidate?: CandidateRecord }> {
-  if (args.candidate !== undefined) {
-    if (args.file !== undefined) {
-      throw new CliError('USAGE', 'Pass EITHER a file or --candidate, not both.', {
-        fix: 'Publish a file with `tenjin publish post.md`, or a candidate with `--candidate <id>`.',
-      });
-    }
-    if (!UUID_RE.test(args.candidate)) {
-      throw new CliError('USAGE', `Invalid candidate id: ${JSON.stringify(args.candidate)}`, {
-        fix: 'Pass a candidate id from `tenjin candidate list`.',
-      });
-    }
-    // Read-then-act (read here, drop after a successful publish) is not atomic, but
-    // the candidate store is a single-user local dir; a concurrent drop between the
-    // two is accepted, and the post-success clear is best-effort anyway.
-    const record = await readCandidate(dataDir, args.candidate);
-    if (record === null) {
-      throw new CliError('USAGE', `Unknown candidate: ${JSON.stringify(args.candidate)}`, {
-        fix: 'List parked candidates with `tenjin candidate list`.',
-      });
-    }
-    return { raw: await readDraft(record), candidate: record };
-  }
+/** The Markdown to publish. A missing path is USAGE before any wallet touch. */
+async function readSource(args: PublishArgs): Promise<string> {
   if (args.file === undefined) {
     throw new CliError('USAGE', 'Nothing to publish.', {
-      fix: 'Pass a Markdown file (`tenjin publish post.md`) or `--candidate <id>`.',
+      fix: 'Pass a Markdown file, e.g. `tenjin publish post.md`.',
     });
   }
-  return { raw: await readMarkdown(args.file) };
-}
-
-/** Read a candidate's draft.md; a readable dir with an unreadable draft is a torn
- *  candidate (INTERNAL), not the caller's usage error. */
-async function readDraft(record: CandidateRecord): Promise<string> {
-  try {
-    return await readFile(record.draftPath, 'utf8');
-  } catch (err) {
-    throw new CliError('INTERNAL', `Candidate ${record.id} is missing its draft.`, {
-      fix: `Drop it with \`tenjin candidate drop ${record.id}\` and re-add the draft.`,
-      cause: err,
-    });
-  }
+  return readMarkdown(args.file);
 }
 
 function receipt(
   result: Awaited<ReturnType<typeof publishPost>>,
   baseUrl: string,
-  candidateInfo?: CandidateReceipt,
   searchInfo?: SearchReceipt,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
@@ -483,7 +368,6 @@ function receipt(
       : missing.length > 0
         ? `Answer card not search-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
-    ...(candidateInfo?.cleared === true ? [`Cleared candidate ${candidateInfo.id}.`] : []),
     ...(searchInfo?.closed === true ? [`Closed the loop on search ${searchInfo.id}.`] : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
@@ -496,7 +380,6 @@ function receipt(
       cacheEligible,
       missing,
       deskUrl,
-      ...(candidateInfo !== undefined ? { candidate: candidateInfo } : {}),
       ...(searchInfo !== undefined ? { search: searchInfo } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
