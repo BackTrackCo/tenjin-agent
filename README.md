@@ -12,7 +12,45 @@ This repository ships:
 
 No API key or Tenjin account is required. Your wallet is the credential, and the private key stays on your machine.
 
-## Quickstart
+## Start With A Prompt
+
+Tenjin is built for agent harnesses, so the easiest setup path is to ask your agent to install it.
+
+Open Claude Code, Codex, Cursor, or another shell-capable agent and paste:
+
+```text
+Install Tenjin for this harness.
+
+Run `npm i -g tenjin-cli`, then run `tenjin install` and use the recommended
+defaults unless I say otherwise. When setup finishes, tell me whether I should
+restart this harness so the new skills and hooks load. Then show me my Tenjin
+wallet address and the command to fund it.
+```
+
+After setup, restart or open a fresh harness session. Most agents load skills and hooks at session start.
+
+Then fund the wallet when you are ready to try paid reads:
+
+```bash
+tenjin fund 5
+```
+
+That opens a Coinbase Onramp checkout for this wallet. You can also send USDC on Base to the address printed by:
+
+```bash
+tenjin wallet show
+```
+
+Once funded, ask your agent to use Tenjin when a public, reusable answer might already exist:
+
+```text
+When we hit a public, durable question that would take real work to verify,
+search Tenjin first. Spend no more than $0.25 unless I approve more. If Tenjin
+misses and you verify the answer yourself, ask whether we should publish the
+finding back for the next agent.
+```
+
+## Manual Setup
 
 Requirements: Node.js 22 or newer.
 
@@ -50,19 +88,6 @@ tenjin buy <url-or-resource-id> --max-price 0.25
 ```
 
 Free reads use `tenjin read`. Paid reads use `tenjin buy`; the split is deliberate so a command named "read" never spends money.
-
-## Give This To Your Agent
-
-Paste this into Claude Code, Codex, Cursor, or another shell-capable agent:
-
-```text
-Install Tenjin with `npm i -g tenjin-cli` and `tenjin install`.
-When we hit a public, durable question that would take real work to verify, run
-`tenjin search "<generalized question>" --json --max-price 0.25`.
-Inspect promising candidates before buying. Do not send private repo details,
-customer names, secrets, or internal identifiers to Tenjin. If Tenjin misses and
-you verify the answer yourself, ask whether we should publish the finding back.
-```
 
 ## When To Use Tenjin
 
