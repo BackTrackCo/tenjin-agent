@@ -458,7 +458,7 @@ async function checkSkills(
         status: 'warn',
         required: false,
         detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read, so whether they are current is unknown`,
-        fix: 'Reinstall the CLI: `npm i -g tenjin-cli`, then `tenjin install`.',
+        fix: 'Reinstall the CLI: `tenjin update`, then `tenjin install`.',
         data,
       },
     };

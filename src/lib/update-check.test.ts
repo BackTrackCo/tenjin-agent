@@ -60,7 +60,7 @@ const NOW = 1_700_000_000_000;
 describe('maybeNudgeUpdate', () => {
   it('nudges toward the alpha tag when a prerelease build is behind', async () => {
     const cap = captureIo(true);
-    const reg = registry({ latest: '0.9.0', alpha: '0.1.0-alpha.7' });
+    const reg = registry({ latest: '0.1.0-alpha.5', alpha: '0.1.0-alpha.7' });
     await maybeNudgeUpdate({
       dir,
       io: cap.io,
@@ -76,6 +76,40 @@ describe('maybeNudgeUpdate', () => {
     expect(cap.stderr()).toContain('Update: run tenjin update');
     // The command's own surface is untouched: nothing on stdout, ever.
     expect(cap.stdout()).toBe('');
+  });
+
+  // Same resolution `tenjin update` uses, so the nudge can never stay quiet
+  // about a version the command would install. Live on npm from 2026-08-01:
+  // `alpha` froze at alpha.7 while alpha.8 through .11 shipped on `latest`.
+  it('nudges toward latest when the channel tag has fallen behind it', async () => {
+    const cap = captureIo(true);
+    const reg = registry({ alpha: '0.1.0-alpha.7', latest: '0.1.0-alpha.11' });
+    await maybeNudgeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => NOW,
+      fetchImpl: reg.fetchImpl,
+      currentVersion: '0.1.0-alpha.10',
+    });
+    expect(cap.stderr()).toContain('tenjin-cli 0.1.0-alpha.11 is available');
+  });
+
+  it('stays quiet for a version it cannot place on a release line', async () => {
+    const cap = captureIo(true);
+    const reg = registry({ alpha: '9.9.9', latest: '9.9.9' });
+    await maybeNudgeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => NOW,
+      fetchImpl: reg.fetchImpl,
+      currentVersion: '1.0.0-rc.1',
+    });
+    expect(cap.stderr()).toBe('');
+    expect(reg.calls()).toBe(0);
   });
 
   it('nudges toward the plain package on the stable channel', async () => {
@@ -366,7 +400,8 @@ describe('maybeNudgeUpdate', () => {
       async () => new Response('', { status: 503 }),
       async () => new Response('<html>', { status: 200 }),
       async () => new Response(JSON.stringify({ alpha: 7 }), { status: 200 }),
-      async () => new Response(JSON.stringify({ latest: '1.0.0' }), { status: 200 }), // no alpha tag
+      // Answered, but with nothing on either tag this build follows.
+      async () => new Response(JSON.stringify({ next: 'nonsense' }), { status: 200 }),
     ];
     for (const fetchImpl of failures) {
       const cap = captureIo(true);

@@ -80,6 +80,7 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     const current = deps.currentVersion ?? pkg.version;
     const path = updateCheckPath(deps.dir);
     const tag = channelTag(current);
+    if (tag === null) return; // a version this build cannot parse follows no channel
 
     // Only this tag's entry answers this binary's question; the other channel's
     // is neither used nor disturbed.
@@ -87,9 +88,10 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
     const entry = cached?.tags[tag];
     const fresh = entry !== undefined && nowMs - entry.checkedAtMs < CHECK_INTERVAL_MS;
 
-    const latest = fresh
-      ? entry.latest
-      : await fetchDistTag(tag, { fetchImpl: deps.fetchImpl, timeoutMs: FETCH_TIMEOUT_MS });
+    // Resolved through the same function `tenjin update` uses, so the nudge can
+    // never advertise a version the command would decline to install, nor stay
+    // quiet about one it would.
+    const latest = fresh ? entry.latest : await resolveLatest(current, deps);
     if (latest === null) return; // asked and learned nothing: cache nothing either
 
     // Once a day means once a day, not once per FETCH: a fresh cache would
@@ -140,28 +142,66 @@ export async function maybeNudgeUpdate(deps: UpdateCheckDeps): Promise<void> {
 }
 
 /**
- * Which dist-tag this build follows. A prerelease build follows the prerelease
- * tag: telling an alpha user about a stable release they cannot get from
- * `@alpha` would be noise, not news. Shared with `tenjin update`, so the nudge
- * and the command can never disagree about the channel.
+ * Which dist-tag this build follows, or null for a version string this package
+ * has no channel for. Null rather than a default, because every caller's right
+ * answer differs: the nudge goes quiet, and `tenjin update` refuses instead of
+ * silently reporting a foreign build "up to date" against a tag it never
+ * belonged to.
  */
-export function channelTag(version: string): 'alpha' | 'latest' {
-  return parseVersion(version)?.alpha !== null ? 'alpha' : 'latest';
+export function channelTag(version: string): 'alpha' | 'latest' | null {
+  const parsed = parseVersion(version);
+  if (parsed === null) return null;
+  // A prerelease build follows the prerelease tag: it is the one that carries
+  // prereleases at all when the release line has moved on past them.
+  return parsed.alpha !== null ? 'alpha' : 'latest';
 }
 
 /**
- * Ask the registry which version `tag` is on. Returns null for every failure
- * there is, INCLUDING a response that arrives too late — the AbortSignal is what
- * bounds the delay a finished command can suffer. Nothing is written here: a
- * failed check caches nothing, so the next command retries rather than going
- * quiet for 24h over one dropped packet. The nudge passes its own short budget;
- * `tenjin update` passes the run's request timeout, because there the fetch IS
- * the command rather than a stowaway on someone else's exit path.
+ * The newest version this build can move to, across BOTH the tag its channel
+ * names and `latest`.
+ *
+ * Deliberately not the channel tag alone. Which tag a publish lands on is a
+ * property of the release pipeline, not of this package's version numbers, and
+ * the two have already disagreed: `alpha` sat on 0.1.0-alpha.7 while
+ * 0.1.0-alpha.8 through .11 shipped on `latest`, so a channel-only lookup told
+ * every alpha user they were current while four newer builds sat on npm. Taking
+ * the newest of the two survives either layout without this command depending
+ * on the pipeline being fixed. `latest` never drags a stable build backwards:
+ * isNewer is the only comparison, and for a release build the two candidates
+ * are the same tag anyway.
+ *
+ * Null when the registry offers nothing parseable on either tag, which is a
+ * different fact from "the registry could not be reached" and is reported as one.
  */
-export async function fetchDistTag(
-  tag: string,
-  opts: { fetchImpl?: typeof fetch; timeoutMs: number },
-): Promise<string | null> {
+export function resolveTarget(current: string, tags: Record<string, string>): string | null {
+  const channel = channelTag(current);
+  if (channel === null) return null;
+  let best: string | null = null;
+  for (const name of new Set([channel, 'latest'])) {
+    const candidate = tags[name];
+    if (candidate === undefined || parseVersion(candidate) === null) continue;
+    if (best === null || isNewer(candidate, best)) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * Ask the registry for tenjin-cli's whole dist-tag map. Returns null for every
+ * failure there is, INCLUDING a response that arrives too late — the AbortSignal
+ * is what bounds the delay a finished command can suffer. Nothing is written
+ * here: a failed check caches nothing, so the next command retries rather than
+ * going quiet for 24h over one dropped packet. The nudge passes its own short
+ * budget; `tenjin update` passes the run's request timeout, because there the
+ * fetch IS the command rather than a stowaway on someone else's exit path.
+ *
+ * The whole map rather than one tag, so a caller can tell an unreachable
+ * registry (null) from one that answered without the tag it asked for (a map
+ * that lacks the key) — two failures with two different fixes.
+ */
+export async function fetchDistTags(opts: {
+  fetchImpl?: typeof fetch;
+  timeoutMs: number;
+}): Promise<Record<string, string> | null> {
   const doFetch = opts.fetchImpl ?? fetch;
   let json: unknown;
   try {
@@ -172,8 +212,13 @@ export async function fetchDistTag(
     return null;
   }
   const parsed = DistTagsSchema.safeParse(json);
-  if (!parsed.success) return null;
-  return parsed.data[tag] ?? null;
+  return parsed.success ? parsed.data : null;
+}
+
+/** The nudge's one-shot: fetch, then resolve. Null for either failure. */
+async function resolveLatest(current: string, deps: UpdateCheckDeps): Promise<string | null> {
+  const tags = await fetchDistTags({ fetchImpl: deps.fetchImpl, timeoutMs: FETCH_TIMEOUT_MS });
+  return tags === null ? null : resolveTarget(current, tags);
 }
 
 async function writeCache(path: string, cache: Cache): Promise<void> {

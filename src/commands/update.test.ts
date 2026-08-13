@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runUpdate, type UpdateDeps, type UpdateSpawn } from './update';
+import {
+  runUpdate,
+  resolveNpmCli,
+  spawnCapture,
+  type SpawnResult,
+  type UpdateDeps,
+  type UpdateSpawn,
+} from './update';
 import { CliError } from '../lib/errors';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -45,14 +52,13 @@ const forbiddenFetch: typeof fetch = async () => {
   throw new Error('this path must not reach the network');
 };
 
-/** Records every spawn; optionally emits output and picks the exit code. */
-function spawnRecorder(opts: { code?: number; output?: string; startError?: Error } = {}) {
-  const calls: { cmd: string; args: string[] }[] = [];
-  const impl: UpdateSpawn = async (cmd, args, onOutput) => {
-    calls.push({ cmd, args });
-    if (opts.startError !== undefined) throw opts.startError;
+/** Records every spawn; optionally emits output and picks the outcome. */
+function spawnRecorder(opts: { result?: SpawnResult; output?: string } = {}) {
+  const calls: { cmd: string; args: string[]; cwd: string; timeoutMs: number }[] = [];
+  const impl: UpdateSpawn = async (cmd, args, spawnOpts, onOutput) => {
+    calls.push({ cmd, args, ...spawnOpts });
     if (opts.output !== undefined) onOutput(opts.output);
-    return opts.code ?? 0;
+    return opts.result ?? { kind: 'exit', code: 0 };
   };
   return { impl, calls };
 }
@@ -61,12 +67,19 @@ const forbiddenSpawn: UpdateSpawn = async () => {
   throw new Error('this path must not spawn anything');
 };
 
-/** An installed-package tree: package.json with dist/ beside it and no src/. */
+/** A global npm tree: the dir above `node_modules` is a prefix, not a package. */
 async function installedTree(...prefix: string[]): Promise<string> {
   const root = join(dir, ...prefix, 'node_modules', 'tenjin-cli');
   await mkdir(join(root, 'dist'), { recursive: true });
   await writeFile(join(root, 'package.json'), '{"name":"tenjin-cli"}');
   return join(root, 'dist');
+}
+
+/** A project-local dependency: the dir above `node_modules` is a project root. */
+async function localTree(): Promise<string> {
+  const moduleDir = await installedTree('project');
+  await writeFile(join(dir, 'project', 'package.json'), '{"name":"someone-elses-app"}');
+  return moduleDir;
 }
 
 /** A source checkout: package.json with src/ beside it. */
@@ -80,8 +93,9 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
   return {
     moduleDir: await installedTree(),
     currentVersion: '0.1.0-alpha.6',
-    fetchImpl: registry({ latest: '0.9.0', alpha: '0.1.0-alpha.7' }).fetchImpl,
+    fetchImpl: registry({ latest: '0.1.0-alpha.5', alpha: '0.1.0-alpha.7' }).fetchImpl,
     spawnImpl: forbiddenSpawn,
+    npmCli: null,
     ...overrides,
   };
 }
@@ -100,8 +114,11 @@ describe('runUpdate', () => {
     const { ctx } = makeCtx();
     const spawned = spawnRecorder();
     const result = await runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl }));
-    expect(spawned.calls).toEqual([
-      { cmd: 'npm', args: ['install', '-g', 'tenjin-cli@0.1.0-alpha.7'] },
+    expect(spawned.calls[0]?.args).toEqual([
+      'install',
+      '-g',
+      '--ignore-scripts',
+      'tenjin-cli@0.1.0-alpha.7',
     ]);
     expect(result.data).toEqual({
       current: '0.1.0-alpha.6',
@@ -113,7 +130,45 @@ describe('runUpdate', () => {
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
   });
 
-  it('follows the stable channel from a release build', async () => {
+  // The live-registry regression: `alpha` sat on 0.1.0-alpha.7 from 2026-07-31
+  // while alpha.8 through .11 shipped on `latest`, so a channel-only lookup told
+  // every alpha user they were current. Both tags are consulted, newest wins.
+  it('follows latest when the channel tag has fallen behind it', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        currentVersion: '0.1.0-alpha.10',
+        fetchImpl: registry({
+          next: '0.1.0-alpha.1',
+          alpha: '0.1.0-alpha.7',
+          latest: '0.1.0-alpha.11',
+        }).fetchImpl,
+        spawnImpl: spawned.impl,
+      }),
+    );
+    expect(spawned.calls[0]?.args).toContain('tenjin-cli@0.1.0-alpha.11');
+    expect(result.data).toMatchObject({ latest: '0.1.0-alpha.11', updateAvailable: true });
+  });
+
+  it('moves an alpha build onto a newer stable release', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        fetchImpl: registry({ latest: '0.9.0', alpha: '0.1.0-alpha.7' }).fetchImpl,
+        spawnImpl: spawned.impl,
+      }),
+    );
+    expect(spawned.calls[0]?.args).toContain('tenjin-cli@0.9.0');
+    expect(result.data).toMatchObject({ latest: '0.9.0' });
+  });
+
+  it('never drags a stable build back onto an alpha', async () => {
     const { ctx } = makeCtx();
     const spawned = spawnRecorder();
     const result = await runUpdate(
@@ -125,7 +180,7 @@ describe('runUpdate', () => {
         spawnImpl: spawned.impl,
       }),
     );
-    expect(spawned.calls[0]?.args).toEqual(['install', '-g', 'tenjin-cli@1.1.0']);
+    expect(spawned.calls[0]?.args).toContain('tenjin-cli@1.1.0');
     expect(result.data).toMatchObject({ channel: 'latest', updated: true });
   });
 
@@ -153,18 +208,52 @@ describe('runUpdate', () => {
     expect(result.humanLines?.join(' ')).toContain('Run tenjin update');
   });
 
-  it('refuses a source checkout before touching the network', async () => {
+  // Every refusal is about writing, so the read-only question is answerable
+  // from a place the write would be refused.
+  it('--check answers inside a source checkout', async () => {
+    const { ctx } = makeCtx();
+    const result = await runUpdate(
+      { check: true },
+      ctx,
+      await deps({ moduleDir: await checkoutTree() }),
+    );
+    expect(result.data).toMatchObject({ latest: '0.1.0-alpha.7', updateAvailable: true });
+  });
+
+  it('refuses to install over a source checkout', async () => {
+    const { ctx } = makeCtx();
+    const err = await caught(async () =>
+      runUpdate({ check: false }, ctx, await deps({ moduleDir: await checkoutTree() })),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.exitCode).toBe(3);
+    expect(err.fix).toContain('git pull');
+  });
+
+  // npx never had a global to replace, and writing one would silently change
+  // nothing about what the next `npx tenjin` runs.
+  it('refuses an npx run rather than installing a global the user never had', async () => {
     const { ctx } = makeCtx();
     const err = await caught(async () =>
       runUpdate(
         { check: false },
         ctx,
-        await deps({ moduleDir: await checkoutTree(), fetchImpl: forbiddenFetch }),
+        await deps({ moduleDir: await installedTree('.npm', '_npx', 'a1b2c3') }),
       ),
     );
     expect(err.code).toBe('REFUSED');
-    expect(err.exitCode).toBe(3);
-    expect(err.fix).toContain('git pull');
+    expect(err.message).toContain('npx cache');
+    expect(err.fix).toContain('npm i -g tenjin-cli@0.1.0-alpha.7');
+  });
+
+  it('refuses a project-local dependency and points at the project', async () => {
+    const { ctx } = makeCtx();
+    const err = await caught(async () =>
+      runUpdate({ check: false }, ctx, await deps({ moduleDir: await localTree() })),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.message).toContain('project-local');
+    expect(err.fix).toBe('Update it where it is declared: npm i tenjin-cli@0.1.0-alpha.7');
   });
 
   it('refuses a pnpm-store install and pins the pnpm command in the fix', async () => {
@@ -189,6 +278,19 @@ describe('runUpdate', () => {
     expect(result.data).toMatchObject({ updateAvailable: false });
   });
 
+  it('refuses a version it cannot place on a release line', async () => {
+    const { ctx } = makeCtx();
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        ctx,
+        await deps({ currentVersion: '1.0.0-rc.1', fetchImpl: forbiddenFetch }),
+      ),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.message).toContain('1.0.0-rc.1');
+  });
+
   it('surfaces an unreachable registry as NETWORK_ERROR', async () => {
     const { ctx } = makeCtx();
     const failures: (typeof fetch)[] = [
@@ -196,7 +298,7 @@ describe('runUpdate', () => {
         throw new Error('ENOTFOUND registry.npmjs.org');
       },
       async () => new Response('', { status: 503 }),
-      async () => new Response(JSON.stringify({ latest: '1.0.0' }), { status: 200 }), // no alpha
+      async () => new Response('not json', { status: 200 }),
     ];
     for (const fetchImpl of failures) {
       const err = await caught(async () =>
@@ -206,9 +308,27 @@ describe('runUpdate', () => {
     }
   });
 
+  // A registry that answered is not a registry that could not be reached, and
+  // sending the user to check their network access would be a wrong diagnosis.
+  it('separates a tag that does not exist from a network failure', async () => {
+    const { ctx } = makeCtx();
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        ctx,
+        await deps({ fetchImpl: registry({ next: 'nonsense' }).fetchImpl }),
+      ),
+    );
+    expect(err.code).toBe('RESOURCE_NOT_FOUND');
+    expect(err.fix).not.toContain('registry.npmjs.org');
+  });
+
   it('turns a nonzero npm exit into UPDATE_FAILED carrying the output tail', async () => {
     const { ctx, stderr } = makeCtx();
-    const spawned = spawnRecorder({ code: 243, output: 'npm ERR! EACCES /usr/lib/node_modules' });
+    const spawned = spawnRecorder({
+      result: { kind: 'exit', code: 243 },
+      output: 'npm ERR! EACCES /usr/lib/node_modules',
+    });
     const err = await caught(async () =>
       runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl })),
     );
@@ -223,13 +343,48 @@ describe('runUpdate', () => {
 
   it('turns npm failing to start into UPDATE_FAILED with the manual command', async () => {
     const { ctx } = makeCtx();
-    const spawned = spawnRecorder({ startError: new Error('spawn npm ENOENT') });
+    const spawned = spawnRecorder({
+      result: { kind: 'start-failed', cause: new Error('spawn npm ENOENT') },
+    });
     const err = await caught(async () =>
       runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl })),
     );
     expect(err.code).toBe('UPDATE_FAILED');
     expect(err.message).toBe('Could not start npm');
     expect(err.fix).toContain('npm i -g');
+  });
+
+  it('turns a wedged npm into UPDATE_FAILED naming the budget it blew', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder({ result: { kind: 'timeout' }, output: 'npm WARN retrying' });
+    const err = await caught(async () =>
+      runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl })),
+    );
+    expect(err.code).toBe('UPDATE_FAILED');
+    expect(err.message).toBe('npm did not finish in 300s');
+    expect(err.details).toEqual({ output: 'npm WARN retrying' });
+    expect(spawned.calls[0]?.timeoutMs).toBe(300_000);
+  });
+
+  it('runs npm as a node child, from the home directory, never a shell', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, npmCli: '/n/lib/node_modules/npm/bin/npm-cli.js' }),
+    );
+    expect(spawned.calls[0]?.cmd).toBe(process.execPath);
+    expect(spawned.calls[0]?.args[0]).toBe('/n/lib/node_modules/npm/bin/npm-cli.js');
+    expect(spawned.calls[0]?.cwd).toBe(homedir());
+  });
+
+  it('falls back to the npm shim when npm-cli.js cannot be found', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    await runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl, npmCli: null }));
+    expect(spawned.calls[0]?.cmd).toBe('npm');
+    expect(spawned.calls[0]?.args[0]).toBe('install');
   });
 
   it('forwards npm chatter to stderr live at a TTY, but not under --json', async () => {
@@ -251,6 +406,19 @@ describe('runUpdate', () => {
     expect(json.stderr()).not.toContain('added 1 package');
   });
 
+  // npm relays publisher-controlled text (deprecation notices), so the escapes
+  // go but the line breaks that make the output readable stay.
+  it('strips terminal escapes from npm chatter without flattening it', async () => {
+    const human = makeCtx({}, true);
+    await runUpdate(
+      { check: false },
+      human.ctx,
+      await deps({ spawnImpl: spawnRecorder({ output: 'npm \x1b[2Kwarn\ndeprecated\n' }).impl }),
+    );
+    expect(human.stderr()).toContain('npm warn\ndeprecated\n');
+    expect(human.stderr()).not.toContain('\x1b');
+  });
+
   it('announces the completed write on stderr on every surface', async () => {
     // emitWriteNotice contract: a write to the operator's own files is announced
     // even to a piped or --json run, and stdout stays untouched.
@@ -258,5 +426,79 @@ describe('runUpdate', () => {
     await runUpdate({ check: false }, piped.ctx, await deps({ spawnImpl: spawnRecorder().impl }));
     expect(piped.stderr()).toContain('replaced the global tenjin-cli with 0.1.0-alpha.7');
     expect(piped.stdout()).toBe('');
+  });
+});
+
+// The default spawn path, against real children rather than an injected stub:
+// it is the one mechanism this command adds, and the platform bug it can carry
+// (a win32 `.cmd` that Node will not spawn without a shell) lives here.
+describe('spawnCapture', () => {
+  const budget = { cwd: homedir(), timeoutMs: 10_000 };
+
+  it('returns the child exit code', async () => {
+    const result = await spawnCapture(
+      process.execPath,
+      ['-e', 'process.exit(3)'],
+      budget,
+      () => {},
+    );
+    expect(result).toEqual({ kind: 'exit', code: 3 });
+  });
+
+  it('merges stdout and stderr into the output callback', async () => {
+    let seen = '';
+    const result = await spawnCapture(
+      process.execPath,
+      ['-e', 'process.stdout.write("out;");process.stderr.write("err;")'],
+      budget,
+      (chunk) => {
+        seen += chunk;
+      },
+    );
+    expect(result).toEqual({ kind: 'exit', code: 0 });
+    expect(seen).toContain('out;');
+    expect(seen).toContain('err;');
+  });
+
+  it('runs the child in the cwd it is given, not the caller"s', async () => {
+    let seen = '';
+    await spawnCapture(
+      process.execPath,
+      ['-e', 'process.stdout.write(process.cwd())'],
+      { ...budget, cwd: dir },
+      (chunk) => {
+        seen += chunk;
+      },
+    );
+    // macOS resolves the tmpdir through /private; compare on the leaf.
+    expect(seen.endsWith(dir.split('/').pop() ?? '')).toBe(true);
+  });
+
+  it('reports a binary that cannot be started rather than throwing', async () => {
+    const result = await spawnCapture('tenjin-no-such-binary-xyz', [], budget, () => {});
+    expect(result.kind).toBe('start-failed');
+  });
+
+  it('kills a child that outlives its budget and says so', async () => {
+    const result = await spawnCapture(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 30000)'],
+      { ...budget, timeoutMs: 250 },
+      () => {},
+    );
+    expect(result).toEqual({ kind: 'timeout' });
+  });
+});
+
+describe('resolveNpmCli', () => {
+  // npm ships inside the Node distribution, so the node running this test has
+  // one. If this ever returns null on a supported runner, the win32 spawn path
+  // is unreachable and the fallback is all that is left.
+  it('finds npm-cli.js beside the running node', () => {
+    expect(resolveNpmCli(process.execPath)).toMatch(/npm-cli\.js$/);
+  });
+
+  it('returns null when no npm ships beside the given binary', () => {
+    expect(resolveNpmCli(join(dir, 'nowhere', 'node'))).toBeNull();
   });
 });

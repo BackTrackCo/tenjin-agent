@@ -1354,7 +1354,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     const check = find(data.checks, 'skills');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('could not be read');
-    expect(check.fix).toContain('npm i -g tenjin-cli');
+    expect(check.fix).toContain('tenjin update');
   });
 
   // `install` writes through a symlinked directory, so a stale one is reportable
