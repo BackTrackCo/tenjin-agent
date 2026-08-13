@@ -37,6 +37,7 @@ import {
   FORBIDDEN_VERB_FRAGMENTS,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  LEGACY_FREE_VERB_RULES,
   permissionsSkipped,
   wireFreeVerbAllowlist,
 } from './harness-permissions';
@@ -67,10 +68,118 @@ async function seedSettings(value: unknown): Promise<void> {
 const allowOf = (s: Record<string, unknown>): unknown[] =>
   (s.permissions as { allow: unknown[] }).allow;
 
+// The upgrade path a real user takes: they installed an older tenjin, updated,
+// and re-ran `tenjin install`. Their settings.json must end up with exactly the
+// current tier and their own rules — no residue from the version they left.
+describe('wireFreeVerbAllowlist: sweeping what an older version wrote', () => {
+  it('leaves an alpha.10 settings.json with exactly the current rules plus the user’s own', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      settingsPath(),
+      JSON.stringify(
+        {
+          permissions: {
+            allow: [...FREE_VERB_RULES, 'Bash(tenjin candidate list:*)', 'Bash(git status:*)'],
+            deny: ['Bash(rm:*)'],
+          },
+          model: 'opus',
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await wireFreeVerbAllowlist(home);
+
+    expect(result.removed).toEqual(['Bash(tenjin candidate list:*)']);
+    expect(result.added).toEqual([]);
+    const after = JSON.parse(await readFile(settingsPath(), 'utf8')) as {
+      permissions: { allow: string[]; deny: string[] };
+      model: string;
+    };
+    expect(after.permissions.allow).toEqual([...FREE_VERB_RULES, 'Bash(git status:*)']);
+    // Everything that is not ours is untouched, keys and order included.
+    expect(after.permissions.deny).toEqual(['Bash(rm:*)']);
+    expect(after.model).toBe('opus');
+  });
+
+  // The half-upgraded case: rules to add AND a retired one to sweep, one pass.
+  it('appends missing rules and sweeps a retired one on the same run', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      settingsPath(),
+      JSON.stringify({
+        permissions: { allow: ['Bash(tenjin search:*)', 'Bash(tenjin candidate list:*)'] },
+      }),
+    );
+
+    const result = await wireFreeVerbAllowlist(home);
+
+    expect(result.removed).toEqual(['Bash(tenjin candidate list:*)']);
+    expect(result.added.length).toBe(FREE_VERB_RULES.length - 1);
+    const after = JSON.parse(await readFile(settingsPath(), 'utf8')) as {
+      permissions: { allow: string[] };
+    };
+    expect(after.permissions.allow.sort()).toEqual([...FREE_VERB_RULES].sort());
+  });
+
+  // The upgrade is a one-time event: the second run after it must be silent, or
+  // every later install reports a reclaim it did not perform.
+  it('is idempotent: the run after the sweep reports nothing and rewrites nothing', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      settingsPath(),
+      JSON.stringify({
+        permissions: { allow: [...FREE_VERB_RULES, 'Bash(tenjin candidate list:*)'] },
+      }),
+    );
+    const first = await wireFreeVerbAllowlist(home);
+    expect(first.removed).toEqual(['Bash(tenjin candidate list:*)']);
+    const afterFirst = await readFile(settingsPath(), 'utf8');
+
+    const second = await wireFreeVerbAllowlist(home);
+    expect(second.removed).toEqual([]);
+    expect(second.added).toEqual([]);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(afterFirst);
+    // And the probe agrees there is nothing left to do.
+    expect((await inspectFreeVerbRules(home)).satisfied).toBeDefined();
+  });
+
+  // A current machine re-running install must still be a no-op.
+  it('changes nothing when there is no residue', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      settingsPath(),
+      JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES] } }),
+    );
+    const before = await readFile(settingsPath(), 'utf8');
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.added).toEqual([]);
+    expect(result.removed).toEqual([]);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
+  });
+
+  // And the probe must not report "satisfied" while residue is still there, or
+  // install short-circuits before the sweep ever runs.
+  it('the probe reports work to do when only a retired rule remains', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      settingsPath(),
+      JSON.stringify({
+        permissions: { allow: [...FREE_VERB_RULES, 'Bash(tenjin candidate list:*)'] },
+      }),
+    );
+    const probe = await inspectFreeVerbRules(home);
+    expect(probe.pending).toEqual([]);
+    expect(probe.satisfied).toBeUndefined();
+  });
+});
+
 describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
   it('is exactly the nine free-verb rules, in the README/doctor order', () => {
     expect([...FREE_VERB_RULES]).toEqual([
       'Bash(tenjin search:*)',
+      'Bash(tenjin fund:*)',
       'Bash(tenjin inspect:*)',
       'Bash(tenjin read:*)',
       'Bash(tenjin outcome:*)',
@@ -78,8 +187,18 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
       'Bash(tenjin wallet show:*)',
       'Bash(tenjin wallet balance:*)',
       'Bash(tenjin config get:*)',
-      'Bash(tenjin candidate list:*)',
     ]);
+  });
+
+  // Both install and uninstall now DELETE these; neither may ever write one. The
+  // disjointness is what guarantees that: if the two sets overlapped, install
+  // would re-add a grant for a command that no longer exists on the same pass
+  // that is supposed to be clearing it.
+  it('never writes a retired rule: the legacy set is disjoint from the writable one', () => {
+    for (const rule of LEGACY_FREE_VERB_RULES) {
+      expect(FREE_VERB_RULES).not.toContain(rule);
+    }
+    expect(LEGACY_FREE_VERB_RULES).toContain('Bash(tenjin candidate list:*)');
   });
 
   it('matches the always-safe tier doctor prints, so the two never drift', () => {
@@ -375,6 +494,7 @@ describe('permissionsSkipped', () => {
       harness: 'claude',
       path: settingsPath(),
       added: [],
+      removed: [],
       alreadyPresent: [],
       skipped: 'declined',
       // Every skipped state names the command that changes it, so a machine

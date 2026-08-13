@@ -1,5 +1,5 @@
 // The local stdio MCP server. It exposes the SAME command cores the CLI runs
-// (search, inspect, buy, outcome, publish, candidate, wallet) to an MCP client,
+// (search, inspect, buy, outcome, publish, wallet) to an MCP client,
 // in-process — no shelling out and no second implementation of the consent gates.
 //
 // Each tool builds a fresh CommandContext, calls the core in a try/catch, and
@@ -20,7 +20,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../../package.json';
-import { CliError } from '../lib/errors';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { buildFailureEnvelope, buildSuccessEnvelope, normalizeError } from '../lib/output';
 import type { Io } from '../lib/output';
@@ -32,18 +31,12 @@ import { runOutcome, type OutcomeArgs, type OutcomeDeps } from '../commands/outc
 import { runPublish, type PublishArgs, type PublishDeps } from '../commands/publish';
 import { runEdit, type EditArgs, type EditDeps } from '../commands/edit';
 import {
-  runCandidateAdd,
-  runCandidateDrop,
-  runCandidateList,
-  type CandidateAddArgs,
-  type CandidateDeps,
-} from '../commands/candidate';
-import {
   runWalletBalance,
   runWalletCreate,
   runWalletShow,
   type WalletCreateOptions,
 } from '../commands/wallet';
+import { runFund, type FundOptions } from '../commands/fund';
 import type { ResolveWalletProviderOptions } from '../lib/wallet';
 
 /**
@@ -57,12 +50,12 @@ export interface McpCommandDeps {
   outcome?: OutcomeDeps;
   publish?: PublishDeps;
   edit?: EditDeps;
-  candidate?: CandidateDeps;
   wallet?: ResolveWalletProviderOptions & WalletCreateOptions;
+  fund?: FundOptions;
 }
 
 export interface BuildMcpOptions {
-  /** Data dir for wallet/library/candidate custody; defaults to TENJIN_DATA_DIR else ~/.tenjin. */
+  /** Data dir for wallet and library custody; defaults to TENJIN_DATA_DIR else ~/.tenjin. */
   dataDir?: string;
   /** Base URL + request timeout; json is forced true (the MCP surface is machine-only). */
   flags?: Partial<GlobalFlags>;
@@ -138,7 +131,12 @@ const outcomeInput = {
 
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
-  candidate: z.string().optional().describe('A parked candidate id to publish instead of a file'),
+  searchId: z
+    .string()
+    .optional()
+    .describe(
+      'The search this file answers; closes its open loop and prefills its question when the draft names none',
+    ),
   draft: z.boolean().optional().describe('Save as a private draft instead of publishing'),
   yes: z
     .boolean()
@@ -148,6 +146,12 @@ const publishInput = {
     ),
   mode: z.string().optional().describe('Consent mode for this run: review | auto | full-auto'),
   price: z.coerce.string().optional().describe('Post price in decimal USD, e.g. "0.10"'),
+  excerpt: z
+    .string()
+    .optional()
+    .describe(
+      'The public preview a non-buyer reads (max 500 chars); omit to let the server derive one from the body',
+    ),
   question: z.array(z.string()).optional().describe('Questions this piece answers'),
   task: z.array(z.string()).optional().describe('Tasks this piece supports'),
   scope: z.string().optional().describe('What the piece covers (card scope)'),
@@ -205,37 +209,35 @@ const editInput = {
     ),
 } satisfies Record<keyof EditArgs, z.ZodTypeAny>;
 
-// candidate is one tool over three actions; guard each action's arg set against
-// its core. add -> CandidateAddArgs, drop -> runCandidateDrop's params, list none.
-const candidateAddInput = {
-  file: z.string().optional().describe('add: path to the Markdown draft to park'),
-  searchId: z
-    .string()
-    .optional()
-    .describe('add: the searchId whose unmet demand this draft answers'),
-  question: z.string().optional().describe('add: the question this draft answers'),
-} satisfies Record<keyof CandidateAddArgs, z.ZodTypeAny>;
-
-const candidateDropInput = {
-  id: z.string().optional().describe('drop: the candidate id to discard'),
-} satisfies Record<keyof Parameters<typeof runCandidateDrop>[0], z.ZodTypeAny>;
-
-const candidateInput = {
-  action: z.enum(['add', 'list', 'drop']).describe('add | list | drop'),
-  ...candidateAddInput,
-  ...candidateDropInput,
-};
-
 // The wallet cores take no args beyond the action discriminator.
 //
 // `tenjin send` (the funds-out escape hatch, src/commands/send.ts) is
 // DELIBERATELY EXCLUDED from this toolset, as an action here and as a tool of
 // its own: the MCP surface stays narrower than the CLI (spec 10's narrow-toolset
 // rule; MCP agents discover and pay under policy, they never export a wallet or
-// move funds out of it). Do not add a send tool or action.
+// move funds out of it). Do not add a send tool or action. `fund` is different
+// in kind and IS a tool: minting moves nothing, the destination is pinned to
+// this wallet server-side, and the human gate (paying on pay.coinbase.com) is
+// enforced by Coinbase, not by a harness dialog.
 const walletInput = {
   action: z.enum(['show', 'balance', 'create']).describe('show | balance | create'),
 } satisfies Record<'action', z.ZodTypeAny>;
+
+// The tool takes ONLY the preset amount: the browser open, the balance poll,
+// and the test seams are CLI-side concerns (a stdio server may be headless and
+// a tool call must not block for minutes), pinned off at the call site.
+//
+// It also takes no `--base-url` equivalent, which is what makes this narrower
+// than a `Bash(tenjin fund:*)` allowlist rule and is why the Bash verb stays a
+// human decision (lib/permissions.ts NEVER_ALLOWLISTED): a prefix rule pins the
+// verb, not the flags, and a mint against an attacker-named host is a wallet
+// signature the operator did not intend to make.
+const fundInput = {
+  amountUsd: z
+    .string()
+    .optional()
+    .describe('optional USD preset for the checkout, e.g. "5" (Coinbase clamps to its own floor)'),
+} satisfies Record<'amountUsd', z.ZodTypeAny>;
 
 /**
  * Build the local Tenjin MCP server with every tool registered against the CLI
@@ -407,7 +409,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Publish a piece',
       description:
-        'Publish a Markdown file (or a parked candidate) as a paid or free piece with an optional ' +
+        'Publish a Markdown file as a paid or free piece with an optional ' +
         'answer card. Gated by a deterministic local scan and your publish.mode consent: in review ' +
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
         'price, findings, card, target) for you to show the user before re-calling with yes:true. A ' +
@@ -421,11 +423,12 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         runPublish(
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
-            ...(args.candidate !== undefined ? { candidate: args.candidate } : {}),
+            ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),
             ...(args.mode !== undefined ? { mode: args.mode } : {}),
             ...(args.price !== undefined ? { price: args.price } : {}),
+            ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
             ...(args.question !== undefined ? { question: args.question } : {}),
             ...(args.task !== undefined ? { task: args.task } : {}),
             ...(args.scope !== undefined ? { scope: args.scope } : {}),
@@ -494,48 +497,6 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
   );
 
   server.registerTool(
-    'tenjin_candidate',
-    {
-      title: 'Manage publish candidates',
-      description:
-        'Manage local publish candidates: parked Markdown drafts that never upload on their own. ' +
-        'action:add parks a file tied to a searchId; action:list shows pending candidates; ' +
-        'action:drop discards one. Nothing reaches the network until a later tenjin_publish, under ' +
-        'the same scan and consent gates.',
-      inputSchema: candidateInput,
-      annotations: { readOnlyHint: false, openWorldHint: false },
-    },
-    async (args) =>
-      runCore(`candidate.${args.action}`, (ctx) => {
-        if (args.action === 'add') {
-          if (args.file === undefined || args.searchId === undefined) {
-            throw new CliError('USAGE', 'candidate add needs both file and searchId.', {
-              fix: 'Pass file (a Markdown path) and searchId (from a prior search).',
-            });
-          }
-          return runCandidateAdd(
-            {
-              file: args.file,
-              searchId: args.searchId,
-              ...(args.question !== undefined ? { question: args.question } : {}),
-            },
-            ctx,
-            deps.candidate,
-          );
-        }
-        if (args.action === 'drop') {
-          if (args.id === undefined) {
-            throw new CliError('USAGE', 'candidate drop needs an id.', {
-              fix: 'Pass the id of a candidate from `candidate list`.',
-            });
-          }
-          return runCandidateDrop({ id: args.id }, ctx);
-        }
-        return runCandidateList(ctx, deps.candidate);
-      }),
-  );
-
-  server.registerTool(
     'tenjin_wallet',
     {
       title: 'Manage the local wallet',
@@ -553,6 +514,38 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         if (args.action === 'balance') return runWalletBalance(ctx, deps.wallet);
         return runWalletShow(ctx, deps.wallet);
       }),
+  );
+
+  server.registerTool(
+    'tenjin_fund',
+    {
+      title: 'Mint a card-funding checkout link',
+      description:
+        'Mint a Coinbase Onramp checkout link that card-funds THIS wallet (the server refuses any ' +
+        'other destination). Minting moves no money: funds move only when the HUMAN opens the link ' +
+        'and completes payment on pay.coinbase.com, so always hand the returned checkoutUrl to the ' +
+        'user and never treat minting as funding. The link is single-use, expires in ~5 minutes, ' +
+        'works only from this machine’s network, and completing it requires a Coinbase ' +
+        'account. Confirm arrival afterwards with tenjin_wallet action:balance.',
+      inputSchema: fundInput,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async (args) =>
+      runCore('fund', (ctx) =>
+        runFund(ctx, {
+          ...deps.fund,
+          ...(args.amountUsd !== undefined ? { amountUsd: args.amountUsd } : {}),
+          // Pinned LAST so no injected dep re-enables them on this surface: no
+          // browser open from a possibly-headless stdio server, no minutes-long
+          // poll inside a tool call. `runFund` also defaults both off when
+          // stdout is not a TTY, which it never is here (sinkIo) — these lines
+          // are the explicit belt to that braces, and a test asserts the two
+          // values actually reach `runFund` rather than inferring it from
+          // behaviour the TTY default would produce anyway.
+          open: false,
+          wait: false,
+        }),
+      ),
   );
 
   return server;

@@ -3,7 +3,6 @@ import { formatUsdDisplay, isPaidPrice, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
-import { listCandidates } from '../lib/candidate-store';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -42,6 +41,8 @@ export interface SearchArgs {
 
 export interface SearchDeps {
   fetchImpl?: typeof fetch;
+  /** Environment seam (TENJIN_SESSION_ID); defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runSearch(
@@ -58,6 +59,7 @@ export async function runSearch(
     input.appliesTo = parseAppliesTo(args.appliesTo);
   }
 
+  const sessionId = readSessionId(deps.env ?? process.env);
   const request = buildSearchRequest(input);
   const response = await postSearch(request, {
     baseUrl: settings.baseUrl,
@@ -104,6 +106,9 @@ export async function runSearch(
     // The Stop hook nags on the two differently, so the tag has to be written
     // here rather than inferred later from anything.
     source: 'cli',
+    // Usually absent; see readSessionId. An unstamped entry is raised in every
+    // session, which is the safe direction for a reminder.
+    ...(sessionId !== undefined ? { sessionId } : {}),
     candidates: candidates.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
@@ -119,13 +124,12 @@ export async function runSearch(
     paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price) === true).length,
   });
 
-  // A parked-candidate nudge on stderr (not in the machine JSON), MISS only: a
-  // MISS is the moment to publish the answer you are about to derive, and stale
-  // drafts should not rot unseen. A HIT is not a publish moment, and hot search
-  // paths should not get advisory noise every call. One line, only when parked.
+  // One stderr line on a MISS (never in the machine JSON): a MISS is the moment
+  // to publish the answer you are about to derive. There is deliberately no
+  // second line about drafts waiting somewhere — a reminder that re-raises work
+  // nobody chose to come back to is the class this CLI stopped emitting.
   if (response.decision === 'MISS') {
     ctx.io.stderr.write(`${publishBackLine(response.searchId)}\n`);
-    await emitCandidateNudge(ctx);
   }
 
   // A MISS may carry up to 3 browse pointers from the broad corpus. They are
@@ -210,38 +214,52 @@ export async function runSearch(
   return { data, humanLines };
 }
 
+/**
+ * The session to stamp this search with, so the Stop hook can tell one session's
+ * open loops from a sibling's, or undefined when nothing can say.
+ *
+ * Two sources, in precedence order. TENJIN_SESSION_ID is the explicit operator
+ * override and wins. CLAUDE_CODE_SESSION_ID is what Claude Code exports to Bash
+ * tool subprocesses, which is what a `tenjin search` runs as; its value is the
+ * same `session_id` the hook scripts are handed on stdin, so a CLI search and a
+ * WebSearch-hook search in one session stamp identically. It is verified against
+ * a live session rather than documented, hence the fallback rather than a
+ * requirement: on a harness that does not export it this stays undefined, and
+ * undefined is the safe answer — the hook raises an unstamped entry in every
+ * session rather than in none.
+ */
+function readSessionId(env: NodeJS.ProcessEnv): string | undefined {
+  return firstNonEmpty(env.TENJIN_SESSION_ID) ?? firstNonEmpty(env.CLAUDE_CODE_SESSION_ID);
+}
+
+function firstNonEmpty(raw: string | undefined): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 /** The publish-back hint, as machine fields rather than prose to re-parse. */
 function publishBackHint(searchId: string): {
   searchId: string;
   reason: string;
   publish: string;
-  park: string;
+  decline: string;
 } {
   return {
     searchId,
     reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
-    publish: 'tenjin publish <file.md> --json',
-    park: `tenjin candidate add <file.md> --search-id ${searchId} --json`,
+    // Both arms carry the searchId, because both are commands to run verbatim and
+    // a publish without it leaves this very loop open (see publish's --search-id).
+    // The second arm is DECLINE, not park: nothing is saved to come back to, and
+    // reporting the outcome is what closes the loop so it never raises again.
+    publish: `tenjin publish <file.md> --json --search-id ${searchId}`,
+    decline: `tenjin outcome --search-id ${searchId} --status regenerated --json`,
   };
 }
 
 /** The same hint as one stderr line for a human. */
 function publishBackLine(searchId: string): string {
-  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish) or park it: tenjin candidate add <file.md> --search-id ${searchId}`;
-}
-
-const STALE_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** One stderr line naming parked candidates (and how many are stale >7d), so a
- *  search is a reminder to publish/tidy the local pen. Silent when none parked. */
-async function emitCandidateNudge(ctx: CommandContext): Promise<void> {
-  const records = await listCandidates(ctx.dataDir);
-  if (records.length === 0) return;
-  const now = Date.now();
-  const stale = records.filter((r) => now - Date.parse(r.meta.created) > STALE_MS).length;
-  ctx.io.stderr.write(
-    `${records.length} candidate(s) parked (${stale} stale >7d) - tenjin candidate list\n`,
-  );
+  return `Nobody has published this yet - if you solve it, publish it back (tenjin publish <file.md> --search-id ${searchId}); if you will not, close the loop: tenjin outcome --search-id ${searchId} --status regenerated`;
 }
 
 function parseLimit(raw: string): number {

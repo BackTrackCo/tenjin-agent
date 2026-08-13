@@ -236,6 +236,31 @@ describe('the published docs do not drift from the allowlist constants', () => {
     return out;
   }
 
+  it('every spelled-out tier count in the prose matches the constant', () => {
+    // Round-3 finding on #130: a merge fixed the constants and left four prose
+    // sentences describing the old tier size. Pin the number word to the array.
+    const words = [
+      'zero',
+      'one',
+      'two',
+      'three',
+      'four',
+      'five',
+      'six',
+      'seven',
+      'eight',
+      'nine',
+      'ten',
+      'eleven',
+      'twelve',
+    ];
+    const count = words[ALWAYS_SAFE_ALLOWLIST.length]!;
+    expect(PERMISSIONS_DOC).toContain(`The free tier is ${count} rules`);
+    expect(PERMISSIONS_DOC).toContain(`writes the ${count} rules`);
+    expect(PERMISSIONS_DOC).toContain(`All ${count} are safe to hand over`);
+    expect(README).toContain(`The ${count} free verbs above`);
+  });
+
   it('the README pastes exactly the free tier, and never an opt-in line', () => {
     expect(fencedRules(README).sort()).toEqual(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule).sort());
   });
@@ -408,7 +433,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
   it('no page calls the free tier read-only or says it cannot touch your wallet', () => {
     // The tier claim lib/permissions.ts refuses. "read-only" survives elsewhere
     // in both files as an honest description of ONE verb (`config get`,
-    // `candidate list`), so this pins the tier-level phrasings only.
+    // `wallet balance`), so this pins the tier-level phrasings only.
     for (const text of [README, PERMISSIONS_DOC]) {
       expect(text).not.toMatch(/\d+ read-only commands/i);
       expect(text).not.toMatch(/free,? read-only verbs/i);
