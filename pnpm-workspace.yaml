@@ -19,13 +19,13 @@
 # @changesets/cli, dev-only). Drop once @changesets/cli's own floors clear
 # 4.3.1 and read-yaml-file's clears 3.15.1.
 #
-# nanoid: GHSA-2v37-7h3g-55p8 (floor 3.3.17) and GHSA-28wg-ghj8-5hjv (floor
-# 3.3.16), via tsup/vitest > postcss, dev-only. 3.3.17 clears both; it is the
-# advisory floor on purpose, not npm's `legacy` tag (3.3.18). Lower-bounded at
-# 3.0.0 so a 1.x/2.x consumer is never dragged across two majors, which is
-# where nanoid's CJS/ESM shape changed. Both advisories also name 4.x/5.x
-# (effective floor 5.1.16), deliberately outside this 3.x entry. Drop once
-# the lockfile resolves nanoid at 3.3.17+ without this entry.
+# nanoid: GHSA-2v37-7h3g-55p8 (floor widened 2026-08-07 from 3.3.17 to 3.3.18,
+# stranding the previous pin) and GHSA-28wg-ghj8-5hjv (floor 3.3.16), via
+# tsup/vitest > postcss, dev-only. 3.3.18 clears both. Lower-bounded at 3.0.0
+# so a 1.x/2.x consumer is never dragged across two majors, which is where
+# nanoid's CJS/ESM shape changed. Both advisories also name 4.x/5.x (effective
+# floor 5.1.16), deliberately outside this 3.x entry. Drop once the lockfile
+# resolves nanoid at 3.3.18+ without this entry.
 #
 # hono: GHSA-f23p-vx2j-j53r, GHSA-79qm-7rj5-m7r9, GHSA-54fx-42gc-7vw4 (via
 # @modelcontextprotocol/sdk, dev-only). Drop once the SDK's floor clears
@@ -49,7 +49,7 @@ overrides:
   'ip-address@>=10.0.0 <10.3.1': '10.3.1'
   'js-yaml@>=4.0.0 <4.3.1': '4.3.1'
   'js-yaml@>=3.0.0 <3.15.1': '3.15.1'
-  'nanoid@>=3.0.0 <3.3.17': '3.3.17'
+  'nanoid@>=3.0.0 <3.3.18': '3.3.18'
   'hono@>=3.8.0 <4.12.34': '4.12.34'
   'postcss@<8.5.23': '8.5.23'
   '@hono/node-server@<2.0.10': '2.0.10'
