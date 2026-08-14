@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPay } from './pay';
+import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
@@ -369,6 +370,68 @@ describe('runPay, bazaar lane', () => {
       runPay({ url: 'http://seller.example/api' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
+  });
+
+  it('verifies via a stored discover listing when the live lookup finds nothing', async () => {
+    await writeConfig();
+    // The live registry answers, but with an empty page: exactly the CDP shape,
+    // whose list filter is a no-op and whose search cannot match a URL.
+    stubRegistry(() =>
+      json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
+    );
+    await saveSweepListings(dir, [
+      { url: FOREIGN_URL, registry: REGISTRY, accepts: [LIVE_ACCEPT] as never },
+    ]);
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: true }),
+    ]);
+    const result = await runPay(
+      // Query strings ride the request, not the listed identity.
+      { url: `${FOREIGN_URL}?q=hello` },
+      makeCtx(),
+      { fetchImpl: fetch, provider: testWalletProvider(), authorizer: fakeAuthorizer('allow') },
+    );
+    const data = result.data as { paid: boolean; registry: string };
+    expect(data.paid).toBe(true);
+    expect(data.registry).toBe(REGISTRY);
+  });
+
+  it('an expired stored listing is not evidence', async () => {
+    await writeConfig();
+    stubRegistry(() =>
+      json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
+    );
+    await saveSweepListings(
+      dir,
+      [{ url: FOREIGN_URL, registry: REGISTRY, accepts: [LIVE_ACCEPT] as never }],
+      () => Date.now() - 25 * 60 * 60 * 1000,
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  it('a stored listing with a lower advertised price is REGISTRY_MISMATCH', async () => {
+    await writeConfig();
+    stubRegistry(() =>
+      json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
+    );
+    await saveSweepListings(dir, [
+      {
+        url: FOREIGN_URL,
+        registry: REGISTRY,
+        accepts: [{ ...LIVE_ACCEPT, amount: '50000' }] as never,
+      },
+    ]);
+    const fixture = buildPaymentRequired(); // live asks 100000
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
   });
 
   it('the toggle-off fix names the operator act, never the URL that failed', async () => {

@@ -1,8 +1,11 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { HTTPFacilitatorClient } from '@x402/core/http';
 import { withBazaar } from '@x402/extensions/bazaar';
 import type { DiscoveryResource } from '@x402/extensions/bazaar';
 import type { PaymentRequirements } from '@x402/core/types';
 import { getAddress } from 'viem';
+import { writeFileAtomic } from './atomic-json';
 
 /**
  * The x402 discovery registries: `discover` reads them, and the Bazaar pay lane
@@ -40,6 +43,8 @@ export interface RegistrySweep {
 
 /** One page is the sweep unit; a payTo filter narrows far below this. */
 const PAGE_LIMIT = 100;
+/** CDP's search endpoint rejects limits above 20 (verified live 2026-08-14). */
+const SEARCH_LIMIT = 20;
 
 function client(registry: string) {
   return withBazaar(new HTTPFacilitatorClient({ url: registry }));
@@ -88,7 +93,7 @@ export async function sweepRegistries(
         opts.query !== undefined
           ? (
               await withTimeout(
-                bazaar.search({ query: opts.query, limit: PAGE_LIMIT }),
+                bazaar.search({ query: opts.query, limit: SEARCH_LIMIT }),
                 opts.timeoutMs,
                 `search on ${registry}`,
               )
@@ -116,6 +121,85 @@ export async function sweepRegistries(
   return { resources, errors, skippedNonHttp };
 }
 
+// ---------------------------------------------------------------------------
+// The local listing store: what `discover` swept, kept as pay-time evidence.
+//
+// The live lookup below is honest but weak: CDP's Bazaar ignores the `payTo`
+// list filter and its search is semantic (a URL query matches nothing), both
+// verified live 2026-08-14, so "look this URL up at pay time" cannot be relied
+// on against the largest registry. What CAN be relied on is what a sweep
+// actually returned: `discover` persists its listings here (bounded, TTL'd),
+// and the pay lane treats a fresh stored listing as the registry's word. That
+// also matches the designed flow — discover, then pay what discovery surfaced.
+// ---------------------------------------------------------------------------
+
+const LISTING_STORE_FILE = 'bazaar-listings.json';
+/** A listing older than this is not pay-time evidence; re-run `discover`. */
+const LISTING_TTL_MS = 24 * 60 * 60 * 1000;
+/** Newest-first cap so the store cannot grow without bound. */
+const LISTING_STORE_CAP = 1000;
+
+export interface StoredListing {
+  url: string;
+  registry: string;
+  accepts: PaymentRequirements[];
+  fetchedAt: string;
+}
+
+interface ListingStore {
+  listings: StoredListing[];
+}
+
+function listingStorePath(dataDir: string): string {
+  return join(dataDir, LISTING_STORE_FILE);
+}
+
+async function loadListingStore(dataDir: string): Promise<ListingStore> {
+  try {
+    const raw = JSON.parse(await readFile(listingStorePath(dataDir), 'utf8')) as ListingStore;
+    return Array.isArray(raw.listings) ? raw : { listings: [] };
+  } catch {
+    return { listings: [] };
+  }
+}
+
+/** Persist a sweep's listings, newest first, deduplicated on (identity, registry). */
+export async function saveSweepListings(
+  dataDir: string,
+  resources: readonly RegistryResource[],
+  now: () => number = Date.now,
+): Promise<void> {
+  const store = await loadListingStore(dataDir);
+  const fetchedAt = new Date(now()).toISOString();
+  const fresh: StoredListing[] = resources.map((r) => ({
+    url: r.url,
+    registry: r.registry,
+    accepts: r.accepts,
+    fetchedAt,
+  }));
+  const seen = new Set(fresh.map((l) => `${l.registry} ${l.url}`));
+  const kept = store.listings.filter((l) => !seen.has(`${l.registry} ${l.url}`));
+  await writeFileAtomic(
+    listingStorePath(dataDir),
+    JSON.stringify({ listings: [...fresh, ...kept].slice(0, LISTING_STORE_CAP) }, null, 2),
+  );
+}
+
+/** Fresh stored listings for this resource identity, newest first. */
+async function storedListingsFor(
+  dataDir: string,
+  url: string,
+  now: () => number,
+): Promise<StoredListing[]> {
+  const store = await loadListingStore(dataDir);
+  return store.listings.filter(
+    (l) =>
+      sameResourceUrl(l.url, url) &&
+      now() - Date.parse(l.fetchedAt) < LISTING_TTL_MS &&
+      Number.isFinite(Date.parse(l.fetchedAt)),
+  );
+}
+
 export type RegistryVerification =
   | { outcome: 'verified'; registry: string }
   /** Listed somewhere, but no listing matches the live 402's terms. */
@@ -124,10 +208,24 @@ export type RegistryVerification =
   /** Every registry errored: the check could not run, which is never a pass. */
   | { outcome: 'unavailable'; errors: RegistryError[] };
 
-/** Trailing-slash tolerance only; anything else must match exactly. */
-function sameResourceUrl(a: string, b: string): boolean {
-  const trim = (u: string) => (u.endsWith('/') ? u.slice(0, -1) : u);
-  return trim(a) === trim(b);
+/**
+ * Resource identity is origin + path (trailing slash normalized): a registry
+ * lists the ENDPOINT, and the query string is the per-call request riding it
+ * (verified live: the Bazaar lists `/search`, callers pay `/search?query=...`).
+ * An unparseable listing matches nothing.
+ */
+function sameResourceUrl(listed: string, requested: string): boolean {
+  const identity = (u: string): string | null => {
+    try {
+      const parsed = new URL(u);
+      const path = parsed.pathname.endsWith('/') ? parsed.pathname.slice(0, -1) : parsed.pathname;
+      return `${parsed.origin}${path}`;
+    } catch {
+      return null;
+    }
+  };
+  const a = identity(listed);
+  return a !== null && a === identity(requested);
 }
 
 /**
@@ -144,9 +242,23 @@ export async function verifyAgainstRegistries(
   url: string,
   live: PaymentRequirements,
   timeoutMs: number,
+  opts: { dataDir?: string; now?: () => number } = {},
 ): Promise<RegistryVerification> {
   const errors: RegistryError[] = [];
   let mismatch: { registry: string; detail: string } | undefined;
+
+  // A fresh listing a `discover` sweep stored IS the registry's word for this
+  // resource; checking it first is also the only reliable path on registries
+  // whose live lookup cannot filter by URL or payTo (see the store note above).
+  if (opts.dataDir !== undefined) {
+    for (const listing of await storedListingsFor(opts.dataDir, url, opts.now ?? Date.now)) {
+      if (!registries.includes(listing.registry)) continue; // no longer configured
+      const detail = acceptsMismatch(listing.accepts, live);
+      if (detail === null) return { outcome: 'verified', registry: listing.registry };
+      mismatch ??= { registry: listing.registry, detail };
+    }
+  }
+
   for (const registry of registries) {
     try {
       const bazaar = client(registry).extensions.bazaar;

@@ -1,5 +1,5 @@
 import type { PaymentRequirements } from '@x402/core/types';
-import { sweepRegistries } from '../lib/bazaar';
+import { saveSweepListings, sweepRegistries } from '../lib/bazaar';
 import { formatUsdDisplay } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
@@ -33,6 +33,16 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
       ? { query: args.query.trim() }
       : {}),
   });
+
+  // The sweep doubles as pay-time evidence: `tenjin pay` verifies a foreign 402
+  // against these stored listings, because a live per-URL registry lookup is not
+  // reliable (see lib/bazaar). Best-effort: a store write failure loses cache,
+  // never the sweep output.
+  try {
+    await saveSweepListings(ctx.dataDir, sweep.resources);
+  } catch {
+    // nothing: the sweep result still stands on its own
+  }
 
   const resources = sweep.resources.map((r) => ({
     url: r.url,

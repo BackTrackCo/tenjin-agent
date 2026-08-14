@@ -117,7 +117,7 @@ export async function runPay(
   // an unverifiable deal must not reach a signer.
   let registry: string | undefined;
   if (lane === 'bazaar') {
-    registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout);
+    registry = await assertRegistryVerified(settings, url, requirement, ctx.flags.timeout, ctx);
   }
 
   const provider = resolveWalletProvider(
@@ -276,12 +276,14 @@ async function assertRegistryVerified(
   url: string,
   requirement: PaymentRequirements,
   timeoutMs: number,
+  ctx: CommandContext,
 ): Promise<string> {
   const verification = await verifyAgainstRegistries(
     settings.bazaarRegistries,
     url,
     requirement,
     timeoutMs,
+    { dataDir: ctx.dataDir },
   );
   switch (verification.outcome) {
     case 'verified':
@@ -296,8 +298,8 @@ async function assertRegistryVerified(
         },
       );
     case 'unlisted':
-      throw new CliError('USAGE', 'No configured registry lists this resource.', {
-        fix: 'The Bazaar lane pays publicly listed deals only. Find payable endpoints with `tenjin discover`.',
+      throw new CliError('USAGE', 'No configured registry is known to list this resource.', {
+        fix: 'The Bazaar lane pays publicly listed deals only, and pay-time lookup leans on the local `discover` cache: run `tenjin discover [query]` so a sweep can surface this endpoint, then re-run pay.',
       });
     case 'unavailable':
       throw new CliError(
