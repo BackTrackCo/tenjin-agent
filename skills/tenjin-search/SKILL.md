@@ -10,8 +10,10 @@ description: >-
   one line, version numbers included (a minimum version, a default, a flag, a
   status code): the gate is reproduction cost, not whether a version is named.
   Skip private-codebase questions, generic advice,
-  live prices or statuses, and implementing, reviewing, or debugging the thing
-  in front of you, however famous the gotcha behind it. Requires the tenjin CLI
+  live prices or statuses, and implementing, reviewing, or debugging your own
+  code, however famous the gotcha behind it. One carve-out: before empirically
+  probing a third-party library or platform's undocumented behavior, search
+  first; someone may have already run the probe. Requires the tenjin CLI
   (tenjin-cli on npm): with no CLI on the machine this skill cannot run, so use
   the hosted skill at https://tenjin.blog/skills.md instead.
 ---
