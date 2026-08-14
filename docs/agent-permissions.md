@@ -8,8 +8,8 @@ forbid working around a denial, so a denied `tenjin search` just stops.
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
 behind which verbs are on that list, which two are separate opt-ins, and which are
 never recommended at all, and it is where `tenjin install` and `tenjin doctor`
-send you. The [README](../README.md#auto-mode-permission-allowlist) carries the
-paste block and the three-tier summary.
+send you. The [README](../README.md#permissions) carries the paste block and the
+three-tier summary.
 
 ## The free tier
 
