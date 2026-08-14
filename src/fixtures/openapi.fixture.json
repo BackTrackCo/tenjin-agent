@@ -1351,7 +1351,8 @@
     "/api/agent/search": {
       "post": {
         "operationId": "agentSearch",
-        "summary": "Search paid resources for a task question",
+        "deprecated": true,
+        "summary": "DEPRECATED: POST /api/agent/search is an alias of POST /api/search (v2 envelope)",
         "description": "Match a natural-language question against author-attested answer cards (+ title/excerpt) and return up to `limit` lean candidates to shortlist, or MISS. Distinct from GET /api/articles: freshness, price, and applicability are HARD gates because the body is invisible before you pay. `calibration` reports the retrieval mode (`lexical-v1` or `hybrid-v1`), NOT a semantic confidence score. This is the breadth step of a two-step flow: search wide, then fetch a candidate `url` unpaid to inspect it for free, then buy the one you want. Unpaid, a PAID piece answers 402 with a `card` object (questionsAnswered, tasksSupported, appliesTo, scope, exclusions, temporalMode) beside the preview, present only when the card has public content, while a FREE piece answers 200 with the whole piece and no `card`. A maximal card is roughly 25kB, so inspect the 2 or 3 most promising candidates, not all of them. The response size is bounded per candidate RETURNED, so a within-caps page always comes back whole; only a pathological slug can cost a trailing candidate, and when that happens the response carries `truncated: true` and a larger `limit` is what recovers the tail. MISS omits `candidates` entirely; with a small early catalog, MISS is the correct answer (a wrong hit on a non-refundable buy is the failure that matters). MISS may carry a `browse` tail (≤3 broad-corpus neighbours), which are pointers to browse, never scored candidates. `estimatedTokens` is a rough word-count heuristic, never an entitlement or billing boundary. Privacy: the question is never logged and never stored by default. Send `X-Tenjin-Eval-Cohort: 1` (exact literal) to opt into storing the generalized question for 90 days. Attribution is OPTIONAL and never part of buying (a purchase needs zero extra headers): you MAY send `X-Tenjin-Client: <name>/<version>` to self-label your flow (self-reported segmentation, not trusted identity), and MAY send the returned `searchId` as `X-Tenjin-Search-Id` on the paid GET /api/read to link that purchase to this search (nulled with the telemetry at 90 days).",
         "security": [],
         "requestBody": {
@@ -1398,7 +1399,7 @@
         }
       }
     },
-    "/api/agent/searches/{id}/outcomes": {
+    "/api/searches/{id}/outcomes": {
       "parameters": [
         {
           "name": "id",
@@ -3953,7 +3954,7 @@
           "searchId": {
             "type": "string",
             "format": "uuid",
-            "description": "The correlation capability — post it to /api/agent/searches/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Search-Id on a later buy to link that purchase to this search (nulled with the telemetry at 90 days)."
+            "description": "The correlation capability — post it to /api/searches/{id}/outcomes. Buying needs no extra headers; OPTIONALLY send it as X-Tenjin-Search-Id on a later buy to link that purchase to this search (nulled with the telemetry at 90 days)."
           },
           "decision": {
             "type": "string",

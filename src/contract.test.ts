@@ -99,11 +99,67 @@ const READ_CARD_REQUIRED = [
 // CLI must see, because a browse pointer must never read as a scored candidate.
 const BROWSE_REQUIRED = ['creator', 'price', 'resourceId', 'title', 'url'];
 
+/**
+ * An operation the CLI calls, pinned with the retirement state the server
+ * advertises TODAY. Presence alone is a lagging signal: a path stays green until
+ * the server deletes it, and by then released CLIs are already taking 404s.
+ * `deprecated` is the server's own retirement notice and it lands a release
+ * ahead of the deletion, so recording it is what buys lead time.
+ */
+interface PinnedOp {
+  path: string;
+  method: 'get' | 'post' | 'put';
+  operationId: string;
+  /** The state live advertises now. A change in EITHER direction is drift. */
+  deprecated: boolean;
+  /** Named in the failure message, so a red run says where the callers go. */
+  migration: string;
+}
+
+const AGENT_OPS: PinnedOp[] = [
+  {
+    path: '/api/agent/search',
+    method: 'post',
+    operationId: 'agentSearch',
+    // Already announced: live serves this as an adapter onto POST /api/search
+    // for one release, then answers 410. `src/lib/agent-api.ts` and the hook
+    // `tenjin install` writes into a harness both still call it (#137).
+    deprecated: true,
+    migration:
+      'move the search client to POST /api/search with `view: "decision"` (SearchRequestV3 -> SearchResult, #137); the alias answers 410 after one release',
+  },
+  {
+    path: '/api/searches/{id}/outcomes',
+    method: 'post',
+    operationId: 'agentSearchOutcomes',
+    // tenjin#616 dropped the `/agent` prefix here. The prefixed spelling survives
+    // as an undocumented alias for one window, so pinning the documented path is
+    // what keeps the CLI on the surviving one.
+    deprecated: false,
+    migration: 'outcome reporting has no second path; `tenjin outcome` stops here',
+  },
+];
+
+function assertPinnedOp(doc: unknown, op: PinnedOp): void {
+  const label = `${op.method.toUpperCase()} ${op.path}`;
+  expect(
+    get(doc, 'paths', op.path, op.method, 'operationId'),
+    `${label} (${op.operationId}) is gone from the spec: ${op.migration}`,
+  ).toBe(op.operationId);
+  // Equality against the RECORDED state, not `.not.toBe(true)`: an already
+  // announced retirement stays green (it is recorded, and #137 tracks it) while
+  // a newly announced one fails here, one release before the path stops
+  // answering. Un-deprecating fails too, because the record must track reality.
+  expect(
+    get(doc, 'paths', op.path, op.method, 'deprecated') === true,
+    op.deprecated
+      ? `${label} is recorded DEPRECATED but the spec no longer marks it; drop the record if the retirement is off`
+      : `${label} is newly DEPRECATED and still answering, so this is the lead time: ${op.migration}`,
+  ).toBe(op.deprecated);
+}
+
 function assertAgentPaths(doc: unknown): void {
-  expect(get(doc, 'paths', '/api/agent/search', 'post', 'operationId')).toBe('agentSearch');
-  expect(get(doc, 'paths', '/api/agent/searches/{id}/outcomes', 'post', 'operationId')).toBe(
-    'agentSearchOutcomes',
-  );
+  for (const op of AGENT_OPS) assertPinnedOp(doc, op);
 }
 
 function assertSchemaDeclares(doc: unknown, schemaName: string, fields: string[]): void {
@@ -151,9 +207,53 @@ function assertOutcomeStatusEnum(doc: unknown): void {
   }
 }
 
+/** A deep copy of the fixture with one operation patched (or dropped), so the
+ *  pin can be pointed at the drift it exists to catch. */
+function patchedFixture(
+  path: string,
+  method: string,
+  patch: Record<string, unknown> | null,
+): unknown {
+  const doc = structuredClone(fixtureJson) as unknown as {
+    paths: Record<string, Record<string, unknown> | undefined>;
+  };
+  const ops = doc.paths[path];
+  if (ops === undefined) throw new Error(`fixture declares no path ${path}`);
+  if (patch === null) {
+    delete ops[method];
+    return doc;
+  }
+  const op = ops[method];
+  if (op === null || typeof op !== 'object')
+    throw new Error(`fixture declares no ${method} ${path}`);
+  Object.assign(op, patch);
+  return doc;
+}
+
 describe('contract fixture pins the agent endpoints', () => {
-  it('declares POST /api/agent/search and /api/agent/searches/{id}/outcomes', () => {
+  it('declares POST /api/agent/search and /api/searches/{id}/outcomes', () => {
     assertAgentPaths(fixtureDoc);
+  });
+
+  // The guard exercised against the drift it is for. A pin that has only ever
+  // passed is an assumption, and the failure TEXT is half the point: a red
+  // scheduled run has to say where the callers go.
+  it('fails on a newly deprecated operation, one release before it stops answering', () => {
+    expect(() =>
+      assertAgentPaths(patchedFixture('/api/searches/{id}/outcomes', 'post', { deprecated: true })),
+    ).toThrow(/newly DEPRECATED and still answering/);
+  });
+
+  it('fails on a removed operation naming the migration, not undefined-vs-string', () => {
+    expect(() => assertAgentPaths(patchedFixture('/api/agent/search', 'post', null))).toThrow(
+      /gone from the spec: move the search client to POST \/api\/search/,
+    );
+  });
+
+  it('fails when a recorded retirement is called off, so the record cannot go stale', () => {
+    expect(() =>
+      assertAgentPaths(patchedFixture('/api/agent/search', 'post', { deprecated: false })),
+    ).toThrow(/recorded DEPRECATED but the spec no longer marks it/);
   });
 });
 
@@ -362,10 +462,32 @@ const CARD_INPUT_FIELDS = [
   'estimatedPaidInputCost',
 ];
 
+const PUBLISH_OPS: PinnedOp[] = [
+  {
+    path: '/api/posts',
+    method: 'post',
+    operationId: 'createPost',
+    deprecated: false,
+    migration: 'publish has no second write path; `tenjin publish` stops here',
+  },
+  {
+    path: '/api/posts/{id}',
+    method: 'get',
+    operationId: 'getOwnPost',
+    deprecated: false,
+    migration: '`tenjin edit` reads the current post through this before it merges',
+  },
+  {
+    path: '/api/posts/{id}',
+    method: 'put',
+    operationId: 'updatePost',
+    deprecated: false,
+    migration: '`tenjin edit` writes through this alone',
+  },
+];
+
 function assertPostPaths(doc: unknown): void {
-  expect(get(doc, 'paths', '/api/posts', 'post', 'operationId')).toBe('createPost');
-  expect(get(doc, 'paths', '/api/posts/{id}', 'get', 'operationId')).toBe('getOwnPost');
-  expect(get(doc, 'paths', '/api/posts/{id}', 'put', 'operationId')).toBe('updatePost');
+  for (const op of PUBLISH_OPS) assertPinnedOp(doc, op);
 }
 
 function postCreateProps(doc: unknown): unknown {
