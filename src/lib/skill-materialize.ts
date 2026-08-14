@@ -11,10 +11,12 @@ import { CliError } from './errors';
  * Materializing resolves those regions against a flag set: an ON flag keeps the
  * inner lines, an OFF or unknown flag drops them, and the marker lines themselves
  * never survive either way, so an installed SKILL.md carries no machinery for an
- * agent to read. Unknown flags are OFF because every skill-shaping config key this
- * CLI defines defaults off; a marker for a key this build does not know is a
- * newer server's block, and advertising a lane this build cannot gate would be
- * the unsafe direction.
+ * agent to read. A flag is a skill-shaping config key or a machine fact the
+ * writer resolves at write time (`wallet`: does a local wallet exist, so the
+ * skill only teaches spending verbs somewhere they can run). Unknown flags are
+ * OFF because every flag this CLI defines defaults off; a marker for a flag this
+ * build does not know is a newer source's block, and advertising a lane this
+ * build cannot gate would be the unsafe direction.
  *
  * The grammar is deliberately line-based and flat (no nesting): the parse below
  * fails closed on anything else, because a half-stripped skill silently teaching
@@ -24,8 +26,22 @@ import { CliError } from './errors';
 const OPEN_MARKER = /^\s*<!--\s*tenjin:when\s+([a-zA-Z][a-zA-Z0-9.]*)\s*-->\s*$/;
 const CLOSE_MARKER = /^\s*<!--\s*\/tenjin:when\s*-->\s*$/;
 
-/** Flag values keyed by config key name; absent keys read as false. */
+/** Flag values keyed by flag name; absent keys read as false. */
 export type SkillContentFlags = Readonly<Record<string, boolean>>;
+
+/**
+ * The machine facts skill content is currently shaped by. One resolver so
+ * `install`, the self-heal, and `doctor` judge the same flag set from the same
+ * inputs: content they disagree on would oscillate between their writes.
+ */
+export interface SkillFlagInputs {
+  /** Does a local wallet exist (lib/paths walletPath)? Gates spending-verb teaching. */
+  walletPresent: boolean;
+}
+
+export function skillContentFlags(input: SkillFlagInputs): SkillContentFlags {
+  return { wallet: input.walletPresent };
+}
 
 export function materializeSkillMarkdown(text: string, flags: SkillContentFlags): string {
   const lines = text.split('\n');

@@ -20,6 +20,7 @@ vi.mock('./lib/skills-source', async (importOriginal) => {
   };
 });
 import { main } from './cli';
+import { materializeTransform, skillContentFlags } from './lib/skill-materialize';
 import { resolveSkillsSource } from './lib/skills-source';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import type { Io } from './lib/output';
@@ -415,8 +416,12 @@ describe('skills self-heal', () => {
     expect(await main(['config', '--json'], cap.io)).toBe(0);
     const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
     expect(parsed.ok).toBe(true);
+    // The heal writes the MATERIALIZED source (no wallet in this test data dir).
     expect(await readFile(wiredPath(), 'utf8')).toBe(
-      await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      materializeTransform(skillContentFlags({ walletPresent: false }))(
+        'SKILL.md',
+        await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md')),
+      ).toString('utf8'),
     );
     expect(cap.stderr()).toContain('Updated');
   });
