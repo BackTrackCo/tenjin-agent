@@ -475,14 +475,14 @@ const PUBLISH_OPS: PinnedOp[] = [
     method: 'get',
     operationId: 'getOwnPost',
     deprecated: false,
-    migration: '`tenjin update` reads the current post through this before it merges',
+    migration: '`tenjin edit` reads the current post through this before it merges',
   },
   {
     path: '/api/posts/{id}',
     method: 'put',
     operationId: 'updatePost',
     deprecated: false,
-    migration: '`tenjin update` writes through this alone',
+    migration: '`tenjin edit` writes through this alone',
   },
 ];
 
