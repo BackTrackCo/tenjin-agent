@@ -123,6 +123,17 @@ export const ConfigSchema = z.object({
    * 90 days. Off by default; no query text is retained server-side without it.
    */
   evalCohort: z.boolean(),
+  /**
+   * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
+   * x402 endpoint, provided a configured registry lists that exact resource and
+   * the live 402 matches the listed deal. Off by default; `install` asks once.
+   * A skill-shaping key (see SKILL_SHAPING_CONFIG_KEYS): the installed skill
+   * mentions the lane only while this is on.
+   */
+  bazaarPay: z.boolean(),
+  /** x402 discovery registries (facilitator base URLs) `discover` queries and
+   *  the Bazaar pay lane verifies against. */
+  bazaarRegistries: z.array(z.url()),
   publish: PublishConfigSchema,
   install: InstallConfigSchema,
   hooks: HooksConfigSchema,
@@ -157,6 +168,29 @@ export type PartialConfig = z.infer<typeof RawConfigSchema>;
  */
 export const SEND_MAX_UNSET = 'unset';
 
+/**
+ * Registries verified keyless on 2026-08-14: both answer GET
+ * /discovery/resources with no credential. CDP's Bazaar is settlement-derived
+ * (it indexes what its facilitator settles, Tenjin's endpoints included);
+ * UltraVioleta is the registry Tenjin also announces to.
+ */
+export const DEFAULT_BAZAAR_REGISTRIES = [
+  'https://api.cdp.coinbase.com/platform/v2/x402',
+  'https://facilitator.ultravioletadao.xyz',
+];
+
+/**
+ * Config keys that shape installed skill CONTENT (lib/skill-materialize):
+ * `config set` of one of these re-materializes the installed skills so the
+ * agent-facing text follows the config state it advertises.
+ */
+export const SKILL_SHAPING_CONFIG_KEYS: readonly string[] = ['bazaarPay'];
+
+/** The flag set skill materialization resolves markers against. */
+export function skillContentFlags(config: PartialConfig): Record<string, boolean> {
+  return { bazaarPay: config.bazaarPay === true };
+}
+
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',
@@ -172,6 +206,8 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
+  bazaarPay: false,
+  bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000' },
   install: { harness: [] },
   // `auto` is the default because the hook exists to be useful without being
@@ -292,6 +328,8 @@ export interface EffectiveSettings {
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
+  bazaarPay: ResolvedSetting<boolean>;
+  bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
@@ -329,6 +367,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
+    bazaarPay: fileOrDefault('bazaarPay', config),
+    bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),

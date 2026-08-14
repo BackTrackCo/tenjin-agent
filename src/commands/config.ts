@@ -323,8 +323,20 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'rpcUrl':
       return parseHttpUrl(value);
     case 'evalCohort':
+    case 'bazaarPay':
       return parseBoolean(value);
+    case 'bazaarRegistries':
+      return parseRegistryList(value);
   }
+}
+
+/** "" clears to []; comma-split, each entry an absolute http(s) URL. */
+function parseRegistryList(value: string): string[] {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => parseHttpUrl(entry));
 }
 
 function parseBoolean(value: string): boolean {
