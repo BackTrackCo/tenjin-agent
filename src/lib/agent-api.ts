@@ -462,7 +462,7 @@ export async function postOutcomes(
       fix: 'Report between 1 and 10 outcomes per call.',
     });
   }
-  const url = `${trimSlash(opts.baseUrl)}/api/agent/searches/${searchId}/outcomes`;
+  const url = `${trimSlash(opts.baseUrl)}/api/searches/${searchId}/outcomes`;
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,

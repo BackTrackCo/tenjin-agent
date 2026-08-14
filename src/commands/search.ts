@@ -23,9 +23,10 @@ import type { CommandContext, CommandResult } from '../context';
  * which is free. So a candidate line stays short on purpose.
  *
  * The response's `searchId` is the outcome-reporting capability for
- * POST /api/agent/searches/<searchId>/outcomes. tenjin#463 renamed both the field
- * (from `lookupId`) and that path, and this client follows the rename end to end,
- * so nothing on the wire or in the local store still speaks `lookupId`.
+ * POST /api/searches/<searchId>/outcomes. tenjin#463 renamed the field (from
+ * `lookupId`) and tenjin#616 dropped the `/agent` prefix from the path; this
+ * client follows both end to end, so nothing on the wire or in the local store
+ * still speaks `lookupId` or the prefixed spelling.
  */
 
 export interface SearchArgs {

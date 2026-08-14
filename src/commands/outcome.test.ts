@@ -72,7 +72,7 @@ describe('runOutcome', () => {
       fetchImpl: fetch,
     });
     expect((res.data as { accepted: number }).accepted).toBe(1);
-    expect(urls[0]).toBe(`https://preview.example/api/agent/searches/${LOOKUP}/outcomes`);
+    expect(urls[0]).toBe(`https://preview.example/api/searches/${LOOKUP}/outcomes`);
   });
 
   it('--last targets the most recent local search', async () => {

@@ -4,7 +4,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+
+// The real core still runs; the wrapper only records the OPTIONS it was handed,
+// which is the one place the `open: false` / `wait: false` pins are observable.
+// Asserting on behaviour instead would pass with either line deleted, since the
+// MCP context is never a TTY and `runFund` defaults both off there anyway.
+vi.mock('../commands/fund', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../commands/fund')>();
+  return { ...actual, runFund: vi.fn(actual.runFund) };
+});
+
+// No RPC from this suite. Unmocked, the baseline balance read would make the
+// no-poll assertion depend on network reachability and pass offline for the
+// wrong reason, which is the direction that ships the bug.
+vi.mock('../lib/usdc', () => ({
+  USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  USDC_DECIMALS: 6,
+  getUsdcBalance: vi.fn(),
+}));
+
 import { buildTenjinMcpServer, type BuildMcpOptions } from './server';
+import { runFund } from '../commands/fund';
+import { getUsdcBalance } from '../lib/usdc';
 import {
   buildPaymentRequired,
   makeReadServer,
@@ -18,6 +39,8 @@ import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-mcp-'));
+  vi.mocked(runFund).mockClear();
+  vi.mocked(getUsdcBalance).mockClear();
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -63,7 +86,7 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string; detail
 type SuccessEnvelope = { ok: true; command: string; data: Record<string, unknown> };
 
 describe('buildTenjinMcpServer, tool surface', () => {
-  it('exposes exactly the seven Tenjin tools', async () => {
+  it('exposes exactly the eight Tenjin tools', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -71,6 +94,7 @@ describe('buildTenjinMcpServer, tool surface', () => {
       [
         'tenjin_buy',
         'tenjin_edit',
+        'tenjin_fund',
         'tenjin_inspect',
         'tenjin_search',
         'tenjin_outcome',
@@ -568,5 +592,83 @@ describe('MCP adapter never writes to real stdout', () => {
       spy.mockRestore();
     }
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('tenjin_fund', () => {
+  const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
+
+  function mintServer(status = 200, json: unknown = { url: CHECKOUT }) {
+    const calls: { url: string; body: unknown }[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify(json), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  it('mints and returns the checkout URL for the human, without opening or waiting', async () => {
+    const { fetchImpl, calls } = mintServer();
+    const openUrl = vi.fn(async () => true);
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { fund: { provider: testWalletProvider(), fetchImpl, openUrl } },
+    });
+    const res = await client.callTool({
+      name: 'tenjin_fund',
+      arguments: { amountUsd: '5' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as SuccessEnvelope;
+    expect(sc.data.checkoutUrl).toBe(CHECKOUT);
+    expect(sc.data.opened).toBe(false);
+    expect(sc.data.funded).toBe(false);
+    expect(sc.data.pollStatus).toBe('skipped');
+    expect(calls[0]!.body).toMatchObject({ mode: 'onramp', presetAmount: 5 });
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(getUsdcBalance).not.toHaveBeenCalled();
+  });
+
+  it('pins open and wait off in the options it hands the core, not just in what happens', async () => {
+    const { fetchImpl } = mintServer();
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      // Deliberately hostile deps: a caller (or a future edit) trying to turn
+      // the browser open and the poll back ON for the MCP surface. The call-site
+      // pins are spread LAST, so both must lose.
+      deps: {
+        fund: { provider: testWalletProvider(), fetchImpl, open: true, wait: true },
+      },
+    });
+    await client.callTool({ name: 'tenjin_fund', arguments: {} });
+
+    const passed = vi.mocked(runFund).mock.calls;
+    expect(passed).toHaveLength(1);
+    expect(passed[0]![1]).toMatchObject({ open: false, wait: false });
+  });
+
+  it('relays a coded refusal (region gate) as the failure envelope', async () => {
+    const { fetchImpl } = mintServer(403, {
+      error: { code: 'region_not_supported', message: 'no' },
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { fund: { provider: testWalletProvider(), fetchImpl } },
+    });
+    const res = await client.callTool({ name: 'tenjin_fund', arguments: {} });
+
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as ErrorEnvelope;
+    expect(sc.error.code).toBe('REFUSED');
   });
 });

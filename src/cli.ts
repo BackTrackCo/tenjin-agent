@@ -284,6 +284,32 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // Funds-IN via Coinbase Onramp. Unlike `send`, this IS also an MCP tool
+  // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
+  // checkout page. The browser open and balance poll below are CLI-only, and
+  // both are off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
+  // run takes it off stderr immediately rather than off a poll that outlives it.
+  addGlobalFlags(program.command('fund [amountUsd]'))
+    .description(
+      'Fund THIS wallet by card via Coinbase Onramp: mint a checkout link bound to this machine, open it in the browser, and wait for the USDC to land on Base',
+    )
+    .option('--no-open', 'print the checkout link without opening a browser')
+    .option(
+      '--no-wait',
+      'return once the link is issued instead of polling the balance (already the default when not at a TTY)',
+    )
+    .action(async function (this: Command, amountUsd: string | undefined) {
+      await runCommand('fund', this, async (ctx) => {
+        const o = this.opts();
+        const { runFund } = await import('./commands/fund');
+        return runFund(ctx, {
+          ...(amountUsd !== undefined ? { amountUsd } : {}),
+          ...(o.open === false ? { open: false } : {}),
+          ...(o.wait === false ? { wait: false } : {}),
+        });
+      });
+    });
+
   // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
   // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
   // surface gains a send trigger (both exclusions are pinned by tests).

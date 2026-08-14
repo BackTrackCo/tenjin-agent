@@ -116,9 +116,11 @@ export function emitNotice(io: Io, text: string, opts: EmitOptions = {}): void {
 
 /**
  * The same dim stderr line, delivered whatever the surface is: no TTY gate and no
- * `--json` gate. Only for an advisory that reports a WRITE to the operator's own
- * files, where a piped or agent-driven run is precisely the case that must not
- * have it happen in silence. stdout is untouched either way, so the exactly-one
+ * `--json` gate. Only for an advisory a piped or agent-driven run must not miss,
+ * which today is two things: a WRITE to the operator's own files, and `fund`'s
+ * checkout link, which expires long before the stdout envelope that also carries
+ * it is written. Anything a piped run can simply do without belongs in
+ * {@link emitNotice} instead. stdout is untouched either way, so the exactly-one
  * JSON object contract is unaffected.
  */
 export function emitWriteNotice(io: Io, text: string): void {
