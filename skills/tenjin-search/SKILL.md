@@ -12,8 +12,9 @@ description: >-
   version, a default, a flag, a status code); skip private-codebase questions,
   generic advice, live prices or statuses, and implementing, reviewing, or
   debugging your own code, however famous the gotcha behind it. Requires the
-  tenjin CLI (tenjin-cli on npm): with no CLI on the machine this skill cannot
-  run, so use the hosted skill at https://tenjin.blog/skills.md instead.
+  tenjin CLI (tenjin-cli on npm) already installed: on a machine without it
+  this skill does not apply and must not fire, not even to route the question;
+  the hosted skill at https://tenjin.blog/skills.md is the CLI-less path.
 ---
 
 # Tenjin search: one search before you regenerate
