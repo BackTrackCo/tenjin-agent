@@ -4,8 +4,10 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
+import { loadRawConfig } from './config';
 import { walletPath } from './paths';
 import { materializeTransform, skillContentFlags } from './skill-materialize';
+import type { SkillContentFlags } from './skill-materialize';
 import { installSkill } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
@@ -71,16 +73,30 @@ export async function healWiredSkills(deps: HealDeps): Promise<void> {
     const targets = healable(home);
     if (targets.length === 0) return;
     // The same flag resolution `install` writes with, so heal and install agree
-    // on the bytes and never trade rewrites. Probed via walletPath directly:
-    // wallet/store would drag the keystore chunk onto every command's tail.
-    const walletPresent = lstatSync(walletPath(deps.dataDir), { throwIfNoEntry: false })?.isFile();
-    const materialize = materializeTransform(
-      skillContentFlags({ walletPresent: walletPresent === true }),
-    );
+    // on the bytes and never trade rewrites. Wallet is probed via walletPath
+    // directly (wallet/store would drag the keystore chunk onto every command's
+    // tail); the config flags come from the raw config, and a config that does
+    // not load leaves this run's skills alone rather than shaping them from a
+    // guessed flag set.
+    const materialize = materializeTransform(await resolveSkillFlags(deps.dataDir));
     await heal(targets, source, deps.io, materialize);
   } catch {
     // Whatever it was, it is the next command's to retry; this one is finished.
   }
+}
+
+/**
+ * The one flag resolution every skill writer shares (heal, the config-set
+ * rematerialize; install mirrors it through its own seams). Throws when the
+ * config does not load, which each caller maps to "leave the skills alone".
+ */
+async function resolveSkillFlags(dataDir: string): Promise<SkillContentFlags> {
+  const walletPresent = lstatSync(walletPath(dataDir), { throwIfNoEntry: false })?.isFile();
+  const config = await loadRawConfig(dataDir);
+  return skillContentFlags({
+    walletPresent: walletPresent === true,
+    bazaarPay: config.bazaarPay === true,
+  });
 }
 
 /**

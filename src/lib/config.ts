@@ -186,11 +186,6 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
  */
 export const SKILL_SHAPING_CONFIG_KEYS: readonly string[] = ['bazaarPay'];
 
-/** The flag set skill materialization resolves markers against. */
-export function skillContentFlags(config: PartialConfig): Record<string, boolean> {
-  return { bazaarPay: config.bazaarPay === true };
-}
-
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',

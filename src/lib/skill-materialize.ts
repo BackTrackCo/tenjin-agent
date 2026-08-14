@@ -37,10 +37,12 @@ export type SkillContentFlags = Readonly<Record<string, boolean>>;
 export interface SkillFlagInputs {
   /** Does a local wallet exist (lib/paths walletPath)? Gates spending-verb teaching. */
   walletPresent: boolean;
+  /** The `bazaarPay` config toggle; gates the Bazaar-lane teaching. */
+  bazaarPay?: boolean;
 }
 
 export function skillContentFlags(input: SkillFlagInputs): SkillContentFlags {
-  return { wallet: input.walletPresent };
+  return { wallet: input.walletPresent, bazaarPay: input.bazaarPay === true };
 }
 
 export function materializeSkillMarkdown(text: string, flags: SkillContentFlags): string {
