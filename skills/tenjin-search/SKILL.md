@@ -43,18 +43,16 @@ Say which line to add and let the operator add it:
 
 ```
 Bash(tenjin search:*)
-<!-- tenjin:when wallet -->
-Bash(tenjin fund:*)
-<!-- /tenjin:when -->
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)
 Bash(tenjin doctor:*)
+Bash(tenjin config get:*)
 <!-- tenjin:when wallet -->
+Bash(tenjin fund:*)
 Bash(tenjin wallet show:*)
 Bash(tenjin wallet balance:*)
 <!-- /tenjin:when -->
-Bash(tenjin config get:*)
 ```
 
 Those verbs are free in the sense that matters: **they cannot spend and cannot
