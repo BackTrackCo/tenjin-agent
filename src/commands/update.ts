@@ -92,12 +92,10 @@ export async function runUpdate(
     });
   }
 
-  // The one refusal that belongs ABOVE the network. It is pure filesystem, its
-  // answer does not depend on anything npm says, and leaving it below the fetch
-  // told an offline contributor in a checkout to go debug their registry access.
-  // The rest need the resolved version for their fix strings, so they stay below
-  // the --check return.
-  if (!opts.check && isSourceCheckout(moduleDir)) throw sourceCheckoutRefusal();
+  // First stage: everything whose fix string does not need a resolved version,
+  // so it answers without the network. An offline contributor in a checkout is
+  // told they are in a checkout, not told to go debug their registry access.
+  refuse(moduleDir, { check: opts.check, spec: null });
 
   const tags = await fetchDistTags({
     fetchImpl: deps.fetchImpl,
@@ -150,10 +148,9 @@ export async function runUpdate(
   // `latest` is argv-safe here: isNewer returned true, so it matched VERSION_RE.
   const spec = `tenjin-cli@${latest}`;
 
-  // Every refusal below is about WRITING, so all of them sit after the --check
-  // return: reporting whether a newer version exists is a question a contributor
-  // in a checkout is as entitled to ask as anyone.
-  refuseUnlessGlobalNpm(moduleDir, spec);
+  // Second stage: the entries whose fix strings name the version just resolved.
+  // Reached only on the install path, since --check has already returned.
+  refuse(moduleDir, { check: false, spec });
 
   // Live chatter is a human courtesy only; the tail rides in the error envelope
   // so a piped failure is still diagnosable. Sanitized per line, because npm
@@ -209,44 +206,102 @@ export async function runUpdate(
 }
 
 /**
- * Throw unless `npm install -g` would actually replace THIS build. Ordered
- * most-specific first: a checkout and an npx cache are both recognizable before
- * any question of which manager or which tree, and the manager check precedes
- * the global/local one because a pnpm or bun store has its own layout that the
- * global test is not written for.
+ * One reason `npm install -g` would not actually replace THIS build.
+ *
+ * Each entry carries the three properties that decide WHEN it is evaluated,
+ * because expressing them by where the line sat is what made this set get
+ * re-cut three times: a missing entry, then a copy on the wrong side of the
+ * fetch, then a duplicate that could not run. Declaring them means adding a
+ * refusal is a matter of answering three questions, not of guessing a position.
  */
-function refuseUnlessGlobalNpm(moduleDir: string, spec: string): void {
-  // Also probed before the fetch on the install path; kept here so the ordering
-  // of the two call sites is not what makes a checkout refuse.
-  if (isSourceCheckout(moduleDir)) throw sourceCheckoutRefusal();
-  if (moduleDir.split(sep).includes('_npx')) {
-    throw new CliError('REFUSED', 'tenjin-cli is running from the npx cache, not an install', {
-      // Writing a global here would "succeed" and change nothing: the next
-      // `npx tenjin` still resolves its own cached copy.
-      fix: `npx fetches its own copy every time. To keep one: npm i -g ${spec}`,
-    });
-  }
-  const manager = classifyManager(moduleDir);
-  if (manager !== 'npm') {
-    throw new CliError(
-      'REFUSED',
-      `This tenjin-cli was installed with ${manager}; replacing it via npm would leave two installs racing on PATH`,
-      { fix: `${GLOBAL_ADD[manager]} ${spec}` },
-    );
-  }
-  if (!isGlobalTree(moduleDir)) {
-    throw new CliError(
-      'REFUSED',
-      'This tenjin-cli is a project-local dependency, not a global install',
-      { fix: `Update it where it is declared: npm i ${spec}` },
-    );
-  }
+interface Refusal {
+  /** Does this install location refuse? Pure filesystem, never the network. */
+  test: (moduleDir: string) => boolean;
+  error: (spec: string, moduleDir: string) => CliError;
+  /**
+   * Does the fix string name the version the registry just resolved? This is
+   * also what decides whether the entry may run BEFORE the fetch: one that does
+   * not need a version is evaluated first, so an offline user in a checkout is
+   * told they are in a checkout rather than told to go debug their network.
+   */
+  needsVersion: boolean;
+  /**
+   * Does it apply to `--check`? Everything here is a reason not to WRITE, and
+   * `--check` only reports, so today nothing does. An entry that ever answers
+   * yes is one whose test says the REPORT would be wrong, not the install.
+   */
+  appliesToCheck: boolean;
 }
 
-const sourceCheckoutRefusal = (): CliError =>
-  new CliError('REFUSED', 'tenjin-cli is running from a source checkout, not an install', {
-    fix: 'Update the checkout instead: git pull && pnpm install',
-  });
+/**
+ * Ordered most-specific first: a checkout and an npx cache are recognizable
+ * before any question of which manager or which tree, and the manager entry
+ * precedes the global/local one because a pnpm or bun store has its own layout
+ * that `isGlobalTree` is not written for.
+ */
+export const REFUSALS: readonly Refusal[] = [
+  {
+    test: isSourceCheckout,
+    error: () =>
+      new CliError('REFUSED', 'tenjin-cli is running from a source checkout, not an install', {
+        fix: 'Update the checkout instead: git pull && pnpm install',
+      }),
+    needsVersion: false,
+    appliesToCheck: false,
+  },
+  {
+    test: (moduleDir) => moduleDir.split(sep).includes('_npx'),
+    error: (spec) =>
+      new CliError('REFUSED', 'tenjin-cli is running from the npx cache, not an install', {
+        // Writing a global here would "succeed" and change nothing: the next
+        // `npx tenjin` still resolves its own cached copy.
+        fix: `npx fetches its own copy every time. To keep one: npm i -g ${spec}`,
+      }),
+    needsVersion: true,
+    appliesToCheck: false,
+  },
+  {
+    test: (moduleDir) => classifyManager(moduleDir) !== 'npm',
+    error: (spec, moduleDir) => {
+      const manager = classifyManager(moduleDir) as keyof typeof GLOBAL_ADD;
+      return new CliError(
+        'REFUSED',
+        `This tenjin-cli was installed with ${manager}; replacing it via npm would leave two installs racing on PATH`,
+        { fix: `${GLOBAL_ADD[manager]} ${spec}` },
+      );
+    },
+    needsVersion: true,
+    appliesToCheck: false,
+  },
+  {
+    test: (moduleDir) => !isGlobalTree(moduleDir),
+    error: (spec) =>
+      new CliError(
+        'REFUSED',
+        'This tenjin-cli is a project-local dependency, not a global install',
+        {
+          fix: `Update it where it is declared: npm i ${spec}`,
+        },
+      ),
+    needsVersion: true,
+    appliesToCheck: false,
+  },
+];
+
+/**
+ * Evaluate the refusal set, once per stage. `spec` is null before the registry
+ * has been asked and the resolved `tenjin-cli@<version>` after, which is what
+ * selects the eligible entries: every entry runs in exactly one stage, so no
+ * refusal can be reached twice or, as in round three, be written twice and
+ * reached once.
+ */
+function refuse(moduleDir: string, opts: { check: boolean; spec: string | null }): void {
+  for (const entry of REFUSALS) {
+    if (opts.check && !entry.appliesToCheck) continue;
+    if (entry.needsVersion !== (opts.spec !== null)) continue;
+    if (entry.test(moduleDir)) throw entry.error(opts.spec ?? '', moduleDir);
+  }
+}
 
 /**
  * The published package ships `dist/`, `docs/`, and `skills/` with no `src/`
@@ -356,6 +411,13 @@ function npmCliOnPath(env: NodeJS.ProcessEnv): string | null {
       if (!isFile(join(part, `npm${ext}`))) continue;
       // POSIX package managers link the shim straight at the script, which is
       // what makes this layout-independent rather than a longer guess list.
+      //
+      // The endsWith is a CORRECTNESS check, not a security guard: it asks "did
+      // this symlink land on npm's script or on something else", and a shim
+      // pointed elsewhere returns null, which falls back to spawning that same
+      // retargeted shim anyway. PATH poisoning is out of scope by construction —
+      // an attacker ahead of npm on PATH owns every tool the user runs, and the
+      // pre-existing fallback `spawn('npm', ...)` resolved through the same PATH.
       const real = realpathOrNull(join(part, `npm${ext}`));
       if (real !== null && real.endsWith(`${sep}npm-cli.js`)) return real;
       const near = npmCliNear(part);

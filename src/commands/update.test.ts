@@ -7,6 +7,7 @@ import {
   runUpdate,
   resolveNpmCli,
   spawnCapture,
+  REFUSALS,
   type SpawnResult,
   type UpdateDeps,
   type UpdateSpawn,
@@ -503,6 +504,51 @@ describe('spawnCapture', () => {
       () => {},
     );
     expect(result).toEqual({ kind: 'timeout' });
+  });
+});
+
+// The set that got re-cut in three consecutive rounds. These enumerate it, so
+// an added refusal cannot quietly skip declaring the properties that decide
+// when it is evaluated.
+describe('REFUSALS', () => {
+  const SENTINEL = 'tenjin-cli@9.9.9-sentinel';
+  const anyDir = join('x', 'node_modules', 'tenjin-cli', 'dist');
+
+  it('is non-empty and every entry is fully declared', () => {
+    expect(REFUSALS.length).toBeGreaterThan(0);
+    for (const entry of REFUSALS) {
+      expect(typeof entry.test).toBe('function');
+      expect(typeof entry.needsVersion).toBe('boolean');
+      expect(typeof entry.appliesToCheck).toBe('boolean');
+    }
+  });
+
+  // The declaration has to match the fix string, because needsVersion is what
+  // decides whether the entry may run before the fetch. One that says no but
+  // interpolates the spec would emit a fix naming an empty version; one that
+  // says yes without using it waits for a network round trip it does not need,
+  // which is the round-2 bug.
+  it('needsVersion agrees with whether the fix string names the version', () => {
+    for (const entry of REFUSALS) {
+      const fix = entry.error(SENTINEL, anyDir).fix ?? '';
+      expect(fix.includes(SENTINEL)).toBe(entry.needsVersion);
+    }
+  });
+
+  it('every entry refuses with REFUSED and a fix', () => {
+    for (const entry of REFUSALS) {
+      const err = entry.error(SENTINEL, anyDir);
+      expect(err.code).toBe('REFUSED');
+      expect(err.exitCode).toBe(3);
+      expect(err.fix).toBeTruthy();
+    }
+  });
+
+  // Everything here is a reason not to WRITE, and --check writes nothing. Pins
+  // the property rather than a count: an entry that ever needs to stop a
+  // --check has to say so.
+  it('no entry claims --check, which only reports', () => {
+    expect(REFUSALS.filter((e) => e.appliesToCheck)).toEqual([]);
   });
 });
 
