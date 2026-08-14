@@ -13,6 +13,7 @@ import {
 import { modeGatedPointer } from '../lib/permissions';
 import { stopHookIsCurrent } from '../lib/harness-hooks';
 import { resolveHermesHomeLenient } from '../lib/hermes';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
@@ -691,12 +692,12 @@ function parseHttpUrl(value: string): string {
     url = new URL(value);
   } catch {
     throw new CliError('USAGE', `Invalid URL: ${JSON.stringify(value)}`, {
-      fix: 'Pass an absolute http(s) URL like https://tenjin.blog.',
+      fix: `Pass an absolute http(s) URL like ${PRODUCTION_ORIGIN}.`,
     });
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new CliError('USAGE', `URL must be http or https: ${JSON.stringify(value)}`, {
-      fix: 'Pass an absolute http(s) URL like https://tenjin.blog.',
+      fix: `Pass an absolute http(s) URL like ${PRODUCTION_ORIGIN}.`,
     });
   }
   return value;

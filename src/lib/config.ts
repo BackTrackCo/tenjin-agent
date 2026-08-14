@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { CliError } from './errors';
+import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
 import { HARNESS_TARGETS } from './skill-wiring';
 import { writeFileAtomic } from './atomic-json';
@@ -250,7 +251,7 @@ export const CONFIG_DEFAULTS: Config = {
   // leak fails closed instead of silently running uncapped.
   sendMaxAmount: '0',
   allowlistCreators: [],
-  baseUrl: 'https://tenjin.blog',
+  baseUrl: PRODUCTION_ORIGIN,
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   bazaarPay: false,

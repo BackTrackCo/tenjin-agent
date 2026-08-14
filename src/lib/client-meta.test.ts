@@ -8,12 +8,15 @@ import {
   WEBSEARCH_HOOK_USER_AGENT,
   composeUserAgent,
 } from './client-meta';
+import { PRODUCTION_ORIGIN } from './production-origin';
 
 /**
- * These assertions pin the STRING, not the constant: every other test in the
+ * These assertions pin the SHAPE, not just the constant: every other test in the
  * suite compares TENJIN_USER_AGENT to itself, so a shape change (dropping the
  * space before the comment, renaming the product) would keep the whole suite
- * green while the server silently attributes the CLI as `none`.
+ * green while the server silently attributes the CLI as `none`. Only the origin
+ * inside the comment derives (from PRODUCTION_ORIGIN), so an origin cutover
+ * stays one edit; production-origin.test.ts pins that the UA reads it at all.
  */
 
 /**
@@ -33,7 +36,7 @@ describe('TENJIN_USER_AGENT', () => {
   it('is the package version behind a `tenjin-cli` product token and nothing else', () => {
     const [product, ...rest] = TENJIN_USER_AGENT.split(' ');
     expect(product).toBe(`tenjin-cli/${pkg.version}`);
-    expect(rest.join(' ')).toBe('(+https://tenjin.blog)');
+    expect(rest.join(' ')).toBe(`(+${PRODUCTION_ORIGIN})`);
   });
 
   it("parses to the `tenjin-cli` attribution label under the server's product regex", () => {

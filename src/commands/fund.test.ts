@@ -6,6 +6,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { Address } from 'viem';
 import { CliError } from '../lib/errors';
+import { PRODUCTION_HOST, PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { SESSION_CHAIN_ID } from '../lib/session-key';
 import type { CommandContext } from '../context';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
@@ -121,7 +122,7 @@ describe('runFund', () => {
     const res = await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+    expect(calls[0]!.url).toBe(`${PRODUCTION_ORIGIN}/api/cdp/session`);
     expect(calls[0]!.body).toEqual({ mode: 'onramp', address });
     expect(res.data).toMatchObject({
       address,
@@ -134,7 +135,7 @@ describe('runFund', () => {
     // What the route's withAuth actually checks, not merely that a header exists:
     // a proof bound to another domain, chain, or key would pass a defined-check.
     const proof = parseSIWxHeader(calls[0]!.headers['sign-in-with-x']!) as Record<string, unknown>;
-    expect(proof.domain).toBe('tenjin.blog');
+    expect(proof.domain).toBe(PRODUCTION_HOST);
     expect(proof.chainId).toBe(SESSION_CHAIN_ID);
     expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
   });
@@ -153,7 +154,7 @@ describe('runFund', () => {
     );
     await runFund(ctx, { provider, fetchImpl, wait: false, open: false });
 
-    expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+    expect(calls[0]!.url).toBe(`${PRODUCTION_ORIGIN}/api/cdp/session`);
   });
 
   it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {
