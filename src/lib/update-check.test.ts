@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { maybeNudgeUpdate, resolveTarget } from './update-check';
-import { updateCheckPath } from './paths';
+import { join, sep } from 'node:path';
+import { maybeUpdate, resolveTarget } from './update-check';
+import { autoUpdatePath, autoUpdateResultPath, updateCheckPath } from './paths';
 import type { Io } from './output';
 
 let dir: string;
@@ -56,12 +56,33 @@ async function seedCache(tags: Record<string, unknown>): Promise<void> {
 }
 
 const NOW = 1_700_000_000_000;
+const DAY = 86_400_000;
 
-describe('maybeNudgeUpdate', () => {
+/**
+ * A module dir shaped like a global npm install, so no refusal fires. ABSOLUTE
+ * and under a path that does not exist: a relative one walks up into this
+ * repo's own package.json and reads as a source checkout.
+ */
+const GLOBAL_DIR = join(sep, 'opt', 'nowhere', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+
+/** Records background launches instead of spawning one. */
+function launcher() {
+  const calls: string[] = [];
+  return { impl: (d: string) => calls.push(d), calls };
+}
+
+/** An already-soaked cache entry: this version was first seen a day ago. */
+async function seedSoaked(latest: string, tag = 'alpha'): Promise<void> {
+  await seedCache({
+    [tag]: { checkedAtMs: NOW, latest, firstSeenMs: NOW - DAY, notifiedAtMs: NOW - DAY },
+  });
+}
+
+describe('maybeUpdate', () => {
   it('nudges toward the alpha tag when a prerelease build is behind', async () => {
     const cap = captureIo(true);
     const reg = registry({ latest: '0.1.0-alpha.5', alpha: '0.1.0-alpha.7' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -84,7 +105,7 @@ describe('maybeNudgeUpdate', () => {
   it('nudges toward latest when the channel tag has fallen behind it', async () => {
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.7', latest: '0.1.0-alpha.11' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -99,7 +120,7 @@ describe('maybeNudgeUpdate', () => {
   it('stays quiet for a version it cannot place on a release line', async () => {
     const cap = captureIo(true);
     const reg = registry({ alpha: '9.9.9', latest: '9.9.9' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -115,7 +136,7 @@ describe('maybeNudgeUpdate', () => {
   it('nudges toward the plain package on the stable channel', async () => {
     const cap = captureIo(true);
     const reg = registry({ latest: '1.1.0', alpha: '2.0.0-alpha.1' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -136,7 +157,7 @@ describe('maybeNudgeUpdate', () => {
     for (const latest of ['0.1.0-alpha.6', '0.1.0-alpha.5', '0.0.9']) {
       at += 86_400_001;
       const cap = captureIo(true);
-      await maybeNudgeUpdate({
+      await maybeUpdate({
         dir,
         io: cap.io,
         json: false,
@@ -153,7 +174,7 @@ describe('maybeNudgeUpdate', () => {
   // and 0.1.0-alpha.9 is not news to someone already on 0.1.0.
   it('orders a release above its prereleases in both directions', async () => {
     const up = captureIo(true);
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: up.io,
       json: false,
@@ -165,7 +186,7 @@ describe('maybeNudgeUpdate', () => {
     expect(up.stderr()).toContain('tenjin-cli 0.1.0 is available');
 
     const down = captureIo(true);
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: down.io,
       json: false,
@@ -184,7 +205,7 @@ describe('maybeNudgeUpdate', () => {
     for (const latest of ['not-a-version', '9.9.9-beta.1', '\u001b[2K9.9.9']) {
       at += 86_400_001; // a day apart, so each case fetches rather than reads
       const cap = captureIo(true);
-      await maybeNudgeUpdate({
+      await maybeUpdate({
         dir,
         io: cap.io,
         json: false,
@@ -206,14 +227,16 @@ describe('maybeNudgeUpdate', () => {
       env: {},
       currentVersion: '0.1.0-alpha.6',
     };
-    await maybeNudgeUpdate({ ...deps, io: first.io, now: () => NOW, fetchImpl: reg.fetchImpl });
+    await maybeUpdate({ ...deps, io: first.io, now: () => NOW, fetchImpl: reg.fetchImpl });
     expect(reg.calls()).toBe(1);
     expect(first.stderr()).toContain('0.1.0-alpha.7 is available');
 
     // The nudge it just printed is recorded, not only the fetch it just made.
     expect(await readCache()).toEqual({
       schemaVersion: 1,
-      tags: { alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW } },
+      tags: {
+        alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', firstSeenMs: NOW, notifiedAtMs: NOW },
+      },
     });
     if (process.platform !== 'win32') {
       expect((await stat(updateCheckPath(dir))).mode & 0o777).toBe(0o600);
@@ -222,7 +245,7 @@ describe('maybeNudgeUpdate', () => {
     // Once a day is once a day: the next command inside the window neither asks
     // npm again nor repeats the line the human has already read.
     const second = captureIo(true);
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       ...deps,
       io: second.io,
       now: () => NOW + 86_399_000,
@@ -237,7 +260,7 @@ describe('maybeNudgeUpdate', () => {
     await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     const cap = captureIo(true);
     const at = NOW + 60_000;
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -250,7 +273,9 @@ describe('maybeNudgeUpdate', () => {
     // checkedAtMs untouched — nothing was asked — but the nudge is now on record.
     expect(await readCache()).toEqual({
       schemaVersion: 1,
-      tags: { alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: at } },
+      tags: {
+        alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', firstSeenMs: at, notifiedAtMs: at },
+      },
     });
   });
 
@@ -261,7 +286,7 @@ describe('maybeNudgeUpdate', () => {
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.7' });
     const at = NOW + 86_400_001;
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -288,7 +313,7 @@ describe('maybeNudgeUpdate', () => {
     });
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.8' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -317,7 +342,7 @@ describe('maybeNudgeUpdate', () => {
     // The stable binary cannot use the alpha entry: an `@alpha` version is not
     // something its install command can reach.
     const stable = captureIo(true);
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       ...shared,
       io: stable.io,
       now: () => NOW + 1000,
@@ -332,8 +357,15 @@ describe('maybeNudgeUpdate', () => {
     expect(await readCache()).toEqual({
       schemaVersion: 1,
       tags: {
+        // Carried forward byte-identical: this run did not ask about the alpha
+        // tag, so it adds no soak clock to an entry it never touched.
         alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW },
-        latest: { checkedAtMs: NOW + 1000, latest: '1.1.0', notifiedAtMs: NOW + 1000 },
+        latest: {
+          checkedAtMs: NOW + 1000,
+          latest: '1.1.0',
+          firstSeenMs: NOW + 1000,
+          notifiedAtMs: NOW + 1000,
+        },
       },
     });
 
@@ -342,7 +374,7 @@ describe('maybeNudgeUpdate', () => {
     // not a forbidden one — a swallowed throw would look identical to silence.
     const alphaAgain = captureIo(true);
     const reg2 = registry({ latest: '1.1.0', alpha: '0.1.0-alpha.7' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       ...shared,
       io: alphaAgain.io,
       now: () => NOW + 2000,
@@ -357,7 +389,7 @@ describe('maybeNudgeUpdate', () => {
     await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.8' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -374,7 +406,7 @@ describe('maybeNudgeUpdate', () => {
     await writeFile(updateCheckPath(dir), 'not json {{{', { mode: 0o600 });
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.7' });
-    await maybeNudgeUpdate({
+    await maybeUpdate({
       dir,
       io: cap.io,
       json: false,
@@ -406,7 +438,7 @@ describe('maybeNudgeUpdate', () => {
     for (const fetchImpl of failures) {
       const cap = captureIo(true);
       await expect(
-        maybeNudgeUpdate({
+        maybeUpdate({
           dir,
           io: cap.io,
           json: false,
@@ -430,7 +462,7 @@ describe('maybeNudgeUpdate', () => {
     ];
     for (const c of cases) {
       const cap = captureIo(c.isTTY);
-      await maybeNudgeUpdate({
+      await maybeUpdate({
         dir,
         io: cap.io,
         json: c.json,
@@ -442,6 +474,208 @@ describe('maybeNudgeUpdate', () => {
       expect(cap.stderr()).toBe('');
       expect(cap.stdout()).toBe('');
     }
+  });
+});
+
+describe('maybeUpdate — auto mode', () => {
+  const base = (extra: Record<string, unknown> = {}) => ({
+    dir,
+    json: false,
+    env: {},
+    now: () => NOW,
+    currentVersion: '0.1.0-alpha.6',
+    moduleDir: GLOBAL_DIR,
+    ...extra,
+  });
+
+  it('installs in the background once the version has soaked', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const cap = captureIo(false); // no TTY: exactly the machine auto exists for
+    const run = launcher();
+    await maybeUpdate({
+      ...base(),
+      io: cap.io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch, // fresh cache; the soak needs no new fetch
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([dir]);
+    // The install is happening, so telling a human to run it by hand is noise.
+    expect(cap.stderr()).toBe('');
+    const state = JSON.parse(await readFile(autoUpdatePath(dir), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(state).toMatchObject({ from: '0.1.0-alpha.6', to: '0.1.0-alpha.7', reported: false });
+  });
+
+  // The blast-radius brake: a version nobody has seen before waits a day, so a
+  // bad publish can be pulled before it reaches every agent machine.
+  it('will not install a version it is seeing for the first time', async () => {
+    const cap = captureIo(true);
+    const run = launcher();
+    await maybeUpdate({
+      ...base(),
+      io: cap.io,
+      mode: 'auto',
+      fetchImpl: registry({ alpha: '0.1.0-alpha.7' }).fetchImpl,
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([]);
+    // It falls back to the ordinary nudge rather than going silent.
+    expect(cap.stderr()).toContain('0.1.0-alpha.7 is available');
+  });
+
+  it('restarts the soak when the offered version changes', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const run = launcher();
+    await maybeUpdate({
+      ...base({ now: () => NOW + DAY + 1 }), // cache stale, so it refetches
+      io: captureIo(false).io,
+      mode: 'auto',
+      fetchImpl: registry({ alpha: '0.1.0-alpha.9' }).fetchImpl,
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([]);
+  });
+
+  it('never installs where an install would be refused', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const run = launcher();
+    await maybeUpdate({
+      ...base({
+        moduleDir: join(sep, 'home', 'me', '.npm', '_npx', 'abc', 'node_modules', 'tenjin-cli'),
+      }),
+      io: captureIo(false).io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([]);
+  });
+
+  it('does not start a second install while one is in flight', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const run = launcher();
+    const args = {
+      ...base(),
+      io: captureIo(false).io,
+      mode: 'auto' as const,
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    };
+    await maybeUpdate(args);
+    await maybeUpdate(args);
+    expect(run.calls).toEqual([dir]);
+  });
+
+  it('announces a finished install once, on every surface', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    await maybeUpdate({
+      ...base(),
+      io: captureIo(false).io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: launcher().impl,
+    });
+    // The child's own --json envelope IS the outcome record.
+    await writeFile(
+      autoUpdateResultPath(dir),
+      JSON.stringify({ ok: true, data: { updated: true, latest: '0.1.0-alpha.7' } }),
+    );
+
+    // Piped and --json: replacing the binary is a write, so it is still said.
+    const after = captureIo(false);
+    await maybeUpdate({
+      ...base({ now: () => NOW + 1000, currentVersion: '0.1.0-alpha.7' }),
+      io: after.io,
+      json: true,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: launcher().impl,
+    });
+    expect(after.stderr()).toContain('updated itself to 0.1.0-alpha.7');
+    expect(after.stdout()).toBe('');
+
+    // Once, not on every run afterwards.
+    const again = captureIo(false);
+    await maybeUpdate({
+      ...base({ now: () => NOW + 2000, currentVersion: '0.1.0-alpha.7' }),
+      io: again.io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: launcher().impl,
+    });
+    expect(again.stderr()).toBe('');
+  });
+
+  it('says nothing for a failed background install and frees the slot', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const run = launcher();
+    await maybeUpdate({
+      ...base(),
+      io: captureIo(false).io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    });
+    await writeFile(
+      autoUpdateResultPath(dir),
+      JSON.stringify({ ok: false, error: { code: 'UPDATE_FAILED' } }),
+    );
+    const after = captureIo(true);
+    await maybeUpdate({
+      ...base({ now: () => NOW + 1000 }),
+      io: after.io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    });
+    expect(after.stderr()).not.toContain('updated itself');
+    // Slot freed, so the next pass may try again.
+    expect(run.calls).toEqual([dir, dir]);
+  });
+
+  it('nudge mode never installs, and off mode does neither', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const nudge = captureIo(true);
+    const run = launcher();
+    await maybeUpdate({
+      ...base(),
+      io: nudge.io,
+      mode: 'nudge',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([]);
+    expect(nudge.stderr()).toContain('is available');
+
+    const off = captureIo(true);
+    await maybeUpdate({
+      ...base({ now: () => NOW + 1 }),
+      io: off.io,
+      mode: 'off',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([]);
+    expect(off.stderr()).toBe('');
+  });
+
+  // A build machine must not silently acquire a different binary mid-pipeline.
+  it('is skipped entirely in CI, auto included', async () => {
+    await seedSoaked('0.1.0-alpha.7');
+    const run = launcher();
+    const cap = captureIo(false);
+    await maybeUpdate({
+      ...base({ env: { CI: '1' } }),
+      io: cap.io,
+      mode: 'auto',
+      fetchImpl: forbiddenFetch,
+      spawnImpl: run.impl,
+    });
+    expect(run.calls).toEqual([]);
+    expect(cap.stderr()).toBe('');
   });
 });
 

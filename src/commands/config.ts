@@ -8,9 +8,11 @@ import {
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
+  UPDATE_CONFIG_KEYS,
   loadRawConfig,
   parseSearchHookModeFlag,
   parseStopNagFlag,
+  parseUpdateModeFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
@@ -22,6 +24,7 @@ import type {
   PublishMode,
   ScalarConfigKey,
   SearchHookMode,
+  UpdateConfigKey,
 } from '../lib/config';
 import type { HarnessTarget } from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
@@ -48,7 +51,9 @@ interface RenderedSetting extends RenderedValue {
 
 const CONFIRM_ABOVE = 'above:';
 const KEY_WIDTH = Math.max(
-  ...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS].map((key) => key.length),
+  ...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...UPDATE_CONFIG_KEYS].map(
+    (key) => key.length,
+  ),
 );
 
 /**
@@ -70,6 +75,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'hooks.searchMode':
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.stopNag': 'end-of-turn reminder about searches nothing answered yet',
+  'update.mode':
+    'auto=install newer versions in the background, nudge=only tell a human, off=neither',
 };
 
 function isPublishKey(key: string): key is PublishConfigKey {
@@ -78,6 +85,10 @@ function isPublishKey(key: string): key is PublishConfigKey {
 
 function isHooksKey(key: string): key is HooksConfigKey {
   return (HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isUpdateKey(key: string): key is UpdateConfigKey {
+  return (UPDATE_CONFIG_KEYS as readonly string[]).includes(key);
 }
 
 /**
@@ -105,6 +116,14 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(describedLine(key, entry));
   }
+  for (const key of UPDATE_CONFIG_KEYS) {
+    const entry: RenderedSetting = {
+      value: settings.updateMode.value,
+      source: settings.updateMode.source,
+    };
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -125,6 +144,11 @@ export async function runConfigGet(
     const entry = renderHooksSetting(key, await resolveFromContext(ctx));
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
+  if (isUpdateKey(key)) {
+    const { updateMode } = await resolveFromContext(ctx);
+    const entry: RenderedSetting = { value: updateMode.value, source: updateMode.source };
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
   const configKey = assertKey(key);
   const settings = await resolveFromContext(ctx);
   const entry = renderSetting(configKey, settings[configKey].value, settings[configKey].source);
@@ -142,6 +166,7 @@ export async function runConfigSet(
 ): Promise<CommandResult> {
   if (isPublishKey(key)) return setPublishKey(key, value, ctx);
   if (isHooksKey(key)) return setHooksKey(key, value, ctx);
+  if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
@@ -190,6 +215,25 @@ async function setHooksKey(
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
+  }));
+  const entry: RenderedSetting = { value: parsed, source: 'file' };
+  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+}
+
+/**
+ * `config set update.mode`. Same locked merge-write as every other set, so the
+ * background installer sees the new mode on the very next run with nothing to
+ * re-install and no process to restart.
+ */
+async function setUpdateKey(
+  key: UpdateConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const parsed = parseUpdateModeFlag(value, key);
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    update: { ...existing.update, mode: parsed },
   }));
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };

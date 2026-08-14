@@ -5,13 +5,12 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   runUpdate,
-  resolveNpmCli,
   spawnCapture,
-  REFUSALS,
   type SpawnResult,
   type UpdateDeps,
   type UpdateSpawn,
 } from './update';
+import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -273,22 +272,84 @@ describe('runUpdate', () => {
     expect(err.fix).toBe('Update it where it is declared: npm i tenjin-cli@0.1.0-alpha.7');
   });
 
-  it('refuses a pnpm-store install and pins the pnpm command in the fix', async () => {
+  // Delegation, not refusal: the PATH race only bites on CROSS-manager writes,
+  // and invoking the owner is what the old refusal told the user to type.
+  it('delegates a pnpm-store install to pnpm', async () => {
     const { ctx } = makeCtx();
-    const err = await caught(async () =>
-      runUpdate({ check: false }, ctx, await deps({ moduleDir: await installedTree('.pnpm') })),
+    const spawned = spawnRecorder();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ moduleDir: await installedTree('.pnpm'), spawnImpl: spawned.impl }),
     );
-    expect(err.code).toBe('REFUSED');
-    expect(err.fix).toBe('pnpm add -g tenjin-cli@0.1.0-alpha.7');
+    expect(spawned.calls[0]?.cmd).toBe('pnpm');
+    expect(spawned.calls[0]?.args).toEqual([
+      'add',
+      '-g',
+      '--ignore-scripts',
+      'tenjin-cli@0.1.0-alpha.7',
+    ]);
+    expect(result.data).toMatchObject({ updated: true });
   });
 
-  it('a pnpm-store install that is already current is simply up to date', async () => {
+  it('delegates a bun install to bun, without a flag bun may not have', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ moduleDir: await installedTree('.bun'), spawnImpl: spawned.impl }),
+    );
+    expect(spawned.calls[0]?.cmd).toBe('bun');
+    expect(spawned.calls[0]?.args).toEqual(['add', '-g', 'tenjin-cli@0.1.0-alpha.7']);
+  });
+
+  // bun's global dir keeps a package.json beside node_modules, so an unscoped
+  // project-local test would refuse the very install we just delegated.
+  it('does not mistake a bun global for a project-local dependency', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const moduleDir = await installedTree('.bun', 'install', 'global');
+    await writeFile(
+      join(dir, '.bun', 'install', 'global', 'package.json'),
+      '{"name":"bun-global"}',
+    );
+    await runUpdate({ check: false }, ctx, await deps({ moduleDir, spawnImpl: spawned.impl }));
+    expect(spawned.calls[0]?.cmd).toBe('bun');
+  });
+
+  it('names the delegated manager in a failure, not npm', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder({ result: { kind: 'exit', code: 1 } });
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        ctx,
+        await deps({ moduleDir: await installedTree('.pnpm'), spawnImpl: spawned.impl }),
+      ),
+    );
+    expect(err.message).toContain('pnpm add -g');
+    expect(err.fix).toBe('Run it yourself: pnpm add -g tenjin-cli@0.1.0-alpha.7');
+  });
+
+  // yarn stays a refusal: `yarn global add` is yarn-1 only and berry dropped
+  // globals, so there is no one command this can drive.
+  it('still refuses yarn, whose global install exists only in yarn 1', async () => {
+    const { ctx } = makeCtx();
+    const err = await caught(async () =>
+      runUpdate({ check: false }, ctx, await deps({ moduleDir: await installedTree('.yarn') })),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.fix).toBe('yarn global add tenjin-cli@0.1.0-alpha.7');
+  });
+
+  it('a yarn install that is already current is simply up to date', async () => {
     const { ctx } = makeCtx();
     const result = await runUpdate(
       { check: false },
       ctx,
       await deps({
-        moduleDir: await installedTree('.pnpm'),
+        moduleDir: await installedTree('.yarn'),
         fetchImpl: registry({ alpha: '0.1.0-alpha.6' }).fetchImpl,
       }),
     );

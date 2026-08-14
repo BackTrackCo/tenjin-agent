@@ -48,9 +48,27 @@ Installs the newest version npm offers this build, pinned to the exact version t
 | --------- | --------------------------------------------------------- |
 | `--check` | Report whether a newer version exists without installing. |
 
-Only a global npm install is replaced. A source checkout, an npx run, a project-local copy, and a pnpm/bun/yarn global each refuse with the instruction that is correct there rather than writing a global you never had. `--check` answers from all of them.
+The manager that owns the install performs it: npm, pnpm, and bun are each driven with their own global-add command. What cannot be driven is refused with the instruction that is correct there, rather than writing a global you never had: a source checkout updates by git, an npx run has nothing installed to replace, a project-local copy updates where it is declared, and yarn is refused because `yarn global add` exists only in yarn 1. `--check` answers from all of them.
 
 Deliberately not in the recommended permission allowlist: it replaces the binary your agent then runs. See [agent-permissions.md](./agent-permissions.md).
+
+### Background updates
+
+Once a day, at most, the CLI asks npm whether a newer version exists. What it does with the answer is `update.mode`:
+
+| Mode    | Behavior                                                                   |
+| ------- | -------------------------------------------------------------------------- |
+| `auto`  | Default. Installs the new version in the background, then reports it once. |
+| `nudge` | Prints one dim line to a human at a terminal. Never installs.              |
+| `off`   | Neither. The CLI stops asking npm entirely.                                |
+
+```bash
+tenjin config set update.mode nudge   # or off
+```
+
+`auto` is the default because the nudge is TTY-only, and most installs sit on agent machines where no human ever sees one. It is bounded in four ways: it never runs in CI, it never runs where `tenjin update` would refuse, it waits until a version has been visible for at least 24 hours so a bad release can be pulled first, and the install runs detached after the command's own output so nothing waits on it. A failed background install says nothing and falls back to the nudge.
+
+The install is announced once, on the next command, on every surface including `--json` — replacing the binary is a write to your machine.
 
 ## Search and read
 

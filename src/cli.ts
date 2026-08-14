@@ -6,7 +6,7 @@ import { dataDir } from './lib/paths';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
-import { maybeNudgeUpdate } from './lib/update-check';
+import { maybeUpdate } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
 /**
@@ -90,7 +90,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // runs the OLD build, so a cached "newer exists" would print the nudge in
     // the same breath as "Updated".
     if (command !== 'update') {
-      await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
+      await maybeUpdate({ dir: dataDir(process.env), io, json });
     }
     // Every command but `install` is a chance to catch up a skill left stale by
     // an upgrade; `install` has just written the same bytes from the same source.
