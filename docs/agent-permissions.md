@@ -38,17 +38,17 @@ needs the wallet.
 
 ### What each verb actually does
 
-| Rule                            | Why it is safe to pre-clear                                                                                                        |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.                  |
-| `Bash(tenjin fund:*)`           | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, origin-pinned (no `--base-url`). |
-| `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                          |
-| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below).     |
-| `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.      |
-| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                           |
-| `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                    |
-| `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                              |
-| `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.                  |
+| Rule                            | Why it is safe to pre-clear                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.              |
+| `Bash(tenjin fund:*)`           | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, env-only origin override.    |
+| `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                      |
+| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below). |
+| `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.  |
+| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                       |
+| `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                |
+| `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                          |
+| `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.              |
 
 `tenjin doctor --json` emits the same per-verb notes under `permissions`, so an
 agent can read them without this page.
@@ -205,11 +205,20 @@ pinned server-side to the wallet that signed the request, so a link an agent
 mints can only ever fund your own wallet, the CLI refuses any checkout host but
 `pay.coinbase.com`, and the payment itself happens behind Coinbase's own human
 gate. The `--base-url` caveat that qualifies every other prefix rule does not
-apply here: `fund` is pinned to the production origin and takes no override from
-the flag, the environment, or config, so an allowlisted invocation cannot steer
-where the wallet's SIWX proof goes. That pin is what separates `fund` from
-`session start` (unattended keystore access, override surface intact), which
+apply here: `fund` defaults to the production origin and ignores both `--base-url`
+and config, because each of those rides inside an allowlisted `Bash(tenjin fund:*)`
+invocation. The one surface that does move it is the `TENJIN_FUND_ORIGIN`
+environment variable, and that is safe for the same reason the others are not: an
+env-prefixed invocation (`TENJIN_FUND_ORIGIN=https://... tenjin fund`) does not
+match the prefix rule, so an allowlisted agent cannot exercise it and the override
+stays human-gated by construction. It is normalized to a bare origin, and any run
+that is not against production says so on stderr. That is what separates `fund`
+from `session start` (unattended keystore access, override surface intact), which
 stays opt-in.
+
+Keeping an escape hatch is deliberate (owner decision, 2026-08-14): a hard pin
+made a domain migration or a run against a preview deployment require a code
+release, which is worse design than one override an agent provably cannot reach.
 
 ### `tenjin send`, the escape hatch
 

@@ -139,21 +139,66 @@ describe('runFund', () => {
     expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
   });
 
-  it('ignores every base-url override: the mint is pinned to production', async () => {
+  it('ignores every base-url override that rides inside an allowlisted invocation', async () => {
     const { provider } = fakeProvider();
     const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
     const ctx = makeCtx();
-    // Hostile overrides on both surfaces a caller controls: the global flag and
-    // the config file. Neither may steer where the wallet's SIWX proof goes.
+    // Hostile overrides on both surfaces `Bash(tenjin fund:*)` already covers:
+    // the global flag and the config file. Neither may steer where the wallet's
+    // SIWX proof goes; only an env prefix, which that rule cannot match, may.
     (ctx.flags as { baseUrl?: string }).baseUrl = 'https://evil.example';
     await mkdir(ctx.dataDir, { recursive: true });
     await writeFile(
       join(ctx.dataDir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://evil.example' }),
     );
-    await runFund(ctx, { provider, fetchImpl, wait: false, open: false });
+    await runFund(ctx, { provider, fetchImpl, wait: false, open: false, env: {} });
 
     expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+  });
+
+  it('mints against TENJIN_FUND_ORIGIN when it is set, proof and all', async () => {
+    const { provider, address } = fakeProvider();
+    const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
+    // A path and a trailing slash normalize away, so the request URL and the
+    // domain the server compares the proof against cannot desync.
+    const env = { TENJIN_FUND_ORIGIN: 'https://staging.tenjin.sh/some/path/' };
+    await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false, env });
+
+    expect(calls[0]!.url).toBe('https://staging.tenjin.sh/api/cdp/session');
+    const proof = parseSIWxHeader(calls[0]!.headers['sign-in-with-x']!) as Record<string, unknown>;
+    expect(proof.domain).toBe('staging.tenjin.sh');
+    expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
+    // Never silent: a signed proof leaving for a non-production origin says so.
+    expect(stderr.join('')).toContain('Funding against https://staging.tenjin.sh');
+  });
+
+  it('refuses a TENJIN_FUND_ORIGIN that is not an absolute http(s) URL', async () => {
+    const { provider } = fakeProvider();
+    const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
+    const err = await catchCliError(
+      runFund(makeCtx(), {
+        provider,
+        fetchImpl,
+        wait: false,
+        open: false,
+        env: { TENJIN_FUND_ORIGIN: 'tenjin.sh' },
+      }),
+    );
+
+    expect(err.code).toBe('USAGE');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('mints against production exactly when the env var is unset', async () => {
+    const { provider } = fakeProvider();
+    const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
+    await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false, env: {} });
+
+    expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+    const proof = parseSIWxHeader(calls[0]!.headers['sign-in-with-x']!) as Record<string, unknown>;
+    expect(proof.domain).toBe('tenjin.blog');
+    expect(stderr.join('')).not.toContain('TENJIN_FUND_ORIGIN');
   });
 
   it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {

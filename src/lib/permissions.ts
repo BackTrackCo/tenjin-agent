@@ -123,8 +123,9 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'fund modal. Minting moves no money: the destination is server-pinned to the wallet ' +
       'that signed, the CLI refuses any checkout host but pay.coinbase.com, and payment ' +
       'happens behind Coinbase\u2019s own human gate. The usual --base-url caveat does not ' +
-      'apply: fund is pinned to the production origin and takes no override from flag, ' +
-      'env, or config.',
+      'apply: fund defaults to the production origin and ignores --base-url and config. ' +
+      'Only TENJIN_FUND_ORIGIN moves it, and an env prefix does not match this rule, so ' +
+      'an allowlisted invocation still cannot steer the wallet\u2019s signed proof.',
   },
   {
     rule: 'Bash(tenjin inspect:*)',

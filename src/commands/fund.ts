@@ -13,6 +13,7 @@ import { getUsdcBalance } from '../lib/usdc';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
 import { openInBrowser } from '../lib/open-url';
+import { tryOriginOf } from '../lib/url';
 import type { CommandContext, CommandResult } from '../context';
 
 /*
@@ -30,12 +31,20 @@ import type { CommandContext, CommandResult } from '../context';
 /** The only host a minted checkout URL may point at; anything else is refused unopened. */
 const CHECKOUT_HOST = 'pay.coinbase.com';
 /**
- * fund talks to production, full stop (owner decision, 2026-08-12): the mint
- * signs with the wallet key, so this path takes no override -- not `--base-url`,
- * not the env, not config. Cutting the surface entirely is what lets the verb
- * sit in the free allowlist tier with nothing to caveat.
+ * fund talks to production by default (owner decision, 2026-08-12): the mint
+ * signs with the wallet key, so `--base-url` and config are cut here -- both ride
+ * INSIDE an allowlisted `Bash(tenjin fund:*)` invocation, so honoring them would
+ * let an allowlisted agent silently redirect the wallet's SIWX proof.
+ *
+ * `TENJIN_FUND_ORIGIN` is the one override that survives (owner decision,
+ * 2026-08-14), because an env-prefixed invocation (`TENJIN_FUND_ORIGIN=...
+ * tenjin fund`) does not match that prefix rule: the allowlist cannot exercise
+ * it, so it stays human-gated by construction. A hard pin instead forced a code
+ * release for any origin change -- a domain migration (tenjin.sh) or a run
+ * against a preview deployment.
  */
-const FUND_ORIGIN = 'https://tenjin.blog';
+const PRODUCTION_FUND_ORIGIN = 'https://tenjin.blog';
+const FUND_ORIGIN_ENV = 'TENJIN_FUND_ORIGIN';
 /** Matches the server's presetAmount bound (app/api/cdp/session bodySchema). */
 const MAX_PRESET_USD = 100_000;
 const POLL_INTERVAL_MS = 5_000;
@@ -58,6 +67,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   wait?: boolean;
   fetchImpl?: typeof fetch;
   openUrl?: typeof openInBrowser;
+  /** Environment the fund origin resolves from; defaults to the real one. */
+  env?: NodeJS.ProcessEnv;
   /** Poll seams so tests never sleep for real. */
   sleep?: (ms: number) => Promise<void>;
   pollIntervalMs?: number;
@@ -74,8 +85,13 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
 
   const config = await loadRawConfig(ctx.dataDir);
   const settings = resolveSettings({ config, flags: {}, env: process.env });
-  const baseUrl = FUND_ORIGIN;
+  const baseUrl = resolveFundOrigin(opts.env ?? process.env);
   const rpcUrl = settings.rpcUrl.value;
+  if (baseUrl !== PRODUCTION_FUND_ORIGIN) {
+    // A signed proof leaving for a non-production origin is never silent, on any
+    // surface: this is the whole cost of having an override at all.
+    emitWriteNotice(ctx.io, `Funding against ${baseUrl} (${FUND_ORIGIN_ENV} is set).`);
+  }
 
   // Waiting is an INTERACTIVE posture: a human is standing at the terminal with
   // a browser open. Piped, --json, and MCP runs default to not waiting, because
@@ -170,6 +186,23 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
 }
 
 /**
+ * The origin this run mints against. Normalized to a bare `scheme://host[:port]`
+ * so a stray path or trailing slash cannot desync the request URL from the
+ * SIWX domain the server compares against.
+ */
+function resolveFundOrigin(env: NodeJS.ProcessEnv): string {
+  const raw = env[FUND_ORIGIN_ENV]?.trim();
+  if (raw === undefined || raw === '') return PRODUCTION_FUND_ORIGIN;
+  const origin = tryOriginOf(raw);
+  if (origin === null) {
+    throw new CliError('USAGE', `${FUND_ORIGIN_ENV} is not an absolute http(s) URL: ${raw}`, {
+      fix: `Set it to an origin, e.g. ${FUND_ORIGIN_ENV}=https://tenjin.sh, or unset it to use ${PRODUCTION_FUND_ORIGIN}.`,
+    });
+  }
+  return origin;
+}
+
+/**
  * The route parses the destination with strict EIP-55 (`checksummedAddress`) but
  * the local wallet store accepts any casing, so an imported or hand-edited wallet
  * file would earn an unactionable 400 on a purely local condition. Normalize here
@@ -230,7 +263,8 @@ function checkoutUrlFrom(status: number, json: unknown): string {
     throw new CliError('REFUSED', 'Coinbase Onramp is not available in your region.');
   }
   // A rejected proof is a local condition ("retry" never fixes it): the signed
-  // window is clock-relative, and the domain is always the pinned production origin.
+  // window is clock-relative, and the domain is whatever origin this run minted
+  // against, which the server compares verbatim.
   if (status === 401) {
     throw new CliError('REFUSED', 'The funding endpoint rejected the signed proof.', {
       fix: 'Check this machine’s clock, then retry.',
@@ -244,7 +278,7 @@ function checkoutUrlFrom(status: number, json: unknown): string {
   if (status === 503) {
     throw new CliError(
       'API_UNREACHABLE',
-      'Production has no Coinbase Onramp configured right now.',
+      'That Tenjin deployment has no Coinbase Onramp configured right now.',
       {
         fix: 'Retry later.',
       },
