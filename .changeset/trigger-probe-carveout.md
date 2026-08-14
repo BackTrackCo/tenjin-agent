@@ -2,16 +2,18 @@
 'tenjin-cli': patch
 ---
 
-Widen the supply/demand triggers by one carve-out each (tenjin-agent#145 item
-1). tenjin-search's skip list now skips "your own code" instead of "the thing
-in front of you", and tells the agent to search before empirically probing a
-third-party library or platform's undocumented behavior: that probe is the
-highest-value search moment, and the old wording suppressed it. tenjin-publish
-gains a fourth trigger for the same shape on the way out: an empirical proof
-of something the docs don't state (a race, a workaround, an integration
-pattern) established by real probing. The trigger eval gains a probe-shaped
-positive and an own-fork negative (the carve-out's two boundaries), and the
-full set scores 22/22 under the new wording. As with the last tuning, that
-score is in-sample, and it was measured with --no-preflight because of the
-known skills/tenjin mirror drift (#88), which does not touch the skill under
-test.
+Widen the supply/demand triggers (tenjin-agent#145 item 1) by restructuring
+both skill descriptions rather than appending to them, holding length at
+parity with the previous wording. tenjin-search now leads with both search
+moments: before regenerating expensive research, and before empirically
+probing a third-party library or platform's undocumented behavior; the skip
+list narrows from "the thing in front of you" to "your own code" and the two
+skip sentences merge into one. tenjin-publish reorganizes its triggers into
+three routes in (user ask, after-a-MISS, unprompted work worth selling), the
+unprompted route covering substantial research and empirical proofs the docs
+don't state. Clean-room results: trigger eval extended 20 to 22 cases (one per
+side of the new probe boundary) and scores 22/22 under the new wording,
+in-sample as with the previous tuning; the no-CLI defer eval reads 1/4 but
+reads 1/4 on the unchanged main wording too, so that red is pre-existing, not
+this change. All runs used --no-preflight because preflight fails on the known
+skills/tenjin mirror drift (#88), which no run here touches.
