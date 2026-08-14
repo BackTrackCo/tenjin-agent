@@ -33,7 +33,12 @@ import {
   parseSearchHookModeFlag,
 } from '../lib/config';
 import type { PublishMode, SearchHookMode } from '../lib/config';
-import { persistInstallHarness, persistPublishMode, persistSearchHookMode } from './config';
+import {
+  persistBazaarPay,
+  persistInstallHarness,
+  persistPublishMode,
+  persistSearchHookMode,
+} from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks, isNoWalletCheck } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
@@ -220,6 +225,8 @@ export interface InstallDeps {
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
   /** Decision 3: the search-hook mode select; defaults to the clack list. */
   promptSearchHooks?: () => Promise<SearchHookMode | null>;
+  /** Decision 5: the Bazaar pay lane opt-in; defaults to the clack confirm (default no). */
+  confirmBazaarPay?: (question: string) => Promise<boolean>;
   /** Decision 4: "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. Seams so tests never load the renderer. */
@@ -386,10 +393,15 @@ async function installBody(
   // ENOENT/ENOTEMPTY renames), and 24 concurrent runs pass without a lock. The
   // self-heal is the other writer, and it writes these same bytes to these same
   // paths through the same writer.
-  // Skill content is shaped by the machine facts at write time (the `wallet`
-  // flag); a wallet created later THIS run re-shapes below, after resolveWallet.
+  // Skill content is shaped by the machine facts at write time; a wallet created
+  // or a Bazaar decision made later THIS run re-shapes below, after the decisions.
   const walletPresentNow = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
-  const materialize = materializeTransform(skillContentFlags({ walletPresent: walletPresentNow }));
+  const rawConfig = await loadRawConfig(ctx.dataDir);
+  const initialFlags = skillContentFlags({
+    walletPresent: walletPresentNow,
+    bazaarPay: rawConfig.bazaarPay === true,
+  });
+  const materialize = materializeTransform(initialFlags);
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun, materialize));
@@ -440,12 +452,24 @@ async function installBody(
   const wallet = await underDataDir(ctx.dataDir, () =>
     resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt),
   );
-  // The skills were written before the wallet decision (write order above), so a
-  // wallet created THIS run re-shapes them: the installed text must describe the
-  // machine the install leaves behind, not the one it found. Idempotent rewrites
-  // through the same writer; the doctor snapshot below then sees the final state.
-  if (!dryRun && wallet.status === 'created' && !walletPresentNow) {
-    const reshaped = materializeTransform(skillContentFlags({ walletPresent: true }));
+  // Decision five, the Bazaar pay lane (plan: tenjin-notes cli-x402-pay). Asked
+  // once: a key already in the config (either answer) is remembered and never
+  // re-asked, and a headless run never enables it, because paying non-Tenjin
+  // sellers is an opt-in only a human makes.
+  const bazaarPay = await underDataDir(ctx.dataDir, () =>
+    resolveBazaarPay(ctx, deps, dryRun, canPrompt, rawConfig.bazaarPay),
+  );
+  // The skills were written before the decisions (write order above), so a
+  // wallet created or a Bazaar opt-in made THIS run re-shapes them: the
+  // installed text must describe the machine the install leaves behind, not the
+  // one it found. Idempotent rewrites through the same writer; the doctor
+  // snapshot below then sees the final state.
+  const finalFlags = skillContentFlags({
+    walletPresent: walletPresentNow || wallet.status === 'created',
+    bazaarPay: bazaarPay.enabled,
+  });
+  if (!dryRun && JSON.stringify(finalFlags) !== JSON.stringify(initialFlags)) {
+    const reshaped = materializeTransform(finalFlags);
     for (const plan of plans) {
       for (const name of SKILL_NAMES) {
         try {
@@ -454,7 +478,7 @@ async function installBody(
           });
         } catch {
           // The first pass already reported this skill; a re-shape failure must
-          // not fail an install whose wallet just landed. The self-heal and
+          // not fail an install whose decisions just landed. The self-heal and
           // doctor own the catch-up, exactly as for any other stale copy.
         }
       }
@@ -491,6 +515,7 @@ async function installBody(
     pointerCleanup,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
+    bazaarPay,
     // Shipped with the install rather than left for the operator to discover after
     // their first auto-mode denial (#33). Static constants, no config key: see
     // lib/permissions.ts for why this is deliberately not operator-editable state.
@@ -936,6 +961,37 @@ async function defaultCreateWallet(
 /** The shared confirm, defaulting to YES (setup ergonomics); cancel reads as no. */
 function defaultConfirm(label: string): Promise<boolean> {
   return confirmChoice(label, true);
+}
+
+export const BAZAAR_QUESTION =
+  'Enable the Bazaar pay lane? x402 lets this wallet pay HTTP endpoints that answer with a priced 402, and the Bazaar (https://docs.cdp.coinbase.com/x402/bazaar) is the public catalog of them. When on, `tenjin pay` may pay Bazaar-listed non-Tenjin endpoints under your spend policy. More: https://x402.org';
+
+interface BazaarPayOutcome {
+  enabled: boolean;
+  /** kept = the config already answered (never re-asked); not-asked = headless or dry run. */
+  status: 'kept' | 'enabled' | 'declined' | 'not-asked';
+}
+
+/**
+ * The one decision that is remembered in BOTH directions: a prompted yes or no
+ * is persisted (`bazaarPay: true|false`), so the question is asked at most once
+ * per machine. A headless run persists nothing, leaving the question for the
+ * first interactive install. Default no: this gate opens spending at sellers
+ * Tenjin does not operate.
+ */
+async function resolveBazaarPay(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  dryRun: boolean,
+  canPrompt: boolean,
+  existing: boolean | undefined,
+): Promise<BazaarPayOutcome> {
+  if (existing !== undefined) return { enabled: existing, status: 'kept' };
+  if (dryRun || !canPrompt) return { enabled: false, status: 'not-asked' };
+  const confirm = deps.confirmBazaarPay ?? ((label: string) => confirmChoice(label, false));
+  const yes = await confirm(BAZAAR_QUESTION);
+  await persistBazaarPay(ctx.dataDir, yes);
+  return { enabled: yes, status: yes ? 'enabled' : 'declined' };
 }
 
 /**

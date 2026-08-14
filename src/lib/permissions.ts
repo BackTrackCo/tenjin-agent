@@ -214,6 +214,17 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
       'read that as a human being on every purchase. Fund small.',
   },
   {
+    rule: 'Bash(tenjin pay:*)',
+    command: 'tenjin pay',
+    note:
+      'SPENDS USDC on Base, unrefundably, at ANY x402 endpoint the origin gate ' +
+      'allows: the configured base URL always, and with `bazaarPay` on, ' +
+      'registry-listed foreign sellers too. The same spend policy and `--yes` ' +
+      'caveat as the buy line apply, and unlike `buy` there is no library ' +
+      'dedupe: a looping agent pays on every call. Set maxAutoSpend and ' +
+      'sessionBudget first, and leave `bazaarPay` off unless you mean it.',
+  },
+  {
     rule: 'Bash(tenjin session start:*)',
     command: 'tenjin session start',
     note:

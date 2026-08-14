@@ -194,6 +194,7 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // and the address is canned; wallet tests opt into realWalletCreate().
     walletExists: async () => existsSync(join(data, 'wallet.json')),
     confirmWallet: async () => false,
+    confirmBazaarPay: async () => false,
     createWallet: async () => {
       await writeFile(join(data, 'wallet.json'), '{}');
       return STUB_ADDRESS;
@@ -236,7 +237,13 @@ type Harnesses = Array<{
   warnings: string[];
   notes: string[];
 }>;
-type Data = { dryRun: boolean; skillsSource: string; harnesses: Harnesses; doctor: unknown };
+type Data = {
+  dryRun: boolean;
+  skillsSource: string;
+  harnesses: Harnesses;
+  doctor: unknown;
+  bazaarPay: { enabled: boolean; status: string };
+};
 
 const asData = (d: unknown) => d as Data;
 
@@ -336,6 +343,50 @@ describe('runInstall: dry run', () => {
     expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
+  });
+});
+
+describe('runInstall: the bazaarPay decision', () => {
+  it('a headless run never enables it and persists nothing (asked later)', async () => {
+    const { data: out } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(asData(out).bazaarPay).toEqual({ enabled: false, status: 'not-asked' });
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
+    expect((JSON.parse(raw) as { bazaarPay?: boolean }).bazaarPay).toBeUndefined();
+  });
+
+  it('an interactive yes persists true; the next install keeps it without re-asking', async () => {
+    const confirm = vi.fn(async () => true);
+    const first = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(first.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const second = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(second.data).bazaarPay).toEqual({ enabled: true, status: 'kept' });
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('an interactive no is remembered too', async () => {
+    const confirm = vi.fn(async () => false);
+    const first = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(first.data).bazaarPay).toEqual({ enabled: false, status: 'declined' });
+    const second = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(second.data).bazaarPay).toEqual({ enabled: false, status: 'kept' });
+    expect(confirm).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1139,6 +1190,7 @@ describe('runInstall: interactive walkthrough', () => {
     );
     expect(d.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
+      'Bash(tenjin pay:*)',
       'Bash(tenjin session start:*)',
     ]);
   });

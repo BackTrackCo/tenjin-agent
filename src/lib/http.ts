@@ -213,6 +213,8 @@ export interface HttpResponse {
   header(name: string): string | undefined;
   /** Parsed JSON body, or undefined when the body was empty or not JSON. */
   json: unknown;
+  /** The raw body text; what a non-JSON endpoint actually said (`pay` delivers it). */
+  text: string;
   requestId?: string;
 }
 
@@ -341,6 +343,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
       status: res.status,
       header: (name) => res.headers.get(name) ?? undefined,
       json,
+      text,
       ...(requestId !== undefined ? { requestId } : {}),
     };
   } finally {

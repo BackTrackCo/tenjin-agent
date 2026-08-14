@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -58,7 +58,7 @@ describe('runConfigList', () => {
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
-    expect(humanLines).toHaveLength(12);
+    expect(humanLines).toHaveLength(14);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -515,5 +515,46 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
     expect(bad.code).toBe('USAGE');
     expect(bad.fix).toContain('"on"');
+  });
+});
+
+describe('runConfigSet: skill-shaping keys', () => {
+  it('re-materializes the installed skills after setting bazaarPay, and only then', async () => {
+    const ctx = makeCtx();
+    const rematerialize = vi.fn(async () => undefined);
+    await runConfigSet({ key: 'bazaarPay', value: 'on' as never }, ctx, { rematerialize }).catch(
+      () => undefined,
+    );
+    // 'on' is not a boolean spelling; the real value contract is true/false.
+    expect(rematerialize).not.toHaveBeenCalled();
+    await runConfigSet({ key: 'bazaarPay', value: 'true' }, ctx, { rematerialize });
+    expect(rematerialize).toHaveBeenCalledWith({ io: ctx.io, dataDir: ctx.dataDir });
+    await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx, { rematerialize });
+    expect(rematerialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('a rematerialize failure never fails the set itself', async () => {
+    const ctx = makeCtx();
+    const result = await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, {
+      rematerialize: async () => {
+        throw new Error('skills dir on fire');
+      },
+    });
+    expect((result.data as { value: boolean }).value).toBe(false);
+  });
+
+  it('bazaarRegistries accepts a comma list of https origins and rejects garbage', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet(
+      { key: 'bazaarRegistries', value: 'https://a.test, https://b.test/x402' },
+      ctx,
+    );
+    expect((set.data as { value: string[] }).value).toEqual([
+      'https://a.test',
+      'https://b.test/x402',
+    ]);
+    await expect(
+      runConfigSet({ key: 'bazaarRegistries', value: 'not a url' }, ctx),
+    ).rejects.toThrow(CliError);
   });
 });

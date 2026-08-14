@@ -5,6 +5,7 @@ import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
+  SKILL_SHAPING_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
@@ -65,6 +66,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   baseUrl: 'Tenjin API base URL',
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
+  bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
+  bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
   'hooks.searchMode':
@@ -136,15 +139,40 @@ export async function runConfigGet(
  * file — never materializing defaults for keys the user did not set, so
  * provenance stays truthful. The written key now reads `file`.
  */
+export interface ConfigSetDeps {
+  /** The skill-rematerialize seam; tests inject a recorder, the default is the
+   *  real writer (lazy import so `config` never loads it for get/list). */
+  rematerialize?: (input: { io: CommandContext['io']; dataDir: string }) => Promise<void>;
+}
+
 export async function runConfigSet(
   { key, value }: { key: string; value: string },
   ctx: CommandContext,
+  deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
   if (isPublishKey(key)) return setPublishKey(key, value, ctx);
   if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
+  // A skill-shaping key changed: re-materialize the installed skills so the
+  // agent-facing text follows the config it advertises, immediately, hosted
+  // mirror included (a config set is an operator act, the same trust class as
+  // install). Best-effort AFTER the persist: the set itself already succeeded,
+  // and a skill write failure is doctor's to report, not this command's to fail.
+  if (SKILL_SHAPING_CONFIG_KEYS.includes(configKey)) {
+    try {
+      const rematerialize =
+        deps.rematerialize ??
+        (async (input: { io: CommandContext['io']; dataDir: string }) => {
+          const { rematerializeInstalledSkills } = await import('../lib/skill-heal');
+          await rematerializeInstalledSkills(input);
+        });
+      await rematerialize({ io: ctx.io, dataDir: ctx.dataDir });
+    } catch {
+      // `tenjin doctor` reports a copy that does not match the current config.
+    }
+  }
   const entry = renderSetting(configKey, stored, 'file');
   return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
@@ -220,6 +248,12 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
  * Persist `hooks.searchMode` through the same locked merge-write, for `install`'s
  * hook decision. The mode is already a validated SearchHookMode.
  */
+/** install's Bazaar-lane decision writer; the same locked read-modify-write every
+ *  `config set` uses, so a concurrent set never loses a sibling key. */
+export async function persistBazaarPay(dir: string, enabled: boolean): Promise<void> {
+  await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
+}
+
 export async function persistSearchHookMode(dir: string, mode: SearchHookMode): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,

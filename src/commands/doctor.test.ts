@@ -1149,6 +1149,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     );
     expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
+      'Bash(tenjin pay:*)',
       'Bash(tenjin session start:*)',
     ]);
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');

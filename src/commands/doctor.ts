@@ -157,7 +157,10 @@ export async function collectDoctorChecks(
       config.install?.harness ?? [],
       // The same flag resolution install and the heal write with, so "stale"
       // means "not what this machine's writers would write", never "shaped".
-      skillContentFlags({ walletPresent: await walletFileExists(ctx.dataDir) }),
+      skillContentFlags({
+        walletPresent: await walletFileExists(ctx.dataDir),
+        bazaarPay: config.bazaarPay === true,
+      }),
       deps.skillsSourceDir,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),

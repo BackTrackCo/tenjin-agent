@@ -15,7 +15,7 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
-import { resolveSkillsSource } from './skills-source';
+import { SKILL_NAMES, resolveSkillsSource } from './skills-source';
 
 export interface HealDeps {
   io: Io;
@@ -180,6 +180,54 @@ async function heal(
     }
   }
   if (updated.length > 0) emitWriteNotice(io, noticeFor(updated));
+}
+
+/**
+ * The `config set` twin of the heal, for a skill-shaping key: an OPERATOR act,
+ * so it covers every installed tenjin skill (the hosted mirror included, which
+ * the unattended heal refuses) and resolves the source the way `install` does
+ * (a checkout's skills are what a checkout's `config set` was run against).
+ * Presence still gates: a skill not on disk is never created, and a same-named
+ * foreign skill is never replaced. Per-skill failures degrade to the next
+ * `install`/doctor, exactly like the heal, because the config change itself has
+ * already been persisted and must not be un-reported by a skill write.
+ */
+export async function rematerializeInstalledSkills(deps: {
+  io: Io;
+  dataDir: string;
+  homeDir?: string;
+  skillsSourceDir?: string;
+}): Promise<void> {
+  const home = deps.homeDir ?? homedir();
+  if (!isAbsolute(home)) return;
+  let source: string;
+  let materialize: (rel: string, content: Buffer) => Buffer;
+  try {
+    source =
+      deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    materialize = materializeTransform(await resolveSkillFlags(deps.dataDir));
+  } catch {
+    return; // no readable source or config: nothing safe to write
+  }
+  const updated: string[] = [];
+  for (const dir of skillsDirsFor(home)) {
+    for (const name of SKILL_NAMES) {
+      const path = join(dir, name, 'SKILL.md');
+      try {
+        // isOurs reads THROUGH a symlink (install writes through them too, and
+        // this is the same operator trust class); an absent copy reads as not
+        // ours, which is the never-create gate.
+        if (!(await isOurs(path, name))) continue;
+        const { status } = await installSkill(join(source, name), join(dir, name), false, name, {
+          materialize,
+        });
+        if (status !== 'up-to-date') updated.push(path);
+      } catch {
+        // This skill keeps what it has; doctor reports it, the next install fixes it.
+      }
+    }
+  }
+  if (updated.length > 0) emitWriteNotice(deps.io, noticeFor(updated));
 }
 
 /** Does this file claim to BE the skill we would write over it? Somebody else's

@@ -50,6 +50,10 @@ export const ErrorCodeSchema = z.enum([
   // A send that reverted or produced no receipt AFTER the human approved it and
   // it was broadcast (exit 4), same post-decision class as PAYMENT_FAILED.
   'SEND_FAILED',
+  // `tenjin pay` Bazaar lane: the live 402 does not match what a configured
+  // registry publicly advertises for this resource (understood-but-refused, 3);
+  // nothing was signed and nothing was spent.
+  'REGISTRY_MISMATCH',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 

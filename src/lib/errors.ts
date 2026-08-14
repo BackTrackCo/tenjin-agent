@@ -54,6 +54,8 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   // A send that reverted or stalled AFTER the human approved it and it was
   // broadcast: the post-decision failure class (4), like PAYMENT_FAILED.
   SEND_FAILED: 4,
+  // Refused BEFORE any signature existed: the Bazaar lane's fail-closed check.
+  REGISTRY_MISMATCH: 3,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {
