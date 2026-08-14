@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
@@ -91,6 +91,13 @@ export async function runUpdate(
       fix: 'Reinstall a published build: npm i -g tenjin-cli',
     });
   }
+
+  // The one refusal that belongs ABOVE the network. It is pure filesystem, its
+  // answer does not depend on anything npm says, and leaving it below the fetch
+  // told an offline contributor in a checkout to go debug their registry access.
+  // The rest need the resolved version for their fix strings, so they stay below
+  // the --check return.
+  if (!opts.check && isSourceCheckout(moduleDir)) throw sourceCheckoutRefusal();
 
   const tags = await fetchDistTags({
     fetchImpl: deps.fetchImpl,
@@ -209,11 +216,9 @@ export async function runUpdate(
  * global test is not written for.
  */
 function refuseUnlessGlobalNpm(moduleDir: string, spec: string): void {
-  if (isSourceCheckout(moduleDir)) {
-    throw new CliError('REFUSED', 'tenjin-cli is running from a source checkout, not an install', {
-      fix: 'Update the checkout instead: git pull && pnpm install',
-    });
-  }
+  // Also probed before the fetch on the install path; kept here so the ordering
+  // of the two call sites is not what makes a checkout refuse.
+  if (isSourceCheckout(moduleDir)) throw sourceCheckoutRefusal();
   if (moduleDir.split(sep).includes('_npx')) {
     throw new CliError('REFUSED', 'tenjin-cli is running from the npx cache, not an install', {
       // Writing a global here would "succeed" and change nothing: the next
@@ -237,6 +242,11 @@ function refuseUnlessGlobalNpm(moduleDir: string, spec: string): void {
     );
   }
 }
+
+const sourceCheckoutRefusal = (): CliError =>
+  new CliError('REFUSED', 'tenjin-cli is running from a source checkout, not an install', {
+    fix: 'Update the checkout instead: git pull && pnpm install',
+  });
 
 /**
  * The published package ships `dist/`, `docs/`, and `skills/` with no `src/`
@@ -299,19 +309,76 @@ function isGlobalTree(moduleDir: string): boolean {
  *
  * On win32 the shim is `npm.cmd`, which Node refuses to spawn without
  * `shell: true`, and `shell: true` is exactly what this command must not do —
- * it would hand back the argv safety the pinned version buys. npm ships inside
- * the Node distribution, so its script is findable from `process.execPath`:
- * beside `node.exe` on win32, under `../lib` on POSIX. Null when neither exists,
- * and the caller falls back to the bare `npm` shim, which works everywhere but
- * win32 — where it fails closed into UPDATE_FAILED carrying the manual command.
+ * it would hand back the argv safety the pinned version buys.
+ *
+ * Deliberately NOT "npm ships inside the Node distribution". That is a property
+ * of the installer, not of Node: Homebrew's plain `node` formula keeps only
+ * corepack in the keg and puts npm at the brew prefix, so a probe relative to
+ * `process.execPath` alone returns null on one of the most common macOS setups.
+ * So the layout is searched, not assumed — beside the running binary first
+ * (official tarball and installer, nvm, volta, versioned brew kegs), then off
+ * PATH, where on POSIX the `npm` shim is itself a symlink to `npm-cli.js` and on
+ * win32 `npm.cmd` has `node_modules` beside it. Still null when npm cannot be
+ * found at all; the caller then falls back to the bare shim, which works
+ * everywhere but win32 and fails closed there into UPDATE_FAILED carrying the
+ * manual command.
  */
-export function resolveNpmCli(execPath: string): string | null {
+export function resolveNpmCli(
+  execPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
   const base = dirname(execPath);
+  return npmCliNear(base) ?? npmCliOnPath(env);
+}
+
+/** npm's script relative to a directory holding `node` or the `npm` shim. */
+function npmCliNear(dir: string): string | null {
   const candidates = [
-    join(base, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-    join(base, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   ];
-  return candidates.find((p) => existsSync(p)) ?? null;
+  return candidates.find(isFile) ?? null;
+}
+
+/**
+ * Walk PATH for an `npm` shim and turn it into npm's script. Probes the PATHEXT
+ * extensions on win32 for the same reason `onPath` in skill-wiring.ts does: the
+ * real file there is `npm.cmd`, never a bare `npm`.
+ */
+function npmCliOnPath(env: NodeJS.ProcessEnv): string | null {
+  const exts =
+    process.platform === 'win32'
+      ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e.length > 0)]
+      : [''];
+  for (const part of (env.PATH ?? '').split(delimiter)) {
+    if (part.length === 0) continue;
+    for (const ext of exts) {
+      if (!isFile(join(part, `npm${ext}`))) continue;
+      // POSIX package managers link the shim straight at the script, which is
+      // what makes this layout-independent rather than a longer guess list.
+      const real = realpathOrNull(join(part, `npm${ext}`));
+      if (real !== null && real.endsWith(`${sep}npm-cli.js`)) return real;
+      const near = npmCliNear(part);
+      if (near !== null) return near;
+    }
+  }
+  return null;
+}
+
+function isFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function realpathOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
 }
 
 /**

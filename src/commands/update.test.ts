@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -227,6 +228,21 @@ describe('runUpdate', () => {
     );
     expect(err.code).toBe('REFUSED');
     expect(err.exitCode).toBe(3);
+    expect(err.fix).toContain('git pull');
+  });
+
+  // Pure filesystem, so it answers before the network: an offline contributor
+  // gets "you are in a checkout", not "check your registry access".
+  it('refuses an install in a checkout before touching the network', async () => {
+    const { ctx } = makeCtx();
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        ctx,
+        await deps({ moduleDir: await checkoutTree(), fetchImpl: forbiddenFetch }),
+      ),
+    );
+    expect(err.code).toBe('REFUSED');
     expect(err.fix).toContain('git pull');
   });
 
@@ -491,14 +507,70 @@ describe('spawnCapture', () => {
 });
 
 describe('resolveNpmCli', () => {
-  // npm ships inside the Node distribution, so the node running this test has
-  // one. If this ever returns null on a supported runner, the win32 spawn path
-  // is unreachable and the fallback is all that is left.
-  it('finds npm-cli.js beside the running node', () => {
-    expect(resolveNpmCli(process.execPath)).toMatch(/npm-cli\.js$/);
+  /** Writes an npm install tree under `prefix` and returns its npm-cli.js. */
+  async function npmTree(prefix: string, layout: 'posix' | 'win32'): Promise<string> {
+    const root =
+      layout === 'posix'
+        ? join(prefix, 'lib', 'node_modules', 'npm', 'bin')
+        : join(prefix, 'node_modules', 'npm', 'bin');
+    await mkdir(root, { recursive: true });
+    const cli = join(root, 'npm-cli.js');
+    await writeFile(cli, '// npm');
+    return cli;
+  }
+
+  it('finds npm beside the running binary', async () => {
+    const prefix = join(dir, 'tarball');
+    const cli = await npmTree(prefix, 'posix');
+    expect(resolveNpmCli(join(prefix, 'bin', 'node'), {})).toBe(cli);
   });
 
-  it('returns null when no npm ships beside the given binary', () => {
-    expect(resolveNpmCli(join(dir, 'nowhere', 'node'))).toBeNull();
+  it('finds npm beside node.exe in the win32 layout', async () => {
+    const prefix = join(dir, 'winnode');
+    const cli = await npmTree(prefix, 'win32');
+    expect(resolveNpmCli(join(prefix, 'node.exe'), {})).toBe(cli);
+  });
+
+  // Homebrew's plain `node` formula keeps only corepack in the keg and puts npm
+  // at the brew prefix, so nothing sits beside the running binary and the PATH
+  // shim, a symlink straight at the script, is the only way through.
+  it('follows a PATH shim that is a symlink to the script', async () => {
+    const brew = join(dir, 'brew');
+    const cli = await npmTree(brew, 'posix');
+    const keg = join(brew, 'Cellar', 'node', '23.9.0', 'bin');
+    await mkdir(join(brew, 'Cellar', 'node', '23.9.0', 'lib', 'node_modules', 'corepack'), {
+      recursive: true,
+    });
+    await mkdir(join(brew, 'bin'), { recursive: true });
+    await mkdir(keg, { recursive: true });
+    await symlink(cli, join(brew, 'bin', 'npm'));
+    // The precondition the old resolution rested on, absent here.
+    expect(existsSync(join(brew, 'Cellar', 'node', '23.9.0', 'lib', 'node_modules', 'npm'))).toBe(
+      false,
+    );
+    // Compared against the resolved path: following a symlink is the point, and
+    // macOS resolves the tmpdir through /private on the way.
+    expect(resolveNpmCli(join(keg, 'node'), { PATH: join(brew, 'bin') })).toBe(realpathSync(cli));
+  });
+
+  // A shim that is a real file rather than a symlink: win32 npm.cmd, and the
+  // POSIX wrapper scripts some managers write.
+  it('finds npm relative to a PATH shim that is not a symlink', async () => {
+    const prefix = join(dir, 'shimdir');
+    const cli = await npmTree(prefix, 'posix');
+    await mkdir(join(prefix, 'bin'), { recursive: true });
+    await writeFile(join(prefix, 'bin', 'npm'), '#!/bin/sh\n');
+    expect(resolveNpmCli(join(dir, 'nowhere', 'node'), { PATH: join(prefix, 'bin') })).toBe(cli);
+  });
+
+  it('returns null when npm is neither beside the binary nor on PATH', () => {
+    expect(resolveNpmCli(join(dir, 'nowhere', 'node'), { PATH: join(dir, 'empty') })).toBeNull();
+  });
+
+  // The declared contract, not this runner's layout. Asserting a hit here would
+  // assert the machine, which is what made the suite red on Homebrew.
+  it('returns a script or null on this machine, never anything else', () => {
+    const found = resolveNpmCli(process.execPath);
+    expect(found === null || found.endsWith('npm-cli.js')).toBe(true);
   });
 });

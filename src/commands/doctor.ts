@@ -458,7 +458,10 @@ async function checkSkills(
         status: 'warn',
         required: false,
         detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read, so whether they are current is unknown`,
-        fix: 'Reinstall the CLI: `tenjin update`, then `tenjin install`.',
+        // NOT `tenjin update`: this warning means the packaged copies are
+        // unreadable, which a current version answers with "up to date" and no
+        // work at all. Reinstalling the same version is the actual repair.
+        fix: 'Reinstall the CLI: `npm i -g tenjin-cli`, then `tenjin install`.',
         data,
       },
     };

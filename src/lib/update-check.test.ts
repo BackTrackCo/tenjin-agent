@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { maybeNudgeUpdate } from './update-check';
+import { maybeNudgeUpdate, resolveTarget } from './update-check';
 import { updateCheckPath } from './paths';
 import type { Io } from './output';
 
@@ -442,5 +442,38 @@ describe('maybeNudgeUpdate', () => {
       expect(cap.stderr()).toBe('');
       expect(cap.stdout()).toBe('');
     }
+  });
+});
+
+describe('resolveTarget', () => {
+  it('takes the newest across the channel tag and latest', () => {
+    expect(
+      resolveTarget('0.1.0-alpha.10', { alpha: '0.1.0-alpha.7', latest: '0.1.0-alpha.11' }),
+    ).toBe('0.1.0-alpha.11');
+  });
+
+  it('reads only latest for a release build', () => {
+    expect(resolveTarget('1.0.0', { alpha: '2.0.0-alpha.1', latest: '1.1.0' })).toBe('1.1.0');
+  });
+
+  // Load-bearing, and nothing else catches it. Iteration order is
+  // [channel, 'latest'], so a channel tag holding a value VERSION_RE cannot
+  // parse would seed `best` with that junk, and every later isNewer comparison
+  // loses against an unparseable side. The caller's isNewer(target, current)
+  // then returns false and the user is told "up to date" indefinitely: round
+  // one's failure mode through a different door, reachable the first time this
+  // project publishes something the regex does not admit.
+  it('skips an unparseable candidate instead of letting it win', () => {
+    expect(
+      resolveTarget('0.1.0-alpha.11', { alpha: 'not-a-version', latest: '0.1.0-alpha.12' }),
+    ).toBe('0.1.0-alpha.12');
+  });
+
+  it('is null when neither tag carries anything parseable', () => {
+    expect(resolveTarget('0.1.0-alpha.11', { alpha: 'nope', latest: '0.2.0-beta.1' })).toBeNull();
+  });
+
+  it('is null for a version with no channel', () => {
+    expect(resolveTarget('1.0.0-rc.1', { latest: '2.0.0' })).toBeNull();
   });
 });
