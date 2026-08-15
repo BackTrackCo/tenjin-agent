@@ -227,10 +227,14 @@ def preflight(
             shutil.rmtree(target)
         shutil.copytree(directory, target)
 
+    names = [name for _, name in skills]
     failures = [
-        *_check_vendored(),
+        # Mirror drift only invalidates a run that measures the mirror itself;
+        # runs over other skills should not be blocked by it (skill-drift.yml
+        # still guards the mirror in CI).
+        *(_check_vendored() if "tenjin" in names else []),
         *_check_behind(),
-        *_check_isolation(workspace, [name for _, name in skills], model, timeout),
+        *_check_isolation(workspace, names, model, timeout),
     ]
 
     if not failures:
