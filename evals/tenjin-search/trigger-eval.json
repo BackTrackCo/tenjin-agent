@@ -98,5 +98,15 @@
     "query": "Review this diff for security issues before I merge the x402 settlement change.",
     "should_trigger": false,
     "rationale": "Review work itself: domain vocabulary, but no question to look up."
+  },
+  {
+    "query": "Base UI's docs don't say how a dialog assigns initial focus when it opens inside a labelled role=group; I'm about to build a minimal repro to probe that behavior empirically.",
+    "should_trigger": true,
+    "rationale": "The probe carve-out: about to empirically probe a third-party library's undocumented behavior, so search first; someone may have already run and published the probe."
+  },
+  {
+    "query": "Our fork of Base UI patches dialog focus handling; I'm about to add traces to see where our patch reassigns initial focus.",
+    "should_trigger": false,
+    "rationale": "The probe carve-out stops at your own code: probing a first-party fork's patched behavior is private work, not a third-party probe someone else could have published."
   }
 ]
