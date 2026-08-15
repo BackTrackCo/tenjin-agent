@@ -6,7 +6,7 @@ import { dataDir } from './lib/paths';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
-import { maybeNudgeUpdate } from './lib/update-check';
+import { maybeUpdate, readUpdateSignal } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
 /**
@@ -75,18 +75,32 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
+    // Read BEFORE the envelope, from the last check's cache only: this is the
+    // agent's copy of the nudge, and it must not cost a network call or a delay.
+    // `update` is excluded for the same reason the nudge is — its own envelope
+    // has just answered the question.
+    const updateAvailable =
+      command === 'update' ? null : await readUpdateSignal(dataDir(process.env));
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
+      emitSuccess(ctx.io, command, result.data, result.humanLines, {
+        json: ctx.flags.json,
+        updateAvailable,
+      });
     } catch (err) {
-      setExit(emitFailure(io, command, err, { json }).exitCode);
+      setExit(emitFailure(io, command, err, { json, updateAvailable }).exitCode);
     }
     // AFTER the envelope, for every command and both outcomes: neither of these
     // may delay a command's output, touch stdout, or move its exit code, and
     // neither ever rejects. The nudge resolves its own data dir because a failed
-    // buildContext has no ctx to read one from.
-    await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
+    // buildContext has no ctx to read one from. Skipped for `update` itself: its
+    // envelope has just answered the nudge's question, and this process still
+    // runs the OLD build, so a cached "newer exists" would print the nudge in
+    // the same breath as "Updated".
+    if (command !== 'update') {
+      await maybeUpdate({ dir: dataDir(process.env), io, json });
+    }
     // Every command but `install` is a chance to catch up a skill left stale by
     // an upgrade; `install` has just written the same bytes from the same source.
     // Lazily imported, like the command bodies, to keep it off the boot path, and
@@ -221,6 +235,18 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runCommand('doctor', this, async (ctx) => {
         const { runDoctor } = await import('./commands/doctor');
         return runDoctor(ctx);
+      });
+    });
+
+  addGlobalFlags(program.command('update'))
+    .description(
+      'Update tenjin-cli to the newest version on its release channel (an alpha build follows @alpha)',
+    )
+    .option('--check', 'report whether a newer version exists without installing it')
+    .action(async function (this: Command) {
+      await runCommand('update', this, async (ctx) => {
+        const { runUpdate } = await import('./commands/update');
+        return runUpdate({ check: this.opts().check === true }, ctx);
       });
     });
 

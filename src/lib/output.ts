@@ -2,6 +2,7 @@ import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
+import type { UpdateAvailable } from '../schemas';
 import type { FailureEnvelope, OutputError, SuccessEnvelope } from '../schemas';
 
 /**
@@ -28,6 +29,12 @@ export function defaultIo(): Io {
 export interface EmitOptions {
   /** The global --json flag. When true, the JSON envelope is emitted even at a TTY. */
   json?: boolean;
+  /**
+   * "A newer tenjin-cli exists", from the daily check's cache. Rides the
+   * envelope so the AGENT running the command learns it; the human at a TTY
+   * gets the dim stderr line instead, and neither path fetches anything.
+   */
+  updateAvailable?: UpdateAvailable | null;
 }
 
 /**
@@ -36,18 +43,38 @@ export interface EmitOptions {
  * hold no I/O and no --json branching: they turn a (command, data) or a normalized
  * CliError into the exact object that goes to stdout / structuredContent.
  */
-export function buildSuccessEnvelope(command: string, data: unknown): SuccessEnvelope {
-  return { schemaVersion: SCHEMA_VERSION, command, ok: true, data };
+export function buildSuccessEnvelope(
+  command: string,
+  data: unknown,
+  updateAvailable?: UpdateAvailable | null,
+): SuccessEnvelope {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    command,
+    ok: true,
+    data,
+    ...(updateAvailable != null ? { updateAvailable: updateAvailable } : {}),
+  };
 }
 
-export function buildFailureEnvelope(command: string, err: CliError): FailureEnvelope {
+export function buildFailureEnvelope(
+  command: string,
+  err: CliError,
+  updateAvailable?: UpdateAvailable | null,
+): FailureEnvelope {
   const error: OutputError = {
     code: err.code,
     message: err.message,
     ...(err.fix !== undefined ? { fix: err.fix } : {}),
     ...(err.details !== undefined ? { details: err.details } : {}),
   };
-  return { schemaVersion: SCHEMA_VERSION, command, ok: false, error };
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    command,
+    ok: false,
+    error,
+    ...(updateAvailable != null ? { updateAvailable: updateAvailable } : {}),
+  };
 }
 
 /**
@@ -67,7 +94,7 @@ export function emitSuccess(
     writeLines(io.stdout, humanLines);
     return;
   }
-  writeJson(io.stdout, buildSuccessEnvelope(command, data));
+  writeJson(io.stdout, buildSuccessEnvelope(command, data, opts.updateAvailable));
 }
 
 /**
@@ -98,7 +125,7 @@ export function emitFailure(
     writeLines(io.stdout, lines);
     return cliErr;
   }
-  writeJson(io.stdout, buildFailureEnvelope(command, cliErr));
+  writeJson(io.stdout, buildFailureEnvelope(command, cliErr, opts.updateAvailable));
   return cliErr;
 }
 

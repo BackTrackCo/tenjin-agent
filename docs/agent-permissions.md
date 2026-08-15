@@ -193,9 +193,20 @@ Deliberately **never** recommended, because each is a human decision:
 | `tenjin config set`    | It can widen the agent's own spend policy.                                           |
 | `tenjin install`       | Writes into harness config and skills directories.                                   |
 | `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                  |
+| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                        |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+### `tenjin update`, a human decision
+
+`tenjin update` replaces the globally installed `tenjin` with whatever npm serves
+next, which is the binary the agent goes on to run for the rest of the session and
+every session after it. Which build an agent executes is an operator decision, so
+no recommended rule pre-clears it. `tenjin update --check` only reports, but a
+prefix rule pins the **verb**, not the flags, so clearing the check would clear
+the install with it. Nothing stops you adding the rule yourself; it stays off the
+recommended set.
 
 ### `tenjin fund`, free on both surfaces
 
