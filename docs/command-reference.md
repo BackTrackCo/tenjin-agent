@@ -52,23 +52,40 @@ The manager that owns the install performs it: npm, pnpm, and bun are each drive
 
 Deliberately not in the recommended permission allowlist: it replaces the binary your agent then runs. See [agent-permissions.md](./agent-permissions.md).
 
-### Background updates
+### The update check
 
-Once a day, at most, the CLI asks npm whether a newer version exists. What it does with the answer is `update.mode`:
+Once a day, at most, the CLI asks npm whether a newer version exists. It never installs on its own; it reports, and you or your agent decide.
 
-| Mode    | Behavior                                                                   |
-| ------- | -------------------------------------------------------------------------- |
-| `auto`  | Default. Installs the new version in the background, then reports it once. |
-| `nudge` | Prints one dim line to a human at a terminal. Never installs.              |
-| `off`   | Neither. The CLI stops asking npm entirely.                                |
+| Surface                                 | Who sees it                                                                        |
+| --------------------------------------- | ---------------------------------------------------------------------------------- |
+| One dim stderr line                     | A human at a TTY.                                                                  |
+| `update_available` on the JSON envelope | Anything reading the envelope, including an agent. Carries `current` and `latest`. |
+| A line on hook output                   | A harness reading `additionalContext`.                                             |
 
-```bash
-tenjin config set update.mode nudge   # or off
+```jsonc
+{
+  "schemaVersion": 1,
+  "command": "search",
+  "ok": true,
+  "data": {},
+  "update_available": { "current": "0.1.0-alpha.6", "latest": "0.1.0-alpha.7" },
+}
 ```
 
-`auto` is the default because the nudge is TTY-only, and most installs sit on agent machines where no human ever sees one. It is bounded in four ways: it never runs in CI, it never runs where `tenjin update` would refuse, it waits until a version has been visible for at least 24 hours so a bad release can be pulled first, and the install runs detached after the command's own output so nothing waits on it. A failed background install says nothing and falls back to the nudge.
+An agent that sees the field can run `tenjin update` itself, at a moment it chooses. That is deliberate: this CLI starts a fresh process per invocation, so there is no deferred-activation window to hide a binary swap in. "Next start" is "mid-session" for whatever is driving it.
 
-The install is announced once, on the next command, on every surface including `--json` — replacing the binary is a write to your machine.
+`update.mode` controls the reporting:
+
+| Mode    | Behavior                                         |
+| ------- | ------------------------------------------------ |
+| `nudge` | Default. All three surfaces above.               |
+| `off`   | None of them; the CLI stops asking npm entirely. |
+
+```bash
+tenjin config set update.mode off
+```
+
+The field is read from the check's cache, never fetched while your command runs, so it costs no request and no delay.
 
 ## Search and read
 

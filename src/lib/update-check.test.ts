@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
-import { maybeUpdate, resolveTarget } from './update-check';
-import { autoUpdatePath, autoUpdateResultPath, updateCheckPath } from './paths';
+import { join } from 'node:path';
+import { maybeUpdate, readUpdateSignal, resolveTarget } from './update-check';
+import { updateCheckPath } from './paths';
 import type { Io } from './output';
 
 let dir: string;
@@ -56,27 +56,6 @@ async function seedCache(tags: Record<string, unknown>): Promise<void> {
 }
 
 const NOW = 1_700_000_000_000;
-const DAY = 86_400_000;
-
-/**
- * A module dir shaped like a global npm install, so no refusal fires. ABSOLUTE
- * and under a path that does not exist: a relative one walks up into this
- * repo's own package.json and reads as a source checkout.
- */
-const GLOBAL_DIR = join(sep, 'opt', 'nowhere', 'lib', 'node_modules', 'tenjin-cli', 'dist');
-
-/** Records background launches instead of spawning one. */
-function launcher() {
-  const calls: string[] = [];
-  return { impl: (d: string) => calls.push(d), calls };
-}
-
-/** An already-soaked cache entry: this version was first seen a day ago. */
-async function seedSoaked(latest: string, tag = 'alpha'): Promise<void> {
-  await seedCache({
-    [tag]: { checkedAtMs: NOW, latest, firstSeenMs: NOW - DAY, notifiedAtMs: NOW - DAY },
-  });
-}
 
 describe('maybeUpdate', () => {
   it('nudges toward the alpha tag when a prerelease build is behind', async () => {
@@ -234,9 +213,8 @@ describe('maybeUpdate', () => {
     // The nudge it just printed is recorded, not only the fetch it just made.
     expect(await readCache()).toEqual({
       schemaVersion: 1,
-      tags: {
-        alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', firstSeenMs: NOW, notifiedAtMs: NOW },
-      },
+      signal: { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' },
+      tags: { alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW } },
     });
     if (process.platform !== 'win32') {
       expect((await stat(updateCheckPath(dir))).mode & 0o777).toBe(0o600);
@@ -273,9 +251,8 @@ describe('maybeUpdate', () => {
     // checkedAtMs untouched — nothing was asked — but the nudge is now on record.
     expect(await readCache()).toEqual({
       schemaVersion: 1,
-      tags: {
-        alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', firstSeenMs: at, notifiedAtMs: at },
-      },
+      signal: { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' },
+      tags: { alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: at } },
     });
   });
 
@@ -356,16 +333,12 @@ describe('maybeUpdate', () => {
     // one, which is what used to make the round trip re-notify.
     expect(await readCache()).toEqual({
       schemaVersion: 1,
+      signal: { current: '1.0.0', latest: '1.1.0' },
       tags: {
         // Carried forward byte-identical: this run did not ask about the alpha
-        // tag, so it adds no soak clock to an entry it never touched.
+        // tag, so it says nothing about an entry it never touched.
         alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW },
-        latest: {
-          checkedAtMs: NOW + 1000,
-          latest: '1.1.0',
-          firstSeenMs: NOW + 1000,
-          notifiedAtMs: NOW + 1000,
-        },
+        latest: { checkedAtMs: NOW + 1000, latest: '1.1.0', notifiedAtMs: NOW + 1000 },
       },
     });
 
@@ -477,205 +450,68 @@ describe('maybeUpdate', () => {
   });
 });
 
-describe('maybeUpdate — auto mode', () => {
-  const base = (extra: Record<string, unknown> = {}) => ({
-    dir,
-    json: false,
-    env: {},
-    now: () => NOW,
-    currentVersion: '0.1.0-alpha.6',
-    moduleDir: GLOBAL_DIR,
-    ...extra,
-  });
-
-  it('installs in the background once the version has soaked', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const cap = captureIo(false); // no TTY: exactly the machine auto exists for
-    const run = launcher();
-    await maybeUpdate({
-      ...base(),
-      io: cap.io,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch, // fresh cache; the soak needs no new fetch
-      spawnImpl: run.impl,
+// The agent-visible half of the daily check. The dim stderr line only ever
+// reaches a human at a terminal; this is what the harness driving the command
+// actually reads, and it is why there is no auto-install mode.
+describe('readUpdateSignal', () => {
+  it('reports a newer version from the cache, without fetching', async () => {
+    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toEqual({
+      current: '0.1.0-alpha.6',
+      latest: '0.1.0-alpha.7',
     });
-    expect(run.calls).toEqual([dir]);
-    // The install is happening, so telling a human to run it by hand is noise.
-    expect(cap.stderr()).toBe('');
-    const state = JSON.parse(await readFile(autoUpdatePath(dir), 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    expect(state).toMatchObject({ from: '0.1.0-alpha.6', to: '0.1.0-alpha.7', reported: false });
   });
 
-  // The blast-radius brake: a version nobody has seen before waits a day, so a
-  // bad publish can be pulled before it reaches every agent machine.
-  it('will not install a version it is seeing for the first time', async () => {
+  it('is null when nothing newer is known', async () => {
+    expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
+    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.6' } });
+    expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
+  });
+
+  // `off` silences BOTH surfaces, not just the line a human sees.
+  it('is null when update.mode is off', async () => {
+    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ update: { mode: 'off' } }));
+    expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
+  });
+
+  it('never throws on an unreadable cache or config', async () => {
+    await writeFile(updateCheckPath(dir), 'not json');
+    await writeFile(join(dir, 'config.json'), 'not json either');
+    expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
+  });
+
+  // Denormalized for the standalone hook scripts, which cannot import any of
+  // this and do not know which version is running.
+  it('the check records the resolved comparison for the hook scripts', async () => {
     const cap = captureIo(true);
-    const run = launcher();
     await maybeUpdate({
-      ...base(),
+      dir,
       io: cap.io,
-      mode: 'auto',
+      json: false,
+      env: {},
+      now: () => NOW,
       fetchImpl: registry({ alpha: '0.1.0-alpha.7' }).fetchImpl,
-      spawnImpl: run.impl,
+      currentVersion: '0.1.0-alpha.6',
     });
-    expect(run.calls).toEqual([]);
-    // It falls back to the ordinary nudge rather than going silent.
-    expect(cap.stderr()).toContain('0.1.0-alpha.7 is available');
+    expect(await readCache()).toMatchObject({
+      signal: { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' },
+    });
   });
 
-  it('restarts the soak when the offered version changes', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const run = launcher();
+  it('clears the recorded signal once the build is current', async () => {
+    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    const cap = captureIo(true);
     await maybeUpdate({
-      ...base({ now: () => NOW + DAY + 1 }), // cache stale, so it refetches
-      io: captureIo(false).io,
-      mode: 'auto',
-      fetchImpl: registry({ alpha: '0.1.0-alpha.9' }).fetchImpl,
-      spawnImpl: run.impl,
-    });
-    expect(run.calls).toEqual([]);
-  });
-
-  it('never installs where an install would be refused', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const run = launcher();
-    await maybeUpdate({
-      ...base({
-        moduleDir: join(sep, 'home', 'me', '.npm', '_npx', 'abc', 'node_modules', 'tenjin-cli'),
-      }),
-      io: captureIo(false).io,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
-    });
-    expect(run.calls).toEqual([]);
-  });
-
-  it('does not start a second install while one is in flight', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const run = launcher();
-    const args = {
-      ...base(),
-      io: captureIo(false).io,
-      mode: 'auto' as const,
-      fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
-    };
-    await maybeUpdate(args);
-    await maybeUpdate(args);
-    expect(run.calls).toEqual([dir]);
-  });
-
-  it('announces a finished install once, on every surface', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    await maybeUpdate({
-      ...base(),
-      io: captureIo(false).io,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: launcher().impl,
-    });
-    // The child's own --json envelope IS the outcome record.
-    await writeFile(
-      autoUpdateResultPath(dir),
-      JSON.stringify({ ok: true, data: { updated: true, latest: '0.1.0-alpha.7' } }),
-    );
-
-    // Piped and --json: replacing the binary is a write, so it is still said.
-    const after = captureIo(false);
-    await maybeUpdate({
-      ...base({ now: () => NOW + 1000, currentVersion: '0.1.0-alpha.7' }),
-      io: after.io,
-      json: true,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: launcher().impl,
-    });
-    expect(after.stderr()).toContain('updated itself to 0.1.0-alpha.7');
-    expect(after.stdout()).toBe('');
-
-    // Once, not on every run afterwards.
-    const again = captureIo(false);
-    await maybeUpdate({
-      ...base({ now: () => NOW + 2000, currentVersion: '0.1.0-alpha.7' }),
-      io: again.io,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: launcher().impl,
-    });
-    expect(again.stderr()).toBe('');
-  });
-
-  it('says nothing for a failed background install and frees the slot', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const run = launcher();
-    await maybeUpdate({
-      ...base(),
-      io: captureIo(false).io,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
-    });
-    await writeFile(
-      autoUpdateResultPath(dir),
-      JSON.stringify({ ok: false, error: { code: 'UPDATE_FAILED' } }),
-    );
-    const after = captureIo(true);
-    await maybeUpdate({
-      ...base({ now: () => NOW + 1000 }),
-      io: after.io,
-      mode: 'auto',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
-    });
-    expect(after.stderr()).not.toContain('updated itself');
-    // Slot freed, so the next pass may try again.
-    expect(run.calls).toEqual([dir, dir]);
-  });
-
-  it('nudge mode never installs, and off mode does neither', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const nudge = captureIo(true);
-    const run = launcher();
-    await maybeUpdate({
-      ...base(),
-      io: nudge.io,
-      mode: 'nudge',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
-    });
-    expect(run.calls).toEqual([]);
-    expect(nudge.stderr()).toContain('is available');
-
-    const off = captureIo(true);
-    await maybeUpdate({
-      ...base({ now: () => NOW + 1 }),
-      io: off.io,
-      mode: 'off',
-      fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
-    });
-    expect(run.calls).toEqual([]);
-    expect(off.stderr()).toBe('');
-  });
-
-  // A build machine must not silently acquire a different binary mid-pipeline.
-  it('is skipped entirely in CI, auto included', async () => {
-    await seedSoaked('0.1.0-alpha.7');
-    const run = launcher();
-    const cap = captureIo(false);
-    await maybeUpdate({
-      ...base({ env: { CI: '1' } }),
+      dir,
       io: cap.io,
-      mode: 'auto',
+      json: false,
+      env: {},
+      now: () => NOW + 1,
       fetchImpl: forbiddenFetch,
-      spawnImpl: run.impl,
+      currentVersion: '0.1.0-alpha.7', // we just updated
     });
-    expect(run.calls).toEqual([]);
-    expect(cap.stderr()).toBe('');
+    expect(await readCache()).not.toHaveProperty('signal');
   });
 });
 

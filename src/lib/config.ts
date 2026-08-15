@@ -83,15 +83,19 @@ const HooksConfigSchema = z.object({
 });
 
 /**
- * What the daily update check is allowed to DO about a newer version.
+ * What the daily update check is allowed to do about a newer version.
  *
- * `auto` installs it in the background, `nudge` only prints the one dim line a
- * human at a terminal sees, `off` does neither and stops asking npm entirely.
- * The nudge is TTY-only by construction, so on the agent machines that make up
- * most installs it reaches nobody; `auto` is what makes the check mean anything
- * there. See lib/update-check.ts for the soak delay and the refusal it honors.
+ * `nudge` reports it — one dim line for a human at a terminal, and an
+ * `update_available` field on the JSON envelope for everyone else, which is how
+ * an agent learns to run `tenjin update` itself. `off` reports neither and stops
+ * asking npm entirely.
+ *
+ * There is deliberately no mode that installs on its own. Replacing the binary
+ * under a running agent has no safe moment in a CLI that starts a fresh process
+ * per invocation: "next start" IS "mid-session". Reporting is the part that was
+ * missing, so reporting is what this key controls.
  */
-export const UpdateModeSchema = z.enum(['auto', 'nudge', 'off']);
+export const UpdateModeSchema = z.enum(['nudge', 'off']);
 export type UpdateMode = z.infer<typeof UpdateModeSchema>;
 
 const UpdateConfigSchema = z.object({
@@ -102,7 +106,7 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
   const parsed = UpdateModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
   throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "nudge", or "off".',
+    fix: 'Use "nudge" or "off".',
   });
 }
 
@@ -204,7 +208,7 @@ export const CONFIG_DEFAULTS: Config = {
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json.
   hooks: { searchMode: 'auto', stopNag: 'on' },
-  update: { mode: 'auto' },
+  update: { mode: 'nudge' },
 };
 
 /**

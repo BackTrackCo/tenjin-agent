@@ -1,17 +1,13 @@
-import { spawn } from 'node:child_process';
-import { closeSync, openSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import pkg from '../../package.json';
 import { writeFileAtomic } from './atomic-json';
 import { loadConfig } from './config';
 import type { UpdateMode } from './config';
-import { wouldRefuse } from './install-location';
-import { withFileLock } from './lock';
-import { emitNotice, emitWriteNotice } from './output';
+import { emitNotice } from './output';
 import type { Io } from './output';
-import { autoUpdateLockPath, autoUpdatePath, autoUpdateResultPath, updateCheckPath } from './paths';
+import type { UpdateAvailable } from '../schemas';
+import { updateCheckPath } from './paths';
 
 /**
  * "A newer tenjin-cli exists" — one dim stderr line, at most once a day, for a
@@ -30,19 +26,6 @@ import { autoUpdateLockPath, autoUpdatePath, autoUpdateResultPath, updateCheckPa
 
 const CHECK_INTERVAL_MS = 86_400_000; // 24h
 const FETCH_TIMEOUT_MS = 1500;
-/**
- * How long a version must have been VISIBLE before `auto` will install it.
- *
- * The brake on blast radius. Default-on auto-update means a bad publish could
- * otherwise reach every agent machine within a day; requiring that we have
- * already seen this exact version on a previous check gives a bad release a
- * window to be pulled first. It costs the fleet one extra day of staleness and
- * needs no extra registry call, since first sighting is recorded in the cache
- * this check already keeps.
- */
-const SOAK_MS = 86_400_000; // 24h
-/** How long to wait for a detached child before calling its outcome lost. */
-const RESULT_GRACE_MS = 900_000; // 15min, comfortably past the install timeout
 const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags';
 
 /** What is known about ONE dist-tag: when it was asked, and what it said. */
@@ -51,12 +34,6 @@ const TagEntrySchema = z.object({
   latest: z.string(),
   /** When the nudge was last PRINTED for this tag. Absent until one has been. */
   notifiedAtMs: z.number().optional(),
-  /**
-   * When THIS version was first seen on this tag; reset whenever the version
-   * changes. What the soak delay measures. Absent in caches written before auto
-   * mode existed, which restarts the soak once rather than installing blind.
-   */
-  firstSeenMs: z.number().optional(),
 });
 
 /**
@@ -70,6 +47,17 @@ const TagEntrySchema = z.object({
 const CacheSchema = z.object({
   schemaVersion: z.literal(1),
   tags: z.record(z.string(), TagEntrySchema),
+  /**
+   * The resolved "you could upgrade" fact, written whenever it changes and
+   * cleared when it stops being true.
+   *
+   * Denormalized from `tags` on purpose: the generated hook scripts are
+   * standalone .mjs that cannot import this module and do not know which
+   * version is running, so a per-tag entry would leave them unable to tell an
+   * upgrade from a match. Storing the comparison's ANSWER is what lets a hook
+   * report it without reimplementing any of it.
+   */
+  signal: z.object({ current: z.string(), latest: z.string() }).optional(),
 });
 type Cache = z.infer<typeof CacheSchema>;
 
@@ -90,10 +78,6 @@ export interface UpdateCheckDeps {
   currentVersion?: string;
   /** Resolved update.mode; defaults to reading the config file. */
   mode?: UpdateMode;
-  /** Where this build lives, for the "could an install even work here" test. */
-  moduleDir?: string;
-  /** Launch the background install. Injected by tests; never spawns for real. */
-  spawnImpl?: (dir: string) => void;
 }
 
 /**
@@ -108,20 +92,8 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // build machine must not silently acquire a different binary mid-pipeline.
     if (env.CI !== undefined && env.CI.length > 0) return;
 
-    // Announced whatever the mode is NOW, and BEFORE the `off` return: if a
-    // background install finished, the binary on this machine was replaced and
-    // the operator is told once. `off` means stop asking npm, and this asks
-    // nothing — it reads a file an install we already started left behind.
-    await reportCompletedUpdate(deps);
-
     const mode = deps.mode ?? (await loadConfig(deps.dir)).update.mode;
     if (mode === 'off') return;
-
-    // The nudge is a courtesy to a human at a terminal. `auto` is what makes the
-    // check mean anything on the agent machines that have no human to nudge, so
-    // only the nudge-only mode may stop here.
-    const human = deps.io.isTTY && !deps.json;
-    if (mode === 'nudge' && !human) return;
 
     const nowMs = (deps.now ?? Date.now)();
     const current = deps.currentVersion ?? pkg.version;
@@ -155,19 +127,19 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // not restart just because the registry was asked again.
     const nudgedAtMs = due ? nowMs : notifiedAtMs;
 
-    // The soak clock, and the reason it is keyed to the VERSION rather than to
-    // the tag: a new version is a new thing to have been burned by, so seeing a
-    // different string restarts the wait.
-    const seenBefore = entry?.latest === latest ? entry?.firstSeenMs : undefined;
-    const firstSeenMs = seenBefore ?? nowMs;
+    // Carries the agent-visible half of the answer, so a hook or an envelope can
+    // report it without knowing which version is running.
+    const signal = upgradeable ? { current, latest } : undefined;
+    const signalChanged =
+      cached?.signal?.current !== signal?.current || cached?.signal?.latest !== signal?.latest;
 
     // Nothing learned and nothing said means nothing to write. Deliberately NOT
     // locked: two concurrent CLI processes can both nudge, and one duplicated
-    // line is cheaper than a lock on the exit path of every command. (The
-    // background INSTALL is locked; that one is not idempotent.)
-    if (!fresh || due || seenBefore === undefined) {
+    // line is cheaper than a lock on the exit path of every command.
+    if (!fresh || due || signalChanged) {
       await writeCache(path, {
         schemaVersion: 1,
+        ...(signal !== undefined ? { signal } : {}),
         // Read-modify-write: the tag this run did not ask about keeps whatever it
         // knew, including its own nudge clock.
         tags: {
@@ -175,24 +147,12 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
           [tag]: {
             checkedAtMs: fresh ? entry.checkedAtMs : nowMs,
             latest,
-            firstSeenMs,
             ...(nudgedAtMs !== undefined ? { notifiedAtMs: nudgedAtMs } : {}),
           },
         },
       });
     }
-    if (!upgradeable) return;
-
-    // Install it ourselves, if this install is one an install could replace and
-    // the version has sat on the registry long enough to have been pulled.
-    if (mode === 'auto' && nowMs - firstSeenMs >= SOAK_MS) {
-      const moduleDir = deps.moduleDir ?? fileURLToPath(new URL('.', import.meta.url));
-      if (!wouldRefuse(moduleDir) && (await claimAutoUpdate(deps, nowMs, current, latest))) {
-        (deps.spawnImpl ?? spawnDetachedUpdate)(deps.dir);
-        return; // the install is running; a nudge to do it by hand would be noise
-      }
-    }
-    if (!due || !human) return;
+    if (!due) return;
 
     // Named as the command, not the npm invocation it wraps: `update` prints the
     // right instructions itself for an install it cannot perform (a source
@@ -209,129 +169,31 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
 }
 
 /**
- * What the background updater last started, and whether it has been reported.
- */
-const AutoUpdateStateSchema = z.object({
-  schemaVersion: z.literal(1),
-  startedAtMs: z.number(),
-  from: z.string(),
-  to: z.string(),
-  reported: z.boolean(),
-});
-type AutoUpdateState = z.infer<typeof AutoUpdateStateSchema>;
-
-/**
- * Take the right to start ONE background install, or decline.
+ * What the last check learned, for the envelope. Cache only: this runs before
+ * every command's output, so it may not fetch, may not block, and may not throw.
+ * Null when nothing newer is known, when the cache is absent or stale-shaped, or
+ * when `update.mode` is `off` — off silences BOTH surfaces, not just the line a
+ * human sees.
  *
- * The lock is what stops two concurrent commands both spawning an installer at
- * the same newer version, which would have two package managers writing one
- * global directory. Its timeout is deliberately tiny: this runs on the exit path
- * of every command, so a lock someone else holds means someone else is already
- * deciding, and the answer is to do nothing rather than to wait.
+ * Reporting rather than installing is the whole design. A CLI that starts a
+ * fresh process per invocation has no deferred-activation moment to hide a
+ * binary swap in, so the agent is told and decides for itself.
  */
-async function claimAutoUpdate(
-  deps: UpdateCheckDeps,
-  nowMs: number,
-  from: string,
-  to: string,
-): Promise<boolean> {
+export async function readUpdateSignal(
+  dir: string,
+  currentVersion?: string,
+): Promise<UpdateAvailable | null> {
   try {
-    return await withFileLock(
-      autoUpdateLockPath(deps.dir),
-      async () => {
-        const prior = await readAutoUpdateState(deps.dir);
-        // An install already running for this same version, or one whose result
-        // nobody has read yet, owns the slot.
-        if (prior !== null && !prior.reported && nowMs - prior.startedAtMs < RESULT_GRACE_MS) {
-          return false;
-        }
-        await writeFileAtomic(
-          autoUpdatePath(deps.dir),
-          `${JSON.stringify({ schemaVersion: 1, startedAtMs: nowMs, from, to, reported: false }, null, 2)}\n`,
-          { mode: 0o600, dirMode: 0o700 },
-        );
-        return true;
-      },
-      { timeoutMs: 250 },
-    );
+    const current = currentVersion ?? pkg.version;
+    const tag = channelTag(current);
+    if (tag === null) return null;
+    if ((await loadConfig(dir)).update.mode === 'off') return null;
+    const cached = await readCache(updateCheckPath(dir));
+    const latest = cached?.tags[tag]?.latest;
+    if (latest === undefined || !isNewer(latest, current)) return null;
+    return { current, latest };
   } catch {
-    return false; // contended or unwritable: not our turn
-  }
-}
-
-/**
- * Launch `tenjin update --json` and let go of it.
- *
- * Detached with no parent pipes, because the whole point is that the command the
- * user actually ran has already printed its envelope and must not wait on an
- * install. stdout goes straight to a file: `--json` emits exactly one envelope,
- * so the child's own output IS the outcome record, with nothing to invent.
- */
-function spawnDetachedUpdate(dir: string): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(autoUpdateResultPath(dir), 'w');
-    const child = spawn(process.execPath, [process.argv[1] ?? '', 'update', '--json'], {
-      detached: true,
-      // stderr discarded on purpose: the write notice and npm's chatter belong to
-      // a terminal nobody is watching here, and the envelope carries the outcome.
-      stdio: ['ignore', fd, 'ignore'],
-    });
-    child.unref();
-  } catch {
-    // Could not launch: the state file says an attempt started, the result file
-    // never appears, and the grace window frees the slot for the next run.
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-/**
- * Announce a finished background install exactly once.
- *
- * Uses the write notice rather than the nudge, and so reaches a piped or --json
- * run too: replacing the binary on this machine is a write to the operator's
- * system, and the surface they happen to be on does not make it less true. A
- * FAILED install says nothing and simply frees the slot, which drops the run
- * back to the ordinary nudge on the next pass.
- */
-async function reportCompletedUpdate(deps: UpdateCheckDeps): Promise<void> {
-  const state = await readAutoUpdateState(deps.dir);
-  if (state === null || state.reported) return;
-  const nowMs = (deps.now ?? Date.now)();
-
-  const envelope = await readJson(autoUpdateResultPath(deps.dir));
-  const done = envelope !== null;
-  // Still running, and still within its grace: leave it alone.
-  if (!done && nowMs - state.startedAtMs < RESULT_GRACE_MS) return;
-
-  const updated =
-    done &&
-    typeof envelope === 'object' &&
-    envelope !== null &&
-    (envelope as { ok?: unknown }).ok === true &&
-    (envelope as { data?: { updated?: unknown } }).data?.updated === true;
-
-  await writeFileAtomic(
-    autoUpdatePath(deps.dir),
-    `${JSON.stringify({ ...state, reported: true }, null, 2)}\n`,
-    { mode: 0o600, dirMode: 0o700 },
-  );
-  if (updated) {
-    emitWriteNotice(deps.io, `tenjin-cli updated itself to ${state.to} in the background`);
-  }
-}
-
-async function readAutoUpdateState(dir: string): Promise<AutoUpdateState | null> {
-  const parsed = AutoUpdateStateSchema.safeParse(await readJson(autoUpdatePath(dir)));
-  return parsed.success ? parsed.data : null;
-}
-
-async function readJson(path: string): Promise<unknown> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as unknown;
-  } catch {
-    return null;
+    return null; // never the command's business
   }
 }
 

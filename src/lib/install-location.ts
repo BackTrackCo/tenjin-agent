@@ -5,9 +5,10 @@ import { CliError } from './errors';
 /**
  * WHERE this build is installed, and what that implies about replacing it.
  *
- * Its own module because two callers need it and neither may import the other:
- * `commands/update` performs the replacement, and `lib/update-check` has to
- * know whether a background update is even possible before it spawns one.
+ * Its own module because it answers a different question from the command that
+ * uses it: "what IS this install" rather than "how do I replace it". The
+ * refusal set is the load-bearing part, and it got re-cut in three consecutive
+ * reviews while it was expressed positionally inside the command body.
  */
 
 /** Managers a global install can be handed back to. yarn is deliberately absent
@@ -110,16 +111,6 @@ export const REFUSALS: readonly Refusal[] = [
  * refusal can be reached twice or, as in round three, be written twice and
  * reached once.
  */
-/**
- * Would ANY refusal fire here? The same list, asked as a question rather than
- * thrown as an error, so the background updater can decline to spawn an install
- * that would only refuse. Asking the entries rather than re-deriving the answer
- * is what keeps this from becoming the fourth copy of the refusal set.
- */
-export function wouldRefuse(moduleDir: string): boolean {
-  return REFUSALS.some((entry) => entry.test(moduleDir));
-}
-
 export function refuse(moduleDir: string, opts: { check: boolean; spec: string | null }): void {
   for (const entry of REFUSALS) {
     if (opts.check && !entry.appliesToCheck) continue;

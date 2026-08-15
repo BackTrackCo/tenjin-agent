@@ -51,30 +51,6 @@ export function updateCheckPath(dir: string = dataDir()): string {
 }
 
 /**
- * State for the background updater: what it last started, and whether that
- * outcome has been reported to the operator yet. Separate from update-check.json
- * because that one is a pure cache a bad parse simply refetches, while losing
- * this one would re-announce an install already announced.
- */
-export function autoUpdatePath(dir: string = dataDir()): string {
-  return join(dir, 'auto-update.json');
-}
-
-/**
- * Where the detached `tenjin update --json` child's stdout lands. It is the
- * command's own envelope verbatim, which is why nothing has to be invented to
- * find out how the background install went.
- */
-export function autoUpdateResultPath(dir: string = dataDir()): string {
-  return join(dir, 'auto-update-result.json');
-}
-
-/** The mutex serializing background-update decisions across processes. */
-export function autoUpdateLockPath(dir: string = dataDir()): string {
-  return join(dir, 'auto-update.lock');
-}
-
-/**
  * Where `install` writes the standalone harness hook scripts. Under the data dir
  * rather than the harness's own config directory: the scripts are ours, a harness
  * only ever holds the path to them, and one location serves every harness.

@@ -6,7 +6,7 @@ import { dataDir } from './lib/paths';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
-import { maybeUpdate } from './lib/update-check';
+import { maybeUpdate, readUpdateSignal } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
 /**
@@ -75,12 +75,21 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
+    // Read BEFORE the envelope, from the last check's cache only: this is the
+    // agent's copy of the nudge, and it must not cost a network call or a delay.
+    // `update` is excluded for the same reason the nudge is — its own envelope
+    // has just answered the question.
+    const updateAvailable =
+      command === 'update' ? null : await readUpdateSignal(dataDir(process.env));
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
+      emitSuccess(ctx.io, command, result.data, result.humanLines, {
+        json: ctx.flags.json,
+        updateAvailable,
+      });
     } catch (err) {
-      setExit(emitFailure(io, command, err, { json }).exitCode);
+      setExit(emitFailure(io, command, err, { json, updateAvailable }).exitCode);
     }
     // AFTER the envelope, for every command and both outcomes: neither of these
     // may delay a command's output, touch stdout, or move its exit code, and
