@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { installSkill } from './skill-writer';
 import { materializeTransform } from './skill-materialize';
+import { SKILL_NAMES, resolveSkillsSource } from './skills-source';
 
 /**
  * The materialize seam on `installSkill`: the source is shaped BEFORE the compare
@@ -88,5 +90,25 @@ describe('installSkill with a materialize transform', () => {
       installSkill(src, dest, false, 'demo', { materialize: materializeTransform({}) }),
     ).rejects.toThrow(/Malformed skill markers/);
     await expect(readFile(join(dest, 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+});
+
+/**
+ * The seam has NO consumer yet: no writer passes `materialize`, so `install`, the
+ * self-heal, `doctor` and `scripts/pack-smoke.sh` all still compare packaged bytes
+ * directly. That is correct only while no packaged skill carries a marker, and
+ * pack-smoke's `cmp` against the raw packaged file is the one comparer that cannot
+ * be taught from inside vitest. So this is a tripwire, not a style check: the first
+ * marker added to a shipped skill fails here, naming the four comparers that have
+ * to learn to materialize through one resolver in that same change. Three of four
+ * is how a shaped skill and a raw comparison disagree forever.
+ */
+describe('packaged skills carry no markers yet', () => {
+  it('every shipped SKILL.md is marker-free, so raw byte comparison stays valid', async () => {
+    const source = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    for (const name of SKILL_NAMES) {
+      const text = await readFile(join(source, name, 'SKILL.md'), 'utf8');
+      expect(text, `${name}/SKILL.md ships a tenjin:when marker`).not.toContain('tenjin:when');
+    }
   });
 });

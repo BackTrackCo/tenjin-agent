@@ -70,7 +70,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
-import { materializeTransform, skillContentFlags } from '../lib/skill-materialize';
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import type { ExecFn } from '../lib/wallet/passphrase';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
@@ -87,13 +86,6 @@ import type { CommandContext, GlobalFlags } from '../context';
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
-
-/** The packaged source as install writes it: materialized for wallet presence. */
-const shaped = async (name: string, wallet: boolean): Promise<string> =>
-  materializeTransform(skillContentFlags({ walletPresent: wallet }))(
-    'SKILL.md',
-    await readFile(join(SKILLS_SRC, name, 'SKILL.md')),
-  ).toString('utf8');
 const MARKER = 'tenjin-cli:skills';
 /** The full marker as it appears in the undo line the walkthrough prints. */
 const MARKER_COMMENT = `<!-- ${MARKER} -->`;
@@ -188,17 +180,13 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // Every prompt seam is answered in-process, so no test renders a prompt or
     // loads the clack chunk. The defaults are the "changed nothing" answers;
     // decision-specific tests override them.
-    // The default wallet stubs model reality: creation leaves a probeable file,
-    // so a re-run sees the wallet the first run made (the skill-shaping wallet
-    // flag depends on exactly this). Still no scrypt: the file is a placeholder
-    // and the address is canned; wallet tests opt into realWalletCreate().
-    walletExists: async () => existsSync(join(data, 'wallet.json')),
+    walletExists: async () => false,
     confirmWallet: async () => false,
-    createWallet: async () => {
-      await writeFile(join(data, 'wallet.json'), '{}');
-      return STUB_ADDRESS;
-    },
-    walletAddress: async () => STUB_ADDRESS,
+    // Stubbed by default so the ~140 tests that are not about the wallet do not
+    // each pay for a real scrypt key derivation. The wallet tests below opt into
+    // the real creator with `realWalletCreate()`, which still goes through the
+    // fake keychain above.
+    createWallet: async () => STUB_ADDRESS,
     promptPublishMode: async () => null,
     promptSearchHooks: async () => null,
     confirmPermissions: async () => false,
@@ -336,26 +324,6 @@ describe('runInstall: dry run', () => {
     expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
-  });
-});
-
-describe('runInstall: skill shaping by wallet presence', () => {
-  // The point of the wallet flag: a machine with no wallet gets a skill that
-  // teaches no spending verbs, and creating the wallet is what adds them back.
-  it('a --no-wallet install teaches no spending verbs; a wallet-creating install does', async () => {
-    await runInstall({ harness: ['claude'], noWallet: true }, makeCtx(), deps());
-    const path = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
-    const reduced = await readFile(path, 'utf8');
-    expect(reduced).toBe(await shaped('tenjin-search', false));
-    expect(reduced).not.toContain('## Buy');
-    expect(reduced).not.toContain('Bash(tenjin fund:*)');
-    expect(reduced).not.toContain('tenjin:when'); // markers never land
-
-    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    const full = await readFile(path, 'utf8');
-    expect(full).toBe(await shaped('tenjin-search', true));
-    expect(full).toContain('## Buy');
-    expect(full).not.toContain('tenjin:when');
   });
 });
 
@@ -1854,7 +1822,10 @@ describe('runInstall: hosted skill already present (#35)', () => {
   it("leaves a user's files beside the skill untouched", async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(dir, 'references'), { recursive: true });
-    await writeFile(join(dir, 'SKILL.md'), await shaped('tenjin-search', false));
+    await writeFile(
+      join(dir, 'SKILL.md'),
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
@@ -1980,7 +1951,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(
-      await shaped('tenjin-search', true),
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
     );
   });
 
@@ -2053,8 +2024,8 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    expect(await readFile(join(real, 'SKILL.md'), 'utf8')).toBe(
-      await shaped('tenjin-search', true),
+    expect(await readFile(join(real, 'SKILL.md'))).toEqual(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
     );
     expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2091,7 +2062,9 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
-    expect(await readFile(managed, 'utf8')).toBe(await shaped('tenjin-search', true));
+    expect(await readFile(managed)).toEqual(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    );
   });
 
   // Treating every read failure as "absent" classified an unreadable skill as a

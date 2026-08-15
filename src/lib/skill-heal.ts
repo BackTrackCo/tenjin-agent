@@ -4,8 +4,6 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
-import { walletPath } from './paths';
-import { materializeTransform, skillContentFlags } from './skill-materialize';
 import { installSkill } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
@@ -17,9 +15,6 @@ import { resolveSkillsSource } from './skills-source';
 
 export interface HealDeps {
   io: Io;
-  /** The CLI data dir, for the machine facts skill content is shaped by
-   *  (wallet presence). Same resolution the running command used. */
-  dataDir: string;
   /** Environment for the CI and opt-out checks. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
   /** Home whose skills directories are healed. Tests inject a temp dir. */
@@ -70,14 +65,7 @@ export async function healWiredSkills(deps: HealDeps): Promise<void> {
     if (source === null) return;
     const targets = healable(home);
     if (targets.length === 0) return;
-    // The same flag resolution `install` writes with, so heal and install agree
-    // on the bytes and never trade rewrites. Probed via walletPath directly:
-    // wallet/store would drag the keystore chunk onto every command's tail.
-    const walletPresent = lstatSync(walletPath(deps.dataDir), { throwIfNoEntry: false })?.isFile();
-    const materialize = materializeTransform(
-      skillContentFlags({ walletPresent: walletPresent === true }),
-    );
-    await heal(targets, source, deps.io, materialize);
+    await heal(targets, source, deps.io);
   } catch {
     // Whatever it was, it is the next command's to retry; this one is finished.
   }
@@ -138,19 +126,13 @@ function isRealDirectory(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
-async function heal(
-  targets: readonly Target[],
-  source: string,
-  io: Io,
-  materialize: (rel: string, content: Buffer) => Buffer,
-): Promise<void> {
+async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {
   const updated: string[] = [];
   for (const { dir, name, path } of targets) {
     try {
       if (!(await isOurs(path, name))) continue;
       const { status } = await installSkill(join(source, name), join(dir, name), false, name, {
         followSymlinks: false,
-        materialize,
       });
       if (status === 'up-to-date') continue;
       updated.push(path);

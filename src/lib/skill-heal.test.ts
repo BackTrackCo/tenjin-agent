@@ -39,7 +39,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { healWiredSkills } from './skill-heal';
-import { materializeTransform, skillContentFlags } from './skill-materialize';
 import { resolveSkillsSource } from './skills-source';
 import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, skillsDirsFor } from './skill-wiring';
 import type { Io } from './output';
@@ -71,13 +70,7 @@ function captureIo(isTTY = true) {
 }
 
 function heal(io: Io, env: NodeJS.ProcessEnv = {}): Promise<void> {
-  return healWiredSkills({
-    io,
-    env,
-    homeDir: home,
-    dataDir: join(home, '.tenjin'),
-    skillsSourceDir: SKILLS_SRC,
-  });
+  return healWiredSkills({ io, env, homeDir: home, skillsSourceDir: SKILLS_SRC });
 }
 
 const claudeDir = (): string => skillsDirsFor(home)[0]!;
@@ -94,16 +87,8 @@ async function seedSkill(dir: string, name: string, text = stale(name)): Promise
   return path;
 }
 
-/**
- * What the heal writes in this test home: the packaged source MATERIALIZED for a
- * machine with no wallet (none of these temp homes has one), the same shaping
- * the real heal resolves from walletPath(dataDir).
- */
-async function packaged(name: string, walletPresent = false): Promise<string> {
-  const raw = await readFile(join(SKILLS_SRC, name, 'SKILL.md'));
-  return materializeTransform(skillContentFlags({ walletPresent }))('SKILL.md', raw).toString(
-    'utf8',
-  );
+async function packaged(name: string): Promise<string> {
+  return readFile(join(SKILLS_SRC, name, 'SKILL.md'), 'utf8');
 }
 
 describe('healWiredSkills', () => {
@@ -352,24 +337,11 @@ describe('healWiredSkills', () => {
   });
 
   // The default source resolution lands on this repo's own skills/ when the CLI
-  // The wallet flag is resolved per run: a wallet appearing later re-shapes the
-  // installed copy on the next command, adding the spending sections back.
-  it('re-shapes a healed skill when a wallet appears', async () => {
-    const path = await seedSkill(claudeDir(), 'tenjin-search', await packaged('tenjin-search'));
-    await mkdir(join(home, '.tenjin'), { recursive: true });
-    await writeFile(join(home, '.tenjin', 'wallet.json'), '{}');
-    const { io } = captureIo();
-    await heal(io);
-    expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search', true));
-    expect(await packaged('tenjin-search', true)).toContain('## Buy');
-    expect(await packaged('tenjin-search')).not.toContain('## Buy');
-  });
-
   // runs from a checkout, and those are nobody's agreed-upon install.
   it('does not heal from a source checkout', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
     const { io, stderr } = captureIo();
-    await healWiredSkills({ io, env: {}, homeDir: home, dataDir: join(home, '.tenjin') });
+    await healWiredSkills({ io, env: {}, homeDir: home });
     expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
     expect(stderr()).toBe('');
   });
@@ -380,7 +352,6 @@ describe('healWiredSkills', () => {
       io,
       env: {},
       homeDir: 'relative-home',
-      dataDir: join(home, '.tenjin'),
       skillsSourceDir: SKILLS_SRC,
     });
     expect(existsSync('relative-home')).toBe(false);
@@ -394,7 +365,6 @@ describe('healWiredSkills', () => {
         io,
         env: {},
         homeDir: home,
-        dataDir: join(home, '.tenjin'),
         skillsSourceDir: join(home, 'not-a-skills-dir'),
       }),
     ).resolves.toBeUndefined();

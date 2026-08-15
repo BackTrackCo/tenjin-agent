@@ -11,7 +11,6 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
 import type { SkillInstallStatus } from '../lib/skill-writer';
-import { materializeTransform, skillContentFlags } from '../lib/skill-materialize';
 import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
 import {
   CLI_SKILL_NAMES,
@@ -386,13 +385,9 @@ async function installBody(
   // ENOENT/ENOTEMPTY renames), and 24 concurrent runs pass without a lock. The
   // self-heal is the other writer, and it writes these same bytes to these same
   // paths through the same writer.
-  // Skill content is shaped by the machine facts at write time (the `wallet`
-  // flag); a wallet created later THIS run re-shapes below, after resolveWallet.
-  const walletPresentNow = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
-  const materialize = materializeTransform(skillContentFlags({ walletPresent: walletPresentNow }));
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun, materialize));
+    harnesses.push(await applyPlan(plan, skillsSource, dryRun));
   }
   await assertSkillsLanded(plans, dryRun);
   if (!dryRun) markPhase('wired');
@@ -440,26 +435,6 @@ async function installBody(
   const wallet = await underDataDir(ctx.dataDir, () =>
     resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt),
   );
-  // The skills were written before the wallet decision (write order above), so a
-  // wallet created THIS run re-shapes them: the installed text must describe the
-  // machine the install leaves behind, not the one it found. Idempotent rewrites
-  // through the same writer; the doctor snapshot below then sees the final state.
-  if (!dryRun && wallet.status === 'created' && !walletPresentNow) {
-    const reshaped = materializeTransform(skillContentFlags({ walletPresent: true }));
-    for (const plan of plans) {
-      for (const name of SKILL_NAMES) {
-        try {
-          await installSkill(join(skillsSource, name), join(plan.skillsDir, name), false, name, {
-            materialize: reshaped,
-          });
-        } catch {
-          // The first pass already reported this skill; a re-shape failure must
-          // not fail an install whose wallet just landed. The self-heal and
-          // doctor own the catch-up, exactly as for any other stale copy.
-        }
-      }
-    }
-  }
 
   // AFTER all four decisions, never before (#101). The snapshot used to be taken
   // straight after the skills were written, so a run that created a wallet
@@ -1367,7 +1342,6 @@ async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
   dryRun: boolean,
-  materialize: (rel: string, content: Buffer) => Buffer,
 ): Promise<HarnessResult> {
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
@@ -1377,7 +1351,6 @@ async function applyPlan(
       join(plan.skillsDir, name),
       dryRun,
       name,
-      { materialize },
     );
     skills.push({
       name,
