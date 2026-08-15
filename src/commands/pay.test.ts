@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import { runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
+import { encodePaymentRequiredHeader } from '@x402/core/http';
+import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
+import type { PaymentRequired } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -269,6 +272,104 @@ describe('runPay, tenjin lane', () => {
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+});
+
+/** A challenge advertising the standard sign-in-with-x extension. */
+function siwxFixture(url: string, amount = '100000'): { header: string } {
+  const paymentRequired: PaymentRequired = {
+    x402Version: 2,
+    resource: { url, description: 'paid', mimeType: 'application/json' },
+    accepts: [{ ...LIVE_ACCEPT, amount } as never],
+    extensions: { 'sign-in-with-x': { info: { domain: new URL(url).host } } },
+  };
+  return { header: encodePaymentRequiredHeader(paymentRequired) };
+}
+
+describe('runPay, the sign-in-with-x extension', () => {
+  it('an entitled wallet re-reads free, with the signature bound to the target host', async () => {
+    const fixture = siwxFixture(TENJIN_URL);
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { answer: 'yours already' }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    });
+    const data = result.data as { paid: boolean; entitled?: boolean };
+    expect(data.paid).toBe(false);
+    expect(data.entitled).toBe(true);
+    expect(calls).toHaveLength(2);
+    const siwx = calls[1]!.headers['sign-in-with-x'];
+    expect(siwx).toBeDefined();
+    const payload = parseSIWxHeader(siwx!) as { domain: string };
+    expect(payload.domain).toBe('tenjin.blog');
+    expect(calls[1]!.headers['payment-signature']).toBeUndefined();
+    expect(authorizer.authorize).not.toHaveBeenCalled(); // nothing to spend
+  });
+
+  it('an unentitled wallet pays the FRESH challenge the re-check returned', async () => {
+    const fixture = siwxFixture(TENJIN_URL);
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '90000').header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    });
+    const data = result.data as { paid: boolean; amountPaid: { atomic: string } };
+    expect(data.paid).toBe(true);
+    // The fresh (lower) price is what was authorized and signed, like buy.
+    expect(data.amountPaid.atomic).toBe('90000');
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.headers['payment-signature']).toBeDefined();
+    expect(calls[2]!.headers['sign-in-with-x']).toBeUndefined(); // payment IS the credential
+  });
+
+  it('a price bump between the first look and signing is refused', async () => {
+    const fixture = siwxFixture(TENJIN_URL, '100000');
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '200000').header }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
+    expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  it('a foreign seller gets a signature bound to ITS origin, never the configured one', async () => {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const fixture = siwxFixture(FOREIGN_URL);
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: 'yours already' }),
+    ]);
+    const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { entitled?: boolean }).entitled).toBe(true);
+    const payload = parseSIWxHeader(calls[1]!.headers['sign-in-with-x']!) as {
+      domain: string;
+      uri: string;
+    };
+    expect(payload.domain).toBe('seller.example');
+    expect(payload.uri).toContain('https://seller.example');
   });
 });
 

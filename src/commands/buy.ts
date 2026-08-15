@@ -1,12 +1,12 @@
 import { CliError } from '../lib/errors';
-import { promptYesNo } from '../lib/prompt';
-import { parseUsdToAtomic, toMoney } from '../lib/money';
+import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
 import { findSearchForResource } from '../lib/search-store';
 import { fetchRead, type Preview } from '../lib/read-client';
 import { buildSiwxHeader } from '../lib/siwx';
 import { buildExactPayment } from '../lib/x402-pay';
+import { gateSpend } from '../lib/spend-gate';
 import { findDelivered, findDeliveredByUrl } from '../lib/library';
 import {
   deliverExisting,
@@ -187,33 +187,26 @@ export async function runBuy(
 
   // 4. Genuinely unentitled: spend policy, provider-side, on the FRESH amount,
   //    BEFORE any payment. A proceeding decision reserves budget atomically.
+  //    The gate itself (deny/confirm/release shapes) is shared with `pay`.
   const authorizer = resolveSpendAuthorizer(
     ctx,
     settings.policy,
     deps.authorizer !== undefined ? { authorizer: deps.authorizer } : {},
   );
-  const authorization = await authorizer.authorize({
+  const reservationId = await gateSpend({
+    ctx,
+    authorizer,
     amountAtomic,
     creator,
     ...(maxPriceAtomic !== undefined ? { maxPriceAtomic } : {}),
+    yes: args.yes === true,
+    ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
+    // The creator label is server-controlled: sanitized so escape sequences
+    // cannot repaint the price the human is approving.
+    payeeLabel: sanitizeForTerminal(creator) || 'this creator',
+    allowlistSubject: 'the creator',
+    notConfirmedMessage: 'Purchase not confirmed.',
   });
-  if (authorization.decision === 'deny') {
-    throw new CliError('POLICY_REFUSED', authorization.message, {
-      fix: policyFix(authorization.reason),
-      details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
-    });
-  }
-  const reservationId = authorization.reservationId;
-  if (authorization.decision === 'confirm') {
-    const approved = await confirmSpend(ctx, deps, args.yes === true, amountAtomic, creator);
-    if (!approved) {
-      await authorizer.release(reservationId);
-      throw new CliError('POLICY_REFUSED', 'Purchase not confirmed.', {
-        fix: 'Re-run with --yes, or set a policy that auto-approves this spend.',
-        details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
-      });
-    }
-  }
 
   // 5. Pay: build the exact-scheme authorization (bound to the FRESH requirement)
   //    and re-request with it. Any non-settlement outcome releases the reservation.
@@ -290,36 +283,4 @@ function creatorFrom(preview: Preview): string {
     if (typeof wallet === 'string' && wallet.length > 0) return wallet;
   }
   return '';
-}
-
-function policyFix(reason: string): string {
-  switch (reason) {
-    case 'price_cap_exceeded':
-      return 'Raise --max-price if this price is acceptable.';
-    case 'not_allowlisted':
-      return 'Add the creator to allowlistCreators, or clear the allowlist.';
-    case 'session_budget_exceeded':
-      return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
-    default:
-      return 'Adjust your spend policy with `tenjin config set`.';
-  }
-}
-
-async function confirmSpend(
-  ctx: CommandContext,
-  deps: BuyDeps,
-  yes: boolean,
-  amountAtomic: bigint,
-  creator: string,
-): Promise<boolean> {
-  if (yes) return true;
-  // The creator label is server-controlled: sanitize so escape sequences cannot
-  // repaint the price the human is approving. The price renders last.
-  const prompt = `Pay ${toMoney(amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(creator) || 'this creator'}? [y/N] `;
-  if (deps.confirm !== undefined) return deps.confirm(prompt);
-  if (!ctx.io.isTTY) return false; // non-interactive without --yes: refuse (exit 3)
-  // The real prompt reads stdin, so stdin must be interactive too: at EOF the
-  // question could never be answered and the process would exit with no answer.
-  if (!process.stdin.isTTY) return false;
-  return promptYesNo(prompt); // default-no: only an explicit y/yes approves
 }

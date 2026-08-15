@@ -9,10 +9,16 @@ client verb, for every paid endpoint instead of only marketplace pieces.
 delivers a 2xx free, and pays a 402 through the same money gates as `buy`
 (spend policy, price cap, session budget, confirm; `--yes` clears only the
 confirm), signing with `buildExactPayment`'s existing exact-scheme,
-canonical-USDC-on-Base pin. No SIWX ever rides this verb, redirects fail closed
-on both legs, and there is deliberately no library dedupe: every paid call
-pays, and the session budget and `--max-price` are the brakes. The configured
-base URL is always payable, which covers Tenjin's paid `/api/answer` and
+canonical-USDC-on-Base pin; the deny/confirm/release ceremony itself is now one
+shared gate (`lib/spend-gate`) both `buy` and `pay` run, so the two verbs
+cannot drift. When the 402 advertises the standard sign-in-with-x extension,
+`pay` runs the same sequence as `buy`: one SIWX re-check bound to the TARGET
+origin (never the configured deployment's, so nothing origin-bound can leak),
+an entitled wallet re-reads free, and an unentitled one pays the fresh
+challenge with the same price-bump refusal as `buy`. Redirects fail closed on
+both legs, and there is deliberately no library dedupe: every paid call pays,
+and the session budget and `--max-price` are the brakes. The configured base
+URL is always payable, which covers Tenjin's paid `/api/answer` and
 `/api/phone-lookup` today and every future paid route without a CLI release.
 
 Any other https origin is the Bazaar lane, off by default. It opens only when

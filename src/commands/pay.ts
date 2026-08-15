@@ -1,4 +1,5 @@
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
+import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
@@ -6,8 +7,9 @@ import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
-import { promptYesNo } from '../lib/prompt';
 import { resolveContextSettings } from '../lib/settings';
+import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
+import { gateSpend } from '../lib/spend-gate';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -24,10 +26,12 @@ import type { CommandContext, CommandResult } from '../context';
  * rather than marketplace pieces. One probe; a 2xx delivers free; a 402 runs
  * the same money gates as `buy` (spend policy, price cap, session budget,
  * confirm; `--yes` clears only the confirm) and retries once with the
- * `PAYMENT-SIGNATURE`. Deliberately NOT `buy`: no SIWX ever (these endpoints
- * are anonymous x402, and the absence is what keeps the foreign lane safe), no
- * library idempotence (every paid call pays; the session budget and
- * `--max-price` are the brakes), no search attribution.
+ * `PAYMENT-SIGNATURE`. Deliberately NOT `buy`: no library idempotence (every
+ * paid call pays; the session budget and `--max-price` are the brakes) and no
+ * search attribution. SIWX rides ONLY when the 402 advertises the standard
+ * sign-in-with-x extension, and the signature is bound to the TARGET origin
+ * (never the configured deployment's), so an entitled wallet re-reads free at
+ * any seller that supports it while nothing origin-bound can leak elsewhere.
  *
  * The origin gate has two lanes. The configured base URL is always payable.
  * Any other https origin is payable only when the operator turned `bazaarPay`
@@ -110,7 +114,8 @@ export async function runPay(
       fix: 'The endpoint looks misconfigured.',
     });
   }
-  const amountAtomic = BigInt(requirement.amount);
+  // The FIRST-SEEN amount: a later challenge may never cost more than this.
+  const firstSeenAmount = BigInt(requirement.amount);
   const host = new URL(url).host;
 
   // The Bazaar lane's registry check runs BEFORE the wallet is even opened:
@@ -127,37 +132,89 @@ export async function runPay(
   await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
   const signer = await provider.getSigner();
 
+  // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
+  // advertises it, an entitled wallet re-reads FREE before any payment exists,
+  // and the re-check doubles as the fresh-challenge refetch the payment is
+  // built against. The signature binds to the TARGET origin (host-with-port),
+  // so a foreign seller gets a credential worth nothing anywhere else.
+  let effectiveChallenge = paymentRequired;
+  let effectiveRequirement = requirement;
+  if (paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined) {
+    const siwxHeader = await buildSiwxHeader(signer, {
+      baseUrl: new URL(url).origin,
+      chainId: requirement.network,
+    });
+    const recheck = await httpRequest(url, {
+      ...fetchOpts,
+      headers: { [SIWX_HEADER]: siwxHeader },
+    });
+    if (!recheck.ok) throw fetchFailureToCliError(recheck);
+    if (recheck.status >= 200 && recheck.status < 300) {
+      return deliver(url, lane, recheck, {
+        paid: false,
+        entitled: true,
+        printBody: args.printBody === true,
+      });
+    }
+    if (recheck.status !== 402) {
+      throw new CliError(
+        'API_UNREACHABLE',
+        `${url} answered ${recheck.status} on the entitlement re-check.`,
+        {
+          fix: 'Retry; if it persists the endpoint looks misconfigured.',
+          details: { status: recheck.status, body: recheck.json },
+        },
+      );
+    }
+    effectiveChallenge = decodeChallenge(recheck, url);
+    const fresh = effectiveChallenge.accepts[0];
+    if (fresh === undefined) {
+      throw new CliError('PAYMENT_FAILED', 'The fresh 402 advertised no payment requirements.', {
+        fix: 'The endpoint looks misconfigured.',
+      });
+    }
+    // Refuse a price bump between the first look and signing, exactly as `buy`.
+    if (BigInt(fresh.amount) > firstSeenAmount) {
+      throw new CliError('PAYMENT_FAILED', 'The price increased before signing; refusing to pay.', {
+        fix: 'Re-run `tenjin pay` to review the new price, and set --max-price to cap it.',
+        details: {
+          firstSeenAtomic: firstSeenAmount.toString(),
+          currentAtomic: fresh.amount,
+        },
+      });
+    }
+    effectiveRequirement = fresh;
+    // The Bazaar lane verifies the challenge it will actually SIGN: the store
+    // answers this without a network round trip in the common case.
+    if (lane === 'bazaar') {
+      registry = await assertRegistryVerified(settings, url, fresh, ctx.flags.timeout, ctx);
+    }
+  }
+  const amountAtomic = BigInt(effectiveRequirement.amount);
+
   const authorizer = resolveSpendAuthorizer(
     ctx,
     settings.policy,
     deps.authorizer !== undefined ? { authorizer: deps.authorizer } : {},
   );
-  // The host is the creator identity here: `allowlistCreators` users pin hosts.
-  const authorization = await authorizer.authorize({
+  // The host is the creator identity here (`allowlistCreators` users pin
+  // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
+  const via = registry !== undefined ? ` (listed on ${sanitizeForTerminal(registry)})` : '';
+  const reservationId = await gateSpend({
+    ctx,
+    authorizer,
     amountAtomic,
     creator: host,
     ...(maxPriceAtomic !== undefined ? { maxPriceAtomic } : {}),
+    yes: args.yes === true,
+    ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
+    payeeLabel: `${sanitizeForTerminal(host)}${via}`,
+    allowlistSubject: 'this host',
+    notConfirmedMessage: 'Payment not confirmed.',
   });
-  if (authorization.decision === 'deny') {
-    throw new CliError('POLICY_REFUSED', authorization.message, {
-      fix: payPolicyFix(authorization.reason),
-      details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
-    });
-  }
-  const reservationId = authorization.reservationId;
-  if (authorization.decision === 'confirm') {
-    const approved = await confirmSpend(ctx, deps, args.yes === true, amountAtomic, host, registry);
-    if (!approved) {
-      await authorizer.release(reservationId);
-      throw new CliError('POLICY_REFUSED', 'Payment not confirmed.', {
-        fix: 'Re-run with --yes, or set a policy that auto-approves this spend.',
-        details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
-      });
-    }
-  }
 
   try {
-    const payment = await buildExactPayment(paymentRequired, signer);
+    const payment = await buildExactPayment(effectiveChallenge, signer);
     const paid = await httpRequest(url, { ...fetchOpts, headers: payment.headers });
     if (!paid.ok) throw fetchFailureToCliError(paid);
     if (paid.status >= 200 && paid.status < 300) {
@@ -165,7 +222,7 @@ export async function runPay(
       return deliver(url, lane, paid, {
         paid: true,
         amountAtomic: payment.amountAtomic,
-        requirement,
+        requirement: effectiveRequirement,
         ...(registry !== undefined ? { registry } : {}),
         printBody: args.printBody === true,
       });
@@ -313,40 +370,10 @@ async function assertRegistryVerified(
   }
 }
 
-function payPolicyFix(reason: string): string {
-  switch (reason) {
-    case 'price_cap_exceeded':
-      return 'Raise --max-price if this price is acceptable.';
-    case 'not_allowlisted':
-      return 'Add this host to allowlistCreators, or clear the allowlist.';
-    case 'session_budget_exceeded':
-      return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
-    default:
-      return 'Adjust your spend policy with `tenjin config set`.';
-  }
-}
-
-async function confirmSpend(
-  ctx: CommandContext,
-  deps: PayDeps,
-  yes: boolean,
-  amountAtomic: bigint,
-  host: string,
-  registry: string | undefined,
-): Promise<boolean> {
-  if (yes) return true;
-  // Host and registry are external input: sanitized so escape sequences cannot
-  // repaint the price the human is approving. The price renders last.
-  const via = registry !== undefined ? ` (listed on ${sanitizeForTerminal(registry)})` : '';
-  const prompt = `Pay ${toMoney(amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(host)}${via}? [y/N] `;
-  if (deps.confirm !== undefined) return deps.confirm(prompt);
-  if (!ctx.io.isTTY) return false; // non-interactive without --yes: refuse (exit 3)
-  if (!process.stdin.isTTY) return false;
-  return promptYesNo(prompt);
-}
-
 interface DeliverOpts {
   paid: boolean;
+  /** A free delivery because the wallet was already entitled (SIWX), not free-of-price. */
+  entitled?: boolean;
   amountAtomic?: bigint;
   requirement?: PaymentRequirements;
   registry?: string;
@@ -367,6 +394,7 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
       ? { payTo: opts.requirement.payTo, network: opts.requirement.network }
       : {}),
     ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
+    ...(opts.entitled === true ? { entitled: true } : {}),
     ...(settlementTxHash !== undefined ? { settlementTxHash } : {}),
     // The body is the product: JSON when the endpoint spoke it, raw text always.
     ...(res.json !== undefined ? { body: res.json } : {}),
@@ -375,7 +403,9 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
   const headline = opts.paid
     ? `paid ${toMoney(opts.amountAtomic!.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +
       (settlementTxHash !== undefined ? ` (tx ${settlementTxHash})` : '')
-    : `free (${res.status}, no charge)`;
+    : opts.entitled === true
+      ? `free (entitled, no charge)`
+      : `free (${res.status}, no charge)`;
   const body = sanitizeForTerminal(res.text);
   const preview =
     opts.printBody || body.length <= BODY_PREVIEW_CHARS
