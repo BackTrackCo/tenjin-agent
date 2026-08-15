@@ -14,6 +14,7 @@
     "doctor-despam",
     "edit-command",
     "fund-onramp",
+    "harvest-ask",
     "injection-fixture-inert",
     "install-harness-record",
     "install-instinct-nudge",
@@ -44,6 +45,7 @@
     "tenjin-send",
     "trigger-probe-carveout",
     "unified-publish-modes",
+    "update-command",
     "wallet-newer-schema",
     "wallet-passphrase-slots",
     "zero-claudemd-footprint"
