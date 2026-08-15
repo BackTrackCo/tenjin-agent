@@ -22,7 +22,7 @@ project-local copy updates where it is declared, and yarn is refused because
 `yarn global add` exists only in yarn 1. `--check` answers from all of them.
 
 The daily check now reaches agents, not just humans. Alongside the dim stderr
-line a TTY gets, a newer version appears as `update_available` (with `current`
+line a TTY gets, a newer version appears as `updateAvailable` (with `current`
 and `latest`) on the JSON envelope and on the generated hook scripts' output, so
 the agent driving a command can run `tenjin update` itself at a moment it picks.
 Nothing installs on its own: a CLI that starts a fresh process per invocation

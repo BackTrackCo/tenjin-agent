@@ -86,7 +86,7 @@ const HooksConfigSchema = z.object({
  * What the daily update check is allowed to do about a newer version.
  *
  * `nudge` reports it — one dim line for a human at a terminal, and an
- * `update_available` field on the JSON envelope for everyone else, which is how
+ * `updateAvailable` field on the JSON envelope for everyone else, which is how
  * an agent learns to run `tenjin update` itself. `off` reports neither and stops
  * asking npm entirely.
  *
@@ -374,8 +374,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
   };
 }
 
-/** update.mode: file or default, no env or flag. The background installer and
- *  the nudge both read the same resolved value, so they cannot disagree. */
+/** update.mode: file or default, no env or flag. Every surface that reports a
+ *  newer version reads this one resolved value, so they cannot disagree. */
 function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   const fromFile = config.update?.mode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };

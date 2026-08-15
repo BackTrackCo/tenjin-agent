@@ -98,7 +98,7 @@ export const SuccessEnvelopeSchema = z.object({
   ok: z.literal(true),
   data: z.unknown(),
   /** Present only when a newer version is known and update.mode is not `off`. */
-  update_available: UpdateAvailableSchema.optional(),
+  updateAvailable: UpdateAvailableSchema.optional(),
 });
 export type SuccessEnvelope = z.infer<typeof SuccessEnvelopeSchema>;
 
@@ -107,7 +107,7 @@ export const FailureEnvelopeSchema = z.object({
   command: z.string(),
   ok: z.literal(false),
   error: OutputErrorSchema,
-  update_available: UpdateAvailableSchema.optional(),
+  updateAvailable: UpdateAvailableSchema.optional(),
 });
 export type FailureEnvelope = z.infer<typeof FailureEnvelopeSchema>;
 

@@ -76,7 +76,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.stopNag': 'end-of-turn reminder about searches nothing answered yet',
   'update.mode':
-    'auto=install newer versions in the background, nudge=only tell a human, off=neither',
+    'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
 
 function isPublishKey(key: string): key is PublishConfigKey {
@@ -222,8 +222,8 @@ async function setHooksKey(
 
 /**
  * `config set update.mode`. Same locked merge-write as every other set, so the
- * background installer sees the new mode on the very next run with nothing to
- * re-install and no process to restart.
+ * next command reports (or stops reporting) under the new mode immediately,
+ * with nothing to re-install and no process to restart.
  */
 async function setUpdateKey(
   key: UpdateConfigKey,

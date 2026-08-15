@@ -56,11 +56,11 @@ Deliberately not in the recommended permission allowlist: it replaces the binary
 
 Once a day, at most, the CLI asks npm whether a newer version exists. It never installs on its own; it reports, and you or your agent decide.
 
-| Surface                                 | Who sees it                                                                        |
-| --------------------------------------- | ---------------------------------------------------------------------------------- |
-| One dim stderr line                     | A human at a TTY.                                                                  |
-| `update_available` on the JSON envelope | Anything reading the envelope, including an agent. Carries `current` and `latest`. |
-| A line on hook output                   | A harness reading `additionalContext`.                                             |
+| Surface                                | Who sees it                                                                        |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| One dim stderr line                    | A human at a TTY.                                                                  |
+| `updateAvailable` on the JSON envelope | Anything reading the envelope, including an agent. Carries `current` and `latest`. |
+| A line on hook output                  | A harness reading `additionalContext`.                                             |
 
 ```jsonc
 {
@@ -68,7 +68,7 @@ Once a day, at most, the CLI asks npm whether a newer version exists. It never i
   "command": "search",
   "ok": true,
   "data": {},
-  "update_available": { "current": "0.1.0-alpha.6", "latest": "0.1.0-alpha.7" },
+  "updateAvailable": { "current": "0.1.0-alpha.6", "latest": "0.1.0-alpha.7" },
 }
 ```
 

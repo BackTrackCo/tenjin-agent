@@ -53,7 +53,7 @@ export function buildSuccessEnvelope(
     command,
     ok: true,
     data,
-    ...(updateAvailable != null ? { update_available: updateAvailable } : {}),
+    ...(updateAvailable != null ? { updateAvailable: updateAvailable } : {}),
   };
 }
 
@@ -73,7 +73,7 @@ export function buildFailureEnvelope(
     command,
     ok: false,
     error,
-    ...(updateAvailable != null ? { update_available: updateAvailable } : {}),
+    ...(updateAvailable != null ? { updateAvailable: updateAvailable } : {}),
   };
 }
 

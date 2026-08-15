@@ -10,18 +10,21 @@ import type { UpdateAvailable } from '../schemas';
 import { updateCheckPath } from './paths';
 
 /**
- * "A newer tenjin-cli exists" — one dim stderr line, at most once a day, for a
- * human at a terminal.
+ * "A newer tenjin-cli exists", asked of npm at most once a day and reported
+ * three ways: one dim stderr line for a human at a terminal, `updateAvailable`
+ * on the JSON envelope, and a line on the generated hook scripts' output.
  *
- * Everything about it is subordinate to the command that ran: it happens AFTER
- * the envelope is written, it never touches stdout, it never changes an exit
- * code, and every failure it can have (offline, slow registry, junk JSON, a tag
- * that does not exist) is swallowed. An agent surface sees nothing at all — no
- * TTY, `--json`, or CI is each on its own enough to skip the whole thing.
+ * It REPORTS and never installs. A CLI that starts a fresh process per
+ * invocation has no deferred-activation window to hide a binary swap in — "next
+ * start" is "mid-session" for whatever is driving it — so the decision to run
+ * `tenjin update` belongs to the agent or the human, not to this check.
  *
- * There is deliberately NO opt-out flag or env var yet. One nudge a day at a
- * human terminal is small enough that the switch would be more surface than the
- * feature; if that stops being true, the switch is the next thing added.
+ * Everything here is subordinate to the command that ran: the fetch happens
+ * AFTER the envelope is written, it never touches stdout, it never changes an
+ * exit code, and every failure it can have (offline, slow registry, junk JSON, a
+ * tag that does not exist) is swallowed. CI skips the whole thing: a build log
+ * can act on none of it. `update.mode off` is the opt-out and silences all three
+ * surfaces, including the request to npm.
  */
 
 const CHECK_INTERVAL_MS = 86_400_000; // 24h
@@ -119,9 +122,17 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // otherwise repeat the same line on every command for 24h. The two clocks are
     // separate because they answer separate questions — when we last asked npm,
     // and when we last interrupted the human.
+    //
+    // `human` is part of `due` for the second of those: this code now runs on
+    // every surface, to feed the envelope signal, so without it an agent run
+    // would stamp the nudge clock having printed nothing and leave a shared
+    // machine's terminal quiet for 24h.
+    const human = deps.io.isTTY && !deps.json;
     const notifiedAtMs = entry?.notifiedAtMs;
     const due =
-      upgradeable && (notifiedAtMs === undefined || nowMs - notifiedAtMs >= CHECK_INTERVAL_MS);
+      human &&
+      upgradeable &&
+      (notifiedAtMs === undefined || nowMs - notifiedAtMs >= CHECK_INTERVAL_MS);
 
     // Carried forward when nothing is printed: the day since the last nudge does
     // not restart just because the registry was asked again.

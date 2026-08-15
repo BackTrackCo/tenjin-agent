@@ -96,7 +96,7 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
     currentVersion: '0.1.0-alpha.6',
     fetchImpl: registry({ latest: '0.1.0-alpha.5', alpha: '0.1.0-alpha.7' }).fetchImpl,
     spawnImpl: forbiddenSpawn,
-    npmCli: null,
+    managerScript: null,
     ...overrides,
   };
 }
@@ -450,7 +450,10 @@ describe('runUpdate', () => {
     await runUpdate(
       { check: false },
       ctx,
-      await deps({ spawnImpl: spawned.impl, npmCli: '/n/lib/node_modules/npm/bin/npm-cli.js' }),
+      await deps({
+        spawnImpl: spawned.impl,
+        managerScript: '/n/lib/node_modules/npm/bin/npm-cli.js',
+      }),
     );
     expect(spawned.calls[0]?.cmd).toBe(process.execPath);
     expect(spawned.calls[0]?.args[0]).toBe('/n/lib/node_modules/npm/bin/npm-cli.js');
@@ -460,7 +463,11 @@ describe('runUpdate', () => {
   it('falls back to the npm shim when npm-cli.js cannot be found', async () => {
     const { ctx } = makeCtx();
     const spawned = spawnRecorder();
-    await runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl, npmCli: null }));
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, managerScript: null }),
+    );
     expect(spawned.calls[0]?.cmd).toBe('npm');
     expect(spawned.calls[0]?.args[0]).toBe('install');
   });

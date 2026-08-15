@@ -69,7 +69,9 @@ interface ResolvedManager {
  */
 function resolveManager(manager: Delegable, deps: UpdateDeps): ResolvedManager {
   const script =
-    deps.npmCli !== undefined ? deps.npmCli : resolveManagerScript(manager, process.execPath);
+    deps.managerScript !== undefined
+      ? deps.managerScript
+      : resolveManagerScript(manager, process.execPath);
   return script === null
     ? { cmd: MANAGERS[manager].bin, prefix: [] }
     : { cmd: process.execPath, prefix: [script] };
@@ -84,7 +86,7 @@ export interface UpdateDeps {
   currentVersion?: string;
   /** The owning manager's entry script, or null when it has none to find.
    *  Injectable so the argv shape is asserted without depending on the runner. */
-  npmCli?: string | null;
+  managerScript?: string | null;
 }
 
 interface UpdateData {
@@ -187,6 +189,10 @@ export async function runUpdate(
   // Whoever owns the install performs it. The PATH-race objection that used to
   // make this a refusal only applies to CROSS-manager writes; invoking the owner
   // is exactly what the refusal used to tell the user to type by hand.
+  //
+  // The cast is sound only because `refuse` ran directly above and yarn is one
+  // of its entries, so the one non-delegable manager has already thrown. Move
+  // this line above that call and it becomes a lie.
   const manager = classifyManager(moduleDir) as Delegable;
   const plan = MANAGERS[manager];
   // --ignore-scripts where the manager has it (tenjin-cli has no runtime
