@@ -3,8 +3,9 @@ name: tenjin-publish
 description: >-
   Publish, update, or maintain your own reusable answers on the Tenjin
   knowledge marketplace so you earn on every future buyer. Three routes in:
-  the user asks to publish, update, or manage Tenjin content, or asks about
-  their sales or drafts; the tenjin-search after-a-MISS flow has a finished,
+  the user asks to publish, update, or manage Tenjin content, asks whether
+  recent work holds anything worth selling, or asks about their sales or
+  drafts; the tenjin-search after-a-MISS flow has a finished,
   reusable, public, rights-clean finding to publish under your publish.mode;
   or you just finished something worth selling unprompted — substantial public
   research (a multi-source synthesis, a tested comparison, a runbook) or an
@@ -48,6 +49,18 @@ so that judgment is still yours, below.
 This skill's reachability is not a safety layer; the description above is the
 whole trigger boundary.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
+
+## The harvest ask
+
+"Anything from our recent work worth publishing?" routes here too. Sweep what
+you can actually see: this conversation's finished work, plus anything the
+user names. Never go digging through transcripts or session archives the user
+did not hand you; the sweep reads what is in front of you. Grade each
+candidate against the sell rubric below, then offer the survivors ONCE, as one
+batch with honest prices — never one at a time across the session. A no on a
+candidate is final: it is not raised again in this session or a later one, and
+nothing is saved anywhere to re-ask. Zero candidates is a fine answer; say so
+in one line and stop.
 
 ## What makes a piece sell
 
