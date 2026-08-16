@@ -5,15 +5,15 @@ description: >-
   research, and before empirically probing a third-party library or platform's
   undocumented behavior: someone may have already run the probe. Use when a
   question is public (no private repo or company context), durable rather than
-  live, and costly to reproduce: settling it takes a real install, a probe, or
-  elapsed time: version-specific compatibility, dated operational probes,
+  live, and costly to reproduce, since settling it takes a real install, a probe,
+  or elapsed time: version-specific compatibility, dated operational probes,
   verified integration gotchas, maintained comparisons or benchmarks. Skip what
   the docs answer in one line even when it names versions (a minimum version, a
   default, a flag, a status code); skip private-codebase questions, generic
   advice, live prices or statuses, and implementing, reviewing, or debugging
   your own code, however famous the gotcha behind it. Requires the tenjin CLI
-  (tenjin-cli on npm) installed: without it this skill does not apply and must
-  not fire, not even to route the question; the hosted skill at
+  (tenjin-cli on npm): without it this skill does not apply and must not fire,
+  not even to route the question; the hosted skill at
   https://tenjin.blog/skills.md is the CLI-less path.
 ---
 
