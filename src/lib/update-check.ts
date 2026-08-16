@@ -34,7 +34,11 @@ const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags
 /** What is known about ONE dist-tag: when it was asked, and what it said. */
 const TagEntrySchema = z.object({
   checkedAtMs: z.number(),
-  latest: z.string(),
+  /**
+   * The version the tag named. Absent when the registry answered with nothing
+   * this build can use, which is still an answer and still moves `checkedAtMs`.
+   */
+  latest: z.string().optional(),
   /** When the nudge was last PRINTED for this tag. Absent until one has been. */
   notifiedAtMs: z.number().optional(),
 });
@@ -113,10 +117,23 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // Resolved through the same function `tenjin update` uses, so the nudge can
     // never advertise a version the command would decline to install, nor stay
     // quiet about one it would.
-    const latest = fresh ? entry.latest : await resolveLatest(current, deps);
-    if (latest === null) return; // asked and learned nothing: cache nothing either
+    //
+    // Two failures with two different answers. A registry that could not be
+    // ASKED caches nothing, so the next command retries rather than going quiet
+    // for 24h over one dropped packet. A registry that answered with nothing
+    // usable — no such tag, or a version VERSION_RE does not admit — has
+    // answered, and re-asking on every command until the tag changes would pound
+    // it indefinitely to print nothing. That one records the clock below.
+    let latest: string | null;
+    if (fresh) {
+      latest = entry.latest ?? null;
+    } else {
+      const answer = await resolveLatest(current, deps);
+      if (answer === null) return;
+      latest = answer.latest;
+    }
 
-    const upgradeable = isNewer(latest, current);
+    const upgradeable = latest !== null && isNewer(latest, current);
 
     // Once a day means once a day, not once per FETCH: a fresh cache would
     // otherwise repeat the same line on every command for 24h. The two clocks are
@@ -140,7 +157,7 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
 
     // Carries the agent-visible half of the answer, so a hook or an envelope can
     // report it without knowing which version is running.
-    const signal = upgradeable ? { current, latest } : undefined;
+    const signal = upgradeable && latest !== null ? { current, latest } : undefined;
     const signalChanged =
       cached?.signal?.current !== signal?.current || cached?.signal?.latest !== signal?.latest;
 
@@ -157,22 +174,24 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
           ...cached?.tags,
           [tag]: {
             checkedAtMs: fresh ? entry.checkedAtMs : nowMs,
-            latest,
+            ...(latest !== null ? { latest } : {}),
             ...(nudgedAtMs !== undefined ? { notifiedAtMs: nudgedAtMs } : {}),
           },
         },
       });
     }
-    if (!due) return;
 
     // Named as the command, not the npm invocation it wraps: `update` prints the
     // right instructions itself for an install it cannot perform (a source
-    // checkout, a yarn global), so this line is correct everywhere.
-    emitNotice(
-      deps.io,
-      `tenjin-cli ${latest} is available (you have ${current}). Update: run tenjin update`,
-      { json: deps.json },
-    );
+    // checkout, a yarn global), so this line is correct everywhere. The null
+    // test is `due`'s own precondition restated for the type checker.
+    if (due && latest !== null) {
+      emitNotice(
+        deps.io,
+        `tenjin-cli ${latest} is available (you have ${current}). Update: run tenjin update`,
+        { json: deps.json },
+      );
+    }
   } catch {
     // Unreachable by construction (every step below is already guarded); here so
     // that staying invisible does not depend on that remaining true.
@@ -227,12 +246,15 @@ export function channelTag(version: string): 'latest' | null {
  * The newest version this build can move to: whatever sits on the tag it
  * follows.
  *
- * One tag and no fallback. A second tag in the comparison only gives a stale
- * answer a chance to win, which is what `alpha` did by sitting on
- * 0.1.0-alpha.7 while every later build shipped on `latest`.
+ * One tag and no fallback. The `latest` tag is what this package's pipeline
+ * moves on every publish, so a second tag in the comparison adds no reachable
+ * version and one way to be wrong: a tag sitting AHEAD of `latest` redirects the
+ * self-update install to a build the release line never promoted. Reading the
+ * one tag the pipeline maintains is both simpler and narrower.
  *
- * Null when the tag carries nothing parseable, which is a different fact from
- * "the registry could not be reached" and is reported as one.
+ * Null for two facts the callers separate: the tag is absent from the registry's
+ * map, and the tag names a version VERSION_RE does not admit. Neither is "the
+ * registry could not be reached", which is reported on its own.
  */
 export function resolveTarget(current: string, tags: Record<string, string>): string | null {
   const channel = channelTag(current);
@@ -274,10 +296,18 @@ export async function fetchDistTags(opts: {
   return parsed.success ? parsed.data : null;
 }
 
-/** The nudge's one-shot: fetch, then resolve. Null for either failure. */
-async function resolveLatest(current: string, deps: UpdateCheckDeps): Promise<string | null> {
+/**
+ * The nudge's one-shot: fetch, then resolve. Null when the registry could not be
+ * asked at all; `{ latest: null }` when it answered with nothing this build can
+ * use. The caller keeps the two apart because only the first is worth retrying
+ * on the very next command.
+ */
+async function resolveLatest(
+  current: string,
+  deps: UpdateCheckDeps,
+): Promise<{ latest: string | null } | null> {
   const tags = await fetchDistTags({ fetchImpl: deps.fetchImpl, timeoutMs: FETCH_TIMEOUT_MS });
-  return tags === null ? null : resolveTarget(current, tags);
+  return tags === null ? null : { latest: resolveTarget(current, tags) };
 }
 
 async function writeCache(path: string, cache: Cache): Promise<void> {

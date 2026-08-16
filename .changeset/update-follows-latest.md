@@ -2,13 +2,19 @@
 'tenjin-cli': patch
 ---
 
-The update machinery follows the `latest` dist-tag for every build.
+The update machinery reads the `latest` dist-tag and nothing else.
 
-`tenjin update`, `tenjin update --check`, and the daily nudge all resolve
-against `latest` alone, prerelease build or stable. Which tag a publish lands on
-is a property of the release pipeline rather than of the version number, and
-this pipeline moves `latest` and nothing else, so consulting a second tag only
-gave a stale answer a chance to win: `alpha` has sat on 0.1.0-alpha.7 while
-every later build shipped on `latest`. A version string this package cannot
-parse still follows no tag at all, which keeps the nudge quiet and has
-`tenjin update` refuse rather than report a foreign build up to date.
+`tenjin update`, `tenjin update --check`, and the daily check all resolve against
+`latest`, prerelease build or stable, which is the one tag this package's
+pipeline moves on every publish. Consulting a second tag as well added no
+reachable version and one way to be wrong: a tag sitting ahead of `latest` could
+redirect the self-update install to a build the release line never promoted.
+
+A `latest` this build cannot read is now reported as what it is. `tenjin update`
+distinguishes a missing tag from a tag naming a version it cannot parse, since
+npm does have a build in the second case and the fix is to install it by name.
+The daily check records that it asked in both cases, so an unreadable answer
+costs one registry request per day rather than one per command. A version string
+this package cannot parse still follows no tag at all, which keeps the check
+quiet and has `tenjin update` refuse rather than report a foreign build up to
+date.

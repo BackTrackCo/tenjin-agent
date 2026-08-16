@@ -33,9 +33,20 @@ To cut a release (two clicks):
 3. **Dispatch (click 2)**: same path. With no pending changesets, the `publish`
    job builds, runs the check suite plus `pnpm audit` plus the packed-artifact
    smoke as a pre-publish gate, then `changeset publish` ships `tenjin-cli` with
-   provenance and creates the GitHub release. Prereleases use Changesets' pre
-   mode (`pnpm changeset pre enter alpha`) and publish to the `alpha` dist-tag;
-   stable goes to `latest`.
+   provenance and creates the GitHub release.
+
+**Every publish lands on the `latest` dist-tag**, prerelease or stable. This is
+observed behaviour of the current pipeline: `0.1.0-alpha.8` through
+`0.1.0-alpha.13` each moved `latest`, while `alpha` has not moved off
+`0.1.0-alpha.7` since 2026-07-31. `.changeset/pre.json` carries `"tag": "alpha"`
+for Changesets' own pre-mode bookkeeping, and under this pipeline that value does
+not decide the published dist-tag.
+
+The CLI's updater depends on this. `tenjin update` and the daily check resolve
+against `latest` alone (`src/lib/update-check.ts`), so a change that stops
+`latest` moving on every publish leaves every installed build reporting "up to
+date" forever, with no second tag to recover through. Change the publish tagging
+and that resolution has to change with it.
 
 Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived, per-run
 token, so there is **no `NPM_TOKEN`** to store or rotate.

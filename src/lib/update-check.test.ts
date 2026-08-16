@@ -379,6 +379,119 @@ describe('maybeUpdate', () => {
     expect(cap.stderr()).toContain('0.1.0-alpha.8 is available');
   });
 
+  // Silence is the right output for a `latest` this build cannot read, but
+  // silence must not cost a registry request on every single command. The
+  // registry ANSWERED, so the clock moves even though the answer is unusable;
+  // only a registry that could not be reached is retried immediately.
+  it('asks once per window when latest carries a version it cannot read', async () => {
+    const reg = registry({ latest: '0.2.0-beta.1' });
+    const shared = { dir, json: false, env: {}, currentVersion: '0.1.0-alpha.6' };
+
+    const first = captureIo(true);
+    await maybeUpdate({ ...shared, io: first.io, now: () => NOW, fetchImpl: reg.fetchImpl });
+    expect(first.stderr()).toBe('');
+    expect(reg.calls()).toBe(1);
+    // Recorded as asked-and-learned-nothing: a clock, but no version to nudge
+    // toward and nothing for the envelope or the hook scripts to report.
+    expect(await readCache()).toEqual({
+      schemaVersion: 1,
+      tags: { latest: { checkedAtMs: NOW } },
+    });
+
+    // Every later command inside the window answers from that, without asking.
+    for (const at of [NOW + 1000, NOW + 86_399_000]) {
+      const again = captureIo(true);
+      await maybeUpdate({ ...shared, io: again.io, now: () => at, fetchImpl: reg.fetchImpl });
+      expect(again.stderr()).toBe('');
+    }
+    expect(reg.calls()).toBe(1);
+
+    // And the day after, it asks again: the tag may have moved to something
+    // readable, and nothing here is a permanent giving-up.
+    const later = captureIo(true);
+    await maybeUpdate({
+      ...shared,
+      io: later.io,
+      now: () => NOW + 86_400_001,
+      fetchImpl: reg.fetchImpl,
+    });
+    expect(reg.calls()).toBe(2);
+  });
+
+  // The other unusable answer: a well-formed map with no `latest` in it. Same
+  // treatment, because the registry answered either way.
+  it('asks once per window when the map has no latest tag at all', async () => {
+    const reg = registry({ next: 'nonsense' });
+    const shared = { dir, json: false, env: {}, currentVersion: '0.1.0-alpha.6' };
+
+    const first = captureIo(true);
+    await maybeUpdate({ ...shared, io: first.io, now: () => NOW, fetchImpl: reg.fetchImpl });
+    expect(first.stderr()).toBe('');
+    expect(await readCache()).toEqual({
+      schemaVersion: 1,
+      tags: { latest: { checkedAtMs: NOW } },
+    });
+
+    const second = captureIo(true);
+    await maybeUpdate({
+      ...shared,
+      io: second.io,
+      now: () => NOW + 1000,
+      fetchImpl: reg.fetchImpl,
+    });
+    expect(second.stderr()).toBe('');
+    expect(reg.calls()).toBe(1);
+  });
+
+  // The same silence, but from a registry that could not be ASKED. Nothing is
+  // recorded, so the next command retries rather than going quiet for a day over
+  // one dropped packet.
+  it('records nothing when the registry could not be reached at all', async () => {
+    const cap = captureIo(true);
+    await maybeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => NOW,
+      fetchImpl: async () => {
+        throw new Error('ENOTFOUND registry.npmjs.org');
+      },
+      currentVersion: '0.1.0-alpha.6',
+    });
+    expect(cap.stderr()).toBe('');
+    await expect(readFile(updateCheckPath(dir), 'utf8')).rejects.toThrow();
+  });
+
+  // A recorded no-answer clears a signal an earlier run left behind: the
+  // envelope and the hook scripts must not keep advertising a version the check
+  // can no longer confirm.
+  it('clears a stale signal when the answer stops being readable', async () => {
+    await seedCache({ latest: { checkedAtMs: NOW - 86_400_001, latest: '0.1.0-alpha.7' } });
+    await writeFile(
+      updateCheckPath(dir),
+      JSON.stringify({
+        schemaVersion: 1,
+        signal: { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' },
+        tags: { latest: { checkedAtMs: NOW - 86_400_001, latest: '0.1.0-alpha.7' } },
+      }),
+      { mode: 0o600 },
+    );
+    const cap = captureIo(true);
+    await maybeUpdate({
+      dir,
+      io: cap.io,
+      json: false,
+      env: {},
+      now: () => NOW,
+      fetchImpl: registry({ latest: '0.2.0-beta.1' }).fetchImpl,
+      currentVersion: '0.1.0-alpha.6',
+    });
+    expect(cap.stderr()).toBe('');
+    expect(await readCache()).not.toHaveProperty('signal');
+    expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
+  });
+
   it('treats an unreadable cache as no cache (it is only a cache)', async () => {
     await writeFile(updateCheckPath(dir), 'not json {{{', { mode: 0o600 });
     const cap = captureIo(true);
@@ -396,8 +509,10 @@ describe('maybeUpdate', () => {
     expect(cap.stderr()).toContain('0.1.0-alpha.7 is available');
   });
 
-  // Every failure mode of the check is the same failure mode: nothing happens,
-  // nothing is cached, and the command that just ran is unaffected.
+  // Every way the registry can fail to ANSWER is the same failure: nothing
+  // happens, nothing is cached, and the command that just ran is unaffected. A
+  // registry that answers with something unusable is a different case and is
+  // pinned separately above, because that one records the clock.
   it('swallows a rejected fetch, a non-200, and a body that is not dist-tags', async () => {
     const failures: (typeof fetch)[] = [
       async () => {
@@ -408,9 +523,9 @@ describe('maybeUpdate', () => {
       },
       async () => new Response('', { status: 503 }),
       async () => new Response('<html>', { status: 200 }),
+      // Shaped like dist-tags but not: a non-string value fails the schema, so
+      // the whole map is discarded rather than half-read.
       async () => new Response(JSON.stringify({ latest: 7 }), { status: 200 }),
-      // Answered, but with nothing on the tag this build follows.
-      async () => new Response(JSON.stringify({ next: 'nonsense' }), { status: 200 }),
     ];
     for (const fetchImpl of failures) {
       const cap = captureIo(true);
