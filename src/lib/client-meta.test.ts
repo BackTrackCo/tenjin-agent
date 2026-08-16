@@ -133,6 +133,25 @@ describe('composeUserAgent', () => {
     expect(FIRST_PRODUCT_RE.exec(composed)?.[2]).toBe(pkg.version);
   });
 
+  /**
+   * The bound is inclusive, pinned one character either side. The test file
+   * keeps its own copy of 512, so loosening the production constant fails here
+   * rather than shipping a field the server discards whole.
+   */
+  it.each([
+    [USER_AGENT_MAX_LENGTH - 1, true],
+    [USER_AGENT_MAX_LENGTH, true],
+    [USER_AGENT_MAX_LENGTH + 1, false],
+  ])('composes to %i characters: kept = %s', (length, kept) => {
+    const overhead = `${TENJIN_USER_AGENT} `.length;
+    const caller = `a/${'x'.repeat(length - overhead - 2)}`;
+    const composed = composeUserAgent({ caller, env: NO_ENV });
+    expect(composed).toBe(
+      kept ? `${TENJIN_PRODUCT} ${caller} (+https://tenjin.blog)` : TENJIN_USER_AGENT,
+    );
+    if (kept) expect(composed.length).toBe(length);
+  });
+
   it('keeps every composition inside the bounds the server parses', () => {
     const composed = composeUserAgent({ caller: 'codex/1.2.0 node/24.4.0', env: NO_ENV });
     expect(composed.length).toBeLessThanOrEqual(USER_AGENT_MAX_LENGTH);

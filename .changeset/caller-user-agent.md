@@ -29,4 +29,7 @@ default `User-Agent: node` and every hook-driven search was landing as a
 synthetic client named `node` that was in fact this CLI. It now composes the same
 field, from constants interpolated out of `lib/client-meta.ts` at generation time
 and the caller handoff read at run time, with a test that runs the shipped bytes
-and the real composer over the same inputs so the two cannot drift.
+and the real composer over the same inputs so the two cannot drift. Because the
+version is baked when the script is written, an installed hook keeps reporting
+the version that wrote it until `tenjin install` is re-run: `tenjin update`
+replaces the binary and leaves hook scripts alone.

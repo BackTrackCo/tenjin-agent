@@ -278,9 +278,12 @@ function emit(hookEventName, additionalContext) {
  * failure rather than silently wrong telemetry.
  *
  * The product is baked at GENERATION time, so a hook written by an older CLI
- * keeps naming that older version until `tenjin install` rewrites it on the
- * byte-drift check. The caller handoff is read at RUN time, because the process
- * that spawned the hook is the harness the handoff exists to attribute.
+ * keeps naming that older version until `tenjin install` is re-run and the
+ * byte-drift check rewrites it. That window is OPEN-ENDED, not short: `tenjin
+ * update` replaces the binary and nothing else, and the self-heal does not reach
+ * hook scripts, so a hook keeps reporting the version that wrote it until a
+ * human re-runs `install`. The caller handoff is read at RUN time instead,
+ * because the process that spawned the hook is the harness to attribute.
  */
 function userAgentSource(): string {
   return `

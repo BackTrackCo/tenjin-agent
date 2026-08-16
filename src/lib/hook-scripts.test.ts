@@ -9,8 +9,10 @@ import { join } from 'node:path';
 import { REMIND_LINE, stopHookScript, websearchHookScript } from './hook-scripts';
 import {
   CALLER_USER_AGENT_ENV,
+  TENJIN_COMMENT,
   TENJIN_PRODUCT,
   TENJIN_USER_AGENT,
+  USER_AGENT_MAX_LENGTH,
   composeUserAgent,
 } from './client-meta';
 import { loadSearches, recordSearch, searchStoreLockPath } from './search-store';
@@ -516,12 +518,47 @@ describe('WebSearch hook: the CLI identity on the wire', () => {
     ['codex/1.2.0 (some comment)', 'a comment, which is not a product'],
     ['user=alice', 'an identifier, which is not a product'],
     ['codex/1.2.0\tnode/24', 'a tab, which is not printable-ASCII whitespace'],
+    // The own-identity filter runs BEFORE the product gate, so this is the shape
+    // that the printable rule alone rejects: drop the tenjin-cli token for being
+    // ours and the newline leaves with it, and `real/1.0` would compose.
+    ['tenjin-cli/1.0\ncodex/1.0 real/1.0', 'a newline hidden inside a token that is ours'],
     ['a/1 '.repeat(200), 'a handoff past the 512-character bound'],
   ])('matches composeUserAgent for %s (%s)', async (caller) => {
     const sent = await identityRun({ [CALLER_USER_AGENT_ENV]: caller });
     expect(sent).toBe(composeUserAgent({ caller, env: {} }));
   });
+
+  /**
+   * The bound is the one rule the cases above cannot pin: they miss it by
+   * hundreds of characters, where `<` and `<=` reject identically, and an
+   * off-by-one at a shared bound is exactly what a duplicated algorithm
+   * produces. Over it the server discards the field whole, on the CLI's
+   * highest-volume request path, with nothing else failing.
+   */
+  it.each([
+    [USER_AGENT_MAX_LENGTH - 1, 'one under'],
+    [USER_AGENT_MAX_LENGTH, 'exactly at'],
+    [USER_AGENT_MAX_LENGTH + 1, 'one over'],
+  ])('matches composeUserAgent at %i composed characters (%s the bound)', async (length) => {
+    const caller = callerComposingTo(length);
+    const expected = composeUserAgent({ caller, env: {} });
+    expect(expected.length).toBe(
+      length <= USER_AGENT_MAX_LENGTH ? length : TENJIN_USER_AGENT.length,
+    );
+    const sent = await identityRun({ [CALLER_USER_AGENT_ENV]: caller });
+    expect(sent).toBe(expected);
+  });
 });
+
+/**
+ * A one-token handoff whose composed field is exactly `length` characters.
+ * Derived from the exported constants, never a literal: `TENJIN_PRODUCT`'s
+ * length moves with the version string on every release.
+ */
+function callerComposingTo(length: number): string {
+  const token = `a/${'x'.repeat(length - `${TENJIN_PRODUCT}  ${TENJIN_COMMENT}`.length - 2)}`;
+  return token;
+}
 
 describe('WebSearch hook: modes', () => {
   it('remind emits the static line and sends nothing', async () => {
