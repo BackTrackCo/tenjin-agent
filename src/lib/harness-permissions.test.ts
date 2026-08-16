@@ -604,11 +604,17 @@ describe('permissionsSkipped', () => {
       added: [],
       removed: [],
       alreadyPresent: [],
+      // The tier split is present and empty on a skip, so every consumer reads
+      // the same fields whether or not a write happened; no modeGrant, because
+      // nothing was granted.
+      addedFree: [],
+      alreadyPresentFree: [],
       skipped: 'declined',
       // Every skipped state names the command that changes it, so a machine
       // consumer reads the remedy as a field rather than parsing prose.
       fix: 'Add them with `tenjin install --allow-free-verbs`.',
     });
+    expect(result.modeGrant).toBeUndefined();
     expect(existsSync(settingsPath())).toBe(false);
   });
 

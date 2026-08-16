@@ -16,11 +16,10 @@ mid-publish to discover.
 so a MISS closed as `regenerated` while the answer was still being written can
 still be attributed to the piece that answered it.
 
-`publish.mode` auto or full-auto now carries `Bash(tenjin publish:*)`: `install`
-writes it, a return to `review` takes it back, and `uninstall` reclaims it. The
-mode is the consent, so the harness no longer asks a second time for what the
-operator already granted. A bare headless install does not write it — that run
-defaults the mode rather than being told it.
+`publish.mode` auto or full-auto now carries `Bash(tenjin publish:*)` and
+`Bash(tenjin edit:*)`: `install` writes them, a return to `review` takes them
+back, and `uninstall` reclaims them. The mode is the consent, so the harness no
+longer asks a second time for what the operator already granted.
 
 tenjin-search is now a lean SKILL.md plus `references/permissions.md`, loaded on
 demand; tenjin-publish drops its duplicated scan-tier explanation and its

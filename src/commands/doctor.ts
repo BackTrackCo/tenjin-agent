@@ -36,6 +36,7 @@ import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
+import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
 import type { PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -131,6 +132,8 @@ export interface DoctorDeps {
  */
 export interface DoctorChecks {
   checks: CheckResult[];
+  /** The mode-gated rules this machine is missing, if any; drives the pointer. */
+  missingModeGated: string[];
   failure?: { code: ErrorCode; result: CheckResult };
   /**
    * The publish mode this machine resolves right now (global config, or the
@@ -172,11 +175,18 @@ export async function collectDoctorChecks(
 
   const checks = built.map((b) => b.result);
   const publishMode = settings.publishMode.value;
+  // Ask the settings file rather than assuming: the pointer below exists to name
+  // a rule that is MISSING, and printing it at a machine that already carries
+  // both is a nag with no action behind it.
+  const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const missingModeGated = (probe.pending ?? []).filter((r) => gated.has(r));
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
-  if (firstFail === undefined) return { checks, publishMode };
+  if (firstFail === undefined) return { checks, publishMode, missingModeGated };
   return {
     checks,
     publishMode,
+    missingModeGated,
     failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result },
   };
 }
@@ -185,7 +195,7 @@ export async function runDoctor(
   ctx: CommandContext,
   deps: DoctorDeps = {},
 ): Promise<CommandResult> {
-  const { checks, failure, publishMode } = await collectDoctorChecks(ctx, deps);
+  const { checks, failure, publishMode, missingModeGated } = await collectDoctorChecks(ctx, deps);
   if (failure !== undefined) {
     const r = failure.result;
     // The allowlist rides on the FAILURE envelope too. An operator whose fresh
@@ -209,7 +219,16 @@ export async function runDoctor(
   // The mode-gated line goes ABOVE the pointer, and only when there is one: it
   // names a rule this machine's own mode needs, which is closer to a finding than
   // to the standing recommendation the pointer links to.
-  const modeLine = modeGatedPointer(publishMode);
+  // An env-set mode needs `config set`, not `install`: install resolves the mode
+  // from the global file, so it would write nothing for a mode that only exists
+  // in this process's environment.
+  const env = deps.env ?? process.env;
+  const fromEnv = env.TENJIN_PUBLISH_MODE !== undefined && env.TENJIN_PUBLISH_MODE.length > 0;
+  const modeLine = modeGatedPointer(
+    publishMode,
+    missingModeGated,
+    fromEnv ? `tenjin config set publish.mode ${publishMode}` : 'tenjin install',
+  );
   return {
     data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
     humanLines: [

@@ -732,6 +732,42 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     expect(syncOf(res.data)?.added).toEqual([]);
   });
 
+  // SATISFIED BEFORE TTY (PR #164 round 2, major 3b): a fully-wired machine under
+  // --json used to come back `no-tty` with a pointer at rules it already had.
+  it('is a clean no-op on a wired machine under --json, not a no-tty pointer', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async () => true,
+    });
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessIsClaude: true,
+      },
+    );
+    expect(syncOf(res.data)).toMatchObject({ added: [], removed: [] });
+    expect(syncOf(res.data)?.skipped).toBeUndefined();
+    expect(syncOf(res.data)?.pointer).toBeUndefined();
+  });
+
+  // And the pointer that DOES render names only what is missing.
+  it('points at the missing rules only, on a machine that has none of them', async () => {
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessIsClaude: true,
+      },
+    );
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+    for (const rule of MODE_GATED_RULES) expect(syncOf(res.data)?.pointer).toContain(rule);
+  });
+
   it('asks nothing when the allowlist already carries every rule the mode needs', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
@@ -785,7 +821,9 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       });
       expect(await allowOf()).toEqual([]);
       expect(syncOf(res.data)?.skipped).toBe('not-claude');
-      expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
+      // No pointer either: there is no settings file of ours here to be missing
+      // anything, so naming Claude rules would be advice about another machine.
+      expect(syncOf(res.data)?.pointer).toBeUndefined();
       // The mode itself still landed.
       expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
         data: { value: 'auto' },

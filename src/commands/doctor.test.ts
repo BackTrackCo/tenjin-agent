@@ -9,6 +9,7 @@ import { isNoWalletCheck, runDoctor } from './doctor';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
+import { claudeSettingsPath, FREE_VERB_RULES, MODE_GATED_RULES } from '../lib/harness-permissions';
 import { emitFailure } from '../lib/output';
 import { fakeRecord } from '../lib/wallet/test-support';
 import { ALWAYS_SAFE_ALLOWLIST, OPT_IN_ALLOWLIST, PERMISSIONS_DOC_URL } from '../lib/permissions';
@@ -1194,6 +1195,14 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
  * and the pointer, which names no rule at all, cannot tell them which one to add.
  */
 describe('runDoctor — the rule the publish mode carries', () => {
+  let home: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'tenjin-doc-home-'));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
   const run = async (): Promise<string> => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -1205,6 +1214,41 @@ describe('runDoctor — the rule the publish mode carries', () => {
 
   it('says nothing extra on review, the shipped default', async () => {
     expect(await run()).not.toContain('Bash(tenjin publish:*)');
+  });
+
+  // The nag this line used to be: it rendered from the mode alone, so a machine
+  // that already carried both rules was still told to go add them, pointing at a
+  // command that would do nothing (PR #164 round 2, major 3a).
+  it('says nothing when the machine already carries both rules', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, ...MODE_GATED_RULES] } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+      homeDir: home,
+    });
+    const text = (res.humanLines ?? []).join('\n');
+    expect(text).not.toContain('also needs');
+  });
+
+  // An env-set mode is invisible to `install`, which resolves from the global
+  // file — so naming install as the remedy sent the reader at a no-op (major 3c).
+  it('names config set, not install, for a mode only the environment carries', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: { TENJIN_PUBLISH_MODE: 'full-auto' },
+      fetchImpl: healthyFetch,
+      homeDir: home,
+    });
+    const text = (res.humanLines ?? []).join('\n');
+    expect(text).toContain('publish.mode=full-auto');
+    expect(text).toContain('tenjin config set publish.mode full-auto');
+    expect(text).not.toMatch(/`tenjin install` writes them/);
   });
 
   it('names the rule on auto', async () => {

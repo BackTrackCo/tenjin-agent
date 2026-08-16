@@ -126,6 +126,7 @@ function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
 // Default doctor stub: one passing check, no network. Overridden per-test.
 const okChecks: DoctorChecks = {
   publishMode: 'review',
+  missingModeGated: [],
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
 };
 
@@ -461,6 +462,7 @@ describe('runInstall: doctor as the final step', () => {
   it('embeds the doctor summary and never throws on a doctor failure', async () => {
     const failing: DoctorChecks = {
       publishMode: 'review',
+      missingModeGated: [],
       checks: [{ name: 'api-contract', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
@@ -524,6 +526,7 @@ describe('runInstall: walkthrough ordering', () => {
 
   const warning: DoctorChecks = {
     publishMode: 'review',
+    missingModeGated: [],
     checks: [
       {
         name: 'search-contract',
@@ -573,6 +576,7 @@ describe('runInstall: walkthrough ordering', () => {
   it('does not repeat the no-wallet line as a warning', async () => {
     const noWallet: DoctorChecks = {
       publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'wallet',
@@ -607,6 +611,7 @@ describe('runInstall: walkthrough ordering', () => {
   it('still reports a wallet warning the summary does not carry', async () => {
     const broken: DoctorChecks = {
       publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'wallet',
@@ -641,6 +646,7 @@ describe('runInstall: walkthrough ordering', () => {
   it('reports a broken env key even while the summary says none', async () => {
     const badEnvKey: DoctorChecks = {
       publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'wallet',
@@ -1243,6 +1249,7 @@ describe('runInstall: interactive walkthrough', () => {
 
     const failing: DoctorChecks = {
       publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'api',
@@ -1287,6 +1294,9 @@ describe('runInstall: permissions decision', () => {
         path?: string;
         added: string[];
         alreadyPresent: string[];
+        addedFree: string[];
+        alreadyPresentFree: string[];
+        modeGrant?: { rules: string[]; state: string; disclosure: string; undo: string[] };
         removed: string[];
         skipped?: string;
         warning?: string;
@@ -1701,6 +1711,71 @@ describe('runInstall: permissions decision', () => {
       expect(wiredOf(res.data).added).toEqual([]);
       expect(wiredOf(res.data).alreadyPresent).toContain(PUBLISH_MODE_RULE);
       expect(await allowList()).toEqual(before);
+    });
+
+    /**
+     * THE HEADLESS PATH, which is the one that grants without anybody present and
+     * therefore the one the whole default rests on. It returns before
+     * buildWalkthrough, so the envelope is the only disclosure there is: it has to
+     * carry the grant sentence and all three undos as data.
+     */
+    it('carries the grant and all three undos in the headless envelope', async () => {
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      expect(res.humanLines ?? []).toHaveLength(0);
+      const grant = wiredOf(res.data).modeGrant!;
+      expect(grant.rules).toEqual([...MODE_GATED_RULES]);
+      expect(grant.state).toBe('added');
+      expect(grant.disclosure).toContain('publish.mode auto');
+      expect(grant.disclosure).toContain('without a harness prompt');
+      expect(grant.undo).toEqual([
+        'tenjin install --publish-mode review',
+        'tenjin config set publish.mode review',
+        'tenjin uninstall',
+      ]);
+    });
+
+    it('carries no grant on review, where nothing was granted', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).modeGrant).toBeUndefined();
+    });
+
+    // `publish` and `edit` are not free verbs, and the count line that called
+    // eleven rules "free tenjin commands" contradicted both this module and the
+    // doctor pointer printed on the next screen.
+    it('counts only the free tier as free, with the pair reported separately', async () => {
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      const wired = wiredOf(res.data);
+      expect(wired.added).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
+      expect(wired.addedFree).toEqual([...FREE_VERB_RULES]);
+      expect(wired.addedFree).toHaveLength(FREE_VERB_RULES.length);
+    });
+
+    it('says nine, not eleven, in the human count lines', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: async () => true }),
+      );
+      const text = human(res);
+      expect(text).toContain(`${FREE_VERB_RULES.length} free tenjin commands`);
+      expect(text).not.toContain(
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} free tenjin commands`,
+      );
+    });
+
+    // One of the pair present, the other written: neither "added" nor "already
+    // present" is true of both, so the sentence says neither.
+    it('reports a mixed run as in place rather than claiming it added both', async () => {
+      await writeSettings({ permissions: { allow: [PUBLISH_MODE_RULE] } });
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      const grant = wiredOf(res.data).modeGrant!;
+      expect(grant.state).toBe('mixed');
+      expect(grant.disclosure).toContain('in place');
+      expect(grant.disclosure).not.toMatch(/\badded\b/);
     });
 
     // The grant is a DEFAULT, so the output has to carry its own receipt.

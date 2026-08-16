@@ -301,7 +301,6 @@ async function syncPublishRule(
 ): Promise<AllowlistSync> {
   const home = deps.homeDir ?? homedir();
   const nothing: AllowlistSync = { added: [], removed: [] };
-  const pointer = modeGatedPointer(mode) ?? undefined;
 
   const write = async (): Promise<AllowlistSync> => {
     const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
@@ -322,9 +321,18 @@ async function syncPublishRule(
   // that nothing reads, so prompting about it is noise and writing to it is an
   // uninvited edit — and the retraction would sweep a file we never owned.
   const isClaude = deps.harnessIsClaude ?? (await claudeInPlay(home, ctx, deps));
-  if (!isClaude) return { ...nothing, skipped: 'not-claude', ...(pointer ? { pointer } : {}) };
+  if (!isClaude) {
+    // No settings file of ours to be missing anything, so the pointer would be
+    // advice about a machine this is not.
+    return { ...nothing, skipped: 'not-claude' };
+  }
 
   const probe = await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode);
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const missing = (probe.pending ?? []).filter((r) => gated.has(r));
+  // Only ever names rules this machine does not have. A pointer built from the
+  // mode alone told a fully-wired operator to go add what they already had.
+  const pointer = modeGatedPointer(mode, missing) ?? undefined;
 
   // Tightening runs with no question, but ONLY while it is purely a retraction.
   // The writer emits the whole set for the mode, so on a machine missing the free
@@ -339,12 +347,15 @@ async function syncPublishRule(
     return write();
   }
 
+  // SATISFIED BEFORE TTY, and the order is the point: a fully-wired machine has
+  // nothing to ask about and nothing to write, so a `--json` or headless run
+  // there is a no-op rather than a `no-tty` skip carrying a pointer at rules it
+  // already has.
+  if (probe.satisfied !== undefined) return nothing;
+
   const canPrompt =
     ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
   if (!canPrompt) return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
-
-  // Already carrying every rule the mode needs: nothing to ask and nothing to do.
-  if (probe.satisfied !== undefined) return nothing;
 
   const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
   if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [])))) {

@@ -75,7 +75,7 @@ three. It cannot unlock a keystore and never consults the spend policy.
 ## Getting the rules onto your machine
 
 `tenjin install` writes the nine rules into `~/.claude/settings.json` for you,
-plus the one rule your publish mode carries (below). It is one of the four setup
+plus the two rules your publish mode carries (below). It is one of the four setup
 decisions, and at a terminal it asks:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
@@ -239,11 +239,6 @@ the file alone and prints where the rules go. Moving back to `review` retracts
 them without asking, because that direction can only take back what this CLI
 wrote — unless the free tier is missing too, which means `install` never wrote
 these rules and none of them are ours to change.
-
-A bare non-interactive `tenjin install` does **not** write it. That run defaults
-the mode to `auto` so an unattended machine works, but nobody chose that, and a
-publish grant follows a choice rather than a default. Once `auto` is in your
-config, the next `install` reads it as yours and writes the rule.
 
 What still stops a bad publish is the CLI, not the harness prompt: the
 deterministic secret scan blocks in every mode and is never clearable by `--yes`,

@@ -444,14 +444,29 @@ export function permissionsPointer(): string {
 }
 
 /**
- * The rules the current mode carries, or null on review. This one DOES name them,
+ * The rules the current mode is missing, or null when it needs none. This one
+ * DOES name them,
  * unlike {@link permissionsPointer}: they are not a tier to weigh and paste, they
  * are lines that should already be in the operator's settings file, and an
  * operator whose agent is being prompted for work the mode said not to ask about
  * needs to see exactly which rules are missing.
+ *
+ * CONSULTS THE MACHINE. Rendering from the mode alone told operators to add
+ * rules their settings file already had, and named a remedy that in one case
+ * would not have written anything — a nag that is wrong twice over on a line
+ * whose whole job is to prevent an agent stalling on a prompt (#161).
  */
-export function modeGatedPointer(mode: PublishMode): string | null {
-  const rules = modeGatedAllowlist(mode).map((e) => e.rule);
-  if (rules.length === 0) return null;
-  return `publish.mode=${mode} also needs ${rules.join(' and ')} in your harness allowlist, or it will prompt anyway; \`tenjin install\` writes them.`;
+export function modeGatedPointer(
+  mode: PublishMode,
+  /** The mode-gated rules this machine is actually MISSING. Empty renders nothing. */
+  missing: readonly string[],
+  /**
+   * The command that would fix it. `tenjin install` for the ordinary case; a
+   * mode coming from TENJIN_PUBLISH_MODE needs `config set` instead, because
+   * install resolves the mode from the global file and would write nothing.
+   */
+  remedy = 'tenjin install',
+): string | null {
+  if (modeGatedAllowlist(mode).length === 0 || missing.length === 0) return null;
+  return `publish.mode=${mode} also needs ${missing.join(' and ')} in your harness allowlist, or it will prompt anyway; \`${remedy}\` writes them.`;
 }

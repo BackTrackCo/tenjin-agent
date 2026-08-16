@@ -242,19 +242,39 @@ describe('the rule publish.mode carries', () => {
   });
 
   describe('the pointer doctor prints for it', () => {
+    const both = ['Bash(tenjin publish:*)', 'Bash(tenjin edit:*)'];
+
     it('is null on review', () => {
-      expect(modeGatedPointer('review')).toBeNull();
+      expect(modeGatedPointer('review', both)).toBeNull();
     });
 
-    // Unlike permissionsPointer, this one NAMES its rule: the operator is looking
-    // for the missing line, not for a page about tiers.
-    it('names the mode and the exact rule, in one line', () => {
-      const line = modeGatedPointer('auto') ?? '';
+    // The nag this used to be: it rendered from the mode alone, so a machine
+    // that already carried both rules was still told to add them.
+    it('is null when the machine is missing nothing', () => {
+      expect(modeGatedPointer('auto', [])).toBeNull();
+    });
+
+    // Unlike permissionsPointer, this one NAMES its rules: the operator is
+    // looking for the missing line, not for a page about tiers.
+    it('names the mode and only the rules actually missing, in one line', () => {
+      const line = modeGatedPointer('auto', both) ?? '';
       expect(line).toContain('publish.mode=auto');
       expect(line).toContain('Bash(tenjin publish:*)');
       expect(line).toContain('Bash(tenjin edit:*)');
       expect(line).toContain('tenjin install');
       expect(line).not.toContain('\n');
+
+      const one = modeGatedPointer('auto', ['Bash(tenjin edit:*)']) ?? '';
+      expect(one).toContain('Bash(tenjin edit:*)');
+      expect(one).not.toContain('Bash(tenjin publish:*)');
+    });
+
+    // An env-set mode is invisible to `install`, which resolves from the global
+    // file, so naming it as the remedy would send the reader at a no-op.
+    it('takes the remedy from the caller, for a mode install cannot see', () => {
+      const line = modeGatedPointer('full-auto', both, 'tenjin config set publish.mode full-auto');
+      expect(line).toContain('tenjin config set publish.mode full-auto');
+      expect(line).not.toMatch(/`tenjin install` writes/);
     });
   });
 

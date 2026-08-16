@@ -202,10 +202,9 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
   if (isPlainObject(permissions) && Array.isArray(permissions.allow)) {
     // What THIS version writes, plus what any prior version wrote. A rule we
     // retired is still a rule we put there, and leaving it behind would strand a
-    // dead allow-line for a command that no longer exists. The publish rule is
-    // The mode-gated pair is reclaimed WHATEVER the mode says: uninstall removes
-    // what this CLI wrote, and the mode that justified those rules is about to
-    // have no CLI behind it.
+    // dead allow-line for a command that no longer exists. The mode-gated pair is
+    // reclaimed WHATEVER the mode says: uninstall removes what this CLI wrote,
+    // and the mode that justified those rules is about to have no CLI behind it.
     const ours = new Set<string>([
       ...FREE_VERB_RULES,
       ...LEGACY_FREE_VERB_RULES,

@@ -185,6 +185,60 @@ export type PermissionsSkipReason =
   | 'unexpected-shape'
   | 'changed-since-read';
 
+/**
+ * The mode-gated half of a write, as DATA rather than as prose a caller
+ * re-derives.
+ *
+ * Every surface that reports the grant reads this one object: the walkthrough's
+ * disclosure line, the `--json` envelope on the headless path (where nobody was
+ * asked and the output is the only disclosure there is), and the tests. The
+ * earlier shape returned one undifferentiated `added`, so each surface split the
+ * tiers itself — and two of them counted `publish` and `edit` as free verbs while
+ * a third never rendered at all.
+ */
+export interface ModeGrant {
+  /** The mode-gated rules now in effect on this machine. */
+  rules: string[];
+  /** Written by THIS run, already there, or one of each. */
+  state: 'added' | 'already-present' | 'mixed';
+  /** The plain sentence naming what the grant allows; the walkthrough colorizes it. */
+  disclosure: string;
+  /** Every command that takes it back, in the order the walkthrough prints them. */
+  undo: string[];
+}
+
+/** The three undos, named wherever a mode-gated grant is reported. */
+export const MODE_GRANT_UNDO: readonly string[] = [
+  'tenjin install --publish-mode review',
+  'tenjin config set publish.mode review',
+  'tenjin uninstall',
+];
+
+/**
+ * Build the grant record for `mode`, or undefined when the mode carries no rules
+ * or none of them ended up on this machine.
+ */
+function modeGrantFor(
+  mode: PublishMode,
+  added: readonly string[],
+  present: readonly string[],
+): ModeGrant | undefined {
+  const wasAdded = MODE_GATED_RULES.filter((r) => added.includes(r));
+  const wasPresent = MODE_GATED_RULES.filter((r) => present.includes(r));
+  const rules = [...wasAdded, ...wasPresent];
+  if (rules.length === 0) return undefined;
+  const state =
+    wasAdded.length === 0 ? 'already-present' : wasPresent.length === 0 ? 'added' : 'mixed';
+  return {
+    rules: MODE_GATED_RULES.filter((r) => rules.includes(r)),
+    state,
+    disclosure: `${MODE_GATED_RULES.join(' and ')} ${
+      state === 'added' ? 'added' : state === 'already-present' ? 'already present' : 'in place'
+    }: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, and update its own posts, without a harness prompt.`,
+    undo: [...MODE_GRANT_UNDO],
+  };
+}
+
 export interface PermissionsResult {
   /** The harness this outcome is about; only `claude` has a settings file we write. */
   harness: string;
@@ -197,6 +251,16 @@ export interface PermissionsResult {
   path?: string;
   added: string[];
   alreadyPresent: string[];
+  /**
+   * The FREE-TIER halves of the two lists above. Every count line reads these:
+   * `publish` and `edit` are not free verbs, and a line calling eleven rules
+   * "free tenjin commands" contradicts both this module and the `doctor` pointer
+   * printed on the next screen.
+   */
+  addedFree: string[];
+  alreadyPresentFree: string[];
+  /** The mode-gated half, or absent when this write carried none. */
+  modeGrant?: ModeGrant;
   /**
    * Rules an EARLIER version of this writer wrote and this one retired, removed
    * on this run. Almost always empty; non-empty exactly once, on the first
@@ -234,6 +298,24 @@ function fixFor(reason: PermissionsSkipReason): string {
   }
 }
 
+/**
+ * The tier split plus the grant record, derived once from the two rule lists so
+ * no caller re-derives it. Spread into every non-skipped result.
+ */
+function tiers(
+  added: readonly string[],
+  alreadyPresent: readonly string[],
+  mode: PublishMode,
+): Pick<PermissionsResult, 'addedFree' | 'alreadyPresentFree'> & { modeGrant?: ModeGrant } {
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const grant = modeGrantFor(mode, added, alreadyPresent);
+  return {
+    addedFree: added.filter((r) => !gated.has(r)),
+    alreadyPresentFree: alreadyPresent.filter((r) => !gated.has(r)),
+    ...(grant !== undefined ? { modeGrant: grant } : {}),
+  };
+}
+
 function skip(
   harness: string,
   path: string | undefined,
@@ -246,6 +328,8 @@ function skip(
     added: [],
     removed: [],
     alreadyPresent: [],
+    addedFree: [],
+    alreadyPresentFree: [],
     skipped: reason,
     ...(warning !== undefined ? { warning } : {}),
     fix: fixFor(reason),
@@ -287,7 +371,14 @@ export async function wireFreeVerbAllowlist(
   const retired = retiredFor(mode);
   const removed = allow.filter((r): r is string => typeof r === 'string' && retired.has(r));
   if (added.length === 0 && removed.length === 0) {
-    return { harness: 'claude', path, added: [], alreadyPresent, removed: [] };
+    return {
+      harness: 'claude',
+      path,
+      added: [],
+      alreadyPresent,
+      ...tiers([], alreadyPresent, mode),
+      removed: [],
+    };
   }
 
   // Object spreads keep the original key order and land the rebuilt `permissions`
@@ -314,7 +405,14 @@ export async function wireFreeVerbAllowlist(
     );
   }
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness: 'claude', path, added, alreadyPresent, removed };
+  return {
+    harness: 'claude',
+    path,
+    added,
+    alreadyPresent,
+    ...tiers(added, alreadyPresent, mode),
+    removed,
+  };
 }
 
 /**
@@ -350,6 +448,7 @@ export async function inspectFreeVerbRules(
       path: found.path,
       added: [],
       alreadyPresent: found.alreadyPresent,
+      ...tiers([], found.alreadyPresent, mode),
       removed: [],
     },
   };

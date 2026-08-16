@@ -608,7 +608,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   // A run that wired permissions without being asked has to say so, and say how to
   // take it back. This is the disclosure that makes the non-interactive default
   // defensible: nothing lands silently, whether it was answered or defaulted.
-  if (s.permissions.added.length > 0) {
+  if (s.permissions.addedFree.length > 0) {
     // What landed and how to take it back. NOT the rules themselves: `doctor`
     // prints those in full with their caveats, and reciting nine lines in the
     // middle of a setup flow is what the walkthrough was trimmed of. The machine
@@ -617,7 +617,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
       paint(
         io,
         'dim',
-        `${s.permissions.added.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor\`.`,
+        `${s.permissions.addedFree.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor\`.`,
       ),
     );
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
@@ -661,7 +661,7 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
   return [
     ...s.harnesses.map((h) => skillsLine(io, h, s.dryRun)),
     publishingLine(io, s.publishMode.value),
-    ...publishGrantLines(io, s.publishMode.value, s.permissions),
+    ...publishGrantLines(io, s.permissions),
     permissionsLine(io, s.permissions),
     hooksLine(io, s.hooks),
     walletLine(io, s.wallet),
@@ -745,17 +745,17 @@ function publishingLine(io: Io, mode: PublishMode): string {
  *
  * Absent on `review`, which grants nothing and has nothing to undo.
  */
-function publishGrantLines(io: Io, mode: PublishMode, wired: PermissionsResult): string[] {
-  if (mode === 'review') return [];
-  const carried = MODE_GATED_RULES.filter((r) => wired.added.includes(r));
-  const present = MODE_GATED_RULES.filter((r) => wired.alreadyPresent.includes(r));
-  if (carried.length === 0 && present.length === 0) return [];
-  const what = carried.length > 0 ? 'added' : 'already present';
+function publishGrantLines(io: Io, wired: PermissionsResult): string[] {
+  const grant = wired.modeGrant;
+  if (grant === undefined) return [];
   // ONE line for the pair, not one each: they are a single decision, and the
   // operator is reading for what the mode just granted rather than a rule roster.
+  // Both strings come from the writer, so this line and the `--json` envelope
+  // cannot drift — and a mixed run says "in place" rather than claiming it added
+  // a rule that was already there.
   return [
-    `  ${paint(io, 'bold', MODE_GATED_RULES.join(' and '))} ${what}: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, and update its own posts, without a harness prompt.`,
-    `  ${paint(io, 'dim', 'Undo:')} tenjin install --publish-mode review  |  tenjin config set publish.mode review  |  tenjin uninstall`,
+    `  ${paint(io, 'bold', grant.disclosure)}`,
+    `  ${paint(io, 'dim', 'Undo:')} ${grant.undo.join('  |  ')}`,
   ];
 }
 
@@ -771,8 +771,12 @@ function publishGrantLines(io: Io, mode: PublishMode, wired: PermissionsResult):
  */
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
-  if (p.added.length > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} free tenjin commands added to ${p.path}. Full caveats: ${PERMISSIONS_DOC_URL}`;
+  // The FREE halves, never the raw totals: `publish` and `edit` are mode-gated
+  // and are reported by publishGrantLines, which says what they actually allow.
+  // Counting them here called them free verbs and contradicted the `doctor`
+  // pointer printed on the next screen.
+  if (p.addedFree.length > 0) {
+    return `${paint(io, 'green', '✓')} ${label} ${p.addedFree.length} free tenjin commands added to ${p.path}. Full caveats: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === undefined) {
     return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}`;
@@ -1111,24 +1115,6 @@ export const PERMISSIONS_QUESTION = [
 ].join(' ');
 
 /**
- * INSTALLING TENJIN IS THE CONSENT (owner call, PR #164 review round).
- *
- * The allowlist is written for the mode this run settles, on every path
- * including the headless one, and the FIRST install writes it — there is no
- * "chosen vs defaulted" distinction any more. The earlier shape gated the rule
- * on provenance, which bought nothing: run 1 wrote `auto` into config and run 2
- * read it back as a choice nobody made, so the grant landed on the second
- * unattended run instead of the first, quieter and later rather than never.
- *
- * What makes the default defensible is that it is DOCUMENTED AND LOUD rather
- * than hidden: every install says which mode it settled, which rule it wrote,
- * and the three ways out (`--publish-mode review`, `tenjin config set
- * publish.mode review`, `tenjin uninstall`). The bare CLI, with no install ever
- * run, still defaults to `review` (CONFIG_DEFAULTS) — install is the consent
- * anchor, so nothing is granted to someone who never ran it.
- */
-
-/**
  * The same question, plus the one sentence the publish modes add. The rule
  * follows from a choice already made a moment earlier in this same run, but it
  * is still a line going into the operator's settings file, and a consent prompt
@@ -1153,6 +1139,16 @@ export const WALLET_QUESTION = 'Create a wallet now?';
  * denied mid-task is the headless one, and leaving it unwired because nobody was
  * there to say yes made a bare `tenjin install` produce an install that does not
  * work. The disclosure and the undo ride the output on both paths.
+ *
+ * INSTALLING TENJIN IS THE CONSENT for the mode-gated rules (owner call, PR #164
+ * review round). The allowlist is written for the mode this run settles, on every
+ * path including the headless one, and the FIRST install writes it — there is no
+ * "chosen vs defaulted" distinction. What makes that defensible is that it is
+ * DOCUMENTED AND LOUD: `publishGrantLines` names the rules and the three ways out
+ * in the walkthrough, and `modeGrant` carries the same strings on the `--json`
+ * envelope, which is the only disclosure a headless run has. The bare CLI, with
+ * no install ever run, still defaults to `review` — install is the consent
+ * anchor, so nothing is granted to someone who never ran it.
  *
  * The probe runs on EVERY path that might write, including the headless ones.
  * Nothing left to grant is not a question and not a write: it is the ordinary
