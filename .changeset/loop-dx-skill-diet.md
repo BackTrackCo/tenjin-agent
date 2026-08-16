@@ -36,10 +36,13 @@ always treated a draft as answering nobody.
 Every install settles `publish.mode` at `auto` unless told otherwise, and the
 first install, headless included, writes the two mode-gated rules
 `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)` alongside the nine free ones.
-The output names the mode, both rules, what they clear (unattended keystore
-access and a read+write session credential minted on disk, plus publishing the
-contents of any local file the agent can read), and the three ways back out:
-`install --publish-mode review`, `config set publish.mode review`, `uninstall`.
+The terminal says it in plain words, two lines and a link: what the agent will now
+do, how many rules are allowed, and the one command that turns it off. The
+complete disclosure (both rule strings, unattended keystore access, the read+write
+session credential minted on disk, publishing the contents of any local file the
+agent can read, the `--base-url` and `--yes` caveats, all three undos) is
+unchanged in docs/agent-permissions.md, in `tenjin doctor --json`, and in this
+command's own `--json` envelope.
 `edit` travels with `publish` because it runs the identical consent gate, touches
 only posts the wallet already owns, spends nothing, and creates no new public
 content; an auto mode that can publish a post unattended but cannot fix that
@@ -56,6 +59,13 @@ defaults to `review`.
 
 `tenjin install` and `tenjin config set` now preserve `~/.claude/settings.json`'s
 file mode, so a `chmod 600` on a file holding an `env` block survives a write.
+
+The install prompts are shorter. The permissions question is two sentences and a
+link rather than a tier inventory, no prompt recites a `Bash(...)` rule an
+operator has not met yet, the search-hook question drops its "(Escape skips,
+registering nothing)" hint, and the summary no longer promises that "your harness
+still shows each command for approval", which the same mode writes a rule to
+remove.
 
 tenjin-search is now a lean SKILL.md plus `references/permissions.md`, loaded on
 demand; tenjin-publish drops its duplicated scan-tier explanation and its

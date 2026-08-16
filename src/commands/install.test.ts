@@ -69,8 +69,15 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
+import {
+  runInstall,
+  PERMISSIONS_QUESTION,
+  permissionsQuestion,
+  PUBLISH_MODE_CHOICES,
+  WALLET_QUESTION,
+} from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
+import type { PublishMode } from '../lib/config';
 import type { ExecFn } from '../lib/wallet/passphrase';
 import { resolveSkillsSource, SHIPPED_SKILL_FILES, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
@@ -772,8 +779,15 @@ describe('runInstall: publish-mode selection', () => {
     expect(PUBLISH_MODE_CHOICES.map((c) => c.value)).toEqual(['auto', 'review', 'full-auto']);
     expect(PUBLISH_MODE_CHOICES[0]!.label).toBe('Auto (recommended)');
     expect(PUBLISH_MODE_CHOICES[0]!.hint).toBe(
-      'your agent publishes clean pieces on its own; your harness still shows each command for approval',
+      'your agent publishes and updates pieces on its own, under your identity',
     );
+    // The clause that used to end this hint promised a harness prompt in front of
+    // every publish, which this same mode now writes a rule to remove.
+    for (const c of PUBLISH_MODE_CHOICES) {
+      const hint: string = 'hint' in c ? c.hint : '';
+      expect(hint).not.toMatch(/harness/i);
+      expect(hint).not.toMatch(/approval/i);
+    }
     expect(PUBLISH_MODE_CHOICES[1]!.label).toBe('Ask me in chat first');
     expect(PUBLISH_MODE_CHOICES[2]!.label).toBe('Fully unattended');
   });
@@ -1031,6 +1045,13 @@ describe('runInstall: interactive walkthrough', () => {
     expect(human(res)).toContain(`Removed the old Tenjin pointer line from ${claudeMd}`);
   });
 
+  /**
+   * A run that wired permissions has to say so and say how to take it back. It
+   * said it twice: a ✓ line with the count, the file and the link, then a dim
+   * paragraph repeating all three. The count and the link stay on the ✓ line, the
+   * undo stays here, and neither recites a rule. The full grant story lives in the
+   * `--json` envelope, asserted in the mode-gated block below.
+   */
   it('discloses the permission rules it wired and how to take them back', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1039,11 +1060,13 @@ describe('runInstall: interactive walkthrough', () => {
     );
     const text = human(res);
     expect(text).toContain(
-      `${FREE_VERB_RULES.length} free tenjin commands were allowed in ${claudeSettingsPath(home)}`,
+      `${FREE_VERB_RULES.length} tenjin commands allowed in ${claudeSettingsPath(home)}`,
     );
-    expect(text).toContain('None can spend USDC or open your wallet keystore');
     expect(text).toContain(`Undo anytime: remove those lines from ${claudeSettingsPath(home)}`);
     for (const rule of FREE_VERB_RULES) expect(text).not.toContain(rule);
+    // Said once, not twice: the old pairing repeated the count and the file in a
+    // dim paragraph directly under the line that already carried them.
+    expect(text.match(/tenjin commands allowed in/g)).toHaveLength(1);
   });
 
   it('no longer prints the allowlist block or the security essays that went with it', async () => {
@@ -1083,35 +1106,62 @@ describe('runInstall: interactive walkthrough', () => {
     }
   });
 
-  it('the consent question says what is true of the tier, and points at the caveats', async () => {
-    // Cannot spend and cannot move your keys is the honest whole-tier claim, and
-    // doctor's local decrypt is named rather than papered over; so are the three
-    // that send or store data.
+  /**
+   * Two sentences and a link. The question is a yes/no an operator answers in a
+   * couple of seconds, so it carries only what they can decide on: it cannot
+   * spend their money, and the rules land in a named file. The tier inventory,
+   * the caveats and the undos are one hop away, unchanged.
+   */
+  it('the consent question is short, honest, and points at the details', async () => {
     expect(PERMISSIONS_QUESTION).toContain(
-      `None of those ${FREE_VERB_RULES.length} can spend USDC or move your keys`,
+      `Adds ${FREE_VERB_RULES.length} command rules to ~/.claude/settings.json`,
     );
-    expect(PERMISSIONS_QUESTION).toContain('doctor may check your wallet still opens');
-    expect(PERMISSIONS_QUESTION).toContain('Three send or store data (search, outcome, read)');
-    // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
-    // walkthrough prints neither, so the consent moment names where both are, in
-    // full. It used to name `tenjin doctor`, which printed them; doctor now
-    // points at the same page (#81), so pointing there too is what keeps this
-    // question one hop from the caveats rather than two.
-    expect(PERMISSIONS_QUESTION).toContain(PERMISSIONS_DOC_URL);
+    expect(PERMISSIONS_QUESTION).toMatch(/spend your money/);
+    expect(permissionsQuestion('auto')).toMatch(/spend your money/);
+    // The one thing auto changes about the answer, said in the question itself.
+    expect(permissionsQuestion('auto')).toContain('publish under your identity on its own');
+    expect(PERMISSIONS_QUESTION).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
     expect(PERMISSIONS_QUESTION).not.toContain('tenjin doctor');
+    // No inventory, no rule syntax, no jargon the operator has not met yet.
+    expect(PERMISSIONS_QUESTION).not.toMatch(/Bash\(/);
+    expect(PERMISSIONS_QUESTION).not.toMatch(/send or store data/i);
+    expect(PERMISSIONS_QUESTION).not.toMatch(/keystore/i);
+    // Short enough to read at a prompt. The old one ran past 300 characters of
+    // inventory before the link, which is where the owner stopped reading.
+    for (const mode of ['review', 'auto', 'full-auto'] as const) {
+      const q = permissionsQuestion(mode);
+      expect(q.split('Details:')[0]!.length, mode).toBeLessThan(230);
+    }
   });
 
-  it('the line reporting a write also points at the caveats', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
+  it('the line reporting a write says how many are allowed, and where the rest is', async () => {
+    const permissionsLineOf = async (mode: PublishMode): Promise<string> => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: mode },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      return (
+        human(res)
+          .split('\n')
+          .find((l) => l.includes('Permissions:')) ?? ''
+      );
+    };
+
+    const review = await permissionsLineOf('review');
+    expect(review).toContain(`${FREE_VERB_RULES.length} tenjin commands allowed in`);
+    expect(review).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
+    // "free" was a qualifier this count needed only while it excluded the pair.
+    expect(review).not.toMatch(/free/i);
+
+    // The count is every rule of ours in the file, so an auto machine says eleven
+    // rather than reporting nine and leaving the pair to a line that no longer
+    // exists.
+    await rm(claudeSettingsPath(home), { force: true });
+    const auto = await permissionsLineOf('auto');
+    expect(auto).toContain(
+      `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed in`,
     );
-    const line = human(res)
-      .split('\n')
-      .find((l) => l.includes('Permissions:'));
-    expect(line).toContain(`${FREE_VERB_RULES.length} free tenjin commands added to`);
-    expect(line).toContain(`Full caveats: ${PERMISSIONS_DOC_URL}`);
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
@@ -1343,7 +1393,7 @@ describe('runInstall: permissions decision', () => {
     expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     expect(human(res)).toContain(
-      `${FREE_VERB_RULES.length} free tenjin commands added to ${claudeSettingsPath(home)}`,
+      `${FREE_VERB_RULES.length} tenjin commands allowed in ${claudeSettingsPath(home)}`,
     );
   });
 
@@ -1787,17 +1837,20 @@ describe('runInstall: permissions decision', () => {
       expect(wired.addedFree).toHaveLength(FREE_VERB_RULES.length);
     });
 
-    it('says nine, not eleven, in the human count lines', async () => {
+    // The human count is every rule of ours in the file. It said nine while the
+    // pair got a block of its own reciting both rule strings; that block is gone,
+    // so a count that still excluded them would under-report what just landed.
+    it('counts all eleven in the human line, and calls none of them free', async () => {
       const res = await runInstall(
         { harness: ['claude'], publishMode: 'auto' },
         makeCtx(),
         deps({ isInteractive: true, confirmPermissions: async () => true }),
       );
       const text = human(res);
-      expect(text).toContain(`${FREE_VERB_RULES.length} free tenjin commands`);
-      expect(text).not.toContain(
-        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} free tenjin commands`,
+      expect(text).toContain(
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed`,
       );
+      expect(text).not.toMatch(/free tenjin commands/);
     });
 
     // One of the pair present, the other written: neither "added" nor "already
@@ -1811,19 +1864,27 @@ describe('runInstall: permissions decision', () => {
       expect(grant.disclosure).not.toMatch(/\badded\b/);
     });
 
-    // The grant is a DEFAULT, so the output has to carry its own receipt.
-    it('names the rule and every way out, in the install output', async () => {
+    /**
+     * The grant is a DEFAULT, so the output carries its own receipt: what the
+     * agent will now do, and the command that stops it. In PLAIN WORDS. The rule
+     * strings and all three undos used to be recited here, which is what the
+     * owner read as slop at an install where `Bash(tenjin publish:*)` means
+     * nothing yet; they live on in the docs, `doctor --json`, and the envelope
+     * asserted above.
+     */
+    it('says what the mode does and how to turn it off, in plain words', async () => {
       const res = await runInstall(
         { harness: ['claude'], publishMode: 'auto' },
         makeCtx(),
         deps({ isInteractive: true, confirmPermissions: async () => true }),
       );
       const text = human(res);
-      expect(text).toContain(PUBLISH_MODE_RULE);
-      expect(text).toContain('without a harness prompt');
-      expect(text).toContain('tenjin install --publish-mode review');
-      expect(text).toContain('tenjin config set publish.mode review');
-      expect(text).toContain('tenjin uninstall');
+      expect(text).toContain('publishes and updates pieces on its own, under your identity');
+      expect(text).toContain('Turn off: tenjin config set publish.mode review');
+      // No rule syntax anywhere in the terminal, and one undo rather than three.
+      expect(text).not.toMatch(/Bash\(/);
+      expect(text).not.toContain('tenjin install --publish-mode review');
+      expect(text).not.toContain('tenjin uninstall');
     });
 
     it('says none of that on review, which grants nothing', async () => {
@@ -1833,7 +1894,7 @@ describe('runInstall: permissions decision', () => {
         deps({ isInteractive: true }),
       );
       expect(human(res)).not.toContain(PUBLISH_MODE_RULE);
-      expect(human(res)).not.toContain('Undo:');
+      expect(human(res)).not.toContain('Turn off:');
     });
 
     // `--no-allow-free-verbs` still refuses the whole write, publish rule included.
@@ -1865,15 +1926,22 @@ describe('runInstall: permissions decision', () => {
     });
 
     // The consent prompt has to name what the write actually carries.
-    it('discloses the extra rule in the question it asks', async () => {
+    // What auto changes about the answer, in the question itself: the count goes
+    // up and the agent publishes as them. NOT the rule strings, which the operator
+    // has not met yet and cannot act on at a yes/no.
+    it('discloses what auto adds in the question it asks', async () => {
       const confirm = vi.fn(async (_label: string) => true);
       await runInstall(
         { harness: ['claude'], publishMode: 'auto' },
         makeCtx(),
         deps({ isInteractive: true, confirmPermissions: confirm }),
       );
-      expect(confirm.mock.calls[0]![0]).toContain(PUBLISH_MODE_RULE);
-      expect(confirm.mock.calls[0]![0]).toContain('publish.mode is auto');
+      const asked = confirm.mock.calls[0]![0];
+      expect(asked).toContain(
+        `Adds ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} command rules`,
+      );
+      expect(asked).toContain('publish.mode auto your agent will publish under your identity');
+      expect(asked).not.toContain(PUBLISH_MODE_RULE);
     });
 
     it('names no extra rule in the question on review', async () => {

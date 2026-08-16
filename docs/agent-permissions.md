@@ -78,11 +78,14 @@ three. It cannot unlock a keystore and never consults the spend policy.
 plus the two rules your publish mode carries (below). It is one of the four setup
 decisions, and at a terminal it asks:
 
-> Let your agent search tenjin without permission popups? Adds 9 free commands to
-> `~/.claude/settings.json`. None of those 9 can spend USDC or move your keys;
-> doctor may check your wallet still opens. Three send or store data (search,
-> outcome, read). Full caveats:
+> Let your agent use tenjin without permission popups? Adds 9 command rules to
+> `~/.claude/settings.json`. None of them can spend your money. Details:
 > https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
+
+On an `auto` or `full-auto` publish mode the same question says 11 rules, and adds
+that your agent will publish under your identity on its own. The question is two
+sentences and a link on purpose: this page is where the detail lives, and an
+operator answering a yes/no cannot act on a rule string they have not met yet.
 
 Answer yes and it merges them in. The write appends the rules that are missing and
 never reorders or rewrites an existing entry or any other key in the file. It

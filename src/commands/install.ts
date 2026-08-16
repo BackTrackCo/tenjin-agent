@@ -44,9 +44,9 @@ import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions'
 import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
-  MODE_GATED_RULES,
   permissionsSkipped,
   retractModeGatedRules,
+  rulesForPublishMode,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
@@ -611,18 +611,11 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   // A run that wired permissions without being asked has to say so, and say how to
   // take it back. This is the disclosure that makes the non-interactive default
   // defensible: nothing lands silently, whether it was answered or defaulted.
-  if (s.permissions.addedFree.length > 0) {
-    // What landed and how to take it back. NOT the rules themselves: `doctor`
-    // prints those in full with their caveats, and reciting nine lines in the
-    // middle of a setup flow is what the walkthrough was trimmed of. The machine
-    // envelope carries the exact rules in `permissions.wired.added`.
-    lines.push(
-      paint(
-        io,
-        'dim',
-        `${s.permissions.addedFree.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor --json\`.`,
-      ),
-    );
+  if (s.permissions.added.length > 0) {
+    // The undo only. The count, the file and the link are already on the
+    // Permissions line above, and saying them twice in one screen is the noise
+    // this walkthrough keeps getting trimmed of. The exact rules stay out of the
+    // terminal entirely; the envelope carries them in `permissions.wired.added`.
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
   }
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
@@ -663,8 +656,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
 function summaryLines(io: Io, s: WalkthroughState): string[] {
   return [
     ...s.harnesses.map((h) => skillsLine(io, h, s.dryRun)),
-    publishingLine(io, s.publishMode.value),
-    ...publishGrantLines(io, s.permissions),
+    publishingLine(io, s.publishMode.value, s.permissions),
     permissionsLine(io, s.permissions),
     hooksLine(io, s.hooks),
     walletLine(io, s.wallet),
@@ -731,35 +723,24 @@ function skillsLine(io: Io, h: HarnessResult, dryRun: boolean): string {
   return `${paint(io, 'green', '✓')} ${paint(io, 'bold', head)} in ${h.skillsDir}. ${skillRoster(h)}.`;
 }
 
-/** One line for the settled consent mode, with the same consequence the question showed. */
-function publishingLine(io: Io, mode: PublishMode): string {
-  return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}`;
-}
-
 /**
- * What the publish modes just granted, and every way back out.
+ * One line for the settled consent mode, with the same consequence the question
+ * showed, and the way back out when this run actually granted something.
  *
- * LOUD BY DESIGN, and it is the whole reason a default may write this rule at
- * all: installing Tenjin is the consent, so the operator has to leave the
- * install knowing the mode they are on, the harness rule it carried, and that
- * three separate commands undo it. A grant nobody is told about is the thing the
- * permissions module refuses; a grant stated in the output of the command that
- * made it is a default with its receipt attached.
- *
- * Absent on `review`, which grants nothing and has nothing to undo.
+ * The grant used to get two more lines of its own, reciting both rule strings and
+ * all three undos. An operator meeting `Bash(tenjin publish:*)` for the first time
+ * mid-install cannot act on it, and three undos for one decision is a menu, not a
+ * disclosure. The full story (exact rules, keystore, session mint, flag caveats,
+ * all three undos) is unchanged in docs/agent-permissions.md, `doctor --json`, and
+ * this command's own `--json` envelope; the terminal gets the one command that
+ * turns it off.
  */
-function publishGrantLines(io: Io, wired: PermissionsResult): string[] {
-  const grant = wired.modeGrant;
-  if (grant === undefined) return [];
-  // ONE line for the pair, not one each: they are a single decision, and the
-  // operator is reading for what the mode just granted rather than a rule roster.
-  // Both strings come from the writer, so this line and the `--json` envelope
-  // cannot drift — and a mixed run says "in place" rather than claiming it added
-  // a rule that was already there.
-  return [
-    `  ${paint(io, 'bold', grant.disclosure)}`,
-    `  ${paint(io, 'dim', 'Undo:')} ${grant.undo.join('  |  ')}`,
-  ];
+function publishingLine(io: Io, mode: PublishMode, wired: PermissionsResult): string {
+  const undo =
+    wired.modeGrant === undefined
+      ? ''
+      : ` ${paint(io, 'dim', 'Turn off:')} tenjin config set publish.mode review`;
+  return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}${undo}`;
 }
 
 /**
@@ -767,19 +748,17 @@ function publishGrantLines(io: Io, wired: PermissionsResult): string[] {
  * skip is never silent, because the operator's next auto-mode session is where
  * they would otherwise find out (#33).
  *
- * "free", never "read-only": see PERMISSIONS_QUESTION for why this tier cannot
- * honestly be called the latter. The line that reports a WRITE carries the
- * `doctor` pointer too, since that is the other moment an operator learns rules
- * landed without seeing them or the flag caveat that qualifies them.
+ * The count is every rule of ours now in the file, and the word "free" is gone
+ * with it: it was there to keep `publish` and `edit` out of a total that called
+ * them free verbs, and a line that just says how many tenjin commands are allowed
+ * needs no such qualifier. What the rules ARE, and what they clear, is one link
+ * away rather than recited here.
  */
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
-  // The FREE halves, never the raw totals: `publish` and `edit` are mode-gated
-  // and are reported by publishGrantLines, which says what they actually allow.
-  // Counting them here called them free verbs and contradicted the `doctor`
-  // pointer printed on the next screen.
-  if (p.addedFree.length > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${p.addedFree.length} free tenjin commands added to ${p.path}. Full caveats: ${PERMISSIONS_DOC_URL}`;
+  const allowed = p.added.length + p.alreadyPresent.length;
+  if (p.added.length > 0) {
+    return `${paint(io, 'green', '✓')} ${label} ${allowed} tenjin commands allowed in ${p.path}. Details: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === undefined) {
     return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}`;
@@ -841,13 +820,20 @@ function skillRoster(h: HarnessResult): string {
   return parts.join('; ');
 }
 
-/** The single line of consequence attached to a mode, wherever it is shown. */
+/**
+ * The single line of consequence attached to a mode, wherever it is shown.
+ *
+ * `auto` used to end "your harness still shows each command for approval", which
+ * stopped being true the moment the mode started writing its own harness rules.
+ * The clause is gone rather than reworded: the thing an operator needs at this
+ * moment is that publishing happens without them, under their name.
+ */
 function modeBlurb(v: PublishMode): string {
   return v === 'auto'
-    ? 'Your agent publishes clean pieces on its own; your harness still shows each command for approval.'
+    ? 'Your agent publishes and updates pieces on its own, under your identity.'
     : v === 'review'
       ? 'Your agent asks you in chat before every publish.'
-      : 'Fully unattended; only hard blocks stop it.';
+      : 'Your agent publishes on its own, under your identity, and only a hard block stops it.';
 }
 
 /**
@@ -1019,10 +1005,10 @@ export const PUBLISH_MODE_CHOICES = [
   {
     value: 'auto',
     label: 'Auto (recommended)',
-    hint: 'your agent publishes clean pieces on its own; your harness still shows each command for approval',
+    hint: 'your agent publishes and updates pieces on its own, under your identity',
   },
   { value: 'review', label: 'Ask me in chat first' },
-  { value: 'full-auto', label: 'Fully unattended', hint: 'only hard blocks stop it' },
+  { value: 'full-auto', label: 'Fully unattended', hint: 'only a hard block stops it' },
 ] as const satisfies readonly { value: PublishMode; label: string; hint?: string }[];
 
 export const PUBLISH_MODE_QUESTION = 'When your agent has something worth publishing:';
@@ -1109,33 +1095,36 @@ function parseModeFlag(value: string): PublishMode {
  * names where both live in full. It used to point at `tenjin doctor`, which
  * printed them; doctor now points at the same page (#81).
  */
-const PERMISSIONS_QUESTION_HEAD = [
-  'Let your agent search tenjin without permission popups?',
-  `Adds ${FREE_VERB_RULES.length} free commands to ~/.claude/settings.json.`,
-  // SCOPED to the nine. It read as covering all eleven once the pair started
-  // landing here, and the pair does open the keystore.
-  `None of those ${FREE_VERB_RULES.length} can spend USDC or move your keys; doctor may check your wallet still opens.`,
-  'Three send or store data (search, outcome, read).',
-].join(' ');
-
-export const PERMISSIONS_QUESTION = `${PERMISSIONS_QUESTION_HEAD} Full caveats: ${PERMISSIONS_DOC_URL}`;
-
 /**
- * The same question, plus what the publish modes add.
+ * The consent moment, in two sentences and a link.
  *
- * The mode clause goes BEFORE the URL, never after: a terminal wraps the two
- * together and the reader's eye stops at the link, so a clause appended past it
- * is a clause nobody reads. It names the keystore, because that is the part the
- * free-tier wording does not cover and the part `tenjin session start` is an
- * explicit opt-in for.
+ * This question used to recite the tier: a count of "free" commands, which of
+ * them send data, what `doctor` does to the wallet, and (once the pair started
+ * landing here) both rule strings verbatim. An operator meeting `Bash(tenjin
+ * publish:*)` for the first time at a yes/no prompt cannot act on any of it, and
+ * a prompt nobody finishes reading is not consent.
+ *
+ * Two facts survive, because they are the two a human can actually decide on:
+ * this cannot spend their money, and on an auto mode their agent will publish
+ * under their name without being asked. Everything else (the exact rules, the
+ * keystore, the read+write session mint, the `--base-url` and `--yes` caveats,
+ * all three undos) is unchanged one link away in docs/agent-permissions.md, and
+ * in `doctor --json` and this command's `--json` envelope for an agent reading it.
+ *
+ * Counts come from the rule sets, so a verb added to either tier cannot make the
+ * question lie.
  */
+function permissionsQuestionHead(mode: PublishMode): string {
+  const count = rulesForPublishMode(mode).length;
+  return `Let your agent use tenjin without permission popups? Adds ${count} command rules to ~/.claude/settings.json.`;
+}
+
+export const PERMISSIONS_QUESTION = `${permissionsQuestionHead('review')} None of them can spend your money. Details: ${PERMISSIONS_DOC_URL}`;
+
+/** The same question, plus the one thing an auto mode changes about the answer. */
 export function permissionsQuestion(mode: PublishMode): string {
   if (mode === 'review') return PERMISSIONS_QUESTION;
-  return [
-    PERMISSIONS_QUESTION_HEAD,
-    `Adds ${MODE_GATED_RULES.join(' and ')} too, because publish.mode is ${mode}: those publish and update under your identity and open your wallet keystore to sign.`,
-    `Full caveats: ${PERMISSIONS_DOC_URL}`,
-  ].join(' ');
+  return `${permissionsQuestionHead(mode)} None of them can spend your money, and on publish.mode ${mode} your agent will publish under your identity on its own. Details: ${PERMISSIONS_DOC_URL}`;
 }
 
 /** The wallet decision's literal copy. */
@@ -1231,8 +1220,7 @@ async function resolvePermissions(args: {
  * agreed to "check Tenjin before a web search" has not thereby agreed to a
  * reminder at the end of every turn, so the question says both out loud.
  */
-export const SEARCH_HOOKS_QUESTION =
-  'Let Tenjin ride along with your web searches? (Escape skips, registering nothing)';
+export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web searches?';
 
 export const SEARCH_HOOKS_CHOICES = [
   {
