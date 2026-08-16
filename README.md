@@ -303,6 +303,39 @@ Important defaults:
 - `publish.mode` starts as `review`; `tenjin install` may settle it based on your choice.
 - `baseUrl` defaults to `https://tenjin.blog`.
 
+## Client identity
+
+Every request the CLI makes, including the ones its search hook makes, carries
+the standard `User-Agent` field and nothing else that identifies the client:
+
+```http
+User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
+```
+
+If you are an agent that runs the CLI, you can travel in that field too. Export
+`TENJIN_CALLER_USER_AGENT` when you launch it, and your products follow the
+CLI's, in your order:
+
+```bash
+TENJIN_CALLER_USER_AGENT="codex/1.2.0 node/24.4.0" tenjin search "..."
+```
+
+```http
+User-Agent: tenjin-cli/<version> codex/1.2.0 node/24.4.0 (+https://tenjin.blog)
+```
+
+The handoff takes a **product sequence only**: `name` or `name/version`,
+space-separated. Never put a user, wallet, session, hostname, or machine
+identifier in it. Anything that is not a bare product sequence, and anything that
+pushes the composed field past the 512 characters Tenjin accepts, is dropped
+whole: the CLI's own identity is then sent alone, never a truncated version of
+yours. Composition is idempotent, so a value that already contains
+`tenjin-cli/...` (a retry, or a handoff you received and re-exported) never
+duplicates it.
+
+This is self-reported telemetry, used for attribution and measurement. It is
+never authentication, and it decides no entitlement, payment, or spend.
+
 ## Developing
 
 ```bash

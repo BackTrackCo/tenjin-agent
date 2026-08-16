@@ -27,6 +27,17 @@
  * the generated JS would have to be escaped in every edit.
  */
 
+import {
+  CALLER_USER_AGENT_ENV,
+  PRINTABLE_ASCII_RE,
+  PRODUCT_RE,
+  TENJIN_COMMENT,
+  TENJIN_PRODUCT,
+  TENJIN_PRODUCT_NAME,
+  TENJIN_USER_AGENT,
+  USER_AGENT_MAX_LENGTH,
+} from './client-meta';
+
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
 export const HOOK_SCRIPT_VERSION = 13;
 
@@ -259,6 +270,61 @@ function emit(hookEventName, additionalContext) {
 }
 
 /**
+ * The identity this hook sends, mirrored from `lib/client-meta.ts`.
+ *
+ * ⚠ MIRRORED, MUST UPDATE TOGETHER with `composeUserAgent`. The hook is the
+ * CLI's highest-volume request path and imports nothing, so without this it
+ * sends Node's default `User-Agent: node` and every hook-driven search is
+ * attributed to a synthetic client named `node` that is in fact this CLI. Only
+ * the ALGORITHM is duplicated: every constant and both regexes are interpolated
+ * from client-meta's exports, and `hook-scripts.test.ts` runs the generated
+ * composer and the real one over the same inputs, so a divergence is a test
+ * failure rather than silently wrong telemetry.
+ *
+ * The product is baked at GENERATION time, so a hook written by an older CLI
+ * keeps naming that older version until `tenjin install` is re-run and the
+ * byte-drift check rewrites it. That window is OPEN-ENDED, not short: `tenjin
+ * update` replaces the binary and nothing else, and the self-heal does not reach
+ * hook scripts, so a hook keeps reporting the version that wrote it until a
+ * human re-runs `install`. The caller handoff is read at RUN time instead,
+ * because the process that spawned the hook is the harness to attribute.
+ */
+function userAgentSource(): string {
+  return `
+const TENJIN_PRODUCT = ${JSON.stringify(TENJIN_PRODUCT)};
+const TENJIN_USER_AGENT = ${JSON.stringify(TENJIN_USER_AGENT)};
+const UA_COMMENT = ${JSON.stringify(TENJIN_COMMENT)};
+const UA_PRODUCT_NAME = ${JSON.stringify(TENJIN_PRODUCT_NAME.toLowerCase())};
+const UA_MAX_LENGTH = ${USER_AGENT_MAX_LENGTH};
+const UA_PRODUCT_RE = ${PRODUCT_RE.toString()};
+const UA_PRINTABLE_RE = ${PRINTABLE_ASCII_RE.toString()};
+
+/** A copy of our own identity inside a caller value, in any casing. */
+function isOwnUaIdentity(token) {
+  const lower = token.toLowerCase();
+  return lower === UA_COMMENT.toLowerCase() || lower === UA_PRODUCT_NAME ||
+    lower.startsWith(UA_PRODUCT_NAME + '/');
+}
+
+/**
+ * Our product, then the launching harness's products in their order, then our
+ * comment. Rejection is TOTAL: a non-printable, non-product, or overlong handoff
+ * is omitted and the CLI identity travels alone, because truncating a product
+ * token would mint a different, false identity. This is self-reported telemetry
+ * and never trusted policy input.
+ */
+function composedUserAgent() {
+  const raw = process.env[${JSON.stringify(CALLER_USER_AGENT_ENV)}];
+  if (typeof raw !== 'string' || !UA_PRINTABLE_RE.test(raw)) return TENJIN_USER_AGENT;
+  const tokens = raw.split(' ').filter((t) => t.length > 0 && !isOwnUaIdentity(t));
+  if (tokens.length === 0 || !tokens.every((t) => UA_PRODUCT_RE.test(t))) return TENJIN_USER_AGENT;
+  const composed = TENJIN_PRODUCT + ' ' + tokens.join(' ') + ' ' + UA_COMMENT;
+  return composed.length <= UA_MAX_LENGTH ? composed : TENJIN_USER_AGENT;
+}
+`;
+}
+
+/**
  * The PreToolUse/WebSearch hook. It asks the marketplace the same question the
  * agent is about to ask the web, and mentions a tested answer when one exists.
  *
@@ -268,7 +334,7 @@ function emit(hookEventName, additionalContext) {
  * are all the same outcome here: exit 0 with nothing on stdout.
  */
 export function websearchHookScript(dataDir: string): string {
-  return `${prelude(dataDir, WATCHDOG_MS)}
+  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}
 const LOCK_PATH = SEARCH_STORE + '.lock';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -403,7 +469,7 @@ async function main() {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'user-agent': composedUserAgent() },
     body: JSON.stringify({ schemaVersion: 2, question, limit: ${SEARCH_LIMIT} }),
     signal: AbortSignal.timeout(${SEARCH_TIMEOUT_MS}),
   });
