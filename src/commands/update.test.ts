@@ -94,7 +94,7 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
   return {
     moduleDir: await installedTree(),
     currentVersion: '0.1.0-alpha.6',
-    fetchImpl: registry({ latest: '0.1.0-alpha.5', alpha: '0.1.0-alpha.7' }).fetchImpl,
+    fetchImpl: registry({ latest: '0.1.0-alpha.7', alpha: '0.1.0-alpha.5' }).fetchImpl,
     spawnImpl: forbiddenSpawn,
     managerScript: null,
     ...overrides,
@@ -111,7 +111,7 @@ async function caught(fn: () => Promise<unknown>): Promise<CliError> {
 }
 
 describe('runUpdate', () => {
-  it('installs the exact alpha version npm just named, never the tag', async () => {
+  it('installs the exact version npm just named, never the tag', async () => {
     const { ctx } = makeCtx();
     const spawned = spawnRecorder();
     const result = await runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl }));
@@ -124,17 +124,18 @@ describe('runUpdate', () => {
     expect(result.data).toEqual({
       current: '0.1.0-alpha.6',
       latest: '0.1.0-alpha.7',
-      channel: 'alpha',
+      channel: 'latest',
       updateAvailable: true,
       updated: true,
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
   });
 
-  // The live-registry regression: `alpha` sat on 0.1.0-alpha.7 from 2026-07-31
-  // while alpha.8 through .11 shipped on `latest`, so a channel-only lookup told
-  // every alpha user they were current. Both tags are consulted, newest wins.
-  it('follows latest when the channel tag has fallen behind it', async () => {
+  // The live-registry regression this command has to survive: `alpha` sat on
+  // 0.1.0-alpha.7 from 2026-07-31 while every later build shipped on `latest`,
+  // and `next` never moved off the first one. A prerelease build reads `latest`
+  // and installs from there, whatever the other tags say.
+  it('installs from latest for a prerelease build, ignoring the other tags', async () => {
     const { ctx } = makeCtx();
     const spawned = spawnRecorder();
     const result = await runUpdate(
@@ -144,7 +145,7 @@ describe('runUpdate', () => {
         currentVersion: '0.1.0-alpha.10',
         fetchImpl: registry({
           next: '0.1.0-alpha.1',
-          alpha: '0.1.0-alpha.7',
+          alpha: '0.1.0-alpha.99',
           latest: '0.1.0-alpha.11',
         }).fetchImpl,
         spawnImpl: spawned.impl,
@@ -154,7 +155,7 @@ describe('runUpdate', () => {
     expect(result.data).toMatchObject({ latest: '0.1.0-alpha.11', updateAvailable: true });
   });
 
-  it('moves an alpha build onto a newer stable release', async () => {
+  it('moves a prerelease build onto a newer stable release', async () => {
     const { ctx } = makeCtx();
     const spawned = spawnRecorder();
     const result = await runUpdate(
@@ -190,7 +191,7 @@ describe('runUpdate', () => {
     const result = await runUpdate(
       { check: false },
       ctx,
-      await deps({ fetchImpl: registry({ alpha: '0.1.0-alpha.6' }).fetchImpl }),
+      await deps({ fetchImpl: registry({ latest: '0.1.0-alpha.6' }).fetchImpl }),
     );
     expect(result.data).toMatchObject({ updateAvailable: false, updated: false });
     expect(result.humanLines?.[0]).toContain('is up to date');
@@ -202,7 +203,7 @@ describe('runUpdate', () => {
     expect(result.data).toEqual({
       current: '0.1.0-alpha.6',
       latest: '0.1.0-alpha.7',
-      channel: 'alpha',
+      channel: 'latest',
       updateAvailable: true,
       updated: false,
     });
@@ -350,7 +351,7 @@ describe('runUpdate', () => {
       ctx,
       await deps({
         moduleDir: await installedTree('.yarn'),
-        fetchImpl: registry({ alpha: '0.1.0-alpha.6' }).fetchImpl,
+        fetchImpl: registry({ latest: '0.1.0-alpha.6' }).fetchImpl,
       }),
     );
     expect(result.data).toMatchObject({ updateAvailable: false });
@@ -398,6 +399,7 @@ describe('runUpdate', () => {
       ),
     );
     expect(err.code).toBe('RESOURCE_NOT_FOUND');
+    expect(err.message).toContain('on the latest tag');
     expect(err.fix).not.toContain('registry.npmjs.org');
   });
 

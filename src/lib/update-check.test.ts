@@ -58,9 +58,13 @@ async function seedCache(tags: Record<string, unknown>): Promise<void> {
 const NOW = 1_700_000_000_000;
 
 describe('maybeUpdate', () => {
-  it('nudges toward the alpha tag when a prerelease build is behind', async () => {
+  // The regression this whole channel exists to prevent: a prerelease build
+  // reads `latest` like every other build. `alpha` is stale on npm (frozen at
+  // 0.1.0-alpha.7 while later builds shipped on `latest`), so a nudge that
+  // consulted it at all could advertise a version older than the one on offer.
+  it('nudges a prerelease build toward latest, ignoring a newer alpha tag', async () => {
     const cap = captureIo(true);
-    const reg = registry({ latest: '0.1.0-alpha.5', alpha: '0.1.0-alpha.7' });
+    const reg = registry({ alpha: '0.1.0-alpha.99', latest: '0.1.0-alpha.7' });
     await maybeUpdate({
       dir,
       io: cap.io,
@@ -74,14 +78,14 @@ describe('maybeUpdate', () => {
       'tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)',
     );
     expect(cap.stderr()).toContain('Update: run tenjin update');
+    expect(cap.stderr()).not.toContain('0.1.0-alpha.99');
     // The command's own surface is untouched: nothing on stdout, ever.
     expect(cap.stdout()).toBe('');
   });
 
   // Same resolution `tenjin update` uses, so the nudge can never stay quiet
-  // about a version the command would install. Live on npm from 2026-08-01:
-  // `alpha` froze at alpha.7 while alpha.8 through .11 shipped on `latest`.
-  it('nudges toward latest when the channel tag has fallen behind it', async () => {
+  // about a version the command would install.
+  it('nudges toward a prerelease sitting on latest', async () => {
     const cap = captureIo(true);
     const reg = registry({ alpha: '0.1.0-alpha.7', latest: '0.1.0-alpha.11' });
     await maybeUpdate({
@@ -142,7 +146,7 @@ describe('maybeUpdate', () => {
         json: false,
         env: {},
         now: () => at,
-        fetchImpl: registry({ alpha: latest }).fetchImpl,
+        fetchImpl: registry({ latest }).fetchImpl,
         currentVersion: '0.1.0-alpha.6',
       });
       expect(cap.stderr()).toBe('');
@@ -159,7 +163,7 @@ describe('maybeUpdate', () => {
       json: false,
       env: {},
       now: () => NOW,
-      fetchImpl: registry({ alpha: '0.1.0' }).fetchImpl,
+      fetchImpl: registry({ latest: '0.1.0' }).fetchImpl,
       currentVersion: '0.1.0-alpha.6',
     });
     expect(up.stderr()).toContain('tenjin-cli 0.1.0 is available');
@@ -190,7 +194,7 @@ describe('maybeUpdate', () => {
         json: false,
         env: {},
         now: () => at,
-        fetchImpl: registry({ alpha: latest }).fetchImpl,
+        fetchImpl: registry({ latest }).fetchImpl,
         currentVersion: '0.1.0-alpha.6',
       });
       expect(cap.stderr()).toBe('');
@@ -199,7 +203,7 @@ describe('maybeUpdate', () => {
 
   it('caches the answer 0600 and asks nobody again for 24h', async () => {
     const first = captureIo(true);
-    const reg = registry({ alpha: '0.1.0-alpha.7' });
+    const reg = registry({ latest: '0.1.0-alpha.7' });
     const deps = {
       dir,
       json: false,
@@ -214,7 +218,7 @@ describe('maybeUpdate', () => {
     expect(await readCache()).toEqual({
       schemaVersion: 1,
       signal: { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' },
-      tags: { alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW } },
+      tags: { latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW } },
     });
     if (process.platform !== 'win32') {
       expect((await stat(updateCheckPath(dir))).mode & 0o777).toBe(0o600);
@@ -235,7 +239,7 @@ describe('maybeUpdate', () => {
   // A cache fresh enough to skip the fetch is not a reason to skip the nudge:
   // this is the first time this entry has been shown to anyone.
   it('nudges from a never-notified cache without fetching, and records it', async () => {
-    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     const cap = captureIo(true);
     const at = NOW + 60_000;
     await maybeUpdate({
@@ -252,16 +256,16 @@ describe('maybeUpdate', () => {
     expect(await readCache()).toEqual({
       schemaVersion: 1,
       signal: { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' },
-      tags: { alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: at } },
+      tags: { latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: at } },
     });
   });
 
   it('nudges again once a day has passed since the last one', async () => {
     await seedCache({
-      alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW },
+      latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW },
     });
     const cap = captureIo(true);
-    const reg = registry({ alpha: '0.1.0-alpha.7' });
+    const reg = registry({ latest: '0.1.0-alpha.7' });
     const at = NOW + 86_400_001;
     await maybeUpdate({
       dir,
@@ -274,7 +278,7 @@ describe('maybeUpdate', () => {
     });
     expect(cap.stderr()).toContain('0.1.0-alpha.7 is available');
     expect(await readCache()).toMatchObject({
-      tags: { alpha: { checkedAtMs: at, notifiedAtMs: at } },
+      tags: { latest: { checkedAtMs: at, notifiedAtMs: at } },
     });
   });
 
@@ -282,14 +286,14 @@ describe('maybeUpdate', () => {
   // buy the right to interrupt the human again.
   it('does not repeat the nudge just because the cache went stale', async () => {
     await seedCache({
-      alpha: {
+      latest: {
         checkedAtMs: NOW - 86_400_001, // due for a re-fetch
         latest: '0.1.0-alpha.7',
         notifiedAtMs: NOW - 1000, // but nudged a second ago
       },
     });
     const cap = captureIo(true);
-    const reg = registry({ alpha: '0.1.0-alpha.8' });
+    const reg = registry({ latest: '0.1.0-alpha.8' });
     await maybeUpdate({
       dir,
       io: cap.io,
@@ -303,21 +307,22 @@ describe('maybeUpdate', () => {
     expect(cap.stderr()).toBe('');
     // and carried the nudge clock forward rather than restarting it
     expect(await readCache()).toMatchObject({
-      tags: { alpha: { checkedAtMs: NOW, notifiedAtMs: NOW - 1000 } },
+      tags: { latest: { checkedAtMs: NOW, notifiedAtMs: NOW - 1000 } },
     });
   });
 
-  // One machine, two binaries, one data dir: the alpha build's answer must not
-  // be handed to the stable build, whose install command cannot reach it.
-  it('ignores the other channel entry, and leaves it intact for its own binary', async () => {
+  // One data dir outlives the build that wrote it. An entry under a tag this
+  // build does not follow — what an older tenjin-cli left behind under `alpha` —
+  // is neither answered from nor thrown away.
+  it('ignores an entry under another tag, and leaves it intact', async () => {
     await seedCache({
       alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7', notifiedAtMs: NOW },
     });
     const reg = registry({ latest: '1.1.0', alpha: '0.1.0-alpha.7' });
     const shared = { dir, json: false, env: {}, fetchImpl: reg.fetchImpl };
 
-    // The stable binary cannot use the alpha entry: an `@alpha` version is not
-    // something its install command can reach.
+    // Fresh in wall-clock terms, but under a tag nothing reads: this run has to
+    // ask npm rather than treat it as its own cached answer.
     const stable = captureIo(true);
     await maybeUpdate({
       ...shared,
@@ -327,10 +332,8 @@ describe('maybeUpdate', () => {
     });
     expect(reg.calls()).toBe(1);
     expect(stable.stderr()).toContain('tenjin-cli 1.1.0 is available');
-    expect(stable.stderr()).not.toContain('@alpha');
+    expect(stable.stderr()).not.toContain('0.1.0-alpha.7');
 
-    // Both records now coexist: writing the stable one did not evict the alpha
-    // one, which is what used to make the round trip re-notify.
     expect(await readCache()).toEqual({
       schemaVersion: 1,
       signal: { current: '1.0.0', latest: '1.1.0' },
@@ -342,26 +345,27 @@ describe('maybeUpdate', () => {
       },
     });
 
-    // So the alpha binary coming back a second later is still inside its own
-    // window: nothing to ask npm, nothing to say. A WORKING registry stub here,
-    // not a forbidden one — a swallowed throw would look identical to silence.
-    const alphaAgain = captureIo(true);
+    // One channel means one window, shared by every build on the machine: a
+    // prerelease build a second later has nothing to ask and nothing to say. A
+    // WORKING registry stub here, not a forbidden one — a swallowed throw would
+    // look identical to silence.
+    const prerelease = captureIo(true);
     const reg2 = registry({ latest: '1.1.0', alpha: '0.1.0-alpha.7' });
     await maybeUpdate({
       ...shared,
-      io: alphaAgain.io,
+      io: prerelease.io,
       now: () => NOW + 2000,
       fetchImpl: reg2.fetchImpl,
       currentVersion: '0.1.0-alpha.6',
     });
     expect(reg2.calls()).toBe(0);
-    expect(alphaAgain.stderr()).toBe('');
+    expect(prerelease.stderr()).toBe('');
   });
 
   it('re-fetches once the cache is older than 24h', async () => {
-    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     const cap = captureIo(true);
-    const reg = registry({ alpha: '0.1.0-alpha.8' });
+    const reg = registry({ latest: '0.1.0-alpha.8' });
     await maybeUpdate({
       dir,
       io: cap.io,
@@ -378,7 +382,7 @@ describe('maybeUpdate', () => {
   it('treats an unreadable cache as no cache (it is only a cache)', async () => {
     await writeFile(updateCheckPath(dir), 'not json {{{', { mode: 0o600 });
     const cap = captureIo(true);
-    const reg = registry({ alpha: '0.1.0-alpha.7' });
+    const reg = registry({ latest: '0.1.0-alpha.7' });
     await maybeUpdate({
       dir,
       io: cap.io,
@@ -404,8 +408,8 @@ describe('maybeUpdate', () => {
       },
       async () => new Response('', { status: 503 }),
       async () => new Response('<html>', { status: 200 }),
-      async () => new Response(JSON.stringify({ alpha: 7 }), { status: 200 }),
-      // Answered, but with nothing on either tag this build follows.
+      async () => new Response(JSON.stringify({ latest: 7 }), { status: 200 }),
+      // Answered, but with nothing on the tag this build follows.
       async () => new Response(JSON.stringify({ next: 'nonsense' }), { status: 200 }),
     ];
     for (const fetchImpl of failures) {
@@ -455,7 +459,7 @@ describe('maybeUpdate', () => {
 // actually reads, and it is why there is no auto-install mode.
 describe('readUpdateSignal', () => {
   it('reports a newer version from the cache, without fetching', async () => {
-    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toEqual({
       current: '0.1.0-alpha.6',
       latest: '0.1.0-alpha.7',
@@ -464,13 +468,13 @@ describe('readUpdateSignal', () => {
 
   it('is null when nothing newer is known', async () => {
     expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
-    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.6' } });
+    await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.6' } });
     expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
   });
 
   // `off` silences BOTH surfaces, not just the line a human sees.
   it('is null when update.mode is off', async () => {
-    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     await writeFile(join(dir, 'config.json'), JSON.stringify({ update: { mode: 'off' } }));
     expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
   });
@@ -491,7 +495,7 @@ describe('readUpdateSignal', () => {
       json: false,
       env: {},
       now: () => NOW,
-      fetchImpl: registry({ alpha: '0.1.0-alpha.7' }).fetchImpl,
+      fetchImpl: registry({ latest: '0.1.0-alpha.7' }).fetchImpl,
       currentVersion: '0.1.0-alpha.6',
     });
     expect(await readCache()).toMatchObject({
@@ -500,7 +504,7 @@ describe('readUpdateSignal', () => {
   });
 
   it('clears the recorded signal once the build is current', async () => {
-    await seedCache({ alpha: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
+    await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
     const cap = captureIo(true);
     await maybeUpdate({
       dir,
@@ -516,31 +520,31 @@ describe('readUpdateSignal', () => {
 });
 
 describe('resolveTarget', () => {
-  it('takes the newest across the channel tag and latest', () => {
+  // The pin this PR exists for: a prerelease build reads `latest` and nothing
+  // else, so a stale `alpha` cannot beat it however high its counter climbs.
+  it('reads latest for a prerelease build, whatever alpha holds', () => {
     expect(
-      resolveTarget('0.1.0-alpha.10', { alpha: '0.1.0-alpha.7', latest: '0.1.0-alpha.11' }),
+      resolveTarget('0.1.0-alpha.10', { alpha: '0.1.0-alpha.99', latest: '0.1.0-alpha.11' }),
     ).toBe('0.1.0-alpha.11');
   });
 
-  it('reads only latest for a release build', () => {
+  it('reads latest for a release build', () => {
     expect(resolveTarget('1.0.0', { alpha: '2.0.0-alpha.1', latest: '1.1.0' })).toBe('1.1.0');
   });
 
-  // Load-bearing, and nothing else catches it. Iteration order is
-  // [channel, 'latest'], so a channel tag holding a value VERSION_RE cannot
-  // parse would seed `best` with that junk, and every later isNewer comparison
-  // loses against an unparseable side. The caller's isNewer(target, current)
-  // then returns false and the user is told "up to date" indefinitely: round
-  // one's failure mode through a different door, reachable the first time this
-  // project publishes something the regex does not admit.
-  it('skips an unparseable candidate instead of letting it win', () => {
+  // No fallback to a second tag, in either failure. An unparseable `latest` is
+  // treated as absent rather than compared: isNewer loses every comparison
+  // against junk, so a candidate that got through would have the caller report
+  // "up to date" indefinitely.
+  it('is null when latest is unparseable or missing, never another tag', () => {
     expect(
-      resolveTarget('0.1.0-alpha.11', { alpha: 'not-a-version', latest: '0.1.0-alpha.12' }),
-    ).toBe('0.1.0-alpha.12');
+      resolveTarget('0.1.0-alpha.11', { alpha: '0.1.0-alpha.12', latest: 'not-a-version' }),
+    ).toBeNull();
+    expect(resolveTarget('0.1.0-alpha.11', { alpha: '0.1.0-alpha.12' })).toBeNull();
   });
 
-  it('is null when neither tag carries anything parseable', () => {
-    expect(resolveTarget('0.1.0-alpha.11', { alpha: 'nope', latest: '0.2.0-beta.1' })).toBeNull();
+  it('is null for a version this package could never have published', () => {
+    expect(resolveTarget('0.1.0-alpha.11', { latest: '0.2.0-beta.1' })).toBeNull();
   });
 
   it('is null for a version with no channel', () => {

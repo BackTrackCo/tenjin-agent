@@ -42,10 +42,10 @@ const TagEntrySchema = z.object({
 /**
  * The cache is a pure optimization, so a bad one is re-fetched, never repaired.
  *
- * One entry PER TAG rather than one entry total, because a machine can run an
- * alpha and a stable build out of the same data dir. A single record would make
- * every channel switch evict the other channel's answer, and the returning binary
- * would re-fetch and re-print a notice it had already shown seconds earlier.
+ * Keyed by dist-tag rather than one record total, because the key names what was
+ * asked. An entry this build did not ask about is carried forward untouched, so
+ * another build sharing the data dir keeps its own answer and its own nudge
+ * clock instead of the two evicting each other on every switch.
  */
 const CacheSchema = z.object({
   schemaVersion: z.literal(1),
@@ -210,46 +210,38 @@ export async function readUpdateSignal(
 
 /**
  * Which dist-tag this build follows, or null for a version string this package
- * has no channel for. Null rather than a default, because every caller's right
- * answer differs: the nudge goes quiet, and `tenjin update` refuses instead of
- * silently reporting a foreign build "up to date" against a tag it never
- * belonged to.
+ * has no channel for. Every build tenjin-cli ships follows `latest`: which tag a
+ * publish lands on is a property of the release pipeline rather than of the
+ * version number, and this pipeline moves `latest` and nothing else, prerelease
+ * or not.
+ *
+ * Null rather than a default, because every caller's right answer differs: the
+ * nudge goes quiet, and `tenjin update` refuses instead of silently reporting a
+ * foreign build "up to date" against a tag it never belonged to.
  */
-export function channelTag(version: string): 'alpha' | 'latest' | null {
-  const parsed = parseVersion(version);
-  if (parsed === null) return null;
-  // A prerelease build follows the prerelease tag: it is the one that carries
-  // prereleases at all when the release line has moved on past them.
-  return parsed.alpha !== null ? 'alpha' : 'latest';
+export function channelTag(version: string): 'latest' | null {
+  return parseVersion(version) === null ? null : 'latest';
 }
 
 /**
- * The newest version this build can move to, across BOTH the tag its channel
- * names and `latest`.
+ * The newest version this build can move to: whatever sits on the tag it
+ * follows.
  *
- * Deliberately not the channel tag alone. Which tag a publish lands on is a
- * property of the release pipeline, not of this package's version numbers, and
- * the two have already disagreed: `alpha` sat on 0.1.0-alpha.7 while
- * 0.1.0-alpha.8 through .11 shipped on `latest`, so a channel-only lookup told
- * every alpha user they were current while four newer builds sat on npm. Taking
- * the newest of the two survives either layout without this command depending
- * on the pipeline being fixed. `latest` never drags a stable build backwards:
- * isNewer is the only comparison, and for a release build the two candidates
- * are the same tag anyway.
+ * One tag and no fallback. A second tag in the comparison only gives a stale
+ * answer a chance to win, which is what `alpha` did by sitting on
+ * 0.1.0-alpha.7 while every later build shipped on `latest`.
  *
- * Null when the registry offers nothing parseable on either tag, which is a
- * different fact from "the registry could not be reached" and is reported as one.
+ * Null when the tag carries nothing parseable, which is a different fact from
+ * "the registry could not be reached" and is reported as one.
  */
 export function resolveTarget(current: string, tags: Record<string, string>): string | null {
   const channel = channelTag(current);
   if (channel === null) return null;
-  let best: string | null = null;
-  for (const name of new Set([channel, 'latest'])) {
-    const candidate = tags[name];
-    if (candidate === undefined || parseVersion(candidate) === null) continue;
-    if (best === null || isNewer(candidate, best)) best = candidate;
-  }
-  return best;
+  const candidate = tags[channel];
+  // Unparseable counts as absent, never as a candidate: isNewer loses every
+  // comparison against junk, so admitting it would report "up to date" forever.
+  if (candidate === undefined || parseVersion(candidate) === null) return null;
+  return candidate;
 }
 
 /**
