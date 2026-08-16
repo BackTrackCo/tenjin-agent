@@ -110,7 +110,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     if (command !== 'install') {
       try {
         const { healWiredSkills } = await import('./lib/skill-heal');
-        await healWiredSkills({ io, dataDir: dataDir(process.env) });
+        await healWiredSkills({ io });
       } catch {
         // Nothing here is the command's business.
       }

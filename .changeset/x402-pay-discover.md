@@ -36,7 +36,13 @@ and unvetted, and the spend policy still bounds the money.
 `tenjin discover [query]` lists or searches those registries via the SDK's own
 bazaar client: free, keyless, wallet-untouched, available with the toggle off
 (a stderr hint says the lane is off), MCP-type listings counted but not shown.
-Because `bazaarPay` is a skill-shaping key, the installed skill mentions the
-lane only while it is on: `config set bazaarPay` re-materializes the installed
-skills immediately, the hosted mirror included. `tenjin pay` joins the opt-in
+
+The lane's teaching is a new OPTIONAL skill, `tenjin-pay`, and PRESENCE is the
+whole mechanism: the skill is on disk exactly while the toggle is on, so an
+agent is never taught a lane the operator turned off. `install` places or
+removes it after the decisions, `config set bazaarPay` converges every wired
+skills directory immediately, the self-heal keeps a present copy current,
+doctor compares it when present and never requires it, and `uninstall` removes
+it. No conditional content and no markers: the unit of consent stays the one
+the pipeline already has, a skill directory. `tenjin pay` joins the opt-in
 permission tier beside `buy`, with the same never-a-spend-grant caveats.

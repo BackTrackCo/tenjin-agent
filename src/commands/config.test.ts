@@ -1,12 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
+import { fileURLToPath } from 'node:url';
+import { resolveSkillsSource } from '../lib/skills-source';
 import type { CommandContext, GlobalFlags } from '../context';
+
+const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let dir: string;
 beforeEach(async () => {
@@ -555,27 +560,36 @@ describe('the hooks block is set through config, which stays human-gated', () =>
   });
 });
 
-describe('runConfigSet: skill-shaping keys', () => {
-  it('re-materializes the installed skills after setting bazaarPay, and only then', async () => {
+describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () => {
+  it('places on true, removes on false, and only for bazaarPay', async () => {
     const ctx = makeCtx();
-    const rematerialize = vi.fn(async () => undefined);
-    await runConfigSet({ key: 'bazaarPay', value: 'on' as never }, ctx, { rematerialize }).catch(
-      () => undefined,
-    );
-    // 'on' is not a boolean spelling; the real value contract is true/false.
-    expect(rematerialize).not.toHaveBeenCalled();
-    await runConfigSet({ key: 'bazaarPay', value: 'true' }, ctx, { rematerialize });
-    expect(rematerialize).toHaveBeenCalledWith({ io: ctx.io, dataDir: ctx.dataDir });
-    await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx, { rematerialize });
-    expect(rematerialize).toHaveBeenCalledTimes(1);
+    const home = await mkdtemp(join(tmpdir(), 'tenjin-cfg-home-'));
+    try {
+      // A wired directory (any shipped skill present) is the consent gate.
+      const wired = join(home, '.claude', 'skills', 'tenjin-search');
+      await mkdir(wired, { recursive: true });
+      await writeFile(join(wired, 'SKILL.md'), '---\nname: tenjin-search\n---\nx\n');
+      const placeSkill = { io: ctx.io, homeDir: home, skillsSourceDir: SKILLS_SRC };
+      const payPath = join(home, '.claude', 'skills', 'tenjin-pay', 'SKILL.md');
+
+      await runConfigSet({ key: 'bazaarPay', value: 'true' }, ctx, { placeSkill });
+      expect(await readFile(payPath, 'utf8')).toContain('name: tenjin-pay');
+
+      await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx, { placeSkill });
+      expect(existsSync(payPath)).toBe(true); // untouched by an unrelated key
+
+      await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, { placeSkill });
+      expect(existsSync(payPath)).toBe(false);
+      expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
-  it('a rematerialize failure never fails the set itself', async () => {
+  it('a placement failure never fails the set itself', async () => {
     const ctx = makeCtx();
     const result = await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, {
-      rematerialize: async () => {
-        throw new Error('skills dir on fire');
-      },
+      placeSkill: { io: ctx.io, homeDir: 'relative-home' },
     });
     expect((result.data as { value: boolean }).value).toBe(false);
   });

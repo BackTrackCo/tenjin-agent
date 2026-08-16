@@ -5,7 +5,6 @@ import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
-  SKILL_SHAPING_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
@@ -164,9 +163,8 @@ export async function runConfigGet(
  * provenance stays truthful. The written key now reads `file`.
  */
 export interface ConfigSetDeps {
-  /** The skill-rematerialize seam; tests inject a recorder, the default is the
-   *  real writer (lazy import so `config` never loads it for get/list). */
-  rematerialize?: (input: { io: CommandContext['io']; dataDir: string }) => Promise<void>;
+  /** Seam for the tenjin-pay skill placement (tests inject homeDir/source). */
+  placeSkill?: { io: CommandContext['io']; homeDir?: string; skillsSourceDir?: string };
 }
 
 export async function runConfigSet(
@@ -180,22 +178,17 @@ export async function runConfigSet(
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
-  // A skill-shaping key changed: re-materialize the installed skills so the
-  // agent-facing text follows the config it advertises, immediately, hosted
-  // mirror included (a config set is an operator act, the same trust class as
-  // install). Best-effort AFTER the persist: the set itself already succeeded,
-  // and a skill write failure is doctor's to report, not this command's to fail.
-  if (SKILL_SHAPING_CONFIG_KEYS.includes(configKey)) {
+  // The Bazaar lane's teaching is an OPTIONAL skill whose presence follows
+  // this toggle: flipping it places or removes the tenjin-pay skill in every
+  // wired skills directory, immediately (a config set is an operator act, the
+  // same trust class as install). Best-effort AFTER the persist: the set
+  // itself already succeeded, and skill drift is doctor's to report.
+  if (configKey === 'bazaarPay') {
     try {
-      const rematerialize =
-        deps.rematerialize ??
-        (async (input: { io: CommandContext['io']; dataDir: string }) => {
-          const { rematerializeInstalledSkills } = await import('../lib/skill-heal');
-          await rematerializeInstalledSkills(input);
-        });
-      await rematerialize({ io: ctx.io, dataDir: ctx.dataDir });
+      const { syncBazaarSkill } = await import('../lib/skill-placement');
+      await syncBazaarSkill(stored === true, deps.placeSkill ?? { io: ctx.io });
     } catch {
-      // `tenjin doctor` reports a copy that does not match the current config.
+      // `tenjin doctor` reports a presence that does not match the toggle.
     }
   }
   const entry = renderSetting(configKey, stored, 'file');

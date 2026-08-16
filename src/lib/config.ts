@@ -155,8 +155,8 @@ export const ConfigSchema = z.object({
    * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
    * x402 endpoint, provided a configured registry lists that exact resource and
    * the live 402 matches the listed deal. Off by default; `install` asks once.
-   * A skill-shaping key (see SKILL_SHAPING_CONFIG_KEYS): the installed skill
-   * mentions the lane only while this is on.
+   * The lane's teaching is the OPTIONAL tenjin-pay skill, present on disk
+   * exactly while this is on (lib/skill-placement).
    */
   bazaarPay: z.boolean(),
   /** x402 discovery registries (facilitator base URLs) `discover` queries and
@@ -208,13 +208,6 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
   'https://api.cdp.coinbase.com/platform/v2/x402',
   'https://facilitator.ultravioletadao.xyz',
 ];
-
-/**
- * Config keys that shape installed skill CONTENT (lib/skill-materialize):
- * `config set` of one of these re-materializes the installed skills so the
- * agent-facing text follows the config state it advertises.
- */
-export const SKILL_SHAPING_CONFIG_KEYS: readonly string[] = ['bazaarPay'];
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',

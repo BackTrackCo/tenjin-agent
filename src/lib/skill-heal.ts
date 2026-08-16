@@ -4,10 +4,6 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
-import { loadRawConfig } from './config';
-import { walletPath } from './paths';
-import { materializeTransform, skillContentFlags } from './skill-materialize';
-import type { SkillContentFlags } from './skill-materialize';
 import { installSkill } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
@@ -15,13 +11,10 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
-import { SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
 
 export interface HealDeps {
   io: Io;
-  /** The CLI data dir, for the machine facts skill content is shaped by
-   *  (wallet presence). Same resolution the running command used. */
-  dataDir: string;
   /** Environment for the CI and opt-out checks. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
   /** Home whose skills directories are healed. Tests inject a temp dir. */
@@ -44,7 +37,8 @@ const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
  *
  * It is an UNATTENDED writer into the operator's home, so it is strictly more
  * conservative than `install`, which a human ran on purpose. What it declines to
- * touch is listed on {@link healable}, and it heals only the two CLI adapters:
+ * touch is listed on {@link healable}, and it heals the CLI adapters plus any
+ * optional skill that is present (presence is the gate that placed it):
  * the hosted `tenjin` skill mirrors tenjin.blog/skills.md, so the copy on disk
  * may be a NEWER fetch than this package ships, and rewriting it would undo that
  * and make install's "re-fetch it from tenjin.blog/skills.md" false. Same domain
@@ -72,31 +66,10 @@ export async function healWiredSkills(deps: HealDeps): Promise<void> {
     if (source === null) return;
     const targets = healable(home);
     if (targets.length === 0) return;
-    // The same flag resolution `install` writes with, so heal and install agree
-    // on the bytes and never trade rewrites. Wallet is probed via walletPath
-    // directly (wallet/store would drag the keystore chunk onto every command's
-    // tail); the config flags come from the raw config, and a config that does
-    // not load leaves this run's skills alone rather than shaping them from a
-    // guessed flag set.
-    const materialize = materializeTransform(await resolveSkillFlags(deps.dataDir));
-    await heal(targets, source, deps.io, materialize);
+    await heal(targets, source, deps.io);
   } catch {
     // Whatever it was, it is the next command's to retry; this one is finished.
   }
-}
-
-/**
- * The one flag resolution every skill writer shares (heal, the config-set
- * rematerialize; install mirrors it through its own seams). Throws when the
- * config does not load, which each caller maps to "leave the skills alone".
- */
-async function resolveSkillFlags(dataDir: string): Promise<SkillContentFlags> {
-  const walletPresent = lstatSync(walletPath(dataDir), { throwIfNoEntry: false })?.isFile();
-  const config = await loadRawConfig(dataDir);
-  return skillContentFlags({
-    walletPresent: walletPresent === true,
-    bazaarPay: config.bazaarPay === true,
-  });
 }
 
 /**
@@ -139,7 +112,7 @@ function healable(home: string): Target[] {
   const found: Target[] = [];
   for (const dir of skillsDirsFor(home)) {
     if (!isRealDirectory(dir)) continue;
-    for (const name of CLI_SKILL_NAMES) {
+    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;
       const path = join(dir, name, 'SKILL.md');
       if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
@@ -154,19 +127,13 @@ function isRealDirectory(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
-async function heal(
-  targets: readonly Target[],
-  source: string,
-  io: Io,
-  materialize: (rel: string, content: Buffer) => Buffer,
-): Promise<void> {
+async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {
   const updated: string[] = [];
   for (const { dir, name, path } of targets) {
     try {
       if (!(await isOurs(path, name))) continue;
       const { status } = await installSkill(join(source, name), join(dir, name), false, name, {
         followSymlinks: false,
-        materialize,
       });
       if (status === 'up-to-date') continue;
       updated.push(path);
@@ -180,54 +147,6 @@ async function heal(
     }
   }
   if (updated.length > 0) emitWriteNotice(io, noticeFor(updated));
-}
-
-/**
- * The `config set` twin of the heal, for a skill-shaping key: an OPERATOR act,
- * so it covers every installed tenjin skill (the hosted mirror included, which
- * the unattended heal refuses) and resolves the source the way `install` does
- * (a checkout's skills are what a checkout's `config set` was run against).
- * Presence still gates: a skill not on disk is never created, and a same-named
- * foreign skill is never replaced. Per-skill failures degrade to the next
- * `install`/doctor, exactly like the heal, because the config change itself has
- * already been persisted and must not be un-reported by a skill write.
- */
-export async function rematerializeInstalledSkills(deps: {
-  io: Io;
-  dataDir: string;
-  homeDir?: string;
-  skillsSourceDir?: string;
-}): Promise<void> {
-  const home = deps.homeDir ?? homedir();
-  if (!isAbsolute(home)) return;
-  let source: string;
-  let materialize: (rel: string, content: Buffer) => Buffer;
-  try {
-    source =
-      deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
-    materialize = materializeTransform(await resolveSkillFlags(deps.dataDir));
-  } catch {
-    return; // no readable source or config: nothing safe to write
-  }
-  const updated: string[] = [];
-  for (const dir of skillsDirsFor(home)) {
-    for (const name of SKILL_NAMES) {
-      const path = join(dir, name, 'SKILL.md');
-      try {
-        // isOurs reads THROUGH a symlink (install writes through them too, and
-        // this is the same operator trust class); an absent copy reads as not
-        // ours, which is the never-create gate.
-        if (!(await isOurs(path, name))) continue;
-        const { status } = await installSkill(join(source, name), join(dir, name), false, name, {
-          materialize,
-        });
-        if (status !== 'up-to-date') updated.push(path);
-      } catch {
-        // This skill keeps what it has; doctor reports it, the next install fixes it.
-      }
-    }
-  }
-  if (updated.length > 0) emitWriteNotice(deps.io, noticeFor(updated));
 }
 
 /** Does this file claim to BE the skill we would write over it? Somebody else's

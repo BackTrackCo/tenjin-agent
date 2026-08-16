@@ -11,6 +11,16 @@ import { CliError } from './errors';
 export const SKILL_NAMES = ['tenjin-search', 'tenjin-publish', 'tenjin'] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
+/**
+ * OPTIONAL skills ship in the package but are PRESENT only while their gate is
+ * on, and are never required for a directory to count as wired: tenjin-pay
+ * exists exactly while the `bazaarPay` toggle does (lib/skill-placement). The
+ * heal and doctor cover them when present, exactly like everything else whose
+ * presence is the operator's consent.
+ */
+export const OPTIONAL_PAY_SKILL = 'tenjin-pay';
+export const OPTIONAL_SKILL_NAMES = [OPTIONAL_PAY_SKILL] as const;
+
 // A `skills/` directory is the real one iff it holds `tenjin/SKILL.md`; a bare
 // `skills/` created for some other reason up the tree can't false-positive.
 const SENTINEL = join('tenjin', 'SKILL.md');

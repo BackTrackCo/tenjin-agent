@@ -11,8 +11,8 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
 import type { SkillInstallStatus } from '../lib/skill-writer';
-import { materializeTransform, skillContentFlags } from '../lib/skill-materialize';
-import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
+import { placeOptionalSkill } from '../lib/skill-placement';
 import {
   CLI_SKILL_NAMES,
   HARNESS_TARGETS,
@@ -393,18 +393,10 @@ async function installBody(
   // ENOENT/ENOTEMPTY renames), and 24 concurrent runs pass without a lock. The
   // self-heal is the other writer, and it writes these same bytes to these same
   // paths through the same writer.
-  // Skill content is shaped by the machine facts at write time; a wallet created
-  // or a Bazaar decision made later THIS run re-shapes below, after the decisions.
-  const walletPresentNow = await (deps.walletExists ?? walletFileExists)(ctx.dataDir);
   const rawConfig = await loadRawConfig(ctx.dataDir);
-  const initialFlags = skillContentFlags({
-    walletPresent: walletPresentNow,
-    bazaarPay: rawConfig.bazaarPay === true,
-  });
-  const materialize = materializeTransform(initialFlags);
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun, materialize));
+    harnesses.push(await applyPlan(plan, skillsSource, dryRun));
   }
   await assertSkillsLanded(plans, dryRun);
   if (!dryRun) markPhase('wired');
@@ -459,28 +451,23 @@ async function installBody(
   const bazaarPay = await underDataDir(ctx.dataDir, () =>
     resolveBazaarPay(ctx, deps, dryRun, canPrompt, rawConfig.bazaarPay),
   );
-  // The skills were written before the decisions (write order above), so a
-  // wallet created or a Bazaar opt-in made THIS run re-shapes them: the
-  // installed text must describe the machine the install leaves behind, not the
-  // one it found. Idempotent rewrites through the same writer; the doctor
-  // snapshot below then sees the final state.
-  const finalFlags = skillContentFlags({
-    walletPresent: walletPresentNow || wallet.status === 'created',
-    bazaarPay: bazaarPay.enabled,
-  });
-  if (!dryRun && JSON.stringify(finalFlags) !== JSON.stringify(initialFlags)) {
-    const reshaped = materializeTransform(finalFlags);
+  // The Bazaar lane's teaching lives in its own OPTIONAL skill, and PRESENCE is
+  // the whole mechanism: the tenjin-pay skill is on disk exactly while the
+  // toggle is on, so an agent is never taught a lane the operator turned off.
+  // Placed after the decisions so this run's own answer is what lands; the
+  // doctor snapshot below then sees the final state. Per-plan best-effort like
+  // the writer loop above: a placement failure is doctor's to report.
+  if (!dryRun) {
     for (const plan of plans) {
-      for (const name of SKILL_NAMES) {
-        try {
-          await installSkill(join(skillsSource, name), join(plan.skillsDir, name), false, name, {
-            materialize: reshaped,
-          });
-        } catch {
-          // The first pass already reported this skill; a re-shape failure must
-          // not fail an install whose decisions just landed. The self-heal and
-          // doctor own the catch-up, exactly as for any other stale copy.
-        }
+      try {
+        await placeOptionalSkill(
+          OPTIONAL_PAY_SKILL,
+          plan.skillsDir,
+          skillsSource,
+          bazaarPay.enabled,
+        );
+      } catch {
+        // The skills check in the embedded doctor run reports what remains.
       }
     }
   }
@@ -1423,7 +1410,6 @@ async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
   dryRun: boolean,
-  materialize: (rel: string, content: Buffer) => Buffer,
 ): Promise<HarnessResult> {
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
@@ -1433,7 +1419,6 @@ async function applyPlan(
       join(plan.skillsDir, name),
       dryRun,
       name,
-      { materialize },
     );
     skills.push({
       name,

@@ -3,7 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveSkillsSource } from '../lib/skills-source';
+import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from '../lib/skills-source';
 import { CliError } from '../lib/errors';
 import {
   CLI_SKILL_NAMES,
@@ -33,8 +33,6 @@ import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
-import { materializeTransform, skillContentFlags } from '../lib/skill-materialize';
-import type { SkillContentFlags } from '../lib/skill-materialize';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
@@ -155,12 +153,6 @@ export async function collectDoctorChecks(
       deps.homeDir ?? homedir(),
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
-      // The same flag resolution install and the heal write with, so "stale"
-      // means "not what this machine's writers would write", never "shaped".
-      skillContentFlags({
-        walletPresent: await walletFileExists(ctx.dataDir),
-        bazaarPay: config.bazaarPay === true,
-      }),
       deps.skillsSourceDir,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
@@ -389,7 +381,6 @@ async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
-  contentFlags: SkillContentFlags,
   skillsSourceDir?: string,
 ): Promise<BuiltCheck> {
   const present = detectHarnesses(home, which);
@@ -458,7 +449,6 @@ async function checkSkills(
   // set than it writes would leave a stale directory nothing ever names.
   const { stale, verifiable } = await compareWiredSkills(
     wiring.map((w) => w.dir),
-    contentFlags,
     skillsSourceDir,
   );
   if (!verifiable) {
@@ -526,7 +516,6 @@ async function checkSkills(
  */
 async function compareWiredSkills(
   dirs: readonly string[],
-  contentFlags: SkillContentFlags,
   sourceDir?: string,
 ): Promise<{ stale: string[]; verifiable: boolean }> {
   let source: string;
@@ -535,26 +524,23 @@ async function compareWiredSkills(
   } catch {
     return { stale: [], verifiable: false };
   }
-  // Read once, not once per directory. Compared MATERIALIZED (the same shaping
-  // install and the heal write with), so a copy shaped by this machine's flags
-  // is current, not stale. Malformed markers make the packaged copy unwritable,
-  // which is the existing "could not read this build's copies" verdict.
-  const materialize = materializeTransform(contentFlags);
+  // Read once, not once per directory. Optional skills join the compare when
+  // present on disk (their presence is gated elsewhere), but only the required
+  // adapters decide `verifiable`: a package missing an optional copy is odd,
+  // not a reason to call every adapter unverifiable.
   const packaged = new Map<string, Buffer>();
-  for (const name of CLI_SKILL_NAMES) {
+  for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
     const read = await readSkillFile(join(source, name, 'SKILL.md'));
-    if (read.kind !== 'ok') continue;
-    try {
-      packaged.set(name, materialize('SKILL.md', read.bytes));
-    } catch {
-      // fall through: an unmaterializable packaged copy leaves the map short
-    }
+    if (read.kind === 'ok') packaged.set(name, read.bytes);
   }
-  if (packaged.size !== CLI_SKILL_NAMES.length) return { stale: [], verifiable: false };
+  if (CLI_SKILL_NAMES.some((name) => !packaged.has(name))) {
+    return { stale: [], verifiable: false };
+  }
 
   const stale: string[] = [];
   for (const dir of dirs) {
-    for (const name of CLI_SKILL_NAMES) {
+    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
+      if (!packaged.has(name)) continue;
       // Guarded: a pipe or device at this path would otherwise block the whole
       // diagnostic. Anything but a readable regular file is the wiring check's
       // business, not this one's.
