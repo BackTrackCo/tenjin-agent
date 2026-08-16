@@ -184,6 +184,34 @@ describe('send and the other money/state verbs stay out of the recommended allow
     },
   );
 
+  /**
+   * COVERAGE, not absence. The rule-string check above passes just as well on a
+   * list that names none of these verbs, which is how `tenjin update` sat off the
+   * enumeration under the very commit that claimed to re-derive it from the
+   * constants. An agent denied on `update` reads this file, finds the verb on
+   * neither the never-propose list nor either opt-in list, falls back to the
+   * standing "surface the exact allowlist line to add" rule, and proposes a grant
+   * for the command that replaces the binary it then runs.
+   */
+  it('the never-propose enumeration covers every NEVER_ALLOWLISTED verb', () => {
+    // The ENUMERATION, not the whole section: a verb named only in the sentence
+    // that explains why one of them is dangerous is not on the list an agent
+    // consults to decide whether it may propose a rule. Scoping this to the
+    // section let a deletion from the list pass, which is the bug's own shape.
+    const head = 'Never propose an allowlist line for';
+    const tail = 'and never propose a broad one';
+    const start = permissionsRef.indexOf(head);
+    const end = permissionsRef.indexOf(tail, start);
+    expect(start, head).toBeGreaterThan(-1);
+    expect(end, tail).toBeGreaterThan(start);
+    const list = permissionsRef.slice(start, end).replace(/[`\n]/g, ' ').replace(/\s+/g, ' ');
+    for (const entry of NEVER_ALLOWLISTED) {
+      for (const command of entry.command.split(' / ')) {
+        expect(list, command).toContain(command);
+      }
+    }
+  });
+
   it('tenjin-search names send explicitly as never-allowlisted', () => {
     expect(permissionsRef).toMatch(/Never propose an allowlist line for `?tenjin send/i);
   });

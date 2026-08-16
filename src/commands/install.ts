@@ -44,6 +44,7 @@ import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions'
 import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  MODE_GATED_RULES,
   permissionsSkipped,
   planFreeVerbAllowlist,
   retractModeGatedRules,
@@ -606,9 +607,14 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   }
   // Same reason as the pointer line above: we edited the operator's settings.json
   // to REMOVE something, and the only way they learn it happened is a line here.
-  if (s.permissions.removed.length > 0) {
+  // Two different removals, and calling them one thing made the honest half a lie:
+  // `publish` and `edit` are current commands whose RULES the mode no longer
+  // carries, and reporting them as "commands that no longer exist" told the
+  // operator their publish verb had been retired.
+  const stale = s.permissions.removed.filter((r) => !MODE_GATED_RULES.includes(r));
+  if (stale.length > 0) {
     lines.push(
-      `Removed ${s.permissions.removed.length} permission rule(s) an older tenjin left in ${s.permissions.path ?? 'your settings'} for commands that no longer exist.`,
+      `Removed ${stale.length} permission rule(s) an older tenjin left in ${s.permissions.path ?? 'your settings'} for commands that no longer exist.`,
     );
   }
   // A run that wired permissions without being asked has to say so, and say how to
@@ -760,6 +766,15 @@ function publishingLine(io: Io, mode: PublishMode, wired: PermissionsResult): st
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
   const allowed = p.added.length + p.alreadyPresent.length;
+  // What a `review` install took back, said on the same line as what it left. A
+  // retraction used to return before the additive pass, so this function printed
+  // "already allowed" over a file it had not looked at; it looks now, and the
+  // sentence has to account for both halves or the removal goes unmentioned.
+  const retracted = p.removed.filter((r) => MODE_GATED_RULES.includes(r));
+  const gaveBack =
+    retracted.length === 0
+      ? ''
+      : ` Publishing is back to asking first, so ${retracted.length} rule(s) for publish and edit were removed.`;
   // A dry run reports the PLAN in the same fields, so it takes this branch and
   // says "would allow". An operator dry-running to find out whether publish and
   // edit get granted was previously told only "unchanged (dry run)".
@@ -767,10 +782,10 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
     return `${paint(io, 'dim', '-')} ${label} would allow ${allowed} tenjin commands in ${p.path}. Details: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.added.length > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${allowed} tenjin commands allowed in ${p.path}. Details: ${PERMISSIONS_DOC_URL}`;
+    return `${paint(io, 'green', '✓')} ${label} ${allowed} tenjin commands allowed in ${p.path}.${gaveBack} Details: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === undefined) {
-    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}`;
+    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}.${gaveBack}`;
   }
   if (p.skipped === 'harness-not-claude') {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
@@ -1154,11 +1169,15 @@ export const WALLET_QUESTION = 'Create a wallet now?';
  * review round). The allowlist is written for the mode this run settles, on every
  * path including the headless one, and the FIRST install writes it — there is no
  * "chosen vs defaulted" distinction. What makes that defensible is that it is
- * DOCUMENTED AND LOUD: `publishGrantLines` names the rules and the three ways out
- * in the walkthrough, and `modeGrant` carries the same strings on the `--json`
- * envelope, which is the only disclosure a headless run has. The bare CLI, with
- * no install ever run, still defaults to `review` — install is the consent
- * anchor, so nothing is granted to someone who never ran it.
+ * DOCUMENTED, on the surface each reader is actually using. A human gets
+ * `publishingLine`: what the agent will now do, in plain words, plus the one
+ * command that turns it off. An agent, and any headless run, gets `modeGrant` on
+ * the `--json` envelope, carrying both rule strings, the keystore sentence and
+ * all three undos. docs/agent-permissions.md carries the rest. The terminal is
+ * deliberately the leanest of the three (owner call): a rule string an operator
+ * is meeting for the first time mid-install is not disclosure they can act on.
+ * The bare CLI, with no install ever run, still defaults to `review` — install is
+ * the consent anchor, so nothing is granted to someone who never ran it.
  *
  * The probe runs on EVERY path that might write, including the headless ones.
  * Nothing left to grant is not a question and not a write: it is the ordinary
@@ -1183,42 +1202,77 @@ async function resolvePermissions(args: {
   publishMode: PublishMode;
 }): Promise<PermissionsResult> {
   const { plans, home, deps, flag, dryRun, canPrompt, publishMode } = args;
+
+  // A dry run writes nothing, so it settles before the retraction rather than
+  // after it: what it owes the operator is the plan, not a revocation.
+  if (dryRun) return (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode);
+
+  /**
+   * TIGHTENING FIRST, above every guard below, because none of them is about a
+   * retraction. `--no-allow-free-verbs` declines a WRITE OF OURS; it is not a
+   * request to keep a grant the operator just revoked by moving to `review`, and
+   * ordering it first let `install --publish-mode review --no-allow-free-verbs`
+   * write `mode: review` to config.json, leave both mode-gated rules allowed, and
+   * report `skipped: declined` with a fix telling the operator to ADD rules on the
+   * run where they asked to revoke. The `--harness` guard is the same shape: it
+   * scopes a write to the harnesses this run targets, and a Claude rule this CLI
+   * wrote is ours to reclaim whichever harness is being installed today.
+   *
+   * The one thing that CANNOT fall through is a file we could not read: the
+   * additive writer refuses it for the same reason, so there is nothing to fall
+   * through to, and the retraction's own `fix` names the pair where the writer's
+   * does not.
+   */
+  let retractedRules: string[] = [];
+  if (publishMode === 'review') {
+    const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
+    if (retracted.skipped !== undefined) return retracted;
+    retractedRules = retracted.removed;
+  }
+
+  /**
+   * Carry what the retraction took back onto whatever the rest of this function
+   * returns. It used to RETURN the retraction, which jumped the additive pass and
+   * the legacy sweep both: a review-install on a machine holding only the pair
+   * retracted them, reported "the 9 free tenjin commands were already allowed"
+   * over a file holding none of them, left a stranded legacy rule in place, and
+   * made the operator run install twice to get the tier.
+   */
+  const withRetraction = (result: PermissionsResult): PermissionsResult =>
+    retractedRules.length === 0
+      ? result
+      : { ...result, removed: [...retractedRules, ...result.removed] };
+
   // Only Claude Code has a settings file with this shape. Codex and the shared
   // Agent Skills location gate permissions elsewhere, so there is nothing here to
   // write for them, and guessing at another harness's config would be the kind of
   // uninvited write this whole module is careful about.
   if (!plans.some((p) => p.harness === 'claude')) {
-    return permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude');
+    return withRetraction(
+      permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude'),
+    );
   }
-  if (dryRun) return (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode);
-  if (flag === false) return permissionsSkipped('claude', home, 'declined');
-
-  // TIGHTENING FIRST, and unconditionally. `review` retracts through a pass that
-  // only ever removes, so it cannot inherit the additive writer's complete-tier
-  // precondition and silently decline — which is what made two of the three
-  // documented undos fail on a machine whose free tier was merely incomplete.
-  if (publishMode === 'review') {
-    const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
-    if (retracted.removed.length > 0 || retracted.skipped !== undefined) return retracted;
-  }
+  if (flag === false) return withRetraction(permissionsSkipped('claude', home, 'declined'));
 
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
-  if (probe.satisfied !== undefined) return probe.satisfied;
+  if (probe.satisfied !== undefined) return withRetraction(probe.satisfied);
   // Nothing to GRANT, but something of ours to retract: an older version's rule
   // for a command that no longer exists, or the publish rule under a mode that
   // no longer carries it. That needs no consent — it only ever removes a rule
   // this CLI wrote — so it runs without the prompt.
   if (probe.pending !== null && probe.pending.length === 0) {
-    return wireFreeVerbAllowlist(home, publishMode);
+    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
   }
 
-  if (flag === true || !canPrompt) return wireFreeVerbAllowlist(home, publishMode);
+  if (flag === true || !canPrompt) {
+    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+  }
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(permissionsQuestion(publishMode)))) {
-    return permissionsSkipped('claude', home, 'declined');
+    return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
-  return wireFreeVerbAllowlist(home, publishMode);
+  return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
 }
 
 // --- Search hooks (decision 3) ----------------------------------------------------

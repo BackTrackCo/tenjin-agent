@@ -13,8 +13,10 @@ resolved publish.mode, which an agent otherwise had to run `tenjin config get`
 mid-publish to discover. That line resolves the mode in the CLI's own order,
 global config then a project `.tenjin.json` found by walking up from the session's
 cwd then `TENJIN_PUBLISH_MODE`, so the hook, `publish`, and `doctor` agree on what
-the next publish in that directory will actually run under. A committed project
-`full-auto` reads as `auto`, mirroring the loosening gate.
+the next publish in that directory will actually run under. That walk stops where
+the CLI's stops: at the repo root, never above `$HOME`, and skipping a
+`.tenjin.json` owned by another user. A project `full-auto` conservatively reads
+as `auto`.
 
 `tenjin publish --search-id <id>` re-links a loop something else already closed,
 so a MISS closed as `regenerated` while the answer was still being written can
@@ -59,6 +61,21 @@ defaults to `review`.
 
 `tenjin install` and `tenjin config set` now preserve `~/.claude/settings.json`'s
 file mode, so a `chmod 600` on a file holding an `env` block survives a write.
+
+Moving to `review` retracts on every install path. The retraction sat below the
+`--no-allow-free-verbs` and `--harness` guards, so a run that declined the free-verb
+WRITE also silently declined the REVOCATION: `install --publish-mode review
+--no-allow-free-verbs` wrote `mode: review` and left both rules allowed. It also
+returned before the additive pass, so one review-install retracted the pair,
+claimed a free tier it had not written, and stranded a legacy rule for a second
+run to clear. It now runs first and falls through: one run retracts, wires the
+tier, and sweeps legacy rules, and the summary stops describing `publish` and
+`edit` as "commands that no longer exist".
+
+`tenjin doctor` resolves `publish.mode` from the project `.tenjin.json` like
+`config get` and `publish` do. It read the global file and env only, so inside a
+repo pinned to `review` under a global `auto` it reported the machine as needing a
+grant the next publish there would never use.
 
 The install prompts are shorter. The permissions question is two sentences and a
 link rather than a tier inventory, no prompt recites a `Bash(...)` rule an

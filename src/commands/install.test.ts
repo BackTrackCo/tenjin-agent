@@ -83,8 +83,10 @@ import { resolveSkillsSource, SHIPPED_SKILL_FILES, SKILL_NAMES } from '../lib/sk
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import {
   claudeSettingsPath,
+  EDIT_MODE_RULE,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
@@ -1952,13 +1954,28 @@ describe('runInstall: permissions decision', () => {
         makeCtx(),
         deps({ isInteractive: true, confirmPermissions: async () => true }),
       );
-      const text = human(res);
-      expect(text).toContain('publishes and updates pieces on its own, under your identity');
-      expect(text).toContain('Turn off: tenjin config set publish.mode review');
-      // No rule syntax anywhere in the terminal, and one undo rather than three.
-      expect(text).not.toMatch(/Bash\(/);
-      expect(text).not.toContain('tenjin install --publish-mode review');
-      expect(text).not.toContain('tenjin uninstall');
+      /**
+       * PRESENCE, not absence. The first cut of this test pinned the lean terminal
+       * with `not.toMatch(/Bash\(/)` and `not.toContain('tenjin uninstall')`, which
+       * encodes the deletion rather than the disclosure: both pass just as well
+       * when the whole block goes missing. These assert the two lines an operator
+       * has to leave the install with.
+       */
+      const lines = human(res).split('\n');
+      const publishing = lines.find((l) => l.includes('Publishing:')) ?? '';
+      expect(publishing).toContain('Publishing: auto');
+      expect(publishing).toContain('publishes and updates pieces on its own, under your identity');
+      expect(publishing).toContain('Turn off: tenjin config set publish.mode review');
+
+      const permissions = lines.find((l) => l.includes('Permissions:')) ?? '';
+      expect(permissions).toContain(
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed in`,
+      );
+      expect(permissions).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
+
+      // Lean stays lean: the depth lives in the envelope and the doc, both pinned
+      // above and in `docs/agent-permissions.md`.
+      expect(human(res)).not.toMatch(/Bash\(/);
     });
 
     it('says none of that on review, which grants nothing', async () => {
@@ -1980,6 +1997,84 @@ describe('runInstall: permissions decision', () => {
       );
       expect(wiredOf(res.data).skipped).toBe('declined');
       expect(await allowList()).toBeUndefined();
+    });
+
+    /**
+     * `--no-allow-free-verbs` declines a WRITE OF OURS. It is not a request to
+     * keep a grant the operator just revoked, and while the retraction sat below
+     * this guard the run wrote `mode: review` to config.json, left both rules
+     * allowed, exited 0, and reported `skipped: declined` with a fix telling the
+     * operator to ADD rules on the run where they asked to revoke.
+     */
+    it('retracts on review even when the free-verb write is refused', async () => {
+      await writeSettings({
+        permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
+      });
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).skipped).toBe('declined');
+      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([FREE_VERB_RULES[0]]);
+    });
+
+    // Same ordering bug, the other guard: scoping a WRITE to the harnesses a run
+    // targets is defensible, but a Claude rule this CLI wrote is ours to reclaim
+    // whichever harness is being installed today.
+    it('retracts on review even when this run targets another harness', async () => {
+      await writeSettings({ permissions: { allow: [PUBLISH_MODE_RULE, EDIT_MODE_RULE] } });
+      const res = await runInstall(
+        { harness: ['codex'], publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).skipped).toBe('harness-not-claude');
+      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([]);
+    });
+
+    /**
+     * The retraction used to RETURN, jumping the additive pass and the legacy
+     * sweep both. One review-install on a machine holding only the pair retracted
+     * them, printed "the 9 free tenjin commands were already allowed" over a file
+     * holding none of them, stranded a legacy rule, and made the operator run
+     * install twice to get the tier.
+     */
+    it('retracts AND wires the free tier AND sweeps legacy, in one run', async () => {
+      await writeSettings({
+        permissions: {
+          allow: [
+            PUBLISH_MODE_RULE,
+            EDIT_MODE_RULE,
+            'Bash(git status:*)',
+            ...LEGACY_ALLOWLIST_RULES,
+          ],
+        },
+      });
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      const wired = wiredOf(res.data);
+      expect(wired.added).toEqual([...FREE_VERB_RULES]);
+      for (const rule of [...MODE_GATED_RULES, ...LEGACY_ALLOWLIST_RULES]) {
+        expect(wired.removed, rule).toContain(rule);
+      }
+      expect(await allowList()).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
+
+      // And the line says what happened rather than claiming a tier it never wrote.
+      const text = human(res);
+      expect(text).toContain(`${FREE_VERB_RULES.length} tenjin commands allowed in`);
+      expect(text).not.toContain('were already allowed');
+      expect(text).toContain('Publishing is back to asking first');
+      // The legacy sweep's note is about commands that no longer exist. `publish`
+      // and `edit` very much exist, so they must not be counted into it.
+      expect(text).toContain(
+        `Removed ${LEGACY_ALLOWLIST_RULES.length} permission rule(s) an older tenjin left`,
+      );
     });
 
     // The mode moved back to "ask me first", so the rule that skipped the asking

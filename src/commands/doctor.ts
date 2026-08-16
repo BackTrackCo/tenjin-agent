@@ -29,6 +29,7 @@ import type {
 } from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
+import { loadProjectConfig } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -112,6 +113,11 @@ export interface DoctorDeps {
   /** PATH probe for the `claude`/`codex` binaries, half of harness detection. Defaults
    * to probing `env.PATH`, so a test passing `env: {}` detects neither. */
   which?: (bin: string) => boolean;
+  /**
+   * Working directory the project `.tenjin.json` layer is resolved from. Defaults
+   * to `process.cwd()`, matching `config get` and `publish`.
+   */
+  cwd?: string;
   /** Clock seam (ms since epoch) for the session-expiry check. */
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
@@ -149,7 +155,25 @@ export async function collectDoctorChecks(
 ): Promise<DoctorChecks> {
   const env = deps.env ?? process.env;
   const { config, check: configCheck } = await loadConfigForDoctor(ctx.dataDir);
-  const settings = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env });
+  /**
+   * PROJECT-AWARE, like `config get` and `publish`. Doctor read the global file
+   * and env only, so inside a repo whose `.tenjin.json` pins `review` under a
+   * global `auto` it reported the machine as needing the mode-gated grant that the
+   * next publish in that same directory would not use. That made three mode
+   * surfaces disagree, which is the class the Stop hook fix was written for.
+   *
+   * A malformed project file is not doctor's failure to report: it throws
+   * CONFIG_INVALID from `config get`, where the operator is asking about config.
+   * Here it degrades to the global answer rather than taking down every unrelated
+   * check on the page.
+   */
+  const project = await loadProjectConfig(deps.cwd ?? process.cwd()).catch(() => null);
+  const settings = resolveSettings({
+    config,
+    flags: { baseUrl: ctx.flags.baseUrl },
+    env,
+    project: project?.layer,
+  });
   const baseUrl = settings.baseUrl.value;
 
   const built: BuiltCheck[] = [

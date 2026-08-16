@@ -231,10 +231,18 @@ your balance.
 
 **Installing Tenjin is the consent for these.** `tenjin install` settles
 `publish.mode` at `auto` unless you say otherwise, and writes both rules alongside
-the free tier on the FIRST install, headless runs included. Every install that
-does so says which mode it settled, names both rules, and prints the three ways
-out. Pass `--publish-mode review` if you want the mode without the rules; at a
-terminal the install asks the question outright, with auto as the default answer.
+the free tier on the FIRST install, headless runs included. Pass
+`--publish-mode review` if you want the mode without the rules; at a terminal the
+install asks the question outright, with auto as the default answer.
+
+Each surface discloses the grant at the depth its reader can use. At a terminal
+the install says which mode it settled, what your agent will now do in plain
+words, and the one command that turns it off (`tenjin config set publish.mode
+review`); it deliberately prints no rule strings, because a `Bash(...)` line an
+operator is meeting for the first time mid-install is not something they can act
+on. `tenjin install --json` and `tenjin doctor --json` carry the whole thing as
+data: both rule strings, what they clear including the keystore and the
+`read+write` session mint, and all three undos. This page is the long form.
 
 The bare CLI, on a machine where `install` never ran, still defaults to `review`
 and grants nothing. Install is the consent anchor: nothing here is granted to

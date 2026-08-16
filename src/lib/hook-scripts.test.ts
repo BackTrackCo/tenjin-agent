@@ -1219,7 +1219,11 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
 
     // A project file may narrow, never widen: the CLI downgrades a committed
     // full-auto to auto and the hook must announce the same thing.
-    it('reads a project full-auto as auto, mirroring the loosening gate', async () => {
+    // NOT an exact mirror, and the comment used to say it was: the CLI downgrades
+    // a COMMITTED project full-auto and honors a gitignored one, while this walk
+    // does not read .gitignore and always says auto. Conservative, so the behavior
+    // stands; the claim is what changes.
+    it('conservatively reads a project full-auto as auto', async () => {
       await seedSearches([OPEN_MISS]);
       await writeConfig({ publish: { mode: 'review' } });
       const project = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
@@ -1232,6 +1236,141 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
         'publish.mode=auto: a clean publish proceeds without asking.',
       );
       await rm(project, { recursive: true, force: true });
+    });
+
+    /**
+     * The three stop conditions of `findProjectConfigFile`, mirrored here because a
+     * generated hook cannot import lib/settings.ts and a duplicate that drops one
+     * announces a mode the CLI will not run under. The CLI side pins the same three
+     * in settings.test.ts; these are the hook's copies, and the first cut of this
+     * walk (a bare 12-level parent walk) failed all three.
+     */
+    describe("the walk stops where the CLI's does", () => {
+      it('stops at the repo root and never sees a file above it', async () => {
+        await seedSearches([OPEN_MISS]);
+        await writeConfig({ publish: { mode: 'review' } });
+        const base = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+        try {
+          // Pinned ABOVE the repo root: the CLI ignores it, so the hook must too,
+          // or it announces auto authority inside a repo that has none.
+          await writeFile(
+            join(base, '.tenjin.json'),
+            JSON.stringify({ publish: { mode: 'auto' } }),
+          );
+          const repo = join(base, 'repo');
+          await mkdir(join(repo, '.git'), { recursive: true });
+          const text = injected(await runScript(stopHookScript(dataDir), stopIn(repo))) ?? '';
+          expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+        } finally {
+          await rm(base, { recursive: true, force: true });
+        }
+      });
+
+      // The boundary is strictly ABOVE the repo root: a directory's own candidate
+      // is checked before its .git probe, so a file AT the root is honored by both.
+      it('honors a .tenjin.json sitting at the repo root itself', async () => {
+        await seedSearches([OPEN_MISS]);
+        await writeConfig({ publish: { mode: 'auto' } });
+        const repo = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+        try {
+          await mkdir(join(repo, '.git'), { recursive: true });
+          await writeFile(
+            join(repo, '.tenjin.json'),
+            JSON.stringify({ publish: { mode: 'review' } }),
+          );
+          const text = injected(await runScript(stopHookScript(dataDir), stopIn(repo))) ?? '';
+          expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+        } finally {
+          await rm(repo, { recursive: true, force: true });
+        }
+      });
+
+      it('never walks above $HOME', async () => {
+        await seedSearches([OPEN_MISS]);
+        await writeConfig({ publish: { mode: 'review' } });
+        const base = await mkdtemp(join(tmpdir(), 'tenjin-home-'));
+        try {
+          const home = join(base, 'home');
+          const cwd = join(home, 'proj', 'sub');
+          await mkdir(cwd, { recursive: true });
+          // Planted above $HOME. `~/.tenjin.json` is the exact file the reviewer's
+          // repro used to make the hook promise unattended publishing.
+          await writeFile(
+            join(base, '.tenjin.json'),
+            JSON.stringify({ publish: { mode: 'auto' } }),
+          );
+          const text =
+            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), { HOME: home })) ?? '';
+          expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+        } finally {
+          await rm(base, { recursive: true, force: true });
+        }
+      });
+
+      /**
+       * $HOME's OWN file is honored, by both walks: `findProjectConfigFile` checks
+       * a directory's candidate before testing `dir === homeDir`, so home is the
+       * last directory searched rather than the first one skipped. Verified
+       * directly against `loadProjectConfig`, which returns the file here. Pinned
+       * because the obvious reading of "never walks above $HOME" is that home
+       * itself is excluded, and a hook written to that reading would diverge.
+       */
+      it("honors $HOME's own .tenjin.json, which is the last directory searched", async () => {
+        await seedSearches([OPEN_MISS]);
+        await writeConfig({ publish: { mode: 'review' } });
+        const home = await mkdtemp(join(tmpdir(), 'tenjin-home-'));
+        try {
+          await writeFile(
+            join(home, '.tenjin.json'),
+            JSON.stringify({ publish: { mode: 'auto' } }),
+          );
+          const cwd = join(home, 'work');
+          await mkdir(cwd, { recursive: true });
+          const text =
+            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), { HOME: home })) ?? '';
+          expect(text.split('\n')[0]).toBe(
+            'publish.mode=auto: a clean publish proceeds without asking.',
+          );
+        } finally {
+          await rm(home, { recursive: true, force: true });
+        }
+      });
+
+      // The shared-host gate. Simulated the only way a test can without root: the
+      // hook compares statSync().uid to process.getuid(), so a run whose uid is not
+      // the file's owner must skip the file. `stopIn` a dir whose .tenjin.json we
+      // own proves the negative half; the positive half needs a foreign uid, which
+      // is what the chown-less check below stands in for.
+      it('skips a .tenjin.json owned by another user and keeps walking', async () => {
+        await seedSearches([OPEN_MISS]);
+        await writeConfig({ publish: { mode: 'review' } });
+        const base = await mkdtemp(join(tmpdir(), 'tenjin-owner-'));
+        try {
+          const cwd = join(base, 'proj');
+          await mkdir(cwd, { recursive: true });
+          await writeFile(join(cwd, '.tenjin.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+          // Owned by us: honored, so the fixture is wired correctly.
+          const mine = injected(await runScript(stopHookScript(dataDir), stopIn(cwd))) ?? '';
+          expect(mine.split('\n')[0]).toBe(
+            'publish.mode=auto: a clean publish proceeds without asking.',
+          );
+
+          // The same file read by a process whose uid differs from its owner's.
+          // `statSync().uid` is what the hook compares, so patching getuid in a
+          // wrapper around the real generated script exercises the real branch.
+          const foreignUid = (process.getuid?.() ?? 0) + 1;
+          const wrapped = stopHookScript(dataDir).replace(
+            "import { homedir } from 'node:os';",
+            `import { homedir } from 'node:os';\nprocess.getuid = () => ${foreignUid};`,
+          );
+          expect(wrapped).not.toBe(stopHookScript(dataDir));
+          await rm(join(dataDir, 'hook-nags.json'), { force: true });
+          const theirs = injected(await runScript(wrapped, stopIn(cwd))) ?? '';
+          expect(theirs.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+        } finally {
+          await rm(base, { recursive: true, force: true });
+        }
+      });
     });
 
     it('keeps the global answer when the directory holds no project file', async () => {

@@ -1308,6 +1308,76 @@ describe('runDoctor — the rule the publish mode carries', () => {
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
     expect(data.permissions.modeGated).toEqual([]);
   });
+
+  /**
+   * PROJECT-AWARE, like `config get` and `publish`. Doctor was global-plus-env
+   * only, so inside a repo pinned to `review` under a global `auto` it reported
+   * the machine as needing a grant the next publish in that directory would never
+   * use: three mode surfaces, three answers.
+   *
+   * The two controls are the point. An empty `modeGated` has to be a state this
+   * path can actually produce, and a populated one has to be what a project-blind
+   * read gives, or the pinned case passing proves nothing.
+   */
+  it('resolves the project .tenjin.json layer, like config get does', async () => {
+    const modeGatedFor = async (cwd?: string): Promise<string[]> => {
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        env: {},
+        fetchImpl: healthyFetch,
+        ...(cwd !== undefined ? { cwd } : {}),
+      });
+      const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+      return data.permissions.modeGated.map((e) => e.rule);
+    };
+
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-doctor-proj-'));
+    try {
+      await mkdir(join(repo, '.git'), { recursive: true });
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+
+      // CONTROL 1: global auto with no project file still reports both rules, so
+      // an empty result below is a real disagreement rather than a dead probe.
+      expect(await modeGatedFor(repo)).toEqual([...MODE_GATED_RULES]);
+
+      await writeFile(join(repo, '.tenjin.json'), JSON.stringify({ publish: { mode: 'review' } }));
+      expect(await modeGatedFor(repo)).toEqual([]);
+
+      // CONTROL 2: global review with no project file, the other way an empty
+      // result is reachable.
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'review' } }));
+      const bare = await mkdtemp(join(tmpdir(), 'tenjin-doctor-bare-'));
+      try {
+        await mkdir(join(bare, '.git'), { recursive: true });
+        expect(await modeGatedFor(bare)).toEqual([]);
+      } finally {
+        await rm(bare, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  // A project file we cannot parse is `config get`'s error to raise, not a reason
+  // for every unrelated check on this page to disappear.
+  it('degrades to the global mode when the project file is malformed', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-doctor-bad-'));
+    try {
+      await mkdir(join(repo, '.git'), { recursive: true });
+      await writeFile(join(repo, '.tenjin.json'), '{ not json');
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        env: {},
+        fetchImpl: healthyFetch,
+        cwd: repo,
+      });
+      const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+      expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([...MODE_GATED_RULES]);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('runDoctor — allowlist on the failure path and terminal safety', () => {
