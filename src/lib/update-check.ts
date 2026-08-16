@@ -34,10 +34,7 @@ const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags
 /** What is known about ONE dist-tag: when it was asked, and what it said. */
 const TagEntrySchema = z.object({
   checkedAtMs: z.number(),
-  /**
-   * The version the tag named. Absent when the registry answered with nothing
-   * this build can use, which is still an answer and still moves `checkedAtMs`.
-   */
+  /** The version the tag named. Absent when the answer was unusable. */
   latest: z.string().optional(),
   /** When the nudge was last PRINTED for this tag. Absent until one has been. */
   notifiedAtMs: z.number().optional(),
@@ -45,11 +42,8 @@ const TagEntrySchema = z.object({
 
 /**
  * The cache is a pure optimization, so a bad one is re-fetched, never repaired.
- *
- * Keyed by dist-tag rather than one record total, because the key names what was
- * asked. An entry this build did not ask about is carried forward untouched, so
- * another build sharing the data dir keeps its own answer and its own nudge
- * clock instead of the two evicting each other on every switch.
+ * Keyed by dist-tag: an entry this build did not ask about is carried forward
+ * untouched rather than evicted.
  */
 const CacheSchema = z.object({
   schemaVersion: z.literal(1),
@@ -118,12 +112,8 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // never advertise a version the command would decline to install, nor stay
     // quiet about one it would.
     //
-    // Two failures with two different answers. A registry that could not be
-    // ASKED caches nothing, so the next command retries rather than going quiet
-    // for 24h over one dropped packet. A registry that answered with nothing
-    // usable — no such tag, or a version VERSION_RE does not admit — has
-    // answered, and re-asking on every command until the tag changes would pound
-    // it indefinitely to print nothing. That one records the clock below.
+    // Only a registry that could not be ASKED returns without caching; an answer
+    // this build cannot use has still been answered, and moves the clock below.
     let latest: string | null;
     if (fresh) {
       latest = entry.latest ?? null;
@@ -183,8 +173,7 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
 
     // Named as the command, not the npm invocation it wraps: `update` prints the
     // right instructions itself for an install it cannot perform (a source
-    // checkout, a yarn global), so this line is correct everywhere. The null
-    // test is `due`'s own precondition restated for the type checker.
+    // checkout, a yarn global), so this line is correct everywhere.
     if (due && latest !== null) {
       emitNotice(
         deps.io,
@@ -229,39 +218,28 @@ export async function readUpdateSignal(
 
 /**
  * Which dist-tag this build follows, or null for a version string this package
- * has no channel for. Every build tenjin-cli ships follows `latest`: which tag a
- * publish lands on is a property of the release pipeline rather than of the
- * version number, and this pipeline moves `latest` and nothing else, prerelease
- * or not.
+ * has no channel for. Null rather than a default, because every caller's right
+ * answer differs: the nudge goes quiet, and `tenjin update` refuses instead of
+ * silently reporting a foreign build "up to date" against a tag it never
+ * belonged to.
  *
- * Null rather than a default, because every caller's right answer differs: the
- * nudge goes quiet, and `tenjin update` refuses instead of silently reporting a
- * foreign build "up to date" against a tag it never belonged to.
+ * Every build follows `latest`; see RELEASING.md, which changes with this.
  */
 export function channelTag(version: string): 'latest' | null {
   return parseVersion(version) === null ? null : 'latest';
 }
 
 /**
- * The newest version this build can move to: whatever sits on the tag it
- * follows.
- *
- * One tag and no fallback. The `latest` tag is what this package's pipeline
- * moves on every publish, so a second tag in the comparison adds no reachable
- * version and one way to be wrong: a tag sitting AHEAD of `latest` redirects the
- * self-update install to a build the release line never promoted. Reading the
- * one tag the pipeline maintains is both simpler and narrower.
- *
- * Null for two facts the callers separate: the tag is absent from the registry's
- * map, and the tag names a version VERSION_RE does not admit. Neither is "the
- * registry could not be reached", which is reported on its own.
+ * The version this build can move to: whatever sits on the tag it follows. Null
+ * both when that tag is absent and when it names a version VERSION_RE rejects;
+ * `runUpdate` separates those, and neither means the registry was unreachable.
  */
 export function resolveTarget(current: string, tags: Record<string, string>): string | null {
   const channel = channelTag(current);
   if (channel === null) return null;
   const candidate = tags[channel];
-  // Unparseable counts as absent, never as a candidate: isNewer loses every
-  // comparison against junk, so admitting it would report "up to date" forever.
+  // Unparseable counts as absent: isNewer loses every comparison against junk,
+  // so admitting one would read as "up to date" forever.
   if (candidate === undefined || parseVersion(candidate) === null) return null;
   return candidate;
 }
@@ -298,9 +276,7 @@ export async function fetchDistTags(opts: {
 
 /**
  * The nudge's one-shot: fetch, then resolve. Null when the registry could not be
- * asked at all; `{ latest: null }` when it answered with nothing this build can
- * use. The caller keeps the two apart because only the first is worth retrying
- * on the very next command.
+ * asked; `{ latest: null }` when it answered with nothing usable.
  */
 async function resolveLatest(
   current: string,

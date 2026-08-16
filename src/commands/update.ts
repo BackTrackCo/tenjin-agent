@@ -129,16 +129,8 @@ export async function runUpdate(
     });
   }
   const latest = resolveTarget(current, tags);
-  // The registry answered; it just said nothing this build can act on. Never a
-  // NETWORK_ERROR: nothing about the connection is wrong, and telling the user to
-  // check their access sends them after a fault that is not there.
-  //
-  // Two facts behind that one null, and they take opposite instructions. An
-  // absent tag means there is nothing to install. A tag naming a version
-  // VERSION_RE does not admit means npm HAS a build and this copy is too old to
-  // read its version, which no amount of retrying here will fix — only naming it
-  // by hand will. Saying "no published tenjin-cli" for the second would be the
-  // same wrong diagnosis, one door further in.
+  // Not a NETWORK_ERROR: nothing about the connection is wrong, and telling the
+  // user to check their access sends them after a fault that is not there.
   if (latest === null) {
     const raw = tags[channel];
     throw raw === undefined
@@ -147,9 +139,7 @@ export async function runUpdate(
         })
       : new CliError(
           'RESOURCE_NOT_FOUND',
-          // Registry-controlled text. Truncated because a dist-tag map is
-          // untrusted input, and sanitized on the way out by the error emitter,
-          // which strips escapes for a terminal and JSON-escapes for the envelope.
+          // Registry-controlled: bounded here, escaped by the error emitter.
           `npm's latest tenjin-cli (${raw.slice(0, 40)}) is not a version this build can read`,
           {
             fix: 'Install it by name: npm i -g tenjin-cli@<version> (npm view tenjin-cli versions)',
