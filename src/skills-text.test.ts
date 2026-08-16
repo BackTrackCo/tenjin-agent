@@ -271,20 +271,44 @@ describe('tenjin-publish: publish denials are the gate working', () => {
 describe('tenjin-publish tells the agent to earn card eligibility', () => {
   const text = flat('tenjin-publish');
 
-  it('names both fields and makes filling them unconditional', () => {
-    expect(text).toMatch(/`exclusions` and `provenance`: ALWAYS fill both/i);
-    expect(text).toMatch(/what the\s*piece does not cover/i);
-    expect(text).toMatch(/how you verified the claims/i);
+  // ONE block, naming every condition the server actually checks. Spreading them
+  // across bullets is how `asOf` went unmentioned while the section claimed to be
+  // about eligibility (PR #164 round 2, minor 2).
+  it('names all five conditions the server gate checks, in one place', () => {
+    expect(text).toMatch(/Fill all five, every time/i);
+    for (const field of [
+      '`questionsAnswered`',
+      '`tasksSupported`',
+      '`scope`',
+      '`exclusions`',
+      '`provenance`',
+      '`asOf`',
+    ]) {
+      expect(text, field).toContain(field);
+    }
   });
 
-  // The server gate is provenance OR methodology, so the instruction must not
-  // tell an agent that filled methodology it got it wrong.
-  it('allows methodology in place of provenance, as the server does', () => {
-    expect(text).toMatch(/`methodology` covers the\s*second/i);
+  it('states the stake once, and states it as absence rather than ranking', () => {
+    expect(text).toMatch(/Leave any one empty and the card is ineligible/i);
+    expect(text).toMatch(/out of agent decision search entirely/i);
+    expect(text).toMatch(/not ranked lower,\s*absent/i);
+    // Said once: the earlier shape repeated the stake in the exclusions bullet.
+    expect(text.match(/out of agent decision search/gi)).toHaveLength(1);
   });
 
-  it('states the stake rather than asserting a rule', () => {
-    expect(text).toMatch(/out of agent decision search/i);
+  // The server gate is provenance OR methodology, and asOf only binds on a
+  // snapshot; the text must not overstate either.
+  it('keeps the two conditional conditions conditional', () => {
+    expect(text).toMatch(/`methodology` counts\s*instead/i);
+    expect(text).toMatch(/required when `temporalMode` is `snapshot`/i);
+  });
+
+  // The eval-pinned specifics survive the consolidation.
+  it('keeps the entry counts, char caps and register variety', () => {
+    expect(text).toMatch(/5 to 10 entries, 200 characters max/i);
+    expect(text).toMatch(/Vary the register/i);
+    expect(text).toMatch(/never a bare topic label/i);
+    expect(text).toMatch(/do not mix the two lists/i);
   });
 });
 

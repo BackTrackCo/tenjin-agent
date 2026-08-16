@@ -89,7 +89,6 @@ edge, and price for the freshness that remains.
 
 ## Draft rules
 
-- Explicit as-of date up top, and a decay note or valid-until where honest.
 - Attribute claims; verify issue numbers and URLs; never invent one.
 - Sanitize (hard rules, and YOURS to enforce): no employer-internal strategy,
   metrics, or unreleased work; no secrets, keys, or wallet addresses; no
@@ -102,29 +101,30 @@ edge, and price for the freshness that remains.
 - Keep the free preview minimal — roughly what it answers plus the as-of date.
   Set it with `--excerpt` (or frontmatter `excerpt:`, max 500 chars); without one
   the server derives it from the body's first ~500 characters, so lead with the
-  as-of date, versions, and questions answered, keeping the verdict below.
+  date, versions, and questions answered, keeping the verdict below.
 
 ### The answer card
 
-A complete card is what makes the resource findable at all. Search matches it on
-wording and on meaning, but only `questionsAnswered` and `scope` are matched on
-meaning, so they carry the recall.
+**Fill all five, every time.** Leave any one empty and the card is ineligible,
+which keeps the piece out of agent decision search entirely — not ranked lower,
+absent. The receipt names whatever is still missing.
 
-- `questionsAnswered`: 5 to 10 entries, 200 characters max each, one question per
-  entry. Vary the register: a natural symptom sentence, the verbatim error string
-  someone would type (never a bare topic label), a why/how question. Every entry
-  must ask something no other does. When the piece answers a question you looked
-  up, make that exact phrasing one of the entries.
-- `tasksSupported`: the tasks the piece supports, same caps. Questions go in
-  `questionsAnswered`, tasks go here; do not mix. Matched on wording only, so
-  anything you want found by meaning belongs in `questionsAnswered`.
+- `questionsAnswered`, or `tasksSupported` for a piece that supports tasks rather
+  than answering questions: 5 to 10 entries, 200 characters max each, one per
+  entry, and do not mix the two lists. Vary the register: a natural symptom
+  sentence, the verbatim error string someone would type (never a bare topic
+  label), a why/how question. Every entry must ask something no other does. When
+  the piece answers a question you looked up, make that exact phrasing one entry.
 - `scope`: dense and factual — versions, platforms, and the setup the work was
   done on, not a pitch.
-- `exclusions` and `provenance`: ALWAYS fill both, one sentence each — what the
-  piece does not cover, and how you verified the claims (`methodology` covers the
-  second if it fits better). You know both at publish time, and leaving either
-  empty makes the card ineligible, keeping the piece out of agent decision search
-  entirely. The receipt names whatever is still missing.
+- `exclusions`: one sentence, what the piece does not cover.
+- `provenance`: one sentence, how you verified the claims (`methodology` counts
+  instead if it fits better). You know both this and `exclusions` at publish time.
+- `asOf`: required when `temporalMode` is `snapshot` — a dated piece with no date
+  is the same silent invisibility. Add a decay note or `validUntil` where honest.
+
+Only `questionsAnswered` and `scope` are matched on MEANING; everything else
+matches on wording, so anything you want found by meaning belongs in those two.
 
 ## Semantic publish safety (you are the semantic layer)
 

@@ -245,6 +245,14 @@ deterministic secret scan blocks in every mode and is never clearable by `--yes`
 `auto` stops on any finding, and `full-auto` stops only on a hard block. These
 rules clear the harness prompt and nothing else.
 
+Read "`auto` stops on any finding" as a stop rather than as a human, though.
+These are prefix rules: they pin the verb, not the flags. `--yes` is an ordinary
+flag on the same allowlisted verb, and it clears exactly the WARN findings `auto`
+stopped on, so a re-run with it collapses `auto` into `full-auto` with nobody
+asked — the same hazard the `tenjin buy` line carries. What holds that line is the
+skills, which render the findings as the question rather than asking a generic
+one first.
+
 ### `tenjin update`, a human decision
 
 `tenjin update` replaces the globally installed `tenjin` with whatever npm serves

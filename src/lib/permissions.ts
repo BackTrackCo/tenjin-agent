@@ -259,7 +259,11 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
       'auto or full-auto — the mode is the consent, and the harness prompt would ask for it ' +
       'twice. What still gates a publish is the CLI itself: the deterministic secret scan ' +
       'blocks in every mode and is not clearable by --yes, auto stops on any finding, and ' +
-      'full-auto stops only on a hard block. Set publish.mode back to review and the next ' +
+      'full-auto stops only on a hard block. Read "auto stops on any finding" as a stop, not ' +
+      'a human: this is a PREFIX rule, so it pins the verb and not the flags, and `--yes` is ' +
+      'an ordinary flag on the same allowlisted verb that clears exactly the WARN findings ' +
+      'auto stopped on — a re-run with it collapses auto into full-auto with nobody asked. ' +
+      'The skills are what hold that line. Set publish.mode back to review and the next ' +
       '`tenjin install` removes this rule.',
   },
   {

@@ -55,10 +55,11 @@ running, because a `--yes` re-run after a bare yes clears findings the user neve
 saw. The stop hook now honors `TENJIN_PUBLISH_MODE`, so the hook, `publish`, and
 `doctor` agree on the mode.
 
-tenjin-publish now tells the agent to always fill the answer card's `exclusions`
-and `provenance`. Both are one sentence, both are known at publish time, and a
-card missing either is cache-ineligible server-side, which keeps the piece out of
-agent decision search entirely.
+tenjin-publish's answer-card guidance is one block naming every condition the
+server's eligibility gate actually checks — questions or tasks, scope,
+exclusions, provenance or methodology, and an as-of date on a snapshot — with the
+stake stated once: leave any of them empty and the piece stays out of agent
+decision search entirely, not ranked lower, absent.
 
 The publish modes carry `Bash(tenjin edit:*)` alongside the publish rule. `edit`
 runs the identical `publish.mode` consent gate in the CLI, touches only posts the
