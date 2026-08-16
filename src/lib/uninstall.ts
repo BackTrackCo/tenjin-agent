@@ -1,6 +1,6 @@
 import { lstat, readFile, readdir, rm, rmdir, realpath } from 'node:fs/promises';
 import { lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import {
   claudeSettingsPath,
@@ -10,6 +10,7 @@ import {
 } from './harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
 import { hooksDir } from './paths';
+import { SHIPPED_SKILL_FILES, type SkillName } from './skills-source';
 import { resolveThroughLink } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
@@ -277,13 +278,16 @@ export async function removeHookScripts(dataDir: string): Promise<{
 /**
  * Remove the skills we installed, in every harness location.
  *
- * REMOVES THE FILE WE SHIPPED, NOT THE DIRECTORY IT SITS IN. Everything else in
+ * REMOVES THE FILES WE SHIPPED, NOT THE DIRECTORY THEY SIT IN. Everything else in
  * that directory belongs to the operator — notes, a local override, anything
- * they put beside our file — and a recursive delete of a directory we only
+ * they put beside our files — and a recursive delete of a directory we only
  * partly own is the data-loss shape this repo already unlearned once on the
  * write side (see lib/skill-writer.ts: "Only the files this package SHIPS are
- * read and written"). So: unlink `SKILL.md`, then remove the directory only if
- * nothing is left in it, exactly as `removeHookScripts` does one function up.
+ * read and written"). So: unlink each path in {@link SHIPPED_SKILL_FILES}, then
+ * remove a directory only if nothing is left in it, exactly as
+ * `removeHookScripts` does one function up. A skill that ships a `references/`
+ * subdirectory has that pruned the same way, deepest first — an operator file
+ * beside ours keeps both itself and the directory it is in.
  *
  * Ours means the SKILL.md frontmatter still claims the name we wrote, the rule
  * `skill-heal` uses to decide it may rewrite a file. A skill someone replaced
@@ -303,10 +307,27 @@ export async function removeSkills(homeDir: string): Promise<string[]> {
       const read = await readSkillFile(path);
       if (read.kind !== 'ok') continue;
       if (skillFrontmatterName(read.bytes.toString('utf8')) !== name) continue;
+      // SKILL.md is the ownership proof, so it is checked first and removed
+      // last: a run that dies partway leaves the frontmatter that lets the next
+      // one recognize the directory as ours.
+      const shipped = SHIPPED_SKILL_FILES[name as SkillName] ?? ['SKILL.md'];
+      const subdirs = new Set<string>();
+      for (const rel of shipped) {
+        if (rel === 'SKILL.md') continue;
+        const file = join(skillDir, rel);
+        if (lstatSync(file, { throwIfNoEntry: false })?.isFile() !== true) continue;
+        await rm(file, { force: true });
+        subdirs.add(dirname(file));
+      }
       await rm(path, { force: true });
-      // Only when OUR file was the only thing in there. An operator file keeps
+      // Only when OUR files were the only things in there. An operator file keeps
       // both itself and the directory; `rmdir` refuses a non-empty one anyway,
       // so the check and the call agree even if something lands in between.
+      // Deepest first, so an emptied `references/` cannot keep its parent alive.
+      for (const dir of [...subdirs].sort((a, b) => b.length - a.length)) {
+        const left = await readdir(dir).catch(() => null);
+        if (left !== null && left.length === 0) await rmdir(dir).catch(() => undefined);
+      }
       const rest = await readdir(skillDir).catch(() => null);
       if (rest !== null && rest.length === 0) {
         await rmdir(skillDir).catch(() => undefined);

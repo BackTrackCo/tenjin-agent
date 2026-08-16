@@ -214,6 +214,57 @@ describe('runUninstall — rules a prior version wrote', () => {
   });
 });
 
+/**
+ * tenjin-search ships a `references/` subdirectory. Uninstall reclaims exactly
+ * the declared files and prunes only what it empties.
+ */
+describe('runUninstall — a skill that ships more than SKILL.md', () => {
+  it('removes the shipped reference file and the directory it emptied', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(join(dir, 'references', 'permissions.md'), 'shipped');
+
+    const { report } = await run();
+    expect(report.skills).toContain(dir);
+    expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(false);
+    expect(existsSync(join(dir, 'references'))).toBe(false);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  // The operator's own file in the same subdirectory keeps itself, its
+  // directory, and the skill directory above it.
+  it("keeps a user's file in the shipped subdirectory, and both directories", async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(join(dir, 'references', 'permissions.md'), 'shipped');
+    await writeFile(join(dir, 'references', 'notes.md'), 'mine');
+
+    await run();
+    expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(false);
+    expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('mine');
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  // Ownership is proven by SKILL.md's frontmatter, so a directory that is not
+  // ours keeps its reference file too.
+  it('leaves the reference file when the SKILL.md is not ours', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search', 'someone-elses-skill');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(join(dir, 'references', 'permissions.md'), 'shipped');
+
+    const { report } = await run();
+    expect(report.skills).toEqual([]);
+    expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(true);
+  });
+
+  it('is fine when the reference file was already gone', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    const { report } = await run();
+    expect(report.skills).toContain(dir);
+    expect(existsSync(dir)).toBe(false);
+  });
+});
+
 describe('runUninstall — ownership gates', () => {
   // Somebody else's skill is not ours to delete just for sitting at our path.
   it('leaves a skill directory whose frontmatter names something else', async () => {

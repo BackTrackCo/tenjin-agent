@@ -552,5 +552,19 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
     expect(bad.code).toBe('USAGE');
     expect(bad.fix).toContain('"on"');
+    // The middle setting is offered by name, or an operator hunting for it
+    // finds only the cliff.
+    expect(bad.fix).toContain('"deliberate-only"');
+  });
+
+  // The arm-level toggle (#162): silencing the batched web-search reminders
+  // without silencing the deliberate-search ones.
+  it('round-trips deliberate-only, the middle stopNag setting', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx);
+    expect(set.data).toMatchObject({ value: 'deliberate-only', source: 'file' });
+    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+      data: { value: 'deliberate-only', source: 'file' },
+    });
   });
 });

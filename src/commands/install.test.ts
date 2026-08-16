@@ -67,12 +67,12 @@ import {
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import type { ExecFn } from '../lib/wallet/passphrase';
-import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import { resolveSkillsSource, SHIPPED_SKILL_FILES, SKILL_NAMES } from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import {
   claudeSettingsPath,
@@ -1935,6 +1935,28 @@ describe('runInstall: hosted skill already present (#35)', () => {
   it("leaves a user's files beside the skill untouched", async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(dir, 'references'), { recursive: true });
+    // Every file the skill ships, already identical — including the one that
+    // lives in the same subdirectory as the operator's own notes.
+    for (const rel of SHIPPED_SKILL_FILES['tenjin-search']) {
+      await writeFile(join(dir, rel), await readFile(join(SKILLS_SRC, 'tenjin-search', rel)));
+    }
+    await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+    // The packaged files were already identical, so nothing changed at all.
+    expect(skill.status).toBe('up-to-date');
+    expect(asData(data).harnesses[0]!.warnings.filter((w) => w.includes('tenjin-search'))).toEqual(
+      [],
+    );
+    expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
+  });
+
+  // The multi-file half of the same promise: a skill that ships a subdirectory
+  // gets it created and written, beside whatever the operator already had there.
+  it('writes a shipped reference file into an existing skill directory', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
     await writeFile(
       join(dir, 'SKILL.md'),
       await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
@@ -1943,10 +1965,9 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
-    // The packaged file was already identical, so nothing changed at all.
-    expect(skill.status).toBe('up-to-date');
-    expect(asData(data).harnesses[0]!.warnings.filter((w) => w.includes('tenjin-search'))).toEqual(
-      [],
+    expect(skill.status).toBe('updated');
+    expect(await readFile(join(dir, 'references', 'permissions.md'), 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'references', 'permissions.md'), 'utf8'),
     );
     expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2514,11 +2535,38 @@ describe('runInstall: preexisting means a real prior copy', () => {
  * linger in every install forever, and the fix is a manifest of what the previous
  * version wrote. This fails first and says so.
  */
-describe('the packaged skills are single-file, which is what makes write-in-place safe', () => {
-  it('ships exactly one SKILL.md per skill and nothing else', async () => {
+describe('the packaged skills ship a DECLARED file set, which is what uninstall reclaims', () => {
+  // `uninstall` removes what this list names, on a machine where the packaged
+  // source may be long gone. A reference file nobody declares is litter no
+  // uninstall can reclaim, so the declaration is pinned against the real tree.
+  it('declares exactly the files each skill actually ships', async () => {
     for (const name of SKILL_NAMES) {
-      const entries = await readdir(join(SKILLS_SRC, name), { recursive: true });
-      expect(entries).toEqual(['SKILL.md']);
+      const entries = await readdir(join(SKILLS_SRC, name), {
+        recursive: true,
+        withFileTypes: true,
+      });
+      const files = entries
+        .filter((e) => e.isFile())
+        .map((e) =>
+          relative(join(SKILLS_SRC, name), join(e.parentPath, e.name)).split(sep).join('/'),
+        )
+        .sort();
+      expect(files).toEqual([...SHIPPED_SKILL_FILES[name]].sort());
+    }
+  });
+
+  it('always ships SKILL.md first, the file that proves the directory is ours', () => {
+    for (const name of SKILL_NAMES) expect(SHIPPED_SKILL_FILES[name][0]).toBe('SKILL.md');
+  });
+
+  // Everything else in the tree is written in place beside the operator's own
+  // files, so a shipped path may never climb out of its skill directory.
+  it('declares no path that escapes its own skill directory', () => {
+    for (const name of SKILL_NAMES) {
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        expect(rel.startsWith('/')).toBe(false);
+        expect(rel.split('/')).not.toContain('..');
+      }
     }
   });
 });

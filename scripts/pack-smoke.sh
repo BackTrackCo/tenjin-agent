@@ -59,6 +59,15 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
+# A skill's SUBDIRECTORY is the part an `files: ["skills"]` entry ships silently
+# and a narrower glob would drop: tenjin-search links references/permissions.md,
+# and install copies whatever is in the packaged tree. A miss here would ship a
+# skill whose own pointer is dead, with every source-tree test still green.
+[ -f "./node_modules/tenjin-cli/skills/tenjin-search/references/permissions.md" ] || {
+  echo "pack-smoke: FAIL — skills/tenjin-search/references/permissions.md missing from the installed package" >&2
+  exit 1
+}
+
 # 1) --version prints exactly the package.json version.
 GOT_VERSION="$("$BIN" --version)"
 if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
