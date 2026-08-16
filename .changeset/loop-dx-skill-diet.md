@@ -62,6 +62,13 @@ defaults to `review`.
 `tenjin install` and `tenjin config set` now preserve `~/.claude/settings.json`'s
 file mode, so a `chmod 600` on a file holding an `env` block survives a write.
 
+Every install line that reports the allowlist says what a `review` run took back,
+and names the file it took it from. The retraction runs above the guards that
+decline a write, so a run can retract and then skip, and two skip lines described
+the file as untouched: "unchanged" under `--no-allow-free-verbs`, and "not wired
+(Claude Code only)" under another `--harness`, which read as "your Claude settings
+were left alone" on the run that had just deleted two rules from them.
+
 Moving to `review` retracts on every install path. The retraction sat below the
 `--no-allow-free-verbs` and `--harness` guards, so a run that declined the free-verb
 WRITE also silently declined the REVOCATION: `install --publish-mode review

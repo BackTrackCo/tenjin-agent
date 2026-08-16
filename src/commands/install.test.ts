@@ -2020,6 +2020,61 @@ describe('runInstall: permissions decision', () => {
       expect(await allowList()).toEqual([FREE_VERB_RULES[0]]);
     });
 
+    /**
+     * The retraction runs above the guards that decline a write, so a run can
+     * retract and then skip. Both skip lines described the file as untouched:
+     * "unchanged" on the declined path, and "not wired (Claude Code only)" on the
+     * other-harness path, which is worse because it names the very file the run
+     * had just deleted two rules from.
+     */
+    it('says what it took back on the skip lines too, not just the write lines', async () => {
+      const lineFor = async (args: Parameters<typeof runInstall>[0]): Promise<string> => {
+        await writeSettings({
+          permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
+        });
+        const res = await runInstall(args, makeCtx(), deps({ isInteractive: true }));
+        return (
+          human(res)
+            .split('\n')
+            .find((l) => l.includes('Permissions:')) ?? ''
+        );
+      };
+
+      const declined = await lineFor({
+        harness: ['claude'],
+        allowFreeVerbs: false,
+        publishMode: 'review',
+      });
+      expect(declined).toContain('2 rule(s) for publish and edit were removed');
+      expect(declined).not.toMatch(/Permissions: unchanged\./);
+
+      const otherHarness = await lineFor({ harness: ['codex'], publishMode: 'review' });
+      expect(otherHarness).toContain('2 rule(s) for publish and edit were removed');
+      // "not wired (Claude Code only)" read as "your Claude settings were left
+      // alone", which is the opposite of what just happened to them.
+      expect(otherHarness).not.toMatch(/not wired \(Claude Code only\)/);
+      // And it NAMES the file. A non-Claude skip carries no path on purpose, but
+      // once this run has deleted from that file, withholding its name is the
+      // thing that leaves the operator unable to check.
+      expect(otherHarness).toContain(claudeSettingsPath(home));
+    });
+
+    // And the word stays honest the other way: a run that retracted nothing and
+    // wrote nothing is the only one allowed to say "unchanged".
+    it('still says unchanged when there was genuinely nothing to take back', async () => {
+      await writeSettings({ permissions: { allow: ['Bash(git status:*)'] } });
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      const line = human(res)
+        .split('\n')
+        .find((l) => l.includes('Permissions:'));
+      expect(line).toMatch(/Permissions: unchanged\./);
+      expect(line).not.toContain('were removed');
+    });
+
     // Same ordering bug, the other guard: scoping a WRITE to the harnesses a run
     // targets is defensible, but a Claude rule this CLI wrote is ours to reclaim
     // whichever harness is being installed today.

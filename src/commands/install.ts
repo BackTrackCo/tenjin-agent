@@ -766,15 +766,27 @@ function publishingLine(io: Io, mode: PublishMode, wired: PermissionsResult): st
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
   const allowed = p.added.length + p.alreadyPresent.length;
-  // What a `review` install took back, said on the same line as what it left. A
-  // retraction used to return before the additive pass, so this function printed
-  // "already allowed" over a file it had not looked at; it looks now, and the
-  // sentence has to account for both halves or the removal goes unmentioned.
+  /**
+   * What a `review` install took back, said on EVERY branch rather than on the
+   * two that happened to be written first.
+   *
+   * The retraction runs above the guards that decline a write, so a run can
+   * retract and then skip: `--no-allow-free-verbs` said "unchanged" and
+   * `--harness shared` said "not wired (Claude Code only)", both over a
+   * settings.json the same run had just deleted two rules from. The second was
+   * the worse of the two, since it tells the operator their Claude settings were
+   * left alone. Hoisted, so a branch that forgets it reads wrong at review time
+   * rather than shipping.
+   */
   const retracted = p.removed.filter((r) => MODE_GATED_RULES.includes(r));
   const gaveBack =
     retracted.length === 0
       ? ''
-      : ` Publishing is back to asking first, so ${retracted.length} rule(s) for publish and edit were removed.`;
+      : ` Publishing is back to asking first, so ${retracted.length} rule(s) for publish and edit were removed from ${p.path ?? 'your settings'}.`;
+  // Nothing was written AND nothing was taken back: only then is "unchanged" the
+  // honest word. Every skip branch below reads this instead of saying so itself.
+  const unchanged = retracted.length === 0 ? 'unchanged' : 'otherwise unchanged';
+
   // A dry run reports the PLAN in the same fields, so it takes this branch and
   // says "would allow". An operator dry-running to find out whether publish and
   // edit get granted was previously told only "unchanged (dry run)".
@@ -788,21 +800,21 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
     return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}.${gaveBack}`;
   }
   if (p.skipped === 'harness-not-claude') {
-    return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
+    return `${paint(io, 'dim', '-')} ${label} not wired for this harness (Claude Code only).${gaveBack} The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === 'dry-run') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged (dry run); the ${FREE_VERB_RULES.length} rules a real run needs are already there.`;
+    return `${paint(io, 'dim', '-')} ${label} ${unchanged} (dry run); the ${FREE_VERB_RULES.length} rules a real run needs are already there.`;
   }
   if (p.skipped === 'declined' || p.skipped === 'not-requested') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
+    return `${paint(io, 'dim', '-')} ${label} ${unchanged}.${gaveBack} Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
   }
   if (p.skipped === 'changed-since-read') {
     // Nothing is wrong with the file and the flag is not the remedy: another
     // writer touched it mid-run, so the merge has to be recomputed against what
     // is there now. The catch-all below says "fix it", which is wrong here.
-    return `${paint(io, 'yellow', '!')} ${label} ${p.path} changed while it was being updated, so nothing was written. Re-run: tenjin install`;
+    return `${paint(io, 'yellow', '!')} ${label} ${p.path} changed while it was being updated, so nothing was written.${gaveBack} Re-run: tenjin install`;
   }
-  return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched. Fix it, then: tenjin install --allow-free-verbs`;
+  return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched.${gaveBack} Fix it, then: tenjin install --allow-free-verbs`;
 }
 
 function walletLine(io: Io, w: WalletOutcome): string {
@@ -1224,10 +1236,12 @@ async function resolvePermissions(args: {
    * does not.
    */
   let retractedRules: string[] = [];
+  let retractedFrom: string | undefined;
   if (publishMode === 'review') {
     const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
     if (retracted.skipped !== undefined) return retracted;
     retractedRules = retracted.removed;
+    retractedFrom = retracted.path;
   }
 
   /**
@@ -1241,7 +1255,15 @@ async function resolvePermissions(args: {
   const withRetraction = (result: PermissionsResult): PermissionsResult =>
     retractedRules.length === 0
       ? result
-      : { ...result, removed: [...retractedRules, ...result.removed] };
+      : {
+          ...result,
+          removed: [...retractedRules, ...result.removed],
+          // A non-Claude skip carries no `path`, deliberately: naming a Claude
+          // file to a Codex-only operator points them at a file that is nothing
+          // to do with their harness. Once we have RETRACTED from that file, the
+          // reverse is true, and the operator needs to know which file changed.
+          ...(result.path === undefined ? { path: retractedFrom } : {}),
+        };
 
   // Only Claude Code has a settings file with this shape. Codex and the shared
   // Agent Skills location gate permissions elsewhere, so there is nothing here to

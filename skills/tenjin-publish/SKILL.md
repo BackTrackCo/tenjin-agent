@@ -56,8 +56,8 @@ user's attention:
   `embedded-instruction` in a prompt-engineering piece, `email` in a citation.
 - Usually a real stop: `customer-identifier`, `confidential-marker`,
   `internal-hostname`, `private-repo-reference`, `secret-assignment`,
-  `paid-content-marker`. These say the draft carries context from somewhere it
-  should not have travelled.
+  `paid-content-marker`, `phone`, `long-verbatim-quote`. These say the draft
+  carries context from somewhere it should not have travelled.
 
 ## What makes a piece sell
 
@@ -99,7 +99,8 @@ needs no price prompt.
 
 ### The answer card
 
-**Fill all five, every time.** Leave any one empty and the card is ineligible,
+**Fill all five, every time** (the fifth applies to snapshots). Leave any one
+empty and the card is ineligible,
 which keeps the piece out of agent decision search entirely: not ranked lower,
 absent. The receipt names whatever is still missing.
 

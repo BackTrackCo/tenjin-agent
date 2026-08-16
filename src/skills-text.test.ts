@@ -27,6 +27,9 @@ import {
  */
 const SKILLS = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
+/** This file's own directory: `src/`, where the code the skills describe lives. */
+const SRC_DIR = fileURLToPath(new URL('.', import.meta.url));
+
 /**
  * A file inside a packaged skill. `tenjin-search` is multi-file: SKILL.md carries
  * the short rules an agent always has loaded, and the detail an agent loads on
@@ -329,6 +332,34 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     expect(text).toMatch(/not ranked lower,\s*absent/i);
     // Said once: the earlier shape repeated the stake in the exclusions bullet.
     expect(text.match(/out of agent decision search/gi)).toHaveLength(1);
+  });
+
+  /**
+   * A PROSE PARTITION OF A CODE-DEFINED SET, pinned to the set. The triage says
+   * warnings "split in two", then lists names by hand; `phone` and
+   * `long-verbatim-quote` sat outside both lists under a sentence claiming the
+   * split was exhaustive and the first half ignorable. The instance was two
+   * names; the cause is that nothing tied the lists to `scan.ts`, so the next
+   * warn detector would land outside them the same silent way.
+   */
+  it('the warn-triage lists cover every warn detector in scan.ts', () => {
+    const scan = readFileSync(join(SRC_DIR, 'lib', 'scan.ts'), 'utf8');
+    // Each detector declares `check: '<name>'` near its severity; keep the names
+    // whose surrounding declaration says `warn` and not `block`.
+    const warns = [...scan.matchAll(/check:\s*'([a-z0-9-]+)'/g)]
+      .map((m) => ({ name: m[1] ?? '', at: m.index ?? 0 }))
+      .filter(({ at }) => {
+        const window = scan.slice(Math.max(0, at - 400), at + 400);
+        return /severity:\s*'warn'/.test(window) && !/severity:\s*'block'/.test(window);
+      })
+      .map(({ name }) => name);
+    expect(warns.length, 'no warn detectors found; the scrape is broken').toBeGreaterThan(5);
+
+    const section = text.slice(text.indexOf('warnings split in two'));
+    expect(section.length, 'the triage section is gone').toBeGreaterThan(0);
+    for (const name of new Set(warns)) {
+      expect(section, `warn detector ${name} is in neither triage list`).toContain(`\`${name}\``);
+    }
   });
 
   // `provenance` and `methodology` are FLAG names; the frontmatter keys are the
