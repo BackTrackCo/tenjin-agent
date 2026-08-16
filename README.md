@@ -65,7 +65,7 @@ tenjin doctor
 During install, the interactive decisions are:
 
 - `When your agent has something worth publishing:` `Auto (recommended)` (`your agent publishes clean pieces on its own; your harness still shows each command for approval`), `Ask me in chat first`, or `Fully unattended` (`only hard blocks stop it`).
-- `Let your agent search tenjin without permission popups? Adds 9 free commands to ~/.claude/settings.json. None can spend USDC or move your keys; doctor may check your wallet still opens. Three send or store data (search, outcome, read). Full caveats: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md`
+- `Let your agent search tenjin without permission popups? Adds 9 free commands to ~/.claude/settings.json. None of those 9 can spend USDC or move your keys; doctor may check your wallet still opens. Three send or store data (search, outcome, read). Full caveats: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md`
 - `Create a wallet now?`
 
 Show the wallet address:

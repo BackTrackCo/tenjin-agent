@@ -81,7 +81,7 @@ describe('tenjin-search: permission-denial rule', () => {
   // agent has the rule and no way to reach the lines it is supposed to surface.
   it('points at the reference file and at doctor for the lines themselves', () => {
     expect(text).toContain(`(${PERMISSIONS_REF})`);
-    expect(text).toMatch(/tenjin doctor` prints/i);
+    expect(text).toMatch(/tenjin doctor --json` carries/i);
     expect(existsSync(join(SKILLS, 'tenjin-search', PERMISSIONS_REF))).toBe(true);
   });
 
@@ -155,7 +155,7 @@ describe('tenjin-search references/permissions.md: the detail, one hop away', ()
   // and the skill still never proposes it: the mode is the decision.
   it('routes publish pre-clearing to the mode, never to a line to paste', () => {
     expect(text).toMatch(/publish\.mode/);
-    expect(text).toMatch(/tenjin install` writes the publish rule/i);
+    expect(text).toMatch(/tenjin install` writes both rules/i);
   });
 });
 
@@ -281,7 +281,7 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
       '`tasksSupported`',
       '`scope`',
       '`exclusions`',
-      '`provenance`',
+      '`provenanceSummary`',
       '`asOf`',
     ]) {
       expect(text, field).toContain(field);
@@ -296,10 +296,22 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     expect(text.match(/out of agent decision search/gi)).toHaveLength(1);
   });
 
+  // `provenance` and `methodology` are FLAG names; the frontmatter keys are the
+  // long ones, and deriveCard has no unknown-key check, so a draft written from
+  // the short spelling loses the field silently and lands ineligible: exactly the
+  // failure this block exists to prevent (PR #164 round 3, major 5).
+  it('names the frontmatter keys, not just the flags that set them', () => {
+    expect(text).toMatch(/`provenanceSummary` \(flag `--provenance`\)/);
+    expect(text).toMatch(/`methodologySummary` \(flag `--methodology`\)/);
+    // And says what the short spelling costs, since that is the reading an agent
+    // arrives with from the `excerpt:` bullet directly above.
+    expect(text).toMatch(/a draft carrying `provenance:` has\s*it silently dropped/i);
+  });
+
   // The server gate is provenance OR methodology, and asOf only binds on a
   // snapshot; the text must not overstate either.
   it('keeps the two conditional conditions conditional', () => {
-    expect(text).toMatch(/`methodology` counts\s*instead/i);
+    expect(text).toMatch(/`methodologySummary` \(flag `--methodology`\) counts\s*instead/i);
     expect(text).toMatch(/required when `temporalMode` is `snapshot`/i);
   });
 
