@@ -245,6 +245,12 @@ with `tenjin config set publish.mode review`. `tenjin uninstall` reclaims them
 like every other rule this CLI wrote. There is no flag that adds them and no line
 to paste: change the mode.
 
+Your `publish.mode` lives in `~/.tenjin/config.json` and survives `tenjin
+uninstall` along with the rest of your config, so a later `tenjin install` resumes
+it and writes both rules again: installing is the consent, each time. Set the mode
+to `review` before uninstalling, or pass `--publish-mode review` when you come
+back, if you want the rules to stay gone.
+
 `tenjin config set publish.mode` keeps the two in step without waiting for the
 next `install`. Moving to `auto` or `full-auto` asks you once, naming both rules,
 and writes them on yes; a run with no terminal, a `--json` run, or a no leaves

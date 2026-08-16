@@ -85,9 +85,15 @@ export type SettingsSkipReason =
  * reported removing. `candidates/` is named explicitly because it is the one
  * directory nothing writes any more: an older version's parked drafts are still
  * sitting there, and someone who wants them needs the path.
+ *
+ * `publish.mode` is called out inside the config item because it is the one kept
+ * value that GRANTS something on the next `install`: the rules come back under the
+ * remembered mode. That is the intended model (installing is the consent, each
+ * time), and docs/agent-permissions.md carries the full paragraph, but an operator
+ * uninstalling to revoke should not have to find it there.
  */
 export const KEPT_ITEMS: readonly string[] = [
-  'your wallet, config, library, and search history under ~/.tenjin',
+  'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
   'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
 ];
 

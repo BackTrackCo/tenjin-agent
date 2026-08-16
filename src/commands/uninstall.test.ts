@@ -162,6 +162,13 @@ describe('runUninstall — a fully installed machine', () => {
     expect(report.scripts.length).toBeGreaterThan(0);
     expect(text).toContain('Removed from ~/.tenjin:');
     expect(text).toContain('~/.tenjin/hooks');
+    /**
+     * The kept config includes `publish.mode`, which is the one kept value that
+     * GRANTS something on the next `install`: the mode-gated rules come back under
+     * it. That is the intended model, but an operator uninstalling to revoke has
+     * to be told, and the receipt is where they are looking.
+     */
+    expect(text).toContain('publish.mode included');
     for (const item of report.kept) {
       expect(item, item).not.toMatch(/everything under/i);
     }
