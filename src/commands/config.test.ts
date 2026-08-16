@@ -34,8 +34,19 @@ const configFile = () => join(dir, 'config.json');
  * allowlist: without one the sync would reach the operator's real
  * ~/.claude/settings.json from a unit test.
  */
-async function hermeticHome(): Promise<{ homeDir: string; isInteractive: boolean }> {
-  return { homeDir: await mkdtemp(join(tmpdir(), 'tenjin-cfg-h-')), isInteractive: false };
+async function hermeticHome(): Promise<{
+  homeDir: string;
+  isInteractive: boolean;
+  harnessIsClaude: boolean;
+}> {
+  return {
+    homeDir: await mkdtemp(join(tmpdir(), 'tenjin-cfg-h-')),
+    isInteractive: false,
+    // PINNED, like every other harness-touching test here: without it these read
+    // whichever harness the RUNNER has, so they pass on a laptop with Claude Code
+    // installed and take a different branch on a bare CI box.
+    harnessIsClaude: false,
+  };
 }
 const readRawFile = async () => JSON.parse(await readFile(configFile(), 'utf8')) as unknown;
 
@@ -576,6 +587,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     const asked: string[] = [];
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: true,
       confirmRule: async (label) => {
         asked.push(label);
@@ -596,6 +608,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     let label = '';
     await runConfigSet({ key: 'publish.mode', value: 'full-auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: true,
       confirmRule: async (l) => {
         label = l;
@@ -609,6 +622,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('writes nothing when the operator declines, and points instead', async () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: true,
       confirmRule: async () => false,
     });
@@ -625,6 +639,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('never prompts and never writes without a TTY', async () => {
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: false,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -641,6 +656,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       makeCtx({ json: true }),
       {
         homeDir: home,
+        harnessIsClaude: true,
         isInteractive: true,
         confirmRule: async () => {
           throw new Error('must not ask');
@@ -658,6 +674,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('retracts the rule on review, unprompted, and reports it', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: true,
       confirmRule: async () => true,
     });
@@ -665,6 +682,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 
     const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: false,
       confirmRule: async () => {
         throw new Error('must not ask');
@@ -700,6 +718,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     );
     const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
     });
     expect(await allowOf()).toEqual(['Bash(git status:*)', PUBLISH_MODE_RULE]);
     expect(syncOf(res.data)?.skipped).toBe('needs-install');
@@ -709,11 +728,13 @@ describe('publish.mode keeps the harness allowlist in step', () => {
   it('asks nothing when the allowlist already carries every rule the mode needs', async () => {
     await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: true,
       confirmRule: async () => true,
     });
     const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
       homeDir: home,
+      harnessIsClaude: true,
       isInteractive: true,
       confirmRule: async () => {
         throw new Error('must not ask');
