@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { fetchJson, fetchFailureToCliError, httpRequest } from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError } from './errors';
-import { TENJIN_USER_AGENT } from './client-meta';
+import { CALLER_USER_AGENT_ENV, TENJIN_PRODUCT, TENJIN_USER_AGENT } from './client-meta';
 import type { FetchJsonFailure, HttpRequestOptions } from './http';
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -168,6 +168,125 @@ describe('User-Agent identity', () => {
     const sent = calls[0]!;
     expect(sent.get('accept')).toBe('application/json');
     expect(sent.get('user-agent')).toBe(TENJIN_USER_AGENT);
+  });
+});
+
+/**
+ * The caller handoff on the wire (spec: user-agent-telemetry-and-client-
+ * attribution.md, "Composition contract"). `client-meta.test.ts` pins the
+ * composer itself; these pin that both transports read BOTH seams and that the
+ * composed field reaches fetch as exactly one header.
+ */
+describe('caller User-Agent handoff', () => {
+  function headerCapture(): { fetchImpl: typeof fetch; calls: Headers[] } {
+    const calls: Headers[] = [];
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      calls.push(new Headers(init?.headers));
+      return new Response(JSON.stringify({ ok: 1 }), { status: 200 });
+    };
+    return { fetchImpl, calls };
+  }
+
+  const COMPOSED = `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.blog)`;
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('composes the env handoff onto both transports', async () => {
+    vi.stubEnv(CALLER_USER_AGENT_ENV, 'codex/1.2.0');
+    const { fetchImpl, calls } = headerCapture();
+    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
+    await httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.get('user-agent')).toBe(COMPOSED);
+    expect(calls[1]?.get('user-agent')).toBe(COMPOSED);
+  });
+
+  it('composes the programmatic handoff, which beats the env', async () => {
+    vi.stubEnv(CALLER_USER_AGENT_ENV, 'from-env/9.9');
+    const { fetchImpl, calls } = headerCapture();
+    await fetchJson('https://tenjin.blog/openapi.json', {
+      timeoutMs: 1000,
+      callerUserAgent: 'codex/1.2.0',
+      fetchImpl,
+    });
+    await httpRequest('https://tenjin.blog/api/search', {
+      timeoutMs: 1000,
+      callerUserAgent: 'codex/1.2.0',
+      fetchImpl,
+    });
+    expect(calls[0]?.get('user-agent')).toBe(COMPOSED);
+    expect(calls[1]?.get('user-agent')).toBe(COMPOSED);
+  });
+
+  it('sends the identity alone when the handoff is unusable, on both transports', async () => {
+    vi.stubEnv(CALLER_USER_AGENT_ENV, 'codex/1.2.0 (host=laptop.local)');
+    const { fetchImpl, calls } = headerCapture();
+    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
+    await httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl });
+    expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
+    expect(calls[1]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
+  });
+
+  it('survives a call-specific User-Agent header, as exactly one field', async () => {
+    vi.stubEnv(CALLER_USER_AGENT_ENV, 'codex/1.2.0');
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/search', {
+      timeoutMs: 1000,
+      headers: { 'User-Agent': 'something-else/1.0' },
+      fetchImpl,
+    });
+    const sent = calls[0]!;
+    expect(sent.get('user-agent')).toBe(COMPOSED);
+    expect([...sent.keys()].filter((key) => key === 'user-agent')).toHaveLength(1);
+  });
+
+  it('does not duplicate the identity when a retry re-sends a composed field as the handoff', async () => {
+    const { fetchImpl, calls } = headerCapture();
+    // The 402 -> pay -> retry shape: the second attempt hands off what the first
+    // attempt already composed, which must not mint a second `tenjin-cli` token.
+    await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      callerUserAgent: 'codex/1.2.0',
+      fetchImpl,
+    });
+    await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      callerUserAgent: calls[0]?.get('user-agent') ?? '',
+      headers: { 'payment-signature': 'sig-value' },
+      fetchImpl,
+    });
+    const retried = calls[1]!.get('user-agent')!;
+    expect(retried).toBe(COMPOSED);
+    expect(retried.match(/tenjin-cli/g)).toHaveLength(1);
+  });
+
+  it('leaves a signed x402 retry byte-for-byte identical apart from the User-Agent', async () => {
+    // Rule 6 of the contract: the handoff rides an UNSIGNED field. Payment and
+    // SIWX signatures cover neither it nor anything it could shift.
+    const signed = {
+      'payment-signature': 'sig-value',
+      [SIWX_HEADER]: 'siwx-value',
+      'x-tenjin-search-id': 'search-1',
+      accept: 'application/json',
+    };
+    const { fetchImpl, calls } = headerCapture();
+    await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: signed,
+      fetchImpl,
+    });
+    await httpRequest('https://tenjin.blog/api/read/x', {
+      timeoutMs: 1000,
+      headers: signed,
+      callerUserAgent: 'codex/1.2.0',
+      fetchImpl,
+    });
+    const withoutUa = (headers: Headers): Array<[string, string]> =>
+      [...headers.entries()].filter(([name]) => name !== 'user-agent');
+    expect(withoutUa(calls[1]!)).toEqual(withoutUa(calls[0]!));
+    expect(calls[0]!.get('user-agent')).toBe(TENJIN_USER_AGENT);
+    expect(calls[1]!.get('user-agent')).toBe(COMPOSED);
   });
 });
 
