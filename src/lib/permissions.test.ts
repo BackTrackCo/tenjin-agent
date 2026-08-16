@@ -9,10 +9,13 @@ import {
   ALWAYS_SAFE_ALLOWLIST,
   FLAG_CAVEAT,
   MCP_CAVEAT,
+  modeGatedAllowlist,
+  modeGatedPointer,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
   PERMISSIONS_DOC_URL,
   permissionsPointer,
+  PUBLISH_MODE_ALLOWLIST,
   recommendedPermissions,
   recommendedRules,
 } from './permissions';
@@ -167,6 +170,91 @@ describe('money-moving and state-changing verbs are never recommended', () => {
       expect(rule).not.toBe('Bash(tenjin wallet:*)');
       expect(rule).not.toBe('Bash(tenjin config:*)');
     }
+  });
+});
+
+/**
+ * The mode-gated tier is not a recommendation, which is why `publish` stays on
+ * NEVER_ALLOWLISTED and out of `recommendedRules()`: nothing here offers the rule
+ * to an operator weighing it. It appears only because a mode they already chose
+ * means it.
+ */
+describe('the rule publish.mode carries', () => {
+  it('is one narrow prefix rule on the publish verb', () => {
+    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual(['Bash(tenjin publish:*)']);
+    expect(ruleCovers(PUBLISH_MODE_ALLOWLIST[0]!.rule, 'tenjin publish')).toBe(true);
+  });
+
+  it('is empty on review and present on both auto modes', () => {
+    expect(modeGatedAllowlist('review')).toEqual([]);
+    expect(modeGatedAllowlist('auto')).toHaveLength(1);
+    expect(modeGatedAllowlist('full-auto')).toHaveLength(1);
+  });
+
+  // The load-bearing separation: it is never offered as advice, so every
+  // existing claim about what this module RECOMMENDS still holds.
+  it('is not in the recommended set, which still covers no forbidden verb', () => {
+    expect(recommendedRules()).not.toContain('Bash(tenjin publish:*)');
+    for (const rule of recommendedRules()) expect(ruleCovers(rule, 'tenjin publish')).toBe(false);
+  });
+
+  it('stays documented as excluded, with the mode named as the only thing that clears it', () => {
+    const publish = NEVER_ALLOWLISTED.find((e) => e.command === 'tenjin publish');
+    expect(publish?.reason).toMatch(/publish\.mode/);
+    expect(publish?.reason).toMatch(/never pre-cleared/i);
+  });
+
+  // An operator pastes a line off a tier list; this one they never see, so the
+  // note has to say what the grant is and how to take it back.
+  it('discloses what it clears and how it goes away', () => {
+    const note = PUBLISH_MODE_ALLOWLIST[0]?.note ?? '';
+    expect(note).toMatch(/PUBLISHES PUBLICLY/);
+    expect(note).toMatch(/auto or full-auto/);
+    expect(note).toMatch(/review/);
+    // What still gates a publish, so "cleared" is not read as "unchecked".
+    expect(note).toMatch(/scan/i);
+  });
+
+  it('is a defensive copy like the other tiers', () => {
+    const first = modeGatedAllowlist('auto');
+    first.splice(0, first.length);
+    expect(modeGatedAllowlist('auto')).toHaveLength(1);
+  });
+
+  describe('the pointer doctor prints for it', () => {
+    it('is null on review', () => {
+      expect(modeGatedPointer('review')).toBeNull();
+    });
+
+    // Unlike permissionsPointer, this one NAMES its rule: the operator is looking
+    // for the missing line, not for a page about tiers.
+    it('names the mode and the exact rule, in one line', () => {
+      const line = modeGatedPointer('auto') ?? '';
+      expect(line).toContain('publish.mode=auto');
+      expect(line).toContain('Bash(tenjin publish:*)');
+      expect(line).toContain('tenjin install');
+      expect(line).not.toContain('\n');
+    });
+  });
+
+  describe('the machine payload', () => {
+    it('defaults to review, so a caller that names no mode gets no extra rule', () => {
+      expect(recommendedPermissions().modeGated).toEqual([]);
+    });
+
+    it('carries the rule when the mode does', () => {
+      expect(recommendedPermissions('full-auto').modeGated.map((e) => e.rule)).toEqual([
+        'Bash(tenjin publish:*)',
+      ]);
+    });
+
+    it('leaves the three recommendation tiers unchanged whatever the mode', () => {
+      const review = recommendedPermissions('review');
+      const auto = recommendedPermissions('auto');
+      expect(auto.alwaysSafe).toEqual(review.alwaysSafe);
+      expect(auto.optIn).toEqual(review.optIn);
+      expect(auto.neverAllowlisted).toEqual(review.neverAllowlisted);
+    });
   });
 });
 

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
-import { claudeSettingsPath, FREE_VERB_RULES } from '../lib/harness-permissions';
+import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
 import { hooksDir } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
@@ -182,15 +182,35 @@ describe('runUninstall — rules a prior version wrote', () => {
     expect(after.permissions.allow).toEqual(['Bash(ls:*)']);
   });
 
+  // `buy` is an OPT-IN line: the operator pastes it themselves and this CLI has
+  // no path that writes it, so it is not ours to take away.
   it('leaves an unrelated tenjin-shaped rule the CLI never wrote', async () => {
     const path = claudeSettingsPath(home);
     await mkdir(join(home, '.claude'), { recursive: true });
-    await writeFile(path, JSON.stringify({ permissions: { allow: ['Bash(tenjin publish:*)'] } }));
+    await writeFile(path, JSON.stringify({ permissions: { allow: ['Bash(tenjin buy:*)'] } }));
     await run();
     const after = JSON.parse(await readFile(path, 'utf8')) as {
       permissions: { allow: string[] };
     };
-    expect(after.permissions.allow).toEqual(['Bash(tenjin publish:*)']);
+    expect(after.permissions.allow).toEqual(['Bash(tenjin buy:*)']);
+  });
+
+  // The publish rule IS ours: `install` writes it whenever publish.mode is auto
+  // or full-auto, so uninstall reclaims it like every other rule this CLI wrote,
+  // whatever the mode says on the way out.
+  it('reclaims the publish rule the publish modes write', async () => {
+    const path = claudeSettingsPath(home);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({ permissions: { allow: [PUBLISH_MODE_RULE, 'Bash(ls:*)'] } }),
+    );
+    const { report } = await run();
+    expect(report.settings.rules).toContain(PUBLISH_MODE_RULE);
+    const after = JSON.parse(await readFile(path, 'utf8')) as {
+      permissions: { allow: string[] };
+    };
+    expect(after.permissions.allow).toEqual(['Bash(ls:*)']);
   });
 });
 

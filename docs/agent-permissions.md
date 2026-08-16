@@ -187,7 +187,7 @@ Deliberately **never** recommended, because each is a human decision:
 | Verb                   | Why it stays a human decision                                                        |
 | ---------------------- | ------------------------------------------------------------------------------------ |
 | `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
-| `tenjin publish`       | Puts your content on a public marketplace under your identity.                       |
+| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
 | `tenjin edit`          | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
 | `tenjin wallet create` | Creates the payment credential.                                                      |
 | `tenjin config set`    | It can widen the agent's own spend policy.                                           |
@@ -197,6 +197,29 @@ Deliberately **never** recommended, because each is a human decision:
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+## The one rule your publish mode carries
+
+`publish.mode` is where you say whether publishing asks you first. On `auto` or
+`full-auto` it does not, and a harness prompt in front of every publish asks that
+same question again somewhere the mode cannot answer it — so the agent stops, and
+the mode you chose does nothing. That is why one rule, `Bash(tenjin publish:*)`,
+tracks the mode. It is deliberately not in any block above: there is nothing to
+paste here, because the mode is the decision and the rule only follows it.
+
+`tenjin install` writes it when the mode it settles is `auto` or `full-auto`, and
+takes it back on the next run once the mode is `review`. `tenjin uninstall`
+reclaims it like every other rule this CLI wrote. There is no flag that adds it
+and no line to paste: change the mode, re-run `install`.
+
+A bare non-interactive `tenjin install` does **not** write it. That run defaults
+the mode to `auto` so an unattended machine works, but nobody chose that, and a
+publish grant follows a choice rather than a default. Once `auto` is in your
+config, the next `install` reads it as yours and writes the rule.
+
+What still stops a bad publish is the CLI, not the harness prompt: the
+deterministic secret scan blocks in every mode and is never clearable by `--yes`,
+`auto` stops on any finding, and `full-auto` stops only on a hard block.
 
 ### `tenjin update`, a human decision
 

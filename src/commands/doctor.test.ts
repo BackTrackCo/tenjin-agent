@@ -1188,6 +1188,61 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
   });
 });
 
+/**
+ * The one rule doctor DOES name. An operator whose agent is being prompted for
+ * every publish, on a mode that says not to ask, is reading exactly this line —
+ * and the pointer, which names no rule at all, cannot tell them which one to add.
+ */
+describe('runDoctor — the rule the publish mode carries', () => {
+  const run = async (): Promise<string> => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return (res.humanLines ?? []).join('\n');
+  };
+
+  it('says nothing extra on review, the shipped default', async () => {
+    expect(await run()).not.toContain('Bash(tenjin publish:*)');
+  });
+
+  it('names the rule on auto', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+    const text = await run();
+    expect(text).toContain('Bash(tenjin publish:*)');
+    expect(text).toContain('publish.mode=auto');
+    // Still above the one pointer that closes every doctor run.
+    expect(text.trimEnd().endsWith(PERMISSIONS_DOC_URL)).toBe(true);
+  });
+
+  it('names the rule on full-auto', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'full-auto' } }));
+    expect(await run()).toContain('publish.mode=full-auto');
+  });
+
+  it('carries the mode-gated tier in --json', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+    expect(data.permissions.modeGated.map((e) => e.rule)).toEqual(['Bash(tenjin publish:*)']);
+  });
+
+  it('carries an empty mode-gated tier on review', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+    expect(data.permissions.modeGated).toEqual([]);
+  });
+});
+
 describe('runDoctor — allowlist on the failure path and terminal safety', () => {
   // The operator whose fresh install is broken is the likeliest reader of doctor
   // output, and the first cut dropped the block on exactly that path while the

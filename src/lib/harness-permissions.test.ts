@@ -39,9 +39,17 @@ import {
   inspectFreeVerbRules,
   LEGACY_FREE_VERB_RULES,
   permissionsSkipped,
+  PUBLISH_MODE_RULE,
+  rulesForPublishMode,
   wireFreeVerbAllowlist,
 } from './harness-permissions';
-import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, OPT_IN_ALLOWLIST } from './permissions';
+import {
+  ALWAYS_SAFE_ALLOWLIST,
+  modeGatedAllowlist,
+  NEVER_ALLOWLISTED,
+  OPT_IN_ALLOWLIST,
+  PUBLISH_MODE_ALLOWLIST,
+} from './permissions';
 
 let home: string;
 beforeEach(async () => {
@@ -226,6 +234,104 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
   it('is never a broad wildcard over the whole CLI', () => {
     expect(FREE_VERB_RULES).not.toContain('Bash(tenjin:*)');
     expect(FREE_VERB_RULES.every((r) => r.startsWith('Bash(tenjin '))).toBe(true);
+  });
+});
+
+/**
+ * The publish rule is the one thing this writer emits that is not free-tier, and
+ * the ONLY thing that turns it on is a publish.mode the operator already chose.
+ * `install` and `config set` are both never-allowlisted, so an agent cannot reach
+ * either without a permission decision of its own.
+ */
+describe('the publish rule is gated on the mode and nothing else', () => {
+  it('writes exactly the free tier on review', () => {
+    expect([...rulesForPublishMode('review')]).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('adds the publish rule on auto and full-auto, and nothing else', () => {
+    for (const mode of ['auto', 'full-auto'] as const) {
+      expect([...rulesForPublishMode(mode)]).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+    }
+  });
+
+  it('mirrors the entry lib/permissions.ts documents, so the two never drift', () => {
+    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual([PUBLISH_MODE_RULE]);
+    expect(modeGatedAllowlist('review')).toEqual([]);
+    expect(modeGatedAllowlist('auto').map((e) => e.rule)).toEqual([PUBLISH_MODE_RULE]);
+  });
+
+  // It publishes publicly under the operator's identity, so it is not free-tier
+  // and must never ride along with a tier that claims it is.
+  it('is never a member of the free tier', () => {
+    expect(FREE_VERB_RULES).not.toContain(PUBLISH_MODE_RULE);
+    expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule)).not.toContain(PUBLISH_MODE_RULE);
+  });
+
+  // Two hardcoded sets and a mode to pick between them: no argument reaches the
+  // rule text, so no caller can widen it to buy, send, or a bare wildcard.
+  it('can produce no rule set but the two constants', () => {
+    for (const mode of ['review', 'auto', 'full-auto'] as const) {
+      for (const rule of rulesForPublishMode(mode)) {
+        expect([...FREE_VERB_RULES, PUBLISH_MODE_RULE]).toContain(rule);
+      }
+    }
+  });
+
+  it('writes the publish rule on auto', async () => {
+    const result = await wireFreeVerbAllowlist(home, 'auto');
+    expect(result.added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+    expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+  });
+
+  // A grant must not outlive the mode that justified it: the operator said
+  // "ask me first" again, so the rule that skipped the asking goes.
+  it('takes the publish rule back when the mode returns to review', async () => {
+    await wireFreeVerbAllowlist(home, 'auto');
+    const result = await wireFreeVerbAllowlist(home, 'review');
+    expect(result.removed).toEqual([PUBLISH_MODE_RULE]);
+    expect(result.added).toEqual([]);
+    expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('is idempotent at a given mode', async () => {
+    await wireFreeVerbAllowlist(home, 'full-auto');
+    const second = await wireFreeVerbAllowlist(home, 'full-auto');
+    expect(second.added).toEqual([]);
+    expect(second.removed).toEqual([]);
+    expect(second.alreadyPresent).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+  });
+
+  it('leaves rules it did not write alone while retracting its own', async () => {
+    await seedSettings({ permissions: { allow: ['Bash(git status:*)', 'Bash(tenjin buy:*)'] } });
+    await wireFreeVerbAllowlist(home, 'auto');
+    await wireFreeVerbAllowlist(home, 'review');
+    const allow = allowOf(await readSettings());
+    expect(allow).toContain('Bash(git status:*)');
+    expect(allow).toContain('Bash(tenjin buy:*)');
+    expect(allow).not.toContain(PUBLISH_MODE_RULE);
+  });
+
+  it('defaults to review when no mode is given', async () => {
+    const result = await wireFreeVerbAllowlist(home);
+    expect(result.added).toEqual([...FREE_VERB_RULES]);
+  });
+
+  it('the probe reports the publish rule as pending under auto', async () => {
+    expect((await inspectFreeVerbRules(home, 'auto')).pending).toEqual([
+      ...FREE_VERB_RULES,
+      PUBLISH_MODE_RULE,
+    ]);
+    await wireFreeVerbAllowlist(home, 'auto');
+    expect((await inspectFreeVerbRules(home, 'auto')).satisfied).toBeDefined();
+  });
+
+  // Nothing to grant, something of ours to retract: the caller must be able to
+  // tell that apart from "already satisfied", or the retraction never runs.
+  it('the probe reports work-to-do, not satisfied, when only a retraction is due', async () => {
+    await wireFreeVerbAllowlist(home, 'auto');
+    const probe = await inspectFreeVerbRules(home, 'review');
+    expect(probe.pending).toEqual([]);
+    expect(probe.satisfied).toBeUndefined();
   });
 });
 

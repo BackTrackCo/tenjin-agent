@@ -45,6 +45,7 @@ import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
   permissionsSkipped,
+  PUBLISH_MODE_RULE,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
@@ -216,6 +217,7 @@ export interface InstallDeps {
   /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
   inspectPermissions?: (
     home: string,
+    mode: PublishMode,
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
   /** Decision 3: the search-hook mode select; defaults to the clack list. */
   promptSearchHooks?: () => Promise<SearchHookMode | null>;
@@ -425,6 +427,7 @@ async function installBody(
     flag: allowFreeVerbs,
     dryRun,
     canPrompt,
+    publishMode,
   });
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
@@ -472,7 +475,7 @@ async function installBody(
     // `wired` is the outcome of THIS run's settings.json write; the three
     // recommendation tiers beside it are unchanged, so a machine consumer that
     // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
-    permissions: { ...recommendedPermissions(), wired: permissions },
+    permissions: { ...recommendedPermissions(allowlistMode(publishMode)), wired: permissions },
     hooks,
     wallet,
   };
@@ -1080,6 +1083,37 @@ export const PERMISSIONS_QUESTION = [
   `Full caveats: ${PERMISSIONS_DOC_URL}`,
 ].join(' ');
 
+/**
+ * The mode the ALLOWLIST is written for, which is not always the mode that ends
+ * up in config.
+ *
+ * A headless install with no flag PERSISTS `auto`, because a machine with nobody
+ * at it is the one that most needs the loop to work — but nobody chose that, and
+ * the publish rule is gated on a choice, not on a default. So a mode this run
+ * defaulted into is treated as `review` here: settings.json is the operator's
+ * file, and a bare `tenjin install` on a fresh CI box must not come back having
+ * granted public publishing. A later run finds `auto` in config, reads it as
+ * `existing`, and writes the rule then — by which point the first run's
+ * walkthrough has already told the operator which mode they are on.
+ */
+function allowlistMode(selection: PublishModeSelection): PublishMode {
+  const chosen =
+    selection.source === 'flag' || selection.source === 'existing' || selection.source === 'prompt';
+  return chosen ? selection.value : 'review';
+}
+
+/**
+ * The same question, plus the one sentence the publish modes add. The rule
+ * follows from a choice already made a moment earlier in this same run, but it
+ * is still a line going into the operator's settings file, and a consent prompt
+ * that named only the free tier while the write also carried `publish` would be
+ * asking about something other than what happens next.
+ */
+export function permissionsQuestion(mode: PublishMode): string {
+  if (mode === 'review') return PERMISSIONS_QUESTION;
+  return `${PERMISSIONS_QUESTION} Adds ${PUBLISH_MODE_RULE} too, because publish.mode is ${mode}.`;
+}
+
 /** The wallet decision's literal copy. */
 export const WALLET_QUESTION = 'Create a wallet now?';
 
@@ -1109,8 +1143,16 @@ async function resolvePermissions(args: {
   flag: boolean | undefined;
   dryRun: boolean;
   canPrompt: boolean;
+  /**
+   * Decision 1's OUTCOME, never a raw flag or a project file: the rule set
+   * follows what this machine's operator has standing on, so the two decisions
+   * cannot disagree about what was chosen. See {@link allowlistMode} for why the
+   * selection's source matters and not only its value.
+   */
+  publishMode: PublishModeSelection;
 }): Promise<PermissionsResult> {
   const { plans, home, deps, flag, dryRun, canPrompt } = args;
+  const publishMode = allowlistMode(args.publishMode);
   // Only Claude Code has a settings file with this shape. Codex and the shared
   // Agent Skills location gate permissions elsewhere, so there is nothing here to
   // write for them, and guessing at another harness's config would be the kind of
@@ -1121,20 +1163,23 @@ async function resolvePermissions(args: {
   if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
   if (flag === false) return permissionsSkipped('claude', home, 'declined');
 
-  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home);
+  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
   if (probe.satisfied !== undefined) return probe.satisfied;
   // Nothing to GRANT, but something of ours to retract: an older version's rule
-  // for a command that no longer exists. That needs no consent — it only ever
-  // removes a rule this CLI wrote — so it runs without the prompt.
-  if (probe.pending !== null && probe.pending.length === 0) return wireFreeVerbAllowlist(home);
+  // for a command that no longer exists, or the publish rule under a mode that
+  // no longer carries it. That needs no consent — it only ever removes a rule
+  // this CLI wrote — so it runs without the prompt.
+  if (probe.pending !== null && probe.pending.length === 0) {
+    return wireFreeVerbAllowlist(home, publishMode);
+  }
 
-  if (flag === true || !canPrompt) return wireFreeVerbAllowlist(home);
+  if (flag === true || !canPrompt) return wireFreeVerbAllowlist(home, publishMode);
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
-  if (!(await confirm(PERMISSIONS_QUESTION))) {
+  if (!(await confirm(permissionsQuestion(publishMode)))) {
     return permissionsSkipped('claude', home, 'declined');
   }
-  return wireFreeVerbAllowlist(home);
+  return wireFreeVerbAllowlist(home, publishMode);
 }
 
 // --- Search hooks (decision 3) ----------------------------------------------------

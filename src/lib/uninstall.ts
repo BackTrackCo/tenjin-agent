@@ -2,7 +2,12 @@ import { lstat, readFile, readdir, rm, rmdir, realpath } from 'node:fs/promises'
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
-import { claudeSettingsPath, FREE_VERB_RULES, LEGACY_FREE_VERB_RULES } from './harness-permissions';
+import {
+  claudeSettingsPath,
+  FREE_VERB_RULES,
+  LEGACY_FREE_VERB_RULES,
+  PUBLISH_MODE_RULE,
+} from './harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
 import { hooksDir } from './paths';
 import { resolveThroughLink } from './skill-writer';
@@ -196,8 +201,14 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
   if (isPlainObject(permissions) && Array.isArray(permissions.allow)) {
     // What THIS version writes, plus what any prior version wrote. A rule we
     // retired is still a rule we put there, and leaving it behind would strand a
-    // dead allow-line for a command that no longer exists.
-    const ours = new Set<string>([...FREE_VERB_RULES, ...LEGACY_FREE_VERB_RULES]);
+    // dead allow-line for a command that no longer exists. The publish rule is
+    // reclaimed WHATEVER the mode says: uninstall removes what this CLI wrote,
+    // and the mode that justified the rule is about to have no CLI behind it.
+    const ours = new Set<string>([
+      ...FREE_VERB_RULES,
+      ...LEGACY_FREE_VERB_RULES,
+      PUBLISH_MODE_RULE,
+    ]);
     const kept = permissions.allow.filter((r) => !(typeof r === 'string' && ours.has(r)));
     if (kept.length !== permissions.allow.length) {
       for (const rule of permissions.allow) {

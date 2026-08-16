@@ -78,6 +78,7 @@ import {
   claudeSettingsPath,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
@@ -123,6 +124,7 @@ function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
 
 // Default doctor stub: one passing check, no network. Overridden per-test.
 const okChecks: DoctorChecks = {
+  publishMode: 'review',
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
 };
 
@@ -457,6 +459,7 @@ describe('runInstall: default PATH binary probe', () => {
 describe('runInstall: doctor as the final step', () => {
   it('embeds the doctor summary and never throws on a doctor failure', async () => {
     const failing: DoctorChecks = {
+      publishMode: 'review',
       checks: [{ name: 'api-contract', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
@@ -519,6 +522,7 @@ describe('runInstall: walkthrough ordering', () => {
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
   const warning: DoctorChecks = {
+    publishMode: 'review',
     checks: [
       {
         name: 'search-contract',
@@ -567,6 +571,7 @@ describe('runInstall: walkthrough ordering', () => {
   // when it does not.
   it('does not repeat the no-wallet line as a warning', async () => {
     const noWallet: DoctorChecks = {
+      publishMode: 'review',
       checks: [
         {
           name: 'wallet',
@@ -600,6 +605,7 @@ describe('runInstall: walkthrough ordering', () => {
   // so suppressing the no-wallet case must not suppress the whole check.
   it('still reports a wallet warning the summary does not carry', async () => {
     const broken: DoctorChecks = {
+      publishMode: 'review',
       checks: [
         {
           name: 'wallet',
@@ -633,6 +639,7 @@ describe('runInstall: walkthrough ordering', () => {
   // else about.
   it('reports a broken env key even while the summary says none', async () => {
     const badEnvKey: DoctorChecks = {
+      publishMode: 'review',
       checks: [
         {
           name: 'wallet',
@@ -1234,6 +1241,7 @@ describe('runInstall: interactive walkthrough', () => {
     expect(human(okRes).split('\n')).toHaveLength(6);
 
     const failing: DoctorChecks = {
+      publishMode: 'review',
       checks: [
         {
           name: 'api',
@@ -1272,11 +1280,13 @@ describe('runInstall: permissions decision', () => {
   type WiredData = {
     permissions: {
       alwaysSafe: { rule: string }[];
+      modeGated: { rule: string }[];
       wired: {
         harness: string;
         path?: string;
         added: string[];
         alreadyPresent: string[];
+        removed: string[];
         skipped?: string;
         warning?: string;
         fix?: string;
@@ -1401,19 +1411,17 @@ describe('runInstall: permissions decision', () => {
   // The old headless arm returned an empty pair whatever the file held, so a
   // re-run against an already-permissioned home reported nothing at all.
   it('reports alreadyPresent accurately on a headless re-run', async () => {
-    await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const args = { harness: ['claude'], publishMode: 'review' };
+    await runInstall(args, makeCtx({ json: true }), deps());
+    const res = await runInstall(args, makeCtx({ json: true }), deps());
     expect(wiredOf(res.data).added).toEqual([]);
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
   });
 
   it('is idempotent: a second run adds nothing and reports already-present', async () => {
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
+    const args = { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' };
+    await runInstall(args, makeCtx(), deps());
+    const res = await runInstall(args, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data).added).toEqual([]);
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
@@ -1423,10 +1431,14 @@ describe('runInstall: permissions decision', () => {
   // Re-running install is the advice for refreshing a stale setup, so this is the
   // ordinary second-run path, not an edge case.
   it('does not re-ask once every rule is already allowed', async () => {
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
       deps({ isInteractive: true, confirmPermissions: confirm }),
     );
@@ -1611,6 +1623,107 @@ describe('runInstall: permissions decision', () => {
       ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule),
     );
     expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+  });
+
+  /**
+   * The publish rule follows decision 1, and only when a human made it. An agent
+   * cannot reach either half: `tenjin install` and `tenjin config set` are both
+   * never-allowlisted, so the mode is always something an operator settled.
+   */
+  describe('the publish rule follows publish.mode', () => {
+    it('writes it when --publish-mode names auto on this run', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+      expect(await allowList()).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+    });
+
+    it('writes it when auto is already the configured mode', async () => {
+      await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      // Second run names no mode: it reads `auto` back out of config.
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).alreadyPresent).toContain(PUBLISH_MODE_RULE);
+    });
+
+    it('does not write it on review', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
+      expect(await allowList()).not.toContain(PUBLISH_MODE_RULE);
+    });
+
+    // A bare headless install PERSISTS auto because a machine with nobody at it
+    // needs the loop to work, but nobody chose that, and settings.json is the
+    // operator's file. The grant waits for a run that reads the mode back as a
+    // standing choice.
+    it('does not write it off a headless default nobody chose', async () => {
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
+      expect(await allowList()).not.toContain(PUBLISH_MODE_RULE);
+    });
+
+    // The mode moved back to "ask me first", so the rule that skipped the asking
+    // must not outlive it.
+    it('takes it back when the mode returns to review', async () => {
+      await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).removed).toEqual([PUBLISH_MODE_RULE]);
+      expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+    });
+
+    // The consent prompt has to name what the write actually carries.
+    it('discloses the extra rule in the question it asks', async () => {
+      const confirm = vi.fn(async (_label: string) => true);
+      await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: confirm }),
+      );
+      expect(confirm.mock.calls[0]![0]).toContain(PUBLISH_MODE_RULE);
+      expect(confirm.mock.calls[0]![0]).toContain('publish.mode is auto');
+    });
+
+    it('names no extra rule in the question on review', async () => {
+      const confirm = vi.fn(async (_label: string) => true);
+      await runInstall(
+        { harness: ['claude'], publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: confirm }),
+      );
+      expect(confirm.mock.calls[0]![0]).not.toContain(PUBLISH_MODE_RULE);
+    });
+
+    it('carries the mode-gated tier in the envelope', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      const d = res.data as WiredData;
+      expect(d.permissions.modeGated.map((e) => e.rule)).toEqual([PUBLISH_MODE_RULE]);
+    });
   });
 });
 

@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
+import type { PublishMode } from './config';
 
 /**
  * The one place the CLI WRITES a permission grant into a harness's own settings
@@ -13,12 +14,23 @@ import { writeFileAtomic } from './atomic-json';
  *    run that writes says which rules landed, in which file, and how to remove
  *    them. What keeps that defensible is the next two invariants: the grant is a
  *    fixed free tier, and it can never widen.
- *  - FREE-TIER ONLY, AND NOT PARAMETERIZED. The rules are the hardcoded
- *    {@link FREE_VERB_RULES} constant and the writer takes no rule argument, so
- *    there is no call path — no flag, no config key, no future caller — that can
- *    make it write `buy`, `publish`, `session start`, `send`, `config set`,
- *    `wallet create`, `mcp`, `install`, or a broad `Bash(tenjin:*)`. A CLI that
- *    could widen its own permission grant is exactly what this shape rules out.
+ *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
+ *    It takes a {@link PublishMode}, and that selects between exactly two
+ *    hardcoded constants: {@link FREE_VERB_RULES}, and those plus
+ *    {@link PUBLISH_MODE_RULE}. So there is no call path — no flag, no config
+ *    key, no future caller — that can make it write `buy`, `session start`,
+ *    `send`, `config set`, `wallet create`, `mcp`, `install`, or a broad
+ *    `Bash(tenjin:*)`. A CLI that could widen its own permission grant is exactly
+ *    what this shape rules out.
+ *
+ *    The publish rule is gated on the mode and on nothing else, and the mode is
+ *    a human's standing choice: `install` settles and PERSISTS it before it gets
+ *    here, `install` and `config set` are both never-allowlisted, so an agent
+ *    cannot reach either without a permission decision of its own. Being on
+ *    `auto` already means "a clean publish proceeds without asking", and a
+ *    harness prompt in front of it asks that same question a second time
+ *    (#161). Going back to `review` RETRACTS the rule on the next `install`,
+ *    which is what stops a grant from outliving the mode that justified it.
  *  - ADDITIVE, PLUS ONE RETRACTION THAT IS STILL OURS. Every other key in the
  *    file, and every allow-rule we did not write, is copied through verbatim in
  *    its original order; missing rules are appended. The single exception is
@@ -61,6 +73,38 @@ export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin wallet balance:*)',
   'Bash(tenjin config get:*)',
 ];
+
+/**
+ * The rule `publish.mode` gates, mirroring lib/permissions.ts's
+ * PUBLISH_MODE_ALLOWLIST and duplicated as a literal for the same reason
+ * {@link FREE_VERB_RULES} is: that module is a DOCUMENT, and an edit there must
+ * not silently change what this file writes. A test pins the two together.
+ *
+ * Deliberately NOT a member of {@link FREE_VERB_RULES}: it can neither spend nor
+ * move keys, but it publishes publicly under the operator's identity, so it is
+ * not free-tier and never rides along with it.
+ */
+export const PUBLISH_MODE_RULE = 'Bash(tenjin publish:*)';
+
+/**
+ * Exactly what may be written for `mode`. The two return values are the only two
+ * rule sets this module can produce.
+ */
+export function rulesForPublishMode(mode: PublishMode): readonly string[] {
+  return mode === 'review' ? FREE_VERB_RULES : [...FREE_VERB_RULES, PUBLISH_MODE_RULE];
+}
+
+/**
+ * What this run should sweep out: what an older version wrote, plus the publish
+ * rule when the mode no longer justifies it. A retraction is always a rule this
+ * CLI wrote under a setting the operator has since changed, and it is reported
+ * exactly like an addition.
+ */
+function retiredFor(mode: PublishMode): Set<string> {
+  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  if (mode === 'review') retired.add(PUBLISH_MODE_RULE);
+  return retired;
+}
 
 /**
  * Rules a PRIOR version of this writer put in `permissions.allow` and this one
@@ -200,20 +244,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Add the free-verb rules to `permissions.allow` in ~/.claude/settings.json.
- * Creates the file (and the `permissions.allow` path) when absent, appends only
- * the rules that are missing, and rewrites nothing else. Idempotent: a second
- * run returns `added: []` with every rule under `alreadyPresent` and does not
- * touch the file at all.
+ * Add the rules `mode` calls for to `permissions.allow` in
+ * ~/.claude/settings.json. Creates the file (and the `permissions.allow` path)
+ * when absent, appends only the rules that are missing, and rewrites nothing
+ * else. Idempotent: a second run at the same mode returns `added: []` with every
+ * rule under `alreadyPresent` and does not touch the file at all.
  */
-export async function wireFreeVerbAllowlist(homeDir: string): Promise<PermissionsResult> {
-  const found = await inspectAllowlist(homeDir);
+export async function wireFreeVerbAllowlist(
+  homeDir: string,
+  mode: PublishMode = 'review',
+): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir, mode);
   if ('result' in found) return found.result;
   const { path, raw, settings, permissions, allow, added, alreadyPresent } = found;
-  // Rules an earlier version of this writer left behind. Swept on the same pass
-  // that appends, so one `tenjin install` after an update leaves a settings.json
-  // with exactly the current tier in it and no residue from the last one.
-  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  // Rules an earlier version of this writer left behind, and the publish rule
+  // when the mode no longer carries it. Swept on the same pass that appends, so
+  // one `tenjin install` leaves a settings.json holding exactly what this
+  // machine's current mode calls for and no residue from what it used to be.
+  const retired = retiredFor(mode);
   const removed = allow.filter((r): r is string => typeof r === 'string' && retired.has(r));
   if (added.length === 0 && removed.length === 0) {
     return { harness: 'claude', path, added: [], alreadyPresent, removed: [] };
@@ -265,11 +313,12 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
  */
 export async function inspectFreeVerbRules(
   homeDir: string,
+  mode: PublishMode = 'review',
 ): Promise<{ pending: string[] | null; satisfied?: PermissionsResult }> {
-  const found = await inspectAllowlist(homeDir);
+  const found = await inspectAllowlist(homeDir, mode);
   if ('result' in found) return { pending: null };
   if (found.added.length > 0) return { pending: found.added };
-  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  const retired = retiredFor(mode);
   if (found.allow.some((r) => typeof r === 'string' && retired.has(r))) return { pending: [] };
   return {
     pending: [],
@@ -301,6 +350,7 @@ interface AllowlistInspection {
  */
 async function inspectAllowlist(
   homeDir: string,
+  mode: PublishMode,
 ): Promise<AllowlistInspection | { result: PermissionsResult }> {
   const declaredPath = claudeSettingsPath(homeDir);
   const refuse = (
@@ -392,7 +442,8 @@ async function inspectAllowlist(
   const allow: unknown[] = allowValue ?? [];
 
   const present = new Set(allow.filter((e): e is string => typeof e === 'string'));
-  const added = FREE_VERB_RULES.filter((rule) => !present.has(rule));
-  const alreadyPresent = FREE_VERB_RULES.filter((rule) => present.has(rule));
+  const writable = rulesForPublishMode(mode);
+  const added = writable.filter((rule) => !present.has(rule));
+  const alreadyPresent = writable.filter((rule) => present.has(rule));
   return { path, raw, settings, permissions, allow, added, alreadyPresent: [...alreadyPresent] };
 }

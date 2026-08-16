@@ -43,6 +43,8 @@
  * x402/payments-semantics change, tracked separately.
  */
 
+import type { PublishMode } from './config';
+
 /** One pasteable allowlist rule plus why it is safe (or what it costs). */
 export interface AllowlistEntry {
   /** The exact line to add to the harness permission allowlist. */
@@ -233,11 +235,50 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
 ];
 
 /**
+ * The one rule that is neither always-safe nor a standing opt-in: it exists only
+ * while `publish.mode` is `auto` or `full-auto`.
+ *
+ * The mode IS the consent. An operator who set auto has already said a clean
+ * publish should proceed without asking; leaving the harness prompt in front of
+ * it asks the same question a second time, in a place the mode cannot answer,
+ * and the agent that hits it does the only safe thing and stops. That was the
+ * observed failure: a session ran `tenjin config get publish.mode` mid-publish to
+ * discover it had permission it had already been given (#161).
+ *
+ * NOT part of {@link recommendedRules}, and not a tier an operator picks from.
+ * There is no line to paste and no flag that adds it: `install` writes it when
+ * the mode it just settled is auto or full-auto, takes it back when the mode is
+ * review, and `uninstall` reclaims it like every other rule this CLI wrote.
+ */
+export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
+  {
+    rule: 'Bash(tenjin publish:*)',
+    command: 'tenjin publish',
+    note:
+      'PUBLISHES PUBLICLY under your identity, and is cleared only while publish.mode is ' +
+      'auto or full-auto — the mode is the consent, and the harness prompt would ask for it ' +
+      'twice. What still gates a publish is the CLI itself: the deterministic secret scan ' +
+      'blocks in every mode and is not clearable by --yes, auto stops on any finding, and ' +
+      'full-auto stops only on a hard block. Set publish.mode back to review and the next ' +
+      '`tenjin install` removes this rule.',
+  },
+];
+
+/** The mode-gated rules in effect for `mode`; empty on review. */
+export function modeGatedAllowlist(mode: PublishMode): AllowlistEntry[] {
+  return mode === 'review' ? [] : PUBLISH_MODE_ALLOWLIST.map((e) => ({ ...e }));
+}
+
+/**
  * Verbs that must NEVER appear in the recommended allowlist, with the reason each
  * one is a human decision. `tenjin send` is the wallet escape hatch (tenjin-agent
  * #40) and heads this list: it moves USDC to an arbitrary address, outside the
  * spend policy that bounds `buy`. Naming it here is load-bearing even in versions
  * where the verb does not exist yet — the exclusion ships before the verb does.
+ *
+ * `tenjin publish` stays on this list under its own terms: nothing RECOMMENDS it,
+ * and no line here or on the doc page adds it. {@link PUBLISH_MODE_ALLOWLIST} is
+ * not a recommendation — it is what one specific operator choice already means.
  */
 export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   {
@@ -248,7 +289,11 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   },
   {
     command: 'tenjin publish',
-    reason: 'Puts your content on a public marketplace under your identity.',
+    reason:
+      'Puts your content on a public marketplace under your identity. Never pre-cleared by the ' +
+      'free tier or an opt-in line: the only thing that clears it is `publish.mode` auto or ' +
+      'full-auto, which is the same human decision said once instead of twice (see ' +
+      'PUBLISH_MODE_ALLOWLIST). Back on review, `install` takes the rule away again.',
   },
   {
     command: 'tenjin edit',
@@ -324,15 +369,24 @@ export interface RecommendedPermissions {
   alwaysSafe: AllowlistEntry[];
   optIn: AllowlistEntry[];
   neverAllowlisted: ExcludedVerb[];
+  /**
+   * Rules the CURRENT publish.mode carries, empty on review. Separate from the
+   * three tiers above because it is not a recommendation to weigh: it is what
+   * this machine's mode already means, so a consumer that renders it beside the
+   * others would be offering a choice that has been made.
+   */
+  modeGated: AllowlistEntry[];
   /** Caveats that qualify the rules above; never omit them when rendering. */
   caveats: { flags: string[]; mcp: string[] };
 }
 
-export function recommendedPermissions(): RecommendedPermissions {
+/** `mode` defaults to the shipped `review`, i.e. no mode-gated rules. */
+export function recommendedPermissions(mode: PublishMode = 'review'): RecommendedPermissions {
   return {
     alwaysSafe: ALWAYS_SAFE_ALLOWLIST.map((e) => ({ ...e })),
     optIn: OPT_IN_ALLOWLIST.map((e) => ({ ...e })),
     neverAllowlisted: NEVER_ALLOWLISTED.map((e) => ({ ...e })),
+    modeGated: modeGatedAllowlist(mode),
     caveats: { flags: [...FLAG_CAVEAT], mcp: [...MCP_CAVEAT] },
   };
 }
@@ -371,4 +425,17 @@ export function permissionsPointer(): string {
     `Auto-mode permission allowlist and subagent delegation (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
     `${OPT_IN_ALLOWLIST.length} opt-ins, the --base-url caveat): ${PERMISSIONS_DOC_URL}`
   );
+}
+
+/**
+ * The one rule the current mode carries, or null on review. This one DOES name
+ * its rule, unlike {@link permissionsPointer}: it is not a tier to weigh and
+ * paste, it is a line that should already be in the operator's settings file, and
+ * an operator whose agent is being prompted for a publish it was told not to ask
+ * about needs to see exactly which rule is missing.
+ */
+export function modeGatedPointer(mode: PublishMode): string | null {
+  const entry = modeGatedAllowlist(mode)[0];
+  if (entry === undefined) return null;
+  return `publish.mode=${mode} also needs ${entry.rule} in your harness allowlist, or it will prompt for every publish anyway; \`tenjin install\` writes it.`;
 }

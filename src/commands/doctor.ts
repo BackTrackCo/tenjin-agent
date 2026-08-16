@@ -35,8 +35,8 @@ import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
-import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
-import type { PartialConfig } from '../lib/config';
+import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
+import type { PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -132,6 +132,12 @@ export interface DoctorDeps {
 export interface DoctorChecks {
   checks: CheckResult[];
   failure?: { code: ErrorCode; result: CheckResult };
+  /**
+   * The publish mode this machine resolves right now (global config, or the
+   * environment when it overrides). Reported rather than checked: it decides
+   * which harness rules the operator needs, and it can never pass or fail.
+   */
+  publishMode: PublishMode;
 }
 
 export async function collectDoctorChecks(
@@ -165,16 +171,21 @@ export async function collectDoctorChecks(
   }
 
   const checks = built.map((b) => b.result);
+  const publishMode = settings.publishMode.value;
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
-  if (firstFail === undefined) return { checks };
-  return { checks, failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result } };
+  if (firstFail === undefined) return { checks, publishMode };
+  return {
+    checks,
+    publishMode,
+    failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result },
+  };
 }
 
 export async function runDoctor(
   ctx: CommandContext,
   deps: DoctorDeps = {},
 ): Promise<CommandResult> {
-  const { checks, failure } = await collectDoctorChecks(ctx, deps);
+  const { checks, failure, publishMode } = await collectDoctorChecks(ctx, deps);
   if (failure !== undefined) {
     const r = failure.result;
     // The allowlist rides on the FAILURE envelope too. An operator whose fresh
@@ -185,7 +196,7 @@ export async function runDoctor(
     // the machine payload is where this has to land.
     throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
-      details: { checks, permissions: recommendedPermissions() },
+      details: { checks, permissions: recommendedPermissions(publishMode) },
     });
   }
 
@@ -195,9 +206,18 @@ export async function runDoctor(
   // exists and where to get it. It reports nothing about the local machine, so it
   // is deliberately NOT a check: it can never pass or fail. `--json` is unchanged
   // and still carries the whole recommendation as data.
+  // The mode-gated line goes ABOVE the pointer, and only when there is one: it
+  // names a rule this machine's own mode needs, which is closer to a finding than
+  // to the standing recommendation the pointer links to.
+  const modeLine = modeGatedPointer(publishMode);
   return {
-    data: { status: 'pass', checks, permissions: recommendedPermissions() },
-    humanLines: [...renderDoctorHuman(ctx.io, checks), '', permissionsPointer()],
+    data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
+    humanLines: [
+      ...renderDoctorHuman(ctx.io, checks),
+      '',
+      ...(modeLine !== null ? [modeLine] : []),
+      permissionsPointer(),
+    ],
   };
 }
 
