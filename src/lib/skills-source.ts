@@ -25,7 +25,7 @@ export type SkillName = (typeof SKILL_NAMES)[number];
  */
 export const SHIPPED_SKILL_FILES: Record<SkillName, readonly string[]> = {
   'tenjin-search': ['SKILL.md', 'references/permissions.md'],
-  'tenjin-publish': ['SKILL.md'],
+  'tenjin-publish': ['SKILL.md', 'references/maintain.md'],
   tenjin: ['SKILL.md'],
 };
 

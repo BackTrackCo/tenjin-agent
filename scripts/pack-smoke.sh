@@ -60,13 +60,17 @@ BIN="./node_modules/.bin/tenjin"
 }
 
 # A skill's SUBDIRECTORY is the part an `files: ["skills"]` entry ships silently
-# and a narrower glob would drop: tenjin-search links references/permissions.md,
-# and install copies whatever is in the packaged tree. A miss here would ship a
-# skill whose own pointer is dead, with every source-tree test still green.
-[ -f "./node_modules/tenjin-cli/skills/tenjin-search/references/permissions.md" ] || {
-  echo "pack-smoke: FAIL — skills/tenjin-search/references/permissions.md missing from the installed package" >&2
-  exit 1
-}
+# and a narrower glob would drop: both CLI skills link a reference file out of
+# their own tree, and install copies whatever is in the packaged one. A miss here
+# would ship a skill whose own pointer is dead, with every source-tree test green.
+for REF in \
+  "skills/tenjin-search/references/permissions.md" \
+  "skills/tenjin-publish/references/maintain.md"; do
+  [ -f "./node_modules/tenjin-cli/$REF" ] || {
+    echo "pack-smoke: FAIL — $REF missing from the installed package" >&2
+    exit 1
+  }
+done
 
 # 1) --version prints exactly the package.json version.
 GOT_VERSION="$("$BIN" --version)"

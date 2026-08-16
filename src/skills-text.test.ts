@@ -282,10 +282,17 @@ describe('tenjin-publish: publish denials are the gate working', () => {
     expect(text).toMatch(/PII, wallet addresses/i);
   });
 
-  // Stated ONCE, in the skill that owns publishing. tenjin-search points at it.
+  /**
+   * Stated ONCE, in the skill that owns publishing. tenjin-search used to restate
+   * it, along with the mode table and the exit-3 render rule, which is two copies
+   * of one contract and a standing invitation to drift. It delegates now, so the
+   * pin here is that it delegates rather than that it repeats.
+   */
   it('is the only skill that carries that caveat', () => {
-    expect(flat('tenjin-search')).not.toMatch(/silently clears WARN-tier findings/i);
-    expect(flat('tenjin-search')).toMatch(/Never a generic "publish\?"\s*first/i);
+    const search = flat('tenjin-search');
+    expect(search).not.toMatch(/silently clears WARN-tier findings/i);
+    expect(search).not.toMatch(/shall I publish/i);
+    expect(search).toMatch(/Invoke the tenjin-publish skill and follow it; never publish bare/i);
   });
 });
 
@@ -357,21 +364,34 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
  * as the ordinary outcome and asking as the opt-out (owner call, PR #164).
  */
 describe('the skills read auto-first', () => {
+  /**
+   * The consent modes are one table near the top now, rather than a prose list
+   * two thirds down. Same contract, same order: `auto` is what install settles
+   * and it leads, `review` closes.
+   */
   it('tenjin-publish names auto as what install sets, before review', () => {
     const text = flat('tenjin-publish');
-    expect(text).toMatch(
-      /`?tenjin install`? settles at \*\*auto\*\*|settles `?publish\.mode`?[^.]*\*\*auto\*\*/i,
-    );
-    expect(text.indexOf('**auto** (what install sets)')).toBeGreaterThan(-1);
-    // The consent list leads with auto and closes with review.
-    expect(text.indexOf('**auto** (what install sets)')).toBeLessThan(text.indexOf('**review**'));
+    expect(text).toMatch(/`?tenjin install`? settles it at \*\*auto\*\*/i);
+    expect(text.indexOf('| `auto`')).toBeGreaterThan(-1);
+    expect(text.indexOf('| `auto`')).toBeLessThan(text.indexOf('| `review`'));
+    // And the table is up front, where a mode decision is made, not buried.
+    expect(text.indexOf('| `auto`')).toBeLessThan(text.length / 3);
   });
 
-  it('tenjin-search after-a-MISS leads with auto too', () => {
+  /**
+   * tenjin-search carried its own copy of the mode default, the mode table and the
+   * exit-3 rule. One contract, two statements, and the drift lands on the agent as
+   * contradictory instructions. It now hands the whole consent question to
+   * tenjin-publish, so what is pinned here is the handoff and the absence of a
+   * second copy.
+   */
+  it('tenjin-search delegates the mode instead of restating it', () => {
     const text = flat('tenjin-search');
-    expect(text).toMatch(/settles `?publish\.mode`? at \*\*auto\*\*/i);
-    expect(text).toMatch(/No permission round-trip/i);
-    expect(text.indexOf('| `auto`')).toBeLessThan(text.indexOf('| `review`'));
+    expect(text).toMatch(
+      /It owns drafting, the safety pass, pricing, the card, and the consent mode/i,
+    );
+    expect(text).not.toMatch(/\| `auto`/);
+    expect(text).not.toMatch(/full-auto/);
   });
 });
 

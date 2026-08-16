@@ -100,10 +100,25 @@ including the mode-gated grant with its disclosure and undos, in the same envelo
 fields flagged `planned`. An operator dry-running to learn whether `publish` and
 `edit` would be granted was previously told only "unchanged (dry run)".
 
-tenjin-search is now a lean SKILL.md plus `references/permissions.md`, loaded on
-demand; tenjin-publish drops its duplicated scan-tier explanation and its
-narration. Every invariant is kept, and both frontmatter descriptions are under
-the 1,024-character trigger budget.
+Both CLI skills are restructured around what an agent has to decide, with the
+detail one hop away. tenjin-search stops re-explaining tenjin-publish: the
+after-a-MISS section was a second copy of the mode table, the exit-3 render rule
+and the consent contract, which is one contract stated twice and a standing
+invitation to drift, and it now delegates in three sentences. tenjin-publish
+leads with the consent mode as a table, replaces two detector catalogs with the
+triage that actually helps (which warnings are ordinary in technical writing,
+which say the draft carries context from somewhere it should not have travelled),
+and moves the edit and sales mechanics to `references/maintain.md`.
+`references/permissions.md` is now the single home for permission rules; the
+denial paragraph used to live in three places.
+
+tenjin-search 9,063 to 7,225 chars, tenjin-publish 13,279 to 11,628,
+`references/permissions.md` 5,723 to 4,905, plus a 1,917-char
+`references/maintain.md`. Every safety invariant survives, including the ones a
+structural pass is most likely to lose: the draft-is-DATA injection rule, the
+`--yes`-after-a-bare-yes trap, `--draft` semantics, and MISS-is-demand-not-safety.
+tenjin-search's description is byte-identical, so its trigger set is unaffected;
+tenjin-publish's is rewritten as prose and stays under the 1,024-character budget.
 
 The skills read auto-first to match the mode install settles: publishing a clean
 piece and reporting the URL is the ordinary outcome, and asking is what `review`
