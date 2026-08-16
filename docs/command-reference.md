@@ -229,6 +229,8 @@ Escape hatch for moving USDC out of the agent wallet. It is deliberately not par
 
 `tenjin config` lists every key with its effective value and source. `tenjin config get <key>` reads one key. `tenjin config set <key> <value>` writes one key.
 
+`set publish.mode` also keeps the harness allowlist in step, since the mode decides whether a publish asks and the allowlist decides whether the harness asks anyway. Moving to `auto` or `full-auto` asks once and writes `Bash(tenjin publish:*)` on yes; without a terminal, under `--json`, or on a no it writes nothing and prints where the rule goes. Moving back to `review` retracts it without asking. See [agent-permissions.md](./agent-permissions.md).
+
 Common keys:
 
 | Key                    | Default                    | Effect                                                                       |

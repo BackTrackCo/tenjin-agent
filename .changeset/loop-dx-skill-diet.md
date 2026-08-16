@@ -34,3 +34,9 @@ unlinked — the thing #161 is actually about. It rides the relink and draft pat
 too, and the id is validated at the command edge against the shape the server
 declares rather than the CLI's looser uuid, so a bad one costs a message instead
 of a 400 collected after the wallet signature.
+
+`tenjin config set publish.mode` now syncs that harness rule instead of leaving
+it to the next `install`. Loosening to auto or full-auto asks once, naming the
+rule, and writes on yes; no terminal, `--json`, or a decline writes nothing and
+points. Tightening back to review retracts it unprompted, since that direction
+can only take back what this CLI wrote.

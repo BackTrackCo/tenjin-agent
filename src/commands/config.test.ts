@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
+import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -26,6 +27,15 @@ function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
 }
 
 const configFile = () => join(dir, 'config.json');
+
+/**
+ * A throwaway home for any `config set publish.mode`, which now syncs the harness
+ * allowlist: without one the sync would reach the operator's real
+ * ~/.claude/settings.json from a unit test.
+ */
+async function hermeticHome(): Promise<{ homeDir: string; isInteractive: boolean }> {
+  return { homeDir: await mkdtemp(join(tmpdir(), 'tenjin-cfg-h-')), isInteractive: false };
+}
 const readRawFile = async () => JSON.parse(await readFile(configFile(), 'utf8')) as unknown;
 
 async function caught<T>(fn: () => Promise<T>): Promise<CliError> {
@@ -365,8 +375,12 @@ describe('publish.mode key', () => {
   it.each(['review', 'auto', 'full-auto'] as const)(
     'round-trips %s through set/get',
     async (mode) => {
-      const set = await runConfigSet({ key: 'publish.mode', value: mode }, makeCtx());
-      expect(set.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
+      const set = await runConfigSet(
+        { key: 'publish.mode', value: mode },
+        makeCtx(),
+        await hermeticHome(),
+      );
+      expect(set.data).toMatchObject({ key: 'publish.mode', value: mode, source: 'file' });
       const get = await runConfigGet({ key: 'publish.mode' }, makeCtx());
       expect(get.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
       expect(await readRawFile()).toEqual({ publish: { mode } });
@@ -406,7 +420,7 @@ describe('publish.defaultPrice key', () => {
   });
 
   it('merges the two publish subkeys without dropping each other', async () => {
-    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), await hermeticHome());
     await runConfigSet({ key: 'publish.defaultPrice', value: '0.5' }, makeCtx());
     expect(await readRawFile()).toEqual({ publish: { mode: 'review', defaultPrice: '500000' } });
   });
@@ -415,7 +429,7 @@ describe('publish.defaultPrice key', () => {
 describe('forward compatibility', () => {
   it('preserves an unknown top-level block through a set', async () => {
     await writeFile(configFile(), JSON.stringify({ future: { some: 'block' } }));
-    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx());
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), await hermeticHome());
     const raw = (await readRawFile()) as Record<string, unknown>;
     expect(raw.future).toEqual({ some: 'block' });
     expect(raw.publish).toEqual({ mode: 'auto' });
@@ -423,7 +437,7 @@ describe('forward compatibility', () => {
 
   it('preserves an unknown publish subkey a newer CLI wrote', async () => {
     await writeFile(configFile(), JSON.stringify({ publish: { visibility: 'unlisted' } }));
-    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), await hermeticHome());
     const raw = (await readRawFile()) as { publish: Record<string, unknown> };
     expect(raw.publish).toEqual({ visibility: 'unlisted', mode: 'review' });
   });
@@ -527,6 +541,212 @@ describe('update.mode', () => {
     expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
       data: { value: 'off', source: 'file' },
     });
+  });
+});
+
+/**
+ * `config set publish.mode` settles whether a PUBLISH asks. The harness rule
+ * settles whether the HARNESS asks anyway, and leaving that to the next `tenjin
+ * install` is the seam that made auto mode look broken (tenjin-agent #161).
+ */
+describe('publish.mode keeps the harness allowlist in step', () => {
+  let home: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'tenjin-cfg-home-'));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const allowOf = async (): Promise<string[]> => {
+    const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
+    if (raw === null) return [];
+    return (JSON.parse(raw) as { permissions?: { allow?: string[] } }).permissions?.allow ?? [];
+  };
+  const syncOf = (d: unknown) =>
+    (
+      d as {
+        allowlist?: { added: string[]; removed: string[]; skipped?: string; pointer?: string };
+      }
+    ).allowlist;
+
+  // Loosening ADDS a grant, so a human says yes to it.
+  it('writes the publish rule on auto when the operator agrees', async () => {
+    const asked: string[] = [];
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async (label) => {
+        asked.push(label);
+        return true;
+      },
+    });
+    expect(asked).toHaveLength(1);
+    // The question names the rule it is about to write.
+    expect(asked[0]).toContain(PUBLISH_MODE_RULE);
+    expect(asked[0]).toContain('publish.mode auto');
+    expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+    expect(syncOf(res.data)?.added).toContain(PUBLISH_MODE_RULE);
+  });
+
+  // The write carries the free tier too on a machine that never ran install, so
+  // the question has to say so rather than name one line and write ten.
+  it('discloses the free-verb rules the same write carries', async () => {
+    let label = '';
+    await runConfigSet({ key: 'publish.mode', value: 'full-auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async (l) => {
+        label = l;
+        return true;
+      },
+    });
+    expect(label).toMatch(/Also adds the \d+ free-verb rule/);
+    expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + 1);
+  });
+
+  it('writes nothing when the operator declines, and points instead', async () => {
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async () => false,
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('declined');
+    expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
+    // The mode itself still landed; only the harness write was refused.
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'auto', source: 'file' },
+    });
+  });
+
+  // Silence is not consent: nobody to ask means the pointer, never a write.
+  it('never prompts and never writes without a TTY', async () => {
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: false,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+    expect(res.humanLines?.join(' ')).toContain(PUBLISH_MODE_RULE);
+  });
+
+  it('never prompts under --json, whatever the TTY says', async () => {
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        isInteractive: true,
+        confirmRule: async () => {
+          throw new Error('must not ask');
+        },
+      },
+    );
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+    // The payload still carries the remedy, since --json renders no humanLines.
+    expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
+  });
+
+  // Tightening only ever removes what this CLI wrote, so it needs no question —
+  // including on a headless machine, which is where a stale grant would sit.
+  it('retracts the rule on review, unprompted, and reports it', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async () => true,
+    });
+    expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+
+    const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: false,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).not.toContain(PUBLISH_MODE_RULE);
+    expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
+    expect(res.humanLines?.join(' ')).toContain('Removed');
+  });
+
+  it('leaves the operator’s own rules alone while retracting ours', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({
+        permissions: { allow: ['Bash(git status:*)', ...FREE_VERB_RULES, PUBLISH_MODE_RULE] },
+      }),
+    );
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), { homeDir: home });
+    expect(await allowOf()).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
+  });
+
+  // The retraction skips its prompt because it can only REMOVE. That claim stops
+  // holding when the free tier is absent, since the one writer would add it in
+  // the same pass — so this path declines to write rather than grant nine rules
+  // nobody asked for. A publish rule without the free tier beside it was not
+  // written by our `install`, which writes them together.
+  it('writes nothing on review when the free tier is missing, rather than adding it', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ permissions: { allow: ['Bash(git status:*)', PUBLISH_MODE_RULE] } }),
+    );
+    const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+      homeDir: home,
+    });
+    expect(await allowOf()).toEqual(['Bash(git status:*)', PUBLISH_MODE_RULE]);
+    expect(syncOf(res.data)?.skipped).toBe('needs-install');
+    expect(syncOf(res.data)?.added).toEqual([]);
+  });
+
+  it('asks nothing when the allowlist already carries every rule the mode needs', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async () => true,
+    });
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(syncOf(res.data)).toMatchObject({ added: [], removed: [] });
+    expect(syncOf(res.data)?.skipped).toBeUndefined();
+  });
+
+  it('touches no settings file on a non-Claude harness', async () => {
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      harnessIsClaude: false,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('not-claude');
+  });
+
+  // publish.defaultPrice is not a consent decision and must not drag the harness
+  // allowlist along with it.
+  it('syncs nothing for the sibling publish key', async () => {
+    const res = await runConfigSet({ key: 'publish.defaultPrice', value: '0.25' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)).toBeUndefined();
   });
 });
 

@@ -211,7 +211,15 @@ paste here, because the mode is the decision and the rule only follows it.
 `tenjin install` writes it when the mode it settles is `auto` or `full-auto`, and
 takes it back on the next run once the mode is `review`. `tenjin uninstall`
 reclaims it like every other rule this CLI wrote. There is no flag that adds it
-and no line to paste: change the mode, re-run `install`.
+and no line to paste: change the mode.
+
+`tenjin config set publish.mode` keeps the two in step without waiting for the
+next `install`. Moving to `auto` or `full-auto` asks you once, naming the rule,
+and writes it on yes; a run with no terminal, a `--json` run, or a no leaves the
+file alone and prints where the rule goes. Moving back to `review` retracts the
+rule without asking, because that direction can only take back what this CLI
+wrote — unless the free tier is missing too, which means `install` never wrote
+these rules and none of them are ours to change.
 
 A bare non-interactive `tenjin install` does **not** write it. That run defaults
 the mode to `auto` so an unattended machine works, but nobody chose that, and a

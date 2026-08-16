@@ -1,6 +1,15 @@
 import { mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
+import { confirmChoice } from '../lib/clack';
+import {
+  inspectFreeVerbRules,
+  PUBLISH_MODE_RULE,
+  wireFreeVerbAllowlist,
+  type PermissionsResult,
+} from '../lib/harness-permissions';
+import { modeGatedPointer } from '../lib/permissions';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
@@ -47,6 +56,23 @@ interface RenderedValue {
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
+}
+
+/**
+ * Seams for the one `config set` path that touches a file outside the data dir.
+ * Tests inject all of them; nothing here is reachable from a flag.
+ */
+export interface ConfigSetDeps {
+  /** Home whose `.claude/settings.json` is synced; defaults to os.homedir(). */
+  homeDir?: string;
+  /** Overrides TTY detection, exactly as install's own seam does. */
+  isInteractive?: boolean;
+  /** The yes/no for a loosening write; defaults to the clack confirm (default yes). */
+  confirmRule?: (label: string) => Promise<boolean>;
+  /** Whether this machine's harness is Claude Code (the only settings file we write). */
+  harnessIsClaude?: boolean;
+  inspectAllowlist?: typeof inspectFreeVerbRules;
+  wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
 
 const CONFIRM_ABOVE = 'above:';
@@ -164,8 +190,9 @@ export async function runConfigGet(
 export async function runConfigSet(
   { key, value }: { key: string; value: string },
   ctx: CommandContext,
+  deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
-  if (isPublishKey(key)) return setPublishKey(key, value, ctx);
+  if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
   if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   const configKey = assertKey(key);
@@ -185,6 +212,7 @@ async function setPublishKey(
   key: PublishConfigKey,
   value: string,
   ctx: CommandContext,
+  deps: ConfigSetDeps,
 ): Promise<CommandResult> {
   const entry: RenderedSetting =
     key === 'publish.mode'
@@ -196,7 +224,131 @@ async function setPublishKey(
     ...existing,
     publish: { ...existing.publish, [subkey]: stored },
   }));
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  const humanLines = [formatLine(key, entry)];
+  if (key !== 'publish.mode') return { data: { key, ...entry }, humanLines };
+
+  // The mode decides whether a publish asks; the harness rule decides whether the
+  // harness asks ANYWAY. Settling one and leaving the other to the next `tenjin
+  // install` is the seam that made publish.mode look broken (tenjin-agent #161),
+  // so the two move together from here too.
+  const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
+  return {
+    data: { key, ...entry, allowlist },
+    humanLines: [...humanLines, ...allowlistLines(allowlist)],
+  };
+}
+
+/**
+ * What `config set publish.mode` did about the harness rule the mode carries.
+ * `skipped` names why nothing was written; `pointer` is the line to show when it
+ * is the operator's move.
+ */
+interface AllowlistSync {
+  added: string[];
+  removed: string[];
+  skipped?: 'not-claude' | 'no-tty' | 'declined' | 'unwritable' | 'needs-install';
+  pointer?: string;
+}
+
+/**
+ * The prompt, naming what the write actually carries.
+ *
+ * Deliberately not a fixed string: the writer emits everything the mode calls
+ * for, so on a machine that never ran `install` the free tier is pending too. A
+ * question that named only the publish rule while ten lines landed would be
+ * asking about something other than what happens next — the same reason
+ * install's own question grew a clause.
+ */
+function publishRuleQuestion(mode: PublishMode, pending: readonly string[]): string {
+  const others = pending.filter((rule) => rule !== PUBLISH_MODE_RULE).length;
+  const also =
+    others > 0 ? ` Also adds the ${others} free-verb rule(s) \`tenjin install\` writes.` : '';
+  return (
+    `publish.mode ${mode} is unattended only if your harness allowlist carries ` +
+    `${PUBLISH_MODE_RULE}. Add it to ~/.claude/settings.json now?${also}`
+  );
+}
+
+/**
+ * Keep the harness allowlist in step with the mode just written.
+ *
+ * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
+ *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
+ *    No TTY, `--json`, or a declined prompt all leave the file alone and return
+ *    the pointer instead; nothing here writes on silence.
+ *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
+ *    the operator has just changed, so it runs unconditionally — the same reason
+ *    install sweeps a retired rule without asking. Leaving it behind would keep
+ *    publishing pre-cleared after the operator said "ask me first", which is the
+ *    failure that matters.
+ */
+async function syncPublishRule(
+  mode: PublishMode,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+): Promise<AllowlistSync> {
+  const home = deps.homeDir ?? homedir();
+  const nothing: AllowlistSync = { added: [], removed: [] };
+  const pointer = modeGatedPointer(mode) ?? undefined;
+
+  const write = async (): Promise<AllowlistSync> => {
+    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
+    if (result.skipped !== undefined) {
+      return {
+        added: [],
+        removed: [],
+        skipped: 'unwritable',
+        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
+      };
+    }
+    return { added: result.added, removed: result.removed };
+  };
+
+  // Only Claude Code has a settings file of this shape; guessing at another
+  // harness's config is the uninvited write lib/harness-permissions.ts avoids.
+  const isClaude = deps.harnessIsClaude ?? true;
+  if (!isClaude) return { ...nothing, skipped: 'not-claude', ...(pointer ? { pointer } : {}) };
+
+  const probe = await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode);
+
+  // Tightening runs with no question, but ONLY while it is purely a retraction.
+  // The writer emits the whole set for the mode, so on a machine missing the free
+  // tier the same call would ADD nine rules nobody asked for — and "it only
+  // removes what this CLI wrote" is the entire reason this path skips consent.
+  // Missing free tier means the publish rule was not written by our `install`
+  // (which writes them together), so it is not ours to take: point instead.
+  if (mode === 'review') {
+    if (probe.pending === null || probe.pending.length > 0) {
+      return { ...nothing, skipped: 'needs-install' };
+    }
+    return write();
+  }
+
+  const canPrompt =
+    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+  if (!canPrompt) return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
+
+  // Already carrying every rule the mode needs: nothing to ask and nothing to do.
+  if (probe.satisfied !== undefined) return nothing;
+
+  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
+  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [])))) {
+    return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
+  }
+  return write();
+}
+
+/** The human rendering of {@link syncPublishRule}, or nothing when it was a no-op. */
+function allowlistLines(sync: AllowlistSync): string[] {
+  const lines: string[] = [];
+  if (sync.added.length > 0) {
+    lines.push(`Added ${sync.added.length} harness rule(s) to your allowlist.`);
+  }
+  if (sync.removed.length > 0) {
+    lines.push(`Removed ${sync.removed.join(', ')} from your allowlist.`);
+  }
+  if (sync.pointer !== undefined) lines.push(sync.pointer);
+  return lines;
 }
 
 /**
