@@ -256,6 +256,33 @@ describe('tenjin-publish: publish denials are the gate working', () => {
 });
 
 /**
+ * The two card fields that decide whether a published piece is reachable at all.
+ * Server-side `evaluateCacheEligibility` requires `exclusions` AND one of
+ * provenance/methodology, and the embeddings indexer skips an ineligible card
+ * outright — so a piece missing either never enters agent decision search
+ * (15 of 241 posts in 30 days, PR #164 comment).
+ */
+describe('tenjin-publish tells the agent to earn card eligibility', () => {
+  const text = flat('tenjin-publish');
+
+  it('names both fields and makes filling them unconditional', () => {
+    expect(text).toMatch(/`exclusions` and `provenance`: ALWAYS fill both/i);
+    expect(text).toMatch(/what the\s*piece does not cover/i);
+    expect(text).toMatch(/how you verified the claims/i);
+  });
+
+  // The server gate is provenance OR methodology, so the instruction must not
+  // tell an agent that filled methodology it got it wrong.
+  it('allows methodology in place of provenance, as the server does', () => {
+    expect(text).toMatch(/`methodology` covers the\s*second/i);
+  });
+
+  it('states the stake rather than asserting a rule', () => {
+    expect(text).toMatch(/out of agent decision search/i);
+  });
+});
+
+/**
  * Auto is the posture `tenjin install` settles, so the skills teach publishing
  * as the ordinary outcome and asking as the opt-out (owner call, PR #164).
  */

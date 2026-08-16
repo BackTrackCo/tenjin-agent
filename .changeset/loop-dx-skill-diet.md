@@ -55,3 +55,8 @@ WARN-findings caveat is restored — never a generic "shall I publish?" before
 running, because a `--yes` re-run after a bare yes clears findings the user never
 saw. The stop hook now honors `TENJIN_PUBLISH_MODE`, so the hook, `publish`, and
 `doctor` agree on the mode.
+
+tenjin-publish now tells the agent to always fill the answer card's `exclusions`
+and `provenance`. Both are one sentence, both are known at publish time, and a
+card missing either is cache-ineligible server-side, which keeps the piece out of
+agent decision search entirely.
