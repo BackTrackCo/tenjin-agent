@@ -712,12 +712,11 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     expect(await allowOf()).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
   });
 
-  // The retraction skips its prompt because it can only REMOVE. That claim stops
-  // holding when the free tier is absent, since the one writer would add it in
-  // the same pass — so this path declines to write rather than grant nine rules
-  // nobody asked for. A publish rule without the free tier beside it was not
-  // written by our `install`, which writes them together.
-  it('writes nothing on review when the free tier is missing, rather than adding it', async () => {
+  // The retraction skips its prompt because it can only REMOVE, and it runs
+  // through a pass that appends nothing — so an incomplete free tier is not a
+  // reason to leave a publish rule standing. It was one while retraction rode the
+  // additive writer, which is the silent decline PR #164 round 3 major 1 found.
+  it('retracts on review even when the free tier is incomplete, and adds nothing', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(
       claudeSettingsPath(home),
@@ -727,9 +726,10 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       homeDir: home,
       harnessIsClaude: true,
     });
-    expect(await allowOf()).toEqual(['Bash(git status:*)', PUBLISH_MODE_RULE]);
-    expect(syncOf(res.data)?.skipped).toBe('needs-install');
+    expect(await allowOf()).toEqual(['Bash(git status:*)']);
+    expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
     expect(syncOf(res.data)?.added).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBeUndefined();
   });
 
   // SATISFIED BEFORE TTY (PR #164 round 2, major 3b): a fully-wired machine under
@@ -797,6 +797,10 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       },
     });
     expect(await allowOf()).toEqual([]);
+    // An empty allowlist reads the same whether the file is absent or was created
+    // holding nothing, and only one of those is acceptable on a machine that is
+    // not running Claude Code.
+    expect(existsSync(claudeSettingsPath(home))).toBe(false);
     expect(syncOf(res.data)?.skipped).toBe('not-claude');
   });
 
@@ -942,5 +946,41 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
       data: { value: 'deliberate-only', source: 'file' },
     });
+  });
+
+  /**
+   * `deliberate-only` is a value only the current script understands: an older
+   * installed script maps every non-`off` value to `on`. Storing it and saying
+   * nothing leaves the operator watching the batch keep firing while `config get`
+   * reports the setting effective.
+   */
+  it('says so when the installed Stop hook predates deliberate-only', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(set.data).toMatchObject({ value: 'deliberate-only', hookScriptStale: true });
+    expect(set.humanLines?.join('\n')).toContain('tenjin install');
+    // Stored regardless: the line reports the script, it does not refuse the set.
+    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+      data: { value: 'deliberate-only', source: 'file' },
+    });
+  });
+
+  it('stays quiet on a current script, and on the values an old script honors', async () => {
+    const ctx = makeCtx();
+    const current = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
+      stopHookIsCurrent: async () => true,
+    });
+    expect(current.data).not.toHaveProperty('hookScriptStale');
+    expect(current.humanLines).toHaveLength(1);
+
+    // `off` and `on` mean the same thing to every script version ever shipped,
+    // so a stale script is not worth a line about them.
+    const off = await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(off.data).not.toHaveProperty('hookScriptStale');
+    expect(off.humanLines).toHaveLength(1);
   });
 });

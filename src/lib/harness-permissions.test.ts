@@ -37,9 +37,11 @@ import {
   FORBIDDEN_VERB_FRAGMENTS,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
-  LEGACY_FREE_VERB_RULES,
+  LEGACY_ALLOWLIST_RULES,
   permissionsSkipped,
+  MODE_GATED_FORBIDDEN_FRAGMENTS,
   MODE_GATED_RULES,
+  retractModeGatedRules,
   rulesForPublishMode,
   wireFreeVerbAllowlist,
 } from './harness-permissions';
@@ -203,10 +205,10 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
   // would re-add a grant for a command that no longer exists on the same pass
   // that is supposed to be clearing it.
   it('never writes a retired rule: the legacy set is disjoint from the writable one', () => {
-    for (const rule of LEGACY_FREE_VERB_RULES) {
+    for (const rule of LEGACY_ALLOWLIST_RULES) {
       expect(FREE_VERB_RULES).not.toContain(rule);
     }
-    expect(LEGACY_FREE_VERB_RULES).toContain('Bash(tenjin candidate list:*)');
+    expect(LEGACY_ALLOWLIST_RULES).toContain('Bash(tenjin candidate list:*)');
   });
 
   it('matches the always-safe tier doctor prints, so the two never drift', () => {
@@ -334,6 +336,103 @@ describe('the publish rule is gated on the mode and nothing else', () => {
     const probe = await inspectFreeVerbRules(home, 'review');
     expect(probe.pending).toEqual([]);
     expect(probe.satisfied).toBeUndefined();
+  });
+
+  // The rail. Every other assertion in this block compares the pair against
+  // PUBLISH_MODE_ALLOWLIST, which is a document editable in the same commit that
+  // edits the rules — so on its own the suite would pass with `Bash(tenjin buy:*)`
+  // in a set that install now writes by default.
+  it('carries no verb that spends, signs, or reconfigures the machine', () => {
+    for (const rule of MODE_GATED_RULES) {
+      for (const fragment of MODE_GATED_FORBIDDEN_FRAGMENTS) {
+        expect(rule).not.toContain(fragment);
+      }
+    }
+  });
+
+  it('is never a broad wildcard, and never widens past the two verbs it names', () => {
+    expect(MODE_GATED_RULES).not.toContain('Bash(tenjin:*)');
+    expect(MODE_GATED_RULES.every((r) => /^Bash\(tenjin (publish|edit):\*\)$/.test(r))).toBe(true);
+  });
+
+  it('never carries an opt-in or never-allowlisted verb other than its own two', () => {
+    const own = ['tenjin publish', 'tenjin edit'];
+    const forbidden = [
+      ...OPT_IN_ALLOWLIST.map((e) => e.command),
+      ...NEVER_ALLOWLISTED.flatMap((e) => e.command.split(' / ')),
+    ].filter((c) => !own.includes(c));
+    for (const rule of MODE_GATED_RULES) {
+      for (const command of forbidden) expect(rule).not.toContain(command);
+    }
+  });
+});
+
+/**
+ * `review` must retract on EVERY machine that carries the pair, which means the
+ * retraction cannot inherit the additive writer's precondition. It used to: the
+ * one call did both, so a free tier that was not byte-exact silently declined the
+ * removal too. The first release that adds a tenth free verb makes every existing
+ * machine's tier incomplete while the pair is still genuinely ours.
+ */
+describe('retractModeGatedRules: the tightening direction has no preconditions', () => {
+  it('retracts the pair even when the free tier is incomplete', async () => {
+    await wireFreeVerbAllowlist(home, 'auto');
+    const settings = await readSettings();
+    const allow = (allowOf(settings) as string[]).filter((r) => r !== 'Bash(tenjin fund:*)');
+    await seedSettings({ ...settings, permissions: { allow } });
+
+    const result = await retractModeGatedRules(home);
+
+    expect(result.removed).toEqual([...MODE_GATED_RULES]);
+    expect(result.skipped).toBeUndefined();
+    const after = allowOf(await readSettings());
+    for (const rule of MODE_GATED_RULES) expect(after).not.toContain(rule);
+    // And it took nothing else with it, nor put the missing free rule back.
+    expect(after).not.toContain('Bash(tenjin fund:*)');
+    expect(after).toContain('Bash(tenjin search:*)');
+  });
+
+  it('adds nothing, ever, even from a file holding none of our rules', async () => {
+    await seedSettings({ permissions: { allow: ['Bash(git status:*)'] } });
+    const result = await retractModeGatedRules(home);
+    expect(result.added).toEqual([]);
+    expect(result.addedFree).toEqual([]);
+    expect(result.removed).toEqual([]);
+    expect(allowOf(await readSettings())).toEqual(['Bash(git status:*)']);
+  });
+
+  it('leaves an unreadable file untouched and names the rules, the path, and uninstall', async () => {
+    await seedSettings('{ not json');
+    const result = await retractModeGatedRules(home);
+    expect(result.removed).toEqual([]);
+    expect(result.fix).toContain(settingsPath());
+    for (const rule of MODE_GATED_RULES) expect(result.fix).toContain(rule);
+    expect(result.fix).toContain('tenjin uninstall');
+    expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
+  });
+
+  it('creates no settings file when there is none', async () => {
+    const result = await retractModeGatedRules(home);
+    expect(result.removed).toEqual([]);
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+});
+
+/**
+ * Operators `chmod 600` this file; it commonly holds an `env` block and
+ * `apiKeyHelper`. Appending a permission line must not hand it back
+ * world-readable.
+ */
+describe('settings.json keeps the file mode it had', () => {
+  it('preserves 0600 across an install write and a retraction', async () => {
+    await wireFreeVerbAllowlist(home, 'review');
+    await chmod(settingsPath(), 0o600);
+
+    await wireFreeVerbAllowlist(home, 'auto');
+    expect((await stat(settingsPath())).mode & 0o777).toBe(0o600);
+
+    await retractModeGatedRules(home);
+    expect((await stat(settingsPath())).mode & 0o777).toBe(0o600);
   });
 });
 

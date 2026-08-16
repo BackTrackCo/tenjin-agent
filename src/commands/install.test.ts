@@ -243,8 +243,13 @@ describe('runInstall: harness override', () => {
     expect(h.skillsDir).toBe(join(home, '.claude', 'skills'));
     expect(h.codexNetworkRule).toBeUndefined();
     expect(h.skills.map((s) => s.status)).toEqual(SKILL_NAMES.map(() => 'installed'));
+    // Every shipped file, not just SKILL.md: this is the only fresh-`create` path
+    // under test, and a nested reference file that ships but never lands here
+    // would go unnoticed until an agent hits a denial and finds nothing to read.
     for (const name of SKILL_NAMES) {
-      expect(existsSync(join(home, '.claude', 'skills', name, 'SKILL.md'))).toBe(true);
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        expect(existsSync(join(home, '.claude', 'skills', name, rel))).toBe(true);
+      }
     }
   });
 
@@ -1082,7 +1087,9 @@ describe('runInstall: interactive walkthrough', () => {
     // Cannot spend and cannot move your keys is the honest whole-tier claim, and
     // doctor's local decrypt is named rather than papered over; so are the three
     // that send or store data.
-    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or move your keys');
+    expect(PERMISSIONS_QUESTION).toContain(
+      `None of those ${FREE_VERB_RULES.length} can spend USDC or move your keys`,
+    );
     expect(PERMISSIONS_QUESTION).toContain('doctor may check your wallet still opens');
     expect(PERMISSIONS_QUESTION).toContain('Three send or store data (search, outcome, read)');
     // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
@@ -1497,10 +1504,11 @@ describe('runInstall: permissions decision', () => {
   // thing, so the two lines used to disagree.
   it('says what to do when the settings file moved under the write', async () => {
     await writeSettings({ model: 'opus', permissions: { allow: [] } });
-    // Read 1 is the consent probe; read 2 is the writer's own snapshot, and only a
-    // change after THAT one is the window the guard exists for.
+    // Read 1 is the review retraction's own look at the file, read 2 the consent
+    // probe, read 3 the writer's snapshot — and only a change after THAT one is
+    // the window the guard exists for.
     fsHooks.settingsInterleave = `${JSON.stringify({ model: 'opus', theirs: 1 }, null, 2)}\n`;
-    fsHooks.settingsInterleaveOnRead = 2;
+    fsHooks.settingsInterleaveOnRead = 3;
     fsHooks.settingsReads = 0;
     let res;
     try {
@@ -1539,12 +1547,32 @@ describe('runInstall: permissions decision', () => {
     await writeSettings('not json at all');
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], publishMode: 'auto' },
       makeCtx(),
       deps({ isInteractive: true, confirmPermissions: confirm }),
     );
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
+  });
+
+  // Under `review` the retraction runs first and reads the same file, so an
+  // unreadable one is settled before the question: nothing can be written either
+  // way, and asking a question whose yes cannot be honored is a prompt for
+  // nothing. What the operator gets instead is the pair named, with the command
+  // that always works.
+  it('asks nothing on an unreadable file under review, and names the pair', async () => {
+    await writeSettings('not json at all');
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'], publishMode: 'review' },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
+    const fix = wiredOf(res.data).fix ?? '';
+    for (const rule of MODE_GATED_RULES) expect(fix).toContain(rule);
+    expect(fix).toContain('tenjin uninstall');
   });
 
   it('--dry-run neither prompts nor writes', async () => {
@@ -1727,6 +1755,11 @@ describe('runInstall: permissions decision', () => {
       expect(grant.state).toBe('added');
       expect(grant.disclosure).toContain('publish.mode auto');
       expect(grant.disclosure).toContain('without a harness prompt');
+      // The keystore is the part the free-tier wording does not cover, and the
+      // part `tenjin session start` exists as an explicit opt-in for. The rest of
+      // what the pair clears is in docs/agent-permissions.md; this line stays one
+      // sentence.
+      expect(grant.disclosure).toContain('open your wallet keystore');
       expect(grant.undo).toEqual([
         'tenjin install --publish-mode review',
         'tenjin config set publish.mode review',
@@ -3009,8 +3042,8 @@ describe('runInstall: wallet creation is the default', () => {
   const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
   /**
-   * Real ox scrypt at N=262144, so these two run past the 5s default whenever the
-   * machine is busy — the flake tenjin-agent#47 named, whose remedy the wallet
+   * Real ox scrypt at N=262144, so these three run past the 5s default whenever
+   * the machine is busy — the flake tenjin-agent#47 named, whose remedy the wallet
    * suites already apply file-wide (`vi.setConfig` in commands/wallet.test.ts and
    * lib/wallet/local.test.ts). Applied PER TEST here instead: this file is 170
    * other cases of ordinary filesystem work, and raising the whole file would

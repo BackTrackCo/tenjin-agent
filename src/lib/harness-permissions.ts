@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import type { PublishMode } from './config';
@@ -44,7 +44,7 @@ import type { PublishMode } from './config';
  *  - ADDITIVE, PLUS ONE RETRACTION THAT IS STILL OURS. Every other key in the
  *    file, and every allow-rule we did not write, is copied through verbatim in
  *    its original order; missing rules are appended. The single exception is
- *    {@link LEGACY_FREE_VERB_RULES}: a rule an EARLIER version of this same
+ *    {@link LEGACY_ALLOWLIST_RULES}: a rule an EARLIER version of this same
  *    writer put there and this one no longer recommends. Leaving it would mean
  *    a user who updates and re-runs `install` keeps a grant for a command that
  *    no longer exists, which is bloat we created and only we can clear. It
@@ -110,6 +110,29 @@ export const EDIT_MODE_RULE = 'Bash(tenjin edit:*)';
 export const MODE_GATED_RULES: readonly string[] = [PUBLISH_MODE_RULE, EDIT_MODE_RULE];
 
 /**
+ * Verb fragments that must never appear in {@link MODE_GATED_RULES}: the rail
+ * {@link FORBIDDEN_VERB_FRAGMENTS} gives the free tier, minus the two verbs this
+ * set exists to carry.
+ *
+ * It needs that rail more than the free tier does. This set was mode-conditional
+ * prose before and is WRITTEN BY DEFAULT on every install now, so a line added
+ * here ships a grant to every machine — and without this, adding
+ * `Bash(tenjin buy:*)` to the pair passes the entire suite, because every other
+ * assertion on it compares against PUBLISH_MODE_ALLOWLIST, a document editable in
+ * the same commit.
+ */
+export const MODE_GATED_FORBIDDEN_FRAGMENTS: readonly string[] = [
+  'tenjin buy',
+  'tenjin session',
+  'tenjin send',
+  'tenjin config set',
+  'tenjin wallet create',
+  'tenjin mcp',
+  'tenjin install',
+  'tenjin update',
+];
+
+/**
  * Exactly what may be written for `mode`. The two return values are the only two
  * rule sets this module can produce.
  */
@@ -124,14 +147,19 @@ export function rulesForPublishMode(mode: PublishMode): readonly string[] {
  * exactly like an addition.
  */
 function retiredFor(mode: PublishMode): Set<string> {
-  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  const retired = new Set<string>(LEGACY_ALLOWLIST_RULES);
   if (mode === 'review') for (const rule of MODE_GATED_RULES) retired.add(rule);
   return retired;
 }
 
 /**
  * Rules a PRIOR version of this writer put in `permissions.allow` and this one
- * no longer recommends. BOTH paths read it: `install` removes them on its next
+ * no longer writes — FREE TIER OR MODE-GATED, which is why this is not
+ * `LEGACY_FREE_VERB_RULES` any more. Nothing is stranded today, but the day a
+ * mode-gated rule is renamed or dropped, every machine holding it would keep a
+ * publish-capable allow-line that no `install` and no `uninstall` reclaims. That
+ * is one layer above the bug this list was created to fix, so the list covers
+ * both layers. BOTH paths read it: `install` removes them on its next
  * run, `uninstall` reclaims them as its own. NEITHER path ever writes one — the
  * writable set is {@link FREE_VERB_RULES} and this list is disjoint from it, so
  * a retired rule can only ever be deleted, never re-added. A test pins that
@@ -149,7 +177,7 @@ function retiredFor(mode: PublishMode): Set<string> {
  * `Bash(tenjin candidate list:*)` is the first entry: the candidate pen was
  * removed, and machines installed before that still carry its rule.
  */
-export const LEGACY_FREE_VERB_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
+export const LEGACY_ALLOWLIST_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
 
 /**
  * Verb fragments that must never appear in {@link FREE_VERB_RULES}. Asserted by
@@ -234,7 +262,7 @@ function modeGrantFor(
     state,
     disclosure: `${MODE_GATED_RULES.join(' and ')} ${
       state === 'added' ? 'added' : state === 'already-present' ? 'already present' : 'in place'
-    }: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, and update its own posts, without a harness prompt.`,
+    }: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, update its own posts, and open your wallet keystore to sign, without a harness prompt.`,
     undo: [...MODE_GRANT_UNDO],
   };
 }
@@ -351,6 +379,86 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Write settings.json KEEPING THE MODE IT HAS. Operators `chmod 600` this file —
+ * it commonly holds an `env` block and `apiKeyHelper` — and handing it back
+ * world-readable because we appended a permission line is a downgrade nobody
+ * asked for. A file we are creating gets the platform default. Mirrors
+ * lib/skill-writer.ts, which already does this for skills.
+ */
+async function writeSettings(path: string, next: Record<string, unknown>): Promise<void> {
+  const current = await stat(path).catch(() => null);
+  await writeFileAtomic(
+    path,
+    `${JSON.stringify(next, null, 2)}\n`,
+    current === null ? {} : { mode: current.mode & 0o777 },
+  );
+}
+
+/**
+ * Remove {@link MODE_GATED_RULES}, and nothing else, from `permissions.allow`.
+ *
+ * SEPARATE FROM THE ADDITIVE WRITER, and that separation is the point. Retraction
+ * used to ride the same call that appends the free tier, so it inherited that
+ * call's precondition and bailed out whenever the free tier was not byte-exact —
+ * silently, in the tightening direction, on two of the three commands the consent
+ * decision names as its own undo. The stated rationale (a publish rule without
+ * the free tier beside it was not written by our install) does not survive the
+ * ordinary case: the first release that adds a tenth free verb makes every
+ * existing machine's tier incomplete while the pair is genuinely ours, and an
+ * unparsable file is UNKNOWN rather than not-ours.
+ *
+ * So `review` always retracts. This adds nothing, ever: it can only shorten the
+ * allow list, which is why it needs no consent and no complete-tier precondition.
+ */
+export async function retractModeGatedRules(homeDir: string): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir, 'review');
+  if ('result' in found) {
+    // Unknown, not absent. The one case that cannot proceed says so, names the
+    // rules and the file, and hands over the command that always works.
+    const refused = found.result;
+    return {
+      ...refused,
+      fix: `${refused.path ?? claudeSettingsPath(homeDir)} could not be read, so ${MODE_GATED_RULES.join(' and ')} may still be allowed there. Remove those lines by hand, or run \`tenjin uninstall\`.`,
+    };
+  }
+  const { path, raw, settings, permissions, allow } = found;
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const removed = allow.filter((r): r is string => typeof r === 'string' && gated.has(r));
+  if (removed.length === 0) {
+    return {
+      harness: 'claude',
+      path,
+      added: [],
+      alreadyPresent: [],
+      addedFree: [],
+      alreadyPresentFree: [],
+      removed: [],
+    };
+  }
+  const kept = allow.filter((r) => !(typeof r === 'string' && gated.has(r)));
+  const next = { ...settings, permissions: { ...permissions, allow: kept } };
+  const current = await readFile(path, 'utf8').catch(() => null);
+  if (current !== raw) {
+    return skip(
+      'claude',
+      path,
+      'changed-since-read',
+      `${path} changed while it was being updated, so nothing was written. Re-run to retract ${MODE_GATED_RULES.join(' and ')}.`,
+    );
+  }
+  await writeSettings(path, next);
+  return {
+    harness: 'claude',
+    path,
+    added: [],
+    alreadyPresent: [],
+    addedFree: [],
+    alreadyPresentFree: [],
+    removed,
+  };
+}
+
+/**
  * Add the rules `mode` calls for to `permissions.allow` in
  * ~/.claude/settings.json. Creates the file (and the `permissions.allow` path)
  * when absent, appends only the rules that are missing, and rewrites nothing
@@ -404,7 +512,7 @@ export async function wireFreeVerbAllowlist(
       `${path} changed while it was being updated, so nothing was written. Re-run \`tenjin install\`.`,
     );
   }
-  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+  await writeSettings(path, next);
   return {
     harness: 'claude',
     path,

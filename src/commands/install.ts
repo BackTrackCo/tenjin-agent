@@ -46,6 +46,7 @@ import {
   inspectFreeVerbRules,
   MODE_GATED_RULES,
   permissionsSkipped,
+  retractModeGatedRules,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
@@ -219,6 +220,8 @@ export interface InstallDeps {
     home: string,
     mode: PublishMode,
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
+  /** The retraction-only pass `review` runs; defaults to the real writer. */
+  retractModeGated?: (home: string) => Promise<PermissionsResult>;
   /** Decision 3: the search-hook mode select; defaults to the clack list. */
   promptSearchHooks?: () => Promise<SearchHookMode | null>;
   /** Decision 4: "Create a wallet now?"; defaults to the clack confirm (default yes). */
@@ -1106,24 +1109,33 @@ function parseModeFlag(value: string): PublishMode {
  * names where both live in full. It used to point at `tenjin doctor`, which
  * printed them; doctor now points at the same page (#81).
  */
-export const PERMISSIONS_QUESTION = [
+const PERMISSIONS_QUESTION_HEAD = [
   'Let your agent search tenjin without permission popups?',
   `Adds ${FREE_VERB_RULES.length} free commands to ~/.claude/settings.json.`,
-  'None can spend USDC or move your keys; doctor may check your wallet still opens.',
+  // SCOPED to the nine. It read as covering all eleven once the pair started
+  // landing here, and the pair does open the keystore.
+  `None of those ${FREE_VERB_RULES.length} can spend USDC or move your keys; doctor may check your wallet still opens.`,
   'Three send or store data (search, outcome, read).',
-  `Full caveats: ${PERMISSIONS_DOC_URL}`,
 ].join(' ');
 
+export const PERMISSIONS_QUESTION = `${PERMISSIONS_QUESTION_HEAD} Full caveats: ${PERMISSIONS_DOC_URL}`;
+
 /**
- * The same question, plus the one sentence the publish modes add. The rule
- * follows from a choice already made a moment earlier in this same run, but it
- * is still a line going into the operator's settings file, and a consent prompt
- * that named only the free tier while the write also carried `publish` would be
- * asking about something other than what happens next.
+ * The same question, plus what the publish modes add.
+ *
+ * The mode clause goes BEFORE the URL, never after: a terminal wraps the two
+ * together and the reader's eye stops at the link, so a clause appended past it
+ * is a clause nobody reads. It names the keystore, because that is the part the
+ * free-tier wording does not cover and the part `tenjin session start` is an
+ * explicit opt-in for.
  */
 export function permissionsQuestion(mode: PublishMode): string {
   if (mode === 'review') return PERMISSIONS_QUESTION;
-  return `${PERMISSIONS_QUESTION} Adds ${MODE_GATED_RULES.join(' and ')} too, because publish.mode is ${mode}.`;
+  return [
+    PERMISSIONS_QUESTION_HEAD,
+    `Adds ${MODE_GATED_RULES.join(' and ')} too, because publish.mode is ${mode}: those publish and update under your identity and open your wallet keystore to sign.`,
+    `Full caveats: ${PERMISSIONS_DOC_URL}`,
+  ].join(' ');
 }
 
 /** The wallet decision's literal copy. */
@@ -1182,6 +1194,15 @@ async function resolvePermissions(args: {
   }
   if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
   if (flag === false) return permissionsSkipped('claude', home, 'declined');
+
+  // TIGHTENING FIRST, and unconditionally. `review` retracts through a pass that
+  // only ever removes, so it cannot inherit the additive writer's complete-tier
+  // precondition and silently decline — which is what made two of the three
+  // documented undos fail on a machine whose free tier was merely incomplete.
+  if (publishMode === 'review') {
+    const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
+    if (retracted.removed.length > 0 || retracted.skipped !== undefined) return retracted;
+  }
 
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
   if (probe.satisfied !== undefined) return probe.satisfied;
