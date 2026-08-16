@@ -49,7 +49,7 @@ afterEach(async () => {
 const BASE = 'https://tenjin.blog';
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
 const RESERVATION = 'rsv-test';
-const SEARCH_ID = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+const SEARCH_ID = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
 
 /** Spin up the server over an in-memory transport, hand back a connected client. */
 async function connect(opts: BuildMcpOptions): Promise<Client> {
@@ -305,7 +305,12 @@ describe('tenjin_publish consent', () => {
     expect(res.isError).toBeFalsy();
     // The excerpt reached the POST body rather than being derived from the body.
     expect(body?.excerpt).toBe('a deliberate public preview');
-    // And the searchId did its job: the loop is reported closed on the receipt.
+    // And so did the searchId. This assertion is the point of the test and was
+    // missing: the name said "through to the wire" while only the receipt and the
+    // local store were checked, so a searchId that never left the machine passed
+    // here for as long as the flag existed (tenjin-agent #161).
+    expect(body?.searchId).toBe(SEARCH_ID);
+    // The local half still holds: the loop is reported closed on the receipt.
     const sc = res.structuredContent as { data: { search?: { id: string; closed: boolean } } };
     expect(sc.data.search).toMatchObject({ id: SEARCH_ID, closed: true });
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');

@@ -26,3 +26,11 @@ tenjin-search is now a lean SKILL.md plus `references/permissions.md`, loaded on
 demand; tenjin-publish drops its duplicated scan-tier explanation and its
 narration. Every invariant is kept, and both frontmatter descriptions are under
 the 1,024-character trigger budget.
+
+`tenjin publish --search-id <id>` now sends that id to the server, which accepts
+and documents it as the attribution for the MISS the piece answers. It never
+reached the wire before, so every publish that named a search still went out
+unlinked — the thing #161 is actually about. It rides the relink and draft paths
+too, and the id is validated at the command edge against the shape the server
+declares rather than the CLI's looser uuid, so a bad one costs a message instead
+of a 400 collected after the wallet signature.

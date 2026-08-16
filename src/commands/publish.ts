@@ -5,7 +5,6 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
-import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
@@ -25,6 +24,7 @@ import {
   publishPost,
   EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
+  SEARCH_ID_WIRE_RE,
   type PublishInput,
   type PublishStatus,
 } from '../lib/posts-api';
@@ -241,6 +241,10 @@ export async function runPublish(
     ...(handle !== undefined ? { handle } : {}),
     status,
     ...(card !== undefined ? { resource: card } : {}),
+    // The attribution half of `--search-id`. Closing the local loop only stops
+    // the reminder; this is what ties the answer to the demand that asked for
+    // it, which is the whole point of naming a search (tenjin-agent #161).
+    ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
   };
 
   const result = await publishPost(input, auth, {
@@ -289,10 +293,15 @@ type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
 /**
  * `--search-id` at the edge: a uuid, refused before any wallet touch so a typo
  * costs a message rather than a signing prompt.
+ *
+ * Checked against the shape the SERVER declares, not the looser local UUID_RE,
+ * because this value is now sent on the publish body: an id that satisfied only
+ * the local shape would be refused by the server as a 400, and that refusal
+ * would arrive after the wallet signature rather than here.
  */
 function validateSearchId(args: PublishArgs): void {
   if (args.searchId === undefined) return;
-  if (!UUID_RE.test(args.searchId)) {
+  if (!SEARCH_ID_WIRE_RE.test(args.searchId)) {
     throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
       fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
     });

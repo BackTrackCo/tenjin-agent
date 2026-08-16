@@ -9,8 +9,13 @@ import {
   buildPostUpdateBody,
   ownPostSchema,
   resourceEchoSchema,
+  SEARCH_ID_WIRE_RE,
 } from './lib/posts-api';
 import { deriveCard } from './lib/card';
+import { CliError } from './lib/errors';
+
+/** A well-formed searchId (uuidv7, as the server mints). */
+const SEARCH_ID = '0197aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee';
 
 // Pins the CLI's wire schemas against the committed server contract fixture
 // (the live tenjin.blog/openapi.json, the A3 publish deploy: it carries the
@@ -442,7 +447,16 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
 // with an optional strictObject `resource` card and reads the cacheEligible echo.
 // Every field the CLI emits must be declared by the fixture, and the card bounds
 // the CLI validates locally must match the server's, or the drift fails here.
-const POST_CREATE_FIELDS = ['title', 'bodyMd', 'excerpt', 'tags', 'price', 'handle', 'status'];
+const POST_CREATE_FIELDS = [
+  'title',
+  'bodyMd',
+  'excerpt',
+  'tags',
+  'price',
+  'handle',
+  'status',
+  'searchId',
+];
 const CARD_INPUT_FIELDS = [
   'artifactType',
   'mediaType',
@@ -537,6 +551,11 @@ function assertPublishContract(doc: unknown): void {
   expect(bound(top, 'price', 'pattern')).toBe('^(0|[1-9]\\d{0,12})$');
   expect(bound(top, 'handle', 'pattern')).toBe('^[a-z0-9-]{2,32}$');
   expect(bound(top, 'status', 'enum')).toEqual(['draft', 'published', 'unlisted']);
+  // searchId is SENT now, and the server's shape is narrower than lib/ids.ts's
+  // UUID_RE (it pins the RFC version and variant nibbles). The CLI mirrors the
+  // declared pattern so a bad id is refused at the command edge rather than as a
+  // 400 collected after the wallet signature.
+  expect(bound(top, 'searchId', 'pattern')).toBe(SEARCH_ID_WIRE_RE.source);
 
   const card = cardInputProps(doc);
   expect(bound(card, 'mediaType', 'maxLength')).toBe(100);
@@ -618,10 +637,57 @@ describe('contract fixture pins the publish endpoints', () => {
       tags: ['x'],
       priceAtomic: '100000',
       handle: 'iris',
+      searchId: SEARCH_ID,
     });
     const declared = postCreateProps(fixtureDoc);
     for (const key of Object.keys(body)) {
       expect(get(declared, key), `fixture does not declare PostCreate field ${key}`).toBeDefined();
+    }
+  });
+
+  // The emitted body diffed against the DECLARED schema, value by value, rather
+  // than against our own types: `searchId` reached the wire only after this
+  // pinned it, because a field the CLI simply never sent satisfies every
+  // type-level check there is (tenjin-agent #161).
+  it('every value buildPostCreateBody emits satisfies the declared PostCreate pattern', () => {
+    const body = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      priceAtomic: '100000',
+      handle: 'iris',
+      searchId: SEARCH_ID,
+    }) as Record<string, unknown>;
+    const declared = postCreateProps(fixtureDoc);
+    for (const [key, value] of Object.entries(body)) {
+      const pattern = get(nonNull(get(declared, key)), 'pattern');
+      if (typeof pattern !== 'string' || typeof value !== 'string') continue;
+      expect(new RegExp(pattern).test(value), `${key}=${value} violates ${pattern}`).toBe(true);
+    }
+  });
+
+  // The attribution field is the whole point of `--search-id`; a body that drops
+  // it publishes an answer nothing can tie to the demand that asked for it.
+  it('carries searchId when one is named, and omits the key entirely otherwise', () => {
+    const withId = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      searchId: SEARCH_ID,
+    });
+    expect(withId.searchId).toBe(SEARCH_ID);
+    const without = buildPostCreateBody({ status: 'published', title: 'T', bodyMd: 'B' });
+    expect('searchId' in without).toBe(false);
+  });
+
+  // Refused at the builder too, not only at the command edge: PostCreate is a
+  // strictObject with a pattern on this field, so an id the server would 400 must
+  // never be handed to a signed request.
+  it('refuses a searchId the declared pattern rejects', () => {
+    for (const bad of ['not-a-uuid', '', '0197aaaa-bbbb-cccc-dddd-00000000000']) {
+      expect(() =>
+        buildPostCreateBody({ status: 'published', title: 'T', bodyMd: 'B', searchId: bad }),
+      ).toThrow(CliError);
     }
   });
 
