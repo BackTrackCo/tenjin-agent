@@ -2870,44 +2870,62 @@ describe('runInstall: wallet creation is the default', () => {
 
   const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
+  /**
+   * Real ox scrypt at N=262144, so these two run past the 5s default whenever the
+   * machine is busy — the flake tenjin-agent#47 named, whose remedy the wallet
+   * suites already apply file-wide (`vi.setConfig` in commands/wallet.test.ts and
+   * lib/wallet/local.test.ts). Applied PER TEST here instead: this file is 170
+   * other cases of ordinary filesystem work, and raising the whole file would
+   * take the 5s hang detector away from all of them.
+   */
+  const SCRYPT_TIMEOUT_MS = 120_000;
+
   // The real creator on a fake keychain: this is the path a headless install
   // actually takes, generated passphrase and scrypt keystore included.
-  it('a non-interactive run really creates one, passphrase in the OS store', async () => {
-    const { exec, entries } = fakeKeychain();
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps(realWalletCreate(exec)),
-    );
-    const wallet = walletOf(res.data);
-    expect(wallet.status).toBe('created');
-    expect(wallet.address).toMatch(ADDRESS_RE);
-    expect(existsSync(join(data, 'wallet.json'))).toBe(true);
-    // Exactly one entry, keyed by the new wallet's own lowercase address.
-    expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
-  });
+  it(
+    'a non-interactive run really creates one, passphrase in the OS store',
+    async () => {
+      const { exec, entries } = fakeKeychain();
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps(realWalletCreate(exec)),
+      );
+      const wallet = walletOf(res.data);
+      expect(wallet.status).toBe('created');
+      expect(wallet.address).toMatch(ADDRESS_RE);
+      expect(existsSync(join(data, 'wallet.json'))).toBe(true);
+      // Exactly one entry, keyed by the new wallet's own lowercase address.
+      expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   // Through the deps seam, NOT vi.stubEnv: mutating the real process environment
   // to steer this is what made it flake under the parallel runner, and the
   // passphrase layer already takes its env as an argument.
-  it('uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all', async () => {
-    const touched: string[] = [];
-    const spyExec: ExecFn = async (file, args) => {
-      touched.push(`${file} ${args[0] ?? ''}`);
-      throw new Error('no store');
-    };
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps({
-        ...realWalletCreate(spyExec),
-        env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
-      }),
-    );
-    expect(walletOf(res.data).status).toBe('created');
-    // The env value settles it, so no credential store is consulted at all.
-    expect(touched).toEqual([]);
-  });
+  it(
+    'uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all',
+    async () => {
+      const touched: string[] = [];
+      const spyExec: ExecFn = async (file, args) => {
+        touched.push(`${file} ${args[0] ?? ''}`);
+        throw new Error('no store');
+      };
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps({
+          ...realWalletCreate(spyExec),
+          env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
+        }),
+      );
+      expect(walletOf(res.data).status).toBe('created');
+      // The env value settles it, so no credential store is consulted at all.
+      expect(touched).toEqual([]);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   // The mirror of the case above, and the reason the fixture pins an empty env:
   // with no passphrase in the environment the store is the only source left, so

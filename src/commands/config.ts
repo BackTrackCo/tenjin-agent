@@ -35,7 +35,13 @@ import type {
   SearchHookMode,
   UpdateConfigKey,
 } from '../lib/config';
-import type { HarnessTarget } from '../lib/skill-wiring';
+import {
+  detectHarnesses,
+  harnessInPlay,
+  harnessTargetDir,
+  onPath,
+  type HarnessTarget,
+} from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -69,8 +75,13 @@ export interface ConfigSetDeps {
   isInteractive?: boolean;
   /** The yes/no for a loosening write; defaults to the clack confirm (default yes). */
   confirmRule?: (label: string) => Promise<boolean>;
-  /** Whether this machine's harness is Claude Code (the only settings file we write). */
+  /** Whether this machine's harness is Claude Code (the only settings file we write).
+   *  Absent, it is DETECTED the way install and doctor detect it. */
   harnessIsClaude?: boolean;
+  /** PATH probe for harness detection; defaults to probing `env.PATH`. */
+  which?: (bin: string) => boolean;
+  /** Environment for that probe; defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
   inspectAllowlist?: typeof inspectFreeVerbRules;
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
@@ -306,7 +317,10 @@ async function syncPublishRule(
 
   // Only Claude Code has a settings file of this shape; guessing at another
   // harness's config is the uninvited write lib/harness-permissions.ts avoids.
-  const isClaude = deps.harnessIsClaude ?? true;
+  // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
+  // that nothing reads, so prompting about it is noise and writing to it is an
+  // uninvited edit — and the retraction would sweep a file we never owned.
+  const isClaude = deps.harnessIsClaude ?? (await claudeInPlay(home, ctx, deps));
   if (!isClaude) return { ...nothing, skipped: 'not-claude', ...(pointer ? { pointer } : {}) };
 
   const probe = await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode);
@@ -336,6 +350,30 @@ async function syncPublishRule(
     return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
   }
   return write();
+}
+
+/**
+ * Is Claude Code this machine's business? The same union `install` and `doctor`
+ * target with: detected on PATH or by its home directory, OR named by a past
+ * `tenjin install --harness`, which outranks the probes because detection only
+ * sees the harnesses this CLI knows to look for.
+ */
+async function claudeInPlay(
+  home: string,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+): Promise<boolean> {
+  const env = deps.env ?? process.env;
+  const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const requested = await loadRawConfig(ctx.dataDir)
+    .then((c) => c.install?.harness ?? [])
+    .catch(() => [] as HarnessTarget[]);
+  return harnessInPlay(
+    home,
+    harnessTargetDir(home, 'claude'),
+    detectHarnesses(home, which),
+    requested,
+  );
 }
 
 /** The human rendering of {@link syncPublishRule}, or nothing when it was a no-op. */

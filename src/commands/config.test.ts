@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -733,6 +734,95 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     });
     expect(await allowOf()).toEqual([]);
     expect(syncOf(res.data)?.skipped).toBe('not-claude');
+  });
+
+  /**
+   * The harness is DETECTED, not assumed. `src/cli.ts` passes no deps, so a
+   * default of "this is Claude Code" would prompt every codex-only operator about
+   * a ~/.claude/settings.json nothing on their machine reads — and a review-set
+   * would then sweep a file this CLI never owned.
+   */
+  describe('harness detection, when the caller names none', () => {
+    // Nothing on PATH, no ~/.claude, no recorded --harness: not our file.
+    it('skips a codex-only machine at a TTY, without asking', async () => {
+      await mkdir(join(home, '.codex'), { recursive: true });
+      const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        isInteractive: true,
+        which: (bin) => bin === 'codex',
+        env: { PATH: '' },
+        confirmRule: async () => {
+          throw new Error('must not ask');
+        },
+      });
+      expect(await allowOf()).toEqual([]);
+      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+      expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
+      // The mode itself still landed.
+      expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+        data: { value: 'auto' },
+      });
+    });
+
+    // Tightening on the same machine must not CREATE the file either: the writer
+    // makes ~/.claude/settings.json when it is absent, so an unguarded retraction
+    // would leave a codex-only operator holding a Claude config they never had.
+    it('creates no settings file on review for a codex-only machine', async () => {
+      const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+        homeDir: home,
+        which: (bin) => bin === 'codex',
+        env: { PATH: '' },
+      });
+      expect(existsSync(claudeSettingsPath(home))).toBe(false);
+      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+    });
+
+    // A ~/.claude directory IS Claude-detection evidence (home-dir reason), so a
+    // machine that already holds that settings file is one we may sweep.
+    it('sweeps a machine whose ~/.claude exists, even with codex on PATH', async () => {
+      await mkdir(join(home, '.claude'), { recursive: true });
+      await writeFile(
+        claudeSettingsPath(home),
+        JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, PUBLISH_MODE_RULE] } }),
+      );
+      const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+        homeDir: home,
+        which: (bin) => bin === 'codex',
+        env: { PATH: '' },
+      });
+      expect(await allowOf()).not.toContain(PUBLISH_MODE_RULE);
+      expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
+    });
+
+    it('detects Claude Code by its binary', async () => {
+      const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        isInteractive: true,
+        which: (bin) => bin === 'claude',
+        env: { PATH: '' },
+        confirmRule: async () => true,
+      });
+      expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+      expect(syncOf(res.data)?.skipped).toBeUndefined();
+    });
+
+    // A past `--harness claude` outranks the probes: detection only sees what this
+    // CLI knows to look for, and the operator already answered the question.
+    it('honors a recorded --harness claude on a machine that detects neither', async () => {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ install: { harness: ['claude'] } }),
+      );
+      const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        isInteractive: true,
+        which: () => false,
+        env: { PATH: '' },
+        confirmRule: async () => true,
+      });
+      expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+      expect(syncOf(res.data)?.skipped).toBeUndefined();
+    });
   });
 
   // publish.defaultPrice is not a consent decision and must not drag the harness
