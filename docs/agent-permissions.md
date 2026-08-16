@@ -74,8 +74,9 @@ three. It cannot unlock a keystore and never consults the spend policy.
 
 ## Getting the rules onto your machine
 
-`tenjin install` writes the nine rules into `~/.claude/settings.json` for you. It
-is one of the four setup decisions, and at a terminal it asks:
+`tenjin install` writes the nine rules into `~/.claude/settings.json` for you,
+plus the one rule your publish mode carries (below). It is one of the four setup
+decisions, and at a terminal it asks:
 
 > Let your agent search tenjin without permission popups? Adds 9 free commands to
 > `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
