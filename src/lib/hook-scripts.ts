@@ -214,15 +214,41 @@ function clean(value, max) {
 }
 
 /**
+ * "A newer tenjin-cli exists", appended to whatever this hook was already going
+ * to say. The CLI's own nudge is one dim stderr line that only a human at a
+ * terminal sees; a harness reads additionalContext, so this is where the AGENT
+ * finds out it can update itself. Pure cache read, and the comparison was
+ * already made by the CLI (see update-check.ts, the cached signal), because it
+ * runs standalone and does not know which version is installed.
+ */
+function updateLine() {
+  try {
+    const cfg = readJsonFile(join(DATA_DIR, 'config.json'));
+    const update = isRecord(cfg) && isRecord(cfg.update) ? cfg.update : {};
+    if (update.mode === 'off') return null;
+    const cache = readJsonFile(join(DATA_DIR, 'update-check.json'));
+    const signal = isRecord(cache) && isRecord(cache.signal) ? cache.signal : null;
+    if (signal === null) return null;
+    if (typeof signal.current !== 'string' || typeof signal.latest !== 'string') return null;
+    return 'tenjin-cli ' + clean(signal.latest, 40) + ' is available (you have ' +
+      clean(signal.current, 40) + '). Run tenjin update to install it.';
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Emit additionalContext for this event and leave. writeFileSync to fd 1, not
  * process.stdout.write: a write to a pipe is asynchronous, so exiting on the next
  * line can truncate the JSON the harness is waiting to parse.
  */
 function emit(hookEventName, additionalContext) {
   try {
+    const extra = updateLine();
+    const context = extra === null ? additionalContext : additionalContext + '\\n' + extra;
     const output = IS_HERMES
-      ? { context: additionalContext }
-      : { hookSpecificOutput: { hookEventName, additionalContext } };
+      ? { context }
+      : { hookSpecificOutput: { hookEventName, additionalContext: context } };
     writeFileSync(1, JSON.stringify(output));
   } catch {
     // A closed or full stdout is not this hook's problem to report.

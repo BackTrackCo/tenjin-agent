@@ -2,13 +2,15 @@
 name: tenjin-publish
 description: >-
   Publish, update, or maintain your own reusable answers on the Tenjin
-  knowledge marketplace so you earn on every future buyer. Use when the user
-  asks to publish, update, or manage Tenjin content; when the tenjin-search
-  after-a-MISS flow has a finished, reusable, public, rights-clean finding to
-  publish under your publish.mode; when you finish substantial research that is
-  public, durable, and reusable (a multi-source synthesis, a tested comparison,
-  a runbook) even with no search behind it; or when the user asks about their
-  Tenjin sales or drafts. Requires something concrete that already exists: a
+  knowledge marketplace so you earn on every future buyer. Three routes in:
+  the user asks to publish, update, or manage Tenjin content, asks whether
+  recent work holds anything worth selling, or asks about their sales or
+  drafts; the tenjin-search after-a-MISS flow has a finished,
+  reusable, public, rights-clean finding to publish under your publish.mode;
+  or you just finished something worth selling unprompted — substantial public
+  research (a multi-source synthesis, a tested comparison, a runbook) or an
+  empirical proof of something the docs don't state (a race, a workaround, an
+  integration pattern). Requires something concrete that already exists: a
   written piece or a completed task's finding. Skip for drive-by
   "maybe publish this" or "we should write this up sometime" musing, for
   anything private to a repo, employer, or person, and for work still in
@@ -17,10 +19,12 @@ description: >-
 
 # Tenjin publish: sell and maintain reusable answers
 
-Three things route here: an explicit user ask to publish/update, the
-tenjin-search skill's after-a-MISS flow publishing a reusable answer you just
-derived, and finishing substantial public research nobody asked you to publish —
-a multi-source synthesis, a tested comparison, a runbook. That last one you
+Three routes in: an explicit user ask to publish/update, the tenjin-search
+skill's after-a-MISS flow publishing a reusable answer you just derived, and
+unprompted work worth selling — substantial public research (a multi-source
+synthesis, a tested comparison, a runbook) or an empirical proof of something
+the docs don't state (a race you isolated, a workaround you validated, an
+integration pattern you had to probe to establish). The unprompted route you
 offer ONCE, routed by the same mode; drive-by musing is not it. All go through
 `publish.mode`, which is the gate, not a checklist to hold the user to. It is
 settled at `tenjin install` and defaults to
@@ -45,6 +49,18 @@ so that judgment is still yours, below.
 This skill's reachability is not a safety layer; the description above is the
 whole trigger boundary.
 Publishing is free and an incomplete card still publishes as a browse-only piece.
+
+## The harvest ask
+
+"Anything from our recent work worth publishing?" routes here too. Sweep what
+you can actually see: this conversation's finished work, plus anything the
+user names. Never go digging through transcripts or session archives the user
+did not hand you; the sweep reads what is in front of you. Grade each
+candidate against the sell rubric below, then offer the survivors ONCE, as one
+batch with honest prices — never one at a time across the session. A no on a
+candidate is final: it is not raised again in this session or a later one, and
+nothing is saved anywhere to re-ask. Zero candidates is a fine answer; say so
+in one line and stop.
 
 ## What makes a piece sell
 

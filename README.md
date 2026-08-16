@@ -127,6 +127,7 @@ tenjin search "Explain OAuth"
 ```bash
 tenjin install
 tenjin doctor
+tenjin update
 tenjin search "<question>"
 tenjin inspect <url-or-resource-id>
 tenjin read <url-or-resource-id>

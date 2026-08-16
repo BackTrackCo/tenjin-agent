@@ -29,6 +29,7 @@ const EXPECTED: Record<ErrorCode, ExitCode> = {
   PUBLISH_BLOCKED: 3,
   PUBLISH_FAILED: 4,
   SEND_FAILED: 4,
+  UPDATE_FAILED: 1,
 };
 
 describe('exitCodeFor', () => {

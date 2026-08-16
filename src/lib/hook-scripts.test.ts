@@ -143,6 +143,77 @@ function injected(run: HookRun): string | null {
   return parsed.hookSpecificOutput?.additionalContext ?? null;
 }
 
+// The agent-visible half of the update check. A harness reads
+// additionalContext; it never sees the dim stderr line the CLI prints to a
+// human, which is why this rides along on whatever the hook already says.
+describe('the update signal on hook output', () => {
+  async function writeSignal(signal: unknown): Promise<void> {
+    await writeFile(
+      join(dataDir, 'update-check.json'),
+      JSON.stringify({ schemaVersion: 1, signal }),
+    );
+  }
+
+  it('appends the available version to the injected context', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(run.code).toBe(0);
+    const text = injected(run);
+    expect(text).toContain('tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)');
+    expect(text).toContain('Run tenjin update');
+    // Still exactly one parseable object on stdout.
+    expect(JSON.parse(run.stdout)).toBeTruthy();
+  });
+
+  // Two features share one `emit`: the update line and the Hermes envelope. A
+  // resolution that kept only one of them leaves every Claude-shaped test green.
+  it('rides inside the Hermes context envelope too', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
+      ['--hermes'],
+    );
+    expect(run.code).toBe(0);
+    const parsed = JSON.parse(run.stdout) as { context?: string };
+    expect(parsed).not.toHaveProperty('hookSpecificOutput');
+    expect(parsed.context).toContain(
+      'tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)',
+    );
+  });
+
+  it('says nothing when no newer version is recorded', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(injected(run)).not.toContain('is available (you have');
+  });
+
+  it('honors update.mode off, which silences every surface', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl, update: { mode: 'off' } });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(injected(run)).not.toContain('is available (you have');
+  });
+
+  // The cache is a file on disk like any other; a mangled version string in it
+  // must not reach a terminal as escapes.
+  it('strips control characters out of the recorded versions', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0', latest: '9.9.9\u001b[31mIGNORE' });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(injected(run)).not.toContain('\u001b');
+  });
+});
+
 describe('WebSearch hook: a hit', () => {
   it('injects the title, the dollar price, and the free inspect command', async () => {
     const { baseUrl, hits } = await serveJson((_body, base) => ({

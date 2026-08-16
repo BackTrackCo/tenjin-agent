@@ -40,6 +40,53 @@ It never touches `~/.tenjin`, so your wallet, config, library, search history, a
 
 Checks the local environment, API reachability, API contracts, skill wiring, session state, wallet state, and balance. Human output includes `fix:` lines where useful; `--json` includes the permission recommendation under `permissions`.
 
+### `tenjin update`
+
+Installs the newest version npm offers this build, pinned to the exact version the registry names.
+
+| Flag      | Effect                                                    |
+| --------- | --------------------------------------------------------- |
+| `--check` | Report whether a newer version exists without installing. |
+
+The manager that owns the install performs it: npm, pnpm, and bun are each driven with their own global-add command. What cannot be driven is refused with the instruction that is correct there, rather than writing a global you never had: a source checkout updates by git, an npx run has nothing installed to replace, a project-local copy updates where it is declared, and yarn is refused because `yarn global add` exists only in yarn 1. `--check` answers from all of them.
+
+Deliberately not in the recommended permission allowlist: it replaces the binary your agent then runs. See [agent-permissions.md](./agent-permissions.md).
+
+### The update check
+
+Once a day, at most, the CLI asks npm whether a newer version exists. It never installs on its own; it reports, and you or your agent decide.
+
+| Surface                                | Who sees it                                                                        |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| One dim stderr line                    | A human at a TTY.                                                                  |
+| `updateAvailable` on the JSON envelope | Anything reading the envelope, including an agent. Carries `current` and `latest`. |
+| A line on hook output                  | A harness reading `additionalContext`.                                             |
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "command": "search",
+  "ok": true,
+  "data": {},
+  "updateAvailable": { "current": "0.1.0-alpha.6", "latest": "0.1.0-alpha.7" },
+}
+```
+
+An agent that sees the field can run `tenjin update` itself, at a moment it chooses. That is deliberate: this CLI starts a fresh process per invocation, so there is no deferred-activation window to hide a binary swap in. "Next start" is "mid-session" for whatever is driving it.
+
+`update.mode` controls the reporting:
+
+| Mode    | Behavior                                         |
+| ------- | ------------------------------------------------ |
+| `nudge` | Default. All three surfaces above.               |
+| `off`   | None of them; the CLI stops asking npm entirely. |
+
+```bash
+tenjin config set update.mode off
+```
+
+The field is read from the check's cache, never fetched while your command runs, so it costs no request and no delay.
+
 ## Search and read
 
 ### `tenjin search "<question>"`

@@ -35,6 +35,15 @@ export interface SkillWriteOptions {
    * regular file where the new link was.
    */
   followSymlinks?: boolean;
+  /**
+   * Shape a packaged file before it is compared and written (config-conditional
+   * skill content; see lib/skill-materialize). Applied to the SOURCE side only,
+   * before the on-disk compare, so "up-to-date" means "matches what this config
+   * state would write" and a config change makes the same source differ again. A
+   * transform that throws aborts the whole install of this skill: a half-shaped
+   * skill must never be written.
+   */
+  materialize?: (rel: string, content: Buffer) => Buffer;
 }
 
 export async function installSkill(
@@ -48,6 +57,9 @@ export async function installSkill(
   if (src === null) {
     // assertSkillsSource already guards SKILL.md; this is defensive for an empty dir.
     throw new CliError('INTERNAL', `Packaged skill source ${srcDir} is empty`);
+  }
+  if (opts.materialize !== undefined) {
+    for (const [rel, content] of src) src.set(rel, opts.materialize(rel, content));
   }
 
   // Only the files this package SHIPS are read and written. Everything else in the
