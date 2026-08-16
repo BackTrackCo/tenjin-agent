@@ -8,12 +8,15 @@ import pkg from '../../package.json';
  */
 export const TENJIN_PRODUCT = `tenjin-cli/${pkg.version}`;
 
+/** The product NAME alone, which is what identifies a copy of us in a handoff. */
+export const TENJIN_PRODUCT_NAME = 'tenjin-cli';
+
 /**
  * The identifying comment. It rides LAST so a caller's products keep the order
  * they were handed off in, and so stripping it is enough to recover the caller's
  * sequence from an already-composed field (see `composeUserAgent`).
  */
-const TENJIN_COMMENT = '(+https://tenjin.blog)';
+export const TENJIN_COMMENT = '(+https://tenjin.blog)';
 
 /**
  * The CLI's identity on every HTTP request, sent as the standard `User-Agent`
@@ -26,7 +29,7 @@ export const TENJIN_USER_AGENT = `${TENJIN_PRODUCT} ${TENJIN_COMMENT}`;
 export const CALLER_USER_AGENT_ENV = 'TENJIN_CALLER_USER_AGENT';
 
 /** The server's bound: a longer field is discarded whole, never truncated. */
-const USER_AGENT_MAX_LENGTH = 512;
+export const USER_AGENT_MAX_LENGTH = 512;
 
 /**
  * One RFC 9110 product: a token, optionally `/token`. The handoff accepts a
@@ -34,10 +37,10 @@ const USER_AGENT_MAX_LENGTH = 512;
  * structurally keeps a user, wallet, session, hostname, or machine identifier
  * out of the field rather than a blocklist that has to guess at one.
  */
-const PRODUCT_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:\/[!#$%&'*+.^_`|~0-9A-Za-z-]+)?$/;
+export const PRODUCT_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:\/[!#$%&'*+.^_`|~0-9A-Za-z-]+)?$/;
 
 /** Printable ASCII, the only range the server parses; also excludes CR/LF/tab. */
-const PRINTABLE_ASCII_RE = /^[\x20-\x7e]*$/;
+export const PRINTABLE_ASCII_RE = /^[\x20-\x7e]*$/;
 
 export interface ComposeUserAgentInput {
   /** A caller's product sequence, passed programmatically; wins over the env. */
@@ -86,5 +89,13 @@ function callerProducts(raw: string | undefined): string[] {
  */
 function isOwnIdentity(token: string): boolean {
   const lower = token.toLowerCase();
-  return lower === TENJIN_COMMENT || lower === 'tenjin-cli' || lower.startsWith('tenjin-cli/');
+  // Both sides are lowered: comparing a lowered token against a constant that is
+  // merely all-lowercase TODAY would break silently the day either gains a
+  // capital, and it fails safe (the stale copy stops matching, then fails
+  // PRODUCT_RE, and the whole handoff drops), so nothing would notice.
+  return (
+    lower === TENJIN_COMMENT.toLowerCase() ||
+    lower === TENJIN_PRODUCT_NAME.toLowerCase() ||
+    lower.startsWith(`${TENJIN_PRODUCT_NAME.toLowerCase()}/`)
+  );
 }

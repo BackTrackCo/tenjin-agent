@@ -15,17 +15,24 @@ export interface FetchJsonOptions {
   /** Optional request headers, merged onto the User-Agent this module always sends. */
   headers?: Record<string, string>;
   /**
-   * An embedding caller's own product sequence, composed BEHIND the CLI's
-   * identity (see `composeUserAgent`). Absent, the `TENJIN_CALLER_USER_AGENT`
-   * environment variable is used, which is how a subprocess launcher hands off.
+   * INTERNAL. A caller's own product sequence, composed BEHIND the CLI's
+   * identity (see `composeUserAgent`). The package ships a `bin` and no
+   * `exports` map, so this is not a supported seam for code outside this repo:
+   * the documented handoff is the `TENJIN_CALLER_USER_AGENT` environment
+   * variable, which is what a subprocess launcher sets and what this falls back
+   * to. Kept as an option so an in-repo caller can pass a value the environment
+   * does not carry.
    */
   callerUserAgent?: string;
 }
 
 /**
- * The one place the identity is written; both transports funnel their Headers
- * through it, so a third entry point cannot ship without it. `.set` on a Headers
- * object is what makes it total: a caller header spelled `User-Agent` in any
+ * The one place the identity is written for anything that can import it; both
+ * transports funnel their Headers through it, so a third entry point on this
+ * side cannot ship without it. The generated hook scripts are the one request
+ * path that cannot reach here, and they carry their own mirrored composer
+ * (`lib/hook-scripts.ts`) rather than an exemption. `.set` on a Headers
+ * object is what makes this total: a caller header spelled `User-Agent` in any
  * case lands in the same slot and is overwritten, never duplicated, so a
  * call-specific header cannot erase the composed field or add a second one.
  */
@@ -204,7 +211,7 @@ export interface HttpRequestOptions {
   method?: 'GET' | 'POST' | 'PUT';
   timeoutMs: number;
   headers?: Record<string, string>;
-  /** An embedding caller's product sequence; see `FetchJsonOptions.callerUserAgent`. */
+  /** INTERNAL; see `FetchJsonOptions.callerUserAgent`. */
   callerUserAgent?: string;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
   jsonBody?: unknown;

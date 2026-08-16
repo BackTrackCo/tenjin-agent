@@ -3,8 +3,7 @@
 ---
 
 Let the agent that runs the CLI travel in the same `User-Agent` field, behind the
-`tenjin-cli` product: `TENJIN_CALLER_USER_AGENT` for a subprocess launcher, a
-`callerUserAgent` option on the shared HTTP boundary for an embedding caller.
+`tenjin-cli` product: export `TENJIN_CALLER_USER_AGENT` when you launch it.
 
 Composition happens in one place (`composeUserAgent` in `lib/client-meta.ts`) and
 is idempotent: the caller value is decomposed into products, any copy of our own
@@ -23,3 +22,11 @@ whole: the CLI identity travels alone rather than as a truncated token that woul
 read as a different client. It is self-reported telemetry, never trusted policy
 input, and no signed header set changes: the payment and RFC 9421 signatures
 cover the same material they did before.
+
+The generated WebSearch hook script carries the identity too. It is the CLI's
+highest-volume request path and it imports nothing, so it had been sending Node's
+default `User-Agent: node` and every hook-driven search was landing as a
+synthetic client named `node` that was in fact this CLI. It now composes the same
+field, from constants interpolated out of `lib/client-meta.ts` at generation time
+and the caller handoff read at run time, with a test that runs the shipped bytes
+and the real composer over the same inputs so the two cannot drift.

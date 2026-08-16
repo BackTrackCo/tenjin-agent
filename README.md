@@ -298,17 +298,20 @@ Important defaults:
 
 ## Client identity
 
-Every request carries the standard `User-Agent` field and nothing else that
-identifies the client:
+Every request the CLI makes, including the ones its search hook makes, carries
+the standard `User-Agent` field and nothing else that identifies the client:
 
 ```http
 User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
 ```
 
 If you are an agent that runs the CLI, you can travel in that field too. Export
-`TENJIN_CALLER_USER_AGENT` when you launch it as a subprocess, or pass
-`callerUserAgent` on the shared HTTP options when you embed it. Your products
-follow the CLI's, in your order:
+`TENJIN_CALLER_USER_AGENT` when you launch it, and your products follow the
+CLI's, in your order:
+
+```bash
+TENJIN_CALLER_USER_AGENT="codex/1.2.0 node/24.4.0" tenjin search "..."
+```
 
 ```http
 User-Agent: tenjin-cli/<version> codex/1.2.0 node/24.4.0 (+https://tenjin.blog)
