@@ -135,6 +135,41 @@ describe('emitFailure', () => {
   });
 });
 
+// How an AGENT learns a newer version exists. The nudge is one dim stderr line
+// that only a human at a terminal sees; this rides the envelope the harness is
+// already parsing, so it can decide to run `tenjin update` itself.
+describe('updateAvailable on the envelope', () => {
+  const signal = { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' };
+
+  it('rides a success envelope when one is known', () => {
+    const cap = captureIo(false);
+    emitSuccess(cap.io, 'search', { hits: [] }, [], { updateAvailable: signal });
+    expect(JSON.parse(cap.stdout())).toMatchObject({ ok: true, updateAvailable: signal });
+  });
+
+  it('rides a failure envelope too, since the command failing is unrelated', () => {
+    const cap = captureIo(false);
+    emitFailure(cap.io, 'buy', new CliError('NETWORK_ERROR', 'nope'), {
+      updateAvailable: signal,
+    });
+    expect(JSON.parse(cap.stdout())).toMatchObject({ ok: false, updateAvailable: signal });
+  });
+
+  // Absent, not null: an optional key nothing sets should not appear at all.
+  it('is absent when nothing is known', () => {
+    const cap = captureIo(false);
+    emitSuccess(cap.io, 'search', { hits: [] }, [], { updateAvailable: null });
+    expect(JSON.parse(cap.stdout())).not.toHaveProperty('updateAvailable');
+  });
+
+  // The human path is the dim line, not the envelope: a TTY run prints no JSON.
+  it('does not disturb the human rendering', () => {
+    const cap = captureIo(true);
+    emitSuccess(cap.io, 'search', { hits: [] }, ['nothing found'], { updateAvailable: signal });
+    expect(cap.stdout()).toBe('nothing found\n');
+  });
+});
+
 describe('emitNotice', () => {
   it('writes one line to STDERR at a TTY, leaving stdout for the envelope', () => {
     const cap = captureIo(true);

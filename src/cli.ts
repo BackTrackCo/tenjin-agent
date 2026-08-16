@@ -6,7 +6,7 @@ import { dataDir } from './lib/paths';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
-import { maybeNudgeUpdate } from './lib/update-check';
+import { maybeUpdate, readUpdateSignal } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
 /**
@@ -75,18 +75,32 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
+    // Read BEFORE the envelope, from the last check's cache only: this is the
+    // agent's copy of the nudge, and it must not cost a network call or a delay.
+    // `update` is excluded for the same reason the nudge is — its own envelope
+    // has just answered the question.
+    const updateAvailable =
+      command === 'update' ? null : await readUpdateSignal(dataDir(process.env));
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, { json: ctx.flags.json });
+      emitSuccess(ctx.io, command, result.data, result.humanLines, {
+        json: ctx.flags.json,
+        updateAvailable,
+      });
     } catch (err) {
-      setExit(emitFailure(io, command, err, { json }).exitCode);
+      setExit(emitFailure(io, command, err, { json, updateAvailable }).exitCode);
     }
     // AFTER the envelope, for every command and both outcomes: neither of these
     // may delay a command's output, touch stdout, or move its exit code, and
     // neither ever rejects. The nudge resolves its own data dir because a failed
-    // buildContext has no ctx to read one from.
-    await maybeNudgeUpdate({ dir: dataDir(process.env), io, json });
+    // buildContext has no ctx to read one from. Skipped for `update` itself: its
+    // envelope has just answered the nudge's question, and this process still
+    // runs the OLD build, so a cached "newer exists" would print the nudge in
+    // the same breath as "Updated".
+    if (command !== 'update') {
+      await maybeUpdate({ dir: dataDir(process.env), io, json });
+    }
     // Every command but `install` is a chance to catch up a skill left stale by
     // an upgrade; `install` has just written the same bytes from the same source.
     // Lazily imported, like the command bodies, to keep it off the boot path, and
@@ -150,8 +164,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // The two affirmative flags are pre-default-on compat only: released docs and
     // the alpha.9 doctor's fix strings name them, so they must parse, but they add
     // nothing over the default and would only clutter --help. Hidden, not removed.
-    .addOption(new Option('--claude-md', 'compat no-op; the nudge is the default').hideHelp())
-    .option('--no-claude-md', 'write no CLAUDE.md nudge')
+    // Both spellings are compat no-ops: `install` writes no CLAUDE.md/AGENTS.md
+    // line any more, and one that is already there is removed. Kept parseable so a
+    // released doc or a pinned script does not fail on an unknown option.
+    .addOption(new Option('--claude-md', 'compat no-op; no nudge is written').hideHelp())
+    .addOption(new Option('--no-claude-md', 'compat no-op; no nudge is written').hideHelp())
     .addOption(
       new Option(
         '--allow-free-verbs',
@@ -201,12 +218,35 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  addGlobalFlags(program.command('uninstall'))
+    .description(
+      'Remove everything `tenjin install` wrote: the skills, the harness hooks and their settings entries, and the tenjin permission rules. Nothing under ~/.tenjin is touched',
+    )
+    .action(async function (this: Command) {
+      await runCommand('uninstall', this, async (ctx) => {
+        const { runUninstall } = await import('./commands/uninstall');
+        return runUninstall(ctx);
+      });
+    });
+
   addGlobalFlags(program.command('doctor'))
     .description('Check the local environment and Tenjin API reachability')
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
         const { runDoctor } = await import('./commands/doctor');
         return runDoctor(ctx);
+      });
+    });
+
+  addGlobalFlags(program.command('update'))
+    .description(
+      'Update tenjin-cli to the newest version on its release channel (an alpha build follows @alpha)',
+    )
+    .option('--check', 'report whether a newer version exists without installing it')
+    .action(async function (this: Command) {
+      await runCommand('update', this, async (ctx) => {
+        const { runUpdate } = await import('./commands/update');
+        return runUpdate({ check: this.opts().check === true }, ctx);
       });
     });
 
@@ -267,6 +307,32 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runCommand('wallet.balance', this, async (ctx) => {
         const { runWalletBalance } = await import('./commands/wallet');
         return runWalletBalance(ctx);
+      });
+    });
+
+  // Funds-IN via Coinbase Onramp. Unlike `send`, this IS also an MCP tool
+  // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
+  // checkout page. The browser open and balance poll below are CLI-only, and
+  // both are off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
+  // run takes it off stderr immediately rather than off a poll that outlives it.
+  addGlobalFlags(program.command('fund [amountUsd]'))
+    .description(
+      'Fund THIS wallet by card via Coinbase Onramp: mint a checkout link bound to this machine, open it in the browser, and wait for the USDC to land on Base',
+    )
+    .option('--no-open', 'print the checkout link without opening a browser')
+    .option(
+      '--no-wait',
+      'return once the link is issued instead of polling the balance (already the default when not at a TTY)',
+    )
+    .action(async function (this: Command, amountUsd: string | undefined) {
+      await runCommand('fund', this, async (ctx) => {
+        const o = this.opts();
+        const { runFund } = await import('./commands/fund');
+        return runFund(ctx, {
+          ...(amountUsd !== undefined ? { amountUsd } : {}),
+          ...(o.open === false ? { open: false } : {}),
+          ...(o.wait === false ? { wait: false } : {}),
+        });
       });
     });
 
@@ -404,16 +470,20 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('publish [file]'))
     .description(
-      'Publish a Markdown file (or a parked --candidate) as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
+      'Publish a Markdown file as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
     )
     .option(
-      '--candidate <id>',
-      'publish a parked candidate by id instead of a file (clears it on success)',
+      '--search-id <id>',
+      'the search this file answers (closes its open loop, and prefills its question)',
     )
     .option('--draft', 'save as a private draft instead of publishing')
     .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
     .option('--price <usd>', 'post price in decimal USD (defaults to publish.defaultPrice)')
+    .option(
+      '--excerpt <text>',
+      'the public preview text (max 500 chars; default: derived from the body)',
+    )
     .option('--question <text>', 'a question this piece answers (repeatable)', collect, [])
     .option('--task <text>', 'a task this piece supports (repeatable)', collect, [])
     .option('--scope <text>', 'what the piece covers (card scope)')
@@ -432,11 +502,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
-            ...(typeof o.candidate === 'string' ? { candidate: o.candidate } : {}),
+            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.draft === true ? { draft: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
+            ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
             ...(Array.isArray(o.question) && o.question.length > 0
               ? { question: o.question as string[] }
               : {}),
@@ -577,51 +648,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           },
           ctx,
         );
-      });
-    });
-
-  // Group-level flags so `tenjin candidate --json list` parses like the wallet
-  // group. Appended after the existing groups to keep merge friction with the
-  // parallel publish work minimal.
-  const candidate = addGlobalFlags(
-    program
-      .command('candidate')
-      .description(
-        'Manage local publish candidates (parked drafts; nothing uploads until publish)',
-      ),
-  );
-  addGlobalFlags(candidate.command('add <file>'))
-    .description('Park a Markdown draft as a publish candidate, tied to a search')
-    .requiredOption('--search-id <id>', 'the search whose unmet demand this draft answers')
-    .option('--question <q>', 'the question this draft answers')
-    .action(async function (this: Command, file: string) {
-      await runCommand('candidate.add', this, async (ctx) => {
-        const o = this.opts();
-        const { runCandidateAdd } = await import('./commands/candidate');
-        return runCandidateAdd(
-          {
-            file,
-            searchId: String(o.searchId),
-            ...(typeof o.question === 'string' ? { question: o.question } : {}),
-          },
-          ctx,
-        );
-      });
-    });
-  addGlobalFlags(candidate.command('list'))
-    .description('List pending candidates, newest first')
-    .action(async function (this: Command) {
-      await runCommand('candidate.list', this, async (ctx) => {
-        const { runCandidateList } = await import('./commands/candidate');
-        return runCandidateList(ctx);
-      });
-    });
-  addGlobalFlags(candidate.command('drop <id>'))
-    .description('Discard a pending candidate (never auto-deleted)')
-    .action(async function (this: Command, id: string) {
-      await runCommand('candidate.drop', this, async (ctx) => {
-        const { runCandidateDrop } = await import('./commands/candidate');
-        return runCandidateDrop({ id }, ctx);
       });
     });
 

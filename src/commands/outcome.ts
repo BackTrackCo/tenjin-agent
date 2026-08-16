@@ -13,7 +13,7 @@ import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin outcome --search-id <id> --status <s>`, POST to
- * /api/agent/searches/:id/outcomes, closing the reuse loop (used / partially_used
+ * /api/searches/:id/outcomes, closing the reuse loop (used / partially_used
  * / rejected / regenerated / purchase_declined). The searchId is the capability,
  * so no wallet is needed; `--last` sugar targets the most recent DELIBERATE
  * search — entries the WebSearch hook rode along with are skipped, or every web

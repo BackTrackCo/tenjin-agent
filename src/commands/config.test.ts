@@ -58,7 +58,8 @@ describe('runConfigList', () => {
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
-    expect(humanLines).toHaveLength(12);
+    expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
+    expect(humanLines).toHaveLength(13);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -490,6 +491,42 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
       process.chdir(prev);
       await rm(projectCwd, { recursive: true, force: true });
     }
+  });
+});
+
+describe('update.mode', () => {
+  it('defaults to nudge and round-trips every mode', async () => {
+    const ctx = makeCtx();
+    expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
+      data: { key: 'update.mode', value: 'nudge', source: 'default' },
+    });
+    for (const value of ['off', 'nudge'] as const) {
+      const set = await runConfigSet({ key: 'update.mode', value }, ctx);
+      expect(set.data).toMatchObject({ key: 'update.mode', value, source: 'file' });
+      expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
+        data: { value, source: 'file' },
+      });
+    }
+  });
+
+  it('rejects a mode outside the enum', async () => {
+    const bad = await caught(() =>
+      runConfigSet({ key: 'update.mode', value: 'sometimes' }, makeCtx()),
+    );
+    expect(bad.code).toBe('USAGE');
+    expect(bad.fix).toContain('"nudge"');
+    expect(bad.fix).not.toContain('auto');
+  });
+
+  // The opt-out has to survive a write to a neighbouring block, or turning auto
+  // off would silently come back on the next `config set`.
+  it('survives a write to another block', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'update.mode', value: 'off' }, ctx);
+    await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx);
+    expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
+      data: { value: 'off', source: 'file' },
+    });
   });
 });
 

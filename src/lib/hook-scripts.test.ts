@@ -143,6 +143,57 @@ function injected(run: HookRun): string | null {
   return parsed.hookSpecificOutput?.additionalContext ?? null;
 }
 
+// The agent-visible half of the update check. A harness reads
+// additionalContext; it never sees the dim stderr line the CLI prints to a
+// human, which is why this rides along on whatever the hook already says.
+describe('the update signal on hook output', () => {
+  async function writeSignal(signal: unknown): Promise<void> {
+    await writeFile(
+      join(dataDir, 'update-check.json'),
+      JSON.stringify({ schemaVersion: 1, signal }),
+    );
+  }
+
+  it('appends the available version to the injected context', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(run.code).toBe(0);
+    const text = injected(run);
+    expect(text).toContain('tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)');
+    expect(text).toContain('Run tenjin update');
+    // Still exactly one parseable object on stdout.
+    expect(JSON.parse(run.stdout)).toBeTruthy();
+  });
+
+  it('says nothing when no newer version is recorded', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(injected(run)).not.toContain('is available (you have');
+  });
+
+  it('honors update.mode off, which silences every surface', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl, update: { mode: 'off' } });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(injected(run)).not.toContain('is available (you have');
+  });
+
+  // The cache is a file on disk like any other; a mangled version string in it
+  // must not reach a terminal as escapes.
+  it('strips control characters out of the recorded versions', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0', latest: '9.9.9\u001b[31mIGNORE' });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect(injected(run)).not.toContain('\u001b');
+  });
+});
+
 describe('WebSearch hook: a hit', () => {
   it('injects the title, the dollar price, and the free inspect command', async () => {
     const { baseUrl, hits } = await serveJson((_body, base) => ({
@@ -450,6 +501,7 @@ interface SeedSearch {
   minutesAgo: number;
   resolved?: { by: string; at: string };
   source?: string;
+  sessionId?: string;
 }
 
 async function seedSearches(entries: SeedSearch[]): Promise<void> {
@@ -461,6 +513,7 @@ async function seedSearches(entries: SeedSearch[]): Promise<void> {
     candidates: [],
     ...(e.resolved !== undefined ? { resolved: e.resolved } : {}),
     ...(e.source !== undefined ? { source: e.source } : {}),
+    ...(e.sessionId !== undefined ? { sessionId: e.sessionId } : {}),
   }));
   await writeFile(
     join(dataDir, 'searches.json'),
@@ -489,9 +542,22 @@ describe('Stop hook: open-loop collection', () => {
     expect(run.stderr).toBe('');
     const text = injected(run) ?? '';
     expect(text).toContain(`you searched '${OPEN_MISS.question}' and got a MISS`);
-    expect(text).toContain(`tenjin publish, searchId ${OPEN_MISS.searchId}`);
-    expect(text).toContain(`tenjin candidate add <file> --search-id ${OPEN_MISS.searchId}`);
+    expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
+    // The second arm CLOSES the loop rather than saving the work for later.
+    expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
+    expect(text).not.toContain('candidate add');
     expect(JSON.parse(run.stdout)).toHaveProperty('hookSpecificOutput.hookEventName', 'Stop');
+  });
+
+  // The nag cannot tell a public finding from a private one, so it must not ask
+  // for a bare publish: this line reaches a model's context at every turn end.
+  it('qualifies the publish arm and offers closing the loop as the other', async () => {
+    await seedSearches([OPEN_MISS]);
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text).toContain('public, reusable, rights-clean finding');
+    expect(text).toContain('If you will not, close it');
+    expect(text).not.toContain('park');
+    expect(text.split('\n')).toHaveLength(1);
   });
 
   it('nags exactly once: the second run is silent', async () => {
@@ -567,6 +633,7 @@ interface StoredEntry {
   question: string;
   decision: string;
   source?: string;
+  sessionId?: string;
   candidates: { resourceId: string; url: string; title: string; price: string }[];
 }
 
@@ -828,6 +895,9 @@ describe('Stop hook: the two kinds of open loop', () => {
     expect(text).toContain('a web query 1');
     expect(text).toContain('a web query 2');
     expect(text).toContain('If any produced a durable public finding');
+    expect(text).toContain('tenjin publish <file> --search-id <id>');
+    expect(text).toContain('tenjin outcome --search-id <id> --status regenerated');
+    expect(text).not.toContain('candidate add');
     expect(text).not.toContain('Open Tenjin loop');
   });
 
@@ -1117,5 +1187,107 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     await writeConfig({ baseUrl });
     await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect((await storedSearches())[0]?.candidates[0]?.price).toBe('150000');
+  });
+});
+
+// --- Nags are scoped to the session that opened the loop ---------------------------
+
+describe('session scoping: the ledger is global, the nag is not', () => {
+  /** The same Stop payload the harness sends, for an arbitrary session. */
+  const stopInputFor = (sessionId: string): string =>
+    JSON.stringify({ hook_event_name: 'Stop', session_id: sessionId, stop_reason: 'end' });
+
+  const MINE = { ...OPEN_MISS, sessionId: 'abc' };
+  const THEIRS = {
+    ...OPEN_MISS,
+    searchId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    question: 'a sibling session question',
+    sessionId: 'other-session',
+  };
+
+  it('raises a loop stamped with the stopping session', async () => {
+    await seedSearches([MINE]);
+    const text = injected(await runScript(stopHookScript(dataDir), stopInputFor('abc'))) ?? '';
+    expect(text).toContain(MINE.searchId);
+  });
+
+  // The live complaint: a session nagged about work it never did and cannot close.
+  it('says nothing about another session, and leaves it UNNAGGED for its own', async () => {
+    await seedSearches([THEIRS]);
+    const run = await runScript(stopHookScript(dataDir), stopInputFor('abc'));
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    // The critical half: skipping must not consume the other session's one nag.
+    expect(await nagged()).toEqual([]);
+    const theirs = injected(
+      await runScript(stopHookScript(dataDir), stopInputFor('other-session')),
+    );
+    expect(theirs).toContain(THEIRS.searchId);
+  });
+
+  it('separates the two when both are open at once', async () => {
+    await seedSearches([MINE, THEIRS]);
+    const text = injected(await runScript(stopHookScript(dataDir), stopInputFor('abc'))) ?? '';
+    expect(text).toContain(MINE.searchId);
+    expect(text).not.toContain(THEIRS.searchId);
+    expect(await nagged()).toEqual([MINE.searchId]);
+  });
+
+  // Scoping must never make a loop invisible everywhere, so an entry nothing
+  // could attribute still raises in whichever session stops.
+  it('raises an unstamped entry in any session', async () => {
+    await seedSearches([OPEN_MISS]);
+    const text = injected(await runScript(stopHookScript(dataDir), stopInputFor('whoever'))) ?? '';
+    expect(text).toContain(OPEN_MISS.searchId);
+  });
+
+  // A payload shape the hook does not recognize costs the scoping, not the nag.
+  it('falls back to global behavior on stdin it cannot parse', async () => {
+    await seedSearches([THEIRS]);
+    const text = injected(await runScript(stopHookScript(dataDir), 'not json at all')) ?? '';
+    expect(text).toContain(THEIRS.searchId);
+  });
+
+  it('falls back to global behavior when the payload names no session', async () => {
+    await seedSearches([THEIRS]);
+    const input = JSON.stringify({ hook_event_name: 'Stop', stop_reason: 'end' });
+    const text = injected(await runScript(stopHookScript(dataDir), input)) ?? '';
+    expect(text).toContain(THEIRS.searchId);
+  });
+
+  // The WebSearch hook is the one recorder the harness hands a session id to.
+  it('stamps the session the WebSearch hook was invoked in', async () => {
+    const { baseUrl } = await serveJson(() => ({
+      status: 200,
+      json: {
+        schemaVersion: 2,
+        searchId: '66666666-6666-4666-8666-666666666666',
+        decision: 'MISS',
+      },
+    }));
+    await writeConfig({ baseUrl });
+    await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    expect((await storedSearches())[0]?.sessionId).toBe('abc');
+  });
+
+  it('omits the stamp rather than writing an empty one when the payload has none', async () => {
+    const { baseUrl } = await serveJson(() => ({
+      status: 200,
+      json: {
+        schemaVersion: 2,
+        searchId: '66666666-6666-4666-8666-666666666666',
+        decision: 'MISS',
+      },
+    }));
+    await writeConfig({ baseUrl });
+    const input = JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'WebSearch',
+      tool_input: { query: 'a question' },
+    });
+    await runScript(websearchHookScript(dataDir), input);
+    const stored = await storedSearches();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).not.toHaveProperty('sessionId');
   });
 });

@@ -83,6 +83,34 @@ const HooksConfigSchema = z.object({
 });
 
 /**
+ * What the daily update check is allowed to do about a newer version.
+ *
+ * `nudge` reports it — one dim line for a human at a terminal, and an
+ * `updateAvailable` field on the JSON envelope for everyone else, which is how
+ * an agent learns to run `tenjin update` itself. `off` reports neither and stops
+ * asking npm entirely.
+ *
+ * There is deliberately no mode that installs on its own. Replacing the binary
+ * under a running agent has no safe moment in a CLI that starts a fresh process
+ * per invocation: "next start" IS "mid-session". Reporting is the part that was
+ * missing, so reporting is what this key controls.
+ */
+export const UpdateModeSchema = z.enum(['nudge', 'off']);
+export type UpdateMode = z.infer<typeof UpdateModeSchema>;
+
+const UpdateConfigSchema = z.object({
+  mode: UpdateModeSchema,
+});
+
+export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode {
+  const parsed = UpdateModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "nudge" or "off".',
+  });
+}
+
+/**
  * What `install` recorded about its OWN targets. `harness` is the explicit
  * `--harness` set of the last install that passed the flag, and it exists so
  * `doctor` keeps judging a directory the user named by hand: detection cannot see a
@@ -126,6 +154,7 @@ export const ConfigSchema = z.object({
   publish: PublishConfigSchema,
   install: InstallConfigSchema,
   hooks: HooksConfigSchema,
+  update: UpdateConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -145,6 +174,7 @@ export const RawConfigSchema = ConfigSchema.partial()
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: InstallConfigSchema.partial().passthrough().optional(),
     hooks: HooksConfigSchema.partial().passthrough().optional(),
+    update: UpdateConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -178,6 +208,7 @@ export const CONFIG_DEFAULTS: Config = {
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json.
   hooks: { searchMode: 'auto', stopNag: 'on' },
+  update: { mode: 'nudge' },
 };
 
 /**
@@ -187,8 +218,8 @@ export const CONFIG_DEFAULTS: Config = {
  * writes about itself rather than a setting to hand-edit, so none is ever a bare
  * scalar.
  */
-export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install' | 'hooks'>;
-const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install', 'hooks']);
+export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install' | 'hooks' | 'update'>;
+const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install', 'hooks', 'update']);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
@@ -200,6 +231,10 @@ export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 /** The dotted keys `config get/set` accept for the nested hooks block. */
 export const HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.stopNag'] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
+
+/** The dotted key `config get/set` accepts for the nested update block. */
+export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
+export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
 
 /**
  * Read and validate config.json WITHOUT applying defaults, so provenance can
@@ -254,6 +289,7 @@ export async function loadConfig(dir: string): Promise<Config> {
       searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
       stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
     },
+    update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
   };
 }
 
@@ -296,6 +332,7 @@ export interface EffectiveSettings {
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
+  updateMode: ResolvedSetting<UpdateMode>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -333,7 +370,16 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),
     hooksStopNag: resolveHooksStopNag(config),
+    updateMode: resolveUpdateMode(config),
   };
+}
+
+/** update.mode: file or default, no env or flag. Every surface that reports a
+ *  newer version reads this one resolved value, so they cannot disagree. */
+function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
+  const fromFile = config.update?.mode;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
 }
 
 /** hooks.stopNag: file or default, same shape as hooks.searchMode. */

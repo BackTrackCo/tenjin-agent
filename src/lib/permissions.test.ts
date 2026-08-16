@@ -24,8 +24,6 @@ const FORBIDDEN_VERBS = [
   'tenjin edit',
   'tenjin wallet create',
   'tenjin config set',
-  'tenjin candidate add',
-  'tenjin candidate drop',
   'tenjin install',
   'tenjin mcp',
 ];
@@ -58,6 +56,7 @@ describe('recommended allowlist shape', () => {
   it('recommends every free (non-paying) verb the command surface exposes', () => {
     expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.command)).toEqual([
       'tenjin search',
+      'tenjin fund',
       'tenjin inspect',
       'tenjin read',
       'tenjin outcome',
@@ -65,7 +64,6 @@ describe('recommended allowlist shape', () => {
       'tenjin wallet show',
       'tenjin wallet balance',
       'tenjin config get',
-      'tenjin candidate list',
     ]);
   });
 });
@@ -168,7 +166,6 @@ describe('money-moving and state-changing verbs are never recommended', () => {
       expect(rule).not.toBe('Bash(tenjin:*)');
       expect(rule).not.toBe('Bash(tenjin wallet:*)');
       expect(rule).not.toBe('Bash(tenjin config:*)');
-      expect(rule).not.toBe('Bash(tenjin candidate:*)');
     }
   });
 });
@@ -199,7 +196,6 @@ describe('the flag surface inside an allowed verb', () => {
     expect(mcp).toContain('mcp__tenjin__tenjin_publish');
     expect(mcp).toContain('mcp__tenjin__tenjin_edit');
     expect(mcp).toContain('mcp__tenjin__tenjin_wallet');
-    expect(mcp).toContain('mcp__tenjin__tenjin_candidate');
   });
 
   it('carries both caveats in the machine payload', () => {

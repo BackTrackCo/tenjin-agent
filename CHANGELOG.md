@@ -1,5 +1,272 @@
 # tenjin-cli
 
+## 0.1.0-alpha.12
+
+### Patch Changes
+
+- a402916: Post outcome reports to `/api/searches/:id/outcomes`, the path the server now
+  documents after BackTrackCo/tenjin#616 dropped the `/agent` prefix. The contract
+  fixture and the live drift pin move with the client, so the scheduled
+  contract-drift run goes green again.
+
+  No fallback: tenjin serves the old `/api/agent/searches/:id/outcomes` spelling as
+  a real alias onto the same handler for one deprecation window, so both spellings
+  answer identically today and the pinned path is the one that survives the window.
+
+- c315e09: Widen the supply/demand triggers (tenjin-agent#145 item 1) by restructuring
+  both skill descriptions rather than appending to them, holding length at
+  parity with the previous wording. tenjin-search now leads with both search
+  moments: before regenerating expensive research, and before empirically
+  probing a third-party library or platform's undocumented behavior; the skip
+  list narrows from "the thing in front of you" to "your own code" and the two
+  skip sentences merge into one. tenjin-publish reorganizes its triggers into
+  three routes in (user ask, after-a-MISS, unprompted work worth selling), the
+  unprompted route covering substantial research and empirical proofs the docs
+  don't state. Two bundled fixes surfaced by the eval work: the requires-CLI
+  sentence becomes an explicit stand-down ("does not apply and must not fire,
+  not even to route the question"), taking the pre-existing no-CLI defer red
+  from 1/4 on main's wording to 2/4 in two independent samples; and preflight's
+  mirror-drift check now only gates runs that install the vendored tenjin
+  mirror, so non-mirror skill evals no longer need --no-preflight during #88.
+  Clean-room results: trigger eval extended 20 to 22 cases (one per side of the
+  new probe boundary) and scores 22/22 under the final wording, in-sample as
+  with the previous tuning. The two defer queries still firing both carry an
+  explicit user directive to use Tenjin while this skill is the only Tenjin
+  skill installed in the eval room; that residual is documented on the PR
+  rather than fought with more description weight.
+
+## 0.1.0-alpha.11
+
+### Minor Changes
+
+- 62c2c25: Card-fund the wallet from the terminal. `tenjin fund [amountUsd]` signs a SIWX
+  proof with the wallet's own key, asks the Tenjin backend to mint a Coinbase
+  Onramp checkout URL for that same address, prints it, opens it in the default
+  browser, and polls the Base USDC balance until the purchase lands (`--no-open`
+  and `--no-wait` opt out). The link is single-use, expires in about five
+  minutes, is bound to this machine's network, and requires a Coinbase account
+  to complete; only `https://pay.coinbase.com` URLs are ever opened. A matching
+  `tenjin_fund` MCP tool mints the link and returns it for the agent to hand to
+  the human (no browser open, no poll; minting moves no money and the payment
+  itself happens on Coinbase's authenticated page). `send` stays off MCP.
+
+  The link goes to stderr the moment it is minted, on every surface, because the
+  stdout envelope that also carries it is written only after the poll and the link
+  does not live that long. Opening a browser and polling are interactive
+  behaviours: both default off when stdout is not a TTY, so a piped, `--json`, or
+  MCP run returns as soon as the link exists. `pollStatus` on the envelope
+  distinguishes `skipped`, `unavailable`, `timed-out` and `arrived` instead of
+  collapsing three of them into `funded: false`. `tenjin fund` is never
+  allowlisted for Bash: a prefix rule would clear `--base-url` with it, which the
+  MCP tool's amount-only input does not.
+
+- 5e1148e: Remove the candidate pen. Implements #133.
+
+  A publish decision is made once. Parking a draft "for later" turned that into a
+  backlog nobody returned to, and the reminder that would have resurfaced it is the
+  repeat-nag class this CLI stopped emitting — so rather than warn about the pen for
+  a release, it is gone now, in the same release as the skills that stopped teaching
+  it.
+
+  Removed: `tenjin candidate add`, `list`, and `drop`; the `tenjin publish
+--candidate` path; the local candidate store; the `tenjin_candidate` MCP tool;
+  and the `Bash(tenjin candidate list:*)` line from the recommended free-verb
+  allowlist, which is now eight rules rather than nine. If an earlier version wrote
+  that rule into your `~/.claude/settings.json`, the next `tenjin install` removes
+  it and says so: a grant for a command that no longer exists is bloat we created,
+  so clearing it is our job rather than yours. `tenjin uninstall` reclaims it too.
+  Nothing else in that file is touched — rules you added yourself, other keys, and
+  their order all survive.
+
+  The Stop hook's open-loop reminder and the MISS `publishBack` hint keep the shape
+  they took when parking was deprecated: publish it back, or close the loop with
+  `tenjin outcome --search-id <id> --status regenerated`. Nothing is saved to come
+  back to, and the outcome report is what marks the search resolved so the reminder
+  never raises it again.
+
+  **Anything already in `~/.tenjin/candidates/` is left exactly where it is.** It is
+  your content, so nothing deletes it and `tenjin uninstall` will not either — but
+  nothing reads it any more, so a draft you want is a file to open at
+  `~/.tenjin/candidates/<id>/draft.md` and publish with `tenjin publish <file.md>`.
+  The `candidate` resolution value stays parseable in the search ledger so an older
+  `searches.json` still loads; nothing writes it now.
+
+- 5cc75d2: Make the MISS → publish loop closable on the path agents actually take. Until now
+  only `tenjin publish --candidate <id>` could name the search it answered, so the
+  bare file publish that both the Stop hook and the auto-mode skill prescribe left
+  the search open in the local store and the reminder kept firing at work that was
+  already on the marketplace. `tenjin publish <file.md> --search-id <id>` now closes
+  it, and prefills the searched question into the answer card's `questionsAnswered`
+  when neither `--question` nor the draft's frontmatter names one — that phrasing is
+  what the next searcher sends, so it is the right fallback. The prefill is dropped
+  rather than truncated when the stored question runs past the card's 200-character
+  item bound, because a prefill nobody asked for must not fail a publish that was
+  otherwise fine. `--search-id` with `--candidate` is a usage error (the candidate
+  already carries its own searchId), a malformed id refuses before any wallet touch,
+  and an id the local store does not know still publishes and says so. What happened
+  is reported in both registers: a stderr line for a human, and a
+  `search: { id, closed, prefill }` field on the JSON receipt, because `--json`
+  suppresses the stderr notes and an agent that named a search could otherwise not
+  tell a closed loop from an open one, nor learn that its question was too long to
+  become a card entry. `closed` reports the OUTCOME of the local write rather than
+  the intent to make it: the store update is best-effort and never throws, so a
+  lock it could not take comes back as `closed: false` and a line naming the
+  command that closes the loop by hand.
+
+  A `--draft` now parks privately on BOTH paths and closes nothing. It leaves the
+  named search open, and — this is a behavior change — it also leaves a
+  `--candidate` draft parked instead of clearing it. A draft answered nobody, so it
+  is not the publish that retires the pen entry; the later real publish is. The
+  receipt reports `cleared: false` with no `warning`, which is how a deliberate hold
+  reads against a clear that failed.
+
+  Every surface that hands you the closing command now hands you a complete one. A
+  MISS's `publishBack` payload emitted `tenjin publish <file.md> --json` beside a
+  `park` line that already carried the id, so the arm the agent was most likely to
+  copy was the one that closed nothing; both arms, and the stderr line beside them,
+  now name the searchId.
+
+  The Stop hook's open-loop reminder is reworded to match. It named a flag that did
+  not exist (`tenjin publish, searchId <id>`) and it carried no safety qualifier, so
+  it nagged just as hard on a question about private infrastructure as on a durable
+  public finding. It now emits the real command and conditions the publish arm on
+  the finding being public, reusable and rights-clean, with parking as the other
+  arm. The batched line for WebSearch-hook misses gets the same command syntax.
+
+  **The reminder is now scoped to the session that opened the loop.** The search
+  ledger is machine-global, so the Stop hook was raising whichever open MISSes it
+  found at whatever session happened to stop next, including a sibling session's
+  work that this one never did and cannot close. A stored search now carries an
+  optional `sessionId`, and the Stop hook parses the `session_id` its turn-end
+  payload already carries and skips entries stamped with a different one — without
+  marking them nagged, so the session that owns a loop still gets its single
+  reminder. The scoping is deliberately one-directional: an entry nothing could
+  attribute is still raised in every session, so a loop can never go invisible in
+  all of them at once, and a payload that is malformed or names no session falls
+  back to exactly the old machine-global behavior.
+
+  Both recorders stamp. The WebSearch hook reads the `session_id` the harness puts
+  on its stdin, and a deliberate `tenjin search` reads the same value from
+  `CLAUDE_CODE_SESSION_ID`, which Claude Code exports to Bash tool subprocesses, so
+  a CLI search and a hook search in one session carry the same stamp.
+  `TENJIN_SESSION_ID` overrides it for anyone wiring this up by hand. On a harness
+  that exports neither, a search records no session rather than guessing one, and
+  falls back to being raised everywhere.
+
+  **`tenjin publish --excerpt` sets the public preview.** The excerpt is what every
+  non-buyer reads — the 402 preview, the directory feed, search results, RSS, the
+  social card — and the server only derives it from the body's leading prose when
+  the client sends none. Frontmatter `excerpt:` already reached the wire; the flag
+  did not exist, so the one-shot path an agent actually uses had no way to say what
+  a stranger sees, and a piece whose answer sat too high leaked its verdict for
+  free. `--excerpt` wins over frontmatter, both are refused over the server's
+  500-character bound rather than truncated (a silently cut preview is a different
+  preview), and the refusal now happens at the command's edge instead of inside the
+  request builder, so it costs a message rather than a keystore unlock.
+
+  Every free-text field that ships is stripped of control bytes, escape sequences
+  and bidi overrides. None of it is necessarily typed by the person publishing: a
+  card question can be prefilled from a stored search, and the title, excerpt,
+  tags and every card field can arrive over MCP from an agent that read them off a
+  fetched page. `trim()` removes neither a CSI sequence nor a right-to-left
+  override, so without this a payload rides into the marketplace and renders in
+  every future reader's terminal. The strip lives in the two request builders that
+  `publish` and `edit` share, so it covers both commands and both MCP tools by
+  construction rather than by each flag remembering, and it runs before the length
+  bounds, since the stripped text is what the bound has to describe. The post BODY
+  is deliberately left alone: that is the author's own markdown, and rewriting it
+  is a content change nobody asked for. Ordinary unicode, including emoji ZWJ
+  sequences, is untouched.
+
+  The MCP `tenjin_publish` tool now forwards `searchId` and `excerpt` to the
+  command core. The tool advertised both, because the input schema is type-checked
+  against the argument type, but the handler that builds the call never passed
+  them, so an agent setting either over MCP had it silently dropped.
+
+  **Two smaller fixes on the same loop.** `tenjin install` now says to restart
+  Claude Code when it wires the hooks: harness hooks are read once at session
+  start, so an operator who does not restart gets no hook activity at all and
+  nothing telling them why. And `tenjin doctor` stops warning about an expired
+  session key. A delegation lives 24 hours by construction, so a spent one is
+  designed decay, not a fault, and warning on it left a permanent yellow on any
+  machine that had ever run `tenjin session start`. Expiry and a scope that does
+  not cover reading now report `ok` and name the verb that re-mints, the same
+  posture an absent or pre-origin cache already had. A file whose expiry cannot be
+  parsed is a different thing and still warns.
+
+  The `tenjin-publish` skill's draft rules now say where the free/paid fold falls: a
+  piece whose Answer section sat too high leaked its verdict into the public
+  excerpt, so the rule names the first ~500 characters as the excerpt and puts the
+  as-of date, versions and questions answered above the verdict.
+
+- 00fd79e: Take the CLAUDE.md footprint to zero, and give `install` a real reverse.
+
+  `tenjin install` no longer writes its pointer line into `~/.claude/CLAUDE.md` or
+  `AGENTS.md`. A harness loads every skill's frontmatter description at session
+  start and that is already the trigger surface, so the line was duplicating the
+  `tenjin-search` description into a file the operator writes their own notes in —
+  a footprint none of the tools people compare us to leave, and one the WebSearch
+  hook already covers deterministically. An install that finds an old line now
+  removes it and says which file it cleaned, so the cleanup reaches existing
+  machines through the command people already re-run rather than one nobody knows
+  to run. `--claude-md` and `--no-claude-md` still parse, hidden, as no-ops, so a
+  pinned script or a released doc does not start failing on an unknown option.
+
+  **`tenjin uninstall`** removes exactly what install wrote: the skills, the hook
+  scripts, our hook entries and permission rules in the harness's settings.json,
+  and any legacy pointer line. Every removal is gated on OWNERSHIP rather than
+  path, reusing the rules the writers already use — a hook entry is ours when its
+  command names one of our script filenames, a skill is ours when its frontmatter
+  still claims our name, a rule is ours when it is one we wrote — so another tool's
+  hook, someone else's skill at our path, and a rule you added yourself all survive,
+  in their original positions. It removes the FILES it shipped rather than the
+  directories they sit in: a note you left beside a SKILL.md survives, and keeps its
+  directory, because a directory we only partly own is not ours to delete. It never touches the wallet, the config, the library,
+  the search ledger, or parked candidates, and it prints that list on every run
+  including the one that finds nothing: the boundary is the reassurance people are
+  looking for when they reach for an uninstaller. Idempotent on a half-installed,
+  already-uninstalled, or never-installed machine.
+
+  Both halves of settings.json are edited in a single pass under one
+  optimistic-concurrency check, rather than a pass for hooks and another for
+  permissions: Claude Code writes that file too, and two whole-file
+  read-modify-writes would be two chances to erase an edit that landed underneath
+  the command.
+
+### Patch Changes
+
+- 177e413: Make `publish.mode` govern what happens to a finished draft, and make every
+  publish decision ephemeral.
+
+  Doubt is two judgments with different answers. Privacy and rights doubt — private
+  context, third-party data, rights, competitor reconstruction — means do not
+  publish; the skills no longer tell the agent to keep a copy anywhere. Quality
+  doubt is the agent's own uncertainty about an unverified claim or a missing
+  polish pass, and the resolved mode decides it: `review` was asking anyway, `auto`
+  asks the user through the harness's own question or permission UI when it has one
+  so the answer is a click rather than a prose reply, and `full-auto` hedges the
+  claim honestly in the piece — named as unverified, with a date — and publishes.
+
+  **A decision is ephemeral.** Nothing is saved in order to re-ask: a "no" is final,
+  closes the loop with an outcome report, and is never raised again. The skills
+  previously taught parking a draft in the candidate pen as the answer to almost
+  every stop, which quietly turned "not now" into a backlog nobody returns to and
+  made a withheld piece indistinguishable from work that never happened. Where a
+  publish genuinely cannot proceed — a hard block, a permission denial, no wallet —
+  the instruction is now to say so and leave the draft file where it is. The
+  candidate verbs still exist in the CLI this release; the skills simply stop
+  teaching them as a step.
+
+  The `tenjin-publish` skill also gains a third trigger, in its description and its
+  body: finishing substantial research that is public, durable, and reusable — a
+  multi-source synthesis, a tested comparison, a runbook — is worth offering to
+  publish once, routed by the same mode, even when no search preceded it. Drive-by
+  "we should write this up sometime" musing stays excluded, as it already was.
+
+  The mode is resolved per run, so `tenjin config set publish.mode <mode>` changes
+  this behavior on the next command with nothing to re-install and no session to
+  restart.
+
 ## 0.1.0-alpha.10
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 ---
 name: tenjin
-description: Read, discover, and publish paid pieces on Tenjin, an x402-native publishing platform on Base, over plain HTTP with nothing installed. If the tenjin CLI is installed, prefer its tenjin-search skill for finding and reading, and its tenjin-publish skill for publishing, for updating, and for questions about sales, drafts, or parked candidates. Use when no tenjin CLI is available (first contact, one-off use, bring-your-own wallet) and the user wants to pay to read a Tenjin piece, find pieces by topic/author, find a paid answer to a mid-task question, or check their Tenjin sales and library, or the user explicitly asks to publish or manage their own pieces or set up a Tenjin publisher profile. Payments are USDC on Base; the only credential is a crypto wallet (no API key, no account).
+description: Read, discover, and publish paid pieces on Tenjin, an x402-native publishing platform on Base, over plain HTTP with nothing installed. If the tenjin CLI is installed, prefer its tenjin-search skill for finding and reading, and its tenjin-publish skill for publishing, for updating, and for questions about sales or drafts. Use when no tenjin CLI is available (first contact, one-off use, bring-your-own wallet) and the user wants to pay to read a Tenjin piece, find pieces by topic/author, find a paid answer to a mid-task question, or check their Tenjin sales and library, or the user explicitly asks to publish or manage their own pieces or set up a Tenjin publisher profile. Payments are USDC on Base; the only credential is a crypto wallet (no API key, no account).
 ---
 <!--
   Synced from https://tenjin.blog/skills.md; that URL is canonical and always current.
@@ -13,8 +13,8 @@ description: Read, discover, and publish paid pieces on Tenjin, an x402-native p
 **Have the `tenjin` CLI?** Use the `tenjin-search` / `tenjin-publish` skills
 from https://github.com/BackTrackCo/tenjin-agent instead; they wrap the read,
 search, and publish flows below in single commands, and `tenjin-publish` also
-takes sales, drafts, and parked candidates. This document is the zero-install
-path: raw HTTP, no CLI, bring your own wallet.
+takes sales and drafts. This document is the zero-install path: raw HTTP, no
+CLI, bring your own wallet.
 
 Tenjin is an x402-native publishing platform. Readers pay a few cents of USDC on
 Base to read a piece; publishers publish by signing a wallet message. The SAME URL

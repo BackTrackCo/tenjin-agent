@@ -13,6 +13,7 @@
     "cli-user-agent",
     "doctor-despam",
     "edit-command",
+    "fund-onramp",
     "injection-fixture-inert",
     "install-harness-record",
     "install-instinct-nudge",
@@ -22,7 +23,11 @@
     "mcp-registry-name",
     "mcp-server-name",
     "mcp-stdio",
+    "mode-carries-park-policy",
+    "no-more-parking",
     "outcome-last-safety",
+    "outcomes-path-contract",
+    "publish-search-id",
     "readme-permissions-cleanup",
     "search-trigger-tuning",
     "search-v2-lean-candidates",
@@ -37,8 +42,10 @@
     "spend-ledger-split",
     "tenjin-read-free-only",
     "tenjin-send",
+    "trigger-probe-carveout",
     "unified-publish-modes",
     "wallet-newer-schema",
-    "wallet-passphrase-slots"
+    "wallet-passphrase-slots",
+    "zero-claudemd-footprint"
   ]
 }

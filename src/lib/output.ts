@@ -2,6 +2,7 @@ import { styleText } from 'node:util';
 import { Stream } from 'node:stream';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
+import type { UpdateAvailable } from '../schemas';
 import type { FailureEnvelope, OutputError, SuccessEnvelope } from '../schemas';
 
 /**
@@ -28,6 +29,12 @@ export function defaultIo(): Io {
 export interface EmitOptions {
   /** The global --json flag. When true, the JSON envelope is emitted even at a TTY. */
   json?: boolean;
+  /**
+   * "A newer tenjin-cli exists", from the daily check's cache. Rides the
+   * envelope so the AGENT running the command learns it; the human at a TTY
+   * gets the dim stderr line instead, and neither path fetches anything.
+   */
+  updateAvailable?: UpdateAvailable | null;
 }
 
 /**
@@ -36,18 +43,38 @@ export interface EmitOptions {
  * hold no I/O and no --json branching: they turn a (command, data) or a normalized
  * CliError into the exact object that goes to stdout / structuredContent.
  */
-export function buildSuccessEnvelope(command: string, data: unknown): SuccessEnvelope {
-  return { schemaVersion: SCHEMA_VERSION, command, ok: true, data };
+export function buildSuccessEnvelope(
+  command: string,
+  data: unknown,
+  updateAvailable?: UpdateAvailable | null,
+): SuccessEnvelope {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    command,
+    ok: true,
+    data,
+    ...(updateAvailable != null ? { updateAvailable: updateAvailable } : {}),
+  };
 }
 
-export function buildFailureEnvelope(command: string, err: CliError): FailureEnvelope {
+export function buildFailureEnvelope(
+  command: string,
+  err: CliError,
+  updateAvailable?: UpdateAvailable | null,
+): FailureEnvelope {
   const error: OutputError = {
     code: err.code,
     message: err.message,
     ...(err.fix !== undefined ? { fix: err.fix } : {}),
     ...(err.details !== undefined ? { details: err.details } : {}),
   };
-  return { schemaVersion: SCHEMA_VERSION, command, ok: false, error };
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    command,
+    ok: false,
+    error,
+    ...(updateAvailable != null ? { updateAvailable: updateAvailable } : {}),
+  };
 }
 
 /**
@@ -67,7 +94,7 @@ export function emitSuccess(
     writeLines(io.stdout, humanLines);
     return;
   }
-  writeJson(io.stdout, buildSuccessEnvelope(command, data));
+  writeJson(io.stdout, buildSuccessEnvelope(command, data, opts.updateAvailable));
 }
 
 /**
@@ -98,7 +125,7 @@ export function emitFailure(
     writeLines(io.stdout, lines);
     return cliErr;
   }
-  writeJson(io.stdout, buildFailureEnvelope(command, cliErr));
+  writeJson(io.stdout, buildFailureEnvelope(command, cliErr, opts.updateAvailable));
   return cliErr;
 }
 
@@ -116,9 +143,11 @@ export function emitNotice(io: Io, text: string, opts: EmitOptions = {}): void {
 
 /**
  * The same dim stderr line, delivered whatever the surface is: no TTY gate and no
- * `--json` gate. Only for an advisory that reports a WRITE to the operator's own
- * files, where a piped or agent-driven run is precisely the case that must not
- * have it happen in silence. stdout is untouched either way, so the exactly-one
+ * `--json` gate. Only for an advisory a piped or agent-driven run must not miss,
+ * which today is two things: a WRITE to the operator's own files, and `fund`'s
+ * checkout link, which expires long before the stdout envelope that also carries
+ * it is written. Anything a piped run can simply do without belongs in
+ * {@link emitNotice} instead. stdout is untouched either way, so the exactly-one
  * JSON object contract is unaffected.
  */
 export function emitWriteNotice(io: Io, text: string): void {
@@ -177,6 +206,27 @@ export function sanitizeForTerminal(text: string): string {
         (_match, rgiFlag: string | undefined) => rgiFlag ?? '',
       )
   );
+}
+
+/**
+ * The same strip, for text that ships to OTHER PEOPLE rather than to this
+ * terminal: a post's title, its public excerpt, and every free-text field of the
+ * answer card a buyer reads before paying.
+ *
+ * The threat is the same one {@link sanitizeForTerminal} closes, one hop further
+ * out. None of this text is necessarily typed by the person publishing: a card
+ * question can be prefilled from a stored search, and every field can arrive over
+ * MCP from an agent that read them off a fetched page. `trim()` removes neither a
+ * CSI sequence nor a right-to-left override, so without this a payload rides into
+ * the marketplace and renders in every future reader's terminal.
+ *
+ * Newlines and tabs fold to a single space FIRST, because these are all
+ * single-line display fields and a bare strip would join the words on either side
+ * of a line break into one. NOT for the post BODY: that is the author's document,
+ * markdown and all, and rewriting it is not this function's business.
+ */
+export function sanitizeWireText(text: string): string {
+  return sanitizeForTerminal(text.replace(/[\r\n\t]+/g, ' ')).trim();
 }
 
 /** CliError passes through; every other thrown value becomes an INTERNAL CliError. */

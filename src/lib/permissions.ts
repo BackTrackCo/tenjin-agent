@@ -93,7 +93,7 @@ export interface ExcludedVerb {
  *
  * Rules are PREFIX rules: `Bash(tenjin search:*)` clears commands that start with
  * `tenjin search` and nothing else. The narrow `wallet show` / `wallet balance` /
- * `config get` / `candidate list` forms are deliberate: a `Bash(tenjin wallet:*)`
+ * The `config get` form is deliberate: a `Bash(tenjin wallet:*)`
  * or `Bash(tenjin config:*)` rule would silently swallow `wallet create` and
  * `config set`, and `config set` can raise the spend caps.
  *
@@ -114,6 +114,17 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'Free anonymous marketplace search. No wallet, no signing, no payment. ' +
       'Not read-only: it POSTs the generalized question off-machine and records ' +
       'the search locally.',
+  },
+  {
+    rule: 'Bash(tenjin fund:*)',
+    command: 'tenjin fund',
+    note:
+      'Owner call (2026-08-12): free on both surfaces, because the command just opens the ' +
+      'fund modal. Minting moves no money: the destination is server-pinned to the wallet ' +
+      'that signed, the CLI refuses any checkout host but pay.coinbase.com, and payment ' +
+      'happens behind Coinbase\u2019s own human gate. The usual --base-url caveat does not ' +
+      'apply: fund is pinned to the production origin and takes no override from flag, ' +
+      'env, or config.',
   },
   {
     rule: 'Bash(tenjin inspect:*)',
@@ -167,11 +178,6 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
       'Reads one effective config value. `config set` is excluded on purpose. ' +
       'Note `config get rpcUrl` returns your RPC URL, which commonly embeds a ' +
       'provider API key: no wallet secret, but a credential-adjacent read.',
-  },
-  {
-    rule: 'Bash(tenjin candidate list:*)',
-    command: 'tenjin candidate list',
-    note: 'Lists local parked drafts. Candidates are local files; nothing uploads.',
   },
 ];
 
@@ -261,10 +267,6 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
       'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy.',
   },
   {
-    command: 'tenjin candidate add / tenjin candidate drop',
-    reason: 'Writes or discards local drafts; `candidate list` is the read-only half.',
-  },
-  {
     command: 'tenjin install',
     reason: 'Writes into harness config and skills directories.',
   },
@@ -273,6 +275,14 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason:
       'Long-running server that re-exposes every command core over stdio; ' +
       'clearing it would indirectly clear everything above.',
+  },
+  {
+    command: 'tenjin update',
+    reason:
+      'Replaces the tenjin binary the agent then runs, with whatever npm serves ' +
+      'next. Which build an agent executes is an operator decision, not something ' +
+      'a rule pre-clears. `--check` only reports, but a prefix rule pins the verb, ' +
+      'not the flags.',
   },
 ];
 
@@ -305,8 +315,8 @@ export const MCP_CAVEAT: readonly string[] = [
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
   '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
-  '`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_candidate` as gated',
-  'for its add/drop actions. `tenjin_buy` is the same opt-in decision as the buy line above.',
+  '`mcp__tenjin__tenjin_wallet` gated. `tenjin_buy` is the same opt-in decision as the',
+  'buy line above.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */

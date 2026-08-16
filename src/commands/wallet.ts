@@ -23,7 +23,8 @@ import { resolvePassphraseForCreate, type PassphraseSource } from '../lib/wallet
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
 
-const FUNDING_LINE = 'Send USDC on Base. $5 covers ~50 typical resources.';
+const FUNDING_LINE =
+  'Fund it with `tenjin fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.';
 const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 const isWindows = process.platform === 'win32';
 
