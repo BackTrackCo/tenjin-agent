@@ -620,7 +620,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
       paint(
         io,
         'dim',
-        `${s.permissions.addedFree.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor\`.`,
+        `${s.permissions.addedFree.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor --json\`.`,
       ),
     );
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));

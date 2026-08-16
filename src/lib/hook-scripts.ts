@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 15;
+export const HOOK_SCRIPT_VERSION = 16;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -207,14 +207,10 @@ function projectPublishMode(start) {
  * and nothing to unwire. An unreadable or unrecognized value falls back to the
  * shipped default rather than failing.
  *
- * \`publishMode\` reads the global file and TENJIN_PUBLISH_MODE, in the CLI's own
- * precedence (env wins). The PROJECT layer is still ignored on purpose: it is
- * found by walking up from cwd, and a hook whose cwd is unrelated to the draft
- * would announce a mode the next \`tenjin publish\` will not run under. An env
- * var has no such hazard — it is process-inherited and cwd-independent, and
- * leaving it out made the hook announce \`review\` at an operator running
- * \`TENJIN_PUBLISH_MODE=full-auto\`, so the agent asked for permission it already
- * had: the exact #161 failure this line exists to prevent.
+ * \`publishMode\` reads the global file and TENJIN_PUBLISH_MODE. \`envPinned\` says
+ * whether the env var decided it, because lib/config.ts resolves
+ * global < project < env < flag: an env var set for this process outranks a
+ * project file, so the caller must not layer one on top of it.
  */
 function readConfig() {
   const raw = readJsonFile(join(DATA_DIR, 'config.json'));
@@ -227,12 +223,14 @@ function readConfig() {
   // value in either place falls through to the shipped default rather than
   // failing, exactly like every other key here.
   const fromEnv = process.env.TENJIN_PUBLISH_MODE;
-  const publishMode = isPublishMode(fromEnv) ? fromEnv : publish.mode;
+  const envPinned = isPublishMode(fromEnv);
+  const publishMode = envPinned ? fromEnv : publish.mode;
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://tenjin.blog';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
     publishMode: isPublishMode(publishMode) ? publishMode : 'review',
+    envPinned,
     baseUrl,
   };
 }
@@ -727,9 +725,11 @@ async function main() {
   }
   const config = readConfig();
   if (config.stopNag === 'off') return quiet();
-  // The mode the next publish IN THIS DIRECTORY would actually run under. A
-  // project file may only narrow; global and env are resolved by readConfig.
-  const project = cwd === null ? null : projectPublishMode(cwd);
+  // The mode the next publish IN THIS DIRECTORY would actually run under. The
+  // Stop hook's cwd IS the session's working directory, so it is the place that
+  // publish runs. Precedence follows lib/config.ts: an env var outranks the
+  // project file, so the project layer is consulted only when nothing pinned it.
+  const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
   const publishMode = project === null ? config.publishMode : project;
 
   const searches = loadSearches();

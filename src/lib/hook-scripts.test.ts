@@ -1193,6 +1193,30 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
       await rm(project, { recursive: true, force: true });
     });
 
+    // lib/config.ts resolves global < project < env < flag, so an env var set for
+    // this process outranks the project file. The hook has to layer them in the
+    // same order or it announces a mode the next publish will not run under,
+    // which is the whole point of reading cwd in the first place.
+    it('lets TENJIN_PUBLISH_MODE outrank the project file, as the CLI does', async () => {
+      await seedSearches([OPEN_MISS]);
+      await writeConfig({ publish: { mode: 'review' } });
+      const project = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+      await writeFile(
+        join(project, '.tenjin.json'),
+        JSON.stringify({ publish: { mode: 'review' } }),
+      );
+      const text =
+        injected(
+          await runScript(stopHookScript(dataDir), stopIn(project), {
+            TENJIN_PUBLISH_MODE: 'auto',
+          }),
+        ) ?? '';
+      expect(text.split('\n')[0]).toBe(
+        'publish.mode=auto: a clean publish proceeds without asking.',
+      );
+      await rm(project, { recursive: true, force: true });
+    });
+
     // A project file may narrow, never widen: the CLI downgrades a committed
     // full-auto to auto and the hook must announce the same thing.
     it('reads a project full-auto as auto, mirroring the loosening gate', async () => {

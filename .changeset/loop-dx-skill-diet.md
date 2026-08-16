@@ -10,9 +10,11 @@ the batch read as harness debug output. `hooks.stopNag` gains `deliberate-only`,
 which drops that arm and keeps the deliberate-search one, so silencing the noise
 is no longer the cliff `off` is. Whatever the hook raises now leads with the
 resolved publish.mode, which an agent otherwise had to run `tenjin config get`
-mid-publish to discover. That line honors `TENJIN_PUBLISH_MODE` and a project
-`.tenjin.json` reached from the session's own cwd, so the hook, `publish`, and
-`doctor` agree on the mode the next publish will actually resolve.
+mid-publish to discover. That line resolves the mode in the CLI's own order,
+global config then a project `.tenjin.json` found by walking up from the session's
+cwd then `TENJIN_PUBLISH_MODE`, so the hook, `publish`, and `doctor` agree on what
+the next publish in that directory will actually run under. A committed project
+`full-auto` reads as `auto`, mirroring the loosening gate.
 
 `tenjin publish --search-id <id>` re-links a loop something else already closed,
 so a MISS closed as `regenerated` while the answer was still being written can
