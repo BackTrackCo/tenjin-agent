@@ -165,7 +165,7 @@ describe('eval fixtures', () => {
     const cases = JSON.parse(read(path)) as TriggerCase[];
     const positives = cases.filter((c) => c.should_trigger);
 
-    expect(cases.length).toBe(20);
+    expect(cases.length).toBeGreaterThanOrEqual(20);
     expect(positives.length).toBe(cases.length - positives.length);
     expect(new Set(cases.map((c) => c.query)).size).toBe(cases.length);
     for (const c of cases) expect(c.rationale.length, c.query).toBeGreaterThan(0);

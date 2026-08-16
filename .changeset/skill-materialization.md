@@ -1,31 +1,25 @@
 ---
-'tenjin-cli': minor
+'tenjin-cli': patch
 ---
 
-Shape installed skill content by machine facts, starting with wallet presence.
+Add an inert seam for config-conditional skill content. No behavior change: no
+skill this package ships carries a marker, and no writer resolves one, so
+`install`, the self-heal and `doctor` all write and compare exactly the bytes
+they wrote and compared before.
 
-A packaged skill markdown may wrap a region in full-line
-`<!-- tenjin:when <flag> -->` / `<!-- /tenjin:when -->` markers, and every
-writer (`install`, the post-command self-heal) materializes those regions
-against the same flag set before the on-disk compare and the write. An ON flag
-keeps the inner lines, an OFF or unknown flag drops them, and the marker lines
-never survive either way, so an installed SKILL.md carries no machinery for an
-agent to read. The parse is flat and fails closed: nesting, an unclosed block,
-or an unopened close aborts that skill's install rather than writing a
-half-shaped copy, and non-markdown files pass through byte-for-byte.
+The grammar is line-based and flat. A packaged skill markdown may wrap a region
+in full-line `<!-- tenjin:when <flag> -->` / `<!-- /tenjin:when -->` markers,
+and `installSkill` takes an optional transform that resolves those regions
+before the on-disk compare and the write. An ON flag keeps the inner lines, an
+OFF or unknown flag drops them, and the marker lines never survive either way.
+The parse fails closed and names the offending line: nesting, an unclosed
+block, an unopened close, or a near-miss marker aborts that skill's install
+rather than writing a half-shaped copy. Non-markdown files pass through
+byte-for-byte.
 
-The first flag is `wallet`. A `--no-wallet` install now receives a
-`tenjin-search` skill that teaches no spending verbs: the `## Buy` section and
-the `fund`/`wallet show`/`wallet balance` allowlist lines exist only where a
-wallet does, so an agent is never coached into flows that end at
-WALLET_MISSING. A wallet created later flips the flag: `install` re-shapes in
-the same run when it creates one, and the self-heal re-shapes on the next
-command when one appears out of band. `doctor` compares wired copies against
-the same materialized expectation, so a shaped copy is current, never stale.
-
-Because the transform runs before the compare, `up-to-date` means "matches
-what this machine's facts would write", and the flag flip turns the same
-packaged source into a real update. `matchesSomeVariant` lets a maintenance
-pass distinguish "ours, shaped by other flags" from "edited or foreign"
-without a ledger. The next consumer is the upcoming `bazaarPay` toggle, whose
-skill block must only be visible when the operator opted in.
+Wiring the first real flag is a bigger change than defining it. Four parties
+compare on-disk skill bytes against packaged bytes: `install`, the self-heal,
+`doctor`, and `scripts/pack-smoke.sh`. They agree today only because no marker
+ships, and a test pins that so the first marker added fails loudly instead of
+leaving a shaped skill and a raw comparison disagreeing forever. All four have
+to learn to materialize through one shared resolver in the same change.

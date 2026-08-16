@@ -126,7 +126,7 @@ describe('readWalletRecord', () => {
     );
     const err = (await readWalletRecord(dataDir).catch((e) => e)) as CliError;
     expect(err.fix).not.toContain('wallet create');
-    expect(err.fix).toContain('npm i -g tenjin-cli');
+    expect(err.fix).toContain('tenjin update');
   });
 
   // A version we would never ship is a malformed record, not the future: calling it

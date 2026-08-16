@@ -114,7 +114,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
       'CONTRACT_MISMATCH',
       `The wallet file at ${path} was written by a newer tenjin-cli (wallet schema v${newer}; this build reads v${WALLET_SCHEMA_VERSION}).`,
       {
-        fix: 'Upgrade with `npm i -g tenjin-cli`. Do not delete or recreate the wallet: the newer CLI still reads this one, and the funds are on the address it holds.',
+        fix: 'Upgrade with `tenjin update`. Do not delete or recreate the wallet: the newer CLI still reads this one, and the funds are on the address it holds.',
       },
     );
   }

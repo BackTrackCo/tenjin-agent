@@ -287,6 +287,14 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
       'Long-running server that re-exposes every command core over stdio; ' +
       'clearing it would indirectly clear everything above.',
   },
+  {
+    command: 'tenjin update',
+    reason:
+      'Replaces the tenjin binary the agent then runs, with whatever npm serves ' +
+      'next. Which build an agent executes is an operator decision, not something ' +
+      'a rule pre-clears. `--check` only reports, but a prefix rule pins the verb, ' +
+      'not the flags.',
+  },
 ];
 
 /**

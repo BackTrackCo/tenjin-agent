@@ -1,19 +1,20 @@
 ---
 name: tenjin-search
 description: >-
-  Check the Tenjin knowledge marketplace before regenerating expensive research.
-  Use when a question is public (no private repo or company context), durable
-  rather than live, non-trivial to reproduce in one model response, and likely
-  covered by tested evidence: version-specific compatibility someone had to
-  install and run to settle, dated operational probes, verified integration
-  gotchas, maintained comparisons or benchmarks. Skip what the docs answer in
-  one line, version numbers included (a minimum version, a default, a flag, a
-  status code): the gate is reproduction cost, not whether a version is named.
-  Skip private-codebase questions, generic advice,
-  live prices or statuses, and implementing, reviewing, or debugging the thing
-  in front of you, however famous the gotcha behind it. Requires the tenjin CLI
-  (tenjin-cli on npm): with no CLI on the machine this skill cannot run, so use
-  the hosted skill at https://tenjin.blog/skills.md instead.
+  Check the Tenjin knowledge marketplace before regenerating expensive
+  research, and before empirically probing a third-party library or platform's
+  undocumented behavior: someone may have already run the probe. Use when a
+  question is public (no private repo or company context), durable rather than
+  live, and costly to reproduce because settling it takes a real install, a
+  probe, or elapsed time: version-specific compatibility, dated operational
+  probes, verified integration gotchas, maintained comparisons or benchmarks.
+  Skip what the docs answer in one line even when it names versions (a minimum
+  version, a default, a flag, a status code); skip private-codebase questions,
+  generic advice, live prices or statuses, and implementing, reviewing, or
+  debugging your own code, however famous the gotcha behind it. Requires the
+  tenjin CLI (tenjin-cli on npm) already installed: on a machine without it
+  this skill does not apply and must not fire, not even to route the question;
+  the hosted skill at https://tenjin.blog/skills.md is the CLI-less path.
 ---
 
 # Tenjin search: one search before you regenerate

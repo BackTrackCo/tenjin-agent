@@ -1,5 +1,94 @@
 # tenjin-cli
 
+## 0.1.0-alpha.13
+
+### Minor Changes
+
+- a38f843: Self-update from the CLI, and tell agents when to use it.
+
+  `tenjin update` installs the newest version npm offers this build, pinned to the
+  exact version the registry names; `--check` only reports. The target is the
+  newest of the build's own channel tag and `latest`, because which tag a publish
+  lands on is a property of the release pipeline rather than of the version
+  number: `alpha` sat on 0.1.0-alpha.7 while 0.1.0-alpha.8 through .11 shipped on
+  `latest`, and a channel-only lookup would tell every alpha user they were
+  current. The daily check resolves the same way, so the two cannot disagree.
+
+  The manager that owns the install performs it: npm, pnpm, and bun are each
+  driven with their own global-add command, since the PATH race that makes a
+  second install dangerous comes from cross-manager writes rather than from asking
+  the owner to do what it already owns. What cannot be driven is refused with the
+  instruction that is correct there instead of writing a global you never had: a
+  source checkout updates by git, an npx run has nothing installed to replace, a
+  project-local copy updates where it is declared, and yarn is refused because
+  `yarn global add` exists only in yarn 1. `--check` answers from all of them.
+
+  The daily check now reaches agents, not just humans. Alongside the dim stderr
+  line a TTY gets, a newer version appears as `updateAvailable` (with `current`
+  and `latest`) on the JSON envelope and on the generated hook scripts' output, so
+  the agent driving a command can run `tenjin update` itself at a moment it picks.
+  Nothing installs on its own: a CLI that starts a fresh process per invocation
+  has no deferred-activation window to hide a binary swap in, and a silent version
+  swap reshapes output exactly where nobody is watching. New `update.mode` config
+  key, `nudge` (default, all three surfaces) or `off` (none, and no request to
+  npm). The field is read from the check's cache, so it costs no request and no
+  delay on the command carrying it.
+
+  Every install runs as a binary or `node <script>` and never through a shell,
+  which is also the only form win32 can spawn, bounded by a 5 minute budget, from
+  the home directory, with the manager's output sanitized before it reaches a
+  terminal. `tenjin update` is documented as never-allowlisted for agents: it
+  replaces the binary the agent then runs.
+
+### Patch Changes
+
+- dcc6b5a: tenjin-publish gains the harvest ask (tenjin-agent#145 item 2, redesigned):
+  "anything from our recent work worth publishing?" now routes into the skill
+  explicitly, with a sweep procedure — grade what is visible in the
+  conversation against the sell rubric, offer survivors once as one batch, a no
+  is final and never re-asked, and never dig through transcripts or archives
+  the user did not hand over. This replaces the weekly scheduled-harvest design
+  outright: an OS-level cron written during onboarding has no precedent and
+  reads as intrusive, out-of-session runs create a session-archive dependency,
+  and per-session nudge telemetry shows unprompted reminders do not convert.
+  In-context, user-invoked, zero scheduling. One trigger clause added to the
+  always-loaded description; the procedure lives in the body.
+
+## 0.1.0-alpha.12
+
+### Patch Changes
+
+- a402916: Post outcome reports to `/api/searches/:id/outcomes`, the path the server now
+  documents after BackTrackCo/tenjin#616 dropped the `/agent` prefix. The contract
+  fixture and the live drift pin move with the client, so the scheduled
+  contract-drift run goes green again.
+
+  No fallback: tenjin serves the old `/api/agent/searches/:id/outcomes` spelling as
+  a real alias onto the same handler for one deprecation window, so both spellings
+  answer identically today and the pinned path is the one that survives the window.
+
+- c315e09: Widen the supply/demand triggers (tenjin-agent#145 item 1) by restructuring
+  both skill descriptions rather than appending to them, holding length at
+  parity with the previous wording. tenjin-search now leads with both search
+  moments: before regenerating expensive research, and before empirically
+  probing a third-party library or platform's undocumented behavior; the skip
+  list narrows from "the thing in front of you" to "your own code" and the two
+  skip sentences merge into one. tenjin-publish reorganizes its triggers into
+  three routes in (user ask, after-a-MISS, unprompted work worth selling), the
+  unprompted route covering substantial research and empirical proofs the docs
+  don't state. Two bundled fixes surfaced by the eval work: the requires-CLI
+  sentence becomes an explicit stand-down ("does not apply and must not fire,
+  not even to route the question"), taking the pre-existing no-CLI defer red
+  from 1/4 on main's wording to 2/4 in two independent samples; and preflight's
+  mirror-drift check now only gates runs that install the vendored tenjin
+  mirror, so non-mirror skill evals no longer need --no-preflight during #88.
+  Clean-room results: trigger eval extended 20 to 22 cases (one per side of the
+  new probe boundary) and scores 22/22 under the final wording, in-sample as
+  with the previous tuning. The two defer queries still firing both carry an
+  explicit user directive to use Tenjin while this skill is the only Tenjin
+  skill installed in the eval room; that residual is documented on the PR
+  rather than fought with more description weight.
+
 ## 0.1.0-alpha.11
 
 ### Minor Changes

@@ -489,7 +489,7 @@ describe('postOutcomes', () => {
       fetchImpl: fetch,
     });
     expect(res.accepted).toBe(1);
-    expect(calls[0]?.url).toBe(`https://preview.example/api/agent/searches/${SEARCH_ID}/outcomes`);
+    expect(calls[0]?.url).toBe(`https://preview.example/api/searches/${SEARCH_ID}/outcomes`);
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ status: 'used' });
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(headers['user-agent']).toMatch(/^tenjin-cli\//);

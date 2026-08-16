@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  markerFlagsIn,
-  matchesSomeVariant,
-  materializeSkillMarkdown,
-  materializeTransform,
-} from './skill-materialize';
+import { materializeSkillMarkdown, materializeTransform } from './skill-materialize';
 import { CliError } from './errors';
 
 const SOURCE = [
@@ -57,12 +52,19 @@ describe('materializeSkillMarkdown', () => {
     expect(materializeSkillMarkdown(two, { a: true, b: false })).toBe('A');
   });
 
+  // Each guard asserts its OWN message, not just CliError: nesting removed still
+  // throws, as `unopened` two lines later, so a bare toThrow(CliError) here passed
+  // with the nesting check deleted and pinned nothing.
   it('fails closed on an unclosed block', () => {
-    expect(() => materializeSkillMarkdown('<!-- tenjin:when a -->\nx', {})).toThrow(CliError);
+    expect(() => materializeSkillMarkdown('<!-- tenjin:when a -->\nx', {})).toThrow(
+      /unclosed tenjin:when "a"/,
+    );
   });
 
   it('fails closed on an unopened close', () => {
-    expect(() => materializeSkillMarkdown('x\n<!-- /tenjin:when -->', {})).toThrow(CliError);
+    expect(() => materializeSkillMarkdown('x\n<!-- /tenjin:when -->', {})).toThrow(
+      /unopened \/tenjin:when at line 2/,
+    );
   });
 
   it('fails closed on nesting', () => {
@@ -72,7 +74,30 @@ describe('materializeSkillMarkdown', () => {
       '<!-- /tenjin:when -->',
       '<!-- /tenjin:when -->',
     ].join('\n');
-    expect(() => materializeSkillMarkdown(nested, { a: true, b: true })).toThrow(CliError);
+    expect(() => materializeSkillMarkdown(nested, { a: true, b: true })).toThrow(
+      /nested tenjin:when at line 2 \(already inside "a"\)/,
+    );
+  });
+
+  it('throws CliError, not a bare Error, on every malformed shape', () => {
+    expect(() => materializeSkillMarkdown('<!-- tenjin:when a -->\nx', {})).toThrow(CliError);
+  });
+
+  // Both name the line the author actually mistyped. Before, trailing content fell
+  // through as ordinary text and the parse blamed whichever marker was left
+  // unbalanced, which is never the line that needs editing.
+  it('blames the open marker itself when it carries trailing content', () => {
+    const text = ['<!-- tenjin:when a --> oops', 'x', '<!-- /tenjin:when -->'].join('\n');
+    expect(() => materializeSkillMarkdown(text, { a: true })).toThrow(
+      /malformed tenjin:when marker at line 1/,
+    );
+  });
+
+  it('blames the close marker itself when it carries a flag name', () => {
+    const text = ['<!-- tenjin:when a -->', 'x', '<!-- /tenjin:when a -->'].join('\n');
+    expect(() => materializeSkillMarkdown(text, { a: true })).toThrow(
+      /malformed tenjin:when marker at line 3/,
+    );
   });
 });
 
@@ -83,41 +108,5 @@ describe('materializeTransform', () => {
     const bin = Buffer.from([0xff, 0x00, 0x81]);
     expect(transform('SKILL.md', md).toString('utf8')).not.toContain('only when on');
     expect(transform('logo.png', bin)).toBe(bin);
-  });
-});
-
-describe('markerFlagsIn', () => {
-  it('lists each referenced flag once, in order', () => {
-    const text = [
-      '<!-- tenjin:when b -->',
-      '<!-- /tenjin:when -->',
-      '<!-- tenjin:when a -->',
-      '<!-- /tenjin:when -->',
-      '<!-- tenjin:when b -->',
-      '<!-- /tenjin:when -->',
-    ].join('\n');
-    expect(markerFlagsIn(text)).toEqual(['b', 'a']);
-    expect(markerFlagsIn('plain')).toEqual([]);
-  });
-});
-
-describe('matchesSomeVariant', () => {
-  it('recognizes both materializations of a one-flag source', () => {
-    const on = Buffer.from(materializeSkillMarkdown(SOURCE, { bazaarPay: true }), 'utf8');
-    const off = Buffer.from(materializeSkillMarkdown(SOURCE, { bazaarPay: false }), 'utf8');
-    expect(matchesSomeVariant(SOURCE, on)).toBe(true);
-    expect(matchesSomeVariant(SOURCE, off)).toBe(true);
-  });
-
-  it('rejects edited bytes', () => {
-    expect(matchesSomeVariant(SOURCE, Buffer.from('someone else wrote this', 'utf8'))).toBe(false);
-  });
-
-  it('reads false past the flag cap and on malformed markers', () => {
-    const many = Array.from({ length: 7 }, (_, i) =>
-      [`<!-- tenjin:when f${i} -->`, 'x', '<!-- /tenjin:when -->'].join('\n'),
-    ).join('\n');
-    expect(matchesSomeVariant(many, Buffer.from('x', 'utf8'))).toBe(false);
-    expect(matchesSomeVariant('<!-- tenjin:when a -->', Buffer.from('', 'utf8'))).toBe(false);
   });
 });
