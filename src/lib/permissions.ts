@@ -139,7 +139,7 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
     note:
       'Free-only delivery: free pieces, local-library re-reads, and pieces this ' +
       'wallet already owns when a read-scoped session key is cached. Cannot spend ' +
-      'and cannot open the keystore — the wallet, payment, and session-MINTING ' +
+      'and cannot open the keystore: the wallet, payment, and session-MINTING ' +
       'modules are all absent from its import graph, so the key it may present is ' +
       'a P-256 delegation loaded from disk, which is the wrong curve to authorize ' +
       'a payment. TRANSMITS A CREDENTIAL: when a session key exists, a cold 402 ' +
@@ -225,7 +225,7 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
       'payment authorization, so no session file can ever move money. Do NOT read ' +
       'the `read` scope as a bound on the rest: the file it leaves is a ' +
       'wallet-derived credential, and what limits it is that it expires in 24h, ' +
-      'lives 0600, and is refused off the origin it was minted for — not its ' +
+      'lives 0600, and is refused off the origin it was minted for, not its ' +
       'scope. What you are opting into is unattended keystore access: on an ' +
       'encrypted wallet the passphrase prompt is skipped or answered from the ' +
       'environment, and the `--base-url` caveat below bites hardest here, because ' +
@@ -256,15 +256,18 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
     command: 'tenjin publish',
     note:
       'PUBLISHES PUBLICLY under your identity, and is cleared only while publish.mode is ' +
-      'auto or full-auto — the mode is the consent, and the harness prompt would ask for it ' +
-      'twice. What still gates a publish is the CLI itself: the deterministic secret scan ' +
-      'blocks in every mode and is not clearable by --yes, auto stops on any finding, and ' +
-      'full-auto stops only on a hard block. Read "auto stops on any finding" as a stop, not ' +
-      'a human: this is a PREFIX rule, so it pins the verb and not the flags, and `--yes` is ' +
-      'an ordinary flag on the same allowlisted verb that clears exactly the WARN findings ' +
-      'auto stopped on — a re-run with it collapses auto into full-auto with nobody asked. ' +
-      'The skills are what hold that line. Set publish.mode back to review and the next ' +
-      '`tenjin install` removes this rule.',
+      'auto or full-auto: the mode is the consent, and the harness prompt would ask for it ' +
+      'twice. Three things it clears that the free tier never did. It OPENS THE KEYSTORE: ' +
+      'publish always resolves a signer, and with no usable session it mints one at ' +
+      'read+write scope, which is strictly broader than the read-only key ' +
+      '`tenjin session start` exists as a deliberate opt-in for. It publishes the contents ' +
+      'of ANY LOCAL FILE the agent can read, gated only by the heuristic scan. And it is a ' +
+      'PREFIX rule, so it pins the verb and not the flags: `--base-url` rides it (see the ' +
+      'flag caveat), and `--yes` is an ordinary flag on the same verb that clears exactly ' +
+      'the WARN findings auto stopped on, so a re-run collapses auto into full-auto with ' +
+      'nobody asked. What still gates a publish is the CLI: the deterministic secret scan ' +
+      'blocks in every mode and no --yes clears it. The skills hold the rest of that line. ' +
+      'Set publish.mode back to review and the rule is retracted.',
   },
   {
     rule: 'Bash(tenjin edit:*)',
@@ -272,12 +275,13 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
     note:
       'Updates posts your wallet ALREADY OWNS: reprices, refreshes an as-of date, repairs an ' +
       'answer card. Owner-scoped on both legs (GET and PUT /api/posts/<id> are signed and ' +
-      'owner-only), spends nothing, moves no keys, and creates no new public content — a ' +
+      'owner-only), spends nothing, moves no keys, and creates no new public content: a ' +
       'narrower blast radius than the publish rule beside it. It rides the same mode for the ' +
       'same reason: edit runs the identical publish.mode consent gate in the CLI ' +
       '(lib/consent.ts needsConfirmation), so a mode that publishes unattended and then ' +
-      'cannot fix its own post\u2019s price is the asymmetry the mode exists to remove. ' +
-      'Removed by the same return to review.',
+      'cannot fix its own post\u2019s price is the asymmetry the mode exists to remove. It ' +
+      'opens the keystore on the same terms as the publish rule beside it, and takes the ' +
+      'same prefix-rule caveats. Removed by the same return to review.',
   },
 ];
 
@@ -369,6 +373,9 @@ export const FLAG_CAVEAT: readonly string[] = [
   'host, and set the base URL in config instead of letting it be an argument. The skills',
   'tell agents never to pass --base-url on an allowlisted verb, but that is a convention,',
   'not an enforced boundary.',
+  'This covers the two rules your publish.mode carries as well, and bites hardest there:',
+  '`tenjin publish --base-url <host>` is cleared by default on auto, and it signs against',
+  'the host it is given.',
 ];
 
 /**
@@ -377,6 +384,10 @@ export const FLAG_CAVEAT: readonly string[] = [
  * (tools, not command strings) where three excluded verbs come back.
  */
 export const MCP_CAVEAT: readonly string[] = [
+  'Note the asymmetry: publish.mode writes the Bash rules for `publish` and `edit`, and',
+  'deliberately does not touch the MCP tool grants below. The mode is a CLI-side consent',
+  'gate, and nothing reads it on the MCP surface, so clearing those tools would hand out',
+  'the same authority with none of the same gate. Aligning the two is tracked separately.',
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
   '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',

@@ -224,17 +224,21 @@ export async function runDoctor(
   // in this process's environment.
   const env = deps.env ?? process.env;
   const fromEnv = env.TENJIN_PUBLISH_MODE !== undefined && env.TENJIN_PUBLISH_MODE.length > 0;
-  const modeLine = modeGatedPointer(
-    publishMode,
-    missingModeGated,
-    fromEnv ? `tenjin config set publish.mode ${publishMode}` : 'tenjin install',
-  );
+  // An env var is per-run and settable by anything in the agent's shell, so an
+  // override is reported AS an override rather than as a remedy to make
+  // permanent: `doctor` is an allowlisted free verb, and printing a `config set`
+  // for a value it just read out of the environment is an escalation command
+  // built from untrusted input.
+  const modeLine = fromEnv
+    ? `TENJIN_PUBLISH_MODE=${publishMode} is overriding your configured publish mode for this run only; the harness rules it needs are ${missingModeGated.join(' and ')}.`
+    : modeGatedPointer(publishMode, missingModeGated, 'tenjin install');
+  const showModeLine = fromEnv ? missingModeGated.length > 0 : modeLine !== null;
   return {
     data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
     humanLines: [
       ...renderDoctorHuman(ctx.io, checks),
       '',
-      ...(modeLine !== null ? [modeLine] : []),
+      ...(showModeLine && modeLine !== null ? [modeLine] : []),
       permissionsPointer(),
     ],
   };

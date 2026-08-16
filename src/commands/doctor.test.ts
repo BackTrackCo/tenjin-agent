@@ -1236,9 +1236,13 @@ describe('runDoctor — the rule the publish mode carries', () => {
     expect(text).not.toContain('also needs');
   });
 
-  // An env-set mode is invisible to `install`, which resolves from the global
-  // file — so naming install as the remedy sent the reader at a no-op (major 3c).
-  it('names config set, not install, for a mode only the environment carries', async () => {
+  /**
+   * An env var is per-run and settable by anything in the agent's shell, and
+   * `doctor` is an allowlisted free verb — so it reports an override AS an
+   * override, and never renders a `config set` built from a value it just read
+   * out of the environment (PR #164 round 3, nit 1).
+   */
+  it('reports a TENJIN_PUBLISH_MODE override as an override, not a remedy', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: { TENJIN_PUBLISH_MODE: 'full-auto' },
@@ -1246,9 +1250,25 @@ describe('runDoctor — the rule the publish mode carries', () => {
       homeDir: home,
     });
     const text = (res.humanLines ?? []).join('\n');
-    expect(text).toContain('publish.mode=full-auto');
-    expect(text).toContain('tenjin config set publish.mode full-auto');
+    expect(text).toContain('TENJIN_PUBLISH_MODE=full-auto is overriding');
+    expect(text).toContain('for this run only');
+    expect(text).not.toContain('tenjin config set publish.mode');
     expect(text).not.toMatch(/`tenjin install` writes them/);
+  });
+
+  it('says nothing about an override on a machine that already has the rules', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, ...MODE_GATED_RULES] } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: { TENJIN_PUBLISH_MODE: 'full-auto' },
+      fetchImpl: healthyFetch,
+      homeDir: home,
+    });
+    expect((res.humanLines ?? []).join('\n')).not.toContain('TENJIN_PUBLISH_MODE');
   });
 
   it('names the rule on auto', async () => {

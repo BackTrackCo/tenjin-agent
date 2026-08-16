@@ -5,12 +5,12 @@ import { writeFileAtomic } from './atomic-json';
 import {
   claudeSettingsPath,
   FREE_VERB_RULES,
-  LEGACY_FREE_VERB_RULES,
+  LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
 } from './harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
 import { hooksDir } from './paths';
-import { SHIPPED_SKILL_FILES, type SkillName } from './skills-source';
+import { SHIPPED_SKILL_FILES } from './skills-source';
 import { resolveThroughLink } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
@@ -207,7 +207,7 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
     // and the mode that justified those rules is about to have no CLI behind it.
     const ours = new Set<string>([
       ...FREE_VERB_RULES,
-      ...LEGACY_FREE_VERB_RULES,
+      ...LEGACY_ALLOWLIST_RULES,
       ...MODE_GATED_RULES,
     ]);
     const kept = permissions.allow.filter((r) => !(typeof r === 'string' && ours.has(r)));
@@ -310,14 +310,17 @@ export async function removeSkills(homeDir: string): Promise<string[]> {
       // SKILL.md is the ownership proof, so it is checked first and removed
       // last: a run that dies partway leaves the frontmatter that lets the next
       // one recognize the directory as ours.
-      const shipped = SHIPPED_SKILL_FILES[name as SkillName] ?? ['SKILL.md'];
+      const shipped = SHIPPED_SKILL_FILES[name];
       const subdirs = new Set<string>();
       for (const rel of shipped) {
         if (rel === 'SKILL.md') continue;
         const file = join(skillDir, rel);
+        // The directory is a prune CANDIDATE whether or not our file is still in
+        // it: an operator who deleted the file by hand would otherwise be left
+        // with an empty `references/` that nothing ever clears.
+        subdirs.add(dirname(file));
         if (lstatSync(file, { throwIfNoEntry: false })?.isFile() !== true) continue;
         await rm(file, { force: true });
-        subdirs.add(dirname(file));
       }
       await rm(path, { force: true });
       // Only when OUR files were the only things in there. An operator file keeps

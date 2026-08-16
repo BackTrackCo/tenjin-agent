@@ -650,6 +650,29 @@ describe('runPublish — publish <file> --search-id', () => {
     );
   });
 
+  // The other repeat case: an earlier PUBLISH already claimed this demand. The
+  // loop is closed either way, but reporting a fresh close would tell the agent
+  // its piece took the attribution when a different post holds it.
+  it('reports a loop an earlier publish already claimed, not a fresh close', async () => {
+    await seed();
+    await markSearchResolved(dir, SEARCH, 'publish');
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: true,
+      alreadyAnswered: true,
+      prefill: 'applied',
+    });
+    expect((res.data as { search?: { relinked?: boolean } }).search?.relinked).toBeUndefined();
+    expect(res.humanLines?.join('\n')).toContain('already answered by an earlier publish');
+    expect(res.humanLines).not.toContain(`Closed the loop on search ${SEARCH}.`);
+  });
+
   // The attribution half. Closing the local loop only silences the reminder; this
   // is what ties the published answer to the demand that asked for it, and it was
   // missing entirely until #161 (the flag never reached the wire at all).
@@ -690,9 +713,11 @@ describe('runPublish — publish <file> --search-id', () => {
     expect((res.data as { search?: { relinked?: boolean } }).search?.relinked).toBe(true);
   });
 
-  // A draft leaves the local loop OPEN, but it is still the post the attribution
-  // belongs to; the server's set-once column carries it when the draft goes live.
-  it('sends the searchId on a draft, whose local loop stays open', async () => {
+  // A draft answers nobody: the local ledger says so and leaves the loop open, so
+  // the wire must say the same. Sending it anyway meant one demand signal claimed
+  // by two posts, since no command promotes a draft and the only route to a public
+  // piece is a second publish naming the same id.
+  it('sends no searchId on a draft, and leaves the local loop open', async () => {
     await seed();
     const { fetch, body } = bodyServer();
     await runPublish(
@@ -700,7 +725,7 @@ describe('runPublish — publish <file> --search-id', () => {
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
-    expect(body()?.searchId).toBe(SEARCH);
+    expect(body()).not.toHaveProperty('searchId');
     expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
@@ -846,14 +871,18 @@ describe('runPublish — publish <file> --search-id', () => {
 
   it('refuses a --search-id that is not a uuid', async () => {
     const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
     await expect(
       runPublish(
         baseArgs(await writeDoc(CLEAN), { searchId: 'not-a-uuid', mode: 'auto' }),
         makeCtx(),
-        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+        hermetic({ fetchImpl: fetch, provider }),
       ),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
+    // Same guarantee its uuid-shaped sibling above asserts: the edge check runs
+    // before the keystore is opened, so a typo costs a message, not a signature.
+    expect(getSignerCount()).toBe(0);
   });
 });
 

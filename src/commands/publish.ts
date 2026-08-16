@@ -241,10 +241,12 @@ export async function runPublish(
     ...(handle !== undefined ? { handle } : {}),
     status,
     ...(card !== undefined ? { resource: card } : {}),
-    // The attribution half of `--search-id`. Closing the local loop only stops
-    // the reminder; this is what ties the answer to the demand that asked for
-    // it, which is the whole point of naming a search (tenjin-agent #161).
-    ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
+    // The attribution half of `--search-id`, and it follows the SAME rule the
+    // local ledger already follows: a draft answers nobody, so it claims nobody's
+    // demand either. Sending it on a draft put one demand signal on two posts —
+    // no command promotes a draft, so reaching a public piece means a second
+    // publish carrying the same id — with one of them possibly never shipping.
+    ...(args.searchId !== undefined && status !== 'draft' ? { searchId: args.searchId } : {}),
   };
 
   const result = await publishPost(input, auth, {
@@ -280,6 +282,12 @@ interface SearchReceipt {
    * search changed a record that was already there.
    */
   relinked?: boolean;
+  /**
+   * An earlier publish had already closed this loop, so this one attributed
+   * nothing new. Distinct from `relinked`, which took a loop over from an
+   * `outcome` report.
+   */
+  alreadyAnswered?: boolean;
   prefill: PrefillOutcome;
 }
 
@@ -359,6 +367,15 @@ async function closeNamedSearch(
     return open(`Published, but search ${searchId} is no longer in the local store.`);
   }
   if (outcome === 'relinked') return { id: searchId, closed: true, relinked: true, prefill };
+  // A PRIOR publish already closed this loop. Reporting a fresh close here is a
+  // receipt for something that did not happen, on the one path where a different
+  // post already claims the demand this body is claiming again.
+  if (outcome === 'already-resolved' && stored.resolved?.by === 'publish') {
+    ctx.io.stderr.write(
+      `Search ${searchId} was already answered by an earlier publish; this piece did not claim it.\n`,
+    );
+    return { id: searchId, closed: true, alreadyAnswered: true, prefill };
+  }
   return { id: searchId, closed: true, prefill };
 }
 
@@ -396,7 +413,9 @@ function receipt(
       ? [
           searchInfo.relinked === true
             ? `Re-linked search ${searchInfo.id} to this piece; it had been closed without one.`
-            : `Closed the loop on search ${searchInfo.id}.`,
+            : searchInfo.alreadyAnswered === true
+              ? `Search ${searchInfo.id} was already answered by an earlier publish.`
+              : `Closed the loop on search ${searchInfo.id}.`,
         ]
       : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),

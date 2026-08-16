@@ -1075,6 +1075,38 @@ describe('Stop hook: hooks.stopNag is a runtime toggle', () => {
     expect(await nagged()).toEqual([]);
   });
 
+  // Across turns, which is the shape an operator actually experiences: the weak
+  // batch is spent once per session, and `deliberate-only` must not let that
+  // per-session stamp swallow the strong arm on the turns that follow.
+  it('keeps raising the cli arm turn after turn under deliberate-only', async () => {
+    const second = {
+      ...OPEN_MISS,
+      searchId: '99999993-9999-4999-8999-999999999999',
+      question: 'a second deliberate search',
+      source: 'cli' as const,
+    };
+    await seedSearches([
+      OPEN_MISS,
+      { ...OPEN_MISS, searchId: '99999994-9999-4999-8999-999999999999', source: 'websearch-hook' },
+    ]);
+    await writeConfig({ hooks: { stopNag: 'deliberate-only' } });
+
+    const first = loopLines(await runScript(stopHookScript(dataDir), stopInput));
+    expect(first).toHaveLength(1);
+    expect(first[0]).toContain(OPEN_MISS.question);
+    // The stamp is what could swallow later turns, and this arm never sets it:
+    // no weak batch was delivered, so the session was never spent.
+    expect(await batchedSessions()).toEqual([]);
+
+    // Same session, next turn: the already-nagged loop is spent, and the new
+    // deliberate MISS still gets its line.
+    await seedSearches([second]);
+    const next = loopLines(await runScript(stopHookScript(dataDir), stopInput));
+    expect(next).toHaveLength(1);
+    expect(next[0]).toContain(second.question);
+    expect((await nagged()).sort()).toEqual([OPEN_MISS.searchId, second.searchId].sort());
+  });
+
   it('an unrecognized stopNag value falls back to on', async () => {
     await seedSearches([OPEN_MISS]);
     await writeConfig({ hooks: { stopNag: 'sometimes' } });
@@ -1137,6 +1169,85 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     expect(text.split('\n')[0]).toBe(
       'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.',
     );
+  });
+
+  /**
+   * The Stop hook's cwd IS the session's working directory, so it is where the
+   * next `tenjin publish` runs. Announcing the global mode there told an agent it
+   * held auto authority inside a repo pinned to review (PR #164 round 3, major 4).
+   */
+  describe('a project .tenjin.json narrows the announced mode', () => {
+    const stopIn = (dir: string): string =>
+      JSON.stringify({ hook_event_name: 'Stop', session_id: 'abc', stop_reason: 'end', cwd: dir });
+
+    it('states the project mode when it narrows the global one', async () => {
+      await seedSearches([OPEN_MISS]);
+      await writeConfig({ publish: { mode: 'auto' } });
+      const project = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+      await writeFile(
+        join(project, '.tenjin.json'),
+        JSON.stringify({ publish: { mode: 'review' } }),
+      );
+      const text = injected(await runScript(stopHookScript(dataDir), stopIn(project))) ?? '';
+      expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+      await rm(project, { recursive: true, force: true });
+    });
+
+    // A project file may narrow, never widen: the CLI downgrades a committed
+    // full-auto to auto and the hook must announce the same thing.
+    it('reads a project full-auto as auto, mirroring the loosening gate', async () => {
+      await seedSearches([OPEN_MISS]);
+      await writeConfig({ publish: { mode: 'review' } });
+      const project = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+      await writeFile(
+        join(project, '.tenjin.json'),
+        JSON.stringify({ publish: { mode: 'full-auto' } }),
+      );
+      const text = injected(await runScript(stopHookScript(dataDir), stopIn(project))) ?? '';
+      expect(text.split('\n')[0]).toBe(
+        'publish.mode=auto: a clean publish proceeds without asking.',
+      );
+      await rm(project, { recursive: true, force: true });
+    });
+
+    it('keeps the global answer when the directory holds no project file', async () => {
+      await seedSearches([OPEN_MISS]);
+      await writeConfig({ publish: { mode: 'auto' } });
+      const project = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+      const text = injected(await runScript(stopHookScript(dataDir), stopIn(project))) ?? '';
+      expect(text.split('\n')[0]).toBe(
+        'publish.mode=auto: a clean publish proceeds without asking.',
+      );
+      await rm(project, { recursive: true, force: true });
+    });
+
+    it('keeps the global answer when the project file cannot be read', async () => {
+      await seedSearches([OPEN_MISS]);
+      await writeConfig({ publish: { mode: 'auto' } });
+      const project = await mkdtemp(join(tmpdir(), 'tenjin-proj-'));
+      await writeFile(join(project, '.tenjin.json'), '{ not json');
+      const text = injected(await runScript(stopHookScript(dataDir), stopIn(project))) ?? '';
+      expect(text.split('\n')[0]).toBe(
+        'publish.mode=auto: a clean publish proceeds without asking.',
+      );
+      await rm(project, { recursive: true, force: true });
+    });
+  });
+
+  // An absurd session id would otherwise land verbatim as a hook-nags.json key,
+  // held a week and re-parsed every turn end.
+  it('ignores a session id past the bound, falling back to global behavior', async () => {
+    await seedSearches([OPEN_MISS]);
+    const huge = JSON.stringify({
+      hook_event_name: 'Stop',
+      session_id: 'x'.repeat(100_000),
+      stop_reason: 'end',
+    });
+    const run = await runScript(stopHookScript(dataDir), huge);
+    expect(injected(run)).toContain('Open Tenjin loop');
+    const raw = await readFile(join(dataDir, 'hook-nags.json'), 'utf8');
+    expect(raw.length).toBeLessThan(2000);
+    expect(raw).not.toContain('xxxxxxxxxx');
   });
 
   it('falls back to the file when the env names no mode', async () => {
