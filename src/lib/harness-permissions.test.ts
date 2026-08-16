@@ -39,7 +39,7 @@ import {
   inspectFreeVerbRules,
   LEGACY_FREE_VERB_RULES,
   permissionsSkipped,
-  PUBLISH_MODE_RULE,
+  MODE_GATED_RULES,
   rulesForPublishMode,
   wireFreeVerbAllowlist,
 } from './harness-permissions';
@@ -248,23 +248,25 @@ describe('the publish rule is gated on the mode and nothing else', () => {
     expect([...rulesForPublishMode('review')]).toEqual([...FREE_VERB_RULES]);
   });
 
-  it('adds the publish rule on auto and full-auto, and nothing else', () => {
+  it('adds the mode-gated pair on auto and full-auto, and nothing else', () => {
     for (const mode of ['auto', 'full-auto'] as const) {
-      expect([...rulesForPublishMode(mode)]).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+      expect([...rulesForPublishMode(mode)]).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
     }
   });
 
   it('mirrors the entry lib/permissions.ts documents, so the two never drift', () => {
-    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual([PUBLISH_MODE_RULE]);
+    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual([...MODE_GATED_RULES]);
     expect(modeGatedAllowlist('review')).toEqual([]);
-    expect(modeGatedAllowlist('auto').map((e) => e.rule)).toEqual([PUBLISH_MODE_RULE]);
+    expect(modeGatedAllowlist('auto').map((e) => e.rule)).toEqual([...MODE_GATED_RULES]);
   });
 
   // It publishes publicly under the operator's identity, so it is not free-tier
   // and must never ride along with a tier that claims it is.
   it('is never a member of the free tier', () => {
-    expect(FREE_VERB_RULES).not.toContain(PUBLISH_MODE_RULE);
-    expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule)).not.toContain(PUBLISH_MODE_RULE);
+    for (const rule of MODE_GATED_RULES) {
+      expect(FREE_VERB_RULES).not.toContain(rule);
+      expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.rule)).not.toContain(rule);
+    }
   });
 
   // Two hardcoded sets and a mode to pick between them: no argument reaches the
@@ -272,23 +274,23 @@ describe('the publish rule is gated on the mode and nothing else', () => {
   it('can produce no rule set but the two constants', () => {
     for (const mode of ['review', 'auto', 'full-auto'] as const) {
       for (const rule of rulesForPublishMode(mode)) {
-        expect([...FREE_VERB_RULES, PUBLISH_MODE_RULE]).toContain(rule);
+        expect([...FREE_VERB_RULES, ...MODE_GATED_RULES]).toContain(rule);
       }
     }
   });
 
-  it('writes the publish rule on auto', async () => {
+  it('writes the mode-gated pair on auto', async () => {
     const result = await wireFreeVerbAllowlist(home, 'auto');
-    expect(result.added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
-    expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+    expect(result.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
   });
 
   // A grant must not outlive the mode that justified it: the operator said
   // "ask me first" again, so the rule that skipped the asking goes.
-  it('takes the publish rule back when the mode returns to review', async () => {
+  it('takes the pair back when the mode returns to review', async () => {
     await wireFreeVerbAllowlist(home, 'auto');
     const result = await wireFreeVerbAllowlist(home, 'review');
-    expect(result.removed).toEqual([PUBLISH_MODE_RULE]);
+    expect(result.removed).toEqual([...MODE_GATED_RULES]);
     expect(result.added).toEqual([]);
     expect(allowOf(await readSettings())).toEqual([...FREE_VERB_RULES]);
   });
@@ -298,7 +300,7 @@ describe('the publish rule is gated on the mode and nothing else', () => {
     const second = await wireFreeVerbAllowlist(home, 'full-auto');
     expect(second.added).toEqual([]);
     expect(second.removed).toEqual([]);
-    expect(second.alreadyPresent).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+    expect(second.alreadyPresent).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
   });
 
   it('leaves rules it did not write alone while retracting its own', async () => {
@@ -308,7 +310,7 @@ describe('the publish rule is gated on the mode and nothing else', () => {
     const allow = allowOf(await readSettings());
     expect(allow).toContain('Bash(git status:*)');
     expect(allow).toContain('Bash(tenjin buy:*)');
-    expect(allow).not.toContain(PUBLISH_MODE_RULE);
+    for (const rule of MODE_GATED_RULES) expect(allow).not.toContain(rule);
   });
 
   it('defaults to review when no mode is given', async () => {
@@ -316,10 +318,10 @@ describe('the publish rule is gated on the mode and nothing else', () => {
     expect(result.added).toEqual([...FREE_VERB_RULES]);
   });
 
-  it('the probe reports the publish rule as pending under auto', async () => {
+  it('the probe reports the mode-gated pair as pending under auto', async () => {
     expect((await inspectFreeVerbRules(home, 'auto')).pending).toEqual([
       ...FREE_VERB_RULES,
-      PUBLISH_MODE_RULE,
+      ...MODE_GATED_RULES,
     ]);
     await wireFreeVerbAllowlist(home, 'auto');
     expect((await inspectFreeVerbRules(home, 'auto')).satisfied).toBeDefined();

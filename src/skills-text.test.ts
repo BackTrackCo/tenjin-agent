@@ -228,8 +228,14 @@ describe('tenjin-publish: publish denials are the gate working', () => {
   // (PR #164 review, nit 3). What is TRUE and useful is where the rule comes
   // from, so that is what the skill says and what this pins.
   it('routes a denial to the mode rather than to a line to paste', () => {
-    expect(text).toMatch(/written by `?tenjin install`? from `?publish\.mode/i);
-    expect(text).toMatch(/point at the mode, never at a line to paste/i);
+    expect(text).toMatch(/written by `?tenjin install`? from\s*`?publish\.mode/i);
+    expect(text).toMatch(/point at the mode, never a line to paste/i);
+  });
+
+  // edit rides the same mode, so a denied edit routes the same way rather than
+  // reading as a different kind of problem.
+  it('routes a denied edit the same way', () => {
+    expect(text).toMatch(/Same for a denied `?tenjin edit/i);
   });
 
   it('does not overload "auto" across the mode and the allowlist tier', () => {

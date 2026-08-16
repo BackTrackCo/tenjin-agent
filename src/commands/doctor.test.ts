@@ -1229,7 +1229,10 @@ describe('runDoctor — the rule the publish mode carries', () => {
       fetchImpl: healthyFetch,
     });
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
-    expect(data.permissions.modeGated.map((e) => e.rule)).toEqual(['Bash(tenjin publish:*)']);
+    expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([
+      'Bash(tenjin publish:*)',
+      'Bash(tenjin edit:*)',
+    ]);
   });
 
   it('carries an empty mode-gated tier on review', async () => {

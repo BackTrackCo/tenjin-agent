@@ -78,6 +78,7 @@ import {
   claudeSettingsPath,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  MODE_GATED_RULES,
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
@@ -1651,8 +1652,8 @@ describe('runInstall: permissions decision', () => {
         makeCtx({ json: true }),
         deps(),
       );
-      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
-      expect(await allowList()).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
     });
 
     it('writes it when auto is already the configured mode', async () => {
@@ -1688,7 +1689,7 @@ describe('runInstall: permissions decision', () => {
       expect(
         (res.data as { publishMode: { value: string; source: string } }).publishMode,
       ).toMatchObject({ value: 'auto', source: 'headless-default' });
-      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
       expect(await allowList()).toContain(PUBLISH_MODE_RULE);
     });
 
@@ -1751,7 +1752,7 @@ describe('runInstall: permissions decision', () => {
         makeCtx({ json: true }),
         deps(),
       );
-      expect(wiredOf(res.data).removed).toEqual([PUBLISH_MODE_RULE]);
+      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
       expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     });
 
@@ -1784,7 +1785,7 @@ describe('runInstall: permissions decision', () => {
         deps(),
       );
       const d = res.data as WiredData;
-      expect(d.permissions.modeGated.map((e) => e.rule)).toEqual([PUBLISH_MODE_RULE]);
+      expect(d.permissions.modeGated.map((e) => e.rule)).toEqual([...MODE_GATED_RULES]);
     });
   });
 });
@@ -3036,7 +3037,7 @@ describe('runInstall: wallet creation is the default', () => {
       hooks: { added: string[] };
     };
     // The default mode is auto, so the publish rule rides along with the tier.
-    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
     expect(d.hooks.added).toEqual(['PreToolUse', 'Stop']);
   });
 

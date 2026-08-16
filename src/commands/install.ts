@@ -44,8 +44,8 @@ import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions'
 import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  MODE_GATED_RULES,
   permissionsSkipped,
-  PUBLISH_MODE_RULE,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
@@ -747,12 +747,14 @@ function publishingLine(io: Io, mode: PublishMode): string {
  */
 function publishGrantLines(io: Io, mode: PublishMode, wired: PermissionsResult): string[] {
   if (mode === 'review') return [];
-  const carried = wired.added.includes(PUBLISH_MODE_RULE);
-  const present = wired.alreadyPresent.includes(PUBLISH_MODE_RULE);
-  if (!carried && !present) return [];
-  const what = carried ? 'added' : 'already present';
+  const carried = MODE_GATED_RULES.filter((r) => wired.added.includes(r));
+  const present = MODE_GATED_RULES.filter((r) => wired.alreadyPresent.includes(r));
+  if (carried.length === 0 && present.length === 0) return [];
+  const what = carried.length > 0 ? 'added' : 'already present';
+  // ONE line for the pair, not one each: they are a single decision, and the
+  // operator is reading for what the mode just granted rather than a rule roster.
   return [
-    `  ${paint(io, 'bold', PUBLISH_MODE_RULE)} ${what}: on publish.mode ${mode} your agent can publish to the public marketplace under your identity without a harness prompt.`,
+    `  ${paint(io, 'bold', MODE_GATED_RULES.join(' and '))} ${what}: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, and update its own posts, without a harness prompt.`,
     `  ${paint(io, 'dim', 'Undo:')} tenjin install --publish-mode review  |  tenjin config set publish.mode review  |  tenjin uninstall`,
   ];
 }
@@ -1135,7 +1137,7 @@ export const PERMISSIONS_QUESTION = [
  */
 export function permissionsQuestion(mode: PublishMode): string {
   if (mode === 'review') return PERMISSIONS_QUESTION;
-  return `${PERMISSIONS_QUESTION} Adds ${PUBLISH_MODE_RULE} too, because publish.mode is ${mode}.`;
+  return `${PERMISSIONS_QUESTION} Adds ${MODE_GATED_RULES.join(' and ')} too, because publish.mode is ${mode}.`;
 }
 
 /** The wallet decision's literal copy. */

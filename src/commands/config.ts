@@ -5,7 +5,7 @@ import { CliError } from '../lib/errors';
 import { confirmChoice } from '../lib/clack';
 import {
   inspectFreeVerbRules,
-  PUBLISH_MODE_RULE,
+  MODE_GATED_RULES,
   wireFreeVerbAllowlist,
   type PermissionsResult,
 } from '../lib/harness-permissions';
@@ -271,12 +271,13 @@ interface AllowlistSync {
  * install's own question grew a clause.
  */
 function publishRuleQuestion(mode: PublishMode, pending: readonly string[]): string {
-  const others = pending.filter((rule) => rule !== PUBLISH_MODE_RULE).length;
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const others = pending.filter((rule) => !gated.has(rule)).length;
   const also =
     others > 0 ? ` Also adds the ${others} free-verb rule(s) \`tenjin install\` writes.` : '';
   return (
     `publish.mode ${mode} is unattended only if your harness allowlist carries ` +
-    `${PUBLISH_MODE_RULE}. Add it to ~/.claude/settings.json now?${also}`
+    `${MODE_GATED_RULES.join(' and ')}. Add them to ~/.claude/settings.json now?${also}`
   );
 }
 

@@ -180,28 +180,48 @@ describe('money-moving and state-changing verbs are never recommended', () => {
  * means it.
  */
 describe('the rule publish.mode carries', () => {
-  it('is one narrow prefix rule on the publish verb', () => {
-    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual(['Bash(tenjin publish:*)']);
-    expect(ruleCovers(PUBLISH_MODE_ALLOWLIST[0]!.rule, 'tenjin publish')).toBe(true);
+  it('is two narrow prefix rules, publish and its update-in-place twin', () => {
+    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual([
+      'Bash(tenjin publish:*)',
+      'Bash(tenjin edit:*)',
+    ]);
+    for (const e of PUBLISH_MODE_ALLOWLIST) expect(ruleCovers(e.rule, e.command)).toBe(true);
+  });
+
+  // edit is the NARROWER of the pair, and the note has to say why it rides along:
+  // owner-scoped, spends nothing, creates no new public content.
+  it("edit's note earns its place beside publish", () => {
+    const note = PUBLISH_MODE_ALLOWLIST.find((e) => e.command === 'tenjin edit')?.note ?? '';
+    expect(note).toMatch(/ALREADY OWNS/);
+    expect(note).toMatch(/spends nothing/i);
+    expect(note).toMatch(/creates no new public content/i);
+    expect(note).toMatch(/narrower blast radius|narrower/i);
   });
 
   it('is empty on review and present on both auto modes', () => {
     expect(modeGatedAllowlist('review')).toEqual([]);
-    expect(modeGatedAllowlist('auto')).toHaveLength(1);
-    expect(modeGatedAllowlist('full-auto')).toHaveLength(1);
+    expect(modeGatedAllowlist('auto')).toHaveLength(2);
+    expect(modeGatedAllowlist('full-auto')).toHaveLength(2);
   });
 
   // The load-bearing separation: it is never offered as advice, so every
   // existing claim about what this module RECOMMENDS still holds.
   it('is not in the recommended set, which still covers no forbidden verb', () => {
-    expect(recommendedRules()).not.toContain('Bash(tenjin publish:*)');
-    for (const rule of recommendedRules()) expect(ruleCovers(rule, 'tenjin publish')).toBe(false);
+    for (const gated of ['Bash(tenjin publish:*)', 'Bash(tenjin edit:*)']) {
+      expect(recommendedRules()).not.toContain(gated);
+    }
+    for (const rule of recommendedRules()) {
+      expect(ruleCovers(rule, 'tenjin publish')).toBe(false);
+      expect(ruleCovers(rule, 'tenjin edit')).toBe(false);
+    }
   });
 
-  it('stays documented as excluded, with the mode named as the only thing that clears it', () => {
-    const publish = NEVER_ALLOWLISTED.find((e) => e.command === 'tenjin publish');
-    expect(publish?.reason).toMatch(/publish\.mode/);
-    expect(publish?.reason).toMatch(/never pre-cleared/i);
+  it('both stay documented as excluded, with the mode named as the only thing that clears them', () => {
+    for (const command of ['tenjin publish', 'tenjin edit']) {
+      const entry = NEVER_ALLOWLISTED.find((e) => e.command === command);
+      expect(entry?.reason, command).toMatch(/publish\.mode/);
+      expect(entry?.reason, command).toMatch(/never pre-cleared/i);
+    }
   });
 
   // An operator pastes a line off a tier list; this one they never see, so the
@@ -218,7 +238,7 @@ describe('the rule publish.mode carries', () => {
   it('is a defensive copy like the other tiers', () => {
     const first = modeGatedAllowlist('auto');
     first.splice(0, first.length);
-    expect(modeGatedAllowlist('auto')).toHaveLength(1);
+    expect(modeGatedAllowlist('auto')).toHaveLength(2);
   });
 
   describe('the pointer doctor prints for it', () => {
@@ -232,6 +252,7 @@ describe('the rule publish.mode carries', () => {
       const line = modeGatedPointer('auto') ?? '';
       expect(line).toContain('publish.mode=auto');
       expect(line).toContain('Bash(tenjin publish:*)');
+      expect(line).toContain('Bash(tenjin edit:*)');
       expect(line).toContain('tenjin install');
       expect(line).not.toContain('\n');
     });
@@ -245,6 +266,7 @@ describe('the rule publish.mode carries', () => {
     it('carries the rule when the mode does', () => {
       expect(recommendedPermissions('full-auto').modeGated.map((e) => e.rule)).toEqual([
         'Bash(tenjin publish:*)',
+        'Bash(tenjin edit:*)',
       ]);
     });
 

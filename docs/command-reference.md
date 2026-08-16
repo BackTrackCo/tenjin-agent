@@ -18,15 +18,15 @@ Detects Claude Code, Codex, or a shared Agent Skills directory; wires Tenjin ski
 
 Useful flags:
 
-| Flag                    | Values                        | Effect                                                                                                 |
-| ----------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.                                                                        |
-| `--dry-run`             |                               | Print what would change without writing.                                                               |
-| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively. Defaults to `auto`, which also writes `Bash(tenjin publish:*)`. |
-| `--no-allow-free-verbs` |                               | Do not write harness permission rules.                                                                 |
-| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.                                                                    |
-| `--no-hooks`            |                               | Register no hooks this run.                                                                            |
-| `--no-wallet`           |                               | Create no wallet.                                                                                      |
+| Flag                    | Values                        | Effect                                                                                                                           |
+| ----------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.                                                                                                  |
+| `--dry-run`             |                               | Print what would change without writing.                                                                                         |
+| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively. Defaults to `auto`, which also writes `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)`. |
+| `--no-allow-free-verbs` |                               | Do not write harness permission rules.                                                                                           |
+| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.                                                                                              |
+| `--no-hooks`            |                               | Register no hooks this run.                                                                                                      |
+| `--no-wallet`           |                               | Create no wallet.                                                                                                                |
 
 `install` is idempotent. Re-run it after upgrading the CLI or changing harnesses.
 
@@ -229,7 +229,7 @@ Escape hatch for moving USDC out of the agent wallet. It is deliberately not par
 
 `tenjin config` lists every key with its effective value and source. `tenjin config get <key>` reads one key. `tenjin config set <key> <value>` writes one key.
 
-`set publish.mode` also keeps the harness allowlist in step, since the mode decides whether a publish asks and the allowlist decides whether the harness asks anyway. Moving to `auto` or `full-auto` asks once and writes `Bash(tenjin publish:*)` on yes; without a terminal, under `--json`, or on a no it writes nothing and prints where the rule goes. Moving back to `review` retracts it without asking. See [agent-permissions.md](./agent-permissions.md).
+`set publish.mode` also keeps the harness allowlist in step, since the mode decides whether a publish asks and the allowlist decides whether the harness asks anyway. Moving to `auto` or `full-auto` asks once and writes `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)` on yes; without a terminal, under `--json`, or on a no it writes nothing and prints where the rule goes. Moving back to `review` retracts them without asking. See [agent-permissions.md](./agent-permissions.md).
 
 Common keys:
 

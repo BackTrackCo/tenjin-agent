@@ -6,7 +6,7 @@ import {
   claudeSettingsPath,
   FREE_VERB_RULES,
   LEGACY_FREE_VERB_RULES,
-  PUBLISH_MODE_RULE,
+  MODE_GATED_RULES,
 } from './harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
 import { hooksDir } from './paths';
@@ -203,12 +203,13 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
     // What THIS version writes, plus what any prior version wrote. A rule we
     // retired is still a rule we put there, and leaving it behind would strand a
     // dead allow-line for a command that no longer exists. The publish rule is
-    // reclaimed WHATEVER the mode says: uninstall removes what this CLI wrote,
-    // and the mode that justified the rule is about to have no CLI behind it.
+    // The mode-gated pair is reclaimed WHATEVER the mode says: uninstall removes
+    // what this CLI wrote, and the mode that justified those rules is about to
+    // have no CLI behind it.
     const ours = new Set<string>([
       ...FREE_VERB_RULES,
       ...LEGACY_FREE_VERB_RULES,
-      PUBLISH_MODE_RULE,
+      ...MODE_GATED_RULES,
     ]);
     const kept = permissions.allow.filter((r) => !(typeof r === 'string' && ours.has(r)));
     if (kept.length !== permissions.allow.length) {

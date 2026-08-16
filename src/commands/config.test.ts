@@ -7,7 +7,12 @@ import { join } from 'node:path';
 import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
+import {
+  claudeSettingsPath,
+  FREE_VERB_RULES,
+  MODE_GATED_RULES,
+  PUBLISH_MODE_RULE,
+} from '../lib/harness-permissions';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -616,7 +621,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       },
     });
     expect(label).toMatch(/Also adds the \d+ free-verb rule/);
-    expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + 1);
+    expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
   });
 
   it('writes nothing when the operator declines, and points instead', async () => {
@@ -689,7 +694,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       },
     });
     expect(await allowOf()).not.toContain(PUBLISH_MODE_RULE);
-    expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
+    expect(syncOf(res.data)?.removed).toEqual([...MODE_GATED_RULES]);
     expect(res.humanLines?.join(' ')).toContain('Removed');
   });
 
@@ -698,7 +703,9 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     await writeFile(
       claudeSettingsPath(home),
       JSON.stringify({
-        permissions: { allow: ['Bash(git status:*)', ...FREE_VERB_RULES, PUBLISH_MODE_RULE] },
+        permissions: {
+          allow: ['Bash(git status:*)', ...FREE_VERB_RULES, ...MODE_GATED_RULES],
+        },
       }),
     );
     await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), { homeDir: home });
@@ -804,7 +811,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
       await mkdir(join(home, '.claude'), { recursive: true });
       await writeFile(
         claudeSettingsPath(home),
-        JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, PUBLISH_MODE_RULE] } }),
+        JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, ...MODE_GATED_RULES] } }),
       );
       const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
         homeDir: home,
@@ -812,7 +819,7 @@ describe('publish.mode keeps the harness allowlist in step', () => {
         env: { PATH: '' },
       });
       expect(await allowOf()).not.toContain(PUBLISH_MODE_RULE);
-      expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
+      expect(syncOf(res.data)?.removed).toEqual([...MODE_GATED_RULES]);
     });
 
     it('detects Claude Code by its binary', async () => {

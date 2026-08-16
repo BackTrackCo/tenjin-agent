@@ -22,7 +22,7 @@ description: >-
 Three routes in: an explicit ask to publish or update; the tenjin-search
 after-a-MISS flow publishing an answer you just derived; and unprompted work
 worth selling — substantial public research, or an empirical proof of something
-the docs don't state. The unprompted route you offer ONCE; musing is not it.
+the docs don't state. The unprompted route you offer ONCE; musing is not.
 
 All three go through `publish.mode`, which `tenjin install` settles at **auto**:
 a clean scan publishes on its own and you report the URL. Asking first is what
@@ -90,8 +90,7 @@ edge, and price for the freshness that remains.
 ## Draft rules
 
 - Explicit as-of date up top, and a decay note or valid-until where honest.
-- Attribute claims; verify issue numbers and URLs before publish; never invent
-  one.
+- Attribute claims; verify issue numbers and URLs; never invent one.
 - Sanitize (hard rules, and YOURS to enforce): no employer-internal strategy,
   metrics, or unreleased work; no secrets, keys, or wallet addresses; no
   third-party private details; no personal data; no long verbatim copyrighted
@@ -190,9 +189,9 @@ loop open.
 Consent follows `publish.mode`; no mode skips the scan:
 
 - **auto** (what install sets): a clean scan publishes at the default price with
-  no prompt. Report the URL and move on. A flagged scan exits 3 with a
-  `needs_confirmation` payload.
-- **full-auto**: warnings do not stop it either; only a hard block refuses.
+  no prompt. Report the URL. A flagged scan exits 3 with a `needs_confirmation`
+  payload.
+- **full-auto**: warnings do not stop it; only a hard block refuses.
 - **review**: every publish exits 3 with that payload, even on a clean scan.
 
 **On any exit 3, render THAT payload's findings and price as one yes/no, then
@@ -205,10 +204,10 @@ clears it.
 **If the harness denies permission to run `tenjin publish`, stop and surface it;
 never retry.** Do not propose an allowlist line for it, do not reword the
 command, and do not route around it via `npx`, a shell wrapper, or HTTP. Tell the
-user what you wanted to publish and leave the draft file where it is. The rule
-that pre-clears publishing is written by `tenjin install` from `publish.mode`, so
-a denial means this machine is on `review` or the rule was removed — point at the
-mode, never at a line to paste.
+user what you wanted to publish and leave the draft file where it is. The rules
+that pre-clear publishing and editing are written by `tenjin install` from
+`publish.mode`, so a denial means this machine is on `review` or they were gone —
+point at the mode, never a line to paste. Same for a denied `tenjin edit`.
 
 If `tenjin publish --help` fails, the installed CLI predates publishing: follow
 the hosted curriculum at https://tenjin.blog/skills.md instead, with the same

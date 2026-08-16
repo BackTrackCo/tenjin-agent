@@ -262,6 +262,19 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
       'full-auto stops only on a hard block. Set publish.mode back to review and the next ' +
       '`tenjin install` removes this rule.',
   },
+  {
+    rule: 'Bash(tenjin edit:*)',
+    command: 'tenjin edit',
+    note:
+      'Updates posts your wallet ALREADY OWNS: reprices, refreshes an as-of date, repairs an ' +
+      'answer card. Owner-scoped on both legs (GET and PUT /api/posts/<id> are signed and ' +
+      'owner-only), spends nothing, moves no keys, and creates no new public content — a ' +
+      'narrower blast radius than the publish rule beside it. It rides the same mode for the ' +
+      'same reason: edit runs the identical publish.mode consent gate in the CLI ' +
+      '(lib/consent.ts needsConfirmation), so a mode that publishes unattended and then ' +
+      'cannot fix its own post\u2019s price is the asymmetry the mode exists to remove. ' +
+      'Removed by the same return to review.',
+  },
 ];
 
 /** The mode-gated rules in effect for `mode`; empty on review. */
@@ -300,7 +313,10 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason:
       'Write-capable despite the no-flag form reading as a pure show: it edits live posts ' +
       'and answer cards under your identity, and moves prices. A prefix rule pins the verb, ' +
-      'not the flags, so no rule can clear the read half without clearing the write half.',
+      'not the flags, so no rule can clear the read half without clearing the write half. ' +
+      'Never pre-cleared as a recommendation: like `tenjin publish`, the only thing that ' +
+      'clears it is `publish.mode` auto or full-auto, whose consent gate it already shares ' +
+      '(see PUBLISH_MODE_ALLOWLIST). Back on review, `install` takes the rule away again.',
   },
   {
     command: 'tenjin wallet create',
@@ -428,14 +444,14 @@ export function permissionsPointer(): string {
 }
 
 /**
- * The one rule the current mode carries, or null on review. This one DOES name
- * its rule, unlike {@link permissionsPointer}: it is not a tier to weigh and
- * paste, it is a line that should already be in the operator's settings file, and
- * an operator whose agent is being prompted for a publish it was told not to ask
- * about needs to see exactly which rule is missing.
+ * The rules the current mode carries, or null on review. This one DOES name them,
+ * unlike {@link permissionsPointer}: they are not a tier to weigh and paste, they
+ * are lines that should already be in the operator's settings file, and an
+ * operator whose agent is being prompted for work the mode said not to ask about
+ * needs to see exactly which rules are missing.
  */
 export function modeGatedPointer(mode: PublishMode): string | null {
-  const entry = modeGatedAllowlist(mode)[0];
-  if (entry === undefined) return null;
-  return `publish.mode=${mode} also needs ${entry.rule} in your harness allowlist, or it will prompt for every publish anyway; \`tenjin install\` writes it.`;
+  const rules = modeGatedAllowlist(mode).map((e) => e.rule);
+  if (rules.length === 0) return null;
+  return `publish.mode=${mode} also needs ${rules.join(' and ')} in your harness allowlist, or it will prompt anyway; \`tenjin install\` writes them.`;
 }

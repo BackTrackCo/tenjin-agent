@@ -189,7 +189,7 @@ Deliberately **never** recommended, because each is a human decision:
 | ---------------------- | ------------------------------------------------------------------------------------ |
 | `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
 | `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
-| `tenjin edit`          | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
+| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.              |
 | `tenjin wallet create` | Creates the payment credential.                                                      |
 | `tenjin config set`    | It can widen the agent's own spend policy.                                           |
 | `tenjin install`       | Writes into harness config and skills directories.                                   |
@@ -199,36 +199,44 @@ Deliberately **never** recommended, because each is a human decision:
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
 
-## The one rule your publish mode carries
+## The two rules your publish mode carries
 
 `publish.mode` is where you say whether publishing asks you first. On `auto` or
 `full-auto` it does not, and a harness prompt in front of every publish asks that
 same question again somewhere the mode cannot answer it — so the agent stops, and
-the mode you chose does nothing. That is why one rule, `Bash(tenjin publish:*)`,
-tracks the mode. It is deliberately not in any block above: there is nothing to
-paste here, because the mode is the decision and the rule only follows it.
+the mode you chose does nothing. That is why two rules track the mode:
 
-**Installing Tenjin is the consent for this one.** `tenjin install` settles
-`publish.mode` at `auto` unless you say otherwise, and writes this rule alongside
+- `Bash(tenjin publish:*)` — puts new content on the marketplace under your identity.
+- `Bash(tenjin edit:*)` — updates posts your wallet already owns: reprices, refreshes
+  an as-of date, repairs an answer card. Owner-scoped on both legs, spends nothing,
+  creates no new public content, and runs the same `publish.mode` gate in the CLI. A
+  mode that can publish a post unattended but cannot fix that post's price is the
+  asymmetry the mode exists to remove.
+
+Neither is in any block above: there is nothing to paste here, because the mode is
+the decision and the rules only follow it.
+
+**Installing Tenjin is the consent for these.** `tenjin install` settles
+`publish.mode` at `auto` unless you say otherwise, and writes both rules alongside
 the free tier on the FIRST install, headless runs included. Every install that
 does so says which mode it settled, names the rule, and prints the three ways
-out. Pass `--publish-mode review` if you want the mode without the rule; at a
+out. Pass `--publish-mode review` if you want the mode without the rules; at a
 terminal the install asks the question outright, with auto as the default answer.
 
 The bare CLI, on a machine where `install` never ran, still defaults to `review`
 and grants nothing. Install is the consent anchor: nothing here is granted to
 someone who never ran it.
 
-Going back to `review` takes the rule away — on the next `install`, or
-immediately with `tenjin config set publish.mode review`. `tenjin uninstall`
-reclaims it like every other rule this CLI wrote. There is no flag that adds it
-and no line to paste: change the mode.
+Going back to `review` takes them away — on the next `install`, or immediately
+with `tenjin config set publish.mode review`. `tenjin uninstall` reclaims them
+like every other rule this CLI wrote. There is no flag that adds them and no line
+to paste: change the mode.
 
 `tenjin config set publish.mode` keeps the two in step without waiting for the
 next `install`. Moving to `auto` or `full-auto` asks you once, naming the rule,
-and writes it on yes; a run with no terminal, a `--json` run, or a no leaves the
-file alone and prints where the rule goes. Moving back to `review` retracts the
-rule without asking, because that direction can only take back what this CLI
+and writes them on yes; a run with no terminal, a `--json` run, or a no leaves
+the file alone and prints where the rules go. Moving back to `review` retracts
+them without asking, because that direction can only take back what this CLI
 wrote — unless the free tier is missing too, which means `install` never wrote
 these rules and none of them are ours to change.
 
@@ -239,8 +247,8 @@ config, the next `install` reads it as yours and writes the rule.
 
 What still stops a bad publish is the CLI, not the harness prompt: the
 deterministic secret scan blocks in every mode and is never clearable by `--yes`,
-`auto` stops on any finding, and `full-auto` stops only on a hard block. This
-rule clears the harness prompt and nothing else.
+`auto` stops on any finding, and `full-auto` stops only on a hard block. These
+rules clear the harness prompt and nothing else.
 
 ### `tenjin update`, a human decision
 

@@ -17,7 +17,7 @@ import type { PublishMode } from './config';
  *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
  *    It takes a {@link PublishMode}, and that selects between exactly two
  *    hardcoded constants: {@link FREE_VERB_RULES}, and those plus
- *    {@link PUBLISH_MODE_RULE}. So there is no call path — no flag, no config
+ *    {@link MODE_GATED_RULES}. So there is no call path — no flag, no config
  *    key, no future caller — that can make it write `buy`, `session start`,
  *    `send`, `config set`, `wallet create`, `mcp`, `install`, or a broad
  *    `Bash(tenjin:*)`. A CLI that could widen its own permission grant is exactly
@@ -97,11 +97,24 @@ export const FREE_VERB_RULES: readonly string[] = [
 export const PUBLISH_MODE_RULE = 'Bash(tenjin publish:*)';
 
 /**
+ * The other half of the mode-gated pair. `edit` runs the SAME publish.mode
+ * consent gate in the CLI (lib/consent.ts's needsConfirmation), touches only
+ * posts this wallet already owns, spends nothing, and creates no new public
+ * content — strictly narrower than the publish rule it travels with. A mode that
+ * can publish a new post unattended but cannot fix that post's price is the
+ * asymmetry the mode exists to remove.
+ */
+export const EDIT_MODE_RULE = 'Bash(tenjin edit:*)';
+
+/** The pair the publish modes carry, in the order they are written and reported. */
+export const MODE_GATED_RULES: readonly string[] = [PUBLISH_MODE_RULE, EDIT_MODE_RULE];
+
+/**
  * Exactly what may be written for `mode`. The two return values are the only two
  * rule sets this module can produce.
  */
 export function rulesForPublishMode(mode: PublishMode): readonly string[] {
-  return mode === 'review' ? FREE_VERB_RULES : [...FREE_VERB_RULES, PUBLISH_MODE_RULE];
+  return mode === 'review' ? FREE_VERB_RULES : [...FREE_VERB_RULES, ...MODE_GATED_RULES];
 }
 
 /**
@@ -112,7 +125,7 @@ export function rulesForPublishMode(mode: PublishMode): readonly string[] {
  */
 function retiredFor(mode: PublishMode): Set<string> {
   const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
-  if (mode === 'review') retired.add(PUBLISH_MODE_RULE);
+  if (mode === 'review') for (const rule of MODE_GATED_RULES) retired.add(rule);
   return retired;
 }
 

@@ -60,3 +60,11 @@ tenjin-publish now tells the agent to always fill the answer card's `exclusions`
 and `provenance`. Both are one sentence, both are known at publish time, and a
 card missing either is cache-ineligible server-side, which keeps the piece out of
 agent decision search entirely.
+
+The publish modes carry `Bash(tenjin edit:*)` alongside the publish rule. `edit`
+runs the identical `publish.mode` consent gate in the CLI, touches only posts the
+wallet already owns, spends nothing, and creates no new public content — a
+narrower blast radius than the publish rule it travels with. An auto mode that
+can publish a post unattended but cannot fix that post's price is the asymmetry
+the mode exists to remove. Install writes both, returning to review retracts
+both, and uninstall reclaims both.
