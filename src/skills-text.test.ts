@@ -222,12 +222,59 @@ describe('tenjin-publish: publish denials are the gate working', () => {
     expect(text).toMatch(/stop and surface it; never retry/i);
   });
 
-  it('says publish is deliberately not in the recommended allowlist', () => {
-    expect(text).toMatch(/NOT in the recommended auto-mode allowlist/i);
+  // The old sentence said publish was "NOT in the recommended auto-mode
+  // allowlist" two lines above one saying publish.mode auto writes that very
+  // rule — "auto" meaning two different things, which read as self-contradictory
+  // (PR #164 review, nit 3). What is TRUE and useful is where the rule comes
+  // from, so that is what the skill says and what this pins.
+  it('routes a denial to the mode rather than to a line to paste', () => {
+    expect(text).toMatch(/written by `?tenjin install`? from `?publish\.mode/i);
+    expect(text).toMatch(/point at the mode, never at a line to paste/i);
+  });
+
+  it('does not overload "auto" across the mode and the allowlist tier', () => {
+    expect(text).not.toMatch(/auto-mode allowlist/i);
   });
 
   it('forbids proposing an allowlist line for it', () => {
     expect(text).toMatch(/Do not propose an allowlist line for it/i);
+  });
+
+  // Restored after the diet dropped it (PR #164 review, major 2): a generic
+  // pre-ask followed by a `--yes` re-run clears WARN findings the user never saw.
+  it('names the WARN-findings failure mode of a generic pre-ask', () => {
+    expect(text).toMatch(/Never ask a generic "shall I publish\?" before running/i);
+    expect(text).toMatch(/silently clears WARN-tier findings/i);
+    expect(text).toMatch(/PII, wallet addresses/i);
+  });
+
+  // Stated ONCE, in the skill that owns publishing. tenjin-search points at it.
+  it('is the only skill that carries that caveat', () => {
+    expect(flat('tenjin-search')).not.toMatch(/silently clears WARN-tier findings/i);
+    expect(flat('tenjin-search')).toMatch(/Never a generic "publish\?"\s*first/i);
+  });
+});
+
+/**
+ * Auto is the posture `tenjin install` settles, so the skills teach publishing
+ * as the ordinary outcome and asking as the opt-out (owner call, PR #164).
+ */
+describe('the skills read auto-first', () => {
+  it('tenjin-publish names auto as what install sets, before review', () => {
+    const text = flat('tenjin-publish');
+    expect(text).toMatch(
+      /`?tenjin install`? settles at \*\*auto\*\*|settles `?publish\.mode`?[^.]*\*\*auto\*\*/i,
+    );
+    expect(text.indexOf('**auto** (what install sets)')).toBeGreaterThan(-1);
+    // The consent list leads with auto and closes with review.
+    expect(text.indexOf('**auto** (what install sets)')).toBeLessThan(text.indexOf('**review**'));
+  });
+
+  it('tenjin-search after-a-MISS leads with auto too', () => {
+    const text = flat('tenjin-search');
+    expect(text).toMatch(/settles `?publish\.mode`? at \*\*auto\*\*/i);
+    expect(text).toMatch(/No permission round-trip/i);
+    expect(text.indexOf('| `auto`')).toBeLessThan(text.indexOf('| `review`'));
   });
 });
 

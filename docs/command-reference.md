@@ -18,15 +18,15 @@ Detects Claude Code, Codex, or a shared Agent Skills directory; wires Tenjin ski
 
 Useful flags:
 
-| Flag                    | Values                        | Effect                                   |
-| ----------------------- | ----------------------------- | ---------------------------------------- |
-| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.          |
-| `--dry-run`             |                               | Print what would change without writing. |
-| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively.   |
-| `--no-allow-free-verbs` |                               | Do not write harness permission rules.   |
-| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.      |
-| `--no-hooks`            |                               | Register no hooks this run.              |
-| `--no-wallet`           |                               | Create no wallet.                        |
+| Flag                    | Values                        | Effect                                                                                                 |
+| ----------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.                                                                        |
+| `--dry-run`             |                               | Print what would change without writing.                                                               |
+| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively. Defaults to `auto`, which also writes `Bash(tenjin publish:*)`. |
+| `--no-allow-free-verbs` |                               | Do not write harness permission rules.                                                                 |
+| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.                                                                    |
+| `--no-hooks`            |                               | Register no hooks this run.                                                                            |
+| `--no-wallet`           |                               | Create no wallet.                                                                                      |
 
 `install` is idempotent. Re-run it after upgrading the CLI or changing harnesses.
 

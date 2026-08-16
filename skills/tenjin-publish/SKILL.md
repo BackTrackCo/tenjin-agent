@@ -21,15 +21,16 @@ description: >-
 
 Three routes in: an explicit ask to publish or update; the tenjin-search
 after-a-MISS flow publishing an answer you just derived; and unprompted work
-worth selling — substantial public research or an empirical proof of something
-the docs don't state. The unprompted route you offer ONCE; drive-by musing is
-not it.
+worth selling — substantial public research, or an empirical proof of something
+the docs don't state. The unprompted route you offer ONCE; musing is not it.
 
-All three go through `publish.mode`: the gate, not a checklist to hold the user
-to. Settled at `tenjin install`, default `review`, it decides whether a publish
-completes silently, asks a one-click yes/no, or stops. This skill's reachability
-is not a safety layer; the description above is the whole trigger boundary.
-Publishing is free, and an incomplete card still publishes as browse-only.
+All three go through `publish.mode`, which `tenjin install` settles at **auto**:
+a clean scan publishes on its own and you report the URL. Asking first is what
+`review` is for, and an operator who wants it says so. So the normal shape of
+this skill is finish the work, run the safety pass, publish, say where it went —
+not a conversation. This skill's reachability is not a safety layer; the
+description above is the whole trigger boundary. Publishing is free, and an
+incomplete card still publishes as browse-only.
 
 ## The scan tiers
 
@@ -46,20 +47,19 @@ verbatim quotes, the caller's own project references, home-anchored local paths,
 labeled customer/account identifiers, paid/licensed-content legends, and
 injection-shaped embedded instructions.
 
-A secret that is not a recognizable shape is therefore a prompt to look, not a
-stop — and under `full-auto` or a bare `--yes`, not even that. Rights and
-employer-internal content have NO blocking detector at all, so that judgment is
-yours.
+A secret that is not a recognizable shape is a prompt to look, not a stop — and
+under `full-auto` or a bare `--yes`, not even that. Rights and employer-internal
+content have NO blocking detector, so that judgment is yours.
 
 ## The harvest ask
 
 "Anything from our recent work worth publishing?" routes here too. Sweep only
 what you can see: this conversation's finished work, plus anything the user
-names. Never dig through transcripts or session archives they did not hand you.
-Grade each candidate against the rubric below, then offer the survivors ONCE, as
-one batch with honest prices — never one at a time across the session. A no is
-final: never raised again, here or in a later session, and nothing saved to
-re-ask. Zero candidates is a fine answer; say so in one line and stop.
+names. Never dig through transcripts or archives they did not hand you. Grade
+each candidate against the rubric below, then offer the survivors ONCE, as one
+batch with honest prices — never one at a time across the session. A no is final:
+never raised again, here or later, and nothing saved to re-ask. Zero candidates
+is a fine answer; say so in one line and stop.
 
 ## What makes a piece sell
 
@@ -160,11 +160,10 @@ not save the draft anywhere. Close the loop (`tenjin outcome --search-id <id>
 --status regenerated`) and tell the user in one line what you withheld and why.
 
 QUALITY doubt is a different judgment — an unverified claim, missing polish, a
-wanted second pass — and `publish.mode` decides it. In `review` you were asking
-anyway. In `auto`, ask through the harness's own question or permission UI when
-it has one, so the user clicks rather than answers in prose. In `full-auto`,
-hedge it honestly in the piece — name the claim unverified and date it — and
-publish.
+wanted second pass — and `publish.mode` decides it. In `auto`, ask through the
+harness's own question UI when it has one, so the user clicks rather than answers
+in prose. In `full-auto`, hedge it in the piece — name the claim unverified and
+date it — and publish. In `review` you were asking anyway.
 
 A decision is EPHEMERAL. Nothing is stored to re-ask later: a "no" is final,
 closes the loop the same way, and is never raised again.
@@ -188,25 +187,26 @@ review and leaves the loop open.
 
 Consent follows `publish.mode`; no mode skips the scan:
 
-- **review** (default): every publish exits 3 with a structured
-  `needs_confirmation` payload, even on a clean scan. Render it to the user as a
-  plain yes/no (with any flagged findings), and re-run with `--yes` only on an
-  explicit yes.
-- **auto**: a clean scan publishes at the default price with no prompt; a flagged
-  scan exits 3 with the same `needs_confirmation` payload to render.
-- **full-auto**: warnings do not stop it; only a hard-block finding refuses, and
-  no mode or `--yes` can clear that.
+- **auto** (what install sets): a clean scan publishes at the default price with
+  no prompt. Report the URL and move on. A flagged scan exits 3 with a structured
+  `needs_confirmation` payload.
+- **full-auto**: warnings do not stop it either; only a hard block refuses.
+- **review**: every publish exits 3 with that payload, even on a clean scan.
+
+**On any exit 3, render THAT payload's findings and price as one yes/no, then
+re-run with `--yes` on an explicit yes.** Never ask a generic "shall I publish?"
+before running: the findings are the question, and a `--yes` re-run after a bare
+yes silently clears WARN-tier findings — PII, wallet addresses, internal
+hostnames — the user never saw. A hard block refuses in every mode and no `--yes`
+clears it.
 
 **If the harness denies permission to run `tenjin publish`, stop and surface it;
-never retry.** `tenjin publish` is deliberately NOT in the recommended auto-mode
-allowlist (neither are `tenjin send`, `tenjin wallet create`, or `tenjin config
-set`): publishing puts the user's content on a public marketplace under their
-identity, so a denial is the gate working, not a misconfiguration. Tell the user
-what you wanted to publish and let them run it themselves. Do not propose an
-allowlist line for it, do not reword the command, and do not route around it via
-`npx`, a shell wrapper, or HTTP. Pre-clearing publishing is what `publish.mode`
-auto/full-auto already means, and `tenjin install` writes that rule itself — so
-point at the mode, never at a line to paste. Leave the draft file where it is.
+never retry.** Do not propose an allowlist line for it, do not reword the
+command, and do not route around it via `npx`, a shell wrapper, or HTTP. Tell the
+user what you wanted to publish and leave the draft file where it is. The rule
+that pre-clears publishing is written by `tenjin install` from `publish.mode`, so
+a denial means this machine is on `review` or the rule was removed — point at the
+mode, never at a line to paste.
 
 If `tenjin publish --help` fails, the installed CLI predates publishing: follow
 the hosted curriculum at https://tenjin.blog/skills.md (the canonical zero-install
@@ -230,5 +230,4 @@ path) instead, with the same rubric and consent rules above.
   are my sales doing?" with `GET https://tenjin.blog/api/me/stats` (this-month
   earnings + paid-read totals) and `GET https://tenjin.blog/api/me/events` (one
   entry per settled sale, poll and diff). Both take the `SIGN-IN-WITH-X` wallet
-  header the hosted `tenjin` skill documents; that skill is the reference for
-  this whole surface.
+  header the hosted `tenjin` skill documents; that skill is the reference.

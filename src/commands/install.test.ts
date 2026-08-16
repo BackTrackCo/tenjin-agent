@@ -1343,7 +1343,7 @@ describe('runInstall: permissions decision', () => {
   it('--allow-free-verbs wires it headlessly, with no prompt', async () => {
     const confirm = vi.fn(async () => false);
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
       makeCtx(),
       deps({ confirmPermissions: confirm }),
     );
@@ -1354,7 +1354,7 @@ describe('runInstall: permissions decision', () => {
 
   it('--allow-free-verbs works under --json and reports the write in the envelope', async () => {
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps({ isInteractive: true }),
     );
@@ -1369,7 +1369,11 @@ describe('runInstall: permissions decision', () => {
   // The inversion #33 was really asking for: the machine most likely to be denied
   // mid-task is the headless one, and there is nobody there to say yes.
   it('a non-interactive run wires the allowlist by default, with no flag', async () => {
-    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const res = await runInstall(
+      { harness: ['claude'], publishMode: 'review' },
+      makeCtx({ json: true }),
+      deps(),
+    );
     expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
     expect(wiredOf(res.data).skipped).toBeUndefined();
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
@@ -1451,10 +1455,14 @@ describe('runInstall: permissions decision', () => {
   // revoked between probe and write was silently re-added without a prompt, which
   // is the one thing a consent gate cannot do.
   it('reports the probe snapshot and writes nothing if a rule is revoked mid-run', async () => {
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
       deps({
         isInteractive: true,
@@ -1603,7 +1611,11 @@ describe('runInstall: permissions decision', () => {
       claudeSettingsPath(home),
       JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(git status:*)'] } }, null, 2),
     );
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
     const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
       model: string;
       permissions: { allow: string[] };
@@ -1614,7 +1626,7 @@ describe('runInstall: permissions decision', () => {
 
   it('keeps the three recommendation tiers beside the write outcome', async () => {
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1626,9 +1638,11 @@ describe('runInstall: permissions decision', () => {
   });
 
   /**
-   * The publish rule follows decision 1, and only when a human made it. An agent
-   * cannot reach either half: `tenjin install` and `tenjin config set` are both
-   * never-allowlisted, so the mode is always something an operator settled.
+   * The publish rule follows decision 1 on EVERY path, first run included:
+   * installing Tenjin is the consent for it (owner call, PR #164). An agent
+   * cannot reach either half on its own — `tenjin install` and `tenjin config
+   * set` are both never-allowlisted — and every install that writes the rule
+   * says so, names it, and prints the three ways out.
    */
   describe('the publish rule follows publish.mode', () => {
     it('writes it when --publish-mode names auto on this run', async () => {
@@ -1666,14 +1680,62 @@ describe('runInstall: permissions decision', () => {
       expect(await allowList()).not.toContain(PUBLISH_MODE_RULE);
     });
 
-    // A bare headless install PERSISTS auto because a machine with nobody at it
-    // needs the loop to work, but nobody chose that, and settings.json is the
-    // operator's file. The grant waits for a run that reads the mode back as a
-    // standing choice.
-    it('does not write it off a headless default nobody chose', async () => {
+    // The headless default IS auto, and the FIRST install writes the rule for it.
+    // The earlier shape withheld it on run 1 and then wrote it on run 2, which
+    // read its own default back as a choice — later and quieter, never absent.
+    it('writes it on the FIRST headless install, off the default mode', async () => {
       const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
-      expect(await allowList()).not.toContain(PUBLISH_MODE_RULE);
+      expect(
+        (res.data as { publishMode: { value: string; source: string } }).publishMode,
+      ).toMatchObject({ value: 'auto', source: 'headless-default' });
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
+      expect(await allowList()).toContain(PUBLISH_MODE_RULE);
+    });
+
+    // No second-run asymmetry: the same box, installed twice, is unchanged.
+    it('is idempotent across two headless installs', async () => {
+      await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      const before = await allowList();
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      expect(wiredOf(res.data).added).toEqual([]);
+      expect(wiredOf(res.data).alreadyPresent).toContain(PUBLISH_MODE_RULE);
+      expect(await allowList()).toEqual(before);
+    });
+
+    // The grant is a DEFAULT, so the output has to carry its own receipt.
+    it('names the rule and every way out, in the install output', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: async () => true }),
+      );
+      const text = human(res);
+      expect(text).toContain(PUBLISH_MODE_RULE);
+      expect(text).toContain('without a harness prompt');
+      expect(text).toContain('tenjin install --publish-mode review');
+      expect(text).toContain('tenjin config set publish.mode review');
+      expect(text).toContain('tenjin uninstall');
+    });
+
+    it('says none of that on review, which grants nothing', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      expect(human(res)).not.toContain(PUBLISH_MODE_RULE);
+      expect(human(res)).not.toContain('Undo:');
+    });
+
+    // `--no-allow-free-verbs` still refuses the whole write, publish rule included.
+    it('writes nothing at all when the allowlist itself is refused', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: false },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).skipped).toBe('declined');
+      expect(await allowList()).toBeUndefined();
     });
 
     // The mode moved back to "ask me first", so the rule that skipped the asking
@@ -2931,16 +2993,21 @@ describe('runInstall: wallet creation is the default', () => {
   // with no passphrase in the environment the store is the only source left, so
   // an ambient one leaking in from a shell or another file would silently make
   // the keychain assertions vacuous.
-  it('falls to the OS store when the environment carries no passphrase', async () => {
-    const { exec, entries } = fakeKeychain();
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps(realWalletCreate(exec)),
-    );
-    expect(walletOf(res.data).status).toBe('created');
-    expect(entries.size).toBe(1);
-  });
+  // Real scrypt again; see SCRYPT_TIMEOUT_MS above.
+  it(
+    'falls to the OS store when the environment carries no passphrase',
+    async () => {
+      const { exec, entries } = fakeKeychain();
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps(realWalletCreate(exec)),
+      );
+      expect(walletOf(res.data).status).toBe('created');
+      expect(entries.size).toBe(1);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   // The one case with no safe answer. No plaintext fallback exists, by design.
   it('creates nothing and skips LOUDLY with no store and no env passphrase', async () => {
@@ -2968,7 +3035,8 @@ describe('runInstall: wallet creation is the default', () => {
       permissions: { wired: { added: string[] } };
       hooks: { added: string[] };
     };
-    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+    // The default mode is auto, so the publish rule rides along with the tier.
+    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE]);
     expect(d.hooks.added).toEqual(['PreToolUse', 'Stop']);
   });
 

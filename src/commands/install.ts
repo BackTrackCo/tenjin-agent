@@ -427,7 +427,7 @@ async function installBody(
     flag: allowFreeVerbs,
     dryRun,
     canPrompt,
-    publishMode,
+    publishMode: publishMode.value,
   });
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
@@ -475,7 +475,7 @@ async function installBody(
     // `wired` is the outcome of THIS run's settings.json write; the three
     // recommendation tiers beside it are unchanged, so a machine consumer that
     // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
-    permissions: { ...recommendedPermissions(allowlistMode(publishMode)), wired: permissions },
+    permissions: { ...recommendedPermissions(publishMode.value), wired: permissions },
     hooks,
     wallet,
   };
@@ -661,6 +661,7 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
   return [
     ...s.harnesses.map((h) => skillsLine(io, h, s.dryRun)),
     publishingLine(io, s.publishMode.value),
+    ...publishGrantLines(io, s.publishMode.value, s.permissions),
     permissionsLine(io, s.permissions),
     hooksLine(io, s.hooks),
     walletLine(io, s.wallet),
@@ -730,6 +731,30 @@ function skillsLine(io: Io, h: HarnessResult, dryRun: boolean): string {
 /** One line for the settled consent mode, with the same consequence the question showed. */
 function publishingLine(io: Io, mode: PublishMode): string {
   return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}`;
+}
+
+/**
+ * What the publish modes just granted, and every way back out.
+ *
+ * LOUD BY DESIGN, and it is the whole reason a default may write this rule at
+ * all: installing Tenjin is the consent, so the operator has to leave the
+ * install knowing the mode they are on, the harness rule it carried, and that
+ * three separate commands undo it. A grant nobody is told about is the thing the
+ * permissions module refuses; a grant stated in the output of the command that
+ * made it is a default with its receipt attached.
+ *
+ * Absent on `review`, which grants nothing and has nothing to undo.
+ */
+function publishGrantLines(io: Io, mode: PublishMode, wired: PermissionsResult): string[] {
+  if (mode === 'review') return [];
+  const carried = wired.added.includes(PUBLISH_MODE_RULE);
+  const present = wired.alreadyPresent.includes(PUBLISH_MODE_RULE);
+  if (!carried && !present) return [];
+  const what = carried ? 'added' : 'already present';
+  return [
+    `  ${paint(io, 'bold', PUBLISH_MODE_RULE)} ${what}: on publish.mode ${mode} your agent can publish to the public marketplace under your identity without a harness prompt.`,
+    `  ${paint(io, 'dim', 'Undo:')} tenjin install --publish-mode review  |  tenjin config set publish.mode review  |  tenjin uninstall`,
+  ];
 }
 
 /**
@@ -1084,23 +1109,22 @@ export const PERMISSIONS_QUESTION = [
 ].join(' ');
 
 /**
- * The mode the ALLOWLIST is written for, which is not always the mode that ends
- * up in config.
+ * INSTALLING TENJIN IS THE CONSENT (owner call, PR #164 review round).
  *
- * A headless install with no flag PERSISTS `auto`, because a machine with nobody
- * at it is the one that most needs the loop to work — but nobody chose that, and
- * the publish rule is gated on a choice, not on a default. So a mode this run
- * defaulted into is treated as `review` here: settings.json is the operator's
- * file, and a bare `tenjin install` on a fresh CI box must not come back having
- * granted public publishing. A later run finds `auto` in config, reads it as
- * `existing`, and writes the rule then — by which point the first run's
- * walkthrough has already told the operator which mode they are on.
+ * The allowlist is written for the mode this run settles, on every path
+ * including the headless one, and the FIRST install writes it — there is no
+ * "chosen vs defaulted" distinction any more. The earlier shape gated the rule
+ * on provenance, which bought nothing: run 1 wrote `auto` into config and run 2
+ * read it back as a choice nobody made, so the grant landed on the second
+ * unattended run instead of the first, quieter and later rather than never.
+ *
+ * What makes the default defensible is that it is DOCUMENTED AND LOUD rather
+ * than hidden: every install says which mode it settled, which rule it wrote,
+ * and the three ways out (`--publish-mode review`, `tenjin config set
+ * publish.mode review`, `tenjin uninstall`). The bare CLI, with no install ever
+ * run, still defaults to `review` (CONFIG_DEFAULTS) — install is the consent
+ * anchor, so nothing is granted to someone who never ran it.
  */
-function allowlistMode(selection: PublishModeSelection): PublishMode {
-  const chosen =
-    selection.source === 'flag' || selection.source === 'existing' || selection.source === 'prompt';
-  return chosen ? selection.value : 'review';
-}
 
 /**
  * The same question, plus the one sentence the publish modes add. The rule
@@ -1144,15 +1168,13 @@ async function resolvePermissions(args: {
   dryRun: boolean;
   canPrompt: boolean;
   /**
-   * Decision 1's OUTCOME, never a raw flag or a project file: the rule set
-   * follows what this machine's operator has standing on, so the two decisions
-   * cannot disagree about what was chosen. See {@link allowlistMode} for why the
-   * selection's source matters and not only its value.
+   * The mode decision 1 just settled, never a raw flag or a project file: the
+   * rule set follows what this install is putting the machine on, so the two
+   * decisions cannot disagree.
    */
-  publishMode: PublishModeSelection;
+  publishMode: PublishMode;
 }): Promise<PermissionsResult> {
-  const { plans, home, deps, flag, dryRun, canPrompt } = args;
-  const publishMode = allowlistMode(args.publishMode);
+  const { plans, home, deps, flag, dryRun, canPrompt, publishMode } = args;
   // Only Claude Code has a settings file with this shape. Codex and the shared
   // Agent Skills location gate permissions elsewhere, so there is nothing here to
   // write for them, and guessing at another harness's config would be the kind of

@@ -23,14 +23,24 @@ import type { PublishMode } from './config';
  *    `Bash(tenjin:*)`. A CLI that could widen its own permission grant is exactly
  *    what this shape rules out.
  *
- *    The publish rule is gated on the mode and on nothing else, and the mode is
- *    a human's standing choice: `install` settles and PERSISTS it before it gets
- *    here, `install` and `config set` are both never-allowlisted, so an agent
- *    cannot reach either without a permission decision of its own. Being on
- *    `auto` already means "a clean publish proceeds without asking", and a
- *    harness prompt in front of it asks that same question a second time
- *    (#161). Going back to `review` RETRACTS the rule on the next `install`,
- *    which is what stops a grant from outliving the mode that justified it.
+ *    The publish rule is gated on the mode and on nothing else. INSTALLING
+ *    TENJIN IS THE CONSENT for it (owner call, PR #164): every install settles
+ *    `publish.mode` at `auto` unless told otherwise, and the FIRST install
+ *    writes this rule alongside the free tier rather than waiting for a second
+ *    run to read that default back as a choice. What keeps it defensible is
+ *    disclosure rather than provenance — the install output names the mode,
+ *    this rule, and the three ways out. Being on `auto` already means "a clean
+ *    publish proceeds without asking", and a harness prompt in front of it asks
+ *    that same question again somewhere the mode cannot answer (#161). Going
+ *    back to `review` RETRACTS the rule, on the next `install` or immediately
+ *    through `config set publish.mode review`, so a grant never outlives the
+ *    mode that justified it; `uninstall` reclaims it outright.
+ *
+ *    What this does NOT loosen: the rule clears the HARNESS prompt and nothing
+ *    else. The CLI's own gates are untouched — the deterministic scan blocks a
+ *    hard finding in every mode and no `--yes` clears it, and `review` still
+ *    asks per publish. An agent cannot reach `install` or `config set` on its
+ *    own either; both are never-allowlisted.
  *  - ADDITIVE, PLUS ONE RETRACTION THAT IS STILL OURS. Every other key in the
  *    file, and every allow-rule we did not write, is copied through verbatim in
  *    its original order; missing rules are appended. The single exception is

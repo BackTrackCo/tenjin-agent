@@ -40,3 +40,18 @@ it to the next `install`. Loosening to auto or full-auto asks once, naming the
 rule, and writes on yes; no terminal, `--json`, or a decline writes nothing and
 points. Tightening back to review retracts it unprompted, since that direction
 can only take back what this CLI wrote.
+
+Installing Tenjin is now the consent for auto-publishing. Every install settles
+`publish.mode` at `auto` unless told otherwise, and the first install — headless
+included — writes `Bash(tenjin publish:*)` alongside the free tier, naming the
+mode, the rule, and the three ways out in its own output. The bare CLI, with no
+install ever run, still defaults to `review`. `--publish-mode review` opts out at
+install time; the interactive question is unchanged, with auto as its default
+answer.
+
+The skills read auto-first to match: publishing a clean piece and reporting the
+URL is the ordinary outcome, and asking is what `review` is for. The
+WARN-findings caveat is restored — never a generic "shall I publish?" before
+running, because a `--yes` re-run after a bare yes clears findings the user never
+saw. The stop hook now honors `TENJIN_PUBLISH_MODE`, so the hook, `publish`, and
+`doctor` agree on the mode.

@@ -208,8 +208,19 @@ the mode you chose does nothing. That is why one rule, `Bash(tenjin publish:*)`,
 tracks the mode. It is deliberately not in any block above: there is nothing to
 paste here, because the mode is the decision and the rule only follows it.
 
-`tenjin install` writes it when the mode it settles is `auto` or `full-auto`, and
-takes it back on the next run once the mode is `review`. `tenjin uninstall`
+**Installing Tenjin is the consent for this one.** `tenjin install` settles
+`publish.mode` at `auto` unless you say otherwise, and writes this rule alongside
+the free tier on the FIRST install, headless runs included. Every install that
+does so says which mode it settled, names the rule, and prints the three ways
+out. Pass `--publish-mode review` if you want the mode without the rule; at a
+terminal the install asks the question outright, with auto as the default answer.
+
+The bare CLI, on a machine where `install` never ran, still defaults to `review`
+and grants nothing. Install is the consent anchor: nothing here is granted to
+someone who never ran it.
+
+Going back to `review` takes the rule away — on the next `install`, or
+immediately with `tenjin config set publish.mode review`. `tenjin uninstall`
 reclaims it like every other rule this CLI wrote. There is no flag that adds it
 and no line to paste: change the mode.
 
@@ -228,7 +239,8 @@ config, the next `install` reads it as yours and writes the rule.
 
 What still stops a bad publish is the CLI, not the harness prompt: the
 deterministic secret scan blocks in every mode and is never clearable by `--yes`,
-`auto` stops on any finding, and `full-auto` stops only on a hard block.
+`auto` stops on any finding, and `full-auto` stops only on a hard block. This
+rule clears the harness prompt and nothing else.
 
 ### `tenjin update`, a human decision
 

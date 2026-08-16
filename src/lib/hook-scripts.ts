@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 13;
+export const HOOK_SCRIPT_VERSION = 14;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -130,6 +130,11 @@ function isRecord(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** The three values \`publish.mode\` may take (lib/config.ts's PublishModeSchema). */
+function isPublishMode(v) {
+  return v === 'review' || v === 'auto' || v === 'full-auto';
+}
+
 /**
  * The harness session this event belongs to, or null when the payload does not
  * name one. \`session_id\` is the documented field on every hook input, and null
@@ -149,11 +154,14 @@ function sessionIdOf(input) {
  * and nothing to unwire. An unreadable or unrecognized value falls back to the
  * shipped default rather than failing.
  *
- * \`publishMode\` is read from the GLOBAL FILE ONLY. The CLI resolves that key
- * through a project \`.tenjin.json\` and TENJIN_PUBLISH_MODE as well, and this
- * script deliberately does not: it reports the mode to a model at turn end, and a
- * hook that walked up from an unrelated cwd would state a mode the next
- * \`tenjin publish\` will not run under.
+ * \`publishMode\` reads the global file and TENJIN_PUBLISH_MODE, in the CLI's own
+ * precedence (env wins). The PROJECT layer is still ignored on purpose: it is
+ * found by walking up from cwd, and a hook whose cwd is unrelated to the draft
+ * would announce a mode the next \`tenjin publish\` will not run under. An env
+ * var has no such hazard — it is process-inherited and cwd-independent, and
+ * leaving it out made the hook announce \`review\` at an operator running
+ * \`TENJIN_PUBLISH_MODE=full-auto\`, so the agent asked for permission it already
+ * had: the exact #161 failure this line exists to prevent.
  */
 function readConfig() {
   const raw = readJsonFile(join(DATA_DIR, 'config.json'));
@@ -162,12 +170,16 @@ function readConfig() {
   const publish = isRecord(cfg.publish) ? cfg.publish : {};
   const mode = hooks.searchMode;
   const nag = hooks.stopNag;
-  const publishMode = publish.mode;
+  // env over file, matching lib/config.ts's resolvePublishMode; an unrecognized
+  // value in either place falls through to the shipped default rather than
+  // failing, exactly like every other key here.
+  const fromEnv = process.env.TENJIN_PUBLISH_MODE;
+  const publishMode = isPublishMode(fromEnv) ? fromEnv : publish.mode;
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://tenjin.blog';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
-    publishMode: publishMode === 'auto' || publishMode === 'full-auto' ? publishMode : 'review',
+    publishMode: isPublishMode(publishMode) ? publishMode : 'review',
     baseUrl,
   };
 }

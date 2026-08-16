@@ -42,12 +42,22 @@ interface HookRun {
 }
 
 /** Write the script and run it exactly as a harness would: stdin in, stdout out. */
-async function runScript(source: string, stdin: string): Promise<HookRun> {
+async function runScript(
+  source: string,
+  stdin: string,
+  env: NodeJS.ProcessEnv = {},
+): Promise<HookRun> {
   const path = join(scriptDir, `hook-${Math.random().toString(36).slice(2)}.mjs`);
   await writeFile(path, source, { mode: 0o755 });
   const started = Date.now();
   return await new Promise<HookRun>((resolve, reject) => {
-    const child = spawn(process.execPath, [path], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // A CLEAN environment plus whatever the case sets: the hook reads
+      // TENJIN_PUBLISH_MODE, and inheriting the runner's would make these read
+      // the machine instead of the fixture.
+      env: { PATH: process.env.PATH ?? '', ...env },
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c) => (stdout += String(c)));
@@ -1107,6 +1117,43 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     await writeConfig({ publish: { mode: 'whatever' } });
     const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
     expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+  });
+
+  /**
+   * env over file, matching `tenjin publish` and `doctor`. Without it an
+   * operator exporting TENJIN_PUBLISH_MODE=full-auto got a hook announcing
+   * `review`, so the agent asked for permission it already had — the #161
+   * failure this line exists to prevent (PR #164 review, minor 1).
+   */
+  it('honors TENJIN_PUBLISH_MODE over the config file', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'review' } });
+    const text =
+      injected(
+        await runScript(stopHookScript(dataDir), stopInput, {
+          TENJIN_PUBLISH_MODE: 'full-auto',
+        }),
+      ) ?? '';
+    expect(text.split('\n')[0]).toBe(
+      'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.',
+    );
+  });
+
+  it('falls back to the file when the env names no mode', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'auto' } });
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput, {})) ?? '';
+    expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
+  });
+
+  it('ignores an env value outside the three modes, keeping the file', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'auto' } });
+    const text =
+      injected(
+        await runScript(stopHookScript(dataDir), stopInput, { TENJIN_PUBLISH_MODE: 'whatever' }),
+      ) ?? '';
+    expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
   });
 
   // Context for the loops, never a standing announcement.
