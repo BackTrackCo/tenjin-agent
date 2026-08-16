@@ -227,7 +227,11 @@ export type PermissionsSkipReason =
 export interface ModeGrant {
   /** The mode-gated rules now in effect on this machine. */
   rules: string[];
-  /** Written by THIS run, already there, or one of each. */
+  /**
+   * Written by THIS run, already there, or one of each. On a `--dry-run` plan it
+   * is what a real run WOULD produce, and {@link PermissionsResult.planned} is the
+   * field that says so; the `disclosure` sentence changes tense to match.
+   */
   state: 'added' | 'already-present' | 'mixed';
   /** The plain sentence naming what the grant allows; the walkthrough colorizes it. */
   disclosure: string;
@@ -250,6 +254,7 @@ function modeGrantFor(
   mode: PublishMode,
   added: readonly string[],
   present: readonly string[],
+  planned: boolean,
 ): ModeGrant | undefined {
   const wasAdded = MODE_GATED_RULES.filter((r) => added.includes(r));
   const wasPresent = MODE_GATED_RULES.filter((r) => present.includes(r));
@@ -257,12 +262,22 @@ function modeGrantFor(
   if (rules.length === 0) return undefined;
   const state =
     wasAdded.length === 0 ? 'already-present' : wasPresent.length === 0 ? 'added' : 'mixed';
+  // A plan says "would be added". The `planned` flag alone left this sentence in
+  // the past tense, and it is the one string a reader quotes back.
+  const verb =
+    state === 'already-present'
+      ? 'already present'
+      : state === 'mixed'
+        ? planned
+          ? 'would be in place'
+          : 'in place'
+        : planned
+          ? 'would be added'
+          : 'added';
   return {
     rules: MODE_GATED_RULES.filter((r) => rules.includes(r)),
     state,
-    disclosure: `${MODE_GATED_RULES.join(' and ')} ${
-      state === 'added' ? 'added' : state === 'already-present' ? 'already present' : 'in place'
-    }: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, update its own posts, and open your wallet keystore to sign, without a harness prompt.`,
+    disclosure: `${MODE_GATED_RULES.join(' and ')} ${verb}: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, update its own posts, and open your wallet keystore to sign, without a harness prompt.`,
     undo: [...MODE_GRANT_UNDO],
   };
 }
@@ -285,6 +300,13 @@ export interface PermissionsResult {
    * "free tenjin commands" contradicts both this module and the `doctor` pointer
    * printed on the next screen.
    */
+  /**
+   * True when this result is a PLAN rather than a record: `--dry-run` fills
+   * `added`, `alreadyPresent` and `modeGrant` with what a real run would do and
+   * writes nothing. Every reader that treats a non-empty `added` as "this landed"
+   * has to check it, which is the point of a flag rather than a parallel shape.
+   */
+  planned?: boolean;
   addedFree: string[];
   alreadyPresentFree: string[];
   /** The mode-gated half, or absent when this write carried none. */
@@ -334,9 +356,10 @@ function tiers(
   added: readonly string[],
   alreadyPresent: readonly string[],
   mode: PublishMode,
+  planned = false,
 ): Pick<PermissionsResult, 'addedFree' | 'alreadyPresentFree'> & { modeGrant?: ModeGrant } {
   const gated = new Set<string>(MODE_GATED_RULES);
-  const grant = modeGrantFor(mode, added, alreadyPresent);
+  const grant = modeGrantFor(mode, added, alreadyPresent, planned);
   return {
     addedFree: added.filter((r) => !gated.has(r)),
     alreadyPresentFree: alreadyPresent.filter((r) => !gated.has(r)),
@@ -465,6 +488,40 @@ export async function retractModeGatedRules(homeDir: string): Promise<Permission
  * else. Idempotent: a second run at the same mode returns `added: []` with every
  * rule under `alreadyPresent` and does not touch the file at all.
  */
+/**
+ * What {@link wireFreeVerbAllowlist} WOULD do, without doing it.
+ *
+ * `--dry-run` used to report the allowlist as a bare `dry-run` skip with an empty
+ * `added` and no `modeGrant`, so an operator dry-running precisely to learn
+ * whether `publish` and `edit` would be granted learned nothing. It reads through
+ * the same `inspectAllowlist` the writer does and fills the same fields, marked
+ * `planned` so nothing mistakes a plan for a record.
+ */
+export async function planFreeVerbAllowlist(
+  homeDir: string,
+  mode: PublishMode = 'review',
+): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir, mode);
+  // Unreadable, unparsable, wrong shape: a real run could not write either, and
+  // the reason it gives is the honest plan.
+  if ('result' in found) return { ...found.result, planned: true };
+  const retired = retiredFor(mode);
+  const wouldRemove = found.allow.filter(
+    (r): r is string => typeof r === 'string' && retired.has(r),
+  );
+  return {
+    harness: 'claude',
+    path: found.path,
+    planned: true,
+    skipped: 'dry-run',
+    fix: fixFor('dry-run'),
+    added: [...found.added],
+    alreadyPresent: [...found.alreadyPresent],
+    ...tiers(found.added, found.alreadyPresent, mode, true),
+    removed: wouldRemove,
+  };
+}
+
 export async function wireFreeVerbAllowlist(
   homeDir: string,
   mode: PublishMode = 'review',

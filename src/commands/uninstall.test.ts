@@ -128,7 +128,7 @@ describe('runUninstall — a fully installed machine', () => {
     expect(after.env).toEqual({ FOO: '1' });
   });
 
-  it('never touches anything under the data dir', async () => {
+  it('keeps everything under the data dir but the hook scripts it generated', async () => {
     await seedSettings();
     await seedHookScripts();
     const keep = {
@@ -148,11 +148,23 @@ describe('runUninstall — a fully installed machine', () => {
     expect(await readFile(join(data, 'candidates', 'abc', 'draft.md'), 'utf8')).toBe('# parked\n');
     // And it SAYS so, every run: the boundary is the point of the command.
     expect(report.kept.length).toBeGreaterThan(0);
-    expect(text).toContain('Kept (uninstall never touches these)');
+    expect(text).toContain('Kept:');
     expect(text).toContain('wallet');
     // The pen is gone as a feature, but an older version's files are still the
     // operator's, so the promise names that path explicitly.
     expect(text).toContain('~/.tenjin/candidates');
+    /**
+     * The exception, stated. The hook scripts live under the same directory the
+     * kept list is about, this run just deleted them, and the same payload lists
+     * them under `scripts` — so a blanket "never touches anything under ~/.tenjin"
+     * was contradicted by the receipt printed directly above it.
+     */
+    expect(report.scripts.length).toBeGreaterThan(0);
+    expect(text).toContain('Removed from ~/.tenjin:');
+    expect(text).toContain('~/.tenjin/hooks');
+    for (const item of report.kept) {
+      expect(item, item).not.toMatch(/everything under/i);
+    }
   });
 });
 
@@ -387,7 +399,7 @@ describe('runUninstall — partial and repeat states', () => {
     expect(report.settings.skipped).toBe('absent');
     expect(text).toContain('Nothing to remove');
     // The kept list still shows, because that is the reassurance being sought.
-    expect(text).toContain('Kept (uninstall never touches these)');
+    expect(text).toContain('Kept:');
   });
 
   it('is idempotent: a second run removes nothing and still exits cleanly', async () => {

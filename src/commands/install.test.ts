@@ -1353,6 +1353,7 @@ describe('runInstall: permissions decision', () => {
         alreadyPresent: string[];
         addedFree: string[];
         alreadyPresentFree: string[];
+        planned?: boolean;
         modeGrant?: { rules: string[]; state: string; disclosure: string; undo: string[] };
         removed: string[];
         skipped?: string;
@@ -1635,6 +1636,79 @@ describe('runInstall: permissions decision', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'dry-run' });
     expect(await allowList()).toBeUndefined();
+  });
+
+  /**
+   * A dry run reported the allowlist as a bare `dry-run` skip: empty `added`, no
+   * `modeGrant`. An operator dry-running for exactly one reason, to find out
+   * whether `publish` and `edit` would be granted, learned nothing. It now fills
+   * the same fields with the plan and flags them `planned`.
+   */
+  it('--dry-run reports the rules it WOULD write, grant included', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const wired = wiredOf(res.data);
+    expect(wired.planned).toBe(true);
+    expect(wired.skipped).toBe('dry-run');
+    expect(wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    expect(wired.addedFree).toEqual([...FREE_VERB_RULES]);
+    // The grant an operator dry-runs to find out about, with the same disclosure
+    // and undos a real run would carry.
+    expect(wired.modeGrant?.rules).toEqual([...MODE_GATED_RULES]);
+    expect(wired.modeGrant?.disclosure).toContain('publish.mode auto');
+    expect(wired.modeGrant?.undo).toHaveLength(3);
+    // In the future tense: the `planned` flag alone left the one string a reader
+    // quotes back claiming the rules had landed.
+    expect(wired.modeGrant?.disclosure).toContain('would be added');
+    expect(wired.modeGrant?.disclosure).not.toMatch(/\)\sadded:/);
+    // And still nothing on disk.
+    expect(await allowList()).toBeUndefined();
+  });
+
+  it('--dry-run on review plans the free tier only, and no grant', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const wired = wiredOf(res.data);
+    expect(wired.added).toEqual([...FREE_VERB_RULES]);
+    expect(wired.modeGrant).toBeUndefined();
+    expect(await allowList()).toBeUndefined();
+  });
+
+  it('--dry-run says "would allow" in the human line, and offers no undo', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const text = human(res);
+    expect(text).toContain(
+      `would allow ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in`,
+    );
+    expect(text).toContain('Would turn off: tenjin config set publish.mode review');
+    // The tail that tells an operator how to undo a write belongs to a write.
+    expect(text).not.toContain('Undo anytime:');
+  });
+
+  it('--dry-run on an already-wired machine says so rather than planning a write', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(wiredOf(res.data).added).toEqual([]);
+    expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    expect(human(res)).toContain('unchanged (dry run)');
   });
 
   it('skips a codex-only install without asking, and says why', async () => {

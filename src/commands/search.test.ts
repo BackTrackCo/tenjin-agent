@@ -202,8 +202,11 @@ describe('runSearch', () => {
   it('renders a MISS browse tail as exactly one extra hint line', async () => {
     const { fetch } = stub(BROWSE_MISS);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    expect(res.humanLines).toHaveLength(2);
+    // MISS line, browse tail, publish-back line. The tail is ONE line whatever the
+    // pointer count is, which is what this test is about.
+    expect(res.humanLines).toHaveLength(3);
     expect(res.humanLines?.[0]).toContain('MISS, no candidates');
+    expect(res.humanLines?.[2]).toContain('publish it back');
     // The price is on the line because `buy <browse url>` really does pay: the
     // URL arm of resolveResourceRef never consults the store, so this is the
     // only human-visible surface that can warn before the spend. It reads in
@@ -356,16 +359,30 @@ describe('runSearch — the MISS stderr surface', () => {
   });
 
   describe('publish-back on a fresh MISS', () => {
-    it('names the searchId, the publish arm, and the decline arm, on stderr', async () => {
+    const humanText = (res: { humanLines?: string[] }): string => (res.humanLines ?? []).join('\n');
+
+    it('names the searchId, the publish arm, and the decline arm', async () => {
+      const { fetch } = stub(miss);
+      const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+      const text = humanText(res);
+      expect(text).toContain('if you solve it, publish it back');
+      // The second arm CLOSES the loop; it does not save anything for later.
+      expect(text).toContain(`tenjin outcome --search-id ${miss.searchId} --status regenerated`);
+      expect(text).not.toContain('candidate add');
+    });
+
+    /**
+     * `--json` says it suppresses human stderr rendering, and this line was the
+     * one thing that ignored it: written straight to `ctx.io.stderr`, which no
+     * output mode gates, so an agent asking for a machine envelope got ~260 bytes
+     * of prose alongside it. It rides humanLines now, which `emitSuccess` drops
+     * whenever the envelope is what was asked for.
+     */
+    it('writes nothing at all to stderr, so --json can suppress it', async () => {
       const { fetch } = stub(miss);
       const { ctx, stderr } = ctxCapturingStderr();
       await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
-      expect(stderr()).toContain('if you solve it, publish it back');
-      // The second arm CLOSES the loop; it does not save anything for later.
-      expect(stderr()).toContain(
-        `tenjin outcome --search-id ${miss.searchId} --status regenerated`,
-      );
-      expect(stderr()).not.toContain('candidate add');
+      expect(stderr()).toBe('');
     });
 
     it('carries a publishBack hint in the machine envelope', async () => {
@@ -382,14 +399,13 @@ describe('runSearch — the MISS stderr surface', () => {
 
     // Both arms are commands to run verbatim; a publish arm without the id closes
     // nothing, which is the loop this hint exists to close.
-    it('names the searchId in BOTH arms of the hint, and on the stderr line', async () => {
+    it('names the searchId in BOTH arms of the hint, and on the rendered line', async () => {
       const { fetch } = stub(miss);
-      const { ctx, stderr } = ctxCapturingStderr();
-      const res = await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
       const hint = (res.data as { publishBack: { publish: string; decline: string } }).publishBack;
       expect(hint.publish).toContain(`--search-id ${miss.searchId}`);
       expect(hint.decline).toContain(`--search-id ${miss.searchId}`);
-      expect(stderr()).toContain(`tenjin publish <file.md> --search-id ${miss.searchId}`);
+      expect(humanText(res)).toContain(`tenjin publish <file.md> --search-id ${miss.searchId}`);
     });
 
     // The envelope is the server's response verbatim everywhere else, so the one
@@ -401,10 +417,11 @@ describe('runSearch — the MISS stderr surface', () => {
       expect(res.data).toEqual(CANDIDATES);
     });
 
-    it('says nothing on a HIT, on stderr either', async () => {
+    it('says nothing on a HIT, in the rendering either', async () => {
       const { fetch } = stub(CANDIDATES);
       const { ctx, stderr } = ctxCapturingStderr();
-      await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      const res = await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
+      expect(humanText(res)).not.toContain('publish it back');
       expect(stderr()).not.toContain('publish it back');
     });
   });

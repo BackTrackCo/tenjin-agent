@@ -45,6 +45,7 @@ import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
   permissionsSkipped,
+  planFreeVerbAllowlist,
   retractModeGatedRules,
   rulesForPublishMode,
   wireFreeVerbAllowlist,
@@ -215,6 +216,8 @@ export interface InstallDeps {
   promptPublishMode?: PromptPublishModeFn;
   /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
   confirmPermissions?: ConfirmFn;
+  /** What a real run WOULD write, for `--dry-run`; defaults to the read-only plan pass. */
+  planPermissions?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
   /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
   inspectPermissions?: (
     home: string,
@@ -611,7 +614,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   // A run that wired permissions without being asked has to say so, and say how to
   // take it back. This is the disclosure that makes the non-interactive default
   // defensible: nothing lands silently, whether it was answered or defaulted.
-  if (s.permissions.added.length > 0) {
+  if (s.permissions.planned !== true && s.permissions.added.length > 0) {
     // The undo only. The count, the file and the link are already on the
     // Permissions line above, and saying them twice in one screen is the noise
     // this walkthrough keeps getting trimmed of. The exact rules stay out of the
@@ -739,7 +742,7 @@ function publishingLine(io: Io, mode: PublishMode, wired: PermissionsResult): st
   const undo =
     wired.modeGrant === undefined
       ? ''
-      : ` ${paint(io, 'dim', 'Turn off:')} tenjin config set publish.mode review`;
+      : ` ${paint(io, 'dim', wired.planned === true ? 'Would turn off:' : 'Turn off:')} tenjin config set publish.mode review`;
   return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}${undo}`;
 }
 
@@ -757,6 +760,12 @@ function publishingLine(io: Io, mode: PublishMode, wired: PermissionsResult): st
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
   const allowed = p.added.length + p.alreadyPresent.length;
+  // A dry run reports the PLAN in the same fields, so it takes this branch and
+  // says "would allow". An operator dry-running to find out whether publish and
+  // edit get granted was previously told only "unchanged (dry run)".
+  if (p.planned === true && p.added.length > 0) {
+    return `${paint(io, 'dim', '-')} ${label} would allow ${allowed} tenjin commands in ${p.path}. Details: ${PERMISSIONS_DOC_URL}`;
+  }
   if (p.added.length > 0) {
     return `${paint(io, 'green', '✓')} ${label} ${allowed} tenjin commands allowed in ${p.path}. Details: ${PERMISSIONS_DOC_URL}`;
   }
@@ -767,7 +776,7 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === 'dry-run') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
+    return `${paint(io, 'dim', '-')} ${label} unchanged (dry run); the ${FREE_VERB_RULES.length} rules a real run needs are already there.`;
   }
   if (p.skipped === 'declined' || p.skipped === 'not-requested') {
     return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
@@ -1181,7 +1190,7 @@ async function resolvePermissions(args: {
   if (!plans.some((p) => p.harness === 'claude')) {
     return permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude');
   }
-  if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
+  if (dryRun) return (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode);
   if (flag === false) return permissionsSkipped('claude', home, 'declined');
 
   // TIGHTENING FIRST, and unconditionally. `review` retracts through a pass that

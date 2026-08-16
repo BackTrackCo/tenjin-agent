@@ -67,6 +67,22 @@ registering nothing)" hint, and the summary no longer promises that "your harnes
 still shows each command for approval", which the same mode writes a rule to
 remove.
 
+`tenjin search --json` no longer writes the publish-back hint to stderr. It went
+straight to the stream rather than through the human rendering, so the flag whose
+help promises to "suppress human stderr rendering" left ~260 bytes of prose beside
+every MISS envelope.
+
+`tenjin uninstall` stops contradicting itself. Its help and its `kept` list both
+claimed nothing under `~/.tenjin` is touched, while the same run correctly deleted
+`~/.tenjin/hooks/*.mjs` and listed them under `scripts`. Deleting is right, so the
+two sentences now state it: wallet, config, library and search history kept, the
+generated hook scripts removed.
+
+`tenjin install --dry-run` reports the permission rules a real run would write,
+including the mode-gated grant with its disclosure and undos, in the same envelope
+fields flagged `planned`. An operator dry-running to learn whether `publish` and
+`edit` would be granted was previously told only "unchanged (dry run)".
+
 tenjin-search is now a lean SKILL.md plus `references/permissions.md`, loaded on
 demand; tenjin-publish drops its duplicated scan-tier explanation and its
 narration. Every invariant is kept, and both frontmatter descriptions are under

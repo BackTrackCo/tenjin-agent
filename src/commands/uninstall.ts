@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import {
   KEPT_ITEMS,
+  REMOVED_FROM_DATA_DIR,
   removeFromSettings,
   removeHookScripts,
   removeMarkerLines,
@@ -17,10 +18,11 @@ import type { CommandContext, CommandResult } from '../context';
  * hook scripts, our hook entries and permission rules in the harness's
  * settings.json, and the legacy pointer line older versions wrote into
  * CLAUDE.md/AGENTS.md. It does NOT remove the wallet, the config, the library,
- * the search ledger, or parked candidates — `install` did not create those, and
- * a wallet holds funds while a candidate is unpublished work. The receipt names
- * what was kept on every run, so the operator learns the boundary from the
- * command rather than from the docs.
+ * the search ledger, or parked candidates: `install` did not create those, and a
+ * wallet holds funds while a candidate is unpublished work. The hook scripts are
+ * the one thing under `~/.tenjin` it does remove, because `install` generated
+ * them. The receipt names both halves on every run, so the operator learns the
+ * boundary from the command rather than from the docs.
  *
  * IDEMPOTENT BY CONSTRUCTION. Every step is "remove it if it is ours and there",
  * so a half-installed machine, an already-uninstalled one, and a machine that
@@ -88,9 +90,12 @@ function humanLines(report: UninstallReport): string[] {
 
   // Named on EVERY run, including the nothing-to-remove one: the boundary is the
   // point of the command, and an operator reaching for it is usually worried
-  // about exactly these five things.
-  lines.push('Kept (uninstall never touches these):');
+  // about exactly these things. The exception is named right under them, because
+  // an unqualified "nothing under ~/.tenjin is touched" is contradicted by the
+  // hook scripts this same receipt just listed as removed.
+  lines.push('Kept:');
   for (const item of report.kept) lines.push(`  - ${item}`);
+  lines.push(`Removed from ~/.tenjin: ${REMOVED_FROM_DATA_DIR}`);
 
   if (settings.warning !== undefined) {
     lines.push(`! ${sanitizeForTerminal(settings.warning)}`);
