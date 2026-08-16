@@ -244,7 +244,7 @@ Common keys:
 | `publish.mode`         | `review`                   | Publish consent mode.                                                        |
 | `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                               |
 | `hooks.searchMode`     | `auto`                     | WebSearch hook behavior.                                                     |
-| `hooks.stopNag`        | `on`                       | End-of-turn reminder behavior.                                               |
+| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.  |
 
 ## MCP
 

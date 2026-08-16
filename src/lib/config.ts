@@ -57,15 +57,25 @@ export function parseSearchHookModeFlag(value: string, flagName: string): Search
   });
 }
 
-/** Whether the Stop hook may raise an open loop at the end of a turn. */
-export const StopNagModeSchema = z.enum(['on', 'off']);
+/**
+ * Which open loops the Stop hook may raise at the end of a turn.
+ *
+ * `deliberate-only` is the middle setting the two-value toggle was missing. The
+ * hook has two arms, and they are not equally welcome: a deliberate `tenjin
+ * search` MISS is a question the agent chose to ask, while the batched
+ * ride-along web searches are a firehose in a research session. With only `on`
+ * and `off`, silencing the noisy arm meant silencing both, and nothing ever
+ * prompts turning them back on (tenjin-agent #162). This keeps the high-signal
+ * arm and drops the batch.
+ */
+export const StopNagModeSchema = z.enum(['on', 'deliberate-only', 'off']);
 export type StopNagMode = z.infer<typeof StopNagModeSchema>;
 
 export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
   const parsed = StopNagModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
   throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
+    fix: 'Use "on", "deliberate-only", or "off".',
   });
 }
 

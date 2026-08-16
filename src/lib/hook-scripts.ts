@@ -28,7 +28,7 @@
  */
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 12;
+export const HOOK_SCRIPT_VERSION = 13;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -74,7 +74,8 @@ const BROWSE_URL_MAX = 512;
 const STORE_LOCK_TIMEOUT_MS = 400;
 /** The store's entry cap, mirroring lib/search-store.ts's MAX_ENTRIES. */
 const STORE_MAX_ENTRIES = 50;
-/** Nag records older than this are pruned; far past the window, so never a re-nag. */
+/** Nag records older than this are pruned; far past the window, so never a re-nag.
+ *  Prunes the per-session weak-batch stamps on the same schedule. */
 const NAG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** The one-liner `remind` mode emits instead of sending the query anywhere. */
@@ -147,16 +148,26 @@ function sessionIdOf(input) {
  * off\` or \`hooks.stopNag off\` silences a hook immediately, with no re-install
  * and nothing to unwire. An unreadable or unrecognized value falls back to the
  * shipped default rather than failing.
+ *
+ * \`publishMode\` is read from the GLOBAL FILE ONLY. The CLI resolves that key
+ * through a project \`.tenjin.json\` and TENJIN_PUBLISH_MODE as well, and this
+ * script deliberately does not: it reports the mode to a model at turn end, and a
+ * hook that walked up from an unrelated cwd would state a mode the next
+ * \`tenjin publish\` will not run under.
  */
 function readConfig() {
   const raw = readJsonFile(join(DATA_DIR, 'config.json'));
   const cfg = isRecord(raw) ? raw : {};
   const hooks = isRecord(cfg.hooks) ? cfg.hooks : {};
+  const publish = isRecord(cfg.publish) ? cfg.publish : {};
   const mode = hooks.searchMode;
+  const nag = hooks.stopNag;
+  const publishMode = publish.mode;
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://tenjin.blog';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
-    stopNag: hooks.stopNag === 'off' ? 'off' : 'on',
+    stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
+    publishMode: publishMode === 'auto' || publishMode === 'full-auto' ? publishMode : 'review',
     baseUrl,
   };
 }
@@ -513,8 +524,11 @@ main().catch(quiet);
  * each one gets its own line naming the searchId. A `websearch-hook` MISS rode
  * along with a web search nobody vetted for the marketplace, and most of those
  * questions are not durable public findings at all, so the whole batch gets ONE
- * line and the agent judges at nag time whether any of it was worth publishing.
- * The hook never makes that judgment; it has no way to.
+ * line, AT MOST ONCE PER SESSION, and the agent judges at nag time whether any of
+ * it was worth publishing. The hook never makes that judgment; it has no way to.
+ *
+ * Whatever it raises, it leads with the publish mode, because the mode is what
+ * decides whether the agent may act on the reminder or has to ask first.
  *
  * The nag record is written BEFORE the message is emitted. Emitting first and
  * failing to persist would repeat the nag every turn, and a nag nobody can silence
@@ -530,21 +544,52 @@ export function stopHookScript(dataDir: string): string {
   return `${prelude(dataDir, STOP_WATCHDOG_MS)}
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
 
-function loadNags() {
-  const raw = readJsonFile(NAGS_PATH);
-  const nagged = isRecord(raw) && isRecord(raw.nagged) ? raw.nagged : {};
+/** The string-valued members of a record, dropping anything else. */
+function stampsOf(value) {
   const out = {};
-  for (const [id, at] of Object.entries(nagged)) {
-    if (typeof at === 'string') out[id] = at;
+  if (!isRecord(value)) return out;
+  for (const [key, at] of Object.entries(value)) {
+    if (typeof at === 'string') out[key] = at;
   }
   return out;
 }
 
+/**
+ * What has already been raised: \`nagged\` per searchId, \`sessions\` per harness
+ * session that has had its weak batch. Both are additive on the same file, and a
+ * file written by an older hook simply has no \`sessions\` key, which reads as
+ * "no session has been batched yet" — one extra weak batch, never a lost nag.
+ */
+function loadNags() {
+  const raw = readJsonFile(NAGS_PATH);
+  return {
+    nagged: stampsOf(isRecord(raw) ? raw.nagged : null),
+    sessions: stampsOf(isRecord(raw) ? raw.sessions : null),
+  };
+}
+
 /** Persist through a temp file + rename, so a crash cannot leave a torn file. */
-function saveNags(nagged) {
+function saveNags(nagged, sessions) {
   const tmp = NAGS_PATH + '.' + process.pid + '.tmp';
-  writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, nagged }, null, 2) + '\\n', { mode: 0o644 });
+  writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, nagged, sessions }, null, 2) + '\\n', {
+    mode: 0o644,
+  });
   renameSync(tmp, NAGS_PATH);
+}
+
+/**
+ * The publish consent mode the next \`tenjin publish\` will run under, stated in
+ * the terms that decide what the agent does next: whether it has to ask.
+ *
+ * NEVER EMITTED ALONE. It is context for the loops below it, not a standing
+ * announcement, so a turn with nothing open says nothing at all.
+ */
+function modeLine(mode) {
+  if (mode === 'auto') return 'publish.mode=auto: a clean publish proceeds without asking.';
+  if (mode === 'full-auto') {
+    return 'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.';
+  }
+  return 'publish.mode=review: publishing asks first.';
 }
 
 /**
@@ -560,11 +605,11 @@ function saveNags(nagged) {
 function strongLine(s) {
   const id = clean(s.searchId, 64);
   return (
-    "Open Tenjin loop: you searched '" +
+    "Open Tenjin loop: '" +
     clean(s.question, 160) +
-    "' and got a MISS. If you solved it with a public, reusable, rights-clean finding, publish it back: tenjin publish <file> --search-id " +
+    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it: tenjin publish <file> --search-id " +
     id +
-    '. If you will not, close it: tenjin outcome --search-id ' +
+    '. If not, close it: tenjin outcome --search-id ' +
     id +
     ' --status regenerated.'
   );
@@ -580,7 +625,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    '. If any produced a durable public finding, publish it back: tenjin publish <file> --search-id <id>. Otherwise close them: tenjin outcome --search-id <id> --status regenerated.'
+    '. Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close them: tenjin outcome --search-id <id> --status regenerated.'
   );
 }
 
@@ -612,11 +657,26 @@ async function main() {
   } catch {
     // Unparseable stdin: fall back to machine-global behavior.
   }
-  if (readConfig().stopNag === 'off') return quiet();
+  const config = readConfig();
+  if (config.stopNag === 'off') return quiet();
 
   const searches = loadSearches();
   const now = Date.now();
-  const nagged = loadNags();
+  const { nagged, sessions } = loadNags();
+
+  // ONE WEAK BATCH PER SESSION. Per-searchId dedupe cannot rate-limit the weak
+  // arm, because a research fan-out mints new ids every turn and each one is
+  // un-nagged by construction; the batch then fires at every turn end for the
+  // whole session and reads as harness debug output rather than a product
+  // (tenjin-agent #162). \`deliberate-only\` is the operator's standing version of
+  // the same suppression, and it exists so silencing this arm is not the cliff
+  // that \`off\` is: the strong arm, which is the high-signal half, keeps running.
+  //
+  // A null sessionId keeps the old behavior. There is nothing to key on, and
+  // refusing the batch outright would silence it on every harness that names no
+  // session.
+  const batchedThisSession = sessionId !== null && sessions[sessionId] !== undefined;
+  const weakAllowed = config.stopNag !== 'deliberate-only' && !batchedThisSession;
 
   const strong = [];
   const weak = [];
@@ -631,23 +691,38 @@ async function main() {
     const at = Date.parse(String(s.at));
     if (!Number.isFinite(at) || now - at > ${OPEN_LOOP_WINDOW_MS} || at > now) continue;
     // An entry with no source predates sources, and those were all deliberate.
-    const bucket = s.source === 'websearch-hook' ? weak : strong;
-    if (bucket === strong && strong.length < ${MAX_STRONG_LOOPS}) strong.push(s);
-    else if (bucket === weak && weak.length < ${MAX_WEAK_LOOPS}) weak.push(s);
+    if (s.source === 'websearch-hook') {
+      // A suppressed weak entry is skipped UNNAGGED, exactly like an entry owned
+      // by another session: the batch was rate-limited, not delivered, so the id
+      // stays available to whatever raises it next.
+      if (!weakAllowed) continue;
+      if (weak.length < ${MAX_WEAK_LOOPS}) weak.push(s);
+    } else if (strong.length < ${MAX_STRONG_LOOPS}) {
+      strong.push(s);
+    }
   }
   const surfaced = strong.concat(weak);
   if (surfaced.length === 0) return quiet();
 
   const stamp = new Date(now).toISOString();
   for (const s of surfaced) nagged[s.searchId] = stamp;
+  if (weak.length > 0 && sessionId !== null) sessions[sessionId] = stamp;
   for (const [id, at] of Object.entries(nagged)) {
     const t = Date.parse(at);
     if (!Number.isFinite(t) || now - t > ${NAG_RETENTION_MS}) delete nagged[id];
   }
+  for (const [id, at] of Object.entries(sessions)) {
+    const t = Date.parse(at);
+    if (!Number.isFinite(t) || now - t > ${NAG_RETENTION_MS}) delete sessions[id];
+  }
   // Record first: a nag we cannot mark is a nag that would repeat every turn.
-  saveNags(nagged);
+  saveNags(nagged, sessions);
 
-  const lines = strong.map(strongLine);
+  // The mode heads the block: it is what decides whether the publish arm below
+  // needs the operator's word, and an agent that has to run \`tenjin config get\`
+  // to find out defaults to asking (tenjin-agent #161).
+  const lines = [modeLine(config.publishMode)];
+  for (const s of strong) lines.push(strongLine(s));
   if (weak.length > 0) lines.push(weakLine(weak));
   emit('Stop', lines.join('\\n'));
 }

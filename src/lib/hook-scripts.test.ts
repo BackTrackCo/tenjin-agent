@@ -527,6 +527,21 @@ async function nagged(): Promise<string[]> {
   return Object.keys((JSON.parse(raw) as { nagged: Record<string, string> }).nagged);
 }
 
+/** The sessions that have already had their one weak batch. */
+async function batchedSessions(): Promise<string[]> {
+  const raw = await readFile(join(dataDir, 'hook-nags.json'), 'utf8').catch(() => null);
+  if (raw === null) return [];
+  const parsed = JSON.parse(raw) as { sessions?: Record<string, string> };
+  return Object.keys(parsed.sessions ?? {});
+}
+
+/** Everything the Stop hook injected except the leading publish.mode line. */
+function loopLines(run: HookRun): string[] {
+  const text = injected(run) ?? '';
+  if (text === '') return [];
+  return text.split('\n').slice(1);
+}
+
 const OPEN_MISS: SeedSearch = {
   searchId: '33333333-3333-4333-8333-333333333333',
   question: 'does ox 0.14 still export Bytes.from',
@@ -541,7 +556,7 @@ describe('Stop hook: open-loop collection', () => {
     expect(run.code).toBe(0);
     expect(run.stderr).toBe('');
     const text = injected(run) ?? '';
-    expect(text).toContain(`you searched '${OPEN_MISS.question}' and got a MISS`);
+    expect(text).toContain(`'${OPEN_MISS.question}' was a MISS`);
     expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
     // The second arm CLOSES the loop rather than saving the work for later.
     expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
@@ -553,11 +568,12 @@ describe('Stop hook: open-loop collection', () => {
   // for a bare publish: this line reaches a model's context at every turn end.
   it('qualifies the publish arm and offers closing the loop as the other', async () => {
     await seedSearches([OPEN_MISS]);
-    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const text = injected(run) ?? '';
     expect(text).toContain('public, reusable, rights-clean finding');
-    expect(text).toContain('If you will not, close it');
+    expect(text).toContain('If not, close it');
     expect(text).not.toContain('park');
-    expect(text.split('\n')).toHaveLength(1);
+    expect(loopLines(run)).toHaveLength(1);
   });
 
   it('nags exactly once: the second run is silent', async () => {
@@ -614,7 +630,7 @@ describe('Stop hook: open-loop collection', () => {
       { ...OPEN_MISS, searchId: '55555555-5555-4555-8555-555555555555', minutesAgo: 30 },
     ]);
     const run = await runScript(stopHookScript(dataDir), stopInput);
-    expect((injected(run) ?? '').split('\n')).toHaveLength(2);
+    expect(loopLines(run)).toHaveLength(2);
     expect(await nagged()).toHaveLength(2);
   });
 
@@ -879,22 +895,24 @@ describe('Stop hook: the two kinds of open loop', () => {
   // A deliberate search nobody answered is the strong signal: named on its own.
   it('names a cli MISS on its own line with its searchId', async () => {
     await seedSearches([{ ...OPEN_MISS, source: 'cli' }]);
-    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const text = injected(run) ?? '';
     expect(text).toContain('Open Tenjin loop');
     expect(text).toContain(OPEN_MISS.searchId);
-    expect(text.split('\n')).toHaveLength(1);
+    expect(loopLines(run)).toHaveLength(1);
   });
 
   // Hook queries were never vetted for the marketplace, so the batch gets one
   // line and the agent decides whether any of it was durable.
   it('batches websearch-hook misses into a single weak line', async () => {
     await seedSearches([hookMiss(1), hookMiss(2)]);
-    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
-    expect(text.split('\n')).toHaveLength(1);
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const text = injected(run) ?? '';
+    expect(loopLines(run)).toHaveLength(1);
     expect(text).toContain('2 web search(es) this session had no Tenjin answer');
     expect(text).toContain('a web query 1');
     expect(text).toContain('a web query 2');
-    expect(text).toContain('If any produced a durable public finding');
+    expect(text).toContain('Durable public finding among them?');
     expect(text).toContain('tenjin publish <file> --search-id <id>');
     expect(text).toContain('tenjin outcome --search-id <id> --status regenerated');
     expect(text).not.toContain('candidate add');
@@ -911,7 +929,7 @@ describe('Stop hook: the two kinds of open loop', () => {
 
   it('emits both kinds together when both are open', async () => {
     await seedSearches([{ ...OPEN_MISS, source: 'cli' }, hookMiss(1)]);
-    const lines = (injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '').split('\n');
+    const lines = loopLines(await runScript(stopHookScript(dataDir), stopInput));
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('Open Tenjin loop');
     expect(lines[1]).toContain('web search(es) this session had no Tenjin answer');
@@ -922,6 +940,52 @@ describe('Stop hook: the two kinds of open loop', () => {
     expect(injected(await runScript(stopHookScript(dataDir), stopInput))).toContain('2 web search');
     const second = await runScript(stopHookScript(dataDir), stopInput);
     expect(second.stdout).toBe('');
+  });
+
+  // The #162 firehose: a research fan-out mints NEW searchIds every turn, so
+  // per-searchId dedupe never rate-limits this arm and the batch fires at every
+  // turn end for the whole session. One batch per session is the bound.
+  it('emits at most one weak batch per session, however many new ids arrive', async () => {
+    await seedSearches([hookMiss(1), hookMiss(2)]);
+    expect(injected(await runScript(stopHookScript(dataDir), stopInput))).toContain('2 web search');
+    expect(await batchedSessions()).toEqual(['abc']);
+
+    await seedSearches([hookMiss(3), hookMiss(4)]);
+    const second = await runScript(stopHookScript(dataDir), stopInput);
+    expect(second.code).toBe(0);
+    expect(second.stdout).toBe('');
+  });
+
+  // Rate-limited, not consumed: the suppressed ids stay unnagged, so the batch
+  // scoping stays exactly what it was for whatever raises them next.
+  it('leaves a suppressed batch UNNAGGED', async () => {
+    await seedSearches([hookMiss(1)]);
+    await runScript(stopHookScript(dataDir), stopInput);
+    await seedSearches([hookMiss(3)]);
+    await runScript(stopHookScript(dataDir), stopInput);
+    expect(await nagged()).toEqual([hookMiss(1).searchId]);
+  });
+
+  // The strong arm is the high-signal half and is not batched, so a session that
+  // has spent its weak batch still hears about a deliberate MISS.
+  it('keeps raising cli misses after the session batch is spent', async () => {
+    await seedSearches([hookMiss(1)]);
+    await runScript(stopHookScript(dataDir), stopInput);
+    await seedSearches([{ ...OPEN_MISS, source: 'cli' }, hookMiss(3)]);
+    const lines = loopLines(await runScript(stopHookScript(dataDir), stopInput));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('Open Tenjin loop');
+  });
+
+  // Nothing to key the batch on. Suppressing it there would silence the arm on
+  // every harness that names no session, so the old behavior stands.
+  it('does not rate-limit a payload that names no session', async () => {
+    const anonymous = JSON.stringify({ hook_event_name: 'Stop', stop_reason: 'end' });
+    await seedSearches([hookMiss(1)]);
+    expect(injected(await runScript(stopHookScript(dataDir), anonymous))).toContain('1 web search');
+    await seedSearches([hookMiss(3)]);
+    expect(injected(await runScript(stopHookScript(dataDir), anonymous))).toContain('1 web search');
+    expect(await batchedSessions()).toEqual([]);
   });
 
   it('says nothing about a hook miss something already closed', async () => {
@@ -967,6 +1031,94 @@ describe('Stop hook: hooks.stopNag is a runtime toggle', () => {
     expect(injected(await runScript(stopHookScript(dataDir), stopInput))).toContain(
       'Open Tenjin loop',
     );
+  });
+
+  // The middle setting: `off` used to be the only escape from the noisy arm, and
+  // it took the high-signal one with it.
+  it('deliberate-only drops the web-search batch and keeps the cli arm', async () => {
+    await seedSearches([
+      { ...OPEN_MISS, source: 'cli' },
+      {
+        ...OPEN_MISS,
+        searchId: '99999991-9999-4999-8999-999999999999',
+        question: 'a web query',
+        source: 'websearch-hook',
+      },
+    ]);
+    await writeConfig({ hooks: { stopNag: 'deliberate-only' } });
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const lines = loopLines(run);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('Open Tenjin loop');
+    // Suppressed, not consumed: turning the arm back on still raises it.
+    expect(await nagged()).toEqual([OPEN_MISS.searchId]);
+  });
+
+  it('deliberate-only is silent when only web-search misses are open', async () => {
+    await seedSearches([
+      { ...OPEN_MISS, searchId: '99999992-9999-4999-8999-999999999999', source: 'websearch-hook' },
+    ]);
+    await writeConfig({ hooks: { stopNag: 'deliberate-only' } });
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(await nagged()).toEqual([]);
+  });
+
+  it('an unrecognized stopNag value falls back to on', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ hooks: { stopNag: 'sometimes' } });
+    expect(injected(await runScript(stopHookScript(dataDir), stopInput))).toContain(
+      'Open Tenjin loop',
+    );
+  });
+});
+
+/**
+ * The mode an agent would otherwise have to run `tenjin config get publish.mode`
+ * to learn — which is why one session defaulted to asking the operator for
+ * permission it had already been given (tenjin-agent #161).
+ */
+describe('Stop hook: the resolved publish mode leads the block', () => {
+  it('states review, the shipped default, when nothing is configured', async () => {
+    await seedSearches([OPEN_MISS]);
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+  });
+
+  it('states auto', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'auto' } });
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
+  });
+
+  it('states full-auto', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'full-auto' } });
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text.split('\n')[0]).toBe(
+      'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.',
+    );
+  });
+
+  it('falls back to review on a mode the CLI would not accept', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'whatever' } });
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
+  });
+
+  // Context for the loops, never a standing announcement.
+  it('is never emitted on its own', async () => {
+    await writeConfig({ publish: { mode: 'auto' } });
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
+
+    await seedSearches([
+      { ...OPEN_MISS, resolved: { by: 'publish', at: new Date().toISOString() } },
+    ]);
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
   });
 });
 

@@ -74,7 +74,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'publish.defaultPrice': 'price used when none is given',
   'hooks.searchMode':
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
-  'hooks.stopNag': 'end-of-turn reminder about searches nothing answered yet',
+  'hooks.stopNag':
+    'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
