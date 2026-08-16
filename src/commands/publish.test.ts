@@ -3,7 +3,12 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
-import { loadSearches, recordSearch, searchStoreLockPath } from '../lib/search-store';
+import {
+  loadSearches,
+  markSearchResolved,
+  recordSearch,
+  searchStoreLockPath,
+} from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -619,6 +624,30 @@ describe('runPublish — publish <file> --search-id', () => {
       prefill: 'applied',
     });
     expect(res.humanLines).toContain(`Closed the loop on search ${SEARCH}.`);
+  });
+
+  // The #161 loop: a research agent closes the MISS as `regenerated` because the
+  // synthesis is still in flight, finishes it minutes later, and names the same
+  // search on the publish. The publish takes the loop over rather than bouncing.
+  it('relinks a search a prior outcome report already closed', async () => {
+    await seed();
+    await markSearchResolved(dir, SEARCH, 'outcome');
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: true,
+      relinked: true,
+      prefill: 'applied',
+    });
+    expect(res.humanLines).toContain(
+      `Re-linked search ${SEARCH} to this piece; it had been closed without one.`,
+    );
   });
 
   it('omits the search field entirely when --search-id was not passed', async () => {

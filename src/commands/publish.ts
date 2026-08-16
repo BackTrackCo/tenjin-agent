@@ -270,6 +270,12 @@ export async function runPublish(
 interface SearchReceipt {
   id: string;
   closed: boolean;
+  /**
+   * The loop had already been closed by something else (an `outcome` report) and
+   * this publish took it over. Reported because it is the one case where naming a
+   * search changed a record that was already there.
+   */
+  relinked?: boolean;
   prefill: PrefillOutcome;
 }
 
@@ -302,12 +308,18 @@ function validateSearchId(args: PublishArgs): void {
  * privately and answers nobody, and an unknown id (aged out of the local store,
  * or from another machine) has no loop here to close.
  *
- * `closed: true` describes the LOOP, not this call: `markSearchResolved` keeps
- * the first resolution, so a search an `outcome` already closed reports closed
- * here too, which is what the caller is actually asking about. It reports the
- * OUTCOME of the write rather than the intent to write, so a swallowed lock
- * timeout comes back as `closed: false` and a stderr line instead of a receipt
- * claiming a close that never landed.
+ * `closed: true` describes the LOOP, not this call: a search an `outcome` already
+ * closed reports closed here too, which is what the caller is actually asking
+ * about. It reports the OUTCOME of the write rather than the intent to write, so
+ * a swallowed lock timeout comes back as `closed: false` and a stderr line
+ * instead of a receipt claiming a close that never landed.
+ *
+ * A publish RELINKS a loop something else already closed. Closing as
+ * `regenerated` is what an agent does when the answer is still being written, so
+ * treating that as final is what severed seventeen demand signals from the two
+ * pieces that answered them (tenjin-agent #161). Nothing is lost by taking the
+ * loop over: the `outcome` report was already sent, and this only records who
+ * ended up answering it.
  */
 async function closeNamedSearch(
   ctx: CommandContext,
@@ -324,7 +336,9 @@ async function closeNamedSearch(
   if (stored === null) {
     return open(`Published, but search ${searchId} is not in the local store.`);
   }
-  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish');
+  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish', undefined, {
+    relink: true,
+  });
   if (outcome === 'failed') {
     return open(
       `Published, but the local record for search ${searchId} could not be updated, so the open-loop reminder may repeat. Close it with \`tenjin outcome --search-id ${searchId} --status used\`.`,
@@ -335,6 +349,7 @@ async function closeNamedSearch(
   if (outcome === 'not-found') {
     return open(`Published, but search ${searchId} is no longer in the local store.`);
   }
+  if (outcome === 'relinked') return { id: searchId, closed: true, relinked: true, prefill };
   return { id: searchId, closed: true, prefill };
 }
 
@@ -368,7 +383,13 @@ function receipt(
       : missing.length > 0
         ? `Answer card not search-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
-    ...(searchInfo?.closed === true ? [`Closed the loop on search ${searchInfo.id}.`] : []),
+    ...(searchInfo?.closed === true
+      ? [
+          searchInfo.relinked === true
+            ? `Re-linked search ${searchInfo.id} to this piece; it had been closed without one.`
+            : `Closed the loop on search ${searchInfo.id}.`,
+        ]
+      : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
