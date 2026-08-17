@@ -154,10 +154,29 @@ function listingStorePath(dataDir: string): string {
   return join(dataDir, LISTING_STORE_FILE);
 }
 
+/**
+ * Shape-checked PER ENTRY, not just per array. `acceptsMismatch` iterates
+ * `accepts`, so one malformed row from a truncated write or a hand-edit throws a
+ * raw TypeError out of the check that decides whether a payment may be signed.
+ * A row that is not the shape this module writes is dropped, which costs at
+ * worst a re-`discover`.
+ */
+function isStoredListing(value: unknown): value is StoredListing {
+  if (typeof value !== 'object' || value === null) return false;
+  const listing = value as Partial<StoredListing>;
+  return (
+    typeof listing.url === 'string' &&
+    typeof listing.registry === 'string' &&
+    typeof listing.fetchedAt === 'string' &&
+    Array.isArray(listing.accepts)
+  );
+}
+
 async function loadListingStore(dataDir: string): Promise<ListingStore> {
   try {
-    const raw = JSON.parse(await readFile(listingStorePath(dataDir), 'utf8')) as ListingStore;
-    return Array.isArray(raw.listings) ? raw : { listings: [] };
+    const raw: unknown = JSON.parse(await readFile(listingStorePath(dataDir), 'utf8'));
+    const listings = (raw as { listings?: unknown } | null)?.listings;
+    return { listings: Array.isArray(listings) ? listings.filter(isStoredListing) : [] };
   } catch {
     return { listings: [] };
   }
@@ -192,12 +211,16 @@ async function storedListingsFor(
   now: () => number,
 ): Promise<StoredListing[]> {
   const store = await loadListingStore(dataDir);
-  return store.listings.filter(
-    (l) =>
-      sameResourceUrl(l.url, url) &&
-      now() - Date.parse(l.fetchedAt) < LISTING_TTL_MS &&
-      Number.isFinite(Date.parse(l.fetchedAt)),
-  );
+  return store.listings.filter((l) => {
+    if (!sameResourceUrl(l.url, url)) return false;
+    const age = now() - Date.parse(l.fetchedAt);
+    // BOUNDED AT BOTH ENDS. A negative age is not extra-fresh evidence, it is a
+    // stamp the clock disagrees with (skew, a restored or copied data dir), and
+    // an unbounded `age < TTL` made such a listing permanent pay-time evidence
+    // that no 24h re-sweep could ever expire. NaN (an unparseable stamp) fails
+    // the same comparison.
+    return age >= 0 && age < LISTING_TTL_MS;
+  });
 }
 
 export type RegistryVerification =

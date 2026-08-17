@@ -516,6 +516,57 @@ describe('runPay, bazaar lane', () => {
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
+  // The mirror of the expiry test above, and the reason the window is bounded at
+  // both ends: a stamp AHEAD of the clock (skew, a data dir restored from a
+  // backup or copied between machines) used to yield a negative age that no TTL
+  // comparison could ever exceed, so that one listing stayed evidence forever.
+  it('a stored listing stamped in the future is not evidence either', async () => {
+    await writeConfig();
+    stubRegistry(() =>
+      json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
+    );
+    await saveSweepListings(
+      dir,
+      [{ url: FOREIGN_URL, registry: REGISTRY, accepts: [LIVE_ACCEPT] as never }],
+      () => Date.now() + 48 * 60 * 60 * 1000,
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  // The store is ours, so the only way in is a truncated write or a hand-edit.
+  // A row whose `accepts` is not an array reached a `for...of` inside the
+  // verification and threw a raw TypeError out of the gate that decides whether
+  // anything may be signed; it is dropped at load instead.
+  it('a malformed stored row is dropped, not thrown out of the registry check', async () => {
+    await writeConfig();
+    stubRegistry(() =>
+      json(200, { x402Version: 2, items: [], pagination: { limit: 20, offset: 0, total: 0 } }),
+    );
+    await writeFile(
+      join(dir, 'bazaar-listings.json'),
+      JSON.stringify({
+        listings: [
+          { url: FOREIGN_URL, registry: REGISTRY, accepts: 'not-an-array', fetchedAt: 7 },
+          {
+            url: FOREIGN_URL,
+            registry: REGISTRY,
+            accepts: null,
+            fetchedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    );
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
   it('a stored listing with a lower advertised price is REGISTRY_MISMATCH', async () => {
     await writeConfig();
     stubRegistry(() =>
