@@ -239,9 +239,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
 
   addGlobalFlags(program.command('update'))
-    .description(
-      'Update tenjin-cli to the newest version on its release channel (an alpha build follows @alpha)',
-    )
+    .description('Update tenjin-cli to the newest version npm publishes on the latest tag')
     .option('--check', 'report whether a newer version exists without installing it')
     .action(async function (this: Command) {
       await runCommand('update', this, async (ctx) => {
