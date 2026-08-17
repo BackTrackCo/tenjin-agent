@@ -39,7 +39,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { healWiredSkills } from './skill-heal';
-import { resolveSkillsSource } from './skills-source';
+import { resolveSkillsSource, SHIPPED_SKILL_FILES, type SkillName } from './skills-source';
 import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, skillsDirsFor } from './skill-wiring';
 import type { Io } from './output';
 
@@ -91,6 +91,20 @@ async function packaged(name: string): Promise<string> {
   return readFile(join(SKILLS_SRC, name, 'SKILL.md'), 'utf8');
 }
 
+/**
+ * Every file the skill ships, seeded from the packaged copy. `tenjin-search`
+ * carries a `references/` subdirectory, and `installSkill` compares the whole
+ * tree: a directory holding only a current SKILL.md is NOT current.
+ */
+async function seedWholeSkill(dir: string, name: SkillName): Promise<string> {
+  for (const rel of SHIPPED_SKILL_FILES[name]) {
+    const path = join(dir, name, rel);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, await readFile(join(SKILLS_SRC, name, rel)));
+  }
+  return join(dir, name, 'SKILL.md');
+}
+
 describe('healWiredSkills', () => {
   it('rewrites a stale skill and names the file it wrote', async () => {
     const path = await seedSkill(claudeDir(), 'tenjin-search');
@@ -110,12 +124,40 @@ describe('healWiredSkills', () => {
   });
 
   it('leaves a current skill untouched, and says nothing', async () => {
-    const path = await seedSkill(claudeDir(), 'tenjin-search', await packaged('tenjin-search'));
+    const path = await seedWholeSkill(claudeDir(), 'tenjin-search');
     const before = await stat(path);
     const { io, stderr } = captureIo();
     await heal(io);
     expect((await stat(path)).mtimeMs).toBe(before.mtimeMs);
     expect(stderr()).toBe('');
+  });
+
+  // SKILL.md is the gate, and it gates the WHOLE tree: a reference file the
+  // operator deleted (or an older build never shipped) comes back on the same
+  // pass, without SKILL.md itself having to be stale.
+  it('restores a missing reference file under a current SKILL.md', async () => {
+    const path = await seedWholeSkill(claudeDir(), 'tenjin-search');
+    const ref = join(dirname(path), 'references', 'permissions.md');
+    await rm(ref);
+    const { io, stderr } = captureIo();
+    await heal(io);
+    expect(await readFile(ref, 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'references', 'permissions.md'), 'utf8'),
+    );
+    expect(stderr()).toContain(path);
+  });
+
+  // The ownership gate still governs the extra files: a SKILL.md that is not
+  // ours means nothing in that directory is written, reference file included.
+  it('writes no reference file into a skill that is not ours', async () => {
+    const path = await seedSkill(
+      claudeDir(),
+      'tenjin-search',
+      '---\nname: someone-else\ndescription: d\n---\n\nmine\n',
+    );
+    const { io } = captureIo();
+    await heal(io);
+    expect(existsSync(join(dirname(path), 'references'))).toBe(false);
   });
 
   // `install` writes THROUGH a symlink because the operator pointed it somewhere

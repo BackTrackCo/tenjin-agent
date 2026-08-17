@@ -5,7 +5,6 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
-import { UUID_RE } from '../lib/ids';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
@@ -25,6 +24,7 @@ import {
   publishPost,
   EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
+  SEARCH_ID_WIRE_RE,
   type PublishInput,
   type PublishStatus,
 } from '../lib/posts-api';
@@ -241,6 +241,12 @@ export async function runPublish(
     ...(handle !== undefined ? { handle } : {}),
     status,
     ...(card !== undefined ? { resource: card } : {}),
+    // The attribution half of `--search-id`, and it follows the SAME rule the
+    // local ledger already follows: a draft answers nobody, so it claims nobody's
+    // demand either. Sending it on a draft put one demand signal on two posts —
+    // no command promotes a draft, so reaching a public piece means a second
+    // publish carrying the same id — with one of them possibly never shipping.
+    ...(args.searchId !== undefined && status !== 'draft' ? { searchId: args.searchId } : {}),
   };
 
   const result = await publishPost(input, auth, {
@@ -270,6 +276,18 @@ export async function runPublish(
 interface SearchReceipt {
   id: string;
   closed: boolean;
+  /**
+   * The loop had already been closed by something else (an `outcome` report) and
+   * this publish took it over. Reported because it is the one case where naming a
+   * search changed a record that was already there.
+   */
+  relinked?: boolean;
+  /**
+   * An earlier publish had already closed this loop, so this one attributed
+   * nothing new. Distinct from `relinked`, which took a loop over from an
+   * `outcome` report.
+   */
+  alreadyAnswered?: boolean;
   prefill: PrefillOutcome;
 }
 
@@ -283,10 +301,15 @@ type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
 /**
  * `--search-id` at the edge: a uuid, refused before any wallet touch so a typo
  * costs a message rather than a signing prompt.
+ *
+ * Checked against the shape the SERVER declares, not the looser local UUID_RE,
+ * because this value is now sent on the publish body: an id that satisfied only
+ * the local shape would be refused by the server as a 400, and that refusal
+ * would arrive after the wallet signature rather than here.
  */
 function validateSearchId(args: PublishArgs): void {
   if (args.searchId === undefined) return;
-  if (!UUID_RE.test(args.searchId)) {
+  if (!SEARCH_ID_WIRE_RE.test(args.searchId)) {
     throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
       fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
     });
@@ -302,12 +325,18 @@ function validateSearchId(args: PublishArgs): void {
  * privately and answers nobody, and an unknown id (aged out of the local store,
  * or from another machine) has no loop here to close.
  *
- * `closed: true` describes the LOOP, not this call: `markSearchResolved` keeps
- * the first resolution, so a search an `outcome` already closed reports closed
- * here too, which is what the caller is actually asking about. It reports the
- * OUTCOME of the write rather than the intent to write, so a swallowed lock
- * timeout comes back as `closed: false` and a stderr line instead of a receipt
- * claiming a close that never landed.
+ * `closed: true` describes the LOOP, not this call: a search an `outcome` already
+ * closed reports closed here too, which is what the caller is actually asking
+ * about. It reports the OUTCOME of the write rather than the intent to write, so
+ * a swallowed lock timeout comes back as `closed: false` and a stderr line
+ * instead of a receipt claiming a close that never landed.
+ *
+ * A publish RELINKS a loop something else already closed. Closing as
+ * `regenerated` is what an agent does when the answer is still being written, so
+ * treating that as final is what severed seventeen demand signals from the two
+ * pieces that answered them (tenjin-agent #161). Nothing is lost by taking the
+ * loop over: the `outcome` report was already sent, and this only records who
+ * ended up answering it.
  */
 async function closeNamedSearch(
   ctx: CommandContext,
@@ -324,7 +353,9 @@ async function closeNamedSearch(
   if (stored === null) {
     return open(`Published, but search ${searchId} is not in the local store.`);
   }
-  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish');
+  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish', undefined, {
+    relink: true,
+  });
   if (outcome === 'failed') {
     return open(
       `Published, but the local record for search ${searchId} could not be updated, so the open-loop reminder may repeat. Close it with \`tenjin outcome --search-id ${searchId} --status used\`.`,
@@ -334,6 +365,16 @@ async function closeNamedSearch(
   // write: nothing was closed, so nothing claims to have been.
   if (outcome === 'not-found') {
     return open(`Published, but search ${searchId} is no longer in the local store.`);
+  }
+  if (outcome === 'relinked') return { id: searchId, closed: true, relinked: true, prefill };
+  // A PRIOR publish already closed this loop. Reporting a fresh close here is a
+  // receipt for something that did not happen, on the one path where a different
+  // post already claims the demand this body is claiming again.
+  if (outcome === 'already-resolved' && stored.resolved?.by === 'publish') {
+    ctx.io.stderr.write(
+      `Search ${searchId} was already answered by an earlier publish; this piece did not claim it.\n`,
+    );
+    return { id: searchId, closed: true, alreadyAnswered: true, prefill };
   }
   return { id: searchId, closed: true, prefill };
 }
@@ -368,7 +409,15 @@ function receipt(
       : missing.length > 0
         ? `Answer card not search-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
-    ...(searchInfo?.closed === true ? [`Closed the loop on search ${searchInfo.id}.`] : []),
+    ...(searchInfo?.closed === true
+      ? [
+          searchInfo.relinked === true
+            ? `Re-linked search ${searchInfo.id} to this piece; it had been closed without one.`
+            : searchInfo.alreadyAnswered === true
+              ? `Search ${searchInfo.id} was already answered by an earlier publish.`
+              : `Closed the loop on search ${searchInfo.id}.`,
+        ]
+      : []),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {

@@ -11,6 +11,24 @@ import { CliError } from './errors';
 export const SKILL_NAMES = ['tenjin-search', 'tenjin-publish', 'tenjin'] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
+/**
+ * Every file a packaged skill ships, per skill, as a path relative to the skill
+ * directory.
+ *
+ * DECLARED rather than discovered, because `uninstall` needs it on a machine
+ * where the packaged source may be gone or unreadable, and "remove exactly the
+ * files this package wrote" is not a question it can answer by listing the
+ * operator's directory — everything else in there is theirs. `install` still
+ * copies the real tree; a test pins this list against it, so a new reference
+ * file that nobody declares fails the build rather than becoming litter no
+ * uninstall can reclaim.
+ */
+export const SHIPPED_SKILL_FILES: Record<SkillName, readonly string[]> = {
+  'tenjin-search': ['SKILL.md', 'references/permissions.md'],
+  'tenjin-publish': ['SKILL.md', 'references/maintain.md'],
+  tenjin: ['SKILL.md'],
+};
+
 // A `skills/` directory is the real one iff it holds `tenjin/SKILL.md`; a bare
 // `skills/` created for some other reason up the tree can't false-positive.
 const SENTINEL = join('tenjin', 'SKILL.md');

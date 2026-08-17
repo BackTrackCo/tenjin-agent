@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
-import { claudeSettingsPath, FREE_VERB_RULES } from '../lib/harness-permissions';
+import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
 import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
 import { hooksDir } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
@@ -146,7 +146,7 @@ describe('runUninstall — a fully installed machine', () => {
     expect(after.env).toEqual({ FOO: '1' });
   });
 
-  it('never touches anything under the data dir', async () => {
+  it('keeps everything under the data dir but the hook scripts it generated', async () => {
     await seedSettings();
     await seedHookScripts();
     const keep = {
@@ -166,11 +166,30 @@ describe('runUninstall — a fully installed machine', () => {
     expect(await readFile(join(data, 'candidates', 'abc', 'draft.md'), 'utf8')).toBe('# parked\n');
     // And it SAYS so, every run: the boundary is the point of the command.
     expect(report.kept.length).toBeGreaterThan(0);
-    expect(text).toContain('Kept (uninstall never touches these)');
+    expect(text).toContain('Kept:');
     expect(text).toContain('wallet');
     // The pen is gone as a feature, but an older version's files are still the
     // operator's, so the promise names that path explicitly.
     expect(text).toContain('~/.tenjin/candidates');
+    /**
+     * The exception, stated. The hook scripts live under the same directory the
+     * kept list is about, this run just deleted them, and the same payload lists
+     * them under `scripts` — so a blanket "never touches anything under ~/.tenjin"
+     * was contradicted by the receipt printed directly above it.
+     */
+    expect(report.scripts.length).toBeGreaterThan(0);
+    expect(text).toContain('Removed from ~/.tenjin:');
+    expect(text).toContain('~/.tenjin/hooks');
+    /**
+     * The kept config includes `publish.mode`, which is the one kept value that
+     * GRANTS something on the next `install`: the mode-gated rules come back under
+     * it. That is the intended model, but an operator uninstalling to revoke has
+     * to be told, and the receipt is where they are looking.
+     */
+    expect(text).toContain('publish.mode included');
+    for (const item of report.kept) {
+      expect(item, item).not.toMatch(/everything under/i);
+    }
   });
 });
 
@@ -200,15 +219,86 @@ describe('runUninstall — rules a prior version wrote', () => {
     expect(after.permissions.allow).toEqual(['Bash(ls:*)']);
   });
 
+  // `buy` is an OPT-IN line: the operator pastes it themselves and this CLI has
+  // no path that writes it, so it is not ours to take away.
   it('leaves an unrelated tenjin-shaped rule the CLI never wrote', async () => {
     const path = claudeSettingsPath(home);
     await mkdir(join(home, '.claude'), { recursive: true });
-    await writeFile(path, JSON.stringify({ permissions: { allow: ['Bash(tenjin publish:*)'] } }));
+    await writeFile(path, JSON.stringify({ permissions: { allow: ['Bash(tenjin buy:*)'] } }));
     await run();
     const after = JSON.parse(await readFile(path, 'utf8')) as {
       permissions: { allow: string[] };
     };
-    expect(after.permissions.allow).toEqual(['Bash(tenjin publish:*)']);
+    expect(after.permissions.allow).toEqual(['Bash(tenjin buy:*)']);
+  });
+
+  // The publish rule IS ours: `install` writes it whenever publish.mode is auto
+  // or full-auto, so uninstall reclaims it like every other rule this CLI wrote,
+  // whatever the mode says on the way out.
+  it('reclaims the publish rule the publish modes write', async () => {
+    const path = claudeSettingsPath(home);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({ permissions: { allow: [PUBLISH_MODE_RULE, 'Bash(ls:*)'] } }),
+    );
+    const { report } = await run();
+    expect(report.settings.rules).toContain(PUBLISH_MODE_RULE);
+    const after = JSON.parse(await readFile(path, 'utf8')) as {
+      permissions: { allow: string[] };
+    };
+    expect(after.permissions.allow).toEqual(['Bash(ls:*)']);
+  });
+});
+
+/**
+ * tenjin-search ships a `references/` subdirectory. Uninstall reclaims exactly
+ * the declared files and prunes only what it empties.
+ */
+describe('runUninstall — a skill that ships more than SKILL.md', () => {
+  it('removes the shipped reference file and the directory it emptied', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(join(dir, 'references', 'permissions.md'), 'shipped');
+
+    const { report } = await run();
+    expect(report.skills).toContain(dir);
+    expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(false);
+    expect(existsSync(join(dir, 'references'))).toBe(false);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  // The operator's own file in the same subdirectory keeps itself, its
+  // directory, and the skill directory above it.
+  it("keeps a user's file in the shipped subdirectory, and both directories", async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(join(dir, 'references', 'permissions.md'), 'shipped');
+    await writeFile(join(dir, 'references', 'notes.md'), 'mine');
+
+    await run();
+    expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(false);
+    expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('mine');
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  // Ownership is proven by SKILL.md's frontmatter, so a directory that is not
+  // ours keeps its reference file too.
+  it('leaves the reference file when the SKILL.md is not ours', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search', 'someone-elses-skill');
+    await mkdir(join(dir, 'references'), { recursive: true });
+    await writeFile(join(dir, 'references', 'permissions.md'), 'shipped');
+
+    const { report } = await run();
+    expect(report.skills).toEqual([]);
+    expect(existsSync(join(dir, 'references', 'permissions.md'))).toBe(true);
+  });
+
+  it('is fine when the reference file was already gone', async () => {
+    const dir = await seedSkill('.claude/skills', 'tenjin-search');
+    const { report } = await run();
+    expect(report.skills).toContain(dir);
+    expect(existsSync(dir)).toBe(false);
   });
 });
 
@@ -334,7 +424,7 @@ describe('runUninstall — partial and repeat states', () => {
     expect(report.settings.skipped).toBe('absent');
     expect(text).toContain('Nothing to remove');
     // The kept list still shows, because that is the reassurance being sought.
-    expect(text).toContain('Kept (uninstall never touches these)');
+    expect(text).toContain('Kept:');
   });
 
   it('is idempotent: a second run removes nothing and still exits cleanly', async () => {

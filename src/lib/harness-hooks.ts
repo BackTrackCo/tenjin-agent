@@ -240,6 +240,26 @@ export async function writeSharedHookScripts(dataDir: string): Promise<{
   };
 }
 
+/**
+ * Does the Stop hook ON DISK match what this build would write?
+ *
+ * `hooks.stopNag` is read by the installed script at run time, so a `config set`
+ * takes effect immediately — but only for values that script UNDERSTANDS. A
+ * script written before `deliberate-only` existed maps every non-`off` value to
+ * `on`, so the set succeeds, `config get` reports it effective from `file`, and
+ * the batch keeps firing. Never throws: a machine with no hook installed is not
+ * drifted, it is unhooked, and neither is this function's caller's problem to
+ * fail on.
+ */
+export async function stopHookIsCurrent(dataDir: string): Promise<boolean> {
+  const spec = specs(dataDir).find((h) => h.scriptFile === STOP_HOOK_FILE);
+  if (spec === undefined) return true;
+  const path = join(hooksDir(dataDir), STOP_HOOK_FILE);
+  const onDisk = await readFile(path, 'utf8').catch(() => null);
+  // Absent means nothing is running that could be stale.
+  return onDisk === null || onDisk === spec.script;
+}
+
 export interface WireHooksOptions {
   homeDir: string;
   dataDir: string;

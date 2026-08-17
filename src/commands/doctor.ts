@@ -31,14 +31,16 @@ import type {
 } from '../lib/skill-wiring';
 import { fetchJson } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
+import { loadProjectConfig } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
-import { permissionsPointer, recommendedPermissions } from '../lib/permissions';
-import type { PartialConfig, SearchHookMode } from '../lib/config';
+import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
+import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
+import type { PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -113,6 +115,11 @@ export interface DoctorDeps {
   /** PATH probe for the `claude`/`codex` binaries, half of harness detection. Defaults
    * to probing `env.PATH`, so a test passing `env: {}` detects neither. */
   which?: (bin: string) => boolean;
+  /**
+   * Working directory the project `.tenjin.json` layer is resolved from. Defaults
+   * to `process.cwd()`, matching `config get` and `publish`.
+   */
+  cwd?: string;
   /** Clock seam (ms since epoch) for the session-expiry check. */
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
@@ -135,7 +142,15 @@ export interface DoctorDeps {
  */
 export interface DoctorChecks {
   checks: CheckResult[];
+  /** The mode-gated rules this machine is missing, if any; drives the pointer. */
+  missingModeGated: string[];
   failure?: { code: ErrorCode; result: CheckResult };
+  /**
+   * The publish mode this machine resolves right now (global config, or the
+   * environment when it overrides). Reported rather than checked: it decides
+   * which harness rules the operator needs, and it can never pass or fail.
+   */
+  publishMode: PublishMode;
 }
 
 export async function collectDoctorChecks(
@@ -144,7 +159,25 @@ export async function collectDoctorChecks(
 ): Promise<DoctorChecks> {
   const env = deps.env ?? process.env;
   const { config, check: configCheck } = await loadConfigForDoctor(ctx.dataDir);
-  const settings = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env });
+  /**
+   * PROJECT-AWARE, like `config get` and `publish`. Doctor read the global file
+   * and env only, so inside a repo whose `.tenjin.json` pins `review` under a
+   * global `auto` it reported the machine as needing the mode-gated grant that the
+   * next publish in that same directory would not use. That made three mode
+   * surfaces disagree, which is the class the Stop hook fix was written for.
+   *
+   * A malformed project file is not doctor's failure to report: it throws
+   * CONFIG_INVALID from `config get`, where the operator is asking about config.
+   * Here it degrades to the global answer rather than taking down every unrelated
+   * check on the page.
+   */
+  const project = await loadProjectConfig(deps.cwd ?? process.cwd()).catch(() => null);
+  const settings = resolveSettings({
+    config,
+    flags: { baseUrl: ctx.flags.baseUrl },
+    env,
+    project: project?.layer,
+  });
   const baseUrl = settings.baseUrl.value;
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
@@ -185,16 +218,28 @@ export async function collectDoctorChecks(
   }
 
   const checks = built.map((b) => b.result);
+  const publishMode = settings.publishMode.value;
+  // Ask the settings file rather than assuming: the pointer below exists to name
+  // a rule that is MISSING, and printing it at a machine that already carries
+  // both is a nag with no action behind it.
+  const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const missingModeGated = (probe.pending ?? []).filter((r) => gated.has(r));
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
-  if (firstFail === undefined) return { checks };
-  return { checks, failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result } };
+  if (firstFail === undefined) return { checks, publishMode, missingModeGated };
+  return {
+    checks,
+    publishMode,
+    missingModeGated,
+    failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result },
+  };
 }
 
 export async function runDoctor(
   ctx: CommandContext,
   deps: DoctorDeps = {},
 ): Promise<CommandResult> {
-  const { checks, failure } = await collectDoctorChecks(ctx, deps);
+  const { checks, failure, publishMode, missingModeGated } = await collectDoctorChecks(ctx, deps);
   if (failure !== undefined) {
     const r = failure.result;
     // The allowlist rides on the FAILURE envelope too. An operator whose fresh
@@ -205,7 +250,7 @@ export async function runDoctor(
     // the machine payload is where this has to land.
     throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
-      details: { checks, permissions: recommendedPermissions() },
+      details: { checks, permissions: recommendedPermissions(publishMode) },
     });
   }
 
@@ -215,9 +260,31 @@ export async function runDoctor(
   // exists and where to get it. It reports nothing about the local machine, so it
   // is deliberately NOT a check: it can never pass or fail. `--json` is unchanged
   // and still carries the whole recommendation as data.
+  // The mode-gated line goes ABOVE the pointer, and only when there is one: it
+  // names a rule this machine's own mode needs, which is closer to a finding than
+  // to the standing recommendation the pointer links to.
+  // An env-set mode needs `config set`, not `install`: install resolves the mode
+  // from the global file, so it would write nothing for a mode that only exists
+  // in this process's environment.
+  const env = deps.env ?? process.env;
+  const fromEnv = env.TENJIN_PUBLISH_MODE !== undefined && env.TENJIN_PUBLISH_MODE.length > 0;
+  // An env var is per-run and settable by anything in the agent's shell, so an
+  // override is reported AS an override rather than as a remedy to make
+  // permanent: `doctor` is an allowlisted free verb, and printing a `config set`
+  // for a value it just read out of the environment is an escalation command
+  // built from untrusted input.
+  const modeLine = fromEnv
+    ? `TENJIN_PUBLISH_MODE=${publishMode} is overriding your configured publish mode for this run only; the harness rules it needs are ${missingModeGated.join(' and ')}.`
+    : modeGatedPointer(publishMode, missingModeGated, 'tenjin install');
+  const showModeLine = fromEnv ? missingModeGated.length > 0 : modeLine !== null;
   return {
-    data: { status: 'pass', checks, permissions: recommendedPermissions() },
-    humanLines: [...renderDoctorHuman(ctx.io, checks), '', permissionsPointer()],
+    data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
+    humanLines: [
+      ...renderDoctorHuman(ctx.io, checks),
+      '',
+      ...(showModeLine && modeLine !== null ? [modeLine] : []),
+      permissionsPointer(),
+    ],
   };
 }
 

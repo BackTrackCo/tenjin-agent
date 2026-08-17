@@ -74,21 +74,27 @@ three. It cannot unlock a keystore and never consults the spend policy.
 
 ## Getting the rules onto your machine
 
-`tenjin install` writes the nine rules into `~/.claude/settings.json` for you. It
-is one of the four setup decisions, and at a terminal it asks:
+`tenjin install` writes the nine rules into `~/.claude/settings.json` for you,
+plus the two rules your publish mode carries (below). It is one of the four setup
+decisions, and at a terminal it asks:
 
-> Let your agent search tenjin without permission popups? Adds 9 free commands to
-> `~/.claude/settings.json`. None can spend USDC or move your keys; doctor may
-> check your wallet still opens. Three send or store data (search, outcome,
-> read). Full caveats:
+> Let your agent use tenjin without permission popups? Adds 9 command rules to
+> `~/.claude/settings.json`. None of them can spend your money. Details:
 > https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
 
-Answer yes and it merges them in. The write is additive only: it appends the rules
-that are missing and never removes, reorders, or rewrites an existing entry or any
-other key in the file, so a re-run adds nothing. A settings file it cannot parse is
-reported and left exactly as it is, never repaired. The rules it may write are a
-fixed constant, so no flag or config value can widen it to `buy`, `publish`,
-`session start`, or a blanket `Bash(tenjin:*)`.
+On an `auto` or `full-auto` publish mode the same question says 11 rules, and adds
+that your agent will publish under your identity on its own. The question is two
+sentences and a link on purpose: this page is where the detail lives, and an
+operator answering a yes/no cannot act on a rule string they have not met yet.
+
+Answer yes and it merges them in. The write appends the rules that are missing and
+never reorders or rewrites an existing entry or any other key in the file. It
+removes exactly two things: a rule an older version of this CLI wrote and this one
+no longer does, and, when your `publish.mode` is back to `review`, the two rules
+that mode carries. A settings file it cannot parse is reported and left exactly as
+it is, never repaired. The rules it may write are fixed constants selected by your
+publish mode, so no flag or config value can widen it to `buy`, `session start`,
+`send`, `config set`, or a blanket `Bash(tenjin:*)`.
 
 A non-interactive install (piped, or under `--json`) does the same write BY
 DEFAULT, with no flag: the machine most likely to be denied mid-task is the
@@ -98,8 +104,8 @@ reports how many rules landed, in which file, and that deleting those lines undo
 it.
 
 `tenjin doctor --json` carries this whole recommendation as data under
-`permissions` — every rule, every per-verb note, both caveats, on the failure
-envelope as well as the success one — so an agent that just got denied can point
+`permissions` (every rule, every per-verb note, both caveats, on the failure
+envelope as well as the success one) so an agent that just got denied can point
 you at the exact line. Its human render is the check list plus one link back
 here.
 
@@ -187,8 +193,8 @@ Deliberately **never** recommended, because each is a human decision:
 | Verb                   | Why it stays a human decision                                                        |
 | ---------------------- | ------------------------------------------------------------------------------------ |
 | `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
-| `tenjin publish`       | Puts your content on a public marketplace under your identity.                       |
-| `tenjin edit`          | Edits live posts and prices; a prefix rule cannot clear its read half only.          |
+| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
+| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.              |
 | `tenjin wallet create` | Creates the payment credential.                                                      |
 | `tenjin config set`    | It can widen the agent's own spend policy.                                           |
 | `tenjin install`       | Writes into harness config and skills directories.                                   |
@@ -197,6 +203,84 @@ Deliberately **never** recommended, because each is a human decision:
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+
+## The two rules your publish mode carries
+
+`publish.mode` is where you say whether publishing asks you first. On `auto` or
+`full-auto` it does not, and a harness prompt in front of every publish asks that
+same question again somewhere the mode cannot answer it, so the agent stops and
+the mode you chose does nothing. That is why two rules track the mode:
+
+- `Bash(tenjin publish:*)` puts new content on the marketplace under your identity.
+  It publishes the contents of any local file the agent can read, gated only by the
+  deterministic scan below. It also opens your wallet keystore unattended and mints
+  a `read+write` session credential to disk when no usable one exists, which is a
+  strictly broader credential than the read-only one `tenjin session start` asks
+  for as an explicit opt-in.
+- `Bash(tenjin edit:*)` updates posts your wallet already owns: reprices, refreshes
+  an as-of date, repairs an answer card. Owner-scoped on both legs, spends nothing,
+  and creates no new public content, but it opens the keystore on the same terms,
+  and it runs the same `publish.mode` gate in the CLI. A mode that can publish a
+  post unattended but cannot fix that post's price is the asymmetry the mode exists
+  to remove.
+
+Neither is in any block above: there is nothing to paste here, because the mode is
+the decision and the rules only follow it. Neither can spend: `publish` and `edit`
+carry no payment path, so what they reach is your identity and your keystore, not
+your balance.
+
+**Installing Tenjin is the consent for these.** `tenjin install` settles
+`publish.mode` at `auto` unless you say otherwise, and writes both rules alongside
+the free tier on the FIRST install, headless runs included. Pass
+`--publish-mode review` if you want the mode without the rules; at a terminal the
+install asks the question outright, with auto as the default answer.
+
+Each surface discloses the grant at the depth its reader can use. At a terminal
+the install says which mode it settled, what your agent will now do in plain
+words, and the one command that turns it off (`tenjin config set publish.mode
+review`); it deliberately prints no rule strings, because a `Bash(...)` line an
+operator is meeting for the first time mid-install is not something they can act
+on. `tenjin install --json` and `tenjin doctor --json` carry the whole thing as
+data: both rule strings, what they clear including the keystore and the
+`read+write` session mint, and all three undos. This page is the long form.
+
+The bare CLI, on a machine where `install` never ran, still defaults to `review`
+and grants nothing. Install is the consent anchor: nothing here is granted to
+someone who never ran it.
+
+Going back to `review` takes them away, on the next `install` or immediately
+with `tenjin config set publish.mode review`. `tenjin uninstall` reclaims them
+like every other rule this CLI wrote. There is no flag that adds them and no line
+to paste: change the mode.
+
+Your `publish.mode` lives in `~/.tenjin/config.json` and survives `tenjin
+uninstall` along with the rest of your config, so a later `tenjin install` resumes
+it and writes both rules again: installing is the consent, each time. Set the mode
+to `review` before uninstalling, or pass `--publish-mode review` when you come
+back, if you want the rules to stay gone.
+
+`tenjin config set publish.mode` keeps the two in step without waiting for the
+next `install`. Moving to `auto` or `full-auto` asks you once, naming both rules,
+and writes them on yes; a run with no terminal, a `--json` run, or a no leaves
+the file alone and prints where the rules go. Moving back to `review` retracts
+them without asking, because that direction can only take back what this CLI
+wrote. It runs through a pass that removes and never appends, so it retracts on
+any machine carrying the rules, including one whose free tier no longer matches
+what this release ships. The one case it cannot handle is a settings file it
+cannot parse, which it reports by name along with `tenjin uninstall`.
+
+What still stops a bad publish is the CLI, not the harness prompt: the
+deterministic secret scan blocks in every mode and is never clearable by `--yes`,
+`auto` stops on any finding, and `full-auto` stops only on a hard block. These
+rules clear the harness prompt and nothing else.
+
+Read "`auto` stops on any finding" as a stop rather than as a human, though.
+These are prefix rules: they pin the verb, not the flags. `--yes` is an ordinary
+flag on the same allowlisted verb, and it clears exactly the WARN findings `auto`
+stopped on, so a re-run with it collapses `auto` into `full-auto` with nobody
+asked, the same hazard the `tenjin buy` line carries. What holds that line is the
+skills, which render the findings as the question rather than asking a generic
+one first.
 
 ### `tenjin update`, a human decision
 

@@ -160,22 +160,39 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
  * loop open and the reminder due, so a receipt claiming otherwise would be a
  * confident lie. `already-resolved` is a success for anyone asking about the
  * LOOP (something closed it), and a no-op for anyone asking about this call.
+ * `relinked` is the one that CHANGED a resolution that was already there.
  */
-export type ResolutionOutcome = 'resolved' | 'already-resolved' | 'not-found' | 'failed';
+export type ResolutionOutcome =
+  'resolved' | 'relinked' | 'already-resolved' | 'not-found' | 'failed';
+
+export interface MarkResolvedOptions {
+  /**
+   * Overwrite a resolution recorded by something else, rather than leaving the
+   * first closer in place. Only `publish` passes it, and the reason is the loop
+   * this whole ledger exists for: an agent mid-research closes a MISS as
+   * `regenerated` because the answer is not written yet, finishes it minutes
+   * later, and then has no way to say the piece it just published is what
+   * answered that question (tenjin-agent #161). A close is a report of intent at
+   * a moment; a publish is the answer arriving, and the answer wins.
+   */
+  relink?: boolean;
+}
 
 /**
  * Record that something closed the loop on `searchId`, so the Stop hook stops
  * raising it. Best-effort and it NEVER throws: an unknown id (the search aged
  * past MAX_ENTRIES, or came from another machine) writes nothing, and a failure
  * to persist costs one stale nag rather than the command the caller actually
- * ran. The FIRST resolution wins, so a publish after an outcome report does not
- * rewrite who closed it.
+ * ran. The FIRST resolution wins unless the caller asks to {@link
+ * MarkResolvedOptions.relink}, so an ordinary `outcome` after a publish still
+ * does not rewrite who closed it.
  */
 export async function markSearchResolved(
   dataDir: string,
   searchId: string,
   by: SearchResolution,
   at: string = new Date().toISOString(),
+  options: MarkResolvedOptions = {},
 ): Promise<ResolutionOutcome> {
   try {
     const lockPath = `${storePath(dataDir)}.lock`;
@@ -185,8 +202,14 @@ export async function markSearchResolved(
       const target = existing.find((s) => s.searchId === searchId);
       if (target === undefined) return;
       if (target.resolved !== undefined) {
-        outcome = 'already-resolved';
-        return;
+        // Nothing to relink when the recorded closer is already this one: the
+        // loop is where it should be, and rewriting the timestamp would report
+        // a change nobody made.
+        if (options.relink !== true || target.resolved.by === by) {
+          outcome = 'already-resolved';
+          return;
+        }
+        outcome = 'relinked';
       }
       const searches = existing.map((s) =>
         s.searchId === searchId ? { ...s, resolved: { by, at } } : s,
@@ -196,7 +219,9 @@ export async function markSearchResolved(
         `${JSON.stringify({ schemaVersion: 1, searches }, null, 2)}\n`,
         { mode: 0o644, dirMode: 0o700 },
       );
-      outcome = 'resolved';
+      // 'relinked' was decided above and survives the write; anything else that
+      // reached here closed a loop nothing had closed.
+      if (outcome !== 'relinked') outcome = 'resolved';
     });
     return outcome;
   } catch {

@@ -44,7 +44,11 @@ import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions'
 import {
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  MODE_GATED_RULES,
   permissionsSkipped,
+  planFreeVerbAllowlist,
+  retractModeGatedRules,
+  rulesForPublishMode,
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
@@ -217,10 +221,15 @@ export interface InstallDeps {
   promptPublishMode?: PromptPublishModeFn;
   /** Decision 2: the permissions confirm (default yes); defaults to the clack confirm. */
   confirmPermissions?: ConfirmFn;
+  /** What a real run WOULD write, for `--dry-run`; defaults to the read-only plan pass. */
+  planPermissions?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
   /** Whether decision 2 has anything left to grant; defaults to reading settings.json. */
   inspectPermissions?: (
     home: string,
+    mode: PublishMode,
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
+  /** The retraction-only pass `review` runs; defaults to the real writer. */
+  retractModeGated?: (home: string) => Promise<PermissionsResult>;
   /** Decision 3: the search-hook mode select; defaults to the clack list. */
   promptSearchHooks?: () => Promise<SearchHookMode | null>;
   /** Decision 4: "Create a wallet now?"; defaults to the clack confirm (default yes). */
@@ -441,6 +450,7 @@ async function installBody(
     flag: allowFreeVerbs,
     dryRun,
     canPrompt,
+    publishMode: publishMode.value,
   });
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
@@ -521,7 +531,7 @@ async function installBody(
     // `wired` is the outcome of THIS run's settings.json write; the three
     // recommendation tiers beside it are unchanged, so a machine consumer that
     // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
-    permissions: { ...recommendedPermissions(), wired: permissions },
+    permissions: { ...recommendedPermissions(publishMode.value), wired: permissions },
     hooks,
     wallet,
   };
@@ -646,26 +656,24 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   }
   // Same reason as the pointer line above: we edited the operator's settings.json
   // to REMOVE something, and the only way they learn it happened is a line here.
-  if (s.permissions.removed.length > 0) {
+  // Two different removals, and calling them one thing made the honest half a lie:
+  // `publish` and `edit` are current commands whose RULES the mode no longer
+  // carries, and reporting them as "commands that no longer exist" told the
+  // operator their publish verb had been retired.
+  const stale = s.permissions.removed.filter((r) => !MODE_GATED_RULES.includes(r));
+  if (stale.length > 0) {
     lines.push(
-      `Removed ${s.permissions.removed.length} permission rule(s) an older tenjin left in ${s.permissions.path ?? 'your settings'} for commands that no longer exist.`,
+      `Removed ${stale.length} permission rule(s) an older tenjin left in ${s.permissions.path ?? 'your settings'} for commands that no longer exist.`,
     );
   }
   // A run that wired permissions without being asked has to say so, and say how to
   // take it back. This is the disclosure that makes the non-interactive default
   // defensible: nothing lands silently, whether it was answered or defaulted.
-  if (s.permissions.added.length > 0) {
-    // What landed and how to take it back. NOT the rules themselves: `doctor`
-    // prints those in full with their caveats, and reciting nine lines in the
-    // middle of a setup flow is what the walkthrough was trimmed of. The machine
-    // envelope carries the exact rules in `permissions.wired.added`.
-    lines.push(
-      paint(
-        io,
-        'dim',
-        `${s.permissions.added.length} free tenjin commands were allowed in ${s.permissions.path}. None can spend USDC or open your wallet keystore; see them with \`tenjin doctor\`.`,
-      ),
-    );
+  if (s.permissions.planned !== true && s.permissions.added.length > 0) {
+    // The undo only. The count, the file and the link are already on the
+    // Permissions line above, and saying them twice in one screen is the noise
+    // this walkthrough keeps getting trimmed of. The exact rules stay out of the
+    // terminal entirely; the envelope carries them in `permissions.wired.added`.
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
   }
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
@@ -706,7 +714,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
 function summaryLines(io: Io, s: WalkthroughState): string[] {
   return [
     ...s.harnesses.map((h) => skillsLine(io, h, s.dryRun)),
-    publishingLine(io, s.publishMode.value),
+    publishingLine(io, s.publishMode.value, s.permissions),
     permissionsLine(io, s.permissions),
     hooksLine(io, s.hooks),
     walletLine(io, s.wallet),
@@ -782,9 +790,24 @@ function skillsLine(io: Io, h: HarnessResult, dryRun: boolean): string {
   return `${paint(io, 'green', '✓')} ${paint(io, 'bold', head)} in ${h.skillsDir}. ${skillRoster(h)}.`;
 }
 
-/** One line for the settled consent mode, with the same consequence the question showed. */
-function publishingLine(io: Io, mode: PublishMode): string {
-  return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}`;
+/**
+ * One line for the settled consent mode, with the same consequence the question
+ * showed, and the way back out when this run actually granted something.
+ *
+ * The grant used to get two more lines of its own, reciting both rule strings and
+ * all three undos. An operator meeting `Bash(tenjin publish:*)` for the first time
+ * mid-install cannot act on it, and three undos for one decision is a menu, not a
+ * disclosure. The full story (exact rules, keystore, session mint, flag caveats,
+ * all three undos) is unchanged in docs/agent-permissions.md, `doctor --json`, and
+ * this command's own `--json` envelope; the terminal gets the one command that
+ * turns it off.
+ */
+function publishingLine(io: Io, mode: PublishMode, wired: PermissionsResult): string {
+  const undo =
+    wired.modeGrant === undefined
+      ? ''
+      : ` ${paint(io, 'dim', wired.planned === true ? 'Would turn off:' : 'Turn off:')} tenjin config set publish.mode review`;
+  return `${paint(io, 'green', '✓')} ${paint(io, 'bold', `Publishing: ${mode}`)}. ${modeBlurb(mode)}${undo}`;
 }
 
 /**
@@ -792,35 +815,76 @@ function publishingLine(io: Io, mode: PublishMode): string {
  * skip is never silent, because the operator's next auto-mode session is where
  * they would otherwise find out (#33).
  *
- * "free", never "read-only": see PERMISSIONS_QUESTION for why this tier cannot
- * honestly be called the latter. The line that reports a WRITE carries the
- * `doctor` pointer too, since that is the other moment an operator learns rules
- * landed without seeing them or the flag caveat that qualifies them.
+ * The count is every rule of ours now in the file, and the word "free" is gone
+ * with it: it was there to keep `publish` and `edit` out of a total that called
+ * them free verbs, and a line that just says how many tenjin commands are allowed
+ * needs no such qualifier. What the rules ARE, and what they clear, is one link
+ * away rather than recited here.
  */
 function permissionsLine(io: Io, p: PermissionsResult): string {
   const label = paint(io, 'bold', 'Permissions:');
+  const allowed = p.added.length + p.alreadyPresent.length;
+  /**
+   * What a `review` install took back, said on EVERY branch rather than on the
+   * two that happened to be written first.
+   *
+   * The retraction runs above the guards that decline a write, so a run can
+   * retract and then skip: `--no-allow-free-verbs` said "unchanged" and
+   * `--harness shared` said "not wired (Claude Code only)", both over a
+   * settings.json the same run had just deleted two rules from. The second was
+   * the worse of the two, since it tells the operator their Claude settings were
+   * left alone. Hoisted, so a branch that forgets it reads wrong at review time
+   * rather than shipping.
+   */
+  const retracted = p.removed.filter((r) => MODE_GATED_RULES.includes(r));
+  /**
+   * PAST TENSE FOR A RUN, FUTURE FOR A PLAN. `planFreeVerbAllowlist` fills
+   * `removed` with what a real run WOULD take back, so a dry run reaching the
+   * past-tense sentence reports a deletion that never happened.
+   */
+  const gaveBack =
+    retracted.length === 0
+      ? ''
+      : p.planned === true
+        ? ` A real run would remove ${retracted.length} rule(s) for publish and edit from ${p.path ?? 'your settings'}.`
+        : ` Publishing is back to asking first, so ${retracted.length} rule(s) for publish and edit were removed from ${p.path ?? 'your settings'}.`;
+  /**
+   * Nothing was written AND nothing was taken back: only then is "unchanged" the
+   * honest word. Gated on `planned` too, because a dry run changes nothing by
+   * definition, and "otherwise unchanged" there qualified against a retraction the
+   * line never named.
+   */
+  const unchanged =
+    retracted.length === 0 || p.planned === true ? 'unchanged' : 'otherwise unchanged';
+
+  // A dry run reports the PLAN in the same fields, so it takes this branch and
+  // says "would allow". An operator dry-running to find out whether publish and
+  // edit get granted was previously told only "unchanged (dry run)".
+  if (p.planned === true && p.added.length > 0) {
+    return `${paint(io, 'dim', '-')} ${label} would allow ${allowed} tenjin commands in ${p.path}. Details: ${PERMISSIONS_DOC_URL}`;
+  }
   if (p.added.length > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${p.added.length} free tenjin commands added to ${p.path}. Full caveats: ${PERMISSIONS_DOC_URL}`;
+    return `${paint(io, 'green', '✓')} ${label} ${allowed} tenjin commands allowed in ${p.path}.${gaveBack} Details: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === undefined) {
-    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}`;
+    return `${paint(io, 'green', '✓')} ${label} the ${FREE_VERB_RULES.length} free tenjin commands were already allowed in ${p.path}.${gaveBack}`;
   }
   if (p.skipped === 'harness-not-claude') {
-    return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only). The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
+    return `${paint(io, 'dim', '-')} ${label} not wired for this harness (Claude Code only).${gaveBack} The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === 'dry-run') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
+    return `${paint(io, 'dim', '-')} ${label} ${unchanged} (dry run); the ${FREE_VERB_RULES.length} rules a real run needs are already there.${gaveBack}`;
   }
   if (p.skipped === 'declined' || p.skipped === 'not-requested') {
-    return `${paint(io, 'dim', '-')} ${label} unchanged. Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
+    return `${paint(io, 'dim', '-')} ${label} ${unchanged}.${gaveBack} Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;
   }
   if (p.skipped === 'changed-since-read') {
     // Nothing is wrong with the file and the flag is not the remedy: another
     // writer touched it mid-run, so the merge has to be recomputed against what
     // is there now. The catch-all below says "fix it", which is wrong here.
-    return `${paint(io, 'yellow', '!')} ${label} ${p.path} changed while it was being updated, so nothing was written. Re-run: tenjin install`;
+    return `${paint(io, 'yellow', '!')} ${label} ${p.path} changed while it was being updated, so nothing was written.${gaveBack} Re-run: tenjin install`;
   }
-  return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched. Fix it, then: tenjin install --allow-free-verbs`;
+  return `${paint(io, 'yellow', '!')} ${label} ${p.path} was left untouched.${gaveBack} Fix it, then: tenjin install --allow-free-verbs`;
 }
 
 function walletLine(io: Io, w: WalletOutcome): string {
@@ -862,13 +926,20 @@ function skillRoster(h: HarnessResult): string {
   return parts.join('; ');
 }
 
-/** The single line of consequence attached to a mode, wherever it is shown. */
+/**
+ * The single line of consequence attached to a mode, wherever it is shown.
+ *
+ * `auto` used to end "your harness still shows each command for approval", which
+ * stopped being true the moment the mode started writing its own harness rules.
+ * The clause is gone rather than reworded: the thing an operator needs at this
+ * moment is that publishing happens without them, under their name.
+ */
 function modeBlurb(v: PublishMode): string {
   return v === 'auto'
-    ? 'Your agent publishes clean pieces on its own; your harness still shows each command for approval.'
+    ? 'Your agent publishes and updates pieces on its own, under your identity.'
     : v === 'review'
       ? 'Your agent asks you in chat before every publish.'
-      : 'Fully unattended; only hard blocks stop it.';
+      : 'Your agent publishes on its own, under your identity, and only a hard block stops it.';
 }
 
 /**
@@ -1040,10 +1111,10 @@ export const PUBLISH_MODE_CHOICES = [
   {
     value: 'auto',
     label: 'Auto (recommended)',
-    hint: 'your agent publishes clean pieces on its own; your harness still shows each command for approval',
+    hint: 'your agent publishes and updates pieces on its own, under your identity',
   },
   { value: 'review', label: 'Ask me in chat first' },
-  { value: 'full-auto', label: 'Fully unattended', hint: 'only hard blocks stop it' },
+  { value: 'full-auto', label: 'Fully unattended', hint: 'only a hard block stops it' },
 ] as const satisfies readonly { value: PublishMode; label: string; hint?: string }[];
 
 export const PUBLISH_MODE_QUESTION = 'When your agent has something worth publishing:';
@@ -1130,13 +1201,37 @@ function parseModeFlag(value: string): PublishMode {
  * names where both live in full. It used to point at `tenjin doctor`, which
  * printed them; doctor now points at the same page (#81).
  */
-export const PERMISSIONS_QUESTION = [
-  'Let your agent search tenjin without permission popups?',
-  `Adds ${FREE_VERB_RULES.length} free commands to ~/.claude/settings.json.`,
-  'None can spend USDC or move your keys; doctor may check your wallet still opens.',
-  'Three send or store data (search, outcome, read).',
-  `Full caveats: ${PERMISSIONS_DOC_URL}`,
-].join(' ');
+/**
+ * The consent moment, in two sentences and a link.
+ *
+ * This question used to recite the tier: a count of "free" commands, which of
+ * them send data, what `doctor` does to the wallet, and (once the pair started
+ * landing here) both rule strings verbatim. An operator meeting `Bash(tenjin
+ * publish:*)` for the first time at a yes/no prompt cannot act on any of it, and
+ * a prompt nobody finishes reading is not consent.
+ *
+ * Two facts survive, because they are the two a human can actually decide on:
+ * this cannot spend their money, and on an auto mode their agent will publish
+ * under their name without being asked. Everything else (the exact rules, the
+ * keystore, the read+write session mint, the `--base-url` and `--yes` caveats,
+ * all three undos) is unchanged one link away in docs/agent-permissions.md, and
+ * in `doctor --json` and this command's `--json` envelope for an agent reading it.
+ *
+ * Counts come from the rule sets, so a verb added to either tier cannot make the
+ * question lie.
+ */
+function permissionsQuestionHead(mode: PublishMode): string {
+  const count = rulesForPublishMode(mode).length;
+  return `Let your agent use tenjin without permission popups? Adds ${count} command rules to ~/.claude/settings.json.`;
+}
+
+export const PERMISSIONS_QUESTION = `${permissionsQuestionHead('review')} None of them can spend your money. Details: ${PERMISSIONS_DOC_URL}`;
+
+/** The same question, plus the one thing an auto mode changes about the answer. */
+export function permissionsQuestion(mode: PublishMode): string {
+  if (mode === 'review') return PERMISSIONS_QUESTION;
+  return `${permissionsQuestionHead(mode)} None of them can spend your money, and on publish.mode ${mode} your agent will publish under your identity on its own. Details: ${PERMISSIONS_DOC_URL}`;
+}
 
 /** The wallet decision's literal copy. */
 export const WALLET_QUESTION = 'Create a wallet now?';
@@ -1151,6 +1246,20 @@ export const WALLET_QUESTION = 'Create a wallet now?';
  * denied mid-task is the headless one, and leaving it unwired because nobody was
  * there to say yes made a bare `tenjin install` produce an install that does not
  * work. The disclosure and the undo ride the output on both paths.
+ *
+ * INSTALLING TENJIN IS THE CONSENT for the mode-gated rules (owner call, PR #164
+ * review round). The allowlist is written for the mode this run settles, on every
+ * path including the headless one, and the FIRST install writes it — there is no
+ * "chosen vs defaulted" distinction. What makes that defensible is that it is
+ * DOCUMENTED, on the surface each reader is actually using. A human gets
+ * `publishingLine`: what the agent will now do, in plain words, plus the one
+ * command that turns it off. An agent, and any headless run, gets `modeGrant` on
+ * the `--json` envelope, carrying both rule strings, the keystore sentence and
+ * all three undos. docs/agent-permissions.md carries the rest. The terminal is
+ * deliberately the leanest of the three (owner call): a rule string an operator
+ * is meeting for the first time mid-install is not disclosure they can act on.
+ * The bare CLI, with no install ever run, still defaults to `review` — install is
+ * the consent anchor, so nothing is granted to someone who never ran it.
  *
  * The probe runs on EVERY path that might write, including the headless ones.
  * Nothing left to grant is not a question and not a write: it is the ordinary
@@ -1167,33 +1276,96 @@ async function resolvePermissions(args: {
   flag: boolean | undefined;
   dryRun: boolean;
   canPrompt: boolean;
+  /**
+   * The mode decision 1 just settled, never a raw flag or a project file: the
+   * rule set follows what this install is putting the machine on, so the two
+   * decisions cannot disagree.
+   */
+  publishMode: PublishMode;
 }): Promise<PermissionsResult> {
-  const { plans, home, deps, flag, dryRun, canPrompt } = args;
+  const { plans, home, deps, flag, dryRun, canPrompt, publishMode } = args;
+
+  // A dry run writes nothing, so it settles before the retraction rather than
+  // after it: what it owes the operator is the plan, not a revocation.
+  if (dryRun) return (deps.planPermissions ?? planFreeVerbAllowlist)(home, publishMode);
+
+  /**
+   * TIGHTENING FIRST, above every guard below, because none of them is about a
+   * retraction. `--no-allow-free-verbs` declines a WRITE OF OURS; it is not a
+   * request to keep a grant the operator just revoked by moving to `review`, and
+   * ordering it first let `install --publish-mode review --no-allow-free-verbs`
+   * write `mode: review` to config.json, leave both mode-gated rules allowed, and
+   * report `skipped: declined` with a fix telling the operator to ADD rules on the
+   * run where they asked to revoke. The `--harness` guard is the same shape: it
+   * scopes a write to the harnesses this run targets, and a Claude rule this CLI
+   * wrote is ours to reclaim whichever harness is being installed today.
+   *
+   * The one thing that CANNOT fall through is a file we could not read: the
+   * additive writer refuses it for the same reason, so there is nothing to fall
+   * through to, and the retraction's own `fix` names the pair where the writer's
+   * does not.
+   */
+  let retractedRules: string[] = [];
+  let retractedFrom: string | undefined;
+  if (publishMode === 'review') {
+    const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
+    if (retracted.skipped !== undefined) return retracted;
+    retractedRules = retracted.removed;
+    retractedFrom = retracted.path;
+  }
+
+  /**
+   * Carry what the retraction took back onto whatever the rest of this function
+   * returns. It used to RETURN the retraction, which jumped the additive pass and
+   * the legacy sweep both: a review-install on a machine holding only the pair
+   * retracted them, reported "the 9 free tenjin commands were already allowed"
+   * over a file holding none of them, left a stranded legacy rule in place, and
+   * made the operator run install twice to get the tier.
+   */
+  const withRetraction = (result: PermissionsResult): PermissionsResult =>
+    retractedRules.length === 0
+      ? result
+      : {
+          ...result,
+          removed: [...retractedRules, ...result.removed],
+          // A non-Claude skip carries no `path`, deliberately: naming a Claude
+          // file to a Codex-only operator points them at a file that is nothing
+          // to do with their harness. Once we have RETRACTED from that file, the
+          // reverse is true, and the operator needs to know which file changed.
+          ...(result.path === undefined ? { path: retractedFrom } : {}),
+        };
+
   // Only Claude Code has a settings file with this shape. Codex and the shared
   // Agent Skills location gate permissions elsewhere, so there is nothing here to
   // write for them, and guessing at another harness's config would be the kind of
   // uninvited write this whole module is careful about.
   const hasClaude = plans.some((p) => p.harness === 'claude');
   if (!hasClaude) {
-    return permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude');
+    return withRetraction(
+      permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude'),
+    );
   }
-  if (dryRun) return permissionsSkipped('claude', home, 'dry-run');
-  if (flag === false) return permissionsSkipped('claude', home, 'declined');
+  if (flag === false) return withRetraction(permissionsSkipped('claude', home, 'declined'));
 
-  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home);
-  if (probe.satisfied !== undefined) return probe.satisfied;
+  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
+  if (probe.satisfied !== undefined) return withRetraction(probe.satisfied);
   // Nothing to GRANT, but something of ours to retract: an older version's rule
-  // for a command that no longer exists. That needs no consent — it only ever
-  // removes a rule this CLI wrote — so it runs without the prompt.
-  if (probe.pending !== null && probe.pending.length === 0) return wireFreeVerbAllowlist(home);
+  // for a command that no longer exists, or the publish rule under a mode that
+  // no longer carries it. That needs no consent — it only ever removes a rule
+  // this CLI wrote — so it runs without the prompt.
+  if (probe.pending !== null && probe.pending.length === 0) {
+    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+  }
 
-  if (flag === true || !canPrompt) return wireFreeVerbAllowlist(home);
+  if (flag === true || !canPrompt) {
+    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+  }
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
-  if (!(await confirm(PERMISSIONS_QUESTION))) {
-    return permissionsSkipped('claude', home, 'declined');
+  if (!(await confirm(permissionsQuestion(publishMode)))) {
+    return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
-  return wireFreeVerbAllowlist(home);
+  return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
 }
 
 // --- Search hooks (decision 3) ----------------------------------------------------
@@ -1204,8 +1376,7 @@ async function resolvePermissions(args: {
  * agreed to "check Tenjin before a web search" has not thereby agreed to a
  * reminder at the end of every turn, so the question says both out loud.
  */
-export const SEARCH_HOOKS_QUESTION =
-  'Let Tenjin ride along with your web searches? (Escape skips, registering nothing)';
+export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web searches?';
 
 export const SEARCH_HOOKS_CHOICES = [
   {

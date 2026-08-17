@@ -34,18 +34,16 @@ const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags
 /** What is known about ONE dist-tag: when it was asked, and what it said. */
 const TagEntrySchema = z.object({
   checkedAtMs: z.number(),
-  latest: z.string(),
+  /** The version the tag named. Absent when the answer was unusable. */
+  latest: z.string().optional(),
   /** When the nudge was last PRINTED for this tag. Absent until one has been. */
   notifiedAtMs: z.number().optional(),
 });
 
 /**
  * The cache is a pure optimization, so a bad one is re-fetched, never repaired.
- *
- * One entry PER TAG rather than one entry total, because a machine can run an
- * alpha and a stable build out of the same data dir. A single record would make
- * every channel switch evict the other channel's answer, and the returning binary
- * would re-fetch and re-print a notice it had already shown seconds earlier.
+ * Keyed by dist-tag: an entry this build did not ask about is carried forward
+ * untouched rather than evicted.
  */
 const CacheSchema = z.object({
   schemaVersion: z.literal(1),
@@ -113,10 +111,19 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // Resolved through the same function `tenjin update` uses, so the nudge can
     // never advertise a version the command would decline to install, nor stay
     // quiet about one it would.
-    const latest = fresh ? entry.latest : await resolveLatest(current, deps);
-    if (latest === null) return; // asked and learned nothing: cache nothing either
+    //
+    // Only a registry that could not be ASKED returns without caching; an answer
+    // this build cannot use has still been answered, and moves the clock below.
+    let latest: string | null;
+    if (fresh) {
+      latest = entry.latest ?? null;
+    } else {
+      const answer = await resolveLatest(current, deps);
+      if (answer === null) return;
+      latest = answer.latest;
+    }
 
-    const upgradeable = isNewer(latest, current);
+    const upgradeable = latest !== null && isNewer(latest, current);
 
     // Once a day means once a day, not once per FETCH: a fresh cache would
     // otherwise repeat the same line on every command for 24h. The two clocks are
@@ -140,7 +147,7 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
 
     // Carries the agent-visible half of the answer, so a hook or an envelope can
     // report it without knowing which version is running.
-    const signal = upgradeable ? { current, latest } : undefined;
+    const signal = upgradeable && latest !== null ? { current, latest } : undefined;
     const signalChanged =
       cached?.signal?.current !== signal?.current || cached?.signal?.latest !== signal?.latest;
 
@@ -157,22 +164,23 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
           ...cached?.tags,
           [tag]: {
             checkedAtMs: fresh ? entry.checkedAtMs : nowMs,
-            latest,
+            ...(latest !== null ? { latest } : {}),
             ...(nudgedAtMs !== undefined ? { notifiedAtMs: nudgedAtMs } : {}),
           },
         },
       });
     }
-    if (!due) return;
 
     // Named as the command, not the npm invocation it wraps: `update` prints the
     // right instructions itself for an install it cannot perform (a source
     // checkout, a yarn global), so this line is correct everywhere.
-    emitNotice(
-      deps.io,
-      `tenjin-cli ${latest} is available (you have ${current}). Update: run tenjin update`,
-      { json: deps.json },
-    );
+    if (due && latest !== null) {
+      emitNotice(
+        deps.io,
+        `tenjin-cli ${latest} is available (you have ${current}). Update: run tenjin update`,
+        { json: deps.json },
+      );
+    }
   } catch {
     // Unreachable by construction (every step below is already guarded); here so
     // that staying invisible does not depend on that remaining true.
@@ -214,42 +222,29 @@ export async function readUpdateSignal(
  * answer differs: the nudge goes quiet, and `tenjin update` refuses instead of
  * silently reporting a foreign build "up to date" against a tag it never
  * belonged to.
+ *
+ * Every build follows `latest`; see RELEASING.md, which changes with this.
  */
-export function channelTag(version: string): 'alpha' | 'latest' | null {
-  const parsed = parseVersion(version);
-  if (parsed === null) return null;
-  // A prerelease build follows the prerelease tag: it is the one that carries
-  // prereleases at all when the release line has moved on past them.
-  return parsed.alpha !== null ? 'alpha' : 'latest';
+export function channelTag(version: string): 'latest' | null {
+  return parseVersion(version) === null ? null : 'latest';
 }
 
 /**
- * The newest version this build can move to, across BOTH the tag its channel
- * names and `latest`.
- *
- * Deliberately not the channel tag alone. Which tag a publish lands on is a
- * property of the release pipeline, not of this package's version numbers, and
- * the two have already disagreed: `alpha` sat on 0.1.0-alpha.7 while
- * 0.1.0-alpha.8 through .11 shipped on `latest`, so a channel-only lookup told
- * every alpha user they were current while four newer builds sat on npm. Taking
- * the newest of the two survives either layout without this command depending
- * on the pipeline being fixed. `latest` never drags a stable build backwards:
- * isNewer is the only comparison, and for a release build the two candidates
- * are the same tag anyway.
- *
- * Null when the registry offers nothing parseable on either tag, which is a
- * different fact from "the registry could not be reached" and is reported as one.
+ * The version this build can move to: whatever sits on the tag it follows.
+ * Consulting a second tag added no reachable version and one way to be wrong: a
+ * tag sitting ahead of `latest` could redirect the self-update to a build the
+ * release line never promoted. Null both when that tag is absent and when it
+ * names a version VERSION_RE rejects; `runUpdate` separates those, and neither
+ * means the registry was unreachable.
  */
 export function resolveTarget(current: string, tags: Record<string, string>): string | null {
   const channel = channelTag(current);
   if (channel === null) return null;
-  let best: string | null = null;
-  for (const name of new Set([channel, 'latest'])) {
-    const candidate = tags[name];
-    if (candidate === undefined || parseVersion(candidate) === null) continue;
-    if (best === null || isNewer(candidate, best)) best = candidate;
-  }
-  return best;
+  const candidate = tags[channel];
+  // Unparseable counts as absent: isNewer loses every comparison against junk,
+  // so admitting one would read as "up to date" forever.
+  if (candidate === undefined || parseVersion(candidate) === null) return null;
+  return candidate;
 }
 
 /**
@@ -282,10 +277,16 @@ export async function fetchDistTags(opts: {
   return parsed.success ? parsed.data : null;
 }
 
-/** The nudge's one-shot: fetch, then resolve. Null for either failure. */
-async function resolveLatest(current: string, deps: UpdateCheckDeps): Promise<string | null> {
+/**
+ * The nudge's one-shot: fetch, then resolve. Null when the registry could not be
+ * asked; `{ latest: null }` when it answered with nothing usable.
+ */
+async function resolveLatest(
+  current: string,
+  deps: UpdateCheckDeps,
+): Promise<{ latest: string | null } | null> {
   const tags = await fetchDistTags({ fetchImpl: deps.fetchImpl, timeoutMs: FETCH_TIMEOUT_MS });
-  return tags === null ? null : resolveTarget(current, tags);
+  return tags === null ? null : { latest: resolveTarget(current, tags) };
 }
 
 async function writeCache(path: string, cache: Cache): Promise<void> {
