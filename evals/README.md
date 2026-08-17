@@ -87,23 +87,38 @@ carrying Tenjin vocabulary around no publish at all.
 python3 evals/harness/run_trigger_eval.py \
   --eval-set evals/tenjin-publish/trigger-eval.json \
   --skill skills/tenjin-publish \
+  --also-skill skills/tenjin-search \
   --workspace "$(mktemp -d)"
 ```
 
+`--also-skill skills/tenjin-search` is part of the measurement, not a detail. Two
+negatives are a pure read and a buy, which belong to that skill; with it absent,
+declining means doing nothing, and those two are scored without the choice that
+makes them hard.
+
 Run it against the old description as well as the new one whenever the
 description changes, by extracting the old `SKILL.md` into a temp skill directory.
-That comparison is what the set is for, and it earned its keep on the first run:
-the rewritten description scored 14 and 13 against the previous one's 15 and 15,
-missing the harvest ask and the unprompted-work ask, which are exactly the two
-routes the rewrite had reshaped (the harvest clause had moved to last position and
-the unprompted route's concrete examples had been dropped). Restoring both took it
-back to parity. Both descriptions now score 19/20.
+That comparison is what the set is for.
+
+**What this set has and has not shown.** An earlier, differently-phrased 16-query
+version did separate two descriptions: it scored 14 and 13 on a rewritten
+tenjin-publish description against 15 and 15 on its predecessor, missing the
+harvest ask and the unprompted-work ask. The set was then expanded to 20 to meet
+`evals-fixtures.test.ts`'s balance floor, and the positives were rephrased in the
+process. **The committed 20-query set has not reproduced that separation.** Three
+runs exist: 19 vs 19 (3 runs/query, sonnet) and, from review, 18 vs 19 in the
+inverted direction (2 runs/query), with every positive saturating at fire rate 1.0
+on both descriptions. Treat it as a tripwire for future edits, not as evidence
+about a past one, and treat any single total as a sampled result rather than a
+score: a 19 and an 18 on the same file are one negative flipping, not a
+regression.
 
 The one shared miss is `What does publish.mode auto actually do in the tenjin
-CLI?`, a negative both descriptions over-fire on. That is a true measurement
-rather than a broken line: a question about the mode plausibly wants the skill
-that documents it, the over-fire is low-harm, and both sides behave the same, so
-it stays as the set's near-boundary case.
+CLI?`, a negative both descriptions over-fire on and which review reproduced
+independently. That is a true measurement rather than a broken line: a question
+about the mode plausibly wants the skill that documents it, the over-fire is
+low-harm, and both sides behave the same, so it stays as the set's near-boundary
+case.
 
 A positive here must carry its artifact in the query. The description requires
 something concrete that already exists and the runner seeds no files, so "publish

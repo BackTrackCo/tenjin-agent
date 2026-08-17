@@ -128,8 +128,10 @@ tenjin-search's description is byte-identical, so its trigger set is unaffected.
 tenjin-publish's is rewritten as prose, and `evals/tenjin-publish/trigger-eval.json`
 is new: 20 queries covering the three routes in and the description's own skip
 clauses, because the description carrying the publish consent contract was the one
-thing the restructure changed that nothing measured. It caught a real regression
-on its first run, and both descriptions now score 19/20.
+thing the restructure changed that nothing measured. It is a regression tripwire
+for future description edits rather than evidence about this one; the committed set
+has not been shown to separate the old description from the new, and its
+near-boundary case is documented alongside it.
 
 The skills read auto-first to match the mode install settles: publishing a clean
 piece and reporting the URL is the ordinary outcome, and asking is what `review`

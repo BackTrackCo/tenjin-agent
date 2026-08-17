@@ -31,7 +31,7 @@ answers a different question.
 
 ## Sales and reads
 
-There is no `tenjin sales` command. Every publish receipt returns `deskUrl`, the
+Sales are a hosted surface, not a CLI verb. Every publish receipt returns `deskUrl`, the
 human dashboard, which is the right answer when the user just wants to look.
 Otherwise `GET /api/me/stats` (this month's earnings and paid-read totals) and
 `GET /api/me/events` (one entry per settled sale, newest first). Both take the
