@@ -18,23 +18,31 @@ Detects Claude Code, Codex, or a shared Agent Skills directory; wires Tenjin ski
 
 Useful flags:
 
-| Flag                    | Values                        | Effect                                   |
-| ----------------------- | ----------------------------- | ---------------------------------------- |
-| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.          |
-| `--dry-run`             |                               | Print what would change without writing. |
-| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively.   |
-| `--no-allow-free-verbs` |                               | Do not write harness permission rules.   |
-| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.      |
-| `--no-hooks`            |                               | Register no hooks this run.              |
-| `--no-wallet`           |                               | Create no wallet.                        |
+| Flag                    | Values                        | Effect                                                                                                                           |
+| ----------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.                                                                                                  |
+| `--dry-run`             |                               | Print what would change without writing, including the permission rules a real run would add.                                    |
+| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively. Defaults to `auto`, which also writes `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)`. |
+| `--no-allow-free-verbs` |                               | Do not write harness permission rules.                                                                                           |
+| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.                                                                                              |
+| `--no-hooks`            |                               | Register no hooks this run.                                                                                                      |
+| `--no-wallet`           |                               | Create no wallet.                                                                                                                |
 
 `install` is idempotent. Re-run it after upgrading the CLI or changing harnesses.
+
+### Hooks
+
+`install` can register two Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open.
+
+**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself.
+
+Hooks are read once at session start, so restart Claude Code after registering them.
 
 ### `tenjin uninstall`
 
 Removes what `tenjin install` wrote: Tenjin skills, hook scripts, Tenjin hook entries, Tenjin permission rules, and older pointer lines in `CLAUDE.md` or `AGENTS.md`.
 
-It never touches `~/.tenjin`, so your wallet, config, library, search history, and older candidate data stay in place. It is safe to run twice.
+Your wallet, config, library, search history, and older candidate data under `~/.tenjin` stay in place. The one thing it removes there is the generated hook scripts in `~/.tenjin/hooks`, which `install` wrote and puts back. It is safe to run twice.
 
 ### `tenjin doctor`
 
@@ -229,6 +237,8 @@ Escape hatch for moving USDC out of the agent wallet. It is deliberately not par
 
 `tenjin config` lists every key with its effective value and source. `tenjin config get <key>` reads one key. `tenjin config set <key> <value>` writes one key.
 
+`set publish.mode` also keeps the harness allowlist in step, since the mode decides whether a publish asks and the allowlist decides whether the harness asks anyway. Moving to `auto` or `full-auto` asks once and writes `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)` on yes; without a terminal, under `--json`, or on a no it writes nothing and prints where the rule goes. Moving back to `review` retracts them without asking. See [agent-permissions.md](./agent-permissions.md).
+
 Common keys:
 
 | Key                    | Default                    | Effect                                                                       |
@@ -244,7 +254,7 @@ Common keys:
 | `publish.mode`         | `review`                   | Publish consent mode.                                                        |
 | `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                               |
 | `hooks.searchMode`     | `auto`                     | WebSearch hook behavior.                                                     |
-| `hooks.stopNag`        | `on`                       | End-of-turn reminder behavior.                                               |
+| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.  |
 
 ## MCP
 

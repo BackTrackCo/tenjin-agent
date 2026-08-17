@@ -1,0 +1,102 @@
+[
+  {
+    "query": "I wrote the findings up in notes.md. Publish it to Tenjin at 25 cents.",
+    "should_trigger": true,
+    "rationale": "Route 1, the explicit ask, in its plainest form. The artifact is named in the query because the description requires something concrete that already exists, and a bare eval workspace holds no files: 'publish this file' with no file is a correct decline, which would make this line a permanent miss rather than a tripwire."
+  },
+  {
+    "query": "The Node 22 note I sold last month is wrong now that 22.14 shipped. Update it.",
+    "should_trigger": true,
+    "rationale": "Route 1 covers update and maintain, not just first publication."
+  },
+  {
+    "query": "How are my Tenjin sales doing this month?",
+    "should_trigger": true,
+    "rationale": "Sales questions are named in the description and answered from references/maintain.md."
+  },
+  {
+    "query": "What Tenjin drafts do I still have open?",
+    "should_trigger": true,
+    "rationale": "Drafts are the other named ask on the manage route."
+  },
+  {
+    "query": "Anything from our work this session worth selling on Tenjin?",
+    "should_trigger": true,
+    "rationale": "The harvest ask: grade what is visible, offer the survivors once as a batch."
+  },
+  {
+    "query": "That was a MISS on Tenjin, and I have now got the tested answer written up. Close the loop.",
+    "should_trigger": true,
+    "rationale": "Route 2, the after-a-MISS flow, with the finding already finished."
+  },
+  {
+    "query": "I finished the compatibility matrix for x402 facilitators across three chains, tested each one. Anything to do with it?",
+    "should_trigger": true,
+    "rationale": "Route 3: substantial finished public work, offered once."
+  },
+  {
+    "query": "Reprice my Tenjin post to 0.50 and refresh its as-of date.",
+    "should_trigger": true,
+    "rationale": "Edit mechanics, which this skill owns and points at references/maintain.md for."
+  },
+  {
+    "query": "Our internal deploy runbook for the payments service is finally accurate. Write it up.",
+    "should_trigger": false,
+    "rationale": "Private to the employer: the description's skip clause, and the semantic pass would withhold it anyway."
+  },
+  {
+    "query": "I am halfway through testing whether pgvector HNSW beats IVFFlat here, still collecting numbers.",
+    "should_trigger": false,
+    "rationale": "Work still in progress: the description requires something concrete that already exists."
+  },
+  {
+    "query": "We should write up our Postgres migration lessons sometime.",
+    "should_trigger": false,
+    "rationale": "Drive-by musing, named verbatim in the skip clause."
+  },
+  {
+    "query": "Has anyone already published a measured Base USDC settlement latency study?",
+    "should_trigger": false,
+    "rationale": "Confusable: this is a tenjin-search read, not a publish. Nothing of the user's exists to sell."
+  },
+  {
+    "query": "Buy that Tenjin piece on Drizzle snapshot digests if it is under a dollar.",
+    "should_trigger": false,
+    "rationale": "Confusable: a purchase is tenjin-search's buy path and spends money rather than earning it."
+  },
+  {
+    "query": "Fix the failing test in src/lib/scan.ts and explain what was wrong.",
+    "should_trigger": false,
+    "rationale": "Ordinary coding work on the repo in front of us, with no artifact and nothing public."
+  },
+  {
+    "query": "Summarize this thread for me so I can paste it into Slack.",
+    "should_trigger": false,
+    "rationale": "A writing task with no marketplace involvement at all."
+  },
+  {
+    "query": "Add my wallet address to the README so people can tip me.",
+    "should_trigger": false,
+    "rationale": "Tenjin-adjacent vocabulary (wallet, payment) around a task that is not a publish."
+  },
+  {
+    "query": "Add two more questions to the answer card on my published Drizzle post so it matches how people actually search.",
+    "should_trigger": true,
+    "rationale": "Card maintenance on a live post: the append-vs-replace flag distinction this skill owns."
+  },
+  {
+    "query": "We nailed down exactly how Tailwind v4 handles the dark variant after a lot of testing. Worth putting on Tenjin?",
+    "should_trigger": true,
+    "rationale": "Unprompted route, asked as a question: finished, tested, public, and the user is inviting the offer."
+  },
+  {
+    "query": "Draft a blog post for our company site announcing the new pricing tiers.",
+    "should_trigger": false,
+    "rationale": "A writing task for a private company surface, with no marketplace involvement."
+  },
+  {
+    "query": "What does publish.mode auto actually do in the tenjin CLI?",
+    "should_trigger": false,
+    "rationale": "A question ABOUT the tool rather than a request to publish; answering it needs no skill."
+  }
+]

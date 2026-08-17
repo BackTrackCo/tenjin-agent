@@ -176,6 +176,47 @@ describe('markSearchResolved', () => {
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
   });
 
+  // The #161 loop: a MISS closed as `regenerated` while the answer was still
+  // being written, then published minutes later. The publish takes the loop over.
+  it('relinks a resolution recorded by something else when asked', async () => {
+    await recordSearch(dir, entry());
+    await markSearchResolved(dir, ID, 'outcome', '2026-08-09T10:00:00.000Z');
+    await expect(
+      markSearchResolved(dir, ID, 'publish', '2026-08-09T11:00:00.000Z', { relink: true }),
+    ).resolves.toBe('relinked');
+    expect((await loadSearches(dir))[0]?.resolved).toEqual({
+      by: 'publish',
+      at: '2026-08-09T11:00:00.000Z',
+    });
+  });
+
+  // Relinking is not re-stamping: the loop is already where it should be, so
+  // nothing is written and nothing claims a change.
+  it('reports already-resolved when the recorded closer is the same one', async () => {
+    await recordSearch(dir, entry());
+    await markSearchResolved(dir, ID, 'publish', '2026-08-09T10:00:00.000Z');
+    await expect(
+      markSearchResolved(dir, ID, 'publish', '2026-08-09T11:00:00.000Z', { relink: true }),
+    ).resolves.toBe('already-resolved');
+    expect((await loadSearches(dir))[0]?.resolved?.at).toBe('2026-08-09T10:00:00.000Z');
+  });
+
+  // The flag is opt-in, so an ordinary outcome report after a publish still
+  // leaves the publish as the closer.
+  it('leaves the first resolution alone without the flag', async () => {
+    await recordSearch(dir, entry());
+    await markSearchResolved(dir, ID, 'publish', '2026-08-09T10:00:00.000Z');
+    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBe('already-resolved');
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  it('relinking an unclosed loop is an ordinary resolve', async () => {
+    await recordSearch(dir, entry());
+    await expect(
+      markSearchResolved(dir, ID, 'publish', '2026-08-09T10:00:00.000Z', { relink: true }),
+    ).resolves.toBe('resolved');
+  });
+
   it('reports not-found for an id the store does not carry', async () => {
     await recordSearch(dir, entry());
     await expect(

@@ -103,9 +103,12 @@ interface Target {
  * home, which every tool including the harness reaches through, so a link there
  * is the operator's name for the place rather than a redirect around us.
  *
- * Gating SKILL.md gates the whole write, because it is the only file these skills
- * ship. The other gate, that the file is ours at all, needs its content and so
- * lives at the write itself.
+ * Gating SKILL.md gates the whole write. It is not the only file a skill ships
+ * any more (tenjin-search carries `references/`), but it is the only one whose
+ * frontmatter can prove the directory is OURS, and `installSkill` writes the
+ * whole packaged tree once that gate passes — so a reference file deleted or
+ * edited under a healthy SKILL.md is restored on the same pass. The other gate,
+ * that the file is ours at all, needs its content and so lives at the write.
  */
 function healable(home: string): Target[] {
   const found: Target[] = [];

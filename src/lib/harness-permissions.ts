@@ -1,6 +1,7 @@
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
+import type { PublishMode } from './config';
 
 /**
  * The one place the CLI WRITES a permission grant into a harness's own settings
@@ -13,16 +14,37 @@ import { writeFileAtomic } from './atomic-json';
  *    run that writes says which rules landed, in which file, and how to remove
  *    them. What keeps that defensible is the next two invariants: the grant is a
  *    fixed free tier, and it can never widen.
- *  - FREE-TIER ONLY, AND NOT PARAMETERIZED. The rules are the hardcoded
- *    {@link FREE_VERB_RULES} constant and the writer takes no rule argument, so
- *    there is no call path — no flag, no config key, no future caller — that can
- *    make it write `buy`, `publish`, `session start`, `send`, `config set`,
- *    `wallet create`, `mcp`, `install`, or a broad `Bash(tenjin:*)`. A CLI that
- *    could widen its own permission grant is exactly what this shape rules out.
+ *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
+ *    It takes a {@link PublishMode}, and that selects between exactly two
+ *    hardcoded constants: {@link FREE_VERB_RULES}, and those plus
+ *    {@link MODE_GATED_RULES}. So there is no call path — no flag, no config
+ *    key, no future caller — that can make it write `buy`, `session start`,
+ *    `send`, `config set`, `wallet create`, `mcp`, `install`, or a broad
+ *    `Bash(tenjin:*)`. A CLI that could widen its own permission grant is exactly
+ *    what this shape rules out.
+ *
+ *    The publish rule is gated on the mode and on nothing else. INSTALLING
+ *    TENJIN IS THE CONSENT for it (owner call, PR #164): every install settles
+ *    `publish.mode` at `auto` unless told otherwise, and the FIRST install
+ *    writes this rule alongside the free tier rather than waiting for a second
+ *    run to read that default back as a choice. What keeps it defensible is
+ *    disclosure rather than provenance — the install output names the mode,
+ *    this rule, and the three ways out. Being on `auto` already means "a clean
+ *    publish proceeds without asking", and a harness prompt in front of it asks
+ *    that same question again somewhere the mode cannot answer (#161). Going
+ *    back to `review` RETRACTS the rule, on the next `install` or immediately
+ *    through `config set publish.mode review`, so a grant never outlives the
+ *    mode that justified it; `uninstall` reclaims it outright.
+ *
+ *    What this does NOT loosen: the rule clears the HARNESS prompt and nothing
+ *    else. The CLI's own gates are untouched — the deterministic scan blocks a
+ *    hard finding in every mode and no `--yes` clears it, and `review` still
+ *    asks per publish. An agent cannot reach `install` or `config set` on its
+ *    own either; both are never-allowlisted.
  *  - ADDITIVE, PLUS ONE RETRACTION THAT IS STILL OURS. Every other key in the
  *    file, and every allow-rule we did not write, is copied through verbatim in
  *    its original order; missing rules are appended. The single exception is
- *    {@link LEGACY_FREE_VERB_RULES}: a rule an EARLIER version of this same
+ *    {@link LEGACY_ALLOWLIST_RULES}: a rule an EARLIER version of this same
  *    writer put there and this one no longer recommends. Leaving it would mean
  *    a user who updates and re-runs `install` keeps a grant for a command that
  *    no longer exists, which is bloat we created and only we can clear. It
@@ -63,8 +85,81 @@ export const FREE_VERB_RULES: readonly string[] = [
 ];
 
 /**
+ * The rule `publish.mode` gates, mirroring lib/permissions.ts's
+ * PUBLISH_MODE_ALLOWLIST and duplicated as a literal for the same reason
+ * {@link FREE_VERB_RULES} is: that module is a DOCUMENT, and an edit there must
+ * not silently change what this file writes. A test pins the two together.
+ *
+ * Deliberately NOT a member of {@link FREE_VERB_RULES}: it can neither spend nor
+ * move keys, but it publishes publicly under the operator's identity, so it is
+ * not free-tier and never rides along with it.
+ */
+export const PUBLISH_MODE_RULE = 'Bash(tenjin publish:*)';
+
+/**
+ * The other half of the mode-gated pair. `edit` runs the SAME publish.mode
+ * consent gate in the CLI (lib/consent.ts's needsConfirmation), touches only
+ * posts this wallet already owns, spends nothing, and creates no new public
+ * content — strictly narrower than the publish rule it travels with. A mode that
+ * can publish a new post unattended but cannot fix that post's price is the
+ * asymmetry the mode exists to remove.
+ */
+export const EDIT_MODE_RULE = 'Bash(tenjin edit:*)';
+
+/** The pair the publish modes carry, in the order they are written and reported. */
+export const MODE_GATED_RULES: readonly string[] = [PUBLISH_MODE_RULE, EDIT_MODE_RULE];
+
+/**
+ * Verb fragments that must never appear in {@link MODE_GATED_RULES}: the rail
+ * {@link FORBIDDEN_VERB_FRAGMENTS} gives the free tier, minus the two verbs this
+ * set exists to carry.
+ *
+ * It needs that rail more than the free tier does. This set was mode-conditional
+ * prose before and is WRITTEN BY DEFAULT on every install now, so a line added
+ * here ships a grant to every machine — and without this, adding
+ * `Bash(tenjin buy:*)` to the pair passes the entire suite, because every other
+ * assertion on it compares against PUBLISH_MODE_ALLOWLIST, a document editable in
+ * the same commit.
+ */
+export const MODE_GATED_FORBIDDEN_FRAGMENTS: readonly string[] = [
+  'tenjin buy',
+  'tenjin session',
+  'tenjin send',
+  'tenjin config set',
+  'tenjin wallet create',
+  'tenjin mcp',
+  'tenjin install',
+  'tenjin update',
+];
+
+/**
+ * Exactly what may be written for `mode`. The two return values are the only two
+ * rule sets this module can produce.
+ */
+export function rulesForPublishMode(mode: PublishMode): readonly string[] {
+  return mode === 'review' ? FREE_VERB_RULES : [...FREE_VERB_RULES, ...MODE_GATED_RULES];
+}
+
+/**
+ * What this run should sweep out: what an older version wrote, plus the publish
+ * rule when the mode no longer justifies it. A retraction is always a rule this
+ * CLI wrote under a setting the operator has since changed, and it is reported
+ * exactly like an addition.
+ */
+function retiredFor(mode: PublishMode): Set<string> {
+  const retired = new Set<string>(LEGACY_ALLOWLIST_RULES);
+  if (mode === 'review') for (const rule of MODE_GATED_RULES) retired.add(rule);
+  return retired;
+}
+
+/**
  * Rules a PRIOR version of this writer put in `permissions.allow` and this one
- * no longer recommends. BOTH paths read it: `install` removes them on its next
+ * no longer writes — FREE TIER OR MODE-GATED, which is why this is not
+ * `LEGACY_FREE_VERB_RULES` any more. Nothing is stranded today, but the day a
+ * mode-gated rule is renamed or dropped, every machine holding it would keep a
+ * publish-capable allow-line that no `install` and no `uninstall` reclaims. That
+ * is one layer above the bug this list was created to fix, so the list covers
+ * both layers. BOTH paths read it: `install` removes them on its next
  * run, `uninstall` reclaims them as its own. NEITHER path ever writes one — the
  * writable set is {@link FREE_VERB_RULES} and this list is disjoint from it, so
  * a retired rule can only ever be deleted, never re-added. A test pins that
@@ -82,7 +177,7 @@ export const FREE_VERB_RULES: readonly string[] = [
  * `Bash(tenjin candidate list:*)` is the first entry: the candidate pen was
  * removed, and machines installed before that still carry its rule.
  */
-export const LEGACY_FREE_VERB_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
+export const LEGACY_ALLOWLIST_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
 
 /**
  * Verb fragments that must never appear in {@link FREE_VERB_RULES}. Asserted by
@@ -118,6 +213,75 @@ export type PermissionsSkipReason =
   | 'unexpected-shape'
   | 'changed-since-read';
 
+/**
+ * The mode-gated half of a write, as DATA rather than as prose a caller
+ * re-derives.
+ *
+ * Every surface that reports the grant reads this one object: the walkthrough's
+ * disclosure line, the `--json` envelope on the headless path (where nobody was
+ * asked and the output is the only disclosure there is), and the tests. The
+ * earlier shape returned one undifferentiated `added`, so each surface split the
+ * tiers itself — and two of them counted `publish` and `edit` as free verbs while
+ * a third never rendered at all.
+ */
+export interface ModeGrant {
+  /** The mode-gated rules now in effect on this machine. */
+  rules: string[];
+  /**
+   * Written by THIS run, already there, or one of each. On a `--dry-run` plan it
+   * is what a real run WOULD produce, and {@link PermissionsResult.planned} is the
+   * field that says so; the `disclosure` sentence changes tense to match.
+   */
+  state: 'added' | 'already-present' | 'mixed';
+  /** The plain sentence naming what the grant allows; the walkthrough colorizes it. */
+  disclosure: string;
+  /** Every command that takes it back, in the order the walkthrough prints them. */
+  undo: string[];
+}
+
+/** The three undos, named wherever a mode-gated grant is reported. */
+export const MODE_GRANT_UNDO: readonly string[] = [
+  'tenjin install --publish-mode review',
+  'tenjin config set publish.mode review',
+  'tenjin uninstall',
+];
+
+/**
+ * Build the grant record for `mode`, or undefined when the mode carries no rules
+ * or none of them ended up on this machine.
+ */
+function modeGrantFor(
+  mode: PublishMode,
+  added: readonly string[],
+  present: readonly string[],
+  planned: boolean,
+): ModeGrant | undefined {
+  const wasAdded = MODE_GATED_RULES.filter((r) => added.includes(r));
+  const wasPresent = MODE_GATED_RULES.filter((r) => present.includes(r));
+  const rules = [...wasAdded, ...wasPresent];
+  if (rules.length === 0) return undefined;
+  const state =
+    wasAdded.length === 0 ? 'already-present' : wasPresent.length === 0 ? 'added' : 'mixed';
+  // A plan says "would be added". The `planned` flag alone left this sentence in
+  // the past tense, and it is the one string a reader quotes back.
+  const verb =
+    state === 'already-present'
+      ? 'already present'
+      : state === 'mixed'
+        ? planned
+          ? 'would be in place'
+          : 'in place'
+        : planned
+          ? 'would be added'
+          : 'added';
+  return {
+    rules: MODE_GATED_RULES.filter((r) => rules.includes(r)),
+    state,
+    disclosure: `${MODE_GATED_RULES.join(' and ')} ${verb}: on publish.mode ${mode} your agent can publish to the public marketplace under your identity, update its own posts, and open your wallet keystore to sign, without a harness prompt.`,
+    undo: [...MODE_GRANT_UNDO],
+  };
+}
+
 export interface PermissionsResult {
   /** The harness this outcome is about; only `claude` has a settings file we write. */
   harness: string;
@@ -126,10 +290,33 @@ export interface PermissionsResult {
    * look. ABSENT when the harness has no such file: naming a Claude path on a
    * Codex-only install would point the envelope's reader at a file that has
    * nothing to do with their harness.
+   *
+   * ONE EXCEPTION, in `install`'s `withRetraction`: a `review` run retracts from
+   * `~/.claude/settings.json` above the harness guard, so a non-Claude result
+   * carrying a non-empty `removed` carries that path too. The reason the general
+   * rule exists is inverted there, because the run did change that file and the
+   * operator cannot check which one without its name.
    */
   path?: string;
   added: string[];
   alreadyPresent: string[];
+  /**
+   * The FREE-TIER halves of the two lists above. Every count line reads these:
+   * `publish` and `edit` are not free verbs, and a line calling eleven rules
+   * "free tenjin commands" contradicts both this module and the `doctor` pointer
+   * printed on the next screen.
+   */
+  /**
+   * True when this result is a PLAN rather than a record: `--dry-run` fills
+   * `added`, `alreadyPresent` and `modeGrant` with what a real run would do and
+   * writes nothing. Every reader that treats a non-empty `added` as "this landed"
+   * has to check it, which is the point of a flag rather than a parallel shape.
+   */
+  planned?: boolean;
+  addedFree: string[];
+  alreadyPresentFree: string[];
+  /** The mode-gated half, or absent when this write carried none. */
+  modeGrant?: ModeGrant;
   /**
    * Rules an EARLIER version of this writer wrote and this one retired, removed
    * on this run. Almost always empty; non-empty exactly once, on the first
@@ -167,6 +354,25 @@ function fixFor(reason: PermissionsSkipReason): string {
   }
 }
 
+/**
+ * The tier split plus the grant record, derived once from the two rule lists so
+ * no caller re-derives it. Spread into every non-skipped result.
+ */
+function tiers(
+  added: readonly string[],
+  alreadyPresent: readonly string[],
+  mode: PublishMode,
+  planned = false,
+): Pick<PermissionsResult, 'addedFree' | 'alreadyPresentFree'> & { modeGrant?: ModeGrant } {
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const grant = modeGrantFor(mode, added, alreadyPresent, planned);
+  return {
+    addedFree: added.filter((r) => !gated.has(r)),
+    alreadyPresentFree: alreadyPresent.filter((r) => !gated.has(r)),
+    ...(grant !== undefined ? { modeGrant: grant } : {}),
+  };
+}
+
 function skip(
   harness: string,
   path: string | undefined,
@@ -179,6 +385,8 @@ function skip(
     added: [],
     removed: [],
     alreadyPresent: [],
+    addedFree: [],
+    alreadyPresentFree: [],
     skipped: reason,
     ...(warning !== undefined ? { warning } : {}),
     fix: fixFor(reason),
@@ -200,23 +408,148 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Add the free-verb rules to `permissions.allow` in ~/.claude/settings.json.
- * Creates the file (and the `permissions.allow` path) when absent, appends only
- * the rules that are missing, and rewrites nothing else. Idempotent: a second
- * run returns `added: []` with every rule under `alreadyPresent` and does not
- * touch the file at all.
+ * Write settings.json KEEPING THE MODE IT HAS. Operators `chmod 600` this file —
+ * it commonly holds an `env` block and `apiKeyHelper` — and handing it back
+ * world-readable because we appended a permission line is a downgrade nobody
+ * asked for. A file we are creating gets the platform default. Mirrors
+ * lib/skill-writer.ts, which already does this for skills.
  */
-export async function wireFreeVerbAllowlist(homeDir: string): Promise<PermissionsResult> {
-  const found = await inspectAllowlist(homeDir);
+async function writeSettings(path: string, next: Record<string, unknown>): Promise<void> {
+  const current = await stat(path).catch(() => null);
+  await writeFileAtomic(
+    path,
+    `${JSON.stringify(next, null, 2)}\n`,
+    current === null ? {} : { mode: current.mode & 0o777 },
+  );
+}
+
+/**
+ * Remove {@link MODE_GATED_RULES}, and nothing else, from `permissions.allow`.
+ *
+ * SEPARATE FROM THE ADDITIVE WRITER, and that separation is the point. Retraction
+ * used to ride the same call that appends the free tier, so it inherited that
+ * call's precondition and bailed out whenever the free tier was not byte-exact —
+ * silently, in the tightening direction, on two of the three commands the consent
+ * decision names as its own undo. The stated rationale (a publish rule without
+ * the free tier beside it was not written by our install) does not survive the
+ * ordinary case: the first release that adds a tenth free verb makes every
+ * existing machine's tier incomplete while the pair is genuinely ours, and an
+ * unparsable file is UNKNOWN rather than not-ours.
+ *
+ * So `review` always retracts. This adds nothing, ever: it can only shorten the
+ * allow list, which is why it needs no consent and no complete-tier precondition.
+ */
+export async function retractModeGatedRules(homeDir: string): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir, 'review');
+  if ('result' in found) {
+    // Unknown, not absent. The one case that cannot proceed says so, names the
+    // rules and the file, and hands over the command that always works.
+    const refused = found.result;
+    return {
+      ...refused,
+      fix: `${refused.path ?? claudeSettingsPath(homeDir)} could not be read, so ${MODE_GATED_RULES.join(' and ')} may still be allowed there. Remove those lines by hand, or run \`tenjin uninstall\`.`,
+    };
+  }
+  const { path, raw, settings, permissions, allow } = found;
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const removed = allow.filter((r): r is string => typeof r === 'string' && gated.has(r));
+  if (removed.length === 0) {
+    return {
+      harness: 'claude',
+      path,
+      added: [],
+      alreadyPresent: [],
+      addedFree: [],
+      alreadyPresentFree: [],
+      removed: [],
+    };
+  }
+  const kept = allow.filter((r) => !(typeof r === 'string' && gated.has(r)));
+  const next = { ...settings, permissions: { ...permissions, allow: kept } };
+  const current = await readFile(path, 'utf8').catch(() => null);
+  if (current !== raw) {
+    return skip(
+      'claude',
+      path,
+      'changed-since-read',
+      `${path} changed while it was being updated, so nothing was written. Re-run to retract ${MODE_GATED_RULES.join(' and ')}.`,
+    );
+  }
+  await writeSettings(path, next);
+  return {
+    harness: 'claude',
+    path,
+    added: [],
+    alreadyPresent: [],
+    addedFree: [],
+    alreadyPresentFree: [],
+    removed,
+  };
+}
+
+/**
+ * Add the rules `mode` calls for to `permissions.allow` in
+ * ~/.claude/settings.json. Creates the file (and the `permissions.allow` path)
+ * when absent, appends only the rules that are missing, and rewrites nothing
+ * else. Idempotent: a second run at the same mode returns `added: []` with every
+ * rule under `alreadyPresent` and does not touch the file at all.
+ */
+/**
+ * What {@link wireFreeVerbAllowlist} WOULD do, without doing it.
+ *
+ * `--dry-run` used to report the allowlist as a bare `dry-run` skip with an empty
+ * `added` and no `modeGrant`, so an operator dry-running precisely to learn
+ * whether `publish` and `edit` would be granted learned nothing. It reads through
+ * the same `inspectAllowlist` the writer does and fills the same fields, marked
+ * `planned` so nothing mistakes a plan for a record.
+ */
+export async function planFreeVerbAllowlist(
+  homeDir: string,
+  mode: PublishMode = 'review',
+): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir, mode);
+  // Unreadable, unparsable, wrong shape: a real run could not write either, and
+  // the reason it gives is the honest plan.
+  if ('result' in found) return { ...found.result, planned: true };
+  const retired = retiredFor(mode);
+  const wouldRemove = found.allow.filter(
+    (r): r is string => typeof r === 'string' && retired.has(r),
+  );
+  return {
+    harness: 'claude',
+    path: found.path,
+    planned: true,
+    skipped: 'dry-run',
+    fix: fixFor('dry-run'),
+    added: [...found.added],
+    alreadyPresent: [...found.alreadyPresent],
+    ...tiers(found.added, found.alreadyPresent, mode, true),
+    removed: wouldRemove,
+  };
+}
+
+export async function wireFreeVerbAllowlist(
+  homeDir: string,
+  mode: PublishMode = 'review',
+): Promise<PermissionsResult> {
+  const found = await inspectAllowlist(homeDir, mode);
   if ('result' in found) return found.result;
   const { path, raw, settings, permissions, allow, added, alreadyPresent } = found;
-  // Rules an earlier version of this writer left behind. Swept on the same pass
-  // that appends, so one `tenjin install` after an update leaves a settings.json
-  // with exactly the current tier in it and no residue from the last one.
-  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  // Rules an earlier version of this writer left behind, and the publish rule
+  // when the mode no longer carries it. Swept on the same pass that appends, so
+  // one `tenjin install` leaves a settings.json holding exactly what this
+  // machine's current mode calls for and no residue from what it used to be.
+  const retired = retiredFor(mode);
   const removed = allow.filter((r): r is string => typeof r === 'string' && retired.has(r));
   if (added.length === 0 && removed.length === 0) {
-    return { harness: 'claude', path, added: [], alreadyPresent, removed: [] };
+    return {
+      harness: 'claude',
+      path,
+      added: [],
+      alreadyPresent,
+      ...tiers([], alreadyPresent, mode),
+      removed: [],
+    };
   }
 
   // Object spreads keep the original key order and land the rebuilt `permissions`
@@ -242,8 +575,15 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
       `${path} changed while it was being updated, so nothing was written. Re-run \`tenjin install\`.`,
     );
   }
-  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness: 'claude', path, added, alreadyPresent, removed };
+  await writeSettings(path, next);
+  return {
+    harness: 'claude',
+    path,
+    added,
+    alreadyPresent,
+    ...tiers(added, alreadyPresent, mode),
+    removed,
+  };
 }
 
 /**
@@ -265,11 +605,12 @@ export async function wireFreeVerbAllowlist(homeDir: string): Promise<Permission
  */
 export async function inspectFreeVerbRules(
   homeDir: string,
+  mode: PublishMode = 'review',
 ): Promise<{ pending: string[] | null; satisfied?: PermissionsResult }> {
-  const found = await inspectAllowlist(homeDir);
+  const found = await inspectAllowlist(homeDir, mode);
   if ('result' in found) return { pending: null };
   if (found.added.length > 0) return { pending: found.added };
-  const retired = new Set<string>(LEGACY_FREE_VERB_RULES);
+  const retired = retiredFor(mode);
   if (found.allow.some((r) => typeof r === 'string' && retired.has(r))) return { pending: [] };
   return {
     pending: [],
@@ -278,6 +619,7 @@ export async function inspectFreeVerbRules(
       path: found.path,
       added: [],
       alreadyPresent: found.alreadyPresent,
+      ...tiers([], found.alreadyPresent, mode),
       removed: [],
     },
   };
@@ -301,6 +643,7 @@ interface AllowlistInspection {
  */
 async function inspectAllowlist(
   homeDir: string,
+  mode: PublishMode,
 ): Promise<AllowlistInspection | { result: PermissionsResult }> {
   const declaredPath = claudeSettingsPath(homeDir);
   const refuse = (
@@ -392,7 +735,8 @@ async function inspectAllowlist(
   const allow: unknown[] = allowValue ?? [];
 
   const present = new Set(allow.filter((e): e is string => typeof e === 'string'));
-  const added = FREE_VERB_RULES.filter((rule) => !present.has(rule));
-  const alreadyPresent = FREE_VERB_RULES.filter((rule) => present.has(rule));
+  const writable = rulesForPublishMode(mode);
+  const added = writable.filter((rule) => !present.has(rule));
+  const alreadyPresent = writable.filter((rule) => present.has(rule));
   return { path, raw, settings, permissions, allow, added, alreadyPresent: [...alreadyPresent] };
 }

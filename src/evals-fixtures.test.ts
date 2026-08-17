@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './cli';
 import { searchCandidateSchema } from './lib/agent-api';
+import { SHIPPED_SKILL_FILES, SKILL_NAMES } from './lib/skills-source';
 import type { Io } from './lib/output';
 
 // The eval fixtures under evals/ are graded by a model, on demand, at real cost
@@ -55,11 +56,20 @@ interface TriggerCase {
 
 const FIXTURE_PATHS = walkFixtures();
 
-// The two skills that ship to npm (package.json `files`), so a stale verb in
-// them reaches every installed agent. The vendored `skills/tenjin/` mirror is
-// deliberately NOT here: it is generated from the tenjin repo and the
-// skill-drift CI owns whether it matches its source.
-const SHIPPED_SKILLS = ['tenjin-search/SKILL.md', 'tenjin-publish/SKILL.md'] as const;
+/**
+ * Every markdown file the CLI skills ship to npm (package.json `files`), so a
+ * stale verb in one reaches every installed agent. DERIVED, for the same reason
+ * the fixtures below are: a hand-written list guards the files someone remembered,
+ * and this one named two while the package shipped four. Both reference files were
+ * outside it, and `references/maintain.md` is where `tenjin edit`'s whole flag
+ * vocabulary now lives, so a flag rename could rot there with CI green.
+ *
+ * The vendored `skills/tenjin/` mirror is deliberately excluded: it is generated
+ * from the tenjin repo and skill-drift CI owns whether it matches its source.
+ */
+const SHIPPED_SKILLS: readonly string[] = SKILL_NAMES.filter((n) => n !== 'tenjin').flatMap(
+  (name) => SHIPPED_SKILL_FILES[name].map((rel) => `${name}/${rel}`),
+);
 
 /**
  * Everything the two verb guards sweep, read once, each carrying the label a

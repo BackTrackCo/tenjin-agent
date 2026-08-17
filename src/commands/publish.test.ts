@@ -3,7 +3,12 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
-import { loadSearches, recordSearch, searchStoreLockPath } from '../lib/search-store';
+import {
+  loadSearches,
+  markSearchResolved,
+  recordSearch,
+  searchStoreLockPath,
+} from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -569,7 +574,7 @@ describe('runPublish — draft end to end', () => {
 });
 
 describe('runPublish — publish <file> --search-id', () => {
-  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  const SEARCH = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
   const QUESTION = 'does ox 0.14 still export Bytes.from';
 
   /** Seed the local store with the MISS a publish is about to close. */
@@ -619,6 +624,132 @@ describe('runPublish — publish <file> --search-id', () => {
       prefill: 'applied',
     });
     expect(res.humanLines).toContain(`Closed the loop on search ${SEARCH}.`);
+  });
+
+  // The #161 loop: a research agent closes the MISS as `regenerated` because the
+  // synthesis is still in flight, finishes it minutes later, and names the same
+  // search on the publish. The publish takes the loop over rather than bouncing.
+  it('relinks a search a prior outcome report already closed', async () => {
+    await seed();
+    await markSearchResolved(dir, SEARCH, 'outcome');
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: true,
+      relinked: true,
+      prefill: 'applied',
+    });
+    expect(res.humanLines).toContain(
+      `Re-linked search ${SEARCH} to this piece; it had been closed without one.`,
+    );
+  });
+
+  // The other repeat case: an earlier PUBLISH already claimed this demand. The
+  // loop is closed either way, but reporting a fresh close would tell the agent
+  // its piece took the attribution when a different post holds it.
+  it('reports a loop an earlier publish already claimed, not a fresh close', async () => {
+    await seed();
+    await markSearchResolved(dir, SEARCH, 'publish');
+    const { fetch } = stubServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { search?: unknown }).search).toEqual({
+      id: SEARCH,
+      closed: true,
+      alreadyAnswered: true,
+      prefill: 'applied',
+    });
+    expect((res.data as { search?: { relinked?: boolean } }).search?.relinked).toBeUndefined();
+    expect(res.humanLines?.join('\n')).toContain('already answered by an earlier publish');
+    expect(res.humanLines).not.toContain(`Closed the loop on search ${SEARCH}.`);
+  });
+
+  // The attribution half. Closing the local loop only silences the reminder; this
+  // is what ties the published answer to the demand that asked for it, and it was
+  // missing entirely until #161 (the flag never reached the wire at all).
+  it('sends the searchId on the publish body', async () => {
+    await seed();
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.searchId).toBe(SEARCH);
+  });
+
+  it('omits searchId from the body when the flag was not passed', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()).not.toHaveProperty('searchId');
+  });
+
+  // A relink is exactly the attribution case: the loop was closed by an outcome
+  // report, and this publish is the answer arriving. The server has no idea about
+  // that local state, so the field goes out unchanged.
+  it('still sends the searchId when the loop is being re-linked', async () => {
+    await seed();
+    await markSearchResolved(dir, SEARCH, 'outcome');
+    const { fetch, body } = bodyServer();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.searchId).toBe(SEARCH);
+    expect((res.data as { search?: { relinked?: boolean } }).search?.relinked).toBe(true);
+  });
+
+  // A draft answers nobody: the local ledger says so and leaves the loop open, so
+  // the wire must say the same. Sending it anyway meant one demand signal claimed
+  // by two posts, since no command promotes a draft and the only route to a public
+  // piece is a second publish naming the same id.
+  it('sends no searchId on a draft, and leaves the local loop open', async () => {
+    await seed();
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, draft: true, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()).not.toHaveProperty('searchId');
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  // The server's declared pattern is narrower than the CLI's own UUID_RE, and the
+  // value is now SENT, so a shape the server would 400 has to be refused here —
+  // before the wallet signature, not after it.
+  it('refuses a uuid-shaped id the server contract would reject, before any wallet touch', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        // Uuid-shaped and accepted by the local UUID_RE, but the version nibble
+        // is not 1-8, so the server's declared pattern refuses it. Before the
+        // field was sent this published fine; now it must fail HERE.
+        baseArgs(await writeDoc(CLEAN), {
+          searchId: '0197bbbb-cccc-dddd-eeee-ffffffffffff',
+          mode: 'auto',
+        }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
   });
 
   it('omits the search field entirely when --search-id was not passed', async () => {
@@ -740,14 +871,18 @@ describe('runPublish — publish <file> --search-id', () => {
 
   it('refuses a --search-id that is not a uuid', async () => {
     const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
     await expect(
       runPublish(
         baseArgs(await writeDoc(CLEAN), { searchId: 'not-a-uuid', mode: 'auto' }),
         makeCtx(),
-        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+        hermetic({ fetchImpl: fetch, provider }),
       ),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(calls).toHaveLength(0);
+    // Same guarantee its uuid-shaped sibling above asserts: the edge check runs
+    // before the keystore is opened, so a typo costs a message, not a signature.
+    expect(getSignerCount()).toBe(0);
   });
 });
 
@@ -858,7 +993,7 @@ describe('runPublish — the public preview (--excerpt)', () => {
 });
 
 describe('runPublish — public card text is sanitized', () => {
-  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  const SEARCH = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
   // A CSI sequence and an RTL override: `trim()` removes neither, and both ride
   // into text every future buyer reads.
   const CSI = '\x1b[31mred\x1b[0m';
@@ -959,7 +1094,7 @@ describe('runPublish — public card text is sanitized', () => {
 });
 
 describe('runPublish — the dropped prefill is reported', () => {
-  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  const SEARCH = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
 
   async function seed(question: string): Promise<void> {
     await recordSearch(dir, {
@@ -1103,7 +1238,7 @@ describe('runPublish — every wire field is stripped, not just the two', () => 
 // this the receipt can go back to claiming a close that never landed — and an
 // agent that believes a paid loop closed does not publish it again, or does.
 describe('runPublish — a search the store could not close reports closed:false', () => {
-  const SEARCH = '0197bbbb-cccc-dddd-eeee-ffffffffffff';
+  const SEARCH = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
 
   it('reports closed:false and names the recovery when the store lock is held', async () => {
     await recordSearch(dir, {
