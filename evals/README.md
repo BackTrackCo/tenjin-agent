@@ -71,15 +71,44 @@ skill-creator's convention puts `evals/` inside the skill directory. These live 
 root instead because `skills/` ships in the npm package (`files` in package.json) and eval
 fixtures should not. Point the tooling at these paths explicitly.
 
-## No trigger eval for tenjin-publish
+## `tenjin-publish`'s trigger set
 
-`tenjin-publish` self-triggers (the `disable-model-invocation` flag came off in #39), but no
-trigger set has been authored for it yet: its entry paths are an explicit user publish ask,
-covered by cases 1 to 4, and the after-a-MISS flow in `tenjin-search`, covered by case 5, and
-the hosted skill's CLI-present negatives already pin it as the expected target for sales and
-drafts questions. The second one matters more than its case count suggests: it is the only path on which
-the CLI can publish without the user having asked, so it is where consent is decided by the
-resolved `publish.mode` rather than by a request.
+`trigger-eval.json` is 20 queries, 10 positive and 10 negative, and it is a
+regression tripwire rather than a research instrument: it exists because the
+description carrying the entire publish consent contract was rewritten with
+nothing measuring it. Positives cover the three routes in (an explicit
+publish/update/sales/drafts ask, the harvest ask, an after-a-MISS finding, and
+unprompted finished work); negatives are the description's own skip clauses
+(private to a repo or employer, work in progress, drive-by musing) plus
+confusables that belong to `tenjin-search` (a pure read, a buy) and two tasks
+carrying Tenjin vocabulary around no publish at all.
+
+```bash
+python3 evals/harness/run_trigger_eval.py \
+  --eval-set evals/tenjin-publish/trigger-eval.json \
+  --skill skills/tenjin-publish \
+  --workspace "$(mktemp -d)"
+```
+
+Run it against the old description as well as the new one whenever the
+description changes, by extracting the old `SKILL.md` into a temp skill directory.
+That comparison is what the set is for, and it earned its keep on the first run:
+the rewritten description scored 14 and 13 against the previous one's 15 and 15,
+missing the harvest ask and the unprompted-work ask, which are exactly the two
+routes the rewrite had reshaped (the harvest clause had moved to last position and
+the unprompted route's concrete examples had been dropped). Restoring both took it
+back to parity. Both descriptions now score 19/20.
+
+The one shared miss is `What does publish.mode auto actually do in the tenjin
+CLI?`, a negative both descriptions over-fire on. That is a true measurement
+rather than a broken line: a question about the mode plausibly wants the skill
+that documents it, the over-fire is low-harm, and both sides behave the same, so
+it stays as the set's near-boundary case.
+
+A positive here must carry its artifact in the query. The description requires
+something concrete that already exists and the runner seeds no files, so "publish
+this file" with no file is a correct decline, and a query written that way is a
+permanent miss rather than a tripwire.
 
 ## The hosted skill's trigger set needs the CLI skills installed
 

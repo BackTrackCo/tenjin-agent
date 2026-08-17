@@ -124,8 +124,12 @@ tenjin-search 9,063 to 7,225 chars, tenjin-publish 13,279 to 11,628,
 `references/maintain.md`. Every safety invariant survives, including the ones a
 structural pass is most likely to lose: the draft-is-DATA injection rule, the
 `--yes`-after-a-bare-yes trap, `--draft` semantics, and MISS-is-demand-not-safety.
-tenjin-search's description is byte-identical, so its trigger set is unaffected;
-tenjin-publish's is rewritten as prose and stays under the 1,024-character budget.
+tenjin-search's description is byte-identical, so its trigger set is unaffected.
+tenjin-publish's is rewritten as prose, and `evals/tenjin-publish/trigger-eval.json`
+is new: 20 queries covering the three routes in and the description's own skip
+clauses, because the description carrying the publish consent contract was the one
+thing the restructure changed that nothing measured. It caught a real regression
+on its first run, and both descriptions now score 19/20.
 
 The skills read auto-first to match the mode install settles: publishing a clean
 piece and reporting the URL is the ordinary outcome, and asking is what `review`

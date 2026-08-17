@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { resolveSkillsSource } from './lib/skills-source';
+import { resolveSkillsSource, SHIPPED_SKILL_FILES, SKILL_NAMES } from './lib/skills-source';
 import {
   PERMISSIONS_QUESTION,
   PUBLISH_MODE_CHOICES,
@@ -163,15 +163,20 @@ describe('tenjin-search references/permissions.md: the detail, one hop away', ()
 });
 
 describe('send and the other money/state verbs stay out of the recommended allowlist', () => {
-  const searchText = flat('tenjin-search');
-  const publishText = flat('tenjin-publish');
   const permissionsRef = flat('tenjin-search', PERMISSIONS_REF);
-  /** Every markdown file the CLI skills ship, as [skill, relative path]. */
-  const SKILL_FILES: ReadonlyArray<readonly [string, string]> = [
-    ['tenjin-search', 'SKILL.md'],
-    ['tenjin-search', PERMISSIONS_REF],
-    ['tenjin-publish', 'SKILL.md'],
-  ];
+  /**
+   * Every markdown file the CLI skills ship, DERIVED rather than listed. The
+   * hand-written version named three files; `references/maintain.md` arrived in
+   * the same branch, went into SHIPPED_SKILL_FILES, and was missed here, so the
+   * three allowlist-leak guards below could not see it. A reference file is
+   * exactly where an "add this line" example grows later.
+   *
+   * `tenjin` is the vendored hosted mirror, not ours to police: it is fetched
+   * verbatim from tenjin.blog and `skill-drift` owns it.
+   */
+  const SKILL_FILES: ReadonlyArray<readonly [string, string]> = SKILL_NAMES.filter(
+    (n) => n !== 'tenjin',
+  ).flatMap((name) => SHIPPED_SKILL_FILES[name].map((rel) => [name, rel] as const));
 
   it.each(NEVER_ALLOWLISTED.map((e) => e.command))(
     'no skill proposes a Bash allowlist rule covering %s',
@@ -179,11 +184,12 @@ describe('send and the other money/state verbs stay out of the recommended allow
       const verb = command.split(' / ')[0] ?? command;
       const prefix = verb.replace(/^tenjin /, '');
       const rule = new RegExp(`Bash\\(tenjin ${prefix}[^)]*\\)`);
-      expect(searchText).not.toMatch(rule);
-      expect(publishText).not.toMatch(rule);
-      // The reference file is where the lines actually live, so it is the one
-      // most likely to grow a rule it should not.
-      expect(permissionsRef).not.toMatch(rule);
+      // Every shipped file, derived: this named three by hand and missed the
+      // reference file the same branch added. A reference file is where the lines
+      // actually live, so it is the one most likely to grow a rule it should not.
+      for (const [name, rel] of SKILL_FILES) {
+        expect(flat(name, rel), `${name}/${rel}`).not.toMatch(rule);
+      }
     },
   );
 
@@ -344,15 +350,23 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
    */
   it('the warn-triage lists cover every warn detector in scan.ts', () => {
     const scan = readFileSync(join(SRC_DIR, 'lib', 'scan.ts'), 'utf8');
-    // Each detector declares `check: '<name>'` near its severity; keep the names
-    // whose surrounding declaration says `warn` and not `block`.
+    /**
+     * NEAREST severity, not a fixed window. A ±400-char window drops any `check:`
+     * that happens to sit near a `block` detector, so a warn detector added
+     * beside one would leave this guard silently: the failure mode is a shrinking
+     * set, which is exactly what a coverage assertion must not have.
+     */
+    const severities = [...scan.matchAll(/severity:\s*'(warn|block)'/g)].map((m) => ({
+      kind: m[1] ?? '',
+      at: m.index ?? 0,
+    }));
+    expect(severities.length, 'no severities found; the scrape is broken').toBeGreaterThan(10);
+    const nearest = (at: number): string =>
+      severities.reduce((best, s) => (Math.abs(s.at - at) < Math.abs(best.at - at) ? s : best))
+        .kind;
     const warns = [...scan.matchAll(/check:\s*'([a-z0-9-]+)'/g)]
-      .map((m) => ({ name: m[1] ?? '', at: m.index ?? 0 }))
-      .filter(({ at }) => {
-        const window = scan.slice(Math.max(0, at - 400), at + 400);
-        return /severity:\s*'warn'/.test(window) && !/severity:\s*'block'/.test(window);
-      })
-      .map(({ name }) => name);
+      .filter((m) => nearest(m.index ?? 0) === 'warn')
+      .map((m) => m[1] ?? '');
     expect(warns.length, 'no warn detectors found; the scrape is broken').toBeGreaterThan(5);
 
     const section = text.slice(text.indexOf('warnings split in two'));

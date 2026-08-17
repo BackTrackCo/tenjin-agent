@@ -779,13 +779,25 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
    * rather than shipping.
    */
   const retracted = p.removed.filter((r) => MODE_GATED_RULES.includes(r));
+  /**
+   * PAST TENSE FOR A RUN, FUTURE FOR A PLAN. `planFreeVerbAllowlist` fills
+   * `removed` with what a real run WOULD take back, so a dry run reaching the
+   * past-tense sentence reports a deletion that never happened.
+   */
   const gaveBack =
     retracted.length === 0
       ? ''
-      : ` Publishing is back to asking first, so ${retracted.length} rule(s) for publish and edit were removed from ${p.path ?? 'your settings'}.`;
-  // Nothing was written AND nothing was taken back: only then is "unchanged" the
-  // honest word. Every skip branch below reads this instead of saying so itself.
-  const unchanged = retracted.length === 0 ? 'unchanged' : 'otherwise unchanged';
+      : p.planned === true
+        ? ` A real run would remove ${retracted.length} rule(s) for publish and edit from ${p.path ?? 'your settings'}.`
+        : ` Publishing is back to asking first, so ${retracted.length} rule(s) for publish and edit were removed from ${p.path ?? 'your settings'}.`;
+  /**
+   * Nothing was written AND nothing was taken back: only then is "unchanged" the
+   * honest word. Gated on `planned` too, because a dry run changes nothing by
+   * definition, and "otherwise unchanged" there qualified against a retraction the
+   * line never named.
+   */
+  const unchanged =
+    retracted.length === 0 || p.planned === true ? 'unchanged' : 'otherwise unchanged';
 
   // A dry run reports the PLAN in the same fields, so it takes this branch and
   // says "would allow". An operator dry-running to find out whether publish and
@@ -803,7 +815,7 @@ function permissionsLine(io: Io, p: PermissionsResult): string {
     return `${paint(io, 'dim', '-')} ${label} not wired for this harness (Claude Code only).${gaveBack} The lines your harness needs: ${PERMISSIONS_DOC_URL}`;
   }
   if (p.skipped === 'dry-run') {
-    return `${paint(io, 'dim', '-')} ${label} ${unchanged} (dry run); the ${FREE_VERB_RULES.length} rules a real run needs are already there.`;
+    return `${paint(io, 'dim', '-')} ${label} ${unchanged} (dry run); the ${FREE_VERB_RULES.length} rules a real run needs are already there.${gaveBack}`;
   }
   if (p.skipped === 'declined' || p.skipped === 'not-requested') {
     return `${paint(io, 'dim', '-')} ${label} ${unchanged}.${gaveBack} Allow the ${FREE_VERB_RULES.length} free tenjin commands with: tenjin install --allow-free-verbs`;

@@ -290,6 +290,12 @@ export interface PermissionsResult {
    * look. ABSENT when the harness has no such file: naming a Claude path on a
    * Codex-only install would point the envelope's reader at a file that has
    * nothing to do with their harness.
+   *
+   * ONE EXCEPTION, in `install`'s `withRetraction`: a `review` run retracts from
+   * `~/.claude/settings.json` above the harness guard, so a non-Claude result
+   * carrying a non-empty `removed` carries that path too. The reason the general
+   * rule exists is inverted there, because the run did change that file and the
+   * operator cannot check which one without its name.
    */
   path?: string;
   added: string[];

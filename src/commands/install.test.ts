@@ -1670,6 +1670,37 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toBeUndefined();
   });
 
+  /**
+   * A dry run fills `removed` with what a real run WOULD take back, so the
+   * retraction sentence has to be future tense here and "otherwise unchanged" has
+   * to not fire: on a fully-wired machine the line said "otherwise unchanged (dry
+   * run)" on a run that changed nothing, qualifying against a retraction it never
+   * named. The three existing dry-run tests all miss it — two run real installs,
+   * and the third starts from a file with no mode-gated rules, so `wouldRemove` is
+   * empty there.
+   */
+  it('--dry-run on review reports the planned retraction in the future tense', async () => {
+    await writeSettings({
+      permissions: { allow: [...FREE_VERB_RULES, PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
+    });
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const line =
+      human(res)
+        .split('\n')
+        .find((l) => l.includes('Permissions:')) ?? '';
+    expect(line).toContain('would remove 2 rule(s) for publish and edit');
+    // Nothing happened, so nothing is "otherwise" unchanged.
+    expect(line).not.toContain('otherwise unchanged');
+    expect(line).toContain('unchanged (dry run)');
+    // Past tense belongs to a run that actually wrote.
+    expect(line).not.toContain('were removed');
+    expect(await allowList()).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE, EDIT_MODE_RULE]);
+  });
+
   it('--dry-run on review plans the free tier only, and no grant', async () => {
     const res = await runInstall(
       { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },

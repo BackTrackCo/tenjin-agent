@@ -4,16 +4,17 @@ description: >-
   Publish, update, and maintain your own reusable answers on the Tenjin
   knowledge marketplace, so a finding you already paid to produce earns on
   every later buyer. Use when the user asks to publish, update, or manage
-  Tenjin content, asks about their sales or drafts, or asks whether recent
-  work holds anything worth selling; when a tenjin-search MISS left you with
+  Tenjin content, asks whether recent work holds anything worth selling, or
+  asks about their sales or drafts; when a tenjin-search MISS left you with
   a finished, public, rights-clean finding to publish under your
   publish.mode; or when you have just finished substantial sellable public
-  work on your own initiative, which you offer once: a multi-source
-  synthesis, a tested comparison, a runbook, or an empirical result the docs
-  do not state. Requires something concrete that already exists, a written
-  piece or a completed task's finding. Skip it for anything private to a
-  repo, employer, or person, for work still in progress, and for passing
-  "maybe publish this" or "we should write this up sometime" musing.
+  work on your own initiative: a multi-source synthesis, a tested
+  comparison, a runbook, or an empirical proof of something the docs do not
+  state (a race, a workaround, an integration pattern), which you offer
+  once. Requires something concrete that already exists, a written piece or
+  a completed task's finding. Skip it for anything private to a repo,
+  employer, or person, for work still in progress, and for passing "maybe
+  publish this" or "we should write this up sometime" musing.
 ---
 
 # Tenjin publish: sell and maintain reusable answers
