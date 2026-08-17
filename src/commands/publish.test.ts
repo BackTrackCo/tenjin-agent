@@ -119,6 +119,23 @@ function stubServer(post: Record<string, unknown> = CREATED): {
   return { fetch: fetchFn, calls };
 }
 
+/** A stub server that also captures the parsed request body. */
+function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
+  let captured: Record<string, unknown> | undefined;
+  const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+    captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+    return new Response(JSON.stringify(CREATED), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+  return { fetch: fetchFn, body: () => captured };
+}
+
+function questionsIn(body: Record<string, unknown> | undefined): string[] | undefined {
+  return (body?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
+}
+
 async function writeDoc(content: string): Promise<string> {
   const path = join(dir, 'post.md');
   await writeFile(path, content, 'utf8');
@@ -588,23 +605,6 @@ describe('runPublish — publish <file> --search-id', () => {
     });
   }
 
-  /** A stub server that also captures the parsed request body. */
-  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
-    let captured: Record<string, unknown> | undefined;
-    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
-      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      return new Response(JSON.stringify(CREATED), {
-        status: 201,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as unknown as typeof fetch;
-    return { fetch: fetchFn, body: () => captured };
-  }
-
-  function questionsIn(body: Record<string, unknown> | undefined): string[] | undefined {
-    return (body?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
-  }
-
   // The gap this flag closes: the path the Stop hook and the auto-mode skill
   // prescribe is a bare file publish, which left the loop open.
   it('resolves the named search on a successful file publish', async () => {
@@ -883,6 +883,146 @@ describe('runPublish — publish <file> --search-id', () => {
     // Same guarantee its uuid-shaped sibling above asserts: the edge check runs
     // before the keystore is opened, so a typo costs a message, not a signature.
     expect(getSignerCount()).toBe(0);
+  });
+});
+
+/**
+ * One research thread fans out into many searchIds and a piece answers the
+ * thread, not one query of it (#167). The siblings used to be closed as
+ * `regenerated`, which reads as failures of a loop that actually converted.
+ */
+describe('runPublish — a piece that answers a whole thread', () => {
+  const A = '0197bbbb-cccc-7ddd-8eee-aaaaaaaaaaaa';
+  const B = '0197bbbb-cccc-7ddd-8eee-bbbbbbbbbbbb';
+  const C = '0197bbbb-cccc-7ddd-8eee-cccccccccccc';
+  const D = '0197bbbb-cccc-7ddd-8eee-dddddddddddd';
+
+  async function seed(searchId: string, question: string): Promise<void> {
+    await recordSearch(dir, {
+      searchId,
+      at: new Date().toISOString(),
+      question,
+      decision: 'MISS',
+      candidates: [],
+    });
+  }
+
+  function searchesIn(res: { data: unknown }): unknown[] | undefined {
+    return (res.data as { searches?: unknown[] }).searches;
+  }
+
+  async function publishWith(ids: string[], over: Partial<PublishArgs> = {}) {
+    const { fetch, body } = bodyServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: ids, mode: 'auto', ...over }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    return { res, body, stderr };
+  }
+
+  // The wire rule the server rollout depends on: a CLI that never names two
+  // keeps working against a post-create that only takes a scalar.
+  it('sends a bare string for one id and an array for several', async () => {
+    await seed(A, 'first');
+    const one = await publishWith([A]);
+    expect(one.body()?.searchId).toBe(A);
+
+    await seed(B, 'second');
+    const many = await publishWith([A, B]);
+    expect(many.body()?.searchId).toEqual([A, B]);
+  });
+
+  // A repeat collapses in the ledger too, not only on the wire.
+  it('collapses a repeated id on the wire and in the receipt', async () => {
+    await seed(A, 'first');
+    await seed(B, 'second');
+    const { res, body } = await publishWith([A, B, A]);
+    expect(body()?.searchId).toEqual([A, B]);
+    expect(searchesIn(res)).toHaveLength(2);
+  });
+
+  it('refuses more than ten searches before any wallet touch', async () => {
+    const ids = Array.from(
+      { length: 11 },
+      (_, i) => `0197bbbb-cccc-7ddd-8eee-0000000000${String(i).padStart(2, '0')}`,
+    );
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { searchId: ids, mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+  });
+
+  // Four local states, differing in who holds the attribution. The id this
+  // machine never heard of must not take the rest down with it.
+  it('closes each named search on its own terms, absent ones included', async () => {
+    await seed(A, 'closeable');
+    await seed(B, 'closed by an outcome report');
+    await seed(C, 'closed by an earlier publish');
+    await markSearchResolved(dir, B, 'outcome');
+    await markSearchResolved(dir, C, 'publish');
+
+    const { res, stderr } = await publishWith([A, B, C, D]);
+
+    expect(searchesIn(res)).toEqual([
+      { id: A, closed: true, prefill: 'applied' },
+      { id: B, closed: true, relinked: true, prefill: 'none' },
+      { id: C, closed: true, alreadyAnswered: true, prefill: 'none' },
+      { id: D, closed: false, prefill: 'none' },
+    ]);
+    const stored = await loadSearches(dir);
+    for (const id of [A, B, C]) {
+      expect(stored.find((s) => s.searchId === id)?.resolved?.by, id).toBe('publish');
+    }
+    expect(stderr()).toContain(`search ${D} is not in the local store`);
+    expect(res.humanLines).toContain(`Closed the loop on search ${A}.`);
+    expect(res.humanLines).toContain(
+      `Re-linked search ${B} to this piece; it had been closed without one.`,
+    );
+    expect(res.humanLines).toContain(`Search ${C} was already answered by an earlier publish.`);
+  });
+
+  // One card, so one prefill: only the first recorded search lends its phrasing.
+  it('prefills the card from the first stored search and says which one', async () => {
+    await seed(B, 'the phrasing that ships');
+    const { res, body } = await publishWith([A, B, C]);
+    expect(questionsIn(body())).toEqual(['the phrasing that ships']);
+    expect(searchesIn(res)).toEqual([
+      { id: A, closed: false, prefill: 'none' },
+      { id: B, closed: true, prefill: 'applied' },
+      { id: C, closed: false, prefill: 'none' },
+    ]);
+  });
+
+  it('sends no searchId on a multi-id draft and leaves every loop open', async () => {
+    await seed(A, 'first');
+    await seed(B, 'second');
+    const { res, body } = await publishWith([A, B], { draft: true });
+    expect(body()).not.toHaveProperty('searchId');
+    expect((await loadSearches(dir)).every((s) => s.resolved === undefined)).toBe(true);
+    expect(searchesIn(res)?.every((s) => (s as { closed: boolean }).closed === false)).toBe(true);
+  });
+
+  // `search` is what callers have read since #161: it survives for a lone id.
+  it('keeps the flat search field for one id and drops it for several', async () => {
+    await seed(A, 'first');
+    const one = await publishWith([A]);
+    expect((one.res.data as { search?: unknown }).search).toEqual({
+      id: A,
+      closed: true,
+      prefill: 'applied',
+    });
+    await seed(B, 'second');
+    const many = await publishWith([A, B]);
+    expect(many.res.data).not.toHaveProperty('search');
   });
 });
 

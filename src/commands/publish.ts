@@ -22,9 +22,9 @@ import {
 } from '../lib/card';
 import {
   publishPost,
+  normalizeSearchIds,
   EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
-  SEARCH_ID_WIRE_RE,
   type PublishInput,
   type PublishStatus,
 } from '../lib/posts-api';
@@ -55,8 +55,8 @@ import type { CommandContext, CommandResult } from '../context';
 export interface PublishArgs {
   /** The Markdown file to publish. */
   file?: string;
-  /** The search this publish answers; closes its open loop. */
-  searchId?: string;
+  /** The search(es) this publish answers; closes each open loop. */
+  searchId?: string | string[];
   draft?: boolean;
   yes?: boolean;
   /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
@@ -101,16 +101,13 @@ export async function runPublish(
   // typo like `--mode Review` must never be silently dropped onto a looser mode
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
-  validateSearchId(args);
+  const searchIds = normalizeSearchIds(args.searchId, '--search-id');
 
   const raw = await readSource(args);
-  // Read the named search ONCE, here: it prefills the card's question below, and
-  // whether it was found decides what the post-publish close reports. Local read,
-  // and a missing store reads as no entry rather than failing the publish.
-  const storedSearch =
-    args.searchId !== undefined
-      ? ((await loadSearches(ctx.dataDir)).find((s) => s.searchId === args.searchId) ?? null)
-      : null;
+  // Read the named searches ONCE, here: one prefills the card's question below,
+  // and each id's presence decides what its close reports. A missing store reads
+  // as no entries rather than failing the publish.
+  const stored = await loadNamedSearches(ctx, searchIds);
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
@@ -122,7 +119,9 @@ export async function runPublish(
   // fallback: an explicit --question OR a frontmatter questionsAnswered still
   // wins. That phrasing is what the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  const wanted = storedSearch?.question;
+  // One card, so one prefill: the first recorded id. The rest are attribution.
+  const prefillFrom = searchIds.find((id) => stored.get(id)?.question !== undefined);
+  const wanted = prefillFrom === undefined ? undefined : stored.get(prefillFrom)?.question;
   const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
   const roomForPrefill =
     cardFlags.question === undefined && frontmatter.questionsAnswered === undefined;
@@ -246,7 +245,7 @@ export async function runPublish(
     // demand either. Sending it on a draft put one demand signal on two posts —
     // no command promotes a draft, so reaching a public piece means a second
     // publish carrying the same id — with one of them possibly never shipping.
-    ...(args.searchId !== undefined && status !== 'draft' ? { searchId: args.searchId } : {}),
+    ...(searchIds.length > 0 && status !== 'draft' ? { searchId: searchIds } : {}),
   };
 
   const result = await publishPost(input, auth, {
@@ -260,11 +259,31 @@ export async function runPublish(
   // what resolves it.
   const parksPrivately = status === 'draft';
 
-  let searchInfo: SearchReceipt | undefined;
-  if (args.searchId !== undefined) {
-    searchInfo = await closeNamedSearch(ctx, args.searchId, storedSearch, parksPrivately, prefill);
+  // One close per id, each reporting for itself: the piece is published and the
+  // server has every id, so an unrecorded search warns without costing the rest.
+  const searches: SearchReceipt[] = [];
+  for (const id of searchIds) {
+    searches.push(
+      await closeNamedSearch(
+        ctx,
+        id,
+        stored.get(id) ?? null,
+        parksPrivately,
+        id === prefillFrom ? prefill : 'none',
+      ),
+    );
   }
-  return receipt(result, runtime.baseUrl, searchInfo);
+  return receipt(result, runtime.baseUrl, searches);
+}
+
+async function loadNamedSearches(
+  ctx: CommandContext,
+  searchIds: string[],
+): Promise<Map<string, StoredSearch>> {
+  if (searchIds.length === 0) return new Map();
+  const searches = await loadSearches(ctx.dataDir);
+  const wanted = new Set(searchIds);
+  return new Map(searches.filter((s) => wanted.has(s.searchId)).map((s) => [s.searchId, s]));
 }
 
 /**
@@ -297,24 +316,6 @@ interface SearchReceipt {
  * nothing was expected; `dropped-too-long` is the one a caller has to be told.
  */
 type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
-
-/**
- * `--search-id` at the edge: a uuid, refused before any wallet touch so a typo
- * costs a message rather than a signing prompt.
- *
- * Checked against the shape the SERVER declares, not the looser local UUID_RE,
- * because this value is now sent on the publish body: an id that satisfied only
- * the local shape would be refused by the server as a 400, and that refusal
- * would arrive after the wallet signature rather than here.
- */
-function validateSearchId(args: PublishArgs): void {
-  if (args.searchId === undefined) return;
-  if (!SEARCH_ID_WIRE_RE.test(args.searchId)) {
-    throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
-      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
-    });
-  }
-}
 
 /**
  * Close the loop a `--search-id` file publish named, and say what happened in
@@ -392,7 +393,7 @@ async function readSource(args: PublishArgs): Promise<string> {
 function receipt(
   result: Awaited<ReturnType<typeof publishPost>>,
   baseUrl: string,
-  searchInfo?: SearchReceipt,
+  searches: SearchReceipt[],
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
@@ -409,15 +410,7 @@ function receipt(
       : missing.length > 0
         ? `Answer card not search-eligible yet: ${missing.join(' ')}`
         : 'Published as a browse-only document (no answer card).',
-    ...(searchInfo?.closed === true
-      ? [
-          searchInfo.relinked === true
-            ? `Re-linked search ${searchInfo.id} to this piece; it had been closed without one.`
-            : searchInfo.alreadyAnswered === true
-              ? `Search ${searchInfo.id} was already answered by an earlier publish.`
-              : `Closed the loop on search ${searchInfo.id}.`,
-        ]
-      : []),
+    ...searches.filter((s) => s.closed).map(closeLine),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -429,11 +422,24 @@ function receipt(
       cacheEligible,
       missing,
       deskUrl,
-      ...(searchInfo !== undefined ? { search: searchInfo } : {}),
+      // `search` repeats a lone result for callers that already read it; a
+      // batch has no single one to repeat.
+      ...(searches.length === 1 ? { search: searches[0] } : {}),
+      ...(searches.length > 0 ? { searches } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,
   };
+}
+
+function closeLine(search: SearchReceipt): string {
+  if (search.relinked === true) {
+    return `Re-linked search ${search.id} to this piece; it had been closed without one.`;
+  }
+  if (search.alreadyAnswered === true) {
+    return `Search ${search.id} was already answered by an earlier publish.`;
+  }
+  return `Closed the loop on search ${search.id}.`;
 }
 
 // ---------------------------------------------------------------------------

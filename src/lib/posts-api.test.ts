@@ -11,6 +11,9 @@ import type { SignableRequest, WriteAuth } from './session-key';
 
 const OPTS = { baseUrl: 'https://tenjin.blog', timeoutMs: 5000 };
 
+const SEARCH_A = '0197aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee';
+const SEARCH_B = '0197aaaa-bbbb-7ccc-8ddd-ffffffffffff';
+
 interface CapturedCall {
   url: string;
   method: string;
@@ -128,6 +131,33 @@ describe('buildPostCreateBody — bounds', () => {
     ).toThrow();
     expect(() => buildPostCreateBody({ status: 'draft', priceAtomic: '1a' })).toThrow();
     expect(() => buildPostCreateBody({ status: 'draft', handle: 'A!' })).toThrow();
+  });
+
+  // The wire rule the server rollout turns on: one search stays the bare string
+  // a post-create that predates the array still takes.
+  it('ships one searchId as a bare string and several as an array', () => {
+    const base = { status: 'published', title: 'T', bodyMd: 'B' } as const;
+    expect(buildPostCreateBody({ ...base, searchId: SEARCH_A }).searchId).toBe(SEARCH_A);
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A] }).searchId).toBe(SEARCH_A);
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A, SEARCH_B] }).searchId).toEqual([
+      SEARCH_A,
+      SEARCH_B,
+    ]);
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A, SEARCH_A] }).searchId).toBe(
+      SEARCH_A,
+    );
+  });
+
+  it('refuses a bad searchId anywhere in the list, and more than ten of them', () => {
+    const base = { status: 'published', title: 'T', bodyMd: 'B' } as const;
+    expect(() => buildPostCreateBody({ ...base, searchId: [SEARCH_A, 'nope'] })).toThrow(
+      /Invalid searchId/,
+    );
+    const eleven = Array.from(
+      { length: 11 },
+      (_, i) => `0197aaaa-bbbb-7ccc-8ddd-0000000000${String(i).padStart(2, '0')}`,
+    );
+    expect(() => buildPostCreateBody({ ...base, searchId: eleven })).toThrow(/at most 10 searches/);
   });
 
   it('emits only defined keys (strictObject-safe), status last', () => {

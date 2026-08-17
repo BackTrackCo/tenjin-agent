@@ -38,11 +38,12 @@ export interface PublishInput {
   status: PublishStatus;
   resource?: ResourceCardInput;
   /**
-   * The search whose MISS motivated this piece, so the marketplace can attribute
-   * supply to the demand that asked for it (tenjin-agent #161). Stored
-   * server-side only and never echoed back, so nothing downstream reads it.
+   * The search(es) whose MISS motivated this piece, so the marketplace can
+   * attribute supply to the demand that asked for it (tenjin-agent #161, #167).
+   * Several because one thread fans out into many searchIds and a piece answers
+   * the thread. Stored server-side only and never echoed back.
    */
-  searchId?: string;
+  searchId?: string | string[];
 }
 
 /** The exact strictObject body sent to POST /api/posts (defined keys only). */
@@ -55,7 +56,7 @@ export interface PostCreateBody {
   handle?: string;
   status?: PublishStatus;
   resource?: ResourceCardInput;
-  searchId?: string;
+  searchId?: string | string[];
 }
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
@@ -71,6 +72,49 @@ const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
  */
 export const SEARCH_ID_WIRE_RE =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+/** How many searches one piece may claim, mirroring the server's cap. */
+export const SEARCH_ID_MAX = 10;
+
+/**
+ * The searchIds a publish claims: deduped (naming one twice says it once, not
+ * twice), each checked against the shape the SERVER declares, and capped. Run
+ * by the command edge before the wallet touch, so a typo costs a message rather
+ * than a signature, and again by the builder, the last gate before a signed body.
+ */
+export function normalizeSearchIds(
+  searchId: string | string[] | undefined,
+  label: string,
+): string[] {
+  if (searchId === undefined) return [];
+  const ids = [...new Set(typeof searchId === 'string' ? [searchId] : searchId)];
+  for (const id of ids) {
+    if (!SEARCH_ID_WIRE_RE.test(id)) {
+      throw new CliError('USAGE', `Invalid ${label}: ${JSON.stringify(id)}`, {
+        fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
+      });
+    }
+  }
+  if (ids.length > SEARCH_ID_MAX) {
+    throw new CliError(
+      'USAGE',
+      `One piece claims at most ${SEARCH_ID_MAX} searches (got ${ids.length}).`,
+      {
+        fix: `Name the ${SEARCH_ID_MAX} this piece actually answers, then close the rest with \`tenjin outcome --search-id <id> --status regenerated\`.`,
+      },
+    );
+  }
+  return ids;
+}
+
+/**
+ * A lone id ships as the bare string it has always been, byte-identical against
+ * a server that predates the array; several need that server deployed.
+ */
+function toWireSearchId(ids: string[]): string | string[] | undefined {
+  if (ids.length === 0) return undefined;
+  return ids.length === 1 ? ids[0] : ids;
+}
+
 /**
  * The server's `excerpt` bound (pinned against the OpenAPI fixture in
  * contract.test.ts). Exported so `publish` can refuse an over-long one at its own
@@ -205,11 +249,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     }
   }
 
-  if (input.searchId !== undefined && !SEARCH_ID_WIRE_RE.test(input.searchId)) {
-    throw new CliError('USAGE', `Invalid searchId: ${JSON.stringify(input.searchId)}`, {
-      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
-    });
-  }
+  const searchId = toWireSearchId(normalizeSearchIds(input.searchId, 'searchId'));
 
   return {
     ...(title !== undefined && title.length > 0 ? { title } : {}),
@@ -223,7 +263,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     // Sent whatever the LOCAL loop says, including on a relink and on a draft:
     // the server stores it against this post, and whether some earlier `outcome`
     // already reported on the search is not a fact about who answered it.
-    ...(input.searchId !== undefined ? { searchId: input.searchId } : {}),
+    ...(searchId !== undefined ? { searchId } : {}),
   };
 }
 
