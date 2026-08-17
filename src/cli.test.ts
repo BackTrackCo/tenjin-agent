@@ -332,6 +332,45 @@ describe('edit flag forwarding (the dispatcher mapping)', () => {
 });
 
 /**
+ * `outcome`'s batch selectors. A `--search-id` that commander did not collect
+ * would keep the LAST id and silently drop the rest, and an `--all-open` that
+ * never reached the arg would report nothing while exiting 0, so both are read
+ * back through refusals that resolve before any request.
+ */
+describe('outcome batch flags (the dispatcher mapping)', () => {
+  const ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  it('--all-open reaches the arg, and is refused at any status but regenerated', async () => {
+    const cap = captureIo();
+    const code = await main(['outcome', '--all-open', '--status', 'used', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('outcome');
+    expect(parsed.error.message).toContain('--all-open');
+  });
+
+  it('--search-id repeats rather than replacing, and refuses to mix with --all-open', async () => {
+    const cap = captureIo();
+    const code = await main(
+      [
+        'outcome',
+        '--search-id',
+        ID,
+        '--search-id',
+        ID,
+        '--all-open',
+        '--status',
+        'regenerated',
+        '--json',
+      ],
+      cap.io,
+    );
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toContain('not several');
+  });
+});
+
+/**
  * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
  * so the cases here are the ones that resolve BEFORE it — the group exists, the
  * leaf exists, and a bad `--scope` is USAGE.

@@ -621,10 +621,14 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
-    .option('--search-id <id>', 'the search to report against')
+    .option('--search-id <id>', 'the search to report against (repeatable)', collect, [])
     .option(
       '--last',
       'target the most recent tenjin search (entries the WebSearch hook recorded are skipped; use --search-id for those)',
+    )
+    .option(
+      '--all-open',
+      'close every open search the WebSearch hook recorded, in any session (requires --status regenerated; deliberate searches are left open)',
     )
     .requiredOption(
       '--status <status>',
@@ -639,8 +643,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runOutcome(
           {
             status: String(o.status),
-            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
+            ...(Array.isArray(o.searchId) && o.searchId.length > 0
+              ? { searchId: o.searchId as string[] }
+              : {}),
             ...(o.last === true ? { last: true } : {}),
+            ...(o.allOpen === true ? { allOpen: true } : {}),
             ...(typeof o.resource === 'string' ? { resource: o.resource } : {}),
             ...(typeof o.contentHash === 'string' ? { contentHash: o.contentHash } : {}),
           },

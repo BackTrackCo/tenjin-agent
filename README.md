@@ -298,11 +298,19 @@ Important defaults:
 
 ## Client identity
 
-Every request the CLI makes, including the ones its search hook makes, carries
-the standard `User-Agent` field and nothing else that identifies the client:
+Every request the CLI makes carries the standard `User-Agent` field and nothing
+else that identifies the client:
 
 ```http
 User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
+```
+
+The WebSearch hook leads with its own product instead, because a query it rode
+along with is not a question anyone chose to look up, and Tenjin's demand data
+keeps the two apart:
+
+```http
+User-Agent: tenjin-websearch-hook/<version> (+https://tenjin.blog)
 ```
 
 If you are an agent that runs the CLI, you can travel in that field too. Export

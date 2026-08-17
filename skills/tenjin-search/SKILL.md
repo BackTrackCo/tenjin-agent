@@ -115,7 +115,9 @@ tenjin outcome --json --last --status used|partially_used|rejected|regenerated|p
 ```
 
 Report honestly after acting on a search, rejections included. `--last` binds to
-the newest local search; after more than one, pass `--search-id`.
+the newest local search; after more than one, pass `--search-id` (repeatable, one
+status for all). `--all-open --status regenerated` closes every open loop the
+WebSearch hook recorded and leaves deliberate searches for you to report.
 
 ## After a MISS: publish what you build
 
