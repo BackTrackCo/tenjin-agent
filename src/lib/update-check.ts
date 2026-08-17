@@ -230,9 +230,12 @@ export function channelTag(version: string): 'latest' | null {
 }
 
 /**
- * The version this build can move to: whatever sits on the tag it follows. Null
- * both when that tag is absent and when it names a version VERSION_RE rejects;
- * `runUpdate` separates those, and neither means the registry was unreachable.
+ * The version this build can move to: whatever sits on the tag it follows.
+ * Consulting a second tag added no reachable version and one way to be wrong: a
+ * tag sitting ahead of `latest` could redirect the self-update to a build the
+ * release line never promoted. Null both when that tag is absent and when it
+ * names a version VERSION_RE rejects; `runUpdate` separates those, and neither
+ * means the registry was unreachable.
  */
 export function resolveTarget(current: string, tags: Record<string, string>): string | null {
   const channel = channelTag(current);
