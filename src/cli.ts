@@ -220,7 +220,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('uninstall'))
     .description(
-      'Remove everything `tenjin install` wrote: the skills, the harness hooks and their settings entries, and the tenjin permission rules. Nothing under ~/.tenjin is touched',
+      'Remove everything `tenjin install` wrote: the skills, the harness hooks and their settings entries, the generated hook scripts in ~/.tenjin/hooks, and the tenjin permission rules. Your wallet, config, library and search history are kept',
     )
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
@@ -239,9 +239,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
 
   addGlobalFlags(program.command('update'))
-    .description(
-      'Update tenjin-cli to the newest version on its release channel (an alpha build follows @alpha)',
-    )
+    .description('Update tenjin-cli to the newest version npm publishes on the latest tag')
     .option('--check', 'report whether a newer version exists without installing it')
     .action(async function (this: Command) {
       await runCommand('update', this, async (ctx) => {

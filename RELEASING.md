@@ -33,9 +33,11 @@ To cut a release (two clicks):
 3. **Dispatch (click 2)**: same path. With no pending changesets, the `publish`
    job builds, runs the check suite plus `pnpm audit` plus the packed-artifact
    smoke as a pre-publish gate, then `changeset publish` ships `tenjin-cli` with
-   provenance and creates the GitHub release. Prereleases use Changesets' pre
-   mode (`pnpm changeset pre enter alpha`) and publish to the `alpha` dist-tag;
-   stable goes to `latest`.
+   provenance and creates the GitHub release. Every publish lands on the `latest`
+   dist-tag, prerelease or stable (`.changeset/pre.json`'s `"tag": "alpha"` is
+   pre-mode bookkeeping and does not decide it); the CLI updater resolves against
+   `latest` alone, so publish tagging and `src/lib/update-check.ts` must change
+   together.
 
 Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived, per-run
 token, so there is **no `NPM_TOKEN`** to store or rotate.

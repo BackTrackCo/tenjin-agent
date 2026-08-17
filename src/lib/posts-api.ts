@@ -37,6 +37,12 @@ export interface PublishInput {
   handle?: string;
   status: PublishStatus;
   resource?: ResourceCardInput;
+  /**
+   * The search whose MISS motivated this piece, so the marketplace can attribute
+   * supply to the demand that asked for it (tenjin-agent #161). Stored
+   * server-side only and never echoed back, so nothing downstream reads it.
+   */
+  searchId?: string;
 }
 
 /** The exact strictObject body sent to POST /api/posts (defined keys only). */
@@ -49,10 +55,22 @@ export interface PostCreateBody {
   handle?: string;
   status?: PublishStatus;
   resource?: ResourceCardInput;
+  searchId?: string;
 }
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
 const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
+/**
+ * The `searchId` shape the SERVER declares, which is narrower than lib/ids.ts's
+ * UUID_RE: it pins the RFC version and variant nibbles, and admits the nil and
+ * max sentinels. Mirrored here (and pinned against the OpenAPI fixture in
+ * contract.test.ts) because this field is now SENT — an id that satisfies the
+ * looser local shape and not this one would turn a publish that used to succeed
+ * into a 400 collected AFTER the wallet signature. Validated at the command edge
+ * instead, where a typo costs a message.
+ */
+export const SEARCH_ID_WIRE_RE =
+  /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 /**
  * The server's `excerpt` bound (pinned against the OpenAPI fixture in
  * contract.test.ts). Exported so `publish` can refuse an over-long one at its own
@@ -187,6 +205,12 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     }
   }
 
+  if (input.searchId !== undefined && !SEARCH_ID_WIRE_RE.test(input.searchId)) {
+    throw new CliError('USAGE', `Invalid searchId: ${JSON.stringify(input.searchId)}`, {
+      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
+    });
+  }
+
   return {
     ...(title !== undefined && title.length > 0 ? { title } : {}),
     ...(bodyMd !== undefined ? { bodyMd } : {}),
@@ -196,6 +220,10 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     ...(input.handle !== undefined ? { handle: input.handle } : {}),
     status: input.status,
     ...(input.resource !== undefined ? { resource: sanitizeCard(input.resource) } : {}),
+    // Sent whatever the LOCAL loop says, including on a relink and on a draft:
+    // the server stores it against this post, and whether some earlier `outcome`
+    // already reported on the search is not a fact about who answered it.
+    ...(input.searchId !== undefined ? { searchId: input.searchId } : {}),
   };
 }
 

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installSkill } from './skill-writer';
 import { materializeTransform } from './skill-materialize';
-import { SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { SHIPPED_SKILL_FILES, SKILL_NAMES, resolveSkillsSource } from './skills-source';
 
 /**
  * The materialize seam on `installSkill`: the source is shaped BEFORE the compare
@@ -104,11 +104,21 @@ describe('installSkill with a materialize transform', () => {
  * is how a shaped skill and a raw comparison disagree forever.
  */
 describe('packaged skills carry no markers yet', () => {
-  it('every shipped SKILL.md is marker-free, so raw byte comparison stays valid', async () => {
+  /**
+   * EVERY packaged markdown file, not every `SKILL.md`. `materializeTransform`
+   * gates on `rel.toLowerCase().endsWith('.md')`, so a marker in a reference file
+   * is exactly as load-bearing as one in a SKILL.md, and this test is the whole
+   * tripwire: `tenjin:when` appears nowhere else in src/, scripts/ or skills/,
+   * and pack-smoke has no marker assertion. Iterating SKILL_NAMES alone covered
+   * three of the five files the package ships.
+   */
+  it('every shipped markdown file is marker-free, so raw byte comparison stays valid', async () => {
     const source = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
     for (const name of SKILL_NAMES) {
-      const text = await readFile(join(source, name, 'SKILL.md'), 'utf8');
-      expect(text, `${name}/SKILL.md ships a tenjin:when marker`).not.toContain('tenjin:when');
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        const text = await readFile(join(source, name, rel), 'utf8');
+        expect(text, `${name}/${rel} ships a tenjin:when marker`).not.toContain('tenjin:when');
+      }
     }
   });
 });

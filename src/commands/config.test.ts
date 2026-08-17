@@ -9,6 +9,12 @@ import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
+import {
+  claudeSettingsPath,
+  FREE_VERB_RULES,
+  MODE_GATED_RULES,
+  PUBLISH_MODE_RULE,
+} from '../lib/harness-permissions';
 import type { CommandContext, GlobalFlags } from '../context';
 
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
@@ -31,6 +37,26 @@ function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
 }
 
 const configFile = () => join(dir, 'config.json');
+
+/**
+ * A throwaway home for any `config set publish.mode`, which now syncs the harness
+ * allowlist: without one the sync would reach the operator's real
+ * ~/.claude/settings.json from a unit test.
+ */
+async function hermeticHome(): Promise<{
+  homeDir: string;
+  isInteractive: boolean;
+  harnessIsClaude: boolean;
+}> {
+  return {
+    homeDir: await mkdtemp(join(tmpdir(), 'tenjin-cfg-h-')),
+    isInteractive: false,
+    // PINNED, like every other harness-touching test here: without it these read
+    // whichever harness the RUNNER has, so they pass on a laptop with Claude Code
+    // installed and take a different branch on a bare CI box.
+    harnessIsClaude: false,
+  };
+}
 const readRawFile = async () => JSON.parse(await readFile(configFile(), 'utf8')) as unknown;
 
 async function caught<T>(fn: () => Promise<T>): Promise<CliError> {
@@ -370,8 +396,12 @@ describe('publish.mode key', () => {
   it.each(['review', 'auto', 'full-auto'] as const)(
     'round-trips %s through set/get',
     async (mode) => {
-      const set = await runConfigSet({ key: 'publish.mode', value: mode }, makeCtx());
-      expect(set.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
+      const set = await runConfigSet(
+        { key: 'publish.mode', value: mode },
+        makeCtx(),
+        await hermeticHome(),
+      );
+      expect(set.data).toMatchObject({ key: 'publish.mode', value: mode, source: 'file' });
       const get = await runConfigGet({ key: 'publish.mode' }, makeCtx());
       expect(get.data).toEqual({ key: 'publish.mode', value: mode, source: 'file' });
       expect(await readRawFile()).toEqual({ publish: { mode } });
@@ -411,7 +441,7 @@ describe('publish.defaultPrice key', () => {
   });
 
   it('merges the two publish subkeys without dropping each other', async () => {
-    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), await hermeticHome());
     await runConfigSet({ key: 'publish.defaultPrice', value: '0.5' }, makeCtx());
     expect(await readRawFile()).toEqual({ publish: { mode: 'review', defaultPrice: '500000' } });
   });
@@ -420,7 +450,7 @@ describe('publish.defaultPrice key', () => {
 describe('forward compatibility', () => {
   it('preserves an unknown top-level block through a set', async () => {
     await writeFile(configFile(), JSON.stringify({ future: { some: 'block' } }));
-    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx());
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), await hermeticHome());
     const raw = (await readRawFile()) as Record<string, unknown>;
     expect(raw.future).toEqual({ some: 'block' });
     expect(raw.publish).toEqual({ mode: 'auto' });
@@ -428,7 +458,7 @@ describe('forward compatibility', () => {
 
   it('preserves an unknown publish subkey a newer CLI wrote', async () => {
     await writeFile(configFile(), JSON.stringify({ publish: { visibility: 'unlisted' } }));
-    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx());
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), await hermeticHome());
     const raw = (await readRawFile()) as { publish: Record<string, unknown> };
     expect(raw.publish).toEqual({ visibility: 'unlisted', mode: 'review' });
   });
@@ -535,6 +565,355 @@ describe('update.mode', () => {
   });
 });
 
+/**
+ * `config set publish.mode` settles whether a PUBLISH asks. The harness rule
+ * settles whether the HARNESS asks anyway, and leaving that to the next `tenjin
+ * install` is the seam that made auto mode look broken (tenjin-agent #161).
+ */
+describe('publish.mode keeps the harness allowlist in step', () => {
+  let home: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'tenjin-cfg-home-'));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const allowOf = async (): Promise<string[]> => {
+    const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
+    if (raw === null) return [];
+    return (JSON.parse(raw) as { permissions?: { allow?: string[] } }).permissions?.allow ?? [];
+  };
+  const syncOf = (d: unknown) =>
+    (
+      d as {
+        allowlist?: { added: string[]; removed: string[]; skipped?: string; pointer?: string };
+      }
+    ).allowlist;
+
+  // Loosening ADDS a grant, so a human says yes to it.
+  it('writes the publish rule on auto when the operator agrees', async () => {
+    const asked: string[] = [];
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async (label) => {
+        asked.push(label);
+        return true;
+      },
+    });
+    expect(asked).toHaveLength(1);
+    // The question names the rule it is about to write.
+    expect(asked[0]).toContain(PUBLISH_MODE_RULE);
+    expect(asked[0]).toContain('publish.mode auto');
+    expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+    expect(syncOf(res.data)?.added).toContain(PUBLISH_MODE_RULE);
+  });
+
+  // The write carries the free tier too on a machine that never ran install, so
+  // the question has to say so rather than name one line and write ten.
+  it('discloses the free-verb rules the same write carries', async () => {
+    let label = '';
+    await runConfigSet({ key: 'publish.mode', value: 'full-auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async (l) => {
+        label = l;
+        return true;
+      },
+    });
+    expect(label).toMatch(/Also adds the \d+ free-verb rule/);
+    expect(await allowOf()).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
+  });
+
+  it('writes nothing when the operator declines, and points instead', async () => {
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async () => false,
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('declined');
+    expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
+    // The mode itself still landed; only the harness write was refused.
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'auto', source: 'file' },
+    });
+  });
+
+  // Silence is not consent: nobody to ask means the pointer, never a write.
+  it('never prompts and never writes without a TTY', async () => {
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: false,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+    expect(res.humanLines?.join(' ')).toContain(PUBLISH_MODE_RULE);
+  });
+
+  it('never prompts under --json, whatever the TTY says', async () => {
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessIsClaude: true,
+        isInteractive: true,
+        confirmRule: async () => {
+          throw new Error('must not ask');
+        },
+      },
+    );
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+    // The payload still carries the remedy, since --json renders no humanLines.
+    expect(syncOf(res.data)?.pointer).toContain(PUBLISH_MODE_RULE);
+  });
+
+  // Tightening only ever removes what this CLI wrote, so it needs no question —
+  // including on a headless machine, which is where a stale grant would sit.
+  it('retracts the rule on review, unprompted, and reports it', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async () => true,
+    });
+    expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+
+    const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: false,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).not.toContain(PUBLISH_MODE_RULE);
+    expect(syncOf(res.data)?.removed).toEqual([...MODE_GATED_RULES]);
+    expect(res.humanLines?.join(' ')).toContain('Removed');
+  });
+
+  it('leaves the operator’s own rules alone while retracting ours', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({
+        permissions: {
+          allow: ['Bash(git status:*)', ...FREE_VERB_RULES, ...MODE_GATED_RULES],
+        },
+      }),
+    );
+    await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), { homeDir: home });
+    expect(await allowOf()).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
+  });
+
+  // The retraction skips its prompt because it can only REMOVE, and it runs
+  // through a pass that appends nothing — so an incomplete free tier is not a
+  // reason to leave a publish rule standing. It was one while retraction rode the
+  // additive writer, which is the silent decline PR #164 round 3 major 1 found.
+  it('retracts on review even when the free tier is incomplete, and adds nothing', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ permissions: { allow: ['Bash(git status:*)', PUBLISH_MODE_RULE] } }),
+    );
+    const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+    });
+    expect(await allowOf()).toEqual(['Bash(git status:*)']);
+    expect(syncOf(res.data)?.removed).toEqual([PUBLISH_MODE_RULE]);
+    expect(syncOf(res.data)?.added).toEqual([]);
+    expect(syncOf(res.data)?.skipped).toBeUndefined();
+  });
+
+  // SATISFIED BEFORE TTY (PR #164 round 2, major 3b): a fully-wired machine under
+  // --json used to come back `no-tty` with a pointer at rules it already had.
+  it('is a clean no-op on a wired machine under --json, not a no-tty pointer', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async () => true,
+    });
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessIsClaude: true,
+      },
+    );
+    expect(syncOf(res.data)).toMatchObject({ added: [], removed: [] });
+    expect(syncOf(res.data)?.skipped).toBeUndefined();
+    expect(syncOf(res.data)?.pointer).toBeUndefined();
+  });
+
+  // And the pointer that DOES render names only what is missing.
+  it('points at the missing rules only, on a machine that has none of them', async () => {
+    const res = await runConfigSet(
+      { key: 'publish.mode', value: 'auto' },
+      makeCtx({ json: true }),
+      {
+        homeDir: home,
+        harnessIsClaude: true,
+      },
+    );
+    expect(syncOf(res.data)?.skipped).toBe('no-tty');
+    for (const rule of MODE_GATED_RULES) expect(syncOf(res.data)?.pointer).toContain(rule);
+  });
+
+  it('asks nothing when the allowlist already carries every rule the mode needs', async () => {
+    await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async () => true,
+    });
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessIsClaude: true,
+      isInteractive: true,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(syncOf(res.data)).toMatchObject({ added: [], removed: [] });
+    expect(syncOf(res.data)?.skipped).toBeUndefined();
+  });
+
+  it('touches no settings file on a non-Claude harness', async () => {
+    const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      harnessIsClaude: false,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).toEqual([]);
+    // An empty allowlist reads the same whether the file is absent or was created
+    // holding nothing, and only one of those is acceptable on a machine that is
+    // not running Claude Code.
+    expect(existsSync(claudeSettingsPath(home))).toBe(false);
+    expect(syncOf(res.data)?.skipped).toBe('not-claude');
+  });
+
+  /**
+   * The harness is DETECTED, not assumed. `src/cli.ts` passes no deps, so a
+   * default of "this is Claude Code" would prompt every codex-only operator about
+   * a ~/.claude/settings.json nothing on their machine reads — and a review-set
+   * would then sweep a file this CLI never owned.
+   */
+  describe('harness detection, when the caller names none', () => {
+    // Nothing on PATH, no ~/.claude, no recorded --harness: not our file.
+    it('skips a codex-only machine at a TTY, without asking', async () => {
+      await mkdir(join(home, '.codex'), { recursive: true });
+      const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        isInteractive: true,
+        which: (bin) => bin === 'codex',
+        env: { PATH: '' },
+        confirmRule: async () => {
+          throw new Error('must not ask');
+        },
+      });
+      expect(await allowOf()).toEqual([]);
+      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+      // No pointer either: there is no settings file of ours here to be missing
+      // anything, so naming Claude rules would be advice about another machine.
+      expect(syncOf(res.data)?.pointer).toBeUndefined();
+      // The mode itself still landed.
+      expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+        data: { value: 'auto' },
+      });
+    });
+
+    // Tightening on the same machine must not CREATE the file either: the writer
+    // makes ~/.claude/settings.json when it is absent, so an unguarded retraction
+    // would leave a codex-only operator holding a Claude config they never had.
+    it('creates no settings file on review for a codex-only machine', async () => {
+      const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+        homeDir: home,
+        which: (bin) => bin === 'codex',
+        env: { PATH: '' },
+      });
+      expect(existsSync(claudeSettingsPath(home))).toBe(false);
+      expect(syncOf(res.data)?.skipped).toBe('not-claude');
+    });
+
+    // A ~/.claude directory IS Claude-detection evidence (home-dir reason), so a
+    // machine that already holds that settings file is one we may sweep.
+    it('sweeps a machine whose ~/.claude exists, even with codex on PATH', async () => {
+      await mkdir(join(home, '.claude'), { recursive: true });
+      await writeFile(
+        claudeSettingsPath(home),
+        JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, ...MODE_GATED_RULES] } }),
+      );
+      const res = await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+        homeDir: home,
+        which: (bin) => bin === 'codex',
+        env: { PATH: '' },
+      });
+      expect(await allowOf()).not.toContain(PUBLISH_MODE_RULE);
+      expect(syncOf(res.data)?.removed).toEqual([...MODE_GATED_RULES]);
+    });
+
+    it('detects Claude Code by its binary', async () => {
+      const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        isInteractive: true,
+        which: (bin) => bin === 'claude',
+        env: { PATH: '' },
+        confirmRule: async () => true,
+      });
+      expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+      expect(syncOf(res.data)?.skipped).toBeUndefined();
+    });
+
+    // A past `--harness claude` outranks the probes: detection only sees what this
+    // CLI knows to look for, and the operator already answered the question.
+    it('honors a recorded --harness claude on a machine that detects neither', async () => {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ install: { harness: ['claude'] } }),
+      );
+      const res = await runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        isInteractive: true,
+        which: () => false,
+        env: { PATH: '' },
+        confirmRule: async () => true,
+      });
+      expect(await allowOf()).toContain(PUBLISH_MODE_RULE);
+      expect(syncOf(res.data)?.skipped).toBeUndefined();
+    });
+  });
+
+  // publish.defaultPrice is not a consent decision and must not drag the harness
+  // allowlist along with it.
+  it('syncs nothing for the sibling publish key', async () => {
+    const res = await runConfigSet({ key: 'publish.defaultPrice', value: '0.25' }, makeCtx(), {
+      homeDir: home,
+      isInteractive: true,
+      confirmRule: async () => {
+        throw new Error('must not ask');
+      },
+    });
+    expect(await allowOf()).toEqual([]);
+    expect(syncOf(res.data)).toBeUndefined();
+  });
+});
+
 describe('the hooks block is set through config, which stays human-gated', () => {
   it('round-trips both hook keys and rejects a value outside the enum', async () => {
     const ctx = makeCtx();
@@ -557,6 +936,56 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
     expect(bad.code).toBe('USAGE');
     expect(bad.fix).toContain('"on"');
+    // The middle setting is offered by name, or an operator hunting for it
+    // finds only the cliff.
+    expect(bad.fix).toContain('"deliberate-only"');
+  });
+
+  // The arm-level toggle (#162): silencing the batched web-search reminders
+  // without silencing the deliberate-search ones.
+  it('round-trips deliberate-only, the middle stopNag setting', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx);
+    expect(set.data).toMatchObject({ value: 'deliberate-only', source: 'file' });
+    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+      data: { value: 'deliberate-only', source: 'file' },
+    });
+  });
+
+  /**
+   * `deliberate-only` is a value only the current script understands: an older
+   * installed script maps every non-`off` value to `on`. Storing it and saying
+   * nothing leaves the operator watching the batch keep firing while `config get`
+   * reports the setting effective.
+   */
+  it('says so when the installed Stop hook predates deliberate-only', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(set.data).toMatchObject({ value: 'deliberate-only', hookScriptStale: true });
+    expect(set.humanLines?.join('\n')).toContain('tenjin install');
+    // Stored regardless: the line reports the script, it does not refuse the set.
+    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+      data: { value: 'deliberate-only', source: 'file' },
+    });
+  });
+
+  it('stays quiet on a current script, and on the values an old script honors', async () => {
+    const ctx = makeCtx();
+    const current = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
+      stopHookIsCurrent: async () => true,
+    });
+    expect(current.data).not.toHaveProperty('hookScriptStale');
+    expect(current.humanLines).toHaveLength(1);
+
+    // `off` and `on` mean the same thing to every script version ever shipped,
+    // so a stale script is not worth a line about them.
+    const off = await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(off.data).not.toHaveProperty('hookScriptStale');
+    expect(off.humanLines).toHaveLength(1);
   });
 });
 

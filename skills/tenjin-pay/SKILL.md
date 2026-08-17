@@ -60,7 +60,8 @@ tenjin pay <url> --json --max-price <usd> [-X POST] [-d '<json-body>'] [--yes]
 - Spend policy refusals (exit 3) are decisions, not errors: surface them and
   stop. Never work around a refusal, a price cap, or a harness permission
   denial; the allowlist line for this verb (`Bash(tenjin pay:*)`) is an
-  operator opt-in documented in the tenjin-search skill's denial section.
+  operator opt-in, documented with the other two in the tenjin-search skill's
+  `references/permissions.md`.
 
 ## Safety
 

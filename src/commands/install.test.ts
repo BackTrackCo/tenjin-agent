@@ -67,17 +67,33 @@ import {
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runInstall, PERMISSIONS_QUESTION, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
+import {
+  runInstall,
+  PERMISSIONS_QUESTION,
+  permissionsQuestion,
+  PUBLISH_MODE_CHOICES,
+  WALLET_QUESTION,
+} from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
+import type { PublishMode } from '../lib/config';
 import type { ExecFn } from '../lib/wallet/passphrase';
-import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import {
+  PACKAGED_SKILL_NAMES,
+  resolveSkillsSource,
+  SHIPPED_SKILL_FILES,
+  SKILL_NAMES,
+} from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import {
   claudeSettingsPath,
+  EDIT_MODE_RULE,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
+  LEGACY_ALLOWLIST_RULES,
+  MODE_GATED_RULES,
+  PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
 import type { DoctorChecks } from './doctor';
@@ -124,6 +140,8 @@ function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
 
 // Default doctor stub: one passing check, no network. Overridden per-test.
 const okChecks: DoctorChecks = {
+  publishMode: 'review',
+  missingModeGated: [],
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
 };
 
@@ -247,8 +265,13 @@ describe('runInstall: harness override', () => {
     expect(h.skillsDir).toBe(join(home, '.claude', 'skills'));
     expect(h.codexNetworkRule).toBeUndefined();
     expect(h.skills.map((s) => s.status)).toEqual(SKILL_NAMES.map(() => 'installed'));
+    // Every shipped file, not just SKILL.md: this is the only fresh-`create` path
+    // under test, and a nested reference file that ships but never lands here
+    // would go unnoticed until an agent hits a denial and finds nothing to read.
     for (const name of SKILL_NAMES) {
-      expect(existsSync(join(home, '.claude', 'skills', name, 'SKILL.md'))).toBe(true);
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        expect(existsSync(join(home, '.claude', 'skills', name, rel))).toBe(true);
+      }
     }
   });
 
@@ -538,6 +561,8 @@ describe('runInstall: default PATH binary probe', () => {
 describe('runInstall: doctor as the final step', () => {
   it('embeds the doctor summary and never throws on a doctor failure', async () => {
     const failing: DoctorChecks = {
+      publishMode: 'review',
+      missingModeGated: [],
       checks: [{ name: 'api-contract', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
@@ -600,6 +625,8 @@ describe('runInstall: walkthrough ordering', () => {
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
   const warning: DoctorChecks = {
+    publishMode: 'review',
+    missingModeGated: [],
     checks: [
       {
         name: 'search-contract',
@@ -648,6 +675,8 @@ describe('runInstall: walkthrough ordering', () => {
   // when it does not.
   it('does not repeat the no-wallet line as a warning', async () => {
     const noWallet: DoctorChecks = {
+      publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'wallet',
@@ -681,6 +710,8 @@ describe('runInstall: walkthrough ordering', () => {
   // so suppressing the no-wallet case must not suppress the whole check.
   it('still reports a wallet warning the summary does not carry', async () => {
     const broken: DoctorChecks = {
+      publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'wallet',
@@ -714,6 +745,8 @@ describe('runInstall: walkthrough ordering', () => {
   // else about.
   it('reports a broken env key even while the summary says none', async () => {
     const badEnvKey: DoctorChecks = {
+      publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'wallet',
@@ -834,8 +867,15 @@ describe('runInstall: publish-mode selection', () => {
     expect(PUBLISH_MODE_CHOICES.map((c) => c.value)).toEqual(['auto', 'review', 'full-auto']);
     expect(PUBLISH_MODE_CHOICES[0]!.label).toBe('Auto (recommended)');
     expect(PUBLISH_MODE_CHOICES[0]!.hint).toBe(
-      'your agent publishes clean pieces on its own; your harness still shows each command for approval',
+      'your agent publishes and updates pieces on its own, under your identity',
     );
+    // The clause that used to end this hint promised a harness prompt in front of
+    // every publish, which this same mode now writes a rule to remove.
+    for (const c of PUBLISH_MODE_CHOICES) {
+      const hint: string = 'hint' in c ? c.hint : '';
+      expect(hint).not.toMatch(/harness/i);
+      expect(hint).not.toMatch(/approval/i);
+    }
     expect(PUBLISH_MODE_CHOICES[1]!.label).toBe('Ask me in chat first');
     expect(PUBLISH_MODE_CHOICES[2]!.label).toBe('Fully unattended');
   });
@@ -1093,6 +1133,13 @@ describe('runInstall: interactive walkthrough', () => {
     expect(human(res)).toContain(`Removed the old Tenjin pointer line from ${claudeMd}`);
   });
 
+  /**
+   * A run that wired permissions has to say so and say how to take it back. It
+   * said it twice: a ✓ line with the count, the file and the link, then a dim
+   * paragraph repeating all three. The count and the link stay on the ✓ line, the
+   * undo stays here, and neither recites a rule. The full grant story lives in the
+   * `--json` envelope, asserted in the mode-gated block below.
+   */
   it('discloses the permission rules it wired and how to take them back', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1101,11 +1148,13 @@ describe('runInstall: interactive walkthrough', () => {
     );
     const text = human(res);
     expect(text).toContain(
-      `${FREE_VERB_RULES.length} free tenjin commands were allowed in ${claudeSettingsPath(home)}`,
+      `${FREE_VERB_RULES.length} tenjin commands allowed in ${claudeSettingsPath(home)}`,
     );
-    expect(text).toContain('None can spend USDC or open your wallet keystore');
     expect(text).toContain(`Undo anytime: remove those lines from ${claudeSettingsPath(home)}`);
     for (const rule of FREE_VERB_RULES) expect(text).not.toContain(rule);
+    // Said once, not twice: the old pairing repeated the count and the file in a
+    // dim paragraph directly under the line that already carried them.
+    expect(text.match(/tenjin commands allowed in/g)).toHaveLength(1);
   });
 
   it('no longer prints the allowlist block or the security essays that went with it', async () => {
@@ -1145,33 +1194,62 @@ describe('runInstall: interactive walkthrough', () => {
     }
   });
 
-  it('the consent question says what is true of the tier, and points at the caveats', async () => {
-    // Cannot spend and cannot move your keys is the honest whole-tier claim, and
-    // doctor's local decrypt is named rather than papered over; so are the three
-    // that send or store data.
-    expect(PERMISSIONS_QUESTION).toContain('None can spend USDC or move your keys');
-    expect(PERMISSIONS_QUESTION).toContain('doctor may check your wallet still opens');
-    expect(PERMISSIONS_QUESTION).toContain('Three send or store data (search, outcome, read)');
-    // FLAG_CAVEAT is "printed with the rules everywhere they are printed". The
-    // walkthrough prints neither, so the consent moment names where both are, in
-    // full. It used to name `tenjin doctor`, which printed them; doctor now
-    // points at the same page (#81), so pointing there too is what keeps this
-    // question one hop from the caveats rather than two.
-    expect(PERMISSIONS_QUESTION).toContain(PERMISSIONS_DOC_URL);
+  /**
+   * Two sentences and a link. The question is a yes/no an operator answers in a
+   * couple of seconds, so it carries only what they can decide on: it cannot
+   * spend their money, and the rules land in a named file. The tier inventory,
+   * the caveats and the undos are one hop away, unchanged.
+   */
+  it('the consent question is short, honest, and points at the details', async () => {
+    expect(PERMISSIONS_QUESTION).toContain(
+      `Adds ${FREE_VERB_RULES.length} command rules to ~/.claude/settings.json`,
+    );
+    expect(PERMISSIONS_QUESTION).toMatch(/spend your money/);
+    expect(permissionsQuestion('auto')).toMatch(/spend your money/);
+    // The one thing auto changes about the answer, said in the question itself.
+    expect(permissionsQuestion('auto')).toContain('publish under your identity on its own');
+    expect(PERMISSIONS_QUESTION).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
     expect(PERMISSIONS_QUESTION).not.toContain('tenjin doctor');
+    // No inventory, no rule syntax, no jargon the operator has not met yet.
+    expect(PERMISSIONS_QUESTION).not.toMatch(/Bash\(/);
+    expect(PERMISSIONS_QUESTION).not.toMatch(/send or store data/i);
+    expect(PERMISSIONS_QUESTION).not.toMatch(/keystore/i);
+    // Short enough to read at a prompt. The old one ran past 300 characters of
+    // inventory before the link, which is where the owner stopped reading.
+    for (const mode of ['review', 'auto', 'full-auto'] as const) {
+      const q = permissionsQuestion(mode);
+      expect(q.split('Details:')[0]!.length, mode).toBeLessThan(230);
+    }
   });
 
-  it('the line reporting a write also points at the caveats', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
+  it('the line reporting a write says how many are allowed, and where the rest is', async () => {
+    const permissionsLineOf = async (mode: PublishMode): Promise<string> => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: mode },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      return (
+        human(res)
+          .split('\n')
+          .find((l) => l.includes('Permissions:')) ?? ''
+      );
+    };
+
+    const review = await permissionsLineOf('review');
+    expect(review).toContain(`${FREE_VERB_RULES.length} tenjin commands allowed in`);
+    expect(review).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
+    // "free" was a qualifier this count needed only while it excluded the pair.
+    expect(review).not.toMatch(/free/i);
+
+    // The count is every rule of ours in the file, so an auto machine says eleven
+    // rather than reporting nine and leaving the pair to a line that no longer
+    // exists.
+    await rm(claudeSettingsPath(home), { force: true });
+    const auto = await permissionsLineOf('auto');
+    expect(auto).toContain(
+      `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed in`,
     );
-    const line = human(res)
-      .split('\n')
-      .find((l) => l.includes('Permissions:'));
-    expect(line).toContain(`${FREE_VERB_RULES.length} free tenjin commands added to`);
-    expect(line).toContain(`Full caveats: ${PERMISSIONS_DOC_URL}`);
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
@@ -1316,6 +1394,8 @@ describe('runInstall: interactive walkthrough', () => {
     expect(human(okRes).split('\n')).toHaveLength(6);
 
     const failing: DoctorChecks = {
+      publishMode: 'review',
+      missingModeGated: [],
       checks: [
         {
           name: 'api',
@@ -1354,11 +1434,17 @@ describe('runInstall: permissions decision', () => {
   type WiredData = {
     permissions: {
       alwaysSafe: { rule: string }[];
+      modeGated: { rule: string }[];
       wired: {
         harness: string;
         path?: string;
         added: string[];
         alreadyPresent: string[];
+        addedFree: string[];
+        alreadyPresentFree: string[];
+        planned?: boolean;
+        modeGrant?: { rules: string[]; state: string; disclosure: string; undo: string[] };
+        removed: string[];
         skipped?: string;
         warning?: string;
         fix?: string;
@@ -1397,7 +1483,7 @@ describe('runInstall: permissions decision', () => {
     expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     expect(human(res)).toContain(
-      `${FREE_VERB_RULES.length} free tenjin commands added to ${claudeSettingsPath(home)}`,
+      `${FREE_VERB_RULES.length} tenjin commands allowed in ${claudeSettingsPath(home)}`,
     );
   });
 
@@ -1415,7 +1501,7 @@ describe('runInstall: permissions decision', () => {
   it('--allow-free-verbs wires it headlessly, with no prompt', async () => {
     const confirm = vi.fn(async () => false);
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
       makeCtx(),
       deps({ confirmPermissions: confirm }),
     );
@@ -1426,7 +1512,7 @@ describe('runInstall: permissions decision', () => {
 
   it('--allow-free-verbs works under --json and reports the write in the envelope', async () => {
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps({ isInteractive: true }),
     );
@@ -1441,7 +1527,11 @@ describe('runInstall: permissions decision', () => {
   // The inversion #33 was really asking for: the machine most likely to be denied
   // mid-task is the headless one, and there is nobody there to say yes.
   it('a non-interactive run wires the allowlist by default, with no flag', async () => {
-    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const res = await runInstall(
+      { harness: ['claude'], publishMode: 'review' },
+      makeCtx({ json: true }),
+      deps(),
+    );
     expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
     expect(wiredOf(res.data).skipped).toBeUndefined();
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
@@ -1483,19 +1573,17 @@ describe('runInstall: permissions decision', () => {
   // The old headless arm returned an empty pair whatever the file held, so a
   // re-run against an already-permissioned home reported nothing at all.
   it('reports alreadyPresent accurately on a headless re-run', async () => {
-    await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+    const args = { harness: ['claude'], publishMode: 'review' };
+    await runInstall(args, makeCtx({ json: true }), deps());
+    const res = await runInstall(args, makeCtx({ json: true }), deps());
     expect(wiredOf(res.data).added).toEqual([]);
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
   });
 
   it('is idempotent: a second run adds nothing and reports already-present', async () => {
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
+    const args = { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' };
+    await runInstall(args, makeCtx(), deps());
+    const res = await runInstall(args, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data).added).toEqual([]);
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
@@ -1505,10 +1593,14 @@ describe('runInstall: permissions decision', () => {
   // Re-running install is the advice for refreshing a stale setup, so this is the
   // ordinary second-run path, not an edge case.
   it('does not re-ask once every rule is already allowed', async () => {
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
       deps({ isInteractive: true, confirmPermissions: confirm }),
     );
@@ -1521,10 +1613,14 @@ describe('runInstall: permissions decision', () => {
   // revoked between probe and write was silently re-added without a prompt, which
   // is the one thing a consent gate cannot do.
   it('reports the probe snapshot and writes nothing if a rule is revoked mid-run', async () => {
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
       deps({
         isInteractive: true,
@@ -1548,10 +1644,11 @@ describe('runInstall: permissions decision', () => {
   // thing, so the two lines used to disagree.
   it('says what to do when the settings file moved under the write', async () => {
     await writeSettings({ model: 'opus', permissions: { allow: [] } });
-    // Read 1 is the consent probe; read 2 is the writer's own snapshot, and only a
-    // change after THAT one is the window the guard exists for.
+    // Read 1 is the review retraction's own look at the file, read 2 the consent
+    // probe, read 3 the writer's snapshot — and only a change after THAT one is
+    // the window the guard exists for.
     fsHooks.settingsInterleave = `${JSON.stringify({ model: 'opus', theirs: 1 }, null, 2)}\n`;
-    fsHooks.settingsInterleaveOnRead = 2;
+    fsHooks.settingsInterleaveOnRead = 3;
     fsHooks.settingsReads = 0;
     let res;
     try {
@@ -1590,12 +1687,32 @@ describe('runInstall: permissions decision', () => {
     await writeSettings('not json at all');
     const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'] },
+      { harness: ['claude'], publishMode: 'auto' },
       makeCtx(),
       deps({ isInteractive: true, confirmPermissions: confirm }),
     );
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
+  });
+
+  // Under `review` the retraction runs first and reads the same file, so an
+  // unreadable one is settled before the question: nothing can be written either
+  // way, and asking a question whose yes cannot be honored is a prompt for
+  // nothing. What the operator gets instead is the pair named, with the command
+  // that always works.
+  it('asks nothing on an unreadable file under review, and names the pair', async () => {
+    await writeSettings('not json at all');
+    const confirm = vi.fn(async () => true);
+    const res = await runInstall(
+      { harness: ['claude'], publishMode: 'review' },
+      makeCtx(),
+      deps({ isInteractive: true, confirmPermissions: confirm }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
+    const fix = wiredOf(res.data).fix ?? '';
+    for (const rule of MODE_GATED_RULES) expect(fix).toContain(rule);
+    expect(fix).toContain('tenjin uninstall');
   });
 
   it('--dry-run neither prompts nor writes', async () => {
@@ -1608,6 +1725,110 @@ describe('runInstall: permissions decision', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'dry-run' });
     expect(await allowList()).toBeUndefined();
+  });
+
+  /**
+   * A dry run reported the allowlist as a bare `dry-run` skip: empty `added`, no
+   * `modeGrant`. An operator dry-running for exactly one reason, to find out
+   * whether `publish` and `edit` would be granted, learned nothing. It now fills
+   * the same fields with the plan and flags them `planned`.
+   */
+  it('--dry-run reports the rules it WOULD write, grant included', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const wired = wiredOf(res.data);
+    expect(wired.planned).toBe(true);
+    expect(wired.skipped).toBe('dry-run');
+    expect(wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    expect(wired.addedFree).toEqual([...FREE_VERB_RULES]);
+    // The grant an operator dry-runs to find out about, with the same disclosure
+    // and undos a real run would carry.
+    expect(wired.modeGrant?.rules).toEqual([...MODE_GATED_RULES]);
+    expect(wired.modeGrant?.disclosure).toContain('publish.mode auto');
+    expect(wired.modeGrant?.undo).toHaveLength(3);
+    // In the future tense: the `planned` flag alone left the one string a reader
+    // quotes back claiming the rules had landed.
+    expect(wired.modeGrant?.disclosure).toContain('would be added');
+    expect(wired.modeGrant?.disclosure).not.toMatch(/\)\sadded:/);
+    // And still nothing on disk.
+    expect(await allowList()).toBeUndefined();
+  });
+
+  /**
+   * A dry run fills `removed` with what a real run WOULD take back, so the
+   * retraction sentence has to be future tense here and "otherwise unchanged" has
+   * to not fire: on a fully-wired machine the line said "otherwise unchanged (dry
+   * run)" on a run that changed nothing, qualifying against a retraction it never
+   * named. The three existing dry-run tests all miss it — two run real installs,
+   * and the third starts from a file with no mode-gated rules, so `wouldRemove` is
+   * empty there.
+   */
+  it('--dry-run on review reports the planned retraction in the future tense', async () => {
+    await writeSettings({
+      permissions: { allow: [...FREE_VERB_RULES, PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
+    });
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const line =
+      human(res)
+        .split('\n')
+        .find((l) => l.includes('Permissions:')) ?? '';
+    expect(line).toContain('would remove 2 rule(s) for publish and edit');
+    // Nothing happened, so nothing is "otherwise" unchanged.
+    expect(line).not.toContain('otherwise unchanged');
+    expect(line).toContain('unchanged (dry run)');
+    // Past tense belongs to a run that actually wrote.
+    expect(line).not.toContain('were removed');
+    expect(await allowList()).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE, EDIT_MODE_RULE]);
+  });
+
+  it('--dry-run on review plans the free tier only, and no grant', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const wired = wiredOf(res.data);
+    expect(wired.added).toEqual([...FREE_VERB_RULES]);
+    expect(wired.modeGrant).toBeUndefined();
+    expect(await allowList()).toBeUndefined();
+  });
+
+  it('--dry-run says "would allow" in the human line, and offers no undo', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const text = human(res);
+    expect(text).toContain(
+      `would allow ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in`,
+    );
+    expect(text).toContain('Would turn off: tenjin config set publish.mode review');
+    // The tail that tells an operator how to undo a write belongs to a write.
+    expect(text).not.toContain('Undo anytime:');
+  });
+
+  it('--dry-run on an already-wired machine says so rather than planning a write', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    const res = await runInstall(
+      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    expect(wiredOf(res.data).added).toEqual([]);
+    expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    expect(human(res)).toContain('unchanged (dry run)');
   });
 
   it('skips a codex-only install without asking, and says why', async () => {
@@ -1673,7 +1894,11 @@ describe('runInstall: permissions decision', () => {
       claudeSettingsPath(home),
       JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(git status:*)'] } }, null, 2),
     );
-    await runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps());
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
     const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
       model: string;
       permissions: { allow: string[] };
@@ -1684,7 +1909,7 @@ describe('runInstall: permissions decision', () => {
 
   it('keeps the three recommendation tiers beside the write outcome', async () => {
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1694,12 +1919,399 @@ describe('runInstall: permissions decision', () => {
     );
     expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
   });
+
+  /**
+   * The publish rule follows decision 1 on EVERY path, first run included:
+   * installing Tenjin is the consent for it (owner call, PR #164). An agent
+   * cannot reach either half on its own — `tenjin install` and `tenjin config
+   * set` are both never-allowlisted — and every install that writes the rule
+   * says so, names it, and prints the three ways out.
+   */
+  describe('the publish rule follows publish.mode', () => {
+    it('writes it when --publish-mode names auto on this run', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+    });
+
+    it('writes it when auto is already the configured mode', async () => {
+      await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      // Second run names no mode: it reads `auto` back out of config.
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).alreadyPresent).toContain(PUBLISH_MODE_RULE);
+    });
+
+    it('does not write it on review', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
+      expect(await allowList()).not.toContain(PUBLISH_MODE_RULE);
+    });
+
+    // The headless default IS auto, and the FIRST install writes the rule for it.
+    // The earlier shape withheld it on run 1 and then wrote it on run 2, which
+    // read its own default back as a choice — later and quieter, never absent.
+    it('writes it on the FIRST headless install, off the default mode', async () => {
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      expect(
+        (res.data as { publishMode: { value: string; source: string } }).publishMode,
+      ).toMatchObject({ value: 'auto', source: 'headless-default' });
+      expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
+      expect(await allowList()).toContain(PUBLISH_MODE_RULE);
+    });
+
+    // No second-run asymmetry: the same box, installed twice, is unchanged.
+    it('is idempotent across two headless installs', async () => {
+      await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      const before = await allowList();
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      expect(wiredOf(res.data).added).toEqual([]);
+      expect(wiredOf(res.data).alreadyPresent).toContain(PUBLISH_MODE_RULE);
+      expect(await allowList()).toEqual(before);
+    });
+
+    /**
+     * THE HEADLESS PATH, which is the one that grants without anybody present and
+     * therefore the one the whole default rests on. It returns before
+     * buildWalkthrough, so the envelope is the only disclosure there is: it has to
+     * carry the grant sentence and all three undos as data.
+     */
+    it('carries the grant and all three undos in the headless envelope', async () => {
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      expect(res.humanLines ?? []).toHaveLength(0);
+      const grant = wiredOf(res.data).modeGrant!;
+      expect(grant.rules).toEqual([...MODE_GATED_RULES]);
+      expect(grant.state).toBe('added');
+      expect(grant.disclosure).toContain('publish.mode auto');
+      expect(grant.disclosure).toContain('without a harness prompt');
+      // The keystore is the part the free-tier wording does not cover, and the
+      // part `tenjin session start` exists as an explicit opt-in for. The rest of
+      // what the pair clears is in docs/agent-permissions.md; this line stays one
+      // sentence.
+      expect(grant.disclosure).toContain('open your wallet keystore');
+      expect(grant.undo).toEqual([
+        'tenjin install --publish-mode review',
+        'tenjin config set publish.mode review',
+        'tenjin uninstall',
+      ]);
+    });
+
+    it('carries no grant on review, where nothing was granted', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).modeGrant).toBeUndefined();
+    });
+
+    // `publish` and `edit` are not free verbs, and the count line that called
+    // eleven rules "free tenjin commands" contradicted both this module and the
+    // doctor pointer printed on the next screen.
+    it('counts only the free tier as free, with the pair reported separately', async () => {
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      const wired = wiredOf(res.data);
+      expect(wired.added).toHaveLength(FREE_VERB_RULES.length + MODE_GATED_RULES.length);
+      expect(wired.addedFree).toEqual([...FREE_VERB_RULES]);
+      expect(wired.addedFree).toHaveLength(FREE_VERB_RULES.length);
+    });
+
+    // The human count is every rule of ours in the file. It said nine while the
+    // pair got a block of its own reciting both rule strings; that block is gone,
+    // so a count that still excluded them would under-report what just landed.
+    it('counts all eleven in the human line, and calls none of them free', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: async () => true }),
+      );
+      const text = human(res);
+      expect(text).toContain(
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed`,
+      );
+      expect(text).not.toMatch(/free tenjin commands/);
+    });
+
+    // One of the pair present, the other written: neither "added" nor "already
+    // present" is true of both, so the sentence says neither.
+    it('reports a mixed run as in place rather than claiming it added both', async () => {
+      await writeSettings({ permissions: { allow: [PUBLISH_MODE_RULE] } });
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
+      const grant = wiredOf(res.data).modeGrant!;
+      expect(grant.state).toBe('mixed');
+      expect(grant.disclosure).toContain('in place');
+      expect(grant.disclosure).not.toMatch(/\badded\b/);
+    });
+
+    /**
+     * The grant is a DEFAULT, so the output carries its own receipt: what the
+     * agent will now do, and the command that stops it. In PLAIN WORDS. The rule
+     * strings and all three undos used to be recited here, which is what the
+     * owner read as slop at an install where `Bash(tenjin publish:*)` means
+     * nothing yet; they live on in the docs, `doctor --json`, and the envelope
+     * asserted above.
+     */
+    it('says what the mode does and how to turn it off, in plain words', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: async () => true }),
+      );
+      /**
+       * PRESENCE, not absence. The first cut of this test pinned the lean terminal
+       * with `not.toMatch(/Bash\(/)` and `not.toContain('tenjin uninstall')`, which
+       * encodes the deletion rather than the disclosure: both pass just as well
+       * when the whole block goes missing. These assert the two lines an operator
+       * has to leave the install with.
+       */
+      const lines = human(res).split('\n');
+      const publishing = lines.find((l) => l.includes('Publishing:')) ?? '';
+      expect(publishing).toContain('Publishing: auto');
+      expect(publishing).toContain('publishes and updates pieces on its own, under your identity');
+      expect(publishing).toContain('Turn off: tenjin config set publish.mode review');
+
+      const permissions = lines.find((l) => l.includes('Permissions:')) ?? '';
+      expect(permissions).toContain(
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed in`,
+      );
+      expect(permissions).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
+
+      // Lean stays lean: the depth lives in the envelope and the doc, both pinned
+      // above and in `docs/agent-permissions.md`.
+      expect(human(res)).not.toMatch(/Bash\(/);
+    });
+
+    it('says none of that on review, which grants nothing', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      expect(human(res)).not.toContain(PUBLISH_MODE_RULE);
+      expect(human(res)).not.toContain('Turn off:');
+    });
+
+    // `--no-allow-free-verbs` still refuses the whole write, publish rule included.
+    it('writes nothing at all when the allowlist itself is refused', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: false },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).skipped).toBe('declined');
+      expect(await allowList()).toBeUndefined();
+    });
+
+    /**
+     * `--no-allow-free-verbs` declines a WRITE OF OURS. It is not a request to
+     * keep a grant the operator just revoked, and while the retraction sat below
+     * this guard the run wrote `mode: review` to config.json, left both rules
+     * allowed, exited 0, and reported `skipped: declined` with a fix telling the
+     * operator to ADD rules on the run where they asked to revoke.
+     */
+    it('retracts on review even when the free-verb write is refused', async () => {
+      await writeSettings({
+        permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
+      });
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).skipped).toBe('declined');
+      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([FREE_VERB_RULES[0]]);
+    });
+
+    /**
+     * The retraction runs above the guards that decline a write, so a run can
+     * retract and then skip. Both skip lines described the file as untouched:
+     * "unchanged" on the declined path, and "not wired (Claude Code only)" on the
+     * other-harness path, which is worse because it names the very file the run
+     * had just deleted two rules from.
+     */
+    it('says what it took back on the skip lines too, not just the write lines', async () => {
+      const lineFor = async (args: Parameters<typeof runInstall>[0]): Promise<string> => {
+        await writeSettings({
+          permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
+        });
+        const res = await runInstall(args, makeCtx(), deps({ isInteractive: true }));
+        return (
+          human(res)
+            .split('\n')
+            .find((l) => l.includes('Permissions:')) ?? ''
+        );
+      };
+
+      const declined = await lineFor({
+        harness: ['claude'],
+        allowFreeVerbs: false,
+        publishMode: 'review',
+      });
+      expect(declined).toContain('2 rule(s) for publish and edit were removed');
+      expect(declined).not.toMatch(/Permissions: unchanged\./);
+
+      const otherHarness = await lineFor({ harness: ['codex'], publishMode: 'review' });
+      expect(otherHarness).toContain('2 rule(s) for publish and edit were removed');
+      // "not wired (Claude Code only)" read as "your Claude settings were left
+      // alone", which is the opposite of what just happened to them.
+      expect(otherHarness).not.toMatch(/not wired \(Claude Code only\)/);
+      // And it NAMES the file. A non-Claude skip carries no path on purpose, but
+      // once this run has deleted from that file, withholding its name is the
+      // thing that leaves the operator unable to check.
+      expect(otherHarness).toContain(claudeSettingsPath(home));
+    });
+
+    // And the word stays honest the other way: a run that retracted nothing and
+    // wrote nothing is the only one allowed to say "unchanged".
+    it('still says unchanged when there was genuinely nothing to take back', async () => {
+      await writeSettings({ permissions: { allow: ['Bash(git status:*)'] } });
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      const line = human(res)
+        .split('\n')
+        .find((l) => l.includes('Permissions:'));
+      expect(line).toMatch(/Permissions: unchanged\./);
+      expect(line).not.toContain('were removed');
+    });
+
+    // Same ordering bug, the other guard: scoping a WRITE to the harnesses a run
+    // targets is defensible, but a Claude rule this CLI wrote is ours to reclaim
+    // whichever harness is being installed today.
+    it('retracts on review even when this run targets another harness', async () => {
+      await writeSettings({ permissions: { allow: [PUBLISH_MODE_RULE, EDIT_MODE_RULE] } });
+      const res = await runInstall(
+        { harness: ['codex'], publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).skipped).toBe('harness-not-claude');
+      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([]);
+    });
+
+    /**
+     * The retraction used to RETURN, jumping the additive pass and the legacy
+     * sweep both. One review-install on a machine holding only the pair retracted
+     * them, printed "the 9 free tenjin commands were already allowed" over a file
+     * holding none of them, stranded a legacy rule, and made the operator run
+     * install twice to get the tier.
+     */
+    it('retracts AND wires the free tier AND sweeps legacy, in one run', async () => {
+      await writeSettings({
+        permissions: {
+          allow: [
+            PUBLISH_MODE_RULE,
+            EDIT_MODE_RULE,
+            'Bash(git status:*)',
+            ...LEGACY_ALLOWLIST_RULES,
+          ],
+        },
+      });
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      const wired = wiredOf(res.data);
+      expect(wired.added).toEqual([...FREE_VERB_RULES]);
+      for (const rule of [...MODE_GATED_RULES, ...LEGACY_ALLOWLIST_RULES]) {
+        expect(wired.removed, rule).toContain(rule);
+      }
+      expect(await allowList()).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
+
+      // And the line says what happened rather than claiming a tier it never wrote.
+      const text = human(res);
+      expect(text).toContain(`${FREE_VERB_RULES.length} tenjin commands allowed in`);
+      expect(text).not.toContain('were already allowed');
+      expect(text).toContain('Publishing is back to asking first');
+      // The legacy sweep's note is about commands that no longer exist. `publish`
+      // and `edit` very much exist, so they must not be counted into it.
+      expect(text).toContain(
+        `Removed ${LEGACY_ALLOWLIST_RULES.length} permission rule(s) an older tenjin left`,
+      );
+    });
+
+    // The mode moved back to "ask me first", so the rule that skipped the asking
+    // must not outlive it.
+    it('takes it back when the mode returns to review', async () => {
+      await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
+      expect(await allowList()).toEqual([...FREE_VERB_RULES]);
+    });
+
+    // The consent prompt has to name what the write actually carries.
+    // What auto changes about the answer, in the question itself: the count goes
+    // up and the agent publishes as them. NOT the rule strings, which the operator
+    // has not met yet and cannot act on at a yes/no.
+    it('discloses what auto adds in the question it asks', async () => {
+      const confirm = vi.fn(async (_label: string) => true);
+      await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: confirm }),
+      );
+      const asked = confirm.mock.calls[0]![0];
+      expect(asked).toContain(
+        `Adds ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} command rules`,
+      );
+      expect(asked).toContain('publish.mode auto your agent will publish under your identity');
+      expect(asked).not.toContain(PUBLISH_MODE_RULE);
+    });
+
+    it('names no extra rule in the question on review', async () => {
+      const confirm = vi.fn(async (_label: string) => true);
+      await runInstall(
+        { harness: ['claude'], publishMode: 'review' },
+        makeCtx(),
+        deps({ isInteractive: true, confirmPermissions: confirm }),
+      );
+      expect(confirm.mock.calls[0]![0]).not.toContain(PUBLISH_MODE_RULE);
+    });
+
+    it('carries the mode-gated tier in the envelope', async () => {
+      const res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx({ json: true }),
+        deps(),
+      );
+      const d = res.data as WiredData;
+      expect(d.permissions.modeGated.map((e) => e.rule)).toEqual([...MODE_GATED_RULES]);
+    });
+  });
 });
 
-// --- The four decisions, in order, and nothing else -------------------------------
+// --- The five decisions, in order, and nothing else -------------------------------
 
-describe('runInstall: at most four questions', () => {
-  it('asks publishing, permissions, search hooks, then wallet, and stops there', async () => {
+describe('runInstall: at most five questions', () => {
+  it('asks publishing, permissions, search hooks, wallet, bazaarPay, and stops there', async () => {
     const asked: string[] = [];
     await runInstall(
       { harness: ['claude'] },
@@ -1723,9 +2335,13 @@ describe('runInstall: at most four questions', () => {
           asked.push('wallet');
           return false;
         },
+        confirmBazaarPay: async () => {
+          asked.push('bazaar-pay');
+          return false;
+        },
       }),
     );
-    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet']);
+    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet', 'bazaar-pay']);
   });
 
   it('asks nothing at all on a machine run', async () => {
@@ -1749,6 +2365,10 @@ describe('runInstall: at most four questions', () => {
         },
         confirmWallet: async () => {
           asked.push('wallet');
+          return true;
+        },
+        confirmBazaarPay: async () => {
+          asked.push('bazaar-pay');
           return true;
         },
       }),
@@ -1904,6 +2524,28 @@ describe('runInstall: hosted skill already present (#35)', () => {
   it("leaves a user's files beside the skill untouched", async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(dir, 'references'), { recursive: true });
+    // Every file the skill ships, already identical — including the one that
+    // lives in the same subdirectory as the operator's own notes.
+    for (const rel of SHIPPED_SKILL_FILES['tenjin-search']) {
+      await writeFile(join(dir, rel), await readFile(join(SKILLS_SRC, 'tenjin-search', rel)));
+    }
+    await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
+
+    const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
+    // The packaged files were already identical, so nothing changed at all.
+    expect(skill.status).toBe('up-to-date');
+    expect(asData(data).harnesses[0]!.warnings.filter((w) => w.includes('tenjin-search'))).toEqual(
+      [],
+    );
+    expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
+  });
+
+  // The multi-file half of the same promise: a skill that ships a subdirectory
+  // gets it created and written, beside whatever the operator already had there.
+  it('writes a shipped reference file into an existing skill directory', async () => {
+    const dir = join(home, '.claude', 'skills', 'tenjin-search');
+    await mkdir(join(dir, 'references'), { recursive: true });
     await writeFile(
       join(dir, 'SKILL.md'),
       await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
@@ -1912,10 +2554,9 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
-    // The packaged file was already identical, so nothing changed at all.
-    expect(skill.status).toBe('up-to-date');
-    expect(asData(data).harnesses[0]!.warnings.filter((w) => w.includes('tenjin-search'))).toEqual(
-      [],
+    expect(skill.status).toBe('updated');
+    expect(await readFile(join(dir, 'references', 'permissions.md'), 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'references', 'permissions.md'), 'utf8'),
     );
     expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2483,11 +3124,40 @@ describe('runInstall: preexisting means a real prior copy', () => {
  * linger in every install forever, and the fix is a manifest of what the previous
  * version wrote. This fails first and says so.
  */
-describe('the packaged skills are single-file, which is what makes write-in-place safe', () => {
-  it('ships exactly one SKILL.md per skill and nothing else', async () => {
-    for (const name of SKILL_NAMES) {
-      const entries = await readdir(join(SKILLS_SRC, name), { recursive: true });
-      expect(entries).toEqual(['SKILL.md']);
+describe('the packaged skills ship a DECLARED file set, which is what uninstall reclaims', () => {
+  // `uninstall` removes what this list names, on a machine where the packaged
+  // source may be long gone. A reference file nobody declares is litter no
+  // uninstall can reclaim, so the declaration is pinned against the real tree.
+  // PACKAGED, not required-only: the gated tenjin-pay directory is written to
+  // the operator's disk like any other, so it is reclaimed like any other.
+  it('declares exactly the files each skill actually ships', async () => {
+    for (const name of PACKAGED_SKILL_NAMES) {
+      const entries = await readdir(join(SKILLS_SRC, name), {
+        recursive: true,
+        withFileTypes: true,
+      });
+      const files = entries
+        .filter((e) => e.isFile())
+        .map((e) =>
+          relative(join(SKILLS_SRC, name), join(e.parentPath, e.name)).split(sep).join('/'),
+        )
+        .sort();
+      expect(files).toEqual([...SHIPPED_SKILL_FILES[name]].sort());
+    }
+  });
+
+  it('always ships SKILL.md first, the file that proves the directory is ours', () => {
+    for (const name of PACKAGED_SKILL_NAMES) expect(SHIPPED_SKILL_FILES[name][0]).toBe('SKILL.md');
+  });
+
+  // Everything else in the tree is written in place beside the operator's own
+  // files, so a shipped path may never climb out of its skill directory.
+  it('declares no path that escapes its own skill directory', () => {
+    for (const name of PACKAGED_SKILL_NAMES) {
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        expect(rel.startsWith('/')).toBe(false);
+        expect(rel.split('/')).not.toContain('..');
+      }
     }
   });
 });
@@ -2791,59 +3461,82 @@ describe('runInstall: wallet creation is the default', () => {
 
   const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
+  /**
+   * Real ox scrypt at N=262144, so these three run past the 5s default whenever
+   * the machine is busy — the flake tenjin-agent#47 named, whose remedy the wallet
+   * suites already apply file-wide (`vi.setConfig` in commands/wallet.test.ts and
+   * lib/wallet/local.test.ts). Applied PER TEST here instead: this file is 170
+   * other cases of ordinary filesystem work, and raising the whole file would
+   * take the 5s hang detector away from all of them.
+   */
+  const SCRYPT_TIMEOUT_MS = 120_000;
+
   // The real creator on a fake keychain: this is the path a headless install
   // actually takes, generated passphrase and scrypt keystore included.
-  it('a non-interactive run really creates one, passphrase in the OS store', async () => {
-    const { exec, entries } = fakeKeychain();
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps(realWalletCreate(exec)),
-    );
-    const wallet = walletOf(res.data);
-    expect(wallet.status).toBe('created');
-    expect(wallet.address).toMatch(ADDRESS_RE);
-    expect(existsSync(join(data, 'wallet.json'))).toBe(true);
-    // Exactly one entry, keyed by the new wallet's own lowercase address.
-    expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
-  });
+  it(
+    'a non-interactive run really creates one, passphrase in the OS store',
+    async () => {
+      const { exec, entries } = fakeKeychain();
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps(realWalletCreate(exec)),
+      );
+      const wallet = walletOf(res.data);
+      expect(wallet.status).toBe('created');
+      expect(wallet.address).toMatch(ADDRESS_RE);
+      expect(existsSync(join(data, 'wallet.json'))).toBe(true);
+      // Exactly one entry, keyed by the new wallet's own lowercase address.
+      expect([...entries.keys()]).toEqual([wallet.address!.toLowerCase()]);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   // Through the deps seam, NOT vi.stubEnv: mutating the real process environment
   // to steer this is what made it flake under the parallel runner, and the
   // passphrase layer already takes its env as an argument.
-  it('uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all', async () => {
-    const touched: string[] = [];
-    const spyExec: ExecFn = async (file, args) => {
-      touched.push(`${file} ${args[0] ?? ''}`);
-      throw new Error('no store');
-    };
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps({
-        ...realWalletCreate(spyExec),
-        env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
-      }),
-    );
-    expect(walletOf(res.data).status).toBe('created');
-    // The env value settles it, so no credential store is consulted at all.
-    expect(touched).toEqual([]);
-  });
+  it(
+    'uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all',
+    async () => {
+      const touched: string[] = [];
+      const spyExec: ExecFn = async (file, args) => {
+        touched.push(`${file} ${args[0] ?? ''}`);
+        throw new Error('no store');
+      };
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps({
+          ...realWalletCreate(spyExec),
+          env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
+        }),
+      );
+      expect(walletOf(res.data).status).toBe('created');
+      // The env value settles it, so no credential store is consulted at all.
+      expect(touched).toEqual([]);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   // The mirror of the case above, and the reason the fixture pins an empty env:
   // with no passphrase in the environment the store is the only source left, so
   // an ambient one leaking in from a shell or another file would silently make
   // the keychain assertions vacuous.
-  it('falls to the OS store when the environment carries no passphrase', async () => {
-    const { exec, entries } = fakeKeychain();
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps(realWalletCreate(exec)),
-    );
-    expect(walletOf(res.data).status).toBe('created');
-    expect(entries.size).toBe(1);
-  });
+  // Real scrypt again; see SCRYPT_TIMEOUT_MS above.
+  it(
+    'falls to the OS store when the environment carries no passphrase',
+    async () => {
+      const { exec, entries } = fakeKeychain();
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps(realWalletCreate(exec)),
+      );
+      expect(walletOf(res.data).status).toBe('created');
+      expect(entries.size).toBe(1);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   // The one case with no safe answer. No plaintext fallback exists, by design.
   it('creates nothing and skips LOUDLY with no store and no env passphrase', async () => {
@@ -2871,7 +3564,8 @@ describe('runInstall: wallet creation is the default', () => {
       permissions: { wired: { added: string[] } };
       hooks: { added: string[] };
     };
-    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES]);
+    // The default mode is auto, so the publish rule rides along with the tier.
+    expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
     expect(d.hooks.added).toEqual(['PreToolUse', 'Stop']);
   });
 

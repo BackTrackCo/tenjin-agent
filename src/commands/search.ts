@@ -124,14 +124,6 @@ export async function runSearch(
     paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price) === true).length,
   });
 
-  // One stderr line on a MISS (never in the machine JSON): a MISS is the moment
-  // to publish the answer you are about to derive. There is deliberately no
-  // second line about drafts waiting somewhere — a reminder that re-raises work
-  // nobody chose to come back to is the class this CLI stopped emitting.
-  if (response.decision === 'MISS') {
-    ctx.io.stderr.write(`${publishBackLine(response.searchId)}\n`);
-  }
-
   // A MISS may carry up to 3 browse pointers from the broad corpus. They are
   // pointers, NOT candidates: rendered as ONE hint line with no scores and no
   // per-item detail, so a MISS still reads as a MISS and an agent is never
@@ -185,9 +177,18 @@ export async function runSearch(
         ]
       : [];
 
+  // The publish-back line rides humanLines like every other rendering, so `--json`
+  // suppresses it the way that flag's own help promises. It used to go straight to
+  // stderr, which no output mode gates: an agent asking for a machine envelope got
+  // ~260 bytes of human prose alongside it.
   const humanLines =
     response.decision === 'MISS'
-      ? [`MISS, no candidates (searchId ${response.searchId})`, ...browseHint, ...truncatedHint]
+      ? [
+          `MISS, no candidates (searchId ${response.searchId})`,
+          ...browseHint,
+          ...truncatedHint,
+          publishBackLine(response.searchId),
+        ]
       : [
           `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
           // Dollars for the same reason the browse hint uses them: this is the
@@ -257,7 +258,7 @@ function publishBackHint(searchId: string): {
   };
 }
 
-/** The same hint as one stderr line for a human. */
+/** The same hint as one rendered line for a human. */
 function publishBackLine(searchId: string): string {
   return `Nobody has published this yet - if you solve it, publish it back (tenjin publish <file.md> --search-id ${searchId}); if you will not, close the loop: tenjin outcome --search-id ${searchId} --status regenerated`;
 }

@@ -92,7 +92,6 @@ export interface UpdateDeps {
 interface UpdateData {
   current: string;
   latest: string;
-  channel: 'alpha' | 'latest';
   updateAvailable: boolean;
   updated: boolean;
 }
@@ -130,22 +129,28 @@ export async function runUpdate(
     });
   }
   const latest = resolveTarget(current, tags);
-  // The registry answered, it just has nothing on the tags this build follows.
   // Not a NETWORK_ERROR: nothing about the connection is wrong, and telling the
   // user to check their access sends them after a fault that is not there.
   if (latest === null) {
-    throw new CliError(
-      'RESOURCE_NOT_FOUND',
-      `npm has no published tenjin-cli on the ${channel} or latest tag`,
-      { fix: 'Pick a version yourself: npm view tenjin-cli versions' },
-    );
+    const raw = tags[channel];
+    throw raw === undefined
+      ? new CliError('RESOURCE_NOT_FOUND', 'npm has no published tenjin-cli on the latest tag', {
+          fix: 'Pick a version yourself: npm view tenjin-cli versions',
+        })
+      : new CliError(
+          'RESOURCE_NOT_FOUND',
+          // Registry-controlled: bounded here, escaped by the error emitter.
+          `npm's latest tenjin-cli (${raw.slice(0, 40)}) is not a version this build can read`,
+          {
+            fix: 'Install it by name: npm i -g tenjin-cli@<version> (npm view tenjin-cli versions)',
+          },
+        );
   }
 
   const updateAvailable = isNewer(latest, current);
   const data = (updated: boolean): UpdateData => ({
     current,
     latest,
-    channel,
     updateAvailable,
     updated,
   });
@@ -153,8 +158,6 @@ export async function runUpdate(
   if (!updateAvailable) {
     return {
       data: data(false),
-      // Not "(alpha channel)": the answer is no longer bounded by one tag, and
-      // naming one was how this line read as authoritative while being wrong.
       humanLines: [`tenjin-cli ${current} is up to date`],
     };
   }

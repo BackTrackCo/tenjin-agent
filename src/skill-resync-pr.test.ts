@@ -314,7 +314,7 @@ describe('open-skill-resync-pr.sh', () => {
     const result = run(lab, mirror('new wording'), [{ number: 99, isCrossRepository: true }]);
 
     expect(result.status).toBe(0);
-    expect(result.output).not.toContain('99');
+    expect(result.output).not.toContain('PR #99');
     expect((await soleGhCall(lab)).slice(0, 2)).toEqual(['pr', 'create']);
     expect(remoteShow(lab, `${BRANCH}:${MIRROR}`)).toBe(mirror('new wording'));
   }, 30_000);

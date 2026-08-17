@@ -1,6 +1,17 @@
 import { mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
+import { confirmChoice } from '../lib/clack';
+import {
+  inspectFreeVerbRules,
+  MODE_GATED_RULES,
+  retractModeGatedRules,
+  wireFreeVerbAllowlist,
+  type PermissionsResult,
+} from '../lib/harness-permissions';
+import { modeGatedPointer } from '../lib/permissions';
+import { stopHookIsCurrent } from '../lib/harness-hooks';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
@@ -26,7 +37,13 @@ import type {
   SearchHookMode,
   UpdateConfigKey,
 } from '../lib/config';
-import type { HarnessTarget } from '../lib/skill-wiring';
+import {
+  detectHarnesses,
+  harnessInPlay,
+  harnessTargetDir,
+  onPath,
+  type HarnessTarget,
+} from '../lib/skill-wiring';
 import { loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -47,6 +64,32 @@ interface RenderedValue {
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
+}
+
+/**
+ * Seams for the one `config set` path that touches a file outside the data dir.
+ * Tests inject all of them; nothing here is reachable from a flag.
+ */
+export interface ConfigSetDeps {
+  /** Home whose `.claude/settings.json` is synced; defaults to os.homedir(). */
+  homeDir?: string;
+  /** Overrides TTY detection, exactly as install's own seam does. */
+  isInteractive?: boolean;
+  /** The yes/no for a loosening write; defaults to the clack confirm (default yes). */
+  confirmRule?: (label: string) => Promise<boolean>;
+  /** Whether this machine's harness is Claude Code (the only settings file we write).
+   *  Absent, it is DETECTED the way install and doctor detect it. */
+  harnessIsClaude?: boolean;
+  /** The retraction-only pass `review` runs; defaults to the real writer. */
+  retractModeGated?: (home: string) => Promise<PermissionsResult>;
+  /** Whether the installed Stop hook matches this build; defaults to reading it. */
+  stopHookIsCurrent?: (dataDir: string) => Promise<boolean>;
+  /** PATH probe for harness detection; defaults to probing `env.PATH`. */
+  which?: (bin: string) => boolean;
+  /** Environment for that probe; defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
+  inspectAllowlist?: typeof inspectFreeVerbRules;
+  wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
 }
 
 const CONFIRM_ABOVE = 'above:';
@@ -76,7 +119,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'publish.defaultPrice': 'price used when none is given',
   'hooks.searchMode':
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
-  'hooks.stopNag': 'end-of-turn reminder about searches nothing answered yet',
+  'hooks.stopNag':
+    'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
@@ -172,8 +216,8 @@ export async function runConfigSet(
   ctx: CommandContext,
   deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
-  if (isPublishKey(key)) return setPublishKey(key, value, ctx);
-  if (isHooksKey(key)) return setHooksKey(key, value, ctx);
+  if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
+  if (isHooksKey(key)) return setHooksKey(key, value, ctx, deps);
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
@@ -205,6 +249,7 @@ async function setPublishKey(
   key: PublishConfigKey,
   value: string,
   ctx: CommandContext,
+  deps: ConfigSetDeps,
 ): Promise<CommandResult> {
   const entry: RenderedSetting =
     key === 'publish.mode'
@@ -216,19 +261,179 @@ async function setPublishKey(
     ...existing,
     publish: { ...existing.publish, [subkey]: stored },
   }));
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  const humanLines = [formatLine(key, entry)];
+  if (key !== 'publish.mode') return { data: { key, ...entry }, humanLines };
+
+  // The mode decides whether a publish asks; the harness rule decides whether the
+  // harness asks ANYWAY. Settling one and leaving the other to the next `tenjin
+  // install` is the seam that made publish.mode look broken (tenjin-agent #161),
+  // so the two move together from here too.
+  const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
+  return {
+    data: { key, ...entry, allowlist },
+    humanLines: [...humanLines, ...allowlistLines(allowlist)],
+  };
+}
+
+/**
+ * What `config set publish.mode` did about the harness rule the mode carries.
+ * `skipped` names why nothing was written; `pointer` is the line to show when it
+ * is the operator's move.
+ */
+interface AllowlistSync {
+  added: string[];
+  removed: string[];
+  skipped?: 'not-claude' | 'no-tty' | 'declined' | 'unwritable';
+  pointer?: string;
+}
+
+/** Names what the write actually carries: on a machine that never ran `install`,
+ *  the free tier is pending too, and a question naming two lines while eleven
+ *  land is asking about something else. */
+function publishRuleQuestion(mode: PublishMode, pending: readonly string[]): string {
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const others = pending.filter((rule) => !gated.has(rule)).length;
+  const also =
+    others > 0 ? ` Also adds the ${others} free-verb rule(s) \`tenjin install\` writes.` : '';
+  return (
+    `publish.mode ${mode} is unattended only if your harness allowlist carries ` +
+    `${MODE_GATED_RULES.join(' and ')}. Add them to ~/.claude/settings.json now?${also}`
+  );
+}
+
+/**
+ * Keep the harness allowlist in step with the mode just written.
+ *
+ * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
+ *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
+ *    No TTY, `--json`, or a declined prompt all leave the file alone and return
+ *    the pointer instead; nothing here writes on silence.
+ *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
+ *    the operator has just changed, so it runs unconditionally — the same reason
+ *    install sweeps a retired rule without asking. Leaving it behind would keep
+ *    publishing pre-cleared after the operator said "ask me first", which is the
+ *    failure that matters.
+ */
+async function syncPublishRule(
+  mode: PublishMode,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+): Promise<AllowlistSync> {
+  const home = deps.homeDir ?? homedir();
+  const nothing: AllowlistSync = { added: [], removed: [] };
+
+  const write = async (): Promise<AllowlistSync> => {
+    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
+    if (result.skipped !== undefined) {
+      return {
+        added: [],
+        removed: [],
+        skipped: 'unwritable',
+        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
+      };
+    }
+    return { added: result.added, removed: result.removed };
+  };
+
+  // Only Claude Code has a settings file of this shape; guessing at another
+  // harness's config is the uninvited write lib/harness-permissions.ts avoids.
+  // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
+  // that nothing reads, so prompting about it is noise and writing to it is an
+  // uninvited edit — and the retraction would sweep a file we never owned.
+  const isClaude = deps.harnessIsClaude ?? (await claudeInPlay(home, ctx, deps));
+  if (!isClaude) {
+    // No settings file of ours to be missing anything, so the pointer would be
+    // advice about a machine this is not.
+    return { ...nothing, skipped: 'not-claude' };
+  }
+
+  const probe = await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode);
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const missing = (probe.pending ?? []).filter((r) => gated.has(r));
+  // Only ever names rules this machine does not have. A pointer built from the
+  // mode alone told a fully-wired operator to go add what they already had.
+  const pointer = modeGatedPointer(mode, missing) ?? undefined;
+
+  // Tightening runs with no question and with no precondition, through a pass
+  // that can only ever REMOVE. Riding the additive writer made this decline
+  // whenever the free tier was not byte-exact — silently, and in the tightening
+  // direction, on the undo the operator just typed.
+  if (mode === 'review') {
+    const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
+    if (retracted.skipped !== undefined) {
+      return {
+        ...nothing,
+        skipped: 'unwritable',
+        ...(retracted.fix !== undefined ? { pointer: retracted.fix } : {}),
+      };
+    }
+    return { added: [], removed: retracted.removed };
+  }
+
+  // SATISFIED BEFORE TTY, and the order is the point: a fully-wired machine has
+  // nothing to ask about and nothing to write, so a `--json` or headless run
+  // there is a no-op rather than a `no-tty` skip carrying a pointer at rules it
+  // already has.
+  if (probe.satisfied !== undefined) return nothing;
+
+  const canPrompt =
+    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+  if (!canPrompt) return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
+
+  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
+  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [])))) {
+    return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
+  }
+  return write();
+}
+
+/** Claude Code's business? The union install and doctor target with: detected on
+ *  PATH or by its home directory, or named by a past `--harness`, which outranks
+ *  the probes. */
+async function claudeInPlay(
+  home: string,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+): Promise<boolean> {
+  const env = deps.env ?? process.env;
+  const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const requested = await loadRawConfig(ctx.dataDir)
+    .then((c) => c.install?.harness ?? [])
+    .catch(() => [] as HarnessTarget[]);
+  return harnessInPlay(
+    home,
+    harnessTargetDir(home, 'claude'),
+    detectHarnesses(home, which),
+    requested,
+  );
+}
+
+/** The human rendering of {@link syncPublishRule}, or nothing when it was a no-op. */
+function allowlistLines(sync: AllowlistSync): string[] {
+  const lines: string[] = [];
+  if (sync.added.length > 0) {
+    lines.push(`Added ${sync.added.length} harness rule(s) to your allowlist.`);
+  }
+  if (sync.removed.length > 0) {
+    lines.push(`Removed ${sync.removed.join(', ')} from your allowlist.`);
+  }
+  if (sync.pointer !== undefined) lines.push(sync.pointer);
+  return lines;
 }
 
 /**
  * `config set hooks.searchMode`. Merged into the nested hooks block through the
  * same locked read-modify-write every other set uses, so a subkey a newer CLI
- * wrote survives. The installed hook script reads this file on every run, so the
- * new mode takes effect immediately with no re-install.
+ * wrote survives. The installed script reads this file on every run, so a value
+ * that script UNDERSTANDS takes effect immediately with no re-install — which is
+ * every value it shipped knowing about, and not `deliberate-only` on a script
+ * written before that existed. That one case is reported, once, below.
  */
 async function setHooksKey(
   key: HooksConfigKey,
   value: string,
   ctx: CommandContext,
+  deps: ConfigSetDeps,
 ): Promise<CommandResult> {
   const subkey = key === 'hooks.searchMode' ? 'searchMode' : 'stopNag';
   const parsed =
@@ -238,7 +443,18 @@ async function setHooksKey(
     hooks: { ...existing.hooks, [subkey]: parsed },
   }));
   const entry: RenderedSetting = { value: parsed, source: 'file' };
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  // ONE honest line, not a nag loop: the value is stored either way, and the
+  // operator is told the running script predates it rather than left believing a
+  // setting took that did not.
+  const current = await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir);
+  const stale =
+    parsed === 'deliberate-only' && !current
+      ? `The installed Stop hook predates ${JSON.stringify(parsed)} and will keep treating it as "on". Run \`tenjin install\` to update it.`
+      : undefined;
+  return {
+    data: { key, ...entry, ...(stale !== undefined ? { hookScriptStale: true } : {}) },
+    humanLines: [formatLine(key, entry), ...(stale !== undefined ? [stale] : [])],
+  };
 }
 
 /**

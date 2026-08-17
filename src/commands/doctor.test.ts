@@ -9,6 +9,7 @@ import { isNoWalletCheck, runDoctor } from './doctor';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
+import { claudeSettingsPath, FREE_VERB_RULES, MODE_GATED_RULES } from '../lib/harness-permissions';
 import { emitFailure } from '../lib/output';
 import { fakeRecord } from '../lib/wallet/test-support';
 import { ALWAYS_SAFE_ALLOWLIST, OPT_IN_ALLOWLIST, PERMISSIONS_DOC_URL } from '../lib/permissions';
@@ -1186,6 +1187,197 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     const fixes = data.checks.filter((c) => c.status !== 'ok' && c.fix !== undefined).length;
     // checks + their fix lines + one blank separator + the pointer.
     expect((res.humanLines ?? []).length).toBe(data.checks.length + fixes + 2);
+  });
+});
+
+/**
+ * The one rule doctor DOES name. An operator whose agent is being prompted for
+ * every publish, on a mode that says not to ask, is reading exactly this line —
+ * and the pointer, which names no rule at all, cannot tell them which one to add.
+ */
+describe('runDoctor — the rule the publish mode carries', () => {
+  let home: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'tenjin-doc-home-'));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const run = async (): Promise<string> => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return (res.humanLines ?? []).join('\n');
+  };
+
+  it('says nothing extra on review, the shipped default', async () => {
+    expect(await run()).not.toContain('Bash(tenjin publish:*)');
+  });
+
+  // The nag this line used to be: it rendered from the mode alone, so a machine
+  // that already carried both rules was still told to go add them, pointing at a
+  // command that would do nothing (PR #164 round 2, major 3a).
+  it('says nothing when the machine already carries both rules', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, ...MODE_GATED_RULES] } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+      homeDir: home,
+    });
+    const text = (res.humanLines ?? []).join('\n');
+    expect(text).not.toContain('also needs');
+  });
+
+  /**
+   * An env var is per-run and settable by anything in the agent's shell, and
+   * `doctor` is an allowlisted free verb — so it reports an override AS an
+   * override, and never renders a `config set` built from a value it just read
+   * out of the environment (PR #164 round 3, nit 1).
+   */
+  it('reports a TENJIN_PUBLISH_MODE override as an override, not a remedy', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: { TENJIN_PUBLISH_MODE: 'full-auto' },
+      fetchImpl: healthyFetch,
+      homeDir: home,
+    });
+    const text = (res.humanLines ?? []).join('\n');
+    expect(text).toContain('TENJIN_PUBLISH_MODE=full-auto is overriding');
+    expect(text).toContain('for this run only');
+    expect(text).not.toContain('tenjin config set publish.mode');
+    expect(text).not.toMatch(/`tenjin install` writes them/);
+  });
+
+  it('says nothing about an override on a machine that already has the rules', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({ permissions: { allow: [...FREE_VERB_RULES, ...MODE_GATED_RULES] } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: { TENJIN_PUBLISH_MODE: 'full-auto' },
+      fetchImpl: healthyFetch,
+      homeDir: home,
+    });
+    expect((res.humanLines ?? []).join('\n')).not.toContain('TENJIN_PUBLISH_MODE');
+  });
+
+  it('names the rule on auto', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+    const text = await run();
+    expect(text).toContain('Bash(tenjin publish:*)');
+    expect(text).toContain('publish.mode=auto');
+    // Still above the one pointer that closes every doctor run.
+    expect(text.trimEnd().endsWith(PERMISSIONS_DOC_URL)).toBe(true);
+  });
+
+  it('names the rule on full-auto', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'full-auto' } }));
+    expect(await run()).toContain('publish.mode=full-auto');
+  });
+
+  it('carries the mode-gated tier in --json', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+    expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([
+      'Bash(tenjin publish:*)',
+      'Bash(tenjin edit:*)',
+    ]);
+  });
+
+  it('carries an empty mode-gated tier on review', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+    expect(data.permissions.modeGated).toEqual([]);
+  });
+
+  /**
+   * PROJECT-AWARE, like `config get` and `publish`. Doctor was global-plus-env
+   * only, so inside a repo pinned to `review` under a global `auto` it reported
+   * the machine as needing a grant the next publish in that directory would never
+   * use: three mode surfaces, three answers.
+   *
+   * The two controls are the point. An empty `modeGated` has to be a state this
+   * path can actually produce, and a populated one has to be what a project-blind
+   * read gives, or the pinned case passing proves nothing.
+   */
+  it('resolves the project .tenjin.json layer, like config get does', async () => {
+    const modeGatedFor = async (cwd?: string): Promise<string[]> => {
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        env: {},
+        fetchImpl: healthyFetch,
+        ...(cwd !== undefined ? { cwd } : {}),
+      });
+      const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+      return data.permissions.modeGated.map((e) => e.rule);
+    };
+
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-doctor-proj-'));
+    try {
+      await mkdir(join(repo, '.git'), { recursive: true });
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+
+      // CONTROL 1: global auto with no project file still reports both rules, so
+      // an empty result below is a real disagreement rather than a dead probe.
+      expect(await modeGatedFor(repo)).toEqual([...MODE_GATED_RULES]);
+
+      await writeFile(join(repo, '.tenjin.json'), JSON.stringify({ publish: { mode: 'review' } }));
+      expect(await modeGatedFor(repo)).toEqual([]);
+
+      // CONTROL 2: global review with no project file, the other way an empty
+      // result is reachable.
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'review' } }));
+      const bare = await mkdtemp(join(tmpdir(), 'tenjin-doctor-bare-'));
+      try {
+        await mkdir(join(bare, '.git'), { recursive: true });
+        expect(await modeGatedFor(bare)).toEqual([]);
+      } finally {
+        await rm(bare, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  // A project file we cannot parse is `config get`'s error to raise, not a reason
+  // for every unrelated check on this page to disappear.
+  it('degrades to the global mode when the project file is malformed', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-doctor-bad-'));
+    try {
+      await mkdir(join(repo, '.git'), { recursive: true });
+      await writeFile(join(repo, '.tenjin.json'), '{ not json');
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ publish: { mode: 'auto' } }));
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        env: {},
+        fetchImpl: healthyFetch,
+        cwd: repo,
+      });
+      const data = res.data as { permissions: { modeGated: { rule: string }[] } };
+      expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([...MODE_GATED_RULES]);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 });
 

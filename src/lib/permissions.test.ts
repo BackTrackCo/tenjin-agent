@@ -9,10 +9,13 @@ import {
   ALWAYS_SAFE_ALLOWLIST,
   FLAG_CAVEAT,
   MCP_CAVEAT,
+  modeGatedAllowlist,
+  modeGatedPointer,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
   PERMISSIONS_DOC_URL,
   permissionsPointer,
+  PUBLISH_MODE_ALLOWLIST,
   recommendedPermissions,
   recommendedRules,
 } from './permissions';
@@ -168,6 +171,133 @@ describe('money-moving and state-changing verbs are never recommended', () => {
       expect(rule).not.toBe('Bash(tenjin wallet:*)');
       expect(rule).not.toBe('Bash(tenjin config:*)');
     }
+  });
+});
+
+/**
+ * The mode-gated tier is not a recommendation, which is why `publish` stays on
+ * NEVER_ALLOWLISTED and out of `recommendedRules()`: nothing here offers the rule
+ * to an operator weighing it. It appears only because a mode they already chose
+ * means it.
+ */
+describe('the rule publish.mode carries', () => {
+  it('is two narrow prefix rules, publish and its update-in-place twin', () => {
+    expect(PUBLISH_MODE_ALLOWLIST.map((e) => e.rule)).toEqual([
+      'Bash(tenjin publish:*)',
+      'Bash(tenjin edit:*)',
+    ]);
+    for (const e of PUBLISH_MODE_ALLOWLIST) expect(ruleCovers(e.rule, e.command)).toBe(true);
+  });
+
+  // edit is the NARROWER of the pair, and the note has to say why it rides along:
+  // owner-scoped, spends nothing, creates no new public content.
+  it("edit's note earns its place beside publish", () => {
+    const note = PUBLISH_MODE_ALLOWLIST.find((e) => e.command === 'tenjin edit')?.note ?? '';
+    expect(note).toMatch(/ALREADY OWNS/);
+    expect(note).toMatch(/spends nothing/i);
+    expect(note).toMatch(/creates no new public content/i);
+    expect(note).toMatch(/narrower blast radius|narrower/i);
+  });
+
+  it('is empty on review and present on both auto modes', () => {
+    expect(modeGatedAllowlist('review')).toEqual([]);
+    expect(modeGatedAllowlist('auto')).toHaveLength(2);
+    expect(modeGatedAllowlist('full-auto')).toHaveLength(2);
+  });
+
+  // The load-bearing separation: it is never offered as advice, so every
+  // existing claim about what this module RECOMMENDS still holds.
+  it('is not in the recommended set, which still covers no forbidden verb', () => {
+    for (const gated of ['Bash(tenjin publish:*)', 'Bash(tenjin edit:*)']) {
+      expect(recommendedRules()).not.toContain(gated);
+    }
+    for (const rule of recommendedRules()) {
+      expect(ruleCovers(rule, 'tenjin publish')).toBe(false);
+      expect(ruleCovers(rule, 'tenjin edit')).toBe(false);
+    }
+  });
+
+  it('both stay documented as excluded, with the mode named as the only thing that clears them', () => {
+    for (const command of ['tenjin publish', 'tenjin edit']) {
+      const entry = NEVER_ALLOWLISTED.find((e) => e.command === command);
+      expect(entry?.reason, command).toMatch(/publish\.mode/);
+      expect(entry?.reason, command).toMatch(/never pre-cleared/i);
+    }
+  });
+
+  // An operator pastes a line off a tier list; this one they never see, so the
+  // note has to say what the grant is and how to take it back.
+  it('discloses what it clears and how it goes away', () => {
+    const note = PUBLISH_MODE_ALLOWLIST[0]?.note ?? '';
+    expect(note).toMatch(/PUBLISHES PUBLICLY/);
+    expect(note).toMatch(/auto or full-auto/);
+    expect(note).toMatch(/review/);
+    // What still gates a publish, so "cleared" is not read as "unchecked".
+    expect(note).toMatch(/scan/i);
+  });
+
+  it('is a defensive copy like the other tiers', () => {
+    const first = modeGatedAllowlist('auto');
+    first.splice(0, first.length);
+    expect(modeGatedAllowlist('auto')).toHaveLength(2);
+  });
+
+  describe('the pointer doctor prints for it', () => {
+    const both = ['Bash(tenjin publish:*)', 'Bash(tenjin edit:*)'];
+
+    it('is null on review', () => {
+      expect(modeGatedPointer('review', both)).toBeNull();
+    });
+
+    // The nag this used to be: it rendered from the mode alone, so a machine
+    // that already carried both rules was still told to add them.
+    it('is null when the machine is missing nothing', () => {
+      expect(modeGatedPointer('auto', [])).toBeNull();
+    });
+
+    // Unlike permissionsPointer, this one NAMES its rules: the operator is
+    // looking for the missing line, not for a page about tiers.
+    it('names the mode and only the rules actually missing, in one line', () => {
+      const line = modeGatedPointer('auto', both) ?? '';
+      expect(line).toContain('publish.mode=auto');
+      expect(line).toContain('Bash(tenjin publish:*)');
+      expect(line).toContain('Bash(tenjin edit:*)');
+      expect(line).toContain('tenjin install');
+      expect(line).not.toContain('\n');
+
+      const one = modeGatedPointer('auto', ['Bash(tenjin edit:*)']) ?? '';
+      expect(one).toContain('Bash(tenjin edit:*)');
+      expect(one).not.toContain('Bash(tenjin publish:*)');
+    });
+
+    // An env-set mode is invisible to `install`, which resolves from the global
+    // file, so naming it as the remedy would send the reader at a no-op.
+    it('takes the remedy from the caller, for a mode install cannot see', () => {
+      const line = modeGatedPointer('full-auto', both, 'tenjin config set publish.mode full-auto');
+      expect(line).toContain('tenjin config set publish.mode full-auto');
+      expect(line).not.toMatch(/`tenjin install` writes/);
+    });
+  });
+
+  describe('the machine payload', () => {
+    it('defaults to review, so a caller that names no mode gets no extra rule', () => {
+      expect(recommendedPermissions().modeGated).toEqual([]);
+    });
+
+    it('carries the rule when the mode does', () => {
+      expect(recommendedPermissions('full-auto').modeGated.map((e) => e.rule)).toEqual([
+        'Bash(tenjin publish:*)',
+        'Bash(tenjin edit:*)',
+      ]);
+    });
+
+    it('leaves the three recommendation tiers unchanged whatever the mode', () => {
+      const review = recommendedPermissions('review');
+      const auto = recommendedPermissions('auto');
+      expect(auto.alwaysSafe).toEqual(review.alwaysSafe);
+      expect(auto.optIn).toEqual(review.optIn);
+      expect(auto.neverAllowlisted).toEqual(review.neverAllowlisted);
+    });
   });
 });
 
