@@ -39,7 +39,7 @@ import {
 } from './client-meta';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 17;
+export const HOOK_SCRIPT_VERSION = 18;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -88,6 +88,19 @@ const STORE_MAX_ENTRIES = 50;
 /** Nag records older than this are pruned; far past the window, so never a re-nag.
  *  Prunes the per-session weak-batch stamps on the same schedule. */
 const NAG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Queries a MISS must not turn into a Stop-hook obligation. Conservative by
+ * construction, because an unsure query is a real one: these flag 6.2% of 1094
+ * real queries off this machine, where a syntactic "operator soup" rule (bare
+ * OR, quoted fragments, `site:`) flagged 11.3% and took durable ones with it.
+ */
+const JUNK_QUERY_RES: RegExp[] = [
+  /\b(tweet|twitter\.com|x\.com|reddit|subreddit|discord|podcast|hacker ?news|linkedin|youtube|instagram|announcement thread|launch (tweet|thread|video))\b/i,
+  /\b(inspiration|dribbble|awwwards|mockup|font pairing|color palette|hero (section|animation)|portfolio site|landing page (example|reference|inspiration))\b/i,
+  /\b(awesome-[a-z-]+|best of 20\d\d|curated (list|gallery)|showcase (site|gallery)|top \d+ (sites|tools|examples))\b/i,
+  /\b(stock photo|free image|icon set|illustration pack|unsplash)\b/i,
+];
 
 /** The one-liner `remind` mode emits instead of sending the query anywhere. */
 export const REMIND_LINE =
@@ -450,6 +463,14 @@ export function websearchHookScript(dataDir: string): string {
   return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}
 const LOCK_PATH = SEARCH_STORE + '.lock';
 
+const JUNK_RES = [
+${JUNK_QUERY_RES.map((re) => `  ${re.toString()},`).join('\n')}
+];
+
+function isJunkQuery(question) {
+  return JUNK_RES.some((re) => re.test(question));
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -647,7 +668,11 @@ async function main() {
   }
   // BEFORE any emit, because emit exits the process. A MISS recorded here is what
   // the Stop hook later finds; a HIT is what a purchase attributes back to.
-  await recordSearch(body.searchId, question, decision, stored, sessionIdOf(input));
+  // The junk gate drops the LOCAL entry only; the POST above already counted the
+  // demand. CANDIDATES overrides it: answers surfaced means the question fit.
+  if (decision === 'CANDIDATES' || !isJunkQuery(question)) {
+    await recordSearch(body.searchId, question, decision, stored, sessionIdOf(input));
+  }
 
   if (decision !== 'CANDIDATES') return quiet();
 

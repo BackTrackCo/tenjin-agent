@@ -875,6 +875,70 @@ describe('WebSearch hook: recording into the one store', () => {
   });
 });
 
+// A recorded MISS is a promise the Stop hook makes the agent keep, so both
+// directions are pinned with real queries out of this machine's transcripts.
+describe('WebSearch hook: the junk gate on a MISS', () => {
+  const MISS_BODY = {
+    schemaVersion: 2,
+    searchId: '66666666-6666-4666-8666-666666666666',
+    decision: 'MISS',
+    calibration: 'ok',
+  };
+
+  it.each([
+    'Cluely launch video who made it agency freelancer',
+    'land-book.com editorial paper design website inspiration 2026',
+    'Veo 3 Sora product demo b-roll hype vs actually useful marketers 2026 reddit',
+    'minimal.gallery curated.design siteinspire best of 2025 editorial serif typography website',
+    'scroll driven storytelling "how it works" animation site awwwards 2026',
+    'x402 protocol Discord Telegram community awesome-x402 list builders',
+  ])('records no obligation for %s', async (query) => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: MISS_BODY }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput(query));
+
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(run.stdout).toBe('');
+    expect(await storedSearches()).toEqual([]);
+    // The server row still exists; only the local obligation is dropped.
+    expect(hits()).toBe(1);
+  });
+
+  it.each([
+    'iCloud Private Relay Sec-Fetch headers stripped OR service worker Sec-Fetch-Dest empty prefetch Sec-Purpose',
+    '"dvh" caniuse baseline "widely available" 2023 date OR "2024" OR "2025"',
+    'execCommand copy "not allowed" OR "SecurityError" async setTimeout requires user gesture same as clipboard API',
+    'llms.txt best practices 2026 examples Anthropic Stripe Vercel',
+    'best article extraction API 2026 Mozilla Readability Postlight Mercury Parser archived Diffbot Firecrawl Jina Reader Exa',
+    'pgvector pg_upgrade "extension" issue discussion install same version new cluster before upgrade',
+    'Anthropic MCP tool description best practices writing effective tools for agents',
+  ])('keeps the obligation for %s', async (query) => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: MISS_BODY }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput(query));
+
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    const [entry] = await storedSearches();
+    expect(entry).toMatchObject({ question: query, decision: 'MISS', source: 'websearch-hook' });
+  });
+
+  // OWNER-LOCKED: answers surfaced means the question was marketplace-shaped.
+  it('records and hints a flagged query the marketplace answered', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    const query = 'Cluely launch video who made it agency freelancer';
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput(query));
+
+    expect(run.code).toBe(0);
+    expect(injected(run)).toContain('tenjin inspect');
+    const [entry] = await storedSearches();
+    expect(entry).toMatchObject({ question: query, decision: 'CANDIDATES' });
+    expect(entry?.candidates).toHaveLength(1);
+  });
+});
+
 /**
  * The mirror guard.
  *
