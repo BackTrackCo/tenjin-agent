@@ -247,6 +247,11 @@ function humanMode(io: Io, opts: EmitOptions): boolean {
  * `  <check> (line N): <excerpt>`. The excerpt is already masked for secret
  * findings at the source; sanitize it anyway since it can echo file content.
  * Returns [] for any other details shape, so no other error leaks a detail dump.
+ *
+ * A finding the SERVER gate contributed carries a `source`, and the marker is
+ * printed because it is the difference between "fix your file" and "the
+ * marketplace refused this": the detector may be one this release predates, so
+ * the line has to stand on the server's own words rather than on recognition.
  */
 function findingLines(io: Io, details: unknown): string[] {
   if (typeof details !== 'object' || details === null || !('findings' in details)) return [];
@@ -255,11 +260,25 @@ function findingLines(io: Io, details: unknown): string[] {
   const rendered: string[] = [];
   for (const f of findings) {
     if (typeof f !== 'object' || f === null) continue;
-    const { check, line, excerpt } = f as { check?: unknown; line?: unknown; excerpt?: unknown };
+    const { check, line, excerpt, source } = f as {
+      check?: unknown;
+      line?: unknown;
+      excerpt?: unknown;
+      source?: unknown;
+    };
     if (typeof check !== 'string' || typeof line !== 'number' || typeof excerpt !== 'string') {
       continue;
     }
-    rendered.push(paint(io, 'dim', `  ${check} (line ${line}): ${sanitizeForTerminal(excerpt)}`));
+    const from = source === 'server' ? ' [server]' : source === 'both' ? ' [local+server]' : '';
+    // The detector id is sanitized too: on a server finding it is a name this
+    // release may never have seen, so it is untrusted text like the excerpt.
+    rendered.push(
+      paint(
+        io,
+        'dim',
+        `  ${sanitizeForTerminal(check)}${from} (line ${line}): ${sanitizeForTerminal(excerpt)}`,
+      ),
+    );
   }
   return rendered;
 }
