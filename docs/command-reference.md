@@ -175,6 +175,15 @@ settlement-derived and unvetted; registries that did not answer are reported so
 a partial sweep never reads as a complete one. The sweep is stored (24h) as the
 pay lane's registry evidence.
 
+A pinned block (`pinned` in the JSON envelope) precedes the sweep: this
+deployment's own paid endpoints, labeled `first-party` and derived from the
+configured `baseUrl`, plus any curated third-party sellers, labeled "VIP
+(curated, quality not guaranteed)". A query filters pins the same way it filters
+the sweep. Pins are display only: nothing in the block is probed, an endpoint
+listed in both places is rendered once with the registry's price, and pins never
+reach the evidence store, so a pin gets no shortcut through the pay lane's
+registry check.
+
 ## Reporting outcomes
 
 ### `tenjin outcome`
