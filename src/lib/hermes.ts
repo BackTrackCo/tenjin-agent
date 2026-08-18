@@ -570,10 +570,18 @@ def _transform_tool_result(tool_name="", result=None, **kwargs):
     return result + "\\n\\n--- Tenjin marketplace context ---\\n" + item[1] + "\\n--- end Tenjin context ---"
 
 
-def _transform_llm_output(response_text="", **_kwargs):
+def _transform_llm_output(response_text="", **kwargs):
     if not isinstance(response_text, str):
         return None
-    context = _run(STOP_SCRIPT, {}, 2.0)
+    # STOP_SCRIPT reads these under the same names as Claude's Stop hook payload
+    # (sessionIdOf/cwdOf in hook-scripts.ts): an empty payload leaves every
+    # session batched together, which is exactly the once-per-session weak-arm
+    # nag main's session-scoping (#164) exists to prevent.
+    payload = {"session_id": kwargs.get("session_id", "")}
+    cwd = kwargs.get("cwd")
+    if isinstance(cwd, str):
+        payload["cwd"] = cwd
+    context = _run(STOP_SCRIPT, payload, 2.0)
     if not context:
         return None
     return response_text + "\\n\\n--- Tenjin publish-back reminder ---\\n" + context

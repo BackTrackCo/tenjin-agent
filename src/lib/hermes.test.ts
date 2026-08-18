@@ -317,6 +317,41 @@ describe('wireHermesIntegration', () => {
     });
   });
 
+  // Main's session-scoped weak-arm rate limit (#164, hook-scripts.ts
+  // `batchedThisSession`) keys off the Stop hook payload's `session_id`. An empty
+  // payload here would batch every Hermes session together, letting the nag
+  // re-fire every turn of a multi-turn session instead of once — the #162
+  // regression the session key exists to prevent.
+  it('forwards session_id and cwd into the STOP_SCRIPT payload', async () => {
+    await wireHermesIntegration({
+      hermesHome: home,
+      dataDir,
+      dryRun: false,
+      explicit: true,
+      ...commands,
+    });
+    const pluginPath = join(hermesPluginDir(home), '__init__.py');
+    const probe = [
+      'import importlib.util, json, sys',
+      'spec = importlib.util.spec_from_file_location("tenjin_plugin", sys.argv[1])',
+      'mod = importlib.util.module_from_spec(spec)',
+      'spec.loader.exec_module(mod)',
+      'hooks = {}',
+      'class Ctx:',
+      '    def register_hook(self, name, callback): hooks[name] = callback',
+      'mod.register(Ctx())',
+      'captured = {}',
+      'def fake_run(script, payload, timeout):',
+      '    captured["payload"] = payload',
+      '    return "publish"',
+      'mod._run = fake_run',
+      'hooks["transform_llm_output"](response_text="answer", session_id="sess-1", cwd="/proj", task_id="t")',
+      'print(json.dumps(captured["payload"]))',
+    ].join('\n');
+    const { stdout } = await execFileAsync('python3', ['-c', probe, pluginPath]);
+    expect(JSON.parse(stdout)).toEqual({ session_id: 'sess-1', cwd: '/proj' });
+  });
+
   // The README's `--no-hooks` row promises "writes no config", and the Claude path
   // honors it by writing no scripts at all. Withholding only the `plugins.enabled`
   // line would leave hook code on disk that the operator never consented to.
