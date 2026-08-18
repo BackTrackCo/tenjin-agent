@@ -16,10 +16,17 @@ identifies as `tenjin-cli`. The caller handoff still composes behind whichever
 product leads. `tenjin install` rewrites the hook scripts.
 
 `tenjin outcome --search-id` now repeats, reporting one status against every id
-named, and `--all-open` closes every open loop the hook recorded, in any
-session. Both report per id in the JSON envelope, and both refuse the whole
-batch before sending anything if one target's status could not describe its
-search. A batch that closed some and failed others says exactly which.
+named, and `--all-open` closes this session's open hook loops. Both report per
+id in the JSON envelope, and both refuse the whole batch before sending anything
+if one target's id or status could not be right. A batch that closed some and
+failed others says exactly which.
+
+The sweep is per session because the loop is: a session's open loops are its
+own, and one that ends leaves its unpublished debt to decay rather than handing
+it to whichever session stops next. The session comes from `TENJIN_SESSION_ID`,
+then `CLAUDE_CODE_SESSION_ID`, the same resolver `search` stamps entries with,
+and an entry no harness could attribute stays in scope everywhere rather than
+nowhere. There is no machine-wide sweep.
 
 `--all-open` reports `regenerated` and nothing else, and sweeps MISSes only. The
 other statuses are claims about what a specific search did for the agent, and a

@@ -3,6 +3,7 @@ import { formatUsdDisplay, isPaidPrice, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
+import { readSessionId } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -213,30 +214,6 @@ export async function runSearch(
       : response;
 
   return { data, humanLines };
-}
-
-/**
- * The session to stamp this search with, so the Stop hook can tell one session's
- * open loops from a sibling's, or undefined when nothing can say.
- *
- * Two sources, in precedence order. TENJIN_SESSION_ID is the explicit operator
- * override and wins. CLAUDE_CODE_SESSION_ID is what Claude Code exports to Bash
- * tool subprocesses, which is what a `tenjin search` runs as; its value is the
- * same `session_id` the hook scripts are handed on stdin, so a CLI search and a
- * WebSearch-hook search in one session stamp identically. It is verified against
- * a live session rather than documented, hence the fallback rather than a
- * requirement: on a harness that does not export it this stays undefined, and
- * undefined is the safe answer — the hook raises an unstamped entry in every
- * session rather than in none.
- */
-function readSessionId(env: NodeJS.ProcessEnv): string | undefined {
-  return firstNonEmpty(env.TENJIN_SESSION_ID) ?? firstNonEmpty(env.CLAUDE_CODE_SESSION_ID);
-}
-
-function firstNonEmpty(raw: string | undefined): string | undefined {
-  if (typeof raw !== 'string') return undefined;
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** The publish-back hint, as machine fields rather than prose to re-parse. */

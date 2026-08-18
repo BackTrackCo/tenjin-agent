@@ -2,6 +2,7 @@ import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
 import { UUID_RE } from '../lib/ids';
+import { ownedByThisSession, readSessionId } from '../lib/session';
 import {
   latestSearch,
   loadSearches,
@@ -28,9 +29,9 @@ import type { CommandContext, CommandResult } from '../context';
  * an outcome that could not describe that search, whether by its status or by
  * naming a resource the search never surfaced, is refused before the request.
  *
- * ONE STATUS, MANY SEARCHES. `--search-id` repeats and `--all-open` sweeps the
- * hook's unanswered loops, because a session that closed seventeen of them one
- * call at a time is a session where the honest close stops happening. Both
+ * ONE STATUS, MANY SEARCHES. `--search-id` repeats and `--all-open` sweeps this
+ * session's unanswered hook loops, because a session that closed seventeen of
+ * them one call at a time is one where the honest close stops happening. Both
  * report per id, both refuse before sending anything if one target's id or
  * status could not be right, and both stop at an unhealthy server and report the
  * rest untouched, because an open loop is the state the Stop hook can recover.
@@ -40,7 +41,7 @@ export interface OutcomeArgs {
   /** One search, or several the same status describes. */
   searchId?: string | string[];
   last?: boolean;
-  /** Close every open websearch-hook loop; `regenerated` only. */
+  /** Close this session's open websearch-hook MISSes; `regenerated` only. */
   allOpen?: boolean;
   status: string;
   resource?: string;
@@ -49,6 +50,8 @@ export interface OutcomeArgs {
 
 export interface OutcomeDeps {
   fetchImpl?: typeof fetch;
+  /** Environment seam (TENJIN_SESSION_ID); defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** `error` when the report did not land, `untouched` when the batch stopped
@@ -73,7 +76,7 @@ export async function runOutcome(
   ctx: CommandContext,
   deps: OutcomeDeps = {},
 ): Promise<CommandResult> {
-  const { targets, deliberateLeftOpen, answeredLeftOpen } = await resolveTargets(args, ctx);
+  const { targets, deliberateLeftOpen, answeredLeftOpen } = await resolveTargets(args, ctx, deps);
   // The status VOCABULARY; `--all-open`'s narrower rule already ran above, so a
   // bad status under that flag reports the restriction rather than the spelling.
   const item = buildOutcomeItem({
@@ -88,8 +91,7 @@ export async function runOutcome(
       { fix: 'Report the resource against its own search with a single --search-id <id>.' },
     );
   }
-  // Every target, id shape included, before any request: a batch that refuses
-  // halfway leaves the marketplace holding half a report nobody meant to send.
+  // Ids and statuses, before any request: half a batch is worse than none.
   for (const target of targets) {
     assertReportableId(target.searchId);
     if (target.stored !== null) assertOutcomeCoherent(item.status, target.stored, item.resourceId);
@@ -143,7 +145,7 @@ export async function runOutcome(
   const humanLines = reports
     .filter((r) => r.error === undefined && r.untouched !== true)
     .map((r) => reportLine(item.status, r));
-  if (targets.length === 0) humanLines.push('No open web-search loops to close.');
+  if (targets.length === 0) humanLines.push('No open web-search loops in this session.');
   humanLines.push(...leftOpenLines(deliberateLeftOpen, answeredLeftOpen));
 
   if (failed.length > 0) {
@@ -253,17 +255,21 @@ function assertReportableId(searchId: string): void {
   });
 }
 
-async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<ResolvedTargets> {
+async function resolveTargets(
+  args: OutcomeArgs,
+  ctx: CommandContext,
+  deps: OutcomeDeps,
+): Promise<ResolvedTargets> {
   const ids = idsOf(args.searchId);
   const selectors = [ids.length > 0, args.last === true, args.allOpen === true].filter(
     Boolean,
   ).length;
   if (selectors > 1) {
     throw new CliError('USAGE', 'Pass one of --search-id, --last or --all-open, not several.', {
-      fix: "Use --search-id <id> (repeatable) for specific searches, --last for the most recent, or --all-open to close the web-search hook's open loops.",
+      fix: "Use --search-id <id> (repeatable) for specific searches, --last for the most recent, or --all-open to close this session's open web-search-hook loops.",
     });
   }
-  if (args.allOpen === true) return resolveAllOpen(args, ctx);
+  if (args.allOpen === true) return resolveAllOpen(args, ctx, deps);
   if (ids.length > 0) {
     const searches = await loadSearches(ctx.dataDir);
     return {
@@ -294,7 +300,14 @@ async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<R
 }
 
 /**
- * Every open loop the WebSearch hook recorded and Tenjin could not answer.
+ * This session's open loops that the WebSearch hook recorded and Tenjin could
+ * not answer.
+ *
+ * THIS SESSION ONLY, and there is no flag for the wider sweep. The hit/miss loop
+ * is per-session by design: a session's open loops are its own, and one that
+ * ends leaves its unpublished debt to decay rather than handing it to whichever
+ * session stops next. `readSessionId` and the unstamped-entry rule are shared
+ * with the Stop hook, so the sweep covers exactly the set the nag names.
  *
  * `regenerated` ONLY: the other statuses claim what a specific search did for
  * the agent, and a blanket `used` over queries nobody read piece by piece is
@@ -303,11 +316,14 @@ async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<R
  * MISS ONLY, the same reason one step further in: the hook records CANDIDATES
  * under this same source, and those are the searches where a priced answer was
  * shown and may have been bought, so `regenerated` would overwrite the one
- * positive attribution this loop collects. It also matches the Stop hook's weak
- * batch, so the nag cannot name a command reaching past what it describes.
- * Neither a deliberate search nor an answered one is swept; both are counted.
+ * positive attribution this loop collects. Neither a deliberate search nor an
+ * answered one is swept; both are counted.
  */
-async function resolveAllOpen(args: OutcomeArgs, ctx: CommandContext): Promise<ResolvedTargets> {
+async function resolveAllOpen(
+  args: OutcomeArgs,
+  ctx: CommandContext,
+  deps: OutcomeDeps,
+): Promise<ResolvedTargets> {
   if (args.status !== 'regenerated') {
     throw new CliError(
       'USAGE',
@@ -317,8 +333,11 @@ async function resolveAllOpen(args: OutcomeArgs, ctx: CommandContext): Promise<R
       },
     );
   }
+  const sessionId = readSessionId(deps.env);
   const open = (await loadSearches(ctx.dataDir)).filter(
-    (s) => s.resolved === undefined || s.resolved === null,
+    (s) =>
+      (s.resolved === undefined || s.resolved === null) &&
+      ownedByThisSession(s.sessionId, sessionId),
   );
   // Absent source predates sources, and those entries were all deliberate.
   const hook = open.filter((s) => s.source === 'websearch-hook');

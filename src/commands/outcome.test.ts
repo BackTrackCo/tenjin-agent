@@ -610,6 +610,52 @@ describe('runOutcome, closing several searches at once', () => {
     expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
   });
 
+  // Per session by design: a session's loops are its own, and one that ends
+  // leaves its debt to decay rather than handing it to whoever stops next.
+  it("--all-open sweeps this session's loops and never a sibling's", async () => {
+    await seed(1, { sessionId: 'session-A' });
+    await seed(2, { sessionId: 'session-B' });
+    await seed(3);
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: 'session-A' },
+    });
+    // This session's stamped entry and the unstamped one, never session-B's.
+    expect(urls).toHaveLength(2);
+    expect(urls.join(' ')).toContain(id(1));
+    expect(urls.join(' ')).toContain(id(3));
+    expect(urls.join(' ')).not.toContain(id(2));
+    expect(res.data).toMatchObject({ closed: 2 });
+    const stored = await loadSearches(dir);
+    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
+  });
+
+  it('reads CLAUDE_CODE_SESSION_ID when no operator override is set', async () => {
+    await seed(1, { sessionId: 'session-A' });
+    await seed(2, { sessionId: 'session-B' });
+    const { fetch, urls } = stub();
+    await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { CLAUDE_CODE_SESSION_ID: 'session-B' },
+    });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain(id(2));
+  });
+
+  // Nothing to scope on: an entry raised in every session is closable in every
+  // session too, which is the direction that cannot strand a loop.
+  it('sweeps every open hook MISS when the harness names no session', async () => {
+    await seed(1, { sessionId: 'session-A' });
+    await seed(2);
+    const { fetch, urls } = stub();
+    await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: {},
+    });
+    expect(urls).toHaveLength(2);
+  });
+
   // An entry written before sources existed was a deliberate search.
   it('--all-open leaves a sourceless entry open', async () => {
     await seed(1, { source: undefined });
@@ -656,7 +702,7 @@ describe('runOutcome, closing several searches at once', () => {
     });
     expect(urls).toHaveLength(0);
     expect(res.data).toMatchObject({ closed: 0 });
-    expect(res.humanLines?.join('\n')).toContain('No open web-search loops to close.');
+    expect(res.humanLines?.join('\n')).toContain('No open web-search loops in this session.');
   });
 
   it('refuses a --resource that cannot describe a batch', async () => {
