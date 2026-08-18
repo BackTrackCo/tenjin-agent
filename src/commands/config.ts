@@ -643,11 +643,15 @@ function parseRegistryList(value: string): string[] {
     .map((entry) => parseHttpUrl(entry));
 }
 
+// on/off ride along with true/false because that is how the CLI's own refusal
+// texts coach these keys (`tenjin config set bazaarPay on`), and the hooks keys
+// already speak on/off; a coached command that exits USAGE teaches an agent the
+// remediation is broken.
 function parseBoolean(value: string): boolean {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
+  if (value === 'true' || value === 'on') return true;
+  if (value === 'false' || value === 'off') return false;
   throw new CliError('USAGE', `Invalid boolean value: ${JSON.stringify(value)}`, {
-    fix: 'Use "true" or "false".',
+    fix: 'Use "on" or "off" (or "true"/"false").',
   });
 }
 

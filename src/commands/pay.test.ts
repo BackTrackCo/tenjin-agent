@@ -192,7 +192,9 @@ describe('runPay, tenjin lane', () => {
     }
   });
 
-  it('a 402 after payment is PAYMENT_FAILED and releases the reservation', async () => {
+  // COMMITTED, not released: the signed authorization already left with the
+  // paid request, so the endpoint can settle it whatever it answered.
+  it('a 402 after payment is PAYMENT_FAILED and still commits the spend', async () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
@@ -206,8 +208,8 @@ describe('runPay, tenjin lane', () => {
         authorizer,
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
-    expect(authorizer.release).toHaveBeenCalledWith(RESERVATION);
-    expect(authorizer.commit).not.toHaveBeenCalled();
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+    expect(authorizer.release).not.toHaveBeenCalled();
   });
 
   it('a policy deny is POLICY_REFUSED before any payment', async () => {
@@ -276,11 +278,15 @@ describe('runPay, tenjin lane', () => {
 });
 
 /** A challenge advertising the standard sign-in-with-x extension. */
-function siwxFixture(url: string, amount = '100000'): { header: string } {
+function siwxFixture(
+  url: string,
+  amount = '100000',
+  acceptOver: Record<string, unknown> = {},
+): { header: string } {
   const paymentRequired: PaymentRequired = {
     x402Version: 2,
     resource: { url, description: 'paid', mimeType: 'application/json' },
-    accepts: [{ ...LIVE_ACCEPT, amount } as never],
+    accepts: [{ ...LIVE_ACCEPT, amount, ...acceptOver } as never],
     extensions: { 'sign-in-with-x': { info: { domain: new URL(url).host } } },
   };
   return { header: encodePaymentRequiredHeader(paymentRequired) };
@@ -422,6 +428,71 @@ describe('runPay, bazaar lane', () => {
     expect(calls).toHaveLength(2);
     // The lookup was narrowed by the live payTo (the self-verifying filter).
     expect(registry.urls.some((u) => u.includes('payTo='))).toBe(true);
+  });
+
+  // The adversarial-money case the budget accounting exists for: a hostile
+  // registry-listed seller answers 402 AFTER receiving each signature. The
+  // authorization it holds is a bearer instrument it can still settle, so the
+  // session budget must count the spend — releasing it here let every retry
+  // sign a fresh authorization while the ledger counted zero of them.
+  it('a hostile seller rejecting the paid leg still burns the session budget', async () => {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(402, { error: 'try again' }, { 'PAYMENT-REQUIRED': fixture.header }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    try {
+      await runPay({ url: FOREIGN_URL }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliError);
+      expect((err as CliError).code).toBe('PAYMENT_FAILED');
+      // The coaching must not send an agent around the loop that compounds it.
+      expect((err as CliError).fix).toContain('counted against the session budget');
+      expect((err as CliError).fix).not.toMatch(/then retry/i);
+    }
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n);
+    expect(authorizer.release).not.toHaveBeenCalled();
+  });
+
+  // The fresh post-SIWX challenge is what gets SIGNED, so it is re-verified
+  // against the registry: a seller whose first 402 matches its listing but
+  // whose fresh 402 swaps payTo at the same price passes the price-bump check
+  // and must be caught here, before the wallet is consulted.
+  it('a fresh challenge that swaps payTo after SIWX is REGISTRY_MISMATCH, nothing signed', async () => {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(FOREIGN_URL).header }),
+      json(
+        402,
+        {},
+        {
+          'PAYMENT-REQUIRED': siwxFixture(FOREIGN_URL, '100000', {
+            payTo: '0x2222222222222222222222222222222222222222',
+          }).header,
+        },
+      ),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    await expect(
+      runPay({ url: FOREIGN_URL }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }),
+    ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
+    expect(calls).toHaveLength(2); // probe + SIWX re-check; never a paid leg
+    expect(calls.every((c) => c.headers['payment-signature'] === undefined)).toBe(true);
+    expect(authorizer.authorize).not.toHaveBeenCalled();
   });
 
   it('a live price above the advertised one is REGISTRY_MISMATCH, wallet untouched', async () => {

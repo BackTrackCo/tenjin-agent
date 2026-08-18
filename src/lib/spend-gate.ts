@@ -10,8 +10,9 @@ import type { CommandContext } from '../context';
  * between seeing a price and building a signature, so the two cannot drift on
  * what `--yes` clears (the confirm only), what a deny looks like, or when a
  * reservation is released. The caller still owns everything around it: the
- * challenge it priced, the payment build, and releasing the reservation when
- * anything after this gate fails.
+ * challenge it priced, the payment build, and settling the reservation after a
+ * failure — releasing only while no signature has left the process, committing
+ * once one has (pay.ts), because a transmitted authorization can still settle.
  */
 
 export interface SpendGateInput {

@@ -213,37 +213,48 @@ export async function runPay(
     notConfirmedMessage: 'Payment not confirmed.',
   });
 
+  // A failure BEFORE transmission (the build) releases: no signature exists,
+  // nothing can move. That is the last point where releasing is honest.
+  let payment: Awaited<ReturnType<typeof buildExactPayment>>;
   try {
-    const payment = await buildExactPayment(effectiveChallenge, signer);
-    const paid = await httpRequest(url, { ...fetchOpts, headers: payment.headers });
-    if (!paid.ok) throw fetchFailureToCliError(paid);
-    if (paid.status >= 200 && paid.status < 300) {
-      await authorizer.commit(reservationId, payment.amountAtomic);
-      return deliver(url, lane, paid, {
-        paid: true,
-        amountAtomic: payment.amountAtomic,
-        requirement: effectiveRequirement,
-        ...(registry !== undefined ? { registry } : {}),
-        printBody: args.printBody === true,
-      });
-    }
-    // Still 402 (payment rejected) or anything else: nothing was delivered.
-    // The reservation is released in the catch below; settlement state on a
-    // non-402 non-2xx is honestly unknown and the message says so.
-    throw new CliError(
-      'PAYMENT_FAILED',
-      paid.status === 402
-        ? 'Payment was not accepted by the endpoint.'
-        : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
-      {
-        fix: 'Check the wallet balance and network, then retry.',
-        details: { status: paid.status, body: paid.json },
-      },
-    );
+    payment = await buildExactPayment(effectiveChallenge, signer);
   } catch (err) {
     await authorizer.release(reservationId);
     throw err;
   }
+
+  // From here the signed EIP-3009 authorization leaves the process, and it is a
+  // bearer instrument: the counterparty can settle it whatever it answers, or
+  // if it answers nothing. So EVERY post-transmission outcome commits the
+  // reservation — money that may move is money accounted. Releasing here let a
+  // hostile registry-listed seller answer 402 after each signature while
+  // sessionBudget counted zero of the authorizations it was stacking up.
+  // (httpRequest never throws on transport failure; it returns ok:false.)
+  const paid = await httpRequest(url, { ...fetchOpts, headers: payment.headers });
+  await authorizer.commit(reservationId, payment.amountAtomic);
+  if (!paid.ok) throw fetchFailureToCliError(paid);
+  if (paid.status >= 200 && paid.status < 300) {
+    return deliver(url, lane, paid, {
+      paid: true,
+      amountAtomic: payment.amountAtomic,
+      requirement: effectiveRequirement,
+      ...(registry !== undefined ? { registry } : {}),
+      printBody: args.printBody === true,
+    });
+  }
+  // Still 402 (payment rejected) or anything else: nothing was delivered, but
+  // the seller holds a live authorization, so the amount stays counted and the
+  // fix must NOT coach a retry loop — each retry signs a fresh authorization.
+  throw new CliError(
+    'PAYMENT_FAILED',
+    paid.status === 402
+      ? 'Payment was not accepted by the endpoint.'
+      : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
+    {
+      fix: 'The signed payment already left and is counted against the session budget; the endpoint may still settle it. Do not simply retry — each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      details: { status: paid.status, body: paid.json },
+    },
+  );
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -370,15 +381,22 @@ async function assertRegistryVerified(
   }
 }
 
-interface DeliverOpts {
-  paid: boolean;
-  /** A free delivery because the wallet was already entitled (SIWX), not free-of-price. */
-  entitled?: boolean;
-  amountAtomic?: bigint;
-  requirement?: PaymentRequirements;
-  registry?: string;
-  printBody: boolean;
-}
+/** Discriminated on `paid`: a paid delivery always carries what it paid and to
+ *  whom, so no branch ever reaches for an amount that might not be there. */
+type DeliverOpts =
+  | {
+      paid: false;
+      /** Free because the wallet was already entitled (SIWX), not free-of-price. */
+      entitled?: boolean;
+      printBody: boolean;
+    }
+  | {
+      paid: true;
+      amountAtomic: bigint;
+      requirement: PaymentRequirements;
+      registry?: string;
+      printBody: boolean;
+    };
 
 function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts): CommandResult {
   const settlementTxHash = opts.paid ? settlementTx(res) : undefined;
@@ -387,21 +405,23 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     lane,
     status: res.status,
     paid: opts.paid,
-    ...(opts.amountAtomic !== undefined
-      ? { amountPaid: toMoney(opts.amountAtomic.toString()) }
-      : {}),
-    ...(opts.requirement !== undefined
-      ? { payTo: opts.requirement.payTo, network: opts.requirement.network }
-      : {}),
-    ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
-    ...(opts.entitled === true ? { entitled: true } : {}),
+    ...(opts.paid
+      ? {
+          amountPaid: toMoney(opts.amountAtomic.toString()),
+          payTo: opts.requirement.payTo,
+          network: opts.requirement.network,
+          ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
+        }
+      : opts.entitled === true
+        ? { entitled: true }
+        : {}),
     ...(settlementTxHash !== undefined ? { settlementTxHash } : {}),
     // The body is the product: JSON when the endpoint spoke it, raw text always.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
   };
   const headline = opts.paid
-    ? `paid ${toMoney(opts.amountAtomic!.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +
+    ? `paid ${toMoney(opts.amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +
       (settlementTxHash !== undefined ? ` (tx ${settlementTxHash})` : '')
     : opts.entitled === true
       ? `free (entitled, no charge)`

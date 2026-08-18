@@ -388,6 +388,18 @@ describe('evalCohort key', () => {
     expect(data).toMatchObject({ key: 'evalCohort', value: value === 'true', source: 'file' });
   });
 
+  // on/off must parse because the CLI's own refusal texts coach exactly
+  // `tenjin config set bazaarPay on` (pay.ts, discover.ts): a coached command
+  // that exits USAGE teaches an agent the remediation is broken.
+  it.each([
+    ['on', true],
+    ['off', false],
+  ] as const)('accepts the coached %s spelling', async (value, expected) => {
+    await runConfigSet({ key: 'evalCohort', value }, makeCtx());
+    const { data } = await runConfigGet({ key: 'evalCohort' }, makeCtx());
+    expect(data).toMatchObject({ key: 'evalCohort', value: expected, source: 'file' });
+  });
+
   it.each(['1', '0', 'True', 'yes', ''])('rejects %j as USAGE', async (bad) => {
     const err = await caught(() => runConfigSet({ key: 'evalCohort', value: bad }, makeCtx()));
     expect(err.code).toBe('USAGE');

@@ -17,8 +17,11 @@ The `tenjin` CLI owns every mechanic: HTTP, the x402 payment signing, the
 registry cross-check, spend policy, entitlement re-checks. You never assemble a
 payment yourself. ALWAYS pass `--json` and parse the one JSON object on stdout.
 
-Exit codes: `0` success, `1` network/runtime, `2` usage, `3` refused-on-purpose
-(spend policy, confirm, or a registry refusal), `4` payment failure.
+Exit codes: `0` success, `1` network/runtime, `2` usage — which also covers a
+URL the lane refuses to touch (`bazaarPay` off, or no registry evidence yet:
+run `discover`, then re-run `pay`, rather than re-shaping the command), `3`
+refused-on-purpose (spend policy, confirm, or a registry mismatch), `4`
+payment failure.
 
 ## Discover (free)
 
