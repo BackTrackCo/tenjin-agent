@@ -501,8 +501,8 @@ describe('WebSearch hook: the hook identity on the wire', () => {
     expect(sent).not.toBe('node');
   });
 
-  // A literal, not the constant: tenjin's /trending tier drops this exact
-  // string, and the server attributes on the FIRST product, so both are pinned.
+  // A literal, not the constant: this exact string is what lands in client_name,
+  // and the server attributes on the FIRST product, so both are pinned.
   it('leads with tenjin-websearch-hook, so a ridealong query is separable', async () => {
     const sent = (await identityRun()) ?? '';
     expect(sent.split(' ')[0]).toMatch(/^tenjin-websearch-hook\//);

@@ -58,8 +58,9 @@ describe('TENJIN_USER_AGENT', () => {
 });
 
 /**
- * The WebSearch hook's own identity, pinned as a literal: tenjin's /trending
- * questions tier drops rows whose client_name is this exact string.
+ * The WebSearch hook's own identity, pinned as a literal because it is the name
+ * the server stores in `client_name` and anything classifying hook demand keys
+ * on, across a repo boundary that no type checks.
  */
 describe('WEBSEARCH_HOOK_USER_AGENT', () => {
   it('is the package version behind a `tenjin-websearch-hook` product token', () => {

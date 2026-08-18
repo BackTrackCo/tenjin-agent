@@ -14,10 +14,11 @@ export const TENJIN_PRODUCT_NAME = 'tenjin-cli';
 /**
  * The product the WebSearch hook leads with, so a ridealong query is separable
  * from a deliberate `tenjin search`. Leading is the mechanism: the server
- * attributes on the FIRST User-Agent product. CROSS-REPO CONTRACT — tenjin's
- * /trending questions tier drops this exact name, so renaming it here silently
- * puts unvetted web-search queries back in front of readers.
- */
+ * attributes on the FIRST User-Agent product, landing here in `client_name`.
+ *
+ * The separation is the deliverable, not any one consumer: whatever judges hook
+ * demand needs these populations distinguishable at ingest (tenjin#704,
+ * tenjin-agent#179). A rename breaks no filter today, it merges them again. */
 export const WEBSEARCH_HOOK_PRODUCT_NAME = 'tenjin-websearch-hook';
 export const WEBSEARCH_HOOK_PRODUCT = `${WEBSEARCH_HOOK_PRODUCT_NAME}/${pkg.version}`;
 

@@ -32,9 +32,9 @@ import type { CommandContext, CommandResult } from '../context';
  * ONE STATUS, MANY SEARCHES. `--search-id` repeats and `--all-open` sweeps this
  * session's unanswered hook loops, because a session that closed seventeen of
  * them one call at a time is one where the honest close stops happening. Both
- * report per id, both refuse before sending anything if one target's id or
- * status could not be right, and both stop at an unhealthy server and report the
- * rest untouched, because an open loop is the state the Stop hook can recover.
+ * report per id, both refuse before sending if one target's id or status could
+ * not be right, and both stop at an unhealthy server and report the rest
+ * untouched, because an open loop is the state the Stop hook can recover.
  */
 
 export interface OutcomeArgs {
@@ -54,8 +54,7 @@ export interface OutcomeDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-/** `error` when the report did not land, `untouched` when the batch stopped
- *  before this id was tried. */
+/** `error` when the report did not land, `untouched` when it was never tried. */
 interface OutcomeReport {
   searchId: string;
   accepted: number;
@@ -64,11 +63,10 @@ interface OutcomeReport {
   untouched?: true;
 }
 
-/** Failures that say the next id fails the same way, so the batch stops: the
- *  budget signal itself (one sweep can spend 50 of the 60/min window), and the
- *  dead network, where 50 ids at the 10s default stalls a turn end for minutes.
- *  `API_UNREACHABLE` is deliberately absent: `apiFailure` gives it to every
- *  non-2xx, so halting on it would abandon a batch over a 400 about ONE id. */
+/** Failures where the next id fails the same way: the budget signal itself (a
+ *  sweep can spend 50 of the 60/min window) and the dead network (50 ids at the
+ *  10s default stalls a turn end). NOT `API_UNREACHABLE` — postOutcomes gives
+ *  that to any non-202, so halting would abandon a batch over a per-id 400. */
 const HALTING_FAILURES = new Set(['RATE_LIMITED', 'NETWORK_ERROR']);
 
 export async function runOutcome(
@@ -77,8 +75,7 @@ export async function runOutcome(
   deps: OutcomeDeps = {},
 ): Promise<CommandResult> {
   const { targets, deliberateLeftOpen, answeredLeftOpen } = await resolveTargets(args, ctx, deps);
-  // The status VOCABULARY; `--all-open`'s narrower rule already ran above, so a
-  // bad status under that flag reports the restriction rather than the spelling.
+  // The status VOCABULARY; `--all-open`'s narrower rule already ran above.
   const item = buildOutcomeItem({
     status: args.status,
     ...(args.resource !== undefined ? { resourceId: args.resource } : {}),
@@ -154,8 +151,7 @@ export async function runOutcome(
       failureCode(failed),
       `Reported ${item.status} for ${closed} of ${reports.length} searches; ${failed.length} failed${remainder}.`,
       {
-        // The ids ride the message, not just `details`: the human rendering
-        // prints `fix` and drops every other details shape (see output.ts).
+        // In `fix`, not just `details`: the renderer drops other shapes.
         fix: `Retry with ${retryFlags(failed.concat(untouched))}`,
         details: { status: item.status, closed, results: reports },
       },
@@ -163,8 +159,7 @@ export async function runOutcome(
   }
 
   return {
-    // The flat fields repeat a lone result, so a caller that has always read
-    // data.searchId still reads it.
+    // Flat fields repeat a lone result, so data.searchId still reads.
     data: {
       status: item.status,
       closed,
@@ -177,7 +172,6 @@ export async function runOutcome(
   };
 }
 
-/** What the sweep walked past, so a blanket close cannot look complete. */
 function leftOpenLines(deliberate: number, answered: number): string[] {
   const lines: string[] = [];
   if (deliberate > 0) {
@@ -243,11 +237,11 @@ interface ResolvedTargets {
   answeredLeftOpen: number;
 }
 
-/** The shape `postOutcomes` enforces, hoisted in front of the send loop: there it
- *  runs per id mid-batch, so a typo in the third of five ids lands after two
- *  reports already left. UUID_RE and not `SEARCH_ID_WIRE_RE` — this path
- *  parameter is declared `format: uuid` with no pattern (openapi.fixture.json),
- *  so the stricter POST /api/posts regex would refuse ids this route accepts. */
+/** The shape `postOutcomes` enforces, hoisted in front of the send loop, where
+ *  it would otherwise run per id after earlier reports already left. UUID_RE and
+ *  not `SEARCH_ID_WIRE_RE`: this path parameter is `format: uuid` with no pattern
+ *  (openapi.fixture.json), so the POST /api/posts regex is stricter than the
+ *  route. */
 function assertReportableId(searchId: string): void {
   if (UUID_RE.test(searchId)) return;
   throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
@@ -300,24 +294,19 @@ async function resolveTargets(
 }
 
 /**
- * This session's open loops that the WebSearch hook recorded and Tenjin could
- * not answer.
+ * This session's open loops that the hook recorded and Tenjin could not answer.
  *
- * THIS SESSION ONLY, and there is no flag for the wider sweep. The hit/miss loop
- * is per-session by design: a session's open loops are its own, and one that
- * ends leaves its unpublished debt to decay rather than handing it to whichever
- * session stops next. `readSessionId` and the unstamped-entry rule are shared
- * with the Stop hook, so the sweep covers exactly the set the nag names.
+ * THIS SESSION ONLY, no flag for a wider sweep: the loop is per-session by
+ * design, a session's loops are its own, and one that ends leaves its debt to
+ * decay rather than handing it to whoever stops next. `readSessionId` and the
+ * unstamped rule are shared with the Stop hook, so this covers the same set the
+ * nag is drawn from.
  *
- * `regenerated` ONLY: the other statuses claim what a specific search did for
- * the agent, and a blanket `used` over queries nobody read piece by piece is
- * attribution the marketplace would be right to trust and wrong to believe.
- *
- * MISS ONLY, the same reason one step further in: the hook records CANDIDATES
- * under this same source, and those are the searches where a priced answer was
- * shown and may have been bought, so `regenerated` would overwrite the one
- * positive attribution this loop collects. Neither a deliberate search nor an
- * answered one is swept; both are counted.
+ * `regenerated` ONLY, and MISS ONLY: the other statuses claim what a search did
+ * for the agent, and the hook records CANDIDATES under this same source, where a
+ * priced answer was shown and may have been bought — `regenerated` there would
+ * overwrite the one positive attribution this loop collects. Deliberate and
+ * answered searches are counted, never swept.
  */
 async function resolveAllOpen(
   args: OutcomeArgs,

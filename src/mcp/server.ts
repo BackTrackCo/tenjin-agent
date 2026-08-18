@@ -132,7 +132,10 @@ const outcomeInput = {
   allOpen: z
     .boolean()
     .optional()
-    .describe("Close this session's open WebSearch-hook MISSes (regenerated only)"),
+    .describe(
+      "Close this session's open WebSearch-hook MISSes, or every open one when the " +
+        'harness names no session (regenerated only)',
+    ),
   resource: z.string().optional().describe('The resourceId the outcome concerns'),
   contentHash: z.string().optional().describe('sha256:<64hex> of the exact body read'),
 } satisfies Record<keyof OutcomeArgs, z.ZodTypeAny>;
@@ -394,7 +397,8 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'purchase_declined), closing the loop the marketplace learns from. No wallet: the searchId ' +
         'is the capability. Use --last (last:true) to target the most recent local search, a ' +
         'searchId array to close several at one status, or allOpen:true to close this ' +
-        "session's unanswered WebSearch-hook loops as regenerated.",
+        "session's unanswered WebSearch-hook loops as regenerated (every open one when " +
+        'the harness names no session).',
       inputSchema: outcomeInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },

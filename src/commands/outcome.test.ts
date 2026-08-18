@@ -610,8 +610,7 @@ describe('runOutcome, closing several searches at once', () => {
     expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
   });
 
-  // Per session by design: a session's loops are its own, and one that ends
-  // leaves its debt to decay rather than handing it to whoever stops next.
+  // Per session by design: a session's loops are its own.
   it("--all-open sweeps this session's loops and never a sibling's", async () => {
     await seed(1, { sessionId: 'session-A' });
     await seed(2, { sessionId: 'session-B' });
@@ -643,8 +642,7 @@ describe('runOutcome, closing several searches at once', () => {
     expect(urls[0]).toContain(id(2));
   });
 
-  // Nothing to scope on: an entry raised in every session is closable in every
-  // session too, which is the direction that cannot strand a loop.
+  // Raised in every session, so closable in every session: nothing strands.
   it('sweeps every open hook MISS when the harness names no session', async () => {
     await seed(1, { sessionId: 'session-A' });
     await seed(2);
@@ -761,8 +759,7 @@ describe('runOutcome, closing several searches at once', () => {
     expect(urls).toHaveLength(0);
   });
 
-  // A batch that closed 1 of 2 must say so: reporting success would claim a
-  // close that never landed, and reporting failure alone would hide the one
+  // Success would claim a close that never landed; failure alone hides the one
   // that did.
   it('names what closed and what failed when one id fails', async () => {
     await seed(1);
@@ -795,8 +792,7 @@ describe('runOutcome, closing several searches at once', () => {
     expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
   });
 
-  // The human rendering prints `fix` and drops every other details shape, so ids
-  // that live only in `details.results` are ids nobody without --json can retry.
+  // The renderer prints `fix` and drops other shapes: ids must ride it.
   it('names the ids to retry in the fix line, not only in the envelope', async () => {
     await seed(1);
     await seed(2);
