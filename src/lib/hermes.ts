@@ -4,6 +4,12 @@ import { writeFileAtomic } from './atomic-json';
 import { CliError } from './errors';
 import { hasCode } from './errno';
 import { writeSharedHookScripts } from './harness-hooks';
+import {
+  DISPATCH_HOOK_FILE,
+  SESSIONSTART_HOOK_FILE,
+  STOP_HOOK_FILE,
+  WEBSEARCH_HOOK_FILE,
+} from './hook-scripts';
 import type { SearchHookMode } from './config';
 
 export const HERMES_MCP_MARKER = 'tenjin-cli:hermes-mcp';
@@ -222,8 +228,8 @@ export async function wireHermesIntegration(opts: {
 }): Promise<HermesIntegrationResult> {
   const { hermesHome, dataDir, tenjinCommand, nodeCommand, dryRun, explicit, hooks } = opts;
   const mcp = await wireHermesMcp(hermesHome, dryRun, tenjinCommand);
-  const websearchPath = join(dataDir, 'hooks', 'tenjin-websearch.mjs');
-  const stopPath = join(dataDir, 'hooks', 'tenjin-stop.mjs');
+  const websearchPath = join(dataDir, 'hooks', WEBSEARCH_HOOK_FILE);
+  const stopPath = join(dataDir, 'hooks', STOP_HOOK_FILE);
   if (!hooks.enabled) {
     const pluginDir = hermesPluginDir(hermesHome);
     return {
@@ -242,8 +248,21 @@ export async function wireHermesIntegration(opts: {
       activation: { path: hermesConfigPath(hermesHome), status: 'skipped' },
     };
   }
+  // The preview has to name every file a real run would write, not just the two
+  // this plugin's own hooks call: `writeSharedHookScripts` writes the whole
+  // shared bundle in one pass (see its docstring), so a dry-run that stopped at
+  // websearch+stop would under-report what lands on disk.
   const shared = dryRun
-    ? { written: [websearchPath, stopPath], websearchPath, stopPath }
+    ? {
+        written: [
+          websearchPath,
+          join(dataDir, 'hooks', DISPATCH_HOOK_FILE),
+          join(dataDir, 'hooks', SESSIONSTART_HOOK_FILE),
+          stopPath,
+        ],
+        websearchPath,
+        stopPath,
+      }
     : await writeSharedHookScripts(dataDir);
   const plugin = await wireHermesPlugin({
     hermesHome,

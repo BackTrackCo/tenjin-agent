@@ -212,7 +212,10 @@ describe('wireHermesIntegration', () => {
       tool: 'web result\n\n--- Tenjin marketplace context ---\nlisting\n--- end Tenjin context ---',
       final: 'answer\n\n--- Tenjin publish-back reminder ---\npublish',
     });
-    expect(result.plugin.scriptPaths).toHaveLength(2);
+    // `writeSharedHookScripts` writes the whole shared bundle in one pass
+    // (websearch, dispatch, session-primer, stop), so Hermes wiring reports all
+    // four even though its own plugin only calls websearch and stop directly.
+    expect(result.plugin.scriptPaths).toHaveLength(4);
   });
 
   it('keeps auto-detected code inert until explicitly enabled', async () => {
@@ -363,10 +366,13 @@ describe('wireHermesIntegration', () => {
     expect(result.mcp.status).toBe('would-install');
     expect(result.plugin.status).toBe('would-install');
     expect(result.activation.status).toBe('would-install');
-    // The envelope has to report what WOULD be written, which is the two scripts a
-    // real run creates.
+    // The envelope has to report what WOULD be written, which is the whole shared
+    // bundle a real run creates (see `writeSharedHookScripts`), not just the two
+    // scripts this plugin's own hooks call.
     expect(result.plugin.scriptPaths).toEqual([
       join(dataDir, 'hooks', 'tenjin-websearch.mjs'),
+      join(dataDir, 'hooks', 'tenjin-dispatch.mjs'),
+      join(dataDir, 'hooks', 'tenjin-sessionstart.mjs'),
       join(dataDir, 'hooks', 'tenjin-stop.mjs'),
     ]);
     await expect(readFile(hermesConfigPath(home), 'utf8')).rejects.toMatchObject({
