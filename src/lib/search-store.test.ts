@@ -257,3 +257,65 @@ describe('markSearchResolved', () => {
     expect(await latestSearch(dir)).toMatchObject({ searchId: ID, resolved: { by: 'candidate' } });
   });
 });
+
+// The same rule the generated hooks enforce, in the writer a `tenjin search`
+// takes. It belongs to the store rather than to whichever process wrote last.
+describe('search-store: the demand budget', () => {
+  const id = (n: number): string => `0197aaaa-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
+
+  /** `count` demand entries, newest first, as the store holds them. */
+  async function seedDemand(count: number, extra: StoredSearch[] = []): Promise<void> {
+    for (let i = count - 1; i >= 0; i -= 1) {
+      await recordSearch(dir, entry({ searchId: id(100 + i), source: 'dispatch-hook' }));
+    }
+    for (const e of extra) await recordSearch(dir, e);
+  }
+
+  it('holds dispatch entries to their share, dropping the oldest first', async () => {
+    await seedDemand(20);
+    const loaded = await loadSearches(dir);
+    expect(loaded.filter((s) => s.source === 'dispatch-hook')).toHaveLength(15);
+    // Newest survive: the last written is at the head, the earliest is gone.
+    expect(loaded[0]?.searchId).toBe(id(100));
+    expect(loaded.map((s) => s.searchId)).not.toContain(id(119));
+  });
+
+  // The property the budget exists for, now on the path `tenjin search` uses.
+  it('never lets a demand entry cost a deliberate one its slot', async () => {
+    const deliberate = entry({ searchId: id(1), source: 'cli' });
+    await recordSearch(dir, deliberate);
+    await seedDemand(40);
+    await recordSearch(dir, entry({ searchId: id(2), source: 'cli' }));
+
+    const loaded = await loadSearches(dir);
+    const ids = loaded.map((s) => s.searchId);
+    expect(ids).toContain(id(1));
+    expect(ids).toContain(id(2));
+    expect(loaded.filter((s) => s.source === 'dispatch-hook')).toHaveLength(15);
+    expect(loaded.length).toBeLessThanOrEqual(50);
+    // Still resolvable, which is what the slot was being taken from.
+    expect(await findStoredCandidate(dir, 'res-1')).not.toBeNull();
+  });
+
+  // Unchanged for everything else: a store with no demand entries drains oldest
+  // first exactly as it always did.
+  it('evicts the oldest overall when nothing in the store is demand data', async () => {
+    for (let i = 59; i >= 0; i -= 1) {
+      await recordSearch(dir, entry({ searchId: id(200 + i), source: 'cli' }));
+    }
+    const loaded = await loadSearches(dir);
+    expect(loaded).toHaveLength(50);
+    expect(loaded[0]?.searchId).toBe(id(200));
+    expect(loaded.map((s) => s.searchId)).not.toContain(id(259));
+  });
+
+  // websearch-hook entries are nagged, closable and drained, so they are NOT
+  // demand data and keep competing for slots on equal terms.
+  it('budgets only the dispatch source', async () => {
+    for (let i = 19; i >= 0; i -= 1) {
+      await recordSearch(dir, entry({ searchId: id(300 + i), source: 'websearch-hook' }));
+    }
+    const loaded = await loadSearches(dir);
+    expect(loaded.filter((s) => s.source === 'websearch-hook')).toHaveLength(20);
+  });
+});

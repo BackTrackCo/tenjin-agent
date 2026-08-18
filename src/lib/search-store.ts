@@ -12,7 +12,15 @@ import { withFileLock } from './lock';
  * than blocking a command. NOT an entitlement record, that is the library receipt.
  */
 
-const MAX_ENTRIES = 50;
+/**
+ * The store's bounds, EXPORTED because lib/hook-scripts.ts bakes them into the
+ * scripts it generates, which cannot import this module: one definition, no
+ * drift. `DEMAND_MAX_ENTRIES` is the share `dispatch-hook` entries may hold —
+ * nothing ever closes one, so without a budget a wide fan-out drains the slots
+ * `buy` and `outcome --last` depend on.
+ */
+export const MAX_ENTRIES = 50;
+export const DEMAND_MAX_ENTRIES = 15;
 
 const StoredCandidateSchema = z.object({
   resourceId: z.string(),
@@ -138,17 +146,36 @@ export async function loadSearches(dataDir: string): Promise<StoredSearch[]> {
   return parsed.success ? parsed.data.searches : [];
 }
 
-/** Prepend a search (newest first), cap to MAX_ENTRIES, persist under a lock so
+/**
+ * Demand entries held to their share, then the whole thing capped. Entries are
+ * newest-first, so dropping once the budget is spent drops the OLDEST demand
+ * entries and spares every deliberate one the plain cap would have taken.
+ *
+ * ⚠ MIRRORED, MUST UPDATE TOGETHER with `budgeted` in lib/hook-scripts.ts. It
+ * lives in BOTH writers so the bound belongs to the store rather than to
+ * whichever process wrote last.
+ */
+function budgeted(entries: StoredSearch[]): StoredSearch[] {
+  const kept: StoredSearch[] = [];
+  let demand = 0;
+  for (const entry of entries) {
+    if (entry.source === 'dispatch-hook') {
+      if (demand >= DEMAND_MAX_ENTRIES) continue;
+      demand += 1;
+    }
+    kept.push(entry);
+  }
+  return kept.slice(0, MAX_ENTRIES);
+}
+
+/** Prepend a search (newest first), budget and cap it, persist under a lock so
  *  concurrent searches don't drop each other's entry. */
 export async function recordSearch(dataDir: string, entry: StoredSearch): Promise<void> {
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const lockPath = `${storePath(dataDir)}.lock`;
   await withFileLock(lockPath, async () => {
     const existing = await loadSearches(dataDir);
-    const searches = [entry, ...existing.filter((l) => l.searchId !== entry.searchId)].slice(
-      0,
-      MAX_ENTRIES,
-    );
+    const searches = budgeted([entry, ...existing.filter((l) => l.searchId !== entry.searchId)]);
     await writeFileAtomic(
       storePath(dataDir),
       `${JSON.stringify({ schemaVersion: 1, searches }, null, 2)}\n`,

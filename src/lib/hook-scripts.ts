@@ -37,6 +37,7 @@ import {
   TENJIN_USER_AGENT,
   USER_AGENT_MAX_LENGTH,
 } from './client-meta';
+import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
 export const HOOK_SCRIPT_VERSION = 18;
@@ -87,15 +88,11 @@ const BROWSE_URL_MAX = 512;
  * never worth delaying a tool call for.
  */
 const STORE_LOCK_TIMEOUT_MS = 400;
-/** The store's entry cap, mirroring lib/search-store.ts's MAX_ENTRIES. */
-const STORE_MAX_ENTRIES = 50;
-/**
- * How many of those slots demand entries may hold. A `dispatch-hook` entry is
- * never nagged, never closed, and leaves only by eviction, while the store's two
- * jobs (resolving a payable read URL for `buy`, finding the last `cli` search)
- * depend on the others. Without a budget one wide fan-out drains both.
- */
-const STORE_DEMAND_MAX = 15;
+/** The store's two bounds, IMPORTED from the module that owns them and baked into
+ *  the generated bodies: a script cannot import at run time, but it can be
+ *  written from one definition. See lib/search-store.ts. */
+const STORE_MAX_ENTRIES = MAX_ENTRIES;
+const STORE_DEMAND_MAX = DEMAND_MAX_ENTRIES;
 /** Nag records older than this are pruned; far past the window, so never a re-nag.
  *  Prunes the per-session weak-batch stamps on the same schedule. */
 const NAG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -123,6 +120,15 @@ const DISPATCH_PROMPT_SLICE = 400;
 const DISPATCH_PROMPT_MIN = 80;
 const DISPATCH_DESCRIPTION_MAX = 100;
 const DISPATCH_SESSION_MAX = 10;
+/**
+ * The failure stop. The ceiling above counts RECORDED lookups, and a lookup that
+ * times out records nothing, so an outage is exactly the case it cannot bound: a
+ * sixty-way fan-out would pay the full budget sixty times over. Two consecutive
+ * failures stop the arm for the window, and any answer at all clears the count —
+ * a MISS is the marketplace working, not a failure.
+ */
+const DISPATCH_FAILURE_STOP = 2;
+const DISPATCH_QUIET_MS = 10 * 60 * 1000;
 /** The server's cap; over it a query is skipped, never truncated. */
 const QUESTION_MAX = 512;
 
@@ -778,6 +784,8 @@ main().catch(quiet);
  */
 export function dispatchHookScript(dataDir: string): string {
   return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('dispatch')}
+const HEALTH_PATH = join(DATA_DIR, 'hook-health.json');
+
 /** A fan-out re-dispatches near-identical prompts; case and spacing carry no
  *  meaning here. */
 function fingerprint(question) {
@@ -813,12 +821,50 @@ function dispatchQuestion(toolInput) {
  * How many dispatch lookups one session has spent; each costs up to the fetch
  * budget in front of a tool call. Counted from the bounded store, so the ceiling
  * rate-limits a BURST rather than capping a session for life.
+ *
+ * The unstamped '' bucket is a real session, exactly as it is in alreadyAsked: a
+ * harness that names no session would otherwise be the one place the ceiling
+ * never binds, which is backwards, since nothing there scopes anything.
  */
 function spentThisSession(sessionId) {
-  if (sessionId === null) return 0;
+  const stamp = sessionId === null ? '' : sessionId;
   return loadSearches().filter(
-    (s) => isRecord(s) && s.source === 'dispatch-hook' && s.sessionId === sessionId,
+    (s) =>
+      isRecord(s) &&
+      s.source === 'dispatch-hook' &&
+      (typeof s.sessionId === 'string' ? s.sessionId : '') === stamp,
   ).length;
+}
+
+/** A consecutive-failure count and when it last changed, on the same terms as the
+ *  Stop hook's hook-nags.json: unreadable reads as healthy, which costs a probe
+ *  rather than a silently dead arm. */
+function readHealth() {
+  const raw = readJsonFile(HEALTH_PATH);
+  if (!isRecord(raw)) return { failures: 0, atMs: 0 };
+  const failures = typeof raw.failures === 'number' && raw.failures > 0 ? raw.failures : 0;
+  const atMs = typeof raw.atMs === 'number' && raw.atMs > 0 ? raw.atMs : 0;
+  return { failures, atMs };
+}
+
+function writeHealth(failures, atMs) {
+  try {
+    const tmp = HEALTH_PATH + '.' + process.pid + '.tmp';
+    writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, failures, atMs }, null, 2) + '\\n', {
+      mode: 0o644,
+    });
+    renameSync(tmp, HEALTH_PATH);
+  } catch {
+    // Losing this costs one probe, never the tool call.
+  }
+}
+
+/** Is the arm stopped right now? The window is what makes this self-healing: it
+ *  expires on its own, so a recovered server needs no intervention. */
+function stopped(health, nowMs) {
+  return (
+    health.failures >= ${DISPATCH_FAILURE_STOP} && nowMs - health.atMs < ${DISPATCH_QUIET_MS}
+  );
 }
 
 async function main() {
@@ -838,8 +884,26 @@ async function main() {
   if (alreadyAsked(question, sessionId)) return quiet();
   if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) return quiet();
 
-  const found = await askTenjin(question, config);
-  if (found === null) return quiet();
+  const nowMs = Date.now();
+  const health = readHealth();
+  if (stopped(health, nowMs)) return quiet();
+
+  // A throw and a null are the same outcome to the caller and to the counter: the
+  // marketplace did not answer. Only an ANSWER clears it, and a MISS is an answer.
+  let found = null;
+  try {
+    found = await askTenjin(question, config);
+  } catch {
+    found = null;
+  }
+  if (found === null) {
+    // Restarted rather than incremented once the window has passed, so an outage
+    // months ago cannot combine with one failure today to stop the arm.
+    const run = nowMs - health.atMs < ${DISPATCH_QUIET_MS} ? health.failures + 1 : 1;
+    writeHealth(run, nowMs);
+    return quiet();
+  }
+  if (health.failures !== 0) writeHealth(0, nowMs);
   await recordSearch(
     found.searchId,
     question,

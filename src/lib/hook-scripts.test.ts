@@ -2440,3 +2440,160 @@ describe('Stop hook: the demand source is never nag material', () => {
     expect(lines[0]).toContain('1 web search(es) this session had no Tenjin answer');
   });
 });
+
+describe('dispatch hook: the failure stop', () => {
+  /** What the hook recorded about the marketplace's health. */
+  async function health(): Promise<{ failures?: number; atMs?: number } | null> {
+    const raw = await readFile(join(dataDir, 'hook-health.json'), 'utf8').catch(() => null);
+    return raw === null ? null : (JSON.parse(raw) as { failures?: number; atMs?: number });
+  }
+
+  const dispatch = async (about: string): Promise<HookRun> =>
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt: longPrompt(about) }));
+
+  // The ceiling counts RECORDED lookups, so an outage — the case it should bite
+  // hardest — was the one it could not bound at all.
+  it('stops the arm after two consecutive failures', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 500, json: {} }));
+    await writeConfig({ baseUrl });
+
+    await dispatch('first question of the outage');
+    expect((await health())?.failures).toBe(1);
+    await dispatch('second question of the outage');
+    expect((await health())?.failures).toBe(2);
+
+    const third = await dispatch('third question, which must not be asked');
+    expect(third.code).toBe(0);
+    expect(third.stdout).toBe('');
+    expect(hits()).toBe(2);
+  });
+
+  // A MISS is the marketplace WORKING. Treating it as a failure would stop the
+  // arm on exactly the questions the marketplace most wants to hear about.
+  it('treats a MISS as success: it neither counts nor trips the stop', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+
+    await dispatch('a question nobody has answered');
+    await dispatch('another question nobody has answered');
+    await dispatch('a third question nobody has answered');
+
+    expect(hits()).toBe(3);
+    const state = await health();
+    expect(state === null || state.failures === 0).toBe(true);
+  });
+
+  it('an answer clears a run of failures', async () => {
+    let fail = true;
+    const { baseUrl, hits } = await serveJson(() =>
+      fail ? { status: 500, json: {} } : { status: 200, json: DISPATCH_MISS },
+    );
+    await writeConfig({ baseUrl });
+
+    await dispatch('the failure before the recovery');
+    expect((await health())?.failures).toBe(1);
+
+    fail = false;
+    await dispatch('the question that got through');
+    expect((await health())?.failures).toBe(0);
+
+    // One later failure is a run of one, not of two: the arm keeps working.
+    fail = true;
+    await dispatch('a failure after the recovery');
+    expect((await health())?.failures).toBe(1);
+    await dispatch('still asking');
+    expect(hits()).toBe(4);
+  });
+
+  // Self-healing: the window expires on its own, so a recovered marketplace
+  // needs no config change and no re-install.
+  it('asks again once the quiet window has passed', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await writeFile(
+      join(dataDir, 'hook-health.json'),
+      JSON.stringify({ schemaVersion: 1, failures: 5, atMs: Date.now() - 11 * 60 * 1000 }),
+    );
+
+    await dispatch('a question after the outage ended');
+    expect(hits()).toBe(1);
+    expect((await health())?.failures).toBe(0);
+  });
+
+  it('stays stopped inside the window', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await writeFile(
+      join(dataDir, 'hook-health.json'),
+      JSON.stringify({ schemaVersion: 1, failures: 2, atMs: Date.now() - 60 * 1000 }),
+    );
+
+    const run = await dispatch('a question during the outage');
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+  });
+
+  // A timeout is the expensive failure, and it throws rather than returning null.
+  it('counts a lookup that times out', { timeout: 20000 }, async () => {
+    const { baseUrl } = await serveJson(() => 'hang');
+    await writeConfig({ baseUrl });
+    const run = await dispatch('a question the server never answers');
+    expect(run.code).toBe(0);
+    expect((await health())?.failures).toBe(1);
+  });
+
+  it('treats an unreadable health file as healthy', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await writeFile(join(dataDir, 'hook-health.json'), '{ not json');
+    await dispatch('a question with a corrupt health file');
+    expect(hits()).toBe(1);
+  });
+});
+
+describe('dispatch hook: the ceiling binds without a session id', () => {
+  const unstamped = (about: string): string =>
+    JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_input: { prompt: longPrompt(about) },
+    });
+
+  /** Dispatch entries carrying no sessionId, as an unstamped harness writes them. */
+  async function seedUnstamped(count: number): Promise<void> {
+    const searches = Array.from({ length: count }, (_, i) => ({
+      searchId: `eeeeeeee-eeee-4eee-8eee-${String(i).padStart(12, '0')}`,
+      at: new Date().toISOString(),
+      question: `an earlier unstamped dispatch ${i}`,
+      decision: 'MISS',
+      candidates: [],
+      source: 'dispatch-hook',
+    }));
+    await writeFile(
+      join(dataDir, 'searches.json'),
+      JSON.stringify({ schemaVersion: 1, searches }, null, 2),
+    );
+  }
+
+  // The '' bucket is a real session, exactly as it is for the dedupe: otherwise
+  // a harness that names no session is the one place nothing bounds the burst.
+  it('counts unstamped entries when the payload names no session', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await seedUnstamped(10);
+
+    const run = await runScript(dispatchHookScript(dataDir), unstamped('one dispatch too many'));
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+  });
+
+  it('still asks below the ceiling, and does not count a stamped session', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await seedUnstamped(9);
+    await runScript(dispatchHookScript(dataDir), unstamped('the last unstamped lookup'));
+    expect(hits()).toBe(1);
+  });
+});
