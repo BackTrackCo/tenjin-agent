@@ -1011,8 +1011,12 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).toContain('the WebSearch hook asks tenjin.blog the same question');
-    expect(text).toContain('the query text leaves the machine');
+    expect(text).toContain('Before a web search or a subagent dispatch, the hooks ask tenjin.blog');
+    // The subagent prompt is the surprising half of what leaves the machine, so
+    // the disclosure names it and its bound rather than only "the query".
+    expect(text).toContain(
+      'the query text, or at most 400 characters of the subagent prompt, leaves the machine',
+    );
     expect(text).toContain('tenjin config set hooks.searchMode off');
     expect(text).toContain(join(data, 'hooks'));
   });
@@ -3146,20 +3150,28 @@ describe('runInstall: search hooks', () => {
 
   // A bare headless install is the one that most needs the hooks, and it is the
   // one that used to get the least.
-  it('a non-interactive run wires both hooks and writes both scripts', async () => {
+  it('a non-interactive run wires every hook and writes every script', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
     const h = hooksOf(res.data);
 
     expect(h.skipped).toBeUndefined();
     expect(h.mode).toBe('auto');
-    expect(h.added).toEqual(['PreToolUse', 'Stop']);
+    expect(h.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(h.scriptsDir).toBe(join(data, 'hooks'));
-    expect(h.scripts).toHaveLength(2);
-    expect(existsSync(join(data, 'hooks', 'tenjin-websearch.mjs'))).toBe(true);
-    expect(existsSync(join(data, 'hooks', 'tenjin-stop.mjs'))).toBe(true);
+    expect(h.scripts).toHaveLength(4);
+    for (const file of [
+      'tenjin-websearch.mjs',
+      'tenjin-dispatch.mjs',
+      'tenjin-sessionstart.mjs',
+      'tenjin-stop.mjs',
+    ]) {
+      expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
+    }
 
     const hooks = (await settings()).hooks as Record<string, { matcher?: string }[]>;
     expect(hooks.PreToolUse?.[0]?.matcher).toBe('WebSearch');
+    expect(hooks.PreToolUse?.[1]?.matcher).toBe('Agent|Task');
+    expect(hooks.SessionStart?.[0]?.matcher).toBe('startup|clear|compact');
     expect(hooks.Stop).toHaveLength(1);
     expect(await persistedMode()).toBe('auto');
   });
@@ -3207,7 +3219,7 @@ describe('runInstall: search hooks', () => {
       deps(),
     );
     expect(hooksOf(res.data).mode).toBe('remind');
-    expect(hooksOf(res.data).added).toEqual(['PreToolUse', 'Stop']);
+    expect(hooksOf(res.data).added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(await persistedMode()).toBe('remind');
   });
 
@@ -3228,7 +3240,7 @@ describe('runInstall: search hooks', () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
     const h = hooksOf(res.data);
     expect(h.added).toEqual([]);
-    expect(h.alreadyPresent).toEqual(['PreToolUse', 'Stop']);
+    expect(h.alreadyPresent).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(h.scripts).toEqual([]);
   });
 
@@ -3469,7 +3481,7 @@ describe('runInstall: wallet creation is the default', () => {
     };
     // The default mode is auto, so the publish rule rides along with the tier.
     expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
-    expect(d.hooks.added).toEqual(['PreToolUse', 'Stop']);
+    expect(d.hooks.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
   });
 
   it('never writes a passphrase to a plain file', async () => {

@@ -8,7 +8,21 @@ import {
   LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
 } from './harness-permissions';
-import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
+import {
+  DISPATCH_HOOK_FILE,
+  SESSIONSTART_HOOK_FILE,
+  STOP_HOOK_FILE,
+  WEBSEARCH_HOOK_FILE,
+} from './hook-scripts';
+
+/** Every script `install` generates, which is exactly what uninstall claims and
+ *  removes: ownership is by filename in both directions. */
+const HOOK_SCRIPT_FILES = [
+  WEBSEARCH_HOOK_FILE,
+  DISPATCH_HOOK_FILE,
+  SESSIONSTART_HOOK_FILE,
+  STOP_HOOK_FILE,
+] as const;
 import { hooksDir } from './paths';
 import { SHIPPED_SKILL_FILES } from './skills-source';
 import { resolveThroughLink } from './skill-writer';
@@ -120,7 +134,7 @@ function ownsHookEntry(entry: unknown): boolean {
     (h) =>
       isPlainObject(h) &&
       typeof h.command === 'string' &&
-      (h.command.includes(WEBSEARCH_HOOK_FILE) || h.command.includes(STOP_HOOK_FILE)),
+      HOOK_SCRIPT_FILES.some((file) => (h.command as string).includes(file)),
   );
 }
 
@@ -260,7 +274,7 @@ export async function removeFromSettings(homeDir: string): Promise<SettingsOutco
 
 /**
  * Delete the generated hook scripts and, when it is left empty, the directory
- * that held them. Only our two filenames: a file someone else parked in there is
+ * that held them. Only our own filenames: a file someone else parked in there is
  * both left alone and reason to keep the directory.
  */
 export async function removeHookScripts(dataDir: string): Promise<{
@@ -269,7 +283,7 @@ export async function removeHookScripts(dataDir: string): Promise<{
 }> {
   const dir = hooksDir(dataDir);
   const removed: string[] = [];
-  for (const file of [WEBSEARCH_HOOK_FILE, STOP_HOOK_FILE]) {
+  for (const file of HOOK_SCRIPT_FILES) {
     const path = join(dir, file);
     // isFile, not mere existence: a directory parked at a script path would make
     // the non-recursive `rm` throw EISDIR and abort the uninstall halfway.
