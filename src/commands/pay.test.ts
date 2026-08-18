@@ -433,7 +433,7 @@ describe('runPay, bazaar lane', () => {
   // The adversarial-money case the budget accounting exists for: a hostile
   // registry-listed seller answers 402 AFTER receiving each signature. The
   // authorization it holds is a bearer instrument it can still settle, so the
-  // session budget must count the spend — releasing it here let every retry
+  // session budget must count the spend; releasing it here let every retry
   // sign a fresh authorization while the ledger counted zero of them.
   it('a hostile seller rejecting the paid leg still burns the session budget', async () => {
     await writeConfig();

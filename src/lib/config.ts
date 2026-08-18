@@ -223,14 +223,19 @@ export type PartialConfig = z.infer<typeof RawConfigSchema>;
 export const SEND_MAX_UNSET = 'unset';
 
 /**
- * Registries verified keyless on 2026-08-14: both answer GET
- * /discovery/resources with no credential. CDP's Bazaar is settlement-derived
- * (it indexes what its facilitator settles, Tenjin's endpoints included);
- * UltraVioleta is the registry Tenjin also announces to.
+ * Registries verified keyless (CDP/UV on 2026-08-14, PayAI on 2026-08-18): all
+ * answer GET /discovery/resources with no credential in the Bazaar envelope
+ * the sweep parses. CDP's Bazaar is settlement-derived (it indexes what its
+ * facilitator settles, Tenjin's endpoints included); UltraVioleta is the
+ * registry Tenjin also announces to; PayAI's facilitator is settlement-derived
+ * like CDP's (26k+ listings at verification). PayAI has no /discovery/search
+ * and ignores payTo filters, the same shapes UV and CDP already exhibit, which
+ * the query sweep's per-registry errors and the stored-sweep evidence cover.
  */
 export const DEFAULT_BAZAAR_REGISTRIES = [
   'https://api.cdp.coinbase.com/platform/v2/x402',
   'https://facilitator.ultravioletadao.xyz',
+  'https://facilitator.payai.network',
 ];
 
 export const CONFIG_DEFAULTS: Config = {

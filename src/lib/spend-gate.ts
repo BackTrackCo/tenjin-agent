@@ -11,7 +11,7 @@ import type { CommandContext } from '../context';
  * what `--yes` clears (the confirm only), what a deny looks like, or when a
  * reservation is released. The caller still owns everything around it: the
  * challenge it priced, the payment build, and settling the reservation after a
- * failure — releasing only while no signature has left the process, committing
+ * failure: releasing only while no signature has left the process, committing
  * once one has (pay.ts), because a transmitted authorization can still settle.
  */
 

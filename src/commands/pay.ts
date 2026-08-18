@@ -226,7 +226,7 @@ export async function runPay(
   // From here the signed EIP-3009 authorization leaves the process, and it is a
   // bearer instrument: the counterparty can settle it whatever it answers, or
   // if it answers nothing. So EVERY post-transmission outcome commits the
-  // reservation — money that may move is money accounted. Releasing here let a
+  // reservation; money that may move is money accounted. Releasing here let a
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
@@ -244,14 +244,14 @@ export async function runPay(
   }
   // Still 402 (payment rejected) or anything else: nothing was delivered, but
   // the seller holds a live authorization, so the amount stays counted and the
-  // fix must NOT coach a retry loop — each retry signs a fresh authorization.
+  // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
   throw new CliError(
     'PAYMENT_FAILED',
     paid.status === 402
       ? 'Payment was not accepted by the endpoint.'
       : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix: 'The signed payment already left and is counted against the session budget; the endpoint may still settle it. Do not simply retry — each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      fix: 'The signed payment already left and is counted against the session budget; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       details: { status: paid.status, body: paid.json },
     },
   );

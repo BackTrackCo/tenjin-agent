@@ -169,8 +169,8 @@ installed beside the others; turning it off removes the skill.
 ### `tenjin discover [query]`
 
 List (no query) or search the configured x402 discovery registries
-(`bazaarRegistries`; defaults to CDP's Bazaar and UltraVioleta). Free, keyless,
-touches no wallet, and works with the toggle off. Listings are
+(`bazaarRegistries`; defaults to CDP's Bazaar, UltraVioleta, and PayAI's
+facilitator). Free, keyless, touches no wallet, and works with the toggle off. Listings are
 settlement-derived and unvetted; registries that did not answer are reported so
 a partial sweep never reads as a complete one. The sweep is stored (24h) as the
 pay lane's registry evidence.
