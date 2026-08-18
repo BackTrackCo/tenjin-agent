@@ -119,5 +119,4 @@ Cancelling the search-hooks prompt now behaves like `--no-hooks`, registering
 nothing and writing no config, which is what every other cancel in the
 walkthrough already did.
 
-Uninstalling the hooks is still manual (the install output prints the lines to
-remove); an unwire command is deliberately out of scope here.
+`tenjin uninstall` unwires the hooks and deletes their scripts.

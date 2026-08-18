@@ -2398,6 +2398,35 @@ describe('dispatch hook: demand entries get a share of the store, not the drain'
     expect(stored.some((s) => s.source === 'websearch-hook')).toBe(true);
     expect(stored.some((s) => s.searchId === CLI_ENTRY_ID)).toBe(true);
   });
+
+  // The mirror guard for the budget, in the spirit of the lock-protocol suite:
+  // the bounds are compiled from one definition, so the two copies can only
+  // drift in ALGORITHM. One fixture through both writers must survive
+  // identically, searchId for searchId.
+  it('budgets one fixture identically through the script and the CLI writer', async () => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+
+    await seedFlood(60);
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('the same entry through both writers') }),
+    );
+    const viaScript = (await storedSearches()).map((s) => s.searchId);
+
+    await seedFlood(60);
+    await recordSearch(dataDir, {
+      searchId: DISPATCH_MISS.searchId,
+      at: new Date().toISOString(),
+      question: 'the same entry through both writers',
+      decision: 'MISS',
+      candidates: [],
+      source: 'dispatch-hook',
+    });
+    const viaCli = (await storedSearches()).map((s) => s.searchId);
+
+    expect(viaScript).toEqual(viaCli);
+  });
 });
 
 // The demand arm is DATA, and the Stop hook's two arms are a reminder to the
