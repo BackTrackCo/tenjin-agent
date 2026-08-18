@@ -23,6 +23,7 @@ import {
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
   parseSearchHookModeFlag,
+  parseSessionPrimerFlag,
   parseStopNagFlag,
   parseUpdateModeFlag,
   resolveSettings,
@@ -120,6 +121,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.stopNag':
     'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
+  'hooks.sessionPrimer':
+    'one-paragraph search-first primer at session start: on=print it, off=print nothing',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
@@ -418,9 +421,18 @@ async function setHooksKey(
   ctx: CommandContext,
   deps: ConfigSetDeps,
 ): Promise<CommandResult> {
-  const subkey = key === 'hooks.searchMode' ? 'searchMode' : 'stopNag';
+  const subkey =
+    key === 'hooks.searchMode'
+      ? 'searchMode'
+      : key === 'hooks.stopNag'
+        ? 'stopNag'
+        : 'sessionPrimer';
   const parsed =
-    key === 'hooks.searchMode' ? parseSearchHookModeFlag(value, key) : parseStopNagFlag(value, key);
+    key === 'hooks.searchMode'
+      ? parseSearchHookModeFlag(value, key)
+      : key === 'hooks.stopNag'
+        ? parseStopNagFlag(value, key)
+        : parseSessionPrimerFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
@@ -551,9 +563,14 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
   };
 }
 
-/** The list/get shape for a hooks key: a plain enum string either way. */
+/** The list/get shape for a hooks key: a plain enum string whichever it is. */
 function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
-  const resolved = key === 'hooks.searchMode' ? settings.hooksSearchMode : settings.hooksStopNag;
+  const resolved =
+    key === 'hooks.searchMode'
+      ? settings.hooksSearchMode
+      : key === 'hooks.stopNag'
+        ? settings.hooksStopNag
+        : settings.hooksSessionPrimer;
   return { value: resolved.value, source: resolved.source };
 }
 

@@ -4,8 +4,12 @@ import { writeFileAtomic } from './atomic-json';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir } from './paths';
 import {
+  DISPATCH_HOOK_FILE,
+  SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
+  dispatchHookScript,
+  sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
@@ -25,22 +29,34 @@ import type { SearchHookMode } from './config';
  *    is no argument, no config key, and no call path that lets a caller point a
  *    hook at some other program, and the scripts themselves are generated from
  *    constants in lib/hook-scripts.ts rather than from anything on the wire.
- *  - Neither hook can block, deny, or modify a tool call. The WebSearch hook emits
- *    `additionalContext` and never `permissionDecision`, so a WebSearch always
- *    proceeds; the Stop hook only ever adds a line at the end of a turn.
+ *  - No hook can block, deny, or modify a tool call. The PreToolUse hooks emit
+ *    `additionalContext` and never `permissionDecision`, so the tool always
+ *    proceeds; the Stop and SessionStart hooks only ever add a line.
  *
- * OWNERSHIP IS BY PATH. An entry is ours when its command mentions one of our two
- * script filenames. That is what makes a re-install idempotent, lets a drifted
- * command (an older install's path, a moved data dir) be rewritten in place
- * instead of duplicated, and keeps every entry someone else wrote untouched.
+ * OWNERSHIP IS BY PATH. An entry is ours when its command mentions one of our
+ * script filenames, and each script owns AT MOST ONE ENTRY: two entries naming
+ * one script would be collapsed by the idempotent rewrite, which is why the
+ * dispatch hook takes a single alternation matcher rather than an entry per tool.
+ * That is what makes a re-install idempotent, lets a drifted command (an older
+ * install's path, a moved data dir) be rewritten in place instead of duplicated,
+ * and keeps every entry someone else wrote untouched.
  */
 
 /** The hook events this module writes, in the order they are reported. */
-export const HOOK_EVENTS = ['PreToolUse', 'Stop'] as const;
+export const HOOK_EVENTS = ['PreToolUse', 'SessionStart', 'Stop'] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
 /** The tool the WebSearch hook fires on. Never `WebFetch`, never a wildcard. */
 export const WEBSEARCH_MATCHER = 'WebSearch';
+
+/** The tools the dispatch hook fires on: one subagent dispatch under two names
+ *  across Claude Code versions. */
+export const DISPATCH_MATCHER = 'Agent|Task';
+
+/** A new session, and the two ways a running one loses its context. `resume` is
+ *  deliberately absent: a resumed session restores its transcript, so the primer
+ *  the original SessionStart printed is already in context. */
+export const SESSION_START_MATCHER = 'startup|clear|compact';
 
 /**
  * Seconds the harness allows each hook before killing it, and the HARD bound on
@@ -214,6 +230,18 @@ function specs(dataDir: string): HookSpec[] {
       script: websearchHookScript(dataDir),
       matcher: WEBSEARCH_MATCHER,
     },
+    {
+      event: 'PreToolUse',
+      scriptFile: DISPATCH_HOOK_FILE,
+      script: dispatchHookScript(dataDir),
+      matcher: DISPATCH_MATCHER,
+    },
+    {
+      event: 'SessionStart',
+      scriptFile: SESSIONSTART_HOOK_FILE,
+      script: sessionPrimerHookScript(dataDir),
+      matcher: SESSION_START_MATCHER,
+    },
     { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir) },
   ];
 }
@@ -290,13 +318,22 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   if ('result' in found) return found.result;
   const { path, raw, settings, hooks } = found;
 
-  const added: HookEvent[] = [];
-  const alreadyPresent: HookEvent[] = [];
-  const updated: HookEvent[] = [];
   const nextHooks: Record<string, unknown> = { ...hooks };
 
+  // One event carries several of our entries, so it is reported ONCE and by its
+  // strongest outcome: two lists would say two contradictory things about it.
+  // Each spec appends to the RUNNING list, not to what was read from disk.
+  const outcomes = new Map<HookEvent, 'added' | 'updated' | 'alreadyPresent'>();
+  const rank = { added: 3, updated: 2, alreadyPresent: 1 } as const;
+  const note = (outcome: 'added' | 'updated' | 'alreadyPresent', event: HookEvent): void => {
+    const seen = outcomes.get(event);
+    if (seen === undefined || rank[outcome] > rank[seen]) outcomes.set(event, outcome);
+  };
+  const eventsWith = (outcome: 'added' | 'updated' | 'alreadyPresent'): HookEvent[] =>
+    HOOK_EVENTS.filter((event) => outcomes.get(event) === outcome);
+
   for (const spec of plan) {
-    const existing = hooks[spec.event];
+    const existing = nextHooks[spec.event];
     if (existing !== undefined && !Array.isArray(existing)) {
       return refuse(
         path,
@@ -314,18 +351,22 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
     const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
     if (idx === -1) {
       nextHooks[spec.event] = [...list, desired];
-      added.push(spec.event);
+      note('added', spec.event);
       continue;
     }
     if (JSON.stringify(list[idx]) === JSON.stringify(desired)) {
-      alreadyPresent.push(spec.event);
+      note('alreadyPresent', spec.event);
       continue;
     }
     // Ours, but stale: an older install's path, or a data dir that moved. Rewritten
     // IN PLACE so the entry keeps its position among whatever else is registered.
     nextHooks[spec.event] = list.map((e, i) => (i === idx ? desired : e));
-    updated.push(spec.event);
+    note('updated', spec.event);
   }
+
+  const added = eventsWith('added');
+  const updated = eventsWith('updated');
+  const alreadyPresent = eventsWith('alreadyPresent');
 
   // Nothing to register: no guard is involved, so the scripts are simply brought
   // up to date. This is the path a re-run takes after an upgrade changed a body.

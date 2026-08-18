@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
 import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
-import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
+import {
+  DISPATCH_HOOK_FILE,
+  SESSIONSTART_HOOK_FILE,
+  STOP_HOOK_FILE,
+  WEBSEARCH_HOOK_FILE,
+} from '../lib/hook-scripts';
 import { hooksDir } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
 import type { CommandContext } from '../context';
@@ -38,7 +43,8 @@ const run = async (): Promise<{ report: UninstallReport; text: string }> => {
   return { report: res.data as UninstallReport, text: (res.humanLines ?? []).join('\n') };
 };
 
-/** A settings.json holding our two hook entries and our rules, plus a stranger's. */
+/** A settings.json holding every hook entry we write and our rules, plus a
+ *  stranger's on two of the same events. */
 async function seedSettings(extra: Record<string, unknown> = {}): Promise<string> {
   const path = claudeSettingsPath(home);
   await mkdir(join(home, '.claude'), { recursive: true });
@@ -50,6 +56,16 @@ async function seedSettings(extra: Record<string, unknown> = {}): Promise<string
           hooks: [{ type: 'command', command: `node '${WEBSEARCH_HOOK_FILE}'` }],
         },
         { matcher: 'Bash', hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] },
+        {
+          matcher: 'Agent|Task',
+          hooks: [{ type: 'command', command: `node '${DISPATCH_HOOK_FILE}'` }],
+        },
+      ],
+      SessionStart: [
+        {
+          matcher: 'startup|clear|compact',
+          hooks: [{ type: 'command', command: `node '${SESSIONSTART_HOOK_FILE}'` }],
+        },
       ],
       Stop: [{ hooks: [{ type: 'command', command: `node '${STOP_HOOK_FILE}'` }] }],
     },
@@ -72,7 +88,12 @@ async function seedSkill(dir: string, name: string, frontmatterName = name): Pro
 
 async function seedHookScripts(): Promise<void> {
   await mkdir(hooksDir(data), { recursive: true });
-  for (const f of [WEBSEARCH_HOOK_FILE, STOP_HOOK_FILE]) {
+  for (const f of [
+    WEBSEARCH_HOOK_FILE,
+    DISPATCH_HOOK_FILE,
+    SESSIONSTART_HOOK_FILE,
+    STOP_HOOK_FILE,
+  ]) {
     await writeFile(join(hooksDir(data), f), '// generated\n');
   }
 }
@@ -88,9 +109,11 @@ describe('runUninstall — a fully installed machine', () => {
 
     expect(report.skills).toHaveLength(2);
     expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search'))).toBe(false);
-    expect(report.scripts).toHaveLength(2);
+    expect(report.scripts).toHaveLength(4);
     expect(existsSync(join(hooksDir(data), STOP_HOOK_FILE))).toBe(false);
-    expect(report.settings.hooks.sort()).toEqual(['PreToolUse', 'Stop']);
+    expect(existsSync(join(hooksDir(data), DISPATCH_HOOK_FILE))).toBe(false);
+    expect(existsSync(join(hooksDir(data), SESSIONSTART_HOOK_FILE))).toBe(false);
+    expect(report.settings.hooks.sort()).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(report.settings.rules.sort()).toEqual([...FREE_VERB_RULES].sort());
 
     const after = JSON.parse(await readFile(path, 'utf8')) as Record<string, never>;
@@ -330,7 +353,7 @@ describe('runUninstall — ownership gates', () => {
     await seedHookScripts();
     await writeFile(join(hooksDir(data), 'theirs.mjs'), '// not ours\n');
     const { report } = await run();
-    expect(report.scripts).toHaveLength(2);
+    expect(report.scripts).toHaveLength(4);
     expect(report.hooksDir).toBeUndefined();
     expect(existsSync(join(hooksDir(data), 'theirs.mjs'))).toBe(true);
   });
@@ -445,7 +468,7 @@ describe('runUninstall — partial and repeat states', () => {
     await seedHookScripts();
     await seedSkill('.claude/skills', 'tenjin-publish');
     const { report } = await run();
-    expect(report.scripts).toHaveLength(2);
+    expect(report.scripts).toHaveLength(4);
     expect(report.skills).toHaveLength(1);
     expect(report.settings.skipped).toBe('absent');
   });
@@ -457,7 +480,7 @@ describe('runUninstall — partial and repeat states', () => {
     await seedHookScripts();
     const { report, text } = await run();
     expect(report.settings.skipped).toBe('unparsable');
-    expect(report.scripts).toHaveLength(2);
+    expect(report.scripts).toHaveLength(4);
     expect(text).toContain('not valid JSON');
   });
 });
