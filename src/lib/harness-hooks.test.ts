@@ -112,7 +112,7 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     expect(pre[0]!.matcher).toBe('WebSearch');
     expect(pre[0]!.hooks[0]!.type).toBe('command');
     expect(pre[0]!.hooks[0]!.command).toContain(WEBSEARCH_HOOK_FILE);
-    expect(pre[1]!.matcher).toBe('Agent|Task|WebFetch');
+    expect(pre[1]!.matcher).toBe('Agent|Task');
     expect(pre[1]!.hooks[0]!.command).toContain(DISPATCH_HOOK_FILE);
 
     const start = entriesFor(settings, 'SessionStart');
@@ -128,16 +128,15 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     expect(stop[0]!.hooks[0]!.command).toContain(STOP_HOOK_FILE);
   });
 
-  // WebFetch is registered on the DISPATCH script, which logs it and never
-  // injects into it; the WebSearch entry stays exactly as narrow as it was.
-  it('keeps the WebSearch entry to WebSearch alone', async () => {
+  // Neither PreToolUse entry reaches WebFetch: nothing fires on a fetch, and the
+  // WebSearch entry stays exactly as narrow as it was.
+  it('matches WebSearch and the two dispatch names, never WebFetch or a wildcard', async () => {
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     const pre = entriesFor(await readSettings(), 'PreToolUse');
     expect(pre[0]!.matcher).toBe('WebSearch');
+    expect(pre[1]!.matcher).toBe('Agent|Task');
     expect(pre.some((e) => e.matcher === '*')).toBe(false);
-    const webfetchEntries = pre.filter((e) => (e.matcher ?? '').includes('WebFetch'));
-    expect(webfetchEntries).toHaveLength(1);
-    expect(webfetchEntries[0]!.hooks[0]!.command).toContain(DISPATCH_HOOK_FILE);
+    expect(JSON.stringify(await readSettings())).not.toContain('WebFetch');
   });
 
   // Ownership is by script filename, so two entries naming one script would be
@@ -203,7 +202,6 @@ describe('wireSearchHooks: idempotence', () => {
     });
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
 
-    expect(result.updated).toContain('PreToolUse');
     const pre = entriesFor(await readSettings(), 'PreToolUse');
     expect(pre).toHaveLength(3);
     // Position preserved, and the stranger's entry untouched.
@@ -211,7 +209,28 @@ describe('wireSearchHooks: idempotence', () => {
     expect(pre[1]!.hooks[0]!.command).toContain(join(data, 'hooks', WEBSEARCH_HOOK_FILE));
     // The dispatch entry was absent, so it is appended rather than rewritten.
     expect(pre[2]!.hooks[0]!.command).toContain(join(data, 'hooks', DISPATCH_HOOK_FILE));
+    // ONE list per event, by the strongest outcome: this run both rewrote a
+    // drifted entry and appended a new one, and `added` is what it reports.
     expect(result.added).toContain('PreToolUse');
+    expect(result.updated).not.toContain('PreToolUse');
+    expect(result.alreadyPresent).not.toContain('PreToolUse');
+  });
+
+  it('reports an event in exactly one list, whatever mix of entries it carries', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const settings = await readSettings();
+    entriesFor(settings, 'PreToolUse')[0]!.hooks[0]!.command =
+      `node /old/path/${WEBSEARCH_HOOK_FILE}`;
+    await writeSettings(settings);
+
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    // Drifted WebSearch entry + untouched dispatch entry: updated beats
+    // already-present, and the event appears once across all three lists.
+    const appearances = [result.added, result.updated, result.alreadyPresent].filter((list) =>
+      list.includes('PreToolUse'),
+    );
+    expect(appearances).toHaveLength(1);
+    expect(result.updated).toContain('PreToolUse');
   });
 
   // Two entries land on one event in a single run; the second must append to the

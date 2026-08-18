@@ -49,12 +49,13 @@ export type HookEvent = (typeof HOOK_EVENTS)[number];
 /** The tool the WebSearch hook fires on. Never `WebFetch`, never a wildcard. */
 export const WEBSEARCH_MATCHER = 'WebSearch';
 
-/** The tools the dispatch hook fires on. `Agent` and `Task` are one subagent
- *  dispatch under two names across Claude Code versions; `WebFetch` shares the
- *  script, which logs it and never injects into it. */
-export const DISPATCH_MATCHER = 'Agent|Task|WebFetch';
+/** The tools the dispatch hook fires on: one subagent dispatch under two names
+ *  across Claude Code versions. */
+export const DISPATCH_MATCHER = 'Agent|Task';
 
-/** A new session, and the two ways a running one loses its context. */
+/** A new session, and the two ways a running one loses its context. `resume` is
+ *  deliberately absent: a resumed session restores its transcript, so the primer
+ *  the original SessionStart printed is already in context. */
 export const SESSION_START_MATCHER = 'startup|clear|compact';
 
 /**
@@ -292,16 +293,19 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   if ('result' in found) return found.result;
   const { path, raw, settings, hooks } = found;
 
-  const added: HookEvent[] = [];
-  const alreadyPresent: HookEvent[] = [];
-  const updated: HookEvent[] = [];
   const nextHooks: Record<string, unknown> = { ...hooks };
 
-  // One event can carry several of our entries, so it is reported once, and each
-  // spec appends to the RUNNING list rather than to what was read from disk.
-  const note = (list: HookEvent[], event: HookEvent): void => {
-    if (!list.includes(event)) list.push(event);
+  // One event carries several of our entries, so it is reported ONCE and by its
+  // strongest outcome: two lists would say two contradictory things about it.
+  // Each spec appends to the RUNNING list, not to what was read from disk.
+  const outcomes = new Map<HookEvent, 'added' | 'updated' | 'alreadyPresent'>();
+  const rank = { added: 3, updated: 2, alreadyPresent: 1 } as const;
+  const note = (outcome: 'added' | 'updated' | 'alreadyPresent', event: HookEvent): void => {
+    const seen = outcomes.get(event);
+    if (seen === undefined || rank[outcome] > rank[seen]) outcomes.set(event, outcome);
   };
+  const eventsWith = (outcome: 'added' | 'updated' | 'alreadyPresent'): HookEvent[] =>
+    HOOK_EVENTS.filter((event) => outcomes.get(event) === outcome);
 
   for (const spec of plan) {
     const existing = nextHooks[spec.event];
@@ -322,18 +326,22 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
     const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
     if (idx === -1) {
       nextHooks[spec.event] = [...list, desired];
-      note(added, spec.event);
+      note('added', spec.event);
       continue;
     }
     if (JSON.stringify(list[idx]) === JSON.stringify(desired)) {
-      note(alreadyPresent, spec.event);
+      note('alreadyPresent', spec.event);
       continue;
     }
     // Ours, but stale: an older install's path, or a data dir that moved. Rewritten
     // IN PLACE so the entry keeps its position among whatever else is registered.
     nextHooks[spec.event] = list.map((e, i) => (i === idx ? desired : e));
-    note(updated, spec.event);
+    note('updated', spec.event);
   }
+
+  const added = eventsWith('added');
+  const updated = eventsWith('updated');
+  const alreadyPresent = eventsWith('alreadyPresent');
 
   // Nothing to register: no guard is involved, so the scripts are simply brought
   // up to date. This is the path a re-run takes after an upgrade changed a body.

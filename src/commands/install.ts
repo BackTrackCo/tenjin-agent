@@ -680,7 +680,7 @@ function hooksDisclosure(h: HooksResult): string {
   if (h.mode === 'remind') {
     return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}`;
   }
-  return `Before a web search, the WebSearch hook asks tenjin.blog the same question (free and anonymous, ~2s budget, 5s harness kill) and mentions a tested answer if one exists; the query text leaves the machine. It can never block or change the search. The dispatch hook does the same when a subagent is dispatched, sending at most 400 characters of its prompt, and logs a WebFetch the same way without ever adding anything to your context. ${shared}`;
+  return `Before a web search or a subagent dispatch, the hooks ask tenjin.blog the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine. They can never block or change the tool call. ${shared}`;
 }
 
 /**
@@ -1323,7 +1323,7 @@ export const SEARCH_HOOKS_CHOICES = [
   {
     value: 'auto',
     label: 'Yes, check Tenjin first (recommended)',
-    hint: 'before a WebSearch or a subagent dispatch, ask tenjin.blog the same question (free, anonymous, 2s budget) and mention a tested answer; the query text leaves the machine',
+    hint: 'before a WebSearch or a subagent dispatch, ask tenjin.blog the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine',
   },
   {
     value: 'remind',

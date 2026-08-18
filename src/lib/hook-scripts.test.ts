@@ -2244,85 +2244,170 @@ describe('dispatch hook: one question per session', () => {
   });
 });
 
-describe('WebFetch demand logging', () => {
-  const fetchInput = (over: { prompt?: string; url?: string } = {}): string =>
-    dispatchInput({
-      tool: 'WebFetch',
-      prompt: over.prompt ?? 'extract the pricing table',
-      url: over.url ?? 'https://docs.example.com/pricing?ref=1',
-    });
+describe('dispatch hook: the burst ceiling', () => {
+  /** N dispatch entries already recorded for `sessionId`, as the store holds them. */
+  async function seedDispatch(count: number, sessionId: string): Promise<void> {
+    const searches = Array.from({ length: count }, (_, i) => ({
+      searchId: `aaaaaaaa-aaaa-4aaa-8aaa-${String(i).padStart(12, '0')}`,
+      at: new Date().toISOString(),
+      question: `an earlier dispatch ${i}`,
+      decision: 'MISS',
+      candidates: [],
+      source: 'dispatch-hook',
+      sessionId,
+    }));
+    await writeFile(
+      join(dataDir, 'searches.json'),
+      JSON.stringify({ schemaVersion: 1, searches }, null, 2),
+    );
+  }
 
-  it('records the fetch and injects NOTHING, hit or miss', async () => {
-    for (const json of [DISPATCH_MISS, null] as const) {
-      await rm(join(dataDir, 'searches.json'), { force: true });
-      const { baseUrl } = await serveJson((_body, base) => ({
-        status: 200,
-        json: json ?? hit(base),
-      }));
-      await writeConfig({ baseUrl });
-      const run = await runScript(dispatchHookScript(dataDir), fetchInput());
-
-      expect(run.code).toBe(0);
-      expect(run.stderr).toBe('');
-      // The whole point of the fetch arm: demand data, never a word to the model.
-      expect(run.stdout).toBe('');
-      expect((await storedSearches())[0]?.source).toBe('webfetch-hook');
-      if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
-      server = null;
-    }
-  });
-
-  it('builds the question from the prompt and the host, never the full url', async () => {
-    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl });
-    await runScript(dispatchHookScript(dataDir), fetchInput());
-    const question = questionSent(bodies);
-    expect(question).toBe('extract the pricing table (docs.example.com)');
-    expect(bodies[0]).not.toContain('ref=1');
-  });
-
-  it('falls back to the prompt alone when the url does not parse', async () => {
-    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl });
-    await runScript(dispatchHookScript(dataDir), fetchInput({ url: 'not a url' }));
-    expect(questionSent(bodies)).toBe('extract the pricing table');
-  });
-
-  it('asks nothing about a fetch with no prompt', async () => {
+  // A fan-out puts the fetch budget in front of every dispatch it makes, so the
+  // session buys a fixed number of lookups rather than one per subagent.
+  it('stops asking once the session has spent its lookups', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
+    await seedDispatch(10, 'abc');
+
     const run = await runScript(
       dispatchHookScript(dataDir),
-      dispatchInput({ tool: 'WebFetch', url: 'https://docs.example.com/x' }),
+      dispatchInput({ prompt: longPrompt('one dispatch too many') }),
     );
+    expect(run.code).toBe(0);
     expect(run.stdout).toBe('');
     expect(hits()).toBe(0);
   });
 
-  it('says nothing in remind mode, where there is nothing to log either', async () => {
-    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
-    const run = await runScript(dispatchHookScript(dataDir), fetchInput());
-    expect(run.stdout).toBe('');
-    expect(hits()).toBe(0);
-    expect(await storedSearches()).toEqual([]);
-  });
-
-  it('dedupes a repeated fetch within the session', async () => {
+  it('still asks one below the ceiling', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
-    await runScript(dispatchHookScript(dataDir), fetchInput());
-    await runScript(dispatchHookScript(dataDir), fetchInput());
+    await seedDispatch(9, 'abc');
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('the last lookup this session gets') }),
+    );
+    expect(hits()).toBe(1);
+  });
+
+  // The ceiling is per session, not per machine: a sibling session's fan-out
+  // must not silence this one.
+  it('counts only this session, and only dispatch entries', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await seedDispatch(10, 'somebody-else');
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question in a fresh session') }),
+    );
     expect(hits()).toBe(1);
   });
 });
 
-// The demand arms are DATA, and the Stop hook's two arms are a reminder to the
+describe('dispatch hook: demand entries get a share of the store, not the drain', () => {
+  const CLI_ENTRY_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  /** A store already full of demand entries, plus the one thing a purchase needs
+   *  and, optionally, a ridealong web search that is not demand data. */
+  async function seedFlood(dispatchCount: number, extra: unknown[] = []): Promise<void> {
+    const demand = Array.from({ length: dispatchCount }, (_, i) => ({
+      searchId: `bbbbbbbb-bbbb-4bbb-8bbb-${String(i).padStart(12, '0')}`,
+      at: new Date(Date.now() - i * 1000).toISOString(),
+      question: `a fan-out dispatch ${i}`,
+      decision: 'MISS',
+      candidates: [],
+      source: 'dispatch-hook',
+      sessionId: 'flood',
+    }));
+    const deliberate = {
+      searchId: CLI_ENTRY_ID,
+      at: new Date(Date.now() - 60_000).toISOString(),
+      question: 'a search the user ran and may still buy from',
+      decision: 'CANDIDATES',
+      candidates: [
+        {
+          resourceId: CANDIDATE.resourceId,
+          url: 'https://tenjin.blog/@a/p',
+          title: CANDIDATE.title,
+          price: CANDIDATE.price,
+        },
+      ],
+      source: 'cli',
+    };
+    await writeFile(
+      join(dataDir, 'searches.json'),
+      JSON.stringify({ schemaVersion: 1, searches: [...extra, ...demand, deliberate] }, null, 2),
+    );
+  }
+
+  it('a dispatch flood cannot evict a cli entry', async () => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    // Well past the 50-slot store: the old unbudgeted drain lost the cli entry.
+    await seedFlood(60);
+
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('one more dispatch on a flooded store') }),
+    );
+
+    const stored = await storedSearches();
+    const cli = stored.find((s) => s.searchId === CLI_ENTRY_ID);
+    expect(cli).toBeDefined();
+    expect(cli?.candidates).toHaveLength(1);
+    expect(stored.filter((s) => s.source === 'dispatch-hook')).toHaveLength(15);
+    expect(stored.length).toBeLessThanOrEqual(50);
+  });
+
+  it('keeps the newest demand entries and drops the oldest', async () => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await seedFlood(20);
+
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('the newest dispatch of all') }),
+    );
+
+    const demand = (await storedSearches()).filter((s) => s.source === 'dispatch-hook');
+    expect(demand).toHaveLength(15);
+    // The entry just written is at the head; the oldest seeded one is gone.
+    expect(demand[0]?.searchId).toBe(DISPATCH_MISS.searchId);
+    expect(demand.map((s) => s.question)).not.toContain('a fan-out dispatch 19');
+  });
+
+  it('leaves a websearch-hook entry alone: only the demand arm is budgeted', async () => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await seedFlood(30, [
+      {
+        searchId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        at: new Date().toISOString(),
+        question: 'a ridealong web search',
+        decision: 'MISS',
+        candidates: [],
+        source: 'websearch-hook',
+      },
+    ]);
+
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a dispatch beside a web search') }),
+    );
+
+    const stored = await storedSearches();
+    expect(stored.some((s) => s.source === 'websearch-hook')).toBe(true);
+    expect(stored.some((s) => s.searchId === CLI_ENTRY_ID)).toBe(true);
+  });
+});
+
+// The demand arm is DATA, and the Stop hook's two arms are a reminder to the
 // agent about its OWN unanswered questions. A dispatch entry in either arm would
 // nag on every subagent a research session spawns.
-describe('Stop hook: the demand sources are never nag material', () => {
-  it('says nothing about a dispatch-hook or webfetch-hook MISS', async () => {
-    for (const source of ['dispatch-hook', 'webfetch-hook']) {
+describe('Stop hook: the demand source is never nag material', () => {
+  // The second value pins the DEFAULT: an unrecognized source is skipped rather
+  // than promoted into the strong arm.
+  it('says nothing about a dispatch-hook MISS, or one from a source it does not know', async () => {
+    for (const source of ['dispatch-hook', 'some-future-hook']) {
       await rm(join(dataDir, 'hook-nags.json'), { force: true });
       await seedSearches([{ ...OPEN_MISS, source, sessionId: 'abc' }]);
       const run = await runScript(stopHookScript(dataDir), stopInput);
@@ -2333,10 +2418,9 @@ describe('Stop hook: the demand sources are never nag material', () => {
     }
   });
 
-  it('raises the deliberate miss beside them and nothing else', async () => {
+  it('raises the deliberate miss beside it and nothing else', async () => {
     await seedSearches([
       { ...OPEN_MISS, searchId: '88888888-8888-4888-8888-888888888888', source: 'dispatch-hook' },
-      { ...OPEN_MISS, searchId: '99999999-9999-4999-8999-999999999999', source: 'webfetch-hook' },
       { ...OPEN_MISS, source: 'cli' },
     ]);
     const run = await runScript(stopHookScript(dataDir), stopInput);

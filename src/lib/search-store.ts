@@ -42,8 +42,9 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * was going to run anyway, which is a much weaker signal, because nobody judged
  * the question suitable for the marketplace before it was sent.
  *
- * `dispatch-hook` and `webfetch-hook` are weaker still: DEMAND DATA about what
- * an agent was about to research, which the Stop hook never raises at all.
+ * `dispatch-hook` is weaker still: DEMAND DATA about what an agent was about to
+ * research, which the Stop hook never raises and which holds a bounded share of
+ * the store, because nothing ever closes one.
  *
  * The distinction exists because the Stop hook must not treat them alike: an
  * unanswered deliberate search deserves being named on its own, while a batch of
@@ -55,12 +56,7 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
  * source field, and those entries were all explicit searches.
  */
-export const SearchSourceSchema = z.enum([
-  'cli',
-  'websearch-hook',
-  'dispatch-hook',
-  'webfetch-hook',
-]);
+export const SearchSourceSchema = z.enum(['cli', 'websearch-hook', 'dispatch-hook']);
 export type SearchSource = z.infer<typeof SearchSourceSchema>;
 
 const StoredSearchSchema = z.object({
@@ -241,8 +237,8 @@ export async function markSearchResolved(
 
 /**
  * The most recent DELIBERATE search: `--last` means "the search I just ran", and
- * in auto mode the hooks prepend a ridealong entry on every web search, subagent
- * dispatch and fetch, so an unfiltered head would routinely re-target `outcome
+ * in auto mode the hooks prepend a ridealong entry on every web search and every
+ * subagent dispatch, so an unfiltered head would routinely re-target `outcome
  * --last` at a query the agent never chose to make (found in dogfooding). Hook
  * entries stay reachable by explicit `--search-id`, which is what the Stop hook's
  * reminder names.

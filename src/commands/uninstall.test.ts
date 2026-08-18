@@ -57,7 +57,7 @@ async function seedSettings(extra: Record<string, unknown> = {}): Promise<string
         },
         { matcher: 'Bash', hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] },
         {
-          matcher: 'Agent|Task|WebFetch',
+          matcher: 'Agent|Task',
           hooks: [{ type: 'command', command: `node '${DISPATCH_HOOK_FILE}'` }],
         },
       ],

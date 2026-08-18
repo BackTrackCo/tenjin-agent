@@ -89,6 +89,13 @@ const BROWSE_URL_MAX = 512;
 const STORE_LOCK_TIMEOUT_MS = 400;
 /** The store's entry cap, mirroring lib/search-store.ts's MAX_ENTRIES. */
 const STORE_MAX_ENTRIES = 50;
+/**
+ * How many of those slots demand entries may hold. A `dispatch-hook` entry is
+ * never nagged, never closed, and leaves only by eviction, while the store's two
+ * jobs (resolving a payable read URL for `buy`, finding the last `cli` search)
+ * depend on the others. Without a budget one wide fan-out drains both.
+ */
+const STORE_DEMAND_MAX = 15;
 /** Nag records older than this are pruned; far past the window, so never a re-nag.
  *  Prunes the per-session weak-batch stamps on the same schedule. */
 const NAG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -109,10 +116,13 @@ export const PRIMER_TEXT =
  * The dispatch hook's bounds. The slice is a PRIVACY bound, not a display one: a
  * subagent prompt is the most sensitive payload any of these hooks sees, so no
  * more of it than this leaves the machine, whatever the server would accept.
+ * `DISPATCH_SESSION_MAX` is the burst bound: a ten-way fan-out of distinct
+ * prompts would otherwise put the fetch budget in front of every one of them.
  */
 const DISPATCH_PROMPT_SLICE = 400;
 const DISPATCH_PROMPT_MIN = 80;
 const DISPATCH_DESCRIPTION_MAX = 100;
+const DISPATCH_SESSION_MAX = 10;
 /** The server's cap; over it a query is skipped, never truncated. */
 const QUESTION_MAX = 512;
 
@@ -520,6 +530,24 @@ async function withStoreLock(fn) {
 }
 
 /**
+ * The store as it should be written. Entries arrive newest-first, so dropping
+ * once the demand budget is spent drops the OLDEST demand entries and leaves
+ * every \`cli\` and \`websearch-hook\` entry the drain would otherwise have taken.
+ */
+function budgeted(entries) {
+  const kept = [];
+  let demand = 0;
+  for (const e of entries) {
+    if (isRecord(e) && e.source === 'dispatch-hook') {
+      if (demand >= ${STORE_DEMAND_MAX}) continue;
+      demand += 1;
+    }
+    kept.push(e);
+  }
+  return kept.slice(0, ${STORE_MAX_ENTRIES});
+}
+
+/**
  * Record this search in the CLI's own store under the calling hook's \`source\`.
  *
  * This is what makes a hook search reachable at all: without it a MISS the hook
@@ -552,7 +580,7 @@ async function recordSearch(searchId, question, decision, candidates, sessionId,
         source,
         ...(sessionId !== null ? { sessionId } : {}),
       };
-      saveSearches([entry, ...existing].slice(0, ${STORE_MAX_ENTRIES}));
+      saveSearches(budgeted([entry, ...existing]));
     });
   } catch {
     // Bookkeeping only. Never the tool call's problem.
@@ -742,11 +770,11 @@ main().catch(quiet);
 }
 
 /**
- * The PreToolUse/research-dispatch hook, on `Agent`, `Task` and `WebFetch`. The
- * WebSearch hook only sees a question the agent had already decided to ask the
- * web; the expensive one is the research it decides to do ITSELF. WebFetch is
- * LOGGED AND NEVER INJECTED INTO: a hint on a fetch measured 45% duplicate noise,
- * so that arm is demand data only. Fail-open throughout, like the WebSearch hook.
+ * The PreToolUse/research-dispatch hook, on `Agent` and `Task`. The WebSearch
+ * hook only sees a question the agent had already decided to ask the web; the
+ * expensive one is the research it decides to do ITSELF. Fail-open throughout,
+ * like the WebSearch hook, and bounded twice: the same question is asked once per
+ * session, and a session gets a fixed number of lookups however wide it fans out.
  */
 export function dispatchHookScript(dataDir: string): string {
   return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('dispatch')}
@@ -781,37 +809,34 @@ function dispatchQuestion(toolInput) {
   return description === '' ? head : description + ': ' + head;
 }
 
-/** The host is most of what makes a bare "extract the pricing table" a question
- *  anyone else could have asked. */
-function fetchQuestion(toolInput) {
-  const prompt = typeof toolInput.prompt === 'string' ? clean(toolInput.prompt, ${DISPATCH_PROMPT_SLICE}) : '';
-  if (prompt.length === 0) return '';
-  let host = '';
-  try {
-    host = new URL(String(toolInput.url)).host;
-  } catch {
-    host = '';
-  }
-  return host === '' ? prompt : prompt + ' (' + host + ')';
+/**
+ * How many dispatch lookups one session has spent; each costs up to the fetch
+ * budget in front of a tool call. Counted from the bounded store, so the ceiling
+ * rate-limits a BURST rather than capping a session for life.
+ */
+function spentThisSession(sessionId) {
+  if (sessionId === null) return 0;
+  return loadSearches().filter(
+    (s) => isRecord(s) && s.source === 'dispatch-hook' && s.sessionId === sessionId,
+  ).length;
 }
 
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
-  // Defense in depth behind the matcher: these three tools and nothing else.
-  const isFetch = input.tool_name === 'WebFetch';
-  if (!isFetch && input.tool_name !== 'Agent' && input.tool_name !== 'Task') return quiet();
+  // Defense in depth behind the matcher: these two tools and nothing else.
+  if (input.tool_name !== 'Agent' && input.tool_name !== 'Task') return quiet();
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
-  const question = isFetch ? fetchQuestion(toolInput) : dispatchQuestion(toolInput);
+  const question = dispatchQuestion(toolInput);
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   const config = readConfig();
   if (config.mode === 'off') return quiet();
-  // \`remind\` sends nothing, so there is nothing to log; the fetch arm is mute.
-  if (config.mode === 'remind') return isFetch ? quiet() : emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
+  if (config.mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const sessionId = sessionIdOf(input);
   if (alreadyAsked(question, sessionId)) return quiet();
+  if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) return quiet();
 
   const found = await askTenjin(question, config);
   if (found === null) return quiet();
@@ -821,11 +846,13 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
-    isFetch ? 'webfetch-hook' : 'dispatch-hook',
+    'dispatch-hook',
   );
-  if (isFetch || found.decision !== 'CANDIDATES') return quiet();
+  if (found.decision !== 'CANDIDATES') return quiet();
   const lines = hintLines(found.stored);
   if (lines.length === 0) return quiet();
+  // The hint lands in the PARENT's context only: tool_input is already formed, so
+  // the subagent never sees it and the disclaimer always travels with the titles.
   emit('PreToolUse', lines.join('\\n'));
 }
 
@@ -875,8 +902,8 @@ main().catch(quiet);
  * line, AT MOST ONCE PER SESSION, and the agent judges at nag time whether any of
  * it was worth publishing. The hook never makes that judgment; it has no way to.
  *
- * Every OTHER source is silent here: the dispatch and fetch arms are demand data,
- * and promoting one would nag on every subagent a session spawns.
+ * Every OTHER source is silent here: the dispatch arm is demand data, and
+ * promoting it would nag on every subagent a session spawns.
  *
  * Whatever it raises, it leads with the publish mode, because the mode is what
  * decides whether the agent may act on the reminder or has to ask first.

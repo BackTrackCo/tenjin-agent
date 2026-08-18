@@ -1011,8 +1011,12 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).toContain('the WebSearch hook asks tenjin.blog the same question');
-    expect(text).toContain('the query text leaves the machine');
+    expect(text).toContain('Before a web search or a subagent dispatch, the hooks ask tenjin.blog');
+    // The subagent prompt is the surprising half of what leaves the machine, so
+    // the disclosure names it and its bound rather than only "the query".
+    expect(text).toContain(
+      'the query text, or at most 400 characters of the subagent prompt, leaves the machine',
+    );
     expect(text).toContain('tenjin config set hooks.searchMode off');
     expect(text).toContain(join(data, 'hooks'));
   });
@@ -3166,7 +3170,7 @@ describe('runInstall: search hooks', () => {
 
     const hooks = (await settings()).hooks as Record<string, { matcher?: string }[]>;
     expect(hooks.PreToolUse?.[0]?.matcher).toBe('WebSearch');
-    expect(hooks.PreToolUse?.[1]?.matcher).toBe('Agent|Task|WebFetch');
+    expect(hooks.PreToolUse?.[1]?.matcher).toBe('Agent|Task');
     expect(hooks.SessionStart?.[0]?.matcher).toBe('startup|clear|compact');
     expect(hooks.Stop).toHaveLength(1);
     expect(await persistedMode()).toBe('auto');
