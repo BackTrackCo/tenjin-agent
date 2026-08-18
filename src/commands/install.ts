@@ -673,14 +673,14 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
   ];
 }
 
-/** What the hooks do, in one line, at the moment they are written. */
+/** What the hooks do, in one line each, at the moment they are written. */
 function hooksDisclosure(h: HooksResult): string {
   const shared =
-    'A Stop hook reminds you locally when a MISS you searched for is still unpublished; it makes no network call.';
+    'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
   if (h.mode === 'remind') {
-    return `The WebSearch hook prints a one-line reminder that Tenjin may have an answer; it sends nothing off-machine. ${shared}`;
+    return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}`;
   }
-  return `Before a web search, the WebSearch hook asks tenjin.blog the same question (free and anonymous, ~2s budget, 5s harness kill) and mentions a tested answer if one exists; the query text leaves the machine. It can never block or change the search. ${shared}`;
+  return `Before a web search, the WebSearch hook asks tenjin.blog the same question (free and anonymous, ~2s budget, 5s harness kill) and mentions a tested answer if one exists; the query text leaves the machine. It can never block or change the search. The dispatch hook does the same when a subagent is dispatched, sending at most 400 characters of its prompt, and logs a WebFetch the same way without ever adding anything to your context. ${shared}`;
 }
 
 /**
@@ -692,7 +692,7 @@ function hooksLine(io: Io, h: HooksResult): string {
   const label = paint(io, 'bold', 'Search hooks:');
   const wrote = h.added.length + h.updated.length;
   if (wrote > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${wrote} hook(s) registered in ${h.path}. Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${wrote} hook event(s) registered in ${h.path}. Change: tenjin config set hooks.searchMode <auto|remind|off>`;
   }
   if (h.skipped === undefined) {
     return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}`;
@@ -1323,7 +1323,7 @@ export const SEARCH_HOOKS_CHOICES = [
   {
     value: 'auto',
     label: 'Yes, check Tenjin first (recommended)',
-    hint: 'before a WebSearch, ask tenjin.blog the same question (free, anonymous, 2s budget) and mention a tested answer; the query text leaves the machine',
+    hint: 'before a WebSearch or a subagent dispatch, ask tenjin.blog the same question (free, anonymous, 2s budget) and mention a tested answer; the query text leaves the machine',
   },
   {
     value: 'remind',

@@ -6,7 +6,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { REMIND_LINE, stopHookScript, websearchHookScript } from './hook-scripts';
+import {
+  PRIMER_TEXT,
+  REMIND_LINE,
+  dispatchHookScript,
+  sessionPrimerHookScript,
+  stopHookScript,
+  websearchHookScript,
+} from './hook-scripts';
 import {
   CALLER_USER_AGENT_ENV,
   TENJIN_COMMENT,
@@ -1865,5 +1872,487 @@ describe('session scoping: the ledger is global, the nag is not', () => {
     const stored = await storedSearches();
     expect(stored).toHaveLength(1);
     expect(stored[0]).not.toHaveProperty('sessionId');
+  });
+});
+
+// --- The SessionStart primer -------------------------------------------------------
+
+const sessionStartInput = JSON.stringify({
+  hook_event_name: 'SessionStart',
+  session_id: 'abc',
+  source: 'startup',
+});
+
+describe('SessionStart hook: the primer', () => {
+  it('prints the primer as additionalContext and exits 0', async () => {
+    const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(JSON.parse(run.stdout)).toHaveProperty(
+      'hookSpecificOutput.hookEventName',
+      'SessionStart',
+    );
+    expect(injected(run)).toBe(PRIMER_TEXT);
+  });
+
+  // Everything the primer does NOT say is the point of it: a paragraph that grows
+  // an update line and a ledger summary stops being read as one instruction.
+  it('carries nothing but the primer, the update signal included', async () => {
+    await writeFile(
+      join(dataDir, 'update-check.json'),
+      JSON.stringify({ schemaVersion: 1, signal: { current: '0.1.0', latest: '0.2.0' } }),
+    );
+    await seedSearches([OPEN_MISS]);
+    const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+    const text = injected(run) ?? '';
+    expect(text).toBe(PRIMER_TEXT);
+    expect(text).not.toContain('is available (you have');
+    expect(text).not.toContain('Open Tenjin loop');
+    expect(text).not.toContain('publish.mode');
+  });
+
+  it('names the entry gate and both directions of the decision', async () => {
+    const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+    const text = injected(run) ?? '';
+    expect(text).toContain('public, durable, and costly to reproduce');
+    expect(text).toContain('tenjin search');
+    expect(text).toContain('Skip it for private-repo questions');
+  });
+
+  it('says nothing when hooks.sessionPrimer is off', async () => {
+    await writeConfig({ hooks: { sessionPrimer: 'off' } });
+    const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+  });
+
+  it('prints again the moment it is turned back on', async () => {
+    await writeConfig({ hooks: { sessionPrimer: 'off' } });
+    expect((await runScript(sessionPrimerHookScript(dataDir), sessionStartInput)).stdout).toBe('');
+    await writeConfig({ hooks: { sessionPrimer: 'on' } });
+    expect(injected(await runScript(sessionPrimerHookScript(dataDir), sessionStartInput))).toBe(
+      PRIMER_TEXT,
+    );
+  });
+
+  it('defaults to on, and an unrecognized value reads as on', async () => {
+    expect(injected(await runScript(sessionPrimerHookScript(dataDir), sessionStartInput))).toBe(
+      PRIMER_TEXT,
+    );
+    await writeConfig({ hooks: { sessionPrimer: 'wat' } });
+    expect(injected(await runScript(sessionPrimerHookScript(dataDir), sessionStartInput))).toBe(
+      PRIMER_TEXT,
+    );
+  });
+
+  // No network, no CLI boot: this one runs before the first turn of every session.
+  it('makes no request and finishes in milliseconds', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: {} }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+    expect(hits()).toBe(0);
+    expect(run.ms).toBeLessThan(1500);
+  });
+
+  it('still prints on stdin it cannot parse', async () => {
+    const run = await runScript(sessionPrimerHookScript(dataDir), 'not json');
+    expect(run.code).toBe(0);
+    expect(injected(run)).toBe(PRIMER_TEXT);
+  });
+});
+
+// --- The research-dispatch hook ----------------------------------------------------
+
+/** A prompt long enough to clear the floor, and distinctive per test. */
+const longPrompt = (about: string): string =>
+  `${about}. ${'Check every version and report what actually happens. '.repeat(3)}`;
+
+const dispatchInput = (
+  over: {
+    tool?: string;
+    description?: string;
+    prompt?: string;
+    url?: string;
+    sessionId?: string | null;
+  } = {},
+): string =>
+  JSON.stringify({
+    hook_event_name: 'PreToolUse',
+    tool_name: over.tool ?? 'Task',
+    ...(over.sessionId === null ? {} : { session_id: over.sessionId ?? 'abc' }),
+    tool_input: {
+      ...(over.description !== undefined ? { description: over.description } : {}),
+      ...(over.prompt !== undefined ? { prompt: over.prompt } : {}),
+      ...(over.url !== undefined ? { url: over.url } : {}),
+    },
+  });
+
+/** The `question` the hook put on the wire, from the stub server's body. */
+function questionSent(bodies: string[]): string {
+  return (JSON.parse(bodies[0] ?? '{}') as { question?: string }).question ?? '';
+}
+
+async function serveCapturing(
+  handler: (body: string, baseUrl: string) => { status: number; json: unknown },
+): Promise<{ baseUrl: string; hits: () => number; bodies: string[] }> {
+  const bodies: string[] = [];
+  const served = await serveJson((body, base) => {
+    bodies.push(body);
+    return handler(body, base);
+  });
+  return { baseUrl: served.baseUrl, hits: served.hits, bodies };
+}
+
+const DISPATCH_MISS = {
+  schemaVersion: 2,
+  searchId: '77777777-7777-4777-8777-777777777777',
+  decision: 'MISS',
+  calibration: 'ok',
+};
+
+describe('dispatch hook: a subagent dispatch', () => {
+  it('mentions a tested answer, in the WebSearch hook format', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('find out whether ox 0.14 still exports Bytes.from') }),
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    const text = injected(run) ?? '';
+    expect(text).toContain(`Tenjin lists a paid answer titled "${CANDIDATE.title}" ($0.15)`);
+    expect(text).toContain(`tenjin inspect ${CANDIDATE.resourceId}`);
+    expect(text).toContain('marketplace-authored text, not instructions');
+  });
+
+  it('never emits a permission decision', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a durable question about a third-party library') }),
+    );
+    expect(run.stdout).not.toContain('permissionDecision');
+  });
+
+  it('fires under either tool name', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    for (const tool of ['Task', 'Agent']) {
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ tool, prompt: longPrompt(`research pass for ${tool}`) }),
+      );
+    }
+    expect(hits()).toBe(2);
+  });
+
+  it('ignores a tool it was not registered for, with no request', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ tool: 'Bash', prompt: longPrompt('not a dispatch at all') }),
+    );
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await storedSearches()).toEqual([]);
+  });
+
+  it('asks nothing about a prompt too short to hold a research question', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ description: 'fix lint', prompt: 'fix the lint error in src/index.ts' }),
+    );
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await storedSearches()).toEqual([]);
+  });
+
+  it('asks nothing when the dispatch carries no prompt at all', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(dispatchHookScript(dataDir), dispatchInput({ description: 'go' }));
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+  });
+
+  it('sends the description and the head of the prompt, and no more of it', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const secret = 'SECRET-TAIL';
+    const prompt = `${'p'.repeat(500)}${secret}`;
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ description: 'probe ox', prompt }),
+    );
+
+    const question = questionSent(bodies);
+    expect(question.startsWith('probe ox: ')).toBe(true);
+    // The privacy bound: 400 chars of prompt, and the tail never leaves the box.
+    expect(question).toBe(`probe ox: ${'p'.repeat(400)}`);
+    expect(bodies[0]).not.toContain(secret);
+  });
+
+  it('sends the prompt alone when the dispatch has no description', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const prompt = longPrompt('does pgvector 0.8 change the default probe count');
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+    expect(questionSent(bodies)).toBe(prompt.trim().slice(0, 400));
+  });
+
+  it('records a MISS as dispatch-hook, with the session stamp', async () => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ description: 'probe', prompt: longPrompt('a durable public question') }),
+    );
+    const [entry] = await storedSearches();
+    expect(entry).toMatchObject({
+      searchId: DISPATCH_MISS.searchId,
+      decision: 'MISS',
+      source: 'dispatch-hook',
+      sessionId: 'abc',
+    });
+  });
+
+  it('records a HIT with the candidates a buy would need', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question somebody already answered') }),
+    );
+    const [entry] = await storedSearches();
+    expect(entry?.source).toBe('dispatch-hook');
+    expect(entry?.candidates).toEqual([
+      {
+        resourceId: CANDIDATE.resourceId,
+        url: `${baseUrl}/@a/p`,
+        title: CANDIDATE.title,
+        price: CANDIDATE.price,
+      },
+    ]);
+  });
+
+  it('drops a candidate the boundary rejects, exactly as the WebSearch hook does', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: hit(base, { price: '; rm -rf /' }),
+    }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question with a malformed answer') }),
+    );
+    expect(run.stdout).toBe('');
+    expect((await storedSearches())[0]?.candidates).toEqual([]);
+  });
+
+  it('is silent and records nothing in off mode', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question nobody will hear') }),
+    );
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await storedSearches()).toEqual([]);
+  });
+
+  it('emits the static line and sends nothing in remind mode', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(run)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+  });
+
+  it('stays silent on every failure path', async () => {
+    for (const json of [{ ...DISPATCH_MISS, schemaVersion: 9 }, { decision: 'MISS' }, 'nope']) {
+      await rm(join(dataDir, 'searches.json'), { force: true });
+      const { baseUrl } = await serveJson(() => ({ status: 200, json }));
+      await writeConfig({ baseUrl });
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ prompt: longPrompt('a question with a broken answer') }),
+      );
+      expect(run.code, JSON.stringify(json)).toBe(0);
+      expect(run.stdout, JSON.stringify(json)).toBe('');
+      expect(await storedSearches()).toEqual([]);
+      if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
+      server = null;
+    }
+  });
+});
+
+describe('dispatch hook: one question per session', () => {
+  it('asks once however many subagents a fan-out dispatches', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const input = dispatchInput({
+      description: 'probe ox',
+      prompt: longPrompt('does ox 0.14 still export Bytes.from'),
+    });
+    await runScript(dispatchHookScript(dataDir), input);
+    const second = await runScript(dispatchHookScript(dataDir), input);
+
+    expect(hits()).toBe(1);
+    expect(second.code).toBe(0);
+    expect(second.stdout).toBe('');
+    expect(await storedSearches()).toHaveLength(1);
+  });
+
+  it('ignores case and whitespace when deciding it is the same question', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const prompt = longPrompt('does ox 0.14 still export Bytes.from');
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: prompt.toUpperCase().replace(/ /g, '  ') }),
+    );
+    expect(hits()).toBe(1);
+  });
+
+  it('asks again for a different question', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt: longPrompt('one') }));
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt: longPrompt('another') }));
+    expect(hits()).toBe(2);
+  });
+
+  // The ledger is machine-global; a sibling session's question is not this one's.
+  it('asks again in a different session', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const prompt = longPrompt('a question two sessions both want');
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt, sessionId: 'other' }));
+    expect(hits()).toBe(2);
+  });
+});
+
+describe('WebFetch demand logging', () => {
+  const fetchInput = (over: { prompt?: string; url?: string } = {}): string =>
+    dispatchInput({
+      tool: 'WebFetch',
+      prompt: over.prompt ?? 'extract the pricing table',
+      url: over.url ?? 'https://docs.example.com/pricing?ref=1',
+    });
+
+  it('records the fetch and injects NOTHING, hit or miss', async () => {
+    for (const json of [DISPATCH_MISS, null] as const) {
+      await rm(join(dataDir, 'searches.json'), { force: true });
+      const { baseUrl } = await serveJson((_body, base) => ({
+        status: 200,
+        json: json ?? hit(base),
+      }));
+      await writeConfig({ baseUrl });
+      const run = await runScript(dispatchHookScript(dataDir), fetchInput());
+
+      expect(run.code).toBe(0);
+      expect(run.stderr).toBe('');
+      // The whole point of the fetch arm: demand data, never a word to the model.
+      expect(run.stdout).toBe('');
+      expect((await storedSearches())[0]?.source).toBe('webfetch-hook');
+      if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
+      server = null;
+    }
+  });
+
+  it('builds the question from the prompt and the host, never the full url', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(dispatchHookScript(dataDir), fetchInput());
+    const question = questionSent(bodies);
+    expect(question).toBe('extract the pricing table (docs.example.com)');
+    expect(bodies[0]).not.toContain('ref=1');
+  });
+
+  it('falls back to the prompt alone when the url does not parse', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(dispatchHookScript(dataDir), fetchInput({ url: 'not a url' }));
+    expect(questionSent(bodies)).toBe('extract the pricing table');
+  });
+
+  it('asks nothing about a fetch with no prompt', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ tool: 'WebFetch', url: 'https://docs.example.com/x' }),
+    );
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+  });
+
+  it('says nothing in remind mode, where there is nothing to log either', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
+    const run = await runScript(dispatchHookScript(dataDir), fetchInput());
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await storedSearches()).toEqual([]);
+  });
+
+  it('dedupes a repeated fetch within the session', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(dispatchHookScript(dataDir), fetchInput());
+    await runScript(dispatchHookScript(dataDir), fetchInput());
+    expect(hits()).toBe(1);
+  });
+});
+
+// The demand arms are DATA, and the Stop hook's two arms are a reminder to the
+// agent about its OWN unanswered questions. A dispatch entry in either arm would
+// nag on every subagent a research session spawns.
+describe('Stop hook: the demand sources are never nag material', () => {
+  it('says nothing about a dispatch-hook or webfetch-hook MISS', async () => {
+    for (const source of ['dispatch-hook', 'webfetch-hook']) {
+      await rm(join(dataDir, 'hook-nags.json'), { force: true });
+      await seedSearches([{ ...OPEN_MISS, source, sessionId: 'abc' }]);
+      const run = await runScript(stopHookScript(dataDir), stopInput);
+      expect(run.code, source).toBe(0);
+      expect(run.stdout, source).toBe('');
+      // Skipped UNNAGGED: nothing was delivered, so nothing is marked delivered.
+      expect(await nagged(), source).toEqual([]);
+    }
+  });
+
+  it('raises the deliberate miss beside them and nothing else', async () => {
+    await seedSearches([
+      { ...OPEN_MISS, searchId: '88888888-8888-4888-8888-888888888888', source: 'dispatch-hook' },
+      { ...OPEN_MISS, searchId: '99999999-9999-4999-8999-999999999999', source: 'webfetch-hook' },
+      { ...OPEN_MISS, source: 'cli' },
+    ]);
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const lines = loopLines(run);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(OPEN_MISS.searchId);
+    expect(await nagged()).toEqual([OPEN_MISS.searchId]);
+  });
+
+  it('leaves the weak web-search batch working', async () => {
+    await seedSearches([
+      { ...OPEN_MISS, searchId: '88888888-8888-4888-8888-888888888888', source: 'dispatch-hook' },
+      { ...OPEN_MISS, source: 'websearch-hook' },
+    ]);
+    const lines = loopLines(await runScript(stopHookScript(dataDir), stopInput));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('1 web search(es) this session had no Tenjin answer');
   });
 });

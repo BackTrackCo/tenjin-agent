@@ -42,17 +42,25 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * was going to run anyway, which is a much weaker signal, because nobody judged
  * the question suitable for the marketplace before it was sent.
  *
+ * `dispatch-hook` and `webfetch-hook` are weaker still: DEMAND DATA about what
+ * an agent was about to research, which the Stop hook never raises at all.
+ *
  * The distinction exists because the Stop hook must not treat them alike: an
  * unanswered deliberate search deserves being named on its own, while a batch of
- * hook searches deserves one line the agent can dismiss at a glance. Keeping both
- * in ONE store is what makes the hook's misses reachable by explicit
+ * hook searches deserves one line the agent can dismiss at a glance. Keeping them
+ * all in ONE store is what makes a hook's misses reachable by explicit
  * `outcome --search-id`, `buy <resourceId>`, and the open-loop reminder at all
  * (`--last` deliberately skips hook entries; see {@link latestSearch}).
  *
  * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
  * source field, and those entries were all explicit searches.
  */
-export const SearchSourceSchema = z.enum(['cli', 'websearch-hook']);
+export const SearchSourceSchema = z.enum([
+  'cli',
+  'websearch-hook',
+  'dispatch-hook',
+  'webfetch-hook',
+]);
 export type SearchSource = z.infer<typeof SearchSourceSchema>;
 
 const StoredSearchSchema = z.object({
@@ -233,14 +241,15 @@ export async function markSearchResolved(
 
 /**
  * The most recent DELIBERATE search: `--last` means "the search I just ran", and
- * in auto mode the WebSearch hook prepends a ridealong entry on every web search,
- * so an unfiltered head would routinely re-target `outcome --last` at a query the
- * agent never chose to make (found in dogfooding). Hook entries stay reachable by
- * explicit `--search-id`, which is what the Stop hook's reminder names.
+ * in auto mode the hooks prepend a ridealong entry on every web search, subagent
+ * dispatch and fetch, so an unfiltered head would routinely re-target `outcome
+ * --last` at a query the agent never chose to make (found in dogfooding). Hook
+ * entries stay reachable by explicit `--search-id`, which is what the Stop hook's
+ * reminder names.
  */
 export async function latestSearch(dataDir: string): Promise<StoredSearch | null> {
   const searches = await loadSearches(dataDir);
-  return searches.find((s) => s.source !== 'websearch-hook') ?? null;
+  return searches.find((s) => s.source === undefined || s.source === 'cli') ?? null;
 }
 
 /** The stored candidate for a resourceId across recent searches (newest first). */

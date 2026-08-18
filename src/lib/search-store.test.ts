@@ -78,6 +78,24 @@ describe('search-store', () => {
     expect(await latestSearch(dir)).toBeNull();
   });
 
+  // The demand arms record what an agent was ABOUT to research, which is even
+  // further from "the search I just ran" than a ridealong web search is.
+  it('round-trips the demand sources, and --last skips them too', async () => {
+    await recordSearch(dir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000006' }));
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000007', source: 'dispatch-hook' }),
+    );
+    await recordSearch(
+      dir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000008', source: 'webfetch-hook' }),
+    );
+    const loaded = await loadSearches(dir);
+    expect(loaded.map((s) => s.source)).toContain('dispatch-hook');
+    expect(loaded.map((s) => s.source)).toContain('webfetch-hook');
+    expect((await latestSearch(dir))?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000006');
+  });
+
   it('resolves a candidate url by resourceId (buy <id>)', async () => {
     await recordSearch(dir, entry());
     const hit = await findStoredCandidate(dir, 'res-1');

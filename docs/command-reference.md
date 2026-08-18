@@ -32,9 +32,9 @@ Useful flags:
 
 ### Hooks
 
-`install` can register two Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The dispatch hook, on the same key, does the same when a subagent is dispatched (sending at most 400 characters of its prompt) and logs a `WebFetch` without ever adding anything to your context. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
-**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself.
+**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch and fetch misses are never raised at all: they are demand data, not questions you asked to be reminded about.
 
 Hooks are read once at session start, so restart Claude Code after registering them.
 
@@ -253,8 +253,9 @@ Common keys:
 | `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                    |
 | `publish.mode`         | `review`                   | Publish consent mode.                                                        |
 | `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                               |
-| `hooks.searchMode`     | `auto`                     | WebSearch hook behavior.                                                     |
+| `hooks.searchMode`     | `auto`                     | WebSearch and dispatch hook behavior.                                        |
 | `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.  |
+| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                              |
 
 ## MCP
 

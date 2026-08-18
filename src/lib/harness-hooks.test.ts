@@ -46,7 +46,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { quoteForShell, wireSearchHooks, hooksSkipped } from './harness-hooks';
 import { claudeSettingsPath } from './harness-permissions';
-import { STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE } from './hook-scripts';
+import {
+  DISPATCH_HOOK_FILE,
+  SESSIONSTART_HOOK_FILE,
+  STOP_HOOK_FILE,
+  WEBSEARCH_HOOK_FILE,
+} from './hook-scripts';
 
 let home: string;
 let data: string;
@@ -85,21 +90,35 @@ const entriesFor = (s: Record<string, unknown>, event: string): Entry[] =>
   ((s.hooks as Record<string, unknown>)?.[event] ?? []) as Entry[];
 
 describe('wireSearchHooks: what a fresh machine gets', () => {
-  it('writes both scripts and registers both events', async () => {
+  it('writes every script and registers every event', async () => {
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
 
     expect(result.skipped).toBeUndefined();
-    expect(result.added).toEqual(['PreToolUse', 'Stop']);
+    // One event carries two entries, and an event is reported once either way.
+    expect(result.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(result.alreadyPresent).toEqual([]);
-    expect(existsSync(join(data, 'hooks', WEBSEARCH_HOOK_FILE))).toBe(true);
-    expect(existsSync(join(data, 'hooks', STOP_HOOK_FILE))).toBe(true);
+    for (const file of [
+      WEBSEARCH_HOOK_FILE,
+      DISPATCH_HOOK_FILE,
+      SESSIONSTART_HOOK_FILE,
+      STOP_HOOK_FILE,
+    ]) {
+      expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
+    }
 
     const settings = await readSettings();
     const pre = entriesFor(settings, 'PreToolUse');
-    expect(pre).toHaveLength(1);
+    expect(pre).toHaveLength(2);
     expect(pre[0]!.matcher).toBe('WebSearch');
     expect(pre[0]!.hooks[0]!.type).toBe('command');
     expect(pre[0]!.hooks[0]!.command).toContain(WEBSEARCH_HOOK_FILE);
+    expect(pre[1]!.matcher).toBe('Agent|Task|WebFetch');
+    expect(pre[1]!.hooks[0]!.command).toContain(DISPATCH_HOOK_FILE);
+
+    const start = entriesFor(settings, 'SessionStart');
+    expect(start).toHaveLength(1);
+    expect(start[0]!.matcher).toBe('startup|clear|compact');
+    expect(start[0]!.hooks[0]!.command).toContain(SESSIONSTART_HOOK_FILE);
 
     const stop = entriesFor(settings, 'Stop');
     expect(stop).toHaveLength(1);
@@ -109,16 +128,32 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     expect(stop[0]!.hooks[0]!.command).toContain(STOP_HOOK_FILE);
   });
 
-  it('matches WebSearch exactly, never WebFetch and never a wildcard', async () => {
+  // WebFetch is registered on the DISPATCH script, which logs it and never
+  // injects into it; the WebSearch entry stays exactly as narrow as it was.
+  it('keeps the WebSearch entry to WebSearch alone', async () => {
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     const pre = entriesFor(await readSettings(), 'PreToolUse');
     expect(pre[0]!.matcher).toBe('WebSearch');
-    expect(JSON.stringify(await readSettings())).not.toContain('WebFetch');
+    expect(pre.some((e) => e.matcher === '*')).toBe(false);
+    const webfetchEntries = pre.filter((e) => (e.matcher ?? '').includes('WebFetch'));
+    expect(webfetchEntries).toHaveLength(1);
+    expect(webfetchEntries[0]!.hooks[0]!.command).toContain(DISPATCH_HOOK_FILE);
+  });
+
+  // Ownership is by script filename, so two entries naming one script would be
+  // collapsed into one by the idempotent rewrite.
+  it('gives each script exactly one entry', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const settings = await readSettings();
+    const commands = ['PreToolUse', 'SessionStart', 'Stop'].flatMap((event) =>
+      entriesFor(settings, event).flatMap((e) => e.hooks.map((h) => h.command)),
+    );
+    expect(new Set(commands).size).toBe(commands.length);
   });
 
   it('runs the scripts through node, from inside the Tenjin data dir', async () => {
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
-    for (const event of ['PreToolUse', 'Stop']) {
+    for (const event of ['PreToolUse', 'SessionStart', 'Stop']) {
       const command = entriesFor(await readSettings(), event)[0]!.hooks[0]!.command;
       expect(command.startsWith('node ')).toBe(true);
       expect(command).toContain(join(data, 'hooks'));
@@ -148,7 +183,7 @@ describe('wireSearchHooks: idempotence', () => {
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     expect(result.added).toEqual([]);
     expect(result.updated).toEqual([]);
-    expect(result.alreadyPresent).toEqual(['PreToolUse', 'Stop']);
+    expect(result.alreadyPresent).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(result.scripts).toEqual([]);
     expect(await readFile(settingsPath(), 'utf8')).toBe(first);
   });
@@ -170,10 +205,30 @@ describe('wireSearchHooks: idempotence', () => {
 
     expect(result.updated).toContain('PreToolUse');
     const pre = entriesFor(await readSettings(), 'PreToolUse');
-    expect(pre).toHaveLength(2);
+    expect(pre).toHaveLength(3);
     // Position preserved, and the stranger's entry untouched.
     expect(pre[0]!.hooks[0]!.command).toBe('somebody-elses-hook');
     expect(pre[1]!.hooks[0]!.command).toContain(join(data, 'hooks', WEBSEARCH_HOOK_FILE));
+    // The dispatch entry was absent, so it is appended rather than rewritten.
+    expect(pre[2]!.hooks[0]!.command).toContain(join(data, 'hooks', DISPATCH_HOOK_FILE));
+    expect(result.added).toContain('PreToolUse');
+  });
+
+  // Two entries land on one event in a single run; the second must append to the
+  // list the first produced rather than to the list that was read from disk.
+  it('keeps both PreToolUse entries when a second run rewrites a drifted one', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const settings = await readSettings();
+    const pre = entriesFor(settings, 'PreToolUse');
+    pre[0]!.hooks[0]!.command = `node /old/path/${WEBSEARCH_HOOK_FILE}`;
+    await writeSettings(settings);
+
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    expect(result.updated).toEqual(['PreToolUse']);
+    const after = entriesFor(await readSettings(), 'PreToolUse');
+    expect(after).toHaveLength(2);
+    expect(after[0]!.hooks[0]!.command).toContain(join(data, 'hooks', WEBSEARCH_HOOK_FILE));
+    expect(after[1]!.hooks[0]!.command).toContain(join(data, 'hooks', DISPATCH_HOOK_FILE));
   });
 
   it('appends beside entries that are not ours and copies every other key through', async () => {
@@ -190,9 +245,12 @@ describe('wireSearchHooks: idempotence', () => {
     const settings = await readSettings();
     expect(settings.model).toBe('opus');
     expect(settings.permissions).toEqual({ allow: ['Bash(ls:*)'] });
-    expect(entriesFor(settings, 'SessionStart')).toHaveLength(1);
+    // Somebody else's SessionStart hook keeps its place ahead of ours.
+    const start = entriesFor(settings, 'SessionStart');
+    expect(start).toHaveLength(2);
+    expect(start[0]!.hooks[0]!.command).toBe('greet.sh');
     const pre = entriesFor(settings, 'PreToolUse');
-    expect(pre).toHaveLength(2);
+    expect(pre).toHaveLength(3);
     expect(pre[0]!.hooks[0]!.command).toBe('guard.sh');
   });
 });
@@ -238,7 +296,7 @@ describe('wireSearchHooks: never clobbers a file it does not understand', () => 
     await symlink(real, settingsPath());
 
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
-    expect(result.added).toEqual(['PreToolUse', 'Stop']);
+    expect(result.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     const parsed = JSON.parse(await readFile(real, 'utf8')) as Record<string, unknown>;
     expect(parsed.model).toBe('opus');
     expect(parsed.hooks).toBeDefined();
