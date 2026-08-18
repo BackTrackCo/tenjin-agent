@@ -37,17 +37,17 @@ and where the encrypted key lives. `--no-wallet` opts out, an interactive run
 still asks and still defaults to yes, and answering no (`"declined"`) stays
 distinguishable from a skip.
 
-**Two harness hooks, installed and disclosed.** `tenjin install` writes two
-standalone Node scripts to `~/.tenjin/hooks/` and registers them in
+**Harness hooks, installed and disclosed.** `tenjin install` writes standalone
+Node scripts to `~/.tenjin/hooks/` and registers them in
 `~/.claude/settings.json`. A `PreToolUse` hook matched to `WebSearch` (never
 `WebFetch`) asks the marketplace the same question the agent is about to ask the
 web, on a ~2s design budget (the hard bound is the harness's own 5s kill), and
 mentions a tested answer with its price and
 a free `tenjin inspect` command when one exists. A `Stop` hook checks locally,
 with no network call, for a MISS from the last eight hours that nothing has closed
-and reminds you once per turn-end to publish it back. Both fail open by
+and reminds you once per turn-end to publish it back. They fail open by
 construction: they emit `additionalContext` and never a `permissionDecision`, so
-neither can block, deny, or modify a tool call, and a miss, a timeout, a dead
+none can block, deny, or modify a tool call, and a miss, a timeout, a dead
 network, an unreadable config, or a response that fails validation all exit 0 with
 nothing on stdout. The response boundary DROPS rather than repairs: a wrong
 `schemaVersion`, a non-uuid searchId or resourceId, an unrecognized decision, an
@@ -119,5 +119,4 @@ Cancelling the search-hooks prompt now behaves like `--no-hooks`, registering
 nothing and writing no config, which is what every other cancel in the
 walkthrough already did.
 
-Uninstalling the hooks is still manual (the install output prints the lines to
-remove); an unwire command is deliberately out of scope here.
+`tenjin uninstall` unwires the hooks and deletes their scripts.

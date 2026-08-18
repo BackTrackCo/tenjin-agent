@@ -79,17 +79,31 @@ export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
   });
 }
 
+/** Whether the SessionStart hook prints its primer. Two values and no middle
+ *  one: one paragraph either belongs at the top of a session or does not. */
+export const SessionPrimerModeSchema = z.enum(['on', 'off']);
+export type SessionPrimerMode = z.infer<typeof SessionPrimerModeSchema>;
+
+export function parseSessionPrimerFlag(value: string, flagName: string): SessionPrimerMode {
+  const parsed = SessionPrimerModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
 /**
- * The harness-hook block. BOTH keys are read by the installed scripts at run
+ * The harness-hook block. EVERY key is read by the installed scripts at run
  * time, which is what makes them runtime toggles rather than install-time
- * choices: `tenjin config set hooks.searchMode off` or `hooks.stopNag off`
- * silences a hook immediately, with no re-install and nothing to unwire. The
- * scripts stay registered and no-op, which is also what lets turning one back on
- * be a single `config set`.
+ * choices: `tenjin config set hooks.searchMode off`, `hooks.stopNag off` or
+ * `hooks.sessionPrimer off` silences a hook immediately, with no re-install and
+ * nothing to unwire. The scripts stay registered and no-op, which is also what
+ * lets turning one back on be a single `config set`.
  */
 const HooksConfigSchema = z.object({
   searchMode: SearchHookModeSchema,
   stopNag: StopNagModeSchema,
+  sessionPrimer: SessionPrimerModeSchema,
 });
 
 /**
@@ -241,7 +255,7 @@ export const CONFIG_DEFAULTS: Config = {
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json.
-  hooks: { searchMode: 'auto', stopNag: 'on' },
+  hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on' },
   update: { mode: 'nudge' },
 };
 
@@ -263,7 +277,11 @@ export const PUBLISH_CONFIG_KEYS = ['publish.mode', 'publish.defaultPrice'] as c
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
-export const HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.stopNag'] as const;
+export const HOOKS_CONFIG_KEYS = [
+  'hooks.searchMode',
+  'hooks.stopNag',
+  'hooks.sessionPrimer',
+] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
 
 /** The dotted key `config get/set` accepts for the nested update block. */
@@ -322,6 +340,7 @@ export async function loadConfig(dir: string): Promise<Config> {
     hooks: {
       searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
       stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
+      sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
   };
@@ -368,6 +387,7 @@ export interface EffectiveSettings {
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
+  hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
   updateMode: ResolvedSetting<UpdateMode>;
 }
 
@@ -408,6 +428,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),
     hooksStopNag: resolveHooksStopNag(config),
+    hooksSessionPrimer: resolveHooksSessionPrimer(config),
     updateMode: resolveUpdateMode(config),
   };
 }
@@ -418,6 +439,13 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   const fromFile = config.update?.mode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
+}
+
+/** hooks.sessionPrimer: file or default, same shape as hooks.searchMode. */
+function resolveHooksSessionPrimer(config: PartialConfig): ResolvedSetting<SessionPrimerMode> {
+  const fromFile = config.hooks?.sessionPrimer;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.sessionPrimer, source: 'default' };
 }
 
 /** hooks.stopNag: file or default, same shape as hooks.searchMode. */

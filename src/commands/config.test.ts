@@ -89,8 +89,11 @@ describe('runConfigList', () => {
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
+    expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    expect(humanLines).toHaveLength(15);
+    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 3 hooks.*
+    // (incl. sessionPrimer) + 1 update.mode.
+    expect(humanLines).toHaveLength(16);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -915,11 +918,12 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 });
 
 describe('the hooks block is set through config, which stays human-gated', () => {
-  it('round-trips both hook keys and rejects a value outside the enum', async () => {
+  it('round-trips every hook key and rejects a value outside the enum', async () => {
     const ctx = makeCtx();
     for (const [key, value] of [
       ['hooks.searchMode', 'remind'],
       ['hooks.stopNag', 'off'],
+      ['hooks.sessionPrimer', 'off'],
     ] as const) {
       const set = await runConfigSet({ key, value }, ctx);
       expect(set.data).toMatchObject({ key, value, source: 'file' });
@@ -927,11 +931,20 @@ describe('the hooks block is set through config, which stays human-gated', () =>
         data: { key, value, source: 'file' },
       });
     }
-    // Both subkeys survive each other's write, so silencing one hook cannot
-    // silently reset the other.
+    // Every subkey survives the others' writes, so silencing one hook cannot
+    // silently reset another.
     expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
       data: { value: 'remind' },
     });
+    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
+
+    const primer = await caught(() =>
+      runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
+    );
+    expect(primer.code).toBe('USAGE');
+    expect(primer.fix).toContain('"off"');
 
     const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
     expect(bad.code).toBe('USAGE');
