@@ -30,6 +30,11 @@ const SKILLS = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)))
 /** This file's own directory: `src/`, where the code the skills describe lives. */
 const SRC_DIR = fileURLToPath(new URL('.', import.meta.url));
 
+/** The shape this file reads out of `lib/scan-rules.json`; scan.ts owns the full type. */
+interface ScanRuleCorpus {
+  rules: Array<{ id: string; tier: string }>;
+}
+
 /**
  * A file inside a packaged skill. `tenjin-search` is multi-file: SKILL.md carries
  * the short rules an agent always has loaded, and the detail an agent loads on
@@ -345,33 +350,21 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
    * warnings "split in two", then lists names by hand; `phone` and
    * `long-verbatim-quote` sat outside both lists under a sentence claiming the
    * split was exhaustive and the first half ignorable. The instance was two
-   * names; the cause is that nothing tied the lists to `scan.ts`, so the next
-   * warn detector would land outside them the same silent way.
+   * names; the cause is that nothing tied the lists to the detector set, so the
+   * next warn detector would land outside them the same silent way. The set now
+   * lives as data in `scan-rules.json`, so this reads it directly instead of
+   * scraping source and inferring each detector's tier from proximity.
    */
-  it('the warn-triage lists cover every warn detector in scan.ts', () => {
-    const scan = readFileSync(join(SRC_DIR, 'lib', 'scan.ts'), 'utf8');
-    /**
-     * NEAREST severity, not a fixed window. A ±400-char window drops any `check:`
-     * that happens to sit near a `block` detector, so a warn detector added
-     * beside one would leave this guard silently: the failure mode is a shrinking
-     * set, which is exactly what a coverage assertion must not have.
-     */
-    const severities = [...scan.matchAll(/severity:\s*'(warn|block)'/g)].map((m) => ({
-      kind: m[1] ?? '',
-      at: m.index ?? 0,
-    }));
-    expect(severities.length, 'no severities found; the scrape is broken').toBeGreaterThan(10);
-    const nearest = (at: number): string =>
-      severities.reduce((best, s) => (Math.abs(s.at - at) < Math.abs(best.at - at) ? s : best))
-        .kind;
-    const warns = [...scan.matchAll(/check:\s*'([a-z0-9-]+)'/g)]
-      .filter((m) => nearest(m.index ?? 0) === 'warn')
-      .map((m) => m[1] ?? '');
-    expect(warns.length, 'no warn detectors found; the scrape is broken').toBeGreaterThan(5);
+  it('the warn-triage lists cover every warn detector in the scan rule corpus', () => {
+    const corpus = JSON.parse(
+      readFileSync(join(SRC_DIR, 'lib', 'scan-rules.json'), 'utf8'),
+    ) as ScanRuleCorpus;
+    const warns = new Set(corpus.rules.filter((r) => r.tier === 'warn').map((r) => r.id));
+    expect(warns.size, 'no warn detectors found; the corpus read is broken').toBeGreaterThan(5);
 
     const section = text.slice(text.indexOf('warnings split in two'));
     expect(section.length, 'the triage section is gone').toBeGreaterThan(0);
-    for (const name of new Set(warns)) {
+    for (const name of warns) {
       expect(section, `warn detector ${name} is in neither triage list`).toContain(`\`${name}\``);
     }
   });

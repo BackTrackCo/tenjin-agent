@@ -54,11 +54,14 @@ user's attention:
 
 - Usually fine in technical writing, when the piece is genuinely about them:
   `local-path` in a shell transcript, `wallet-address` in an on-chain piece,
-  `embedded-instruction` in a prompt-engineering piece, `email` in a citation.
+  `embedded-instruction` in a prompt-engineering piece, `email` in a citation,
+  `private-network-endpoint` in a local-dev walkthrough, `high-entropy-string`
+  where the piece quotes an opaque handle.
 - Usually a real stop: `customer-identifier`, `confidential-marker`,
   `internal-hostname`, `private-repo-reference`, `secret-assignment`,
-  `paid-content-marker`, `phone`, `long-verbatim-quote`. These say the draft
-  carries context from somewhere it should not have travelled.
+  `paid-content-marker`, `phone`, `long-verbatim-quote`, `collaboration-url`,
+  `cloud-resource-id`, `env-dump-block`. These say the draft carries context
+  from somewhere it should not have travelled.
 
 ## What makes a piece sell
 
