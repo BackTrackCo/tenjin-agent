@@ -793,9 +793,8 @@ function strongLine(s) {
 
 /** ONE line for the whole batch of hook searches, because most of them are not
  *  publishable and the agent is the only one that can tell which are. ONE close
- *  command too: a per-id one bought seventeen sequential \`outcome\` calls in a
- *  single session. \`--all-open\` reaches every open hook loop on the machine
- *  rather than only the ids listed, so the line says so. */
+ *  command too: a per-id one bought seventeen sequential \`outcome\` calls in one
+ *  session. \`--all-open\` sweeps the same MISS-only set this batch is drawn from. */
 function weakLine(batch) {
   const items = batch
     .map((s) => "'" + clean(s.question, 80) + "' (" + clean(s.searchId, 64) + ')')
@@ -804,7 +803,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    '. Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close every open hook loop in one call: tenjin outcome --all-open --status regenerated.'
+    '. Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close them in one call: tenjin outcome --all-open --status regenerated.'
   );
 }
 

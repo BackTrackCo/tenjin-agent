@@ -628,7 +628,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option(
       '--all-open',
-      'close every open search the WebSearch hook recorded, in any session (requires --status regenerated; deliberate searches are left open)',
+      'close every open MISS the WebSearch hook recorded, in any session (requires --status regenerated; deliberate and answered searches are left open)',
     )
     .requiredOption(
       '--status <status>',

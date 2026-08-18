@@ -133,7 +133,7 @@ const outcomeInput = {
     .boolean()
     .optional()
     .describe(
-      'Close every open search the WebSearch hook recorded, in any session (regenerated only)',
+      'Close every open MISS the WebSearch hook recorded, in any session (regenerated only)',
     ),
   resource: z.string().optional().describe('The resourceId the outcome concerns'),
   contentHash: z.string().optional().describe('sha256:<64hex> of the exact body read'),
@@ -395,8 +395,8 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'Report honestly how a search ended (used, partially_used, rejected, regenerated, ' +
         'purchase_declined), closing the loop the marketplace learns from. No wallet: the searchId ' +
         'is the capability. Use --last (last:true) to target the most recent local search, a ' +
-        'searchId array to close several at one status, or allOpen:true to close every open ' +
-        'WebSearch-hook loop as regenerated.',
+        'searchId array to close several at one status, or allOpen:true to close every ' +
+        'unanswered WebSearch-hook loop as regenerated.',
       inputSchema: outcomeInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },

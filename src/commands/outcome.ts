@@ -1,6 +1,7 @@
 import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
+import { UUID_RE } from '../lib/ids';
 import {
   latestSearch,
   loadSearches,
@@ -28,10 +29,11 @@ import type { CommandContext, CommandResult } from '../context';
  * naming a resource the search never surfaced, is refused before the request.
  *
  * ONE STATUS, MANY SEARCHES. `--search-id` repeats and `--all-open` sweeps the
- * hook's open loops, because a session that closed seventeen of them one call at
- * a time is a session where the honest close stops happening. Both report per
- * id, and both refuse before sending anything if one target's status is
- * incoherent.
+ * hook's unanswered loops, because a session that closed seventeen of them one
+ * call at a time is a session where the honest close stops happening. Both
+ * report per id, both refuse before sending anything if one target's id or
+ * status could not be right, and both stop at an unhealthy server and report the
+ * rest untouched, because an open loop is the state the Stop hook can recover.
  */
 
 export interface OutcomeArgs {
@@ -49,45 +51,59 @@ export interface OutcomeDeps {
   fetchImpl?: typeof fetch;
 }
 
-/** `error` is set exactly when the report did not land, so a partial batch can
- *  be reported honestly. */
+/** `error` when the report did not land, `untouched` when the batch stopped
+ *  before this id was tried. */
 interface OutcomeReport {
   searchId: string;
   accepted: number;
   question?: string;
   error?: { code: string; message: string };
+  untouched?: true;
 }
+
+/** Failures that say the next id fails the same way, so the batch stops: the
+ *  budget signal itself (one sweep can spend 50 of the 60/min window), and the
+ *  dead network, where 50 ids at the 10s default stalls a turn end for minutes.
+ *  `API_UNREACHABLE` is deliberately absent: `apiFailure` gives it to every
+ *  non-2xx, so halting on it would abandon a batch over a 400 about ONE id. */
+const HALTING_FAILURES = new Set(['RATE_LIMITED', 'NETWORK_ERROR']);
 
 export async function runOutcome(
   args: OutcomeArgs,
   ctx: CommandContext,
   deps: OutcomeDeps = {},
 ): Promise<CommandResult> {
-  const { targets, deliberateLeftOpen } = await resolveTargets(args, ctx);
-  // Status name first, so an unknown status still fails as an unknown status
-  // rather than as an incoherent one.
+  const { targets, deliberateLeftOpen, answeredLeftOpen } = await resolveTargets(args, ctx);
+  // The status VOCABULARY; `--all-open`'s narrower rule already ran above, so a
+  // bad status under that flag reports the restriction rather than the spelling.
   const item = buildOutcomeItem({
     status: args.status,
     ...(args.resource !== undefined ? { resourceId: args.resource } : {}),
     ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
   });
-  if (item.resourceId !== undefined && targets.length > 1) {
+  if (item.resourceId !== undefined && (targets.length > 1 || args.allOpen === true)) {
     throw new CliError(
       'USAGE',
       "A --resource names one search's candidate, so it cannot describe a batch.",
       { fix: 'Report the resource against its own search with a single --search-id <id>.' },
     );
   }
-  // Every target before any request: a batch that refuses halfway leaves the
-  // marketplace holding half a report nobody meant to send.
+  // Every target, id shape included, before any request: a batch that refuses
+  // halfway leaves the marketplace holding half a report nobody meant to send.
   for (const target of targets) {
+    assertReportableId(target.searchId);
     if (target.stored !== null) assertOutcomeCoherent(item.status, target.stored, item.resourceId);
   }
 
   const settings = await resolveContextSettings(ctx);
   const reports: OutcomeReport[] = [];
+  let halted = false;
   for (const target of targets) {
     const question = target.stored !== null ? echoQuestion(target.stored.question) : undefined;
+    if (halted) {
+      reports.push({ searchId: target.searchId, accepted: 0, untouched: true });
+      continue;
+    }
     try {
       const result = await postOutcomes(target.searchId, [item], {
         baseUrl: settings.baseUrl,
@@ -106,37 +122,39 @@ export async function runOutcome(
     } catch (err) {
       // One id keeps its own error envelope, with the code callers already read.
       if (targets.length === 1) throw err;
+      const error = describeFailure(err);
+      halted = HALTING_FAILURES.has(error.code);
       reports.push({
         searchId: target.searchId,
         accepted: 0,
         ...(question !== undefined ? { question } : {}),
-        error: describeFailure(err),
+        error,
       });
     }
   }
 
   const failed = reports.filter((r) => r.error !== undefined);
-  const closed = reports.length - failed.length;
+  const untouched = reports.filter((r) => r.untouched === true);
+  const closed = reports.length - failed.length - untouched.length;
   // The question rides both renderings, so the misfire this guards against is
   // visible whether a human is reading the line or an agent is reading the JSON.
   // Sanitized on the human line only: the envelope is machine data and keeps the
   // bytes it was given (see output.ts).
   const humanLines = reports
-    .filter((r) => r.error === undefined)
+    .filter((r) => r.error === undefined && r.untouched !== true)
     .map((r) => reportLine(item.status, r));
   if (targets.length === 0) humanLines.push('No open web-search loops to close.');
-  if (deliberateLeftOpen > 0) {
-    humanLines.push(
-      `${deliberateLeftOpen} deliberate search(es) left open; close each with --search-id <id>.`,
-    );
-  }
+  humanLines.push(...leftOpenLines(deliberateLeftOpen, answeredLeftOpen));
 
   if (failed.length > 0) {
+    const remainder = untouched.length > 0 ? `, ${untouched.length} left untouched` : '';
     throw new CliError(
-      'API_UNREACHABLE',
-      `Reported ${item.status} for ${closed} of ${reports.length} searches; ${failed.length} failed.`,
+      failureCode(failed),
+      `Reported ${item.status} for ${closed} of ${reports.length} searches; ${failed.length} failed${remainder}.`,
       {
-        fix: 'Retry the failed ids with --search-id <id>.',
+        // The ids ride the message, not just `details`: the human rendering
+        // prints `fix` and drops every other details shape (see output.ts).
+        fix: `Retry with ${retryFlags(failed.concat(untouched))}`,
         details: { status: item.status, closed, results: reports },
       },
     );
@@ -150,10 +168,43 @@ export async function runOutcome(
       closed,
       results: reports,
       ...(deliberateLeftOpen > 0 ? { deliberateLeftOpen } : {}),
+      ...(answeredLeftOpen > 0 ? { answeredLeftOpen } : {}),
       ...(reports.length === 1 ? flatten(reports[0]!) : {}),
     },
     humanLines,
   };
+}
+
+/** What the sweep walked past, so a blanket close cannot look complete. */
+function leftOpenLines(deliberate: number, answered: number): string[] {
+  const lines: string[] = [];
+  if (deliberate > 0) {
+    lines.push(`${deliberate} deliberate search(es) left open; close each with --search-id <id>.`);
+  }
+  if (answered > 0) {
+    lines.push(
+      `${answered} hook search(es) Tenjin answered left open; report each with --search-id <id>.`,
+    );
+  }
+  return lines;
+}
+
+/** One shared code when every failure agrees, so an all-USAGE batch keeps its
+ *  exit 2 and an all-RATE_LIMITED one stays recoverable; mixed is an outage. */
+function failureCode(failed: OutcomeReport[]): 'USAGE' | 'RATE_LIMITED' | 'API_UNREACHABLE' {
+  const codes = new Set(failed.map((r) => r.error?.code));
+  if (codes.size !== 1) return 'API_UNREACHABLE';
+  const [only] = [...codes];
+  if (only === 'USAGE') return 'USAGE';
+  return only === 'RATE_LIMITED' ? 'RATE_LIMITED' : 'API_UNREACHABLE';
+}
+
+/** The copy-pasteable retry, bounded: a fix line naming fifty ids is not a fix. */
+function retryFlags(pending: OutcomeReport[]): string {
+  const MAX_NAMED = 5;
+  const named = pending.slice(0, MAX_NAMED).map((r) => `--search-id ${r.searchId}`);
+  const rest = pending.length - named.length;
+  return rest > 0 ? `${named.join(' ')} (and ${rest} more, see results)` : named.join(' ');
 }
 
 function flatten(report: OutcomeReport): Record<string, unknown> {
@@ -183,10 +234,23 @@ interface OutcomeTarget {
   stored: StoredSearch | null;
 }
 
-/** The searches this run reports against, plus what `--all-open` walked past. */
+/** The searches to report against, plus what `--all-open` walked past. */
 interface ResolvedTargets {
   targets: OutcomeTarget[];
   deliberateLeftOpen: number;
+  answeredLeftOpen: number;
+}
+
+/** The shape `postOutcomes` enforces, hoisted in front of the send loop: there it
+ *  runs per id mid-batch, so a typo in the third of five ids lands after two
+ *  reports already left. UUID_RE and not `SEARCH_ID_WIRE_RE` — this path
+ *  parameter is declared `format: uuid` with no pattern (openapi.fixture.json),
+ *  so the stricter POST /api/posts regex would refuse ids this route accepts. */
+function assertReportableId(searchId: string): void {
+  if (UUID_RE.test(searchId)) return;
+  throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
+    fix: 'Pass a searchId from a prior search (or use --last).',
+  });
 }
 
 async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<ResolvedTargets> {
@@ -208,6 +272,7 @@ async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<R
         stored: searches.find((s) => s.searchId === searchId) ?? null,
       })),
       deliberateLeftOpen: 0,
+      answeredLeftOpen: 0,
     };
   }
   if (args.last === true) {
@@ -217,7 +282,11 @@ async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<R
         fix: 'Run `tenjin search` first, or pass --search-id <id>.',
       });
     }
-    return { targets: [{ searchId: latest.searchId, stored: latest }], deliberateLeftOpen: 0 };
+    return {
+      targets: [{ searchId: latest.searchId, stored: latest }],
+      deliberateLeftOpen: 0,
+      answeredLeftOpen: 0,
+    };
   }
   throw new CliError('USAGE', 'An outcome needs a search to report against.', {
     fix: 'Pass --search-id <id>, --last, or --all-open --status regenerated.',
@@ -225,13 +294,18 @@ async function resolveTargets(args: OutcomeArgs, ctx: CommandContext): Promise<R
 }
 
 /**
- * Every open loop the WebSearch hook recorded, in any session.
+ * Every open loop the WebSearch hook recorded and Tenjin could not answer.
  *
- * `regenerated` ONLY, and the refusal is the point: the other statuses claim
- * what a specific search did for the agent, and a blanket `used` over queries
- * nobody read piece by piece is attribution the marketplace would be right to
- * trust and wrong to believe. A deliberate `tenjin search` is never swept, and
- * open ones are counted so a blanket close cannot look more complete than it is.
+ * `regenerated` ONLY: the other statuses claim what a specific search did for
+ * the agent, and a blanket `used` over queries nobody read piece by piece is
+ * attribution the marketplace would be right to trust and wrong to believe.
+ *
+ * MISS ONLY, the same reason one step further in: the hook records CANDIDATES
+ * under this same source, and those are the searches where a priced answer was
+ * shown and may have been bought, so `regenerated` would overwrite the one
+ * positive attribution this loop collects. It also matches the Stop hook's weak
+ * batch, so the nag cannot name a command reaching past what it describes.
+ * Neither a deliberate search nor an answered one is swept; both are counted.
  */
 async function resolveAllOpen(args: OutcomeArgs, ctx: CommandContext): Promise<ResolvedTargets> {
   if (args.status !== 'regenerated') {
@@ -246,12 +320,14 @@ async function resolveAllOpen(args: OutcomeArgs, ctx: CommandContext): Promise<R
   const open = (await loadSearches(ctx.dataDir)).filter(
     (s) => s.resolved === undefined || s.resolved === null,
   );
+  // Absent source predates sources, and those entries were all deliberate.
+  const hook = open.filter((s) => s.source === 'websearch-hook');
   return {
-    targets: open
-      .filter((s) => s.source === 'websearch-hook')
+    targets: hook
+      .filter((s) => s.decision === 'MISS')
       .map((stored) => ({ searchId: stored.searchId, stored })),
-    // Absent source predates sources, and those were all deliberate.
-    deliberateLeftOpen: open.filter((s) => s.source !== 'websearch-hook').length,
+    deliberateLeftOpen: open.length - hook.length,
+    answeredLeftOpen: hook.filter((s) => s.decision !== 'MISS').length,
   };
 }
 

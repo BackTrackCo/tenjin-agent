@@ -331,12 +331,9 @@ describe('edit flag forwarding (the dispatcher mapping)', () => {
   });
 });
 
-/**
- * `outcome`'s batch selectors. A `--search-id` that commander did not collect
- * would keep the LAST id and silently drop the rest, and an `--all-open` that
- * never reached the arg would report nothing while exiting 0, so both are read
- * back through refusals that resolve before any request.
- */
+// `outcome`'s batch selectors, read back through refusals that resolve before
+// any request: an uncollected `--search-id` would keep the LAST id and drop the
+// rest, and an `--all-open` that never reached the arg would exit 0 doing nothing.
 describe('outcome batch flags (the dispatcher mapping)', () => {
   const ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 

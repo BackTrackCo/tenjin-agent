@@ -592,6 +592,24 @@ describe('runOutcome, closing several searches at once', () => {
     expect(res.humanLines?.join('\n')).toContain('1 deliberate search(es) left open');
   });
 
+  // The hook records CANDIDATES under the same source, and `regenerated` there
+  // would overwrite the only positive attribution the loop collects.
+  it('--all-open leaves a hook search Tenjin answered open, and counts it', async () => {
+    await seed(1);
+    await seed(2, { decision: 'CANDIDATES', candidates: [CANDIDATE] });
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain(id(1));
+    expect(urls.join(' ')).not.toContain(id(2));
+    expect(res.data).toMatchObject({ closed: 1, answeredLeftOpen: 1 });
+    expect(res.humanLines?.join('\n')).toContain('1 hook search(es) Tenjin answered left open');
+    const stored = await loadSearches(dir);
+    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
+  });
+
   // An entry written before sources existed was a deliberate search.
   it('--all-open leaves a sourceless entry open', async () => {
     await seed(1, { source: undefined });
@@ -655,6 +673,34 @@ describe('runOutcome, closing several searches at once', () => {
     expect(urls).toHaveLength(0);
   });
 
+  // Otherwise a one-entry sweep attaches the resource to whatever it happened to
+  // find, and a zero-entry sweep ignores it in silence.
+  it('refuses --resource under --all-open, however many loops are open', async () => {
+    await seed(1);
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome(
+        { allOpen: true, status: 'regenerated', resource: CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  // Inside postOutcomes this check runs per id mid-batch, so a typo used to send
+  // the ids before it and then fail as a network-class error nobody can retry.
+  it('refuses a malformed id before any request, as USAGE', async () => {
+    await seed(1);
+    const { fetch, urls } = stub();
+    const call = runOutcome({ searchId: [id(1), 'not-a-uuid'], status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    await expect(call).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    await expect(call).rejects.toThrow('not-a-uuid');
+    expect(urls).toHaveLength(0);
+  });
+
   // Half a report nobody meant to send is worse than none: the whole batch is
   // checked for coherence before the first request.
   it("refuses the whole batch when one target's status is incoherent", async () => {
@@ -701,5 +747,70 @@ describe('runOutcome, closing several searches at once', () => {
     const stored = await loadSearches(dir);
     expect(stored.find((s) => s.searchId === id(1))?.resolved?.by).toBe('outcome');
     expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
+  });
+
+  // The human rendering prints `fix` and drops every other details shape, so ids
+  // that live only in `details.results` are ids nobody without --json can retry.
+  it('names the ids to retry in the fix line, not only in the envelope', async () => {
+    await seed(1);
+    await seed(2);
+    const fetchImpl = (async (url: string) =>
+      String(url).includes(id(2))
+        ? new Response('nope', { status: 500 })
+        : new Response(JSON.stringify({ accepted: 1 }), {
+            status: 202,
+            headers: { 'content-type': 'application/json' },
+          })) as unknown as typeof fetch;
+    const call = runOutcome({ searchId: [id(1), id(2)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl,
+    });
+    await expect(call).rejects.toMatchObject({ fix: `Retry with --search-id ${id(2)}` });
+  });
+
+  // One sweep can spend 50 of the 60/min budget. An open loop is the safe state:
+  // the Stop hook raises it again.
+  it('stops the sweep at the first rate limit and reports the rest untouched', async () => {
+    for (const n of [1, 2, 3]) await seed(n);
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(String(url));
+      return new Response('slow down', { status: 429, headers: { 'retry-after': '30' } });
+    }) as unknown as typeof fetch;
+    const call = runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), { fetchImpl });
+    await expect(call).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      details: { closed: 0 },
+    });
+    // One attempt, not three: the remainder never left the machine.
+    expect(urls).toHaveLength(1);
+    const stored = await loadSearches(dir);
+    expect(stored.filter((s) => s.resolved !== undefined)).toHaveLength(0);
+    const untouched = await call.catch(
+      (e: { details: { results: { untouched?: true }[] } }) =>
+        e.details.results.filter((r) => r.untouched === true).length,
+    );
+    expect(untouched).toBe(2);
+  });
+
+  // A transport failure is the server being unhealthy; a rejected id is not.
+  it('keeps going past a failure that is about one id', async () => {
+    for (const n of [1, 2, 3]) await seed(n);
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(String(url));
+      return String(url).includes(id(2))
+        ? new Response(JSON.stringify({ error: { message: 'no' } }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(JSON.stringify({ accepted: 1 }), {
+            status: 202,
+            headers: { 'content-type': 'application/json' },
+          });
+    }) as unknown as typeof fetch;
+    await expect(
+      runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), { fetchImpl }),
+    ).rejects.toMatchObject({ details: { closed: 2 } });
+    expect(urls).toHaveLength(3);
   });
 });

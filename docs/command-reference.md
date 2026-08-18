@@ -150,14 +150,14 @@ Mints a read-scoped session key so `tenjin read` can recover pieces you already 
 
 Reports how a search ended.
 
-| Flag                    | Values                                                                   | Effect                                                                                                                                      |
-| ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                                                                                                                    |
-| `--search-id <uuid>`    |                                                                          | Search to report against. Repeatable; one status covers all of them.                                                                        |
-| `--last`                |                                                                          | Target the most recent manual `tenjin search`.                                                                                              |
-| `--all-open`            |                                                                          | Close every open search the WebSearch hook recorded, in any session. `regenerated` only, and deliberate searches are left open and counted. |
-| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                                                                                                              |
-| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                                                                                                                |
+| Flag                    | Values                                                                   | Effect                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                                                                                                                                                  |
+| `--search-id <uuid>`    |                                                                          | Search to report against. Repeatable; one status covers all of them.                                                                                                      |
+| `--last`                |                                                                          | Target the most recent manual `tenjin search`.                                                                                                                            |
+| `--all-open`            |                                                                          | Close every open MISS the WebSearch hook recorded, in any session. `regenerated` only. Deliberate searches, and hook searches Tenjin answered, are left open and counted. |
+| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                                                                                                                                            |
+| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                                                                                                                                              |
 
 ## Publishing and editing
 
