@@ -79,6 +79,17 @@ export function nagStatePath(dir: string = dataDir()): string {
 }
 
 /**
+ * How the marketplace has been answering the dispatch hook lately, so a run of
+ * failures stops the arm instead of paying the fetch budget per subagent through
+ * an outage. Same conventions as {@link nagStatePath}: hook-written, unlocked,
+ * and cheap to lose, since a missing file reads as "healthy". Its own file
+ * because two hooks writing one unlocked file would erase each other.
+ */
+export function hookHealthPath(dir: string = dataDir()): string {
+  return join(dir, 'hook-health.json');
+}
+
+/**
  * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
  * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
  * New writes go to the per-wallet path below; this one is only read as a
