@@ -660,14 +660,47 @@ describe('scan — #45 deferred detectors (private network, collaboration, cloud
   });
 });
 
+/**
+ * The block tier is non-bypassable by contract, so the docs-placeholder rule — a
+ * SUBSTRING test over the whole match — is confined to warns. Real passwords
+ * routinely carry `<`, `>`, `{`, `}` or a letter run, and a connection string is
+ * one of the commonest ways a live credential reaches a transcript, so a
+ * substring match was silently converting a block into nothing.
+ */
+describe('scan — the block tier is non-bypassable', () => {
+  it('blocks a live secret whose value merely CONTAINS a placeholder shape', () => {
+    const bypasses = [
+      'postgres://appuser:Str0ng<Pw>Value@prod-db.acme.com:5432/main',
+      'mysql://root:Pa{{ss}}w0rd99@10.2.3.4:3306/app',
+      'postgres://appuser:realpwxxxxxx99@prod-db.acme.com/main',
+      'Authorization: Bearer ghp_realtokenxxxxxx0123456789abcdef',
+      'redis://cache:yourkeyR3al99Value@cache.acme.com:6379',
+      `the docs show ghp_${'x'.repeat(36)} as the shape`,
+    ];
+    for (const text of bypasses) {
+      const blocks = scan(text).filter((f) => f.severity === 'block');
+      expect(blocks.length, text).toBeGreaterThan(0);
+      // A non-bypassable block must not become a leak either.
+      for (const f of blocks) expect(f.excerpt).toContain('[redacted');
+    }
+  });
+
+  it('keeps the value-anchored block suppressions, which are not substring rules', () => {
+    // Here the WHOLE captured password/token is the placeholder, not a fragment
+    // of a live one — the shape a docs snippet actually takes.
+    expect(checks('postgres://user:<password>@host:5432/db')).not.toContain('db-connection-uri');
+    expect(checks('Authorization: Bearer <token>')).not.toContain('bearer-token');
+  });
+});
+
 describe('scan — placeholder suppression', () => {
-  it('drops docs-shaped placeholder matches even for block-tier detectors', () => {
-    expect(checks(`the docs show ghp_${'x'.repeat(36)} as the shape`)).not.toContain(
-      'github-token',
-    );
+  it('drops docs-shaped placeholder matches for warn-tier detectors', () => {
     expect(checks('API_KEY=<YOUR_KEY>')).not.toContain('secret-assignment');
     expect(checks('set the header to A1b2C3xxxxxx4D5e6F7g8H9i0J1k2L3m4N5o')).not.toContain(
       'high-entropy-string',
+    );
+    expect(checks('deploy to api-xxxxxx.acme.internal for the smoke test')).not.toContain(
+      'internal-hostname',
     );
   });
 
@@ -677,8 +710,7 @@ describe('scan — placeholder suppression', () => {
   });
 
   it('does not treat a boring key body as a placeholder (no block bypass)', () => {
-    // Only `x` runs and template braces are placeholders; a repeated-letter body
-    // is still a live key shape.
+    // A repeated-letter body is still a live key shape.
     expect(checks(`t=ghp_${'Z'.repeat(36)}`)).toContain('github-token');
     expect(checks(`0x${HEX64}`)).toContain('raw-private-key');
   });

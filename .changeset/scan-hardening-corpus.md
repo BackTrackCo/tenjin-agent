@@ -17,8 +17,11 @@ paths, bucket URIs), pasted `.env` blocks, and a generic Shannon-entropy
 catch-all for unknown credential formats.
 
 Placeholder suppression drops docs-shaped matches (`sk-xxxx`, `<YOUR_KEY>`,
-`user@example.com`) before they reach the findings list, including for block-tier
-detectors, so a documentation sample cannot teach an operator to skim findings.
+`user@example.com`) before they reach the findings list, so a documentation
+sample cannot teach an operator to skim findings. Warn tier only: the block tier
+stays non-bypassable, and its own suppressions are anchored to the captured
+secret value rather than matched as a substring, so a live password containing
+`<`, `>`, `{`, `}` or an `x` run still blocks.
 
 A labeled fixture corpus (`src/lib/scan-corpus.json`, positives and benign
 lookalikes for every detector, plus an adversarial transcript-shaped sample)

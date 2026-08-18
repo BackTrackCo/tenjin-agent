@@ -95,9 +95,9 @@
       "text": "Set GH_TOKEN in the environment before running gh."
     },
     {
-      "id": "github-token/neg-placeholder",
-      "label": "negative",
-      "detectors": [],
+      "id": "github-token/pos-placeholder-body",
+      "label": "positive",
+      "detectors": ["github-token"],
       "text": "The docs show ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx as the shape."
     },
     {
@@ -412,6 +412,41 @@
       "label": "negative",
       "detectors": [],
       "text": "Authorization: Bearer <token>"
+    },
+    {
+      "id": "db-connection-uri/pos-angle-in-password",
+      "label": "positive",
+      "detectors": ["db-connection-uri"],
+      "text": "postgres://appuser:Str0ng<Pw>Value@prod-db.acme.com:5432/main",
+      "secret": "Str0ng<Pw>Value"
+    },
+    {
+      "id": "db-connection-uri/pos-braces-in-password",
+      "label": "positive",
+      "detectors": ["db-connection-uri", "private-network-endpoint"],
+      "text": "mysql://root:Pa{{ss}}w0rd99@10.2.3.4:3306/app",
+      "secret": "Pa{{ss}}w0rd99"
+    },
+    {
+      "id": "db-connection-uri/pos-x-run-in-password",
+      "label": "positive",
+      "detectors": ["db-connection-uri"],
+      "text": "postgres://appuser:realpwxxxxxx99@prod-db.acme.com/main",
+      "secret": "realpwxxxxxx99"
+    },
+    {
+      "id": "db-connection-uri/pos-your-label-in-password",
+      "label": "positive",
+      "detectors": ["db-connection-uri"],
+      "text": "redis://cache:yourkeyR3al99Value@cache.acme.com:6379",
+      "secret": "yourkeyR3al99Value"
+    },
+    {
+      "id": "bearer-token/pos-x-run-in-token",
+      "label": "positive",
+      "detectors": ["bearer-token"],
+      "text": "Authorization: Bearer ghp_realtokenxxxxxx0123456789abcdef",
+      "secret": "ghp_realtokenxxxxxx0123456789abcdef"
     },
     {
       "id": "raw-private-key/pos",

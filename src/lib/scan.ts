@@ -5,30 +5,28 @@
  * replace it. `block` findings refuse a publish in every mode and are never
  * `--yes`-clearable; `warn` findings are surfaced for review.
  *
- * REDACTION INVARIANT (enforced by scan.corpus.test.ts): every `block` finding's
- * excerpt is masked — a short type-identifying prefix plus a redaction count,
- * never the matched secret. The only exception is `pem-private-key`, whose
- * excerpt is the armor header, which carries no key material. `warn` excerpts
- * may show the caller their own content (wallet addresses, PII, quotes) but the
- * secret-shaped warns (secret-assignment, customer-identifier,
- * high-entropy-string) are masked too. A finding therefore travels as detector
- * id + tier + offsets + redacted excerpt, which is exactly what the #166 digest
- * and the server-side ingest gate render.
+ * Three invariants, all pinned by scan.corpus.test.ts and scan.test.ts:
+ *
+ * REDACTION: a `block` excerpt is masked — a type-identifying prefix plus a
+ * redaction count, never the matched secret. `pem-private-key` is the one
+ * exception, its excerpt being the armor header. Secret-shaped warns
+ * (secret-assignment, customer-identifier, high-entropy-string) are masked too.
+ * A finding travels as detector id + tier + offsets + redacted excerpt.
+ *
+ * TIER ORDERING: suppression may downgrade a warn, never a block. Block-tier
+ * suppression is per-detector and anchored to the captured secret value; no
+ * substring rule may reach it (see DOCS_PLACEHOLDER).
+ *
+ * ReDoS: no pattern may contain a quantified group whose body can also match the
+ * group's own separator while a further obligation follows it. Audited against a
+ * single line of hundreds of kilobytes, the shape a JSONL transcript record takes.
  *
  * The detector corpus lives as DATA in `scan-rules.json` so the tenjin
  * server-side ingest gate can vendor it verbatim; this file compiles that data
- * and implements the handlers and algorithmic detectors it names. Patterns
- * adapted from the gitleaks ruleset (MIT), the secretlint preset-recommend rules
- * (MIT), and the BlockRun-credited wallet-key leak scanner are attributed per
- * rule in the data file's `source` field and in NOTICE.md. No pattern set is a
- * runtime dependency — this is a wallet-holding CLI, kept offline with a tight
- * dep tree by design.
- *
- * ReDoS: every pattern is audited against transcript-scale input (a single line
- * of hundreds of kilobytes — a JSONL transcript record is one such line). The
- * audit rule is that no pattern may contain a quantified group whose body can
- * also match the group's own separator while a further obligation follows it;
- * `scan.corpus.test.ts` pins the budget with pathological inputs.
+ * and implements the handlers and algorithmic detectors it names. Per-rule
+ * attribution is in the data file's `source` field and in NOTICE.md. No pattern
+ * set is a runtime dependency: this is a wallet-holding CLI, kept offline with a
+ * tight dep tree by design.
  */
 
 import corpusJson from './scan-rules.json';
@@ -218,7 +216,7 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
-        if (!isDocsPlaceholder(m[0]) && detector.skip?.(m) !== true) {
+        if (!isSuppressedAsDocs(detector, m) && detector.skip?.(m) !== true) {
           out.push({
             check: detector.check,
             severity: detector.severity,
@@ -240,18 +238,26 @@ function scanLineDetectors(lines: string[]): ScanFinding[] {
 // ---------------------------------------------------------------------------
 
 /**
- * A match that is documentation scaffolding, not a live value. Applied to EVERY
- * regex detector before its own skip predicate, because warn fatigue from
- * `<YOUR_KEY>`-shaped samples is what teaches an operator to stop reading
- * findings. Deliberately narrow: a run of `x` placeholders, an angle/brace
- * template, or a `your…` label. Repeated non-`x` characters are NOT treated as
- * placeholders — a key is not made safe by having a boring body.
+ * A match that is documentation scaffolding, not a live value: a run of `x`
+ * placeholders, an angle/brace template, or a `your…` label. It exists to cut
+ * warn fatigue, because `<YOUR_KEY>`-shaped samples are what teach an operator
+ * to stop reading findings.
+ *
+ * TIER ORDERING INVARIANT — this test is a SUBSTRING test over the whole match,
+ * so it may only ever suppress a `warn`. A block finding is non-bypassable by
+ * contract, and a substring rule hands the bypass to anyone whose secret merely
+ * CONTAINS a placeholder shape: real passwords carry `<`, `>`, `{`, `}` and
+ * letter runs, so `postgres://app:Str0ng<Pw>Value@prod-db/main` is a live
+ * credential, not a docs sample. Block-tier suppression is per-detector only,
+ * and is anchored to the captured secret VALUE (isPlaceholder via the
+ * `exampleDbPassword` / `placeholderGroup1` handlers), never to a substring of
+ * the match. Pinned by "the block tier is non-bypassable" in scan.test.ts.
  */
 const DOCS_PLACEHOLDER =
   /x{6,}|<[^<>]*>|\{\{[^{}]*\}\}|\byour[_-]?(?:key|token|secret|password)\b/i;
 
-function isDocsPlaceholder(match: string): boolean {
-  return DOCS_PLACEHOLDER.test(match);
+function isSuppressedAsDocs(detector: LineDetector, m: RegExpExecArray): boolean {
+  return detector.severity === 'warn' && DOCS_PLACEHOLDER.test(m[0]);
 }
 
 // RFC 2606 reserved second-level domains. The reserved .example TLD is NOT
@@ -296,7 +302,7 @@ function truncate(value: string, max: number): string {
  * in the text — warn 'private-repo-reference'. Literal case-insensitive match,
  * compiled once per marker (not per line) and executed against the ORIGINAL
  * line, so spans stay exact (a locale-sensitive toLowerCase can change string
- * length — U+0130 — and misalign them; review r5). Token-bounded: `Org/repo`
+ * length — U+0130 — and misalign them). Token-bounded: `Org/repo`
  * must not fire inside a sibling slug (`Org/repo-docs`, `xOrg/repo`), but a
  * trailing `.` stays allowed so a remote-URL mention (`…/Org/repo.git`) fires.
  * Markers shorter than 3 chars are dropped as degenerate. The excerpt names the
@@ -338,9 +344,9 @@ function escapeRegExp(s: string): string {
 
 function localPathExcerpt(m: RegExpExecArray): string {
   // Splice at the capture's own offsets (d-flag indices): a plain
-  // String.replace masked the FIRST occurrence of the username, which for a
-  // username that is a substring of the /Users|/home prefix mangled the
-  // prefix and echoed the real username (review r5).
+  // String.replace masks the FIRST occurrence of the username, which for a
+  // username that is a substring of the /Users|/home prefix mangles the prefix
+  // and echoes the real username.
   const bounds = m.indices?.[1] ?? m.indices?.[2];
   const masked =
     bounds === undefined
@@ -624,7 +630,8 @@ function scanHighEntropy(lines: string[], named: ScanFinding[]): ScanFinding[] {
     let m: RegExpExecArray | null;
     while ((m = ENTROPY_CANDIDATE.exec(line)) !== null) {
       const token = m[0];
-      if (!looksRandom(token) || isDocsPlaceholder(token)) continue;
+      // Warn tier, so the substring placeholder test is allowed here.
+      if (!looksRandom(token) || DOCS_PLACEHOLDER.test(token)) continue;
       const span: [number, number] = [m.index, m.index + token.length];
       if (named.some((f) => f.line === i + 1 && f.span[0] < span[1] && span[0] < f.span[1])) {
         continue;
