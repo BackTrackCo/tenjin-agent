@@ -34,9 +34,11 @@ import {
   needsConfirmation,
   publicFinding,
   resolveWriteAuth,
+  throughScanGate,
   writeModeNotices,
 } from '../lib/consent';
 import { publishedUrlFor, recordPublished } from '../lib/publish-dedup';
+import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -93,6 +95,12 @@ export interface PublishDeps {
    *  by default, `searchId` from the MCP tool. A dep and not an arg because
    *  `publishInput`'s `satisfies` would expose a new PublishArgs key to agents. */
   searchIdLabel?: string;
+  /**
+   * Force the answer to the server gate's warn tier, whatever `publish.mode`
+   * says. The unattended observer lane (PR 5) passes `false`: it never acks, so
+   * a server warn drops its candidate to a draft.
+   */
+  ackServerWarnings?: boolean;
 }
 
 export async function runPublish(
@@ -323,11 +331,25 @@ export async function runPublish(
     ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
   };
 
-  const result = await publishPost(input, auth, {
+  const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
     ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  };
+  // The server ingest gate runs the same rule corpus in the marketplace's write
+  // path, so its warn tier joins this command's exit-3 flow rather than arriving
+  // as an opaque write failure. Its block tier has no acknowledgement path.
+  const result = await throughScanGate({
+    send: (scanAck) =>
+      publishPost(scanAck === undefined ? input : { ...input, scanAck }, auth, client),
+    localWarns: warns,
+    mode: settings.mode,
+    yes: args.yes === true,
+    ...(deps.ackServerWarnings !== undefined ? { ackOverride: deps.ackServerWarnings } : {}),
+    detail: { mode: settings.mode, price: { atomic: price.atomic, usd: price.usd } },
+    noun: 'Publish',
+    heldSuffix: `, price $${price.usd}`,
   });
 
   // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
@@ -581,6 +603,7 @@ function receipt(
         ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
         : 'Published without an answer card: ranks below every carded piece in agent search.',
     ...searches.filter((s) => s.closed).map(closeLine),
+    ...scanNoteLines(result.scan),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -596,6 +619,7 @@ function receipt(
       // batch has no single one to repeat.
       ...(searches.length === 1 ? { search: searches[0] } : {}),
       ...(searches.length > 0 ? { searches } : {}),
+      ...(result.scan !== undefined ? { scan: scanReceipt(result.scan) } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,

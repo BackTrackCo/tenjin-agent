@@ -1587,3 +1587,140 @@ describe('runEdit — a team shelf narrows the scan exactly as publish does', ()
     expect(stub.puts()).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The server ingest scan gate (session-observer plan PR 2b). The gate lives in
+// the shared write path, not in the publish route, so an edit passes through it
+// too; these run against a STUBBED gate response.
+// ---------------------------------------------------------------------------
+
+const GATE_FINDING = {
+  check: 'email',
+  severity: 'warn',
+  line: 3,
+  span: [8, 24],
+  excerpt: 'iris@example.com',
+  field: 'body',
+};
+
+/** A gate envelope as `error.details.scan` carries it. */
+function gateResponse(
+  code: 'scan_blocked' | 'scan_needs_ack',
+  scan: Record<string, unknown>,
+): Response {
+  return json(422, { error: { code, message: `gate says ${code}`, details: { scan } } });
+}
+
+describe('runEdit — server ingest gate', () => {
+  it('maps scan_needs_ack into the exit-3 consent flow, writing nothing', async () => {
+    const stub = stubServer({
+      respond: (call) =>
+        call.method === 'PUT'
+          ? gateResponse('scan_needs_ack', {
+              findings: [GATE_FINDING],
+              checks: { semantic: 'ran' },
+              ackToken: 'v1.tok.mac',
+            })
+          : undefined,
+    });
+    const err = (await runEdit(
+      args({ title: 'A new title' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as {
+      code: string;
+      exitCode: number;
+      message: string;
+      details: unknown;
+    };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.exitCode).toBe(3);
+    expect(err.message).toContain('Edit held by the marketplace scan');
+    expect((err.details as { findings: { source: string }[] }).findings[0]).toMatchObject({
+      check: 'email',
+      source: 'server',
+    });
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('re-sends the identical body with the token on an explicit yes', async () => {
+    const stub = stubServer({
+      put: { ...STORED, title: 'A new title', scan: { findings: [GATE_FINDING], acked: true } },
+      respond: (call, attempt) =>
+        call.method === 'PUT' && attempt === 2
+          ? gateResponse('scan_needs_ack', { findings: [GATE_FINDING], ackToken: 'v1.tok.mac' })
+          : undefined,
+    });
+    const res = await runEdit(
+      args({ title: 'A new title', yes: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    const puts = stub.puts();
+    expect(puts).toHaveLength(2);
+    expect(puts[0]?.body?.scanAck).toBeUndefined();
+    expect(puts[1]?.body?.scanAck).toBe('v1.tok.mac');
+    expect(puts[1]?.body?.title).toBe(puts[0]?.body?.title);
+    expect((res.data as { scan: { acked: boolean } }).scan.acked).toBe(true);
+  });
+
+  it('renders scan_blocked as a hard failure with no ack path', async () => {
+    const stub = stubServer({
+      respond: (call) =>
+        call.method === 'PUT'
+          ? gateResponse('scan_blocked', {
+              findings: [
+                {
+                  ...GATE_FINDING,
+                  check: 'npm-token',
+                  severity: 'block',
+                  excerpt: 'npm_…[redacted]',
+                },
+              ],
+              checks: { semantic: 'skipped' },
+            })
+          : undefined,
+    });
+    const err = (await runEdit(
+      args({ title: 'A new title', yes: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string; message: string; fix?: string };
+    expect(err.code).toBe('PUBLISH_BLOCKED');
+    expect(err.message).toContain('npm-token');
+    expect(err.fix).toContain('no acknowledgement path');
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('surfaces advisory findings on a successful edit without blocking it', async () => {
+    const stub = stubServer({
+      put: {
+        ...STORED,
+        title: 'A new title',
+        scan: {
+          findings: [{ check: 'brand-new-detector', severity: 'notice', line: 2, excerpt: 'xyz' }],
+          checks: { semantic: 'skipped' },
+        },
+      },
+    });
+    const res = await runEdit(
+      args({ title: 'A new title' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    const scan = (res.data as { scan: { findings: { check: string }[]; semantic: string } }).scan;
+    expect(scan.semantic).toBe('skipped');
+    expect(scan.findings[0]?.check).toBe('brand-new-detector');
+    expect((res.humanLines ?? []).join('\n')).toContain('brand-new-detector (notice, line 2): xyz');
+  });
+
+  it('leaves no scan field on the receipt when the server sent none', async () => {
+    const stub = stubServer({ put: { ...STORED, title: 'A new title' } });
+    const res = await runEdit(
+      args({ title: 'A new title' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect((res.data as { scan?: unknown }).scan).toBeUndefined();
+  });
+});
