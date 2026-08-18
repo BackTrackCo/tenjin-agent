@@ -127,6 +127,41 @@ describe('scan — 0x-64-hex is a key or a hash by context', () => {
     expect(checks(`blockhash = 0x${HEX64}`)).toContain('hex32-value');
   });
 
+  /**
+   * The shapes an advisory replay over 389 published posts found (tenjin#723):
+   * every block-tier hit in the live catalog was a public hex constant the old
+   * demotion window missed. Demotion is to WARN, so a real key mislabeled
+   * `hash` is still surfaced for review rather than silenced.
+   */
+  it('demotes a label separated from the value by up to two tokens', () => {
+    expect(checks(`the committee hash was 0x${HEX64}`)).toContain('hex32-value');
+    expect(checks(`the committee hash was 0x${HEX64}`)).not.toContain('raw-private-key');
+    expect(checks(`source_id = 0x${HEX64}`)).toContain('hex32-value');
+    expect(checks(`source_id = 0x${HEX64}`)).not.toContain('raw-private-key');
+  });
+
+  it('demotes the widened identifier label set', () => {
+    for (const label of ['salt', 'id', 'topic0', 'root', 'digest', 'commitment']) {
+      expect(checks(`${label}: 0x${HEX64}`), label).toContain('hex32-value');
+      expect(checks(`${label}: 0x${HEX64}`), label).not.toContain('raw-private-key');
+    }
+  });
+
+  it('demotes a universal public constant carrying no label at all', () => {
+    const topic0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+    expect(checks(`emitted ${topic0} first`)).toContain('hex32-value');
+    expect(checks(`emitted ${topic0} first`)).not.toContain('raw-private-key');
+  });
+
+  it('keeps the block floor: the window widened, it did not open', () => {
+    // Four tokens between label and value is out of window.
+    expect(checks(`the hash of the private key is 0x${HEX64}`)).toContain('raw-private-key');
+    // Words merely ENDING in a label are not labels.
+    expect(checks(`the grid 0x${HEX64}`)).toContain('raw-private-key');
+    expect(checks(`a valid 0x${HEX64}`)).toContain('raw-private-key');
+    expect(checks(`PRIVATE_KEY=0x${HEX64}`)).toContain('raw-private-key');
+  });
+
   it('blocks a bare, uncontextualized 64-hex as a raw private key', () => {
     const found = scan(`0x${HEX64}`);
     const f = found.find((x) => x.check === 'raw-private-key');

@@ -1,6 +1,56 @@
 {
   "schemaVersion": 1,
   "note": "Detector corpus for the Tenjin publish scan, kept as data so the tenjin server-side ingest gate can vendor it verbatim (see plans/2026-08-18-session-observer.md, PR 2a). Every entry is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is either a JS regex (pattern + flags) or the name of an algorithmic detector a consumer must implement, `excerpt` is the redaction policy, and `skip` names a suppression predicate. Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "publicHexConstants": [
+    {
+      "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "name": "topic0 ERC-20 / ERC-721 Transfer"
+    },
+    {
+      "value": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+      "name": "topic0 ERC-20 / ERC-721 Approval"
+    },
+    {
+      "value": "0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31",
+      "name": "topic0 ERC-721 / ERC-1155 ApprovalForAll"
+    },
+    {
+      "value": "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62",
+      "name": "topic0 ERC-1155 TransferSingle"
+    },
+    {
+      "value": "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb",
+      "name": "topic0 ERC-1155 TransferBatch"
+    },
+    {
+      "value": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+      "name": "topic0 Ownable OwnershipTransferred"
+    },
+    {
+      "value": "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",
+      "name": "topic0 WETH Deposit"
+    },
+    {
+      "value": "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65",
+      "name": "topic0 WETH Withdrawal"
+    },
+    {
+      "value": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+      "name": "EIP-1967 implementation storage slot"
+    },
+    {
+      "value": "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103",
+      "name": "EIP-1967 admin storage slot"
+    },
+    {
+      "value": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+      "name": "keccak256 of the empty string"
+    },
+    {
+      "value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "name": "the zero hash"
+    }
+  ],
   "excerptPolicies": {
     "mask": "Keep the first `keep` characters (a public type marker) and replace the rest with a redaction count.",
     "verbatim": "Echo the match, truncated to `max` characters when set. Only for non-secret matches.",
@@ -682,7 +732,7 @@
     {
       "id": "raw-private-key",
       "tier": "block",
-      "description": "0x + 64 hex with no hash context. Demoted to the warn detector hex32-value when the surrounding text reads as a transaction/block hash.",
+      "description": "0x + 64 hex with no hash context. Demoted to the warn detector hex32-value when a hash/identifier label precedes it (within two intervening tokens), when it sits inside an http(s) URL, or when it is one of the publicHexConstants below. An unlabeled bare 64-hex stays block: that is the floor.",
       "source": "blockrun-mcp (wallet-key leak scanner)",
       "match": {
         "kind": "algorithm",

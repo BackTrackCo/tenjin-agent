@@ -23,11 +23,19 @@ stays non-bypassable, and its own suppressions are anchored to the captured
 secret value rather than matched as a substring, so a live password containing
 `<`, `>`, `{`, `}` or an `x` run still blocks.
 
+The `raw-private-key` to `hex32-value` demotion widens, so quoting a public
+32-byte value no longer refuses a publish: the label set gains `salt`, `id`,
+`topic`, `root`, `digest`, and `commitment`, a label may now sit up to two short
+tokens before the value (`the committee hash was 0x…`, `source_id = 0x…`), and
+well-known public constants such as the ERC-20 `Transfer` event topic0 are
+recognized from a data list. Demotion is to warn only. An unlabeled bare 64-hex
+still blocks, and a real key mislabeled `hash` still surfaces for review.
+
 A labeled fixture corpus (`src/lib/scan-corpus.json`, positives and benign
 lookalikes for every detector, plus an adversarial transcript-shaped sample)
 holds per-detector precision and recall at 1.0 in CI, so a detector edit shows
 its false-positive cost. The same suite enforces the redaction invariant — a
 finding carries a detector id, a tier, offsets, and a masked excerpt, never the
 matched secret — and a ReDoS budget against transcript-scale input, which caught
-and fixed three quadratic patterns (`email`, `internal-hostname`,
-`db-connection-uri`).
+and fixed four quadratic paths (`email`, `internal-hostname`,
+`db-connection-uri`, and the hash-label lookback).

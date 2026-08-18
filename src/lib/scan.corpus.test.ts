@@ -169,6 +169,9 @@ describe('scan corpus — ReDoS budget on transcript-scale input', () => {
     ['colon run', 'a:'.repeat(100_000)],
     ['at-sign run', 'a@'.repeat(100_000)],
     ['wordlist run', 'abandon '.repeat(25_000)],
+    // Every value here runs the hash-label lookback. An unbounded lookback
+    // re-slices the whole line per match and goes quadratic.
+    ['dense 64-hex line', `hash ${`0x${'ab'.repeat(32)} `.repeat(3_000)}`],
     ['fence and quote run', `\`\`\`\n${'> word '.repeat(30_000)}\n\`\`\``],
   ];
 

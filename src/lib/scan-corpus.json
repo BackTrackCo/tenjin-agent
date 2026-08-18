@@ -486,6 +486,42 @@
       "text": "A PEM file opens with a five-dash BEGIN armor line."
     },
     {
+      "id": "hex32-value/pos-label-with-intervening-word",
+      "label": "positive",
+      "detectors": ["hex32-value"],
+      "text": "The committee hash was 0xb2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4 at that height."
+    },
+    {
+      "id": "hex32-value/pos-id-label",
+      "label": "positive",
+      "detectors": ["hex32-value"],
+      "text": "source_id = 0x07e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b29"
+    },
+    {
+      "id": "hex32-value/pos-event-topic0",
+      "label": "positive",
+      "detectors": ["hex32-value"],
+      "text": "topics[0] is 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef for Transfer"
+    },
+    {
+      "id": "hex32-value/pos-salt-label",
+      "label": "positive",
+      "detectors": ["hex32-value"],
+      "text": "The CREATE2 salt: 0x5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e"
+    },
+    {
+      "id": "raw-private-key/pos-far-label",
+      "label": "positive",
+      "detectors": ["raw-private-key"],
+      "text": "The hash of the private key is 0xa18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3"
+    },
+    {
+      "id": "raw-private-key/pos-unlabeled-prose",
+      "label": "positive",
+      "detectors": ["raw-private-key"],
+      "text": "Paste 0xf6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18 into the wallet import field."
+    },
+    {
       "id": "bip39-seed-phrase/pos-12",
       "label": "positive",
       "detectors": ["bip39-seed-phrase"],

@@ -103,7 +103,11 @@ interface Rule {
   skip?: { handler: string };
 }
 
-const CORPUS = corpusJson as unknown as { schemaVersion: number; rules: Rule[] };
+const CORPUS = corpusJson as unknown as {
+  schemaVersion: number;
+  rules: Rule[];
+  publicHexConstants?: Array<{ value: string; name: string }>;
+};
 
 /** Algorithmic detectors this file implements; a corpus entry naming any other fails to compile. */
 const ALGORITHMS = new Set([
@@ -443,15 +447,32 @@ function isExamplePassword(password: string): boolean {
   return EXAMPLE_PASSWORDS.has(password.toLowerCase());
 }
 
-// EVM raw private key (0x + 64 hex) vs. a 32-byte hash. On Base the two are
-// syntactically identical, and a block finding is permanently non-bypassable, so
-// a post carrying an x402 receipt / basescan tx hash must not be hard-blocked.
-// A 64-hex is demoted to a warn 'hex32-value' when the context reads as a hash:
-// it sits inside an http(s) URL token, or is labelled tx/txhash/txn/hash/
-// blockhash just before it. A bare, uncontextualized 64-hex stays a block
-// 'raw-private-key' (continuing the BlockRun-credited wallet-key scanner).
+// EVM raw private key (0x + 64 hex) vs. a 32-byte public value. On Base the two
+// are syntactically identical, and a block finding is permanently
+// non-bypassable, so a post quoting a hash, an identifier, or an event topic
+// must not be hard-blocked. A 64-hex demotes to the WARN 'hex32-value' when it
+// sits inside an http(s) URL token, when a hash/identifier label precedes it, or
+// when it is a known public constant. An unlabeled bare 64-hex stays a block
+// 'raw-private-key' (continuing the BlockRun-credited wallet-key scanner): that
+// is the floor, and demotion never silences, so a real key mislabeled `hash`
+// still surfaces for review.
+//
+// The label window is what a replay over 389 published posts (tenjin#723)
+// forced open: every block-tier hit in the live catalog was a public hex
+// constant, and each missed the old rule differently — `hash was 0x…` (a word
+// between label and value), `source_id = 0x…` (an id-class label), and the
+// ERC-20 Transfer topic0 (no label at all). Hence the wider label set, up to TWO
+// short intervening tokens, and the constants set. Two is the bound that keeps
+// the window honest: "the hash of the private key is 0x…" is four tokens out and
+// still blocks.
 const HEX64_RE = /(?<![0-9a-fx])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])/gi;
-const HASH_LABEL_RE = /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash)[\s/:=]*$/i;
+const HASH_LABEL_RE =
+  /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash|salt|id|topic\d*|root|digest|commitment)(?:[\s:=/,._-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._-]*$/i;
+
+/** Public 64-hex values that are never key material; see scan-rules.json. */
+const PUBLIC_HEX_CONSTANTS = new Set(
+  (CORPUS.publicHexConstants ?? []).map((c) => c.value.toLowerCase()),
+);
 
 function scanHex64(lines: string[]): ScanFinding[] {
   const out: ScanFinding[] = [];
@@ -460,7 +481,7 @@ function scanHex64(lines: string[]): ScanFinding[] {
     HEX64_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = HEX64_RE.exec(line)) !== null) {
-      const hash = isHashContext(line, m.index);
+      const hash = isHashContext(line, m.index, m[0]);
       out.push({
         check: hash ? 'hex32-value' : 'raw-private-key',
         severity: hash ? 'warn' : 'block',
@@ -473,9 +494,23 @@ function scanHex64(lines: string[]): ScanFinding[] {
   return out;
 }
 
-function isHashContext(line: string, matchIndex: number): boolean {
-  const before = line.slice(0, matchIndex);
-  if (HASH_LABEL_RE.test(before)) return true;
+/**
+ * How far back a label or URL scheme may sit. Bounded so the lookback is O(1)
+ * per match rather than a fresh slice of the whole line: a transcript line
+ * carrying hundreds of 64-hex values would otherwise be quadratic. A label is
+ * relevant within ~40 characters and a scheme+host+path prefix within 256; past
+ * that the value stays block, which is the fail-safe direction.
+ */
+const LABEL_LOOKBACK = 256;
+
+function isHashContext(line: string, matchIndex: number, match: string): boolean {
+  if (PUBLIC_HEX_CONSTANTS.has(match.toLowerCase())) return true;
+  const from = Math.max(0, matchIndex - LABEL_LOOKBACK);
+  const before = line.slice(from, matchIndex);
+  // A truncated window must not start mid-word, or `gridhash` cut to `hash`
+  // reads as a label. Underscore is kept: it is the boundary `source_id` needs.
+  const labelWindow = from === 0 ? before : before.replace(/^[A-Za-z0-9]+/, '');
+  if (HASH_LABEL_RE.test(labelWindow)) return true;
   // The whitespace-delimited token containing the match starts with http(s)://.
   const prefix = /(\S*)$/.exec(before)?.[1] ?? '';
   return /^https?:\/\//.test(line.slice(matchIndex - prefix.length));
