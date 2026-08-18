@@ -157,9 +157,28 @@ jobs:
           bash scripts/pack-smoke.sh
 
       - name: Publish to npm
+        id: publish
         uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1.8.0
         with:
           publish: pnpm exec changeset publish
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # The MCP Registry pins tenjin-cli by exact version from BackTrackCo/tenjin,
+      # so every publish here stales a listing nothing in either repo watches
+      # (tenjin-agent#98). Gated on the action's own `published` output, because a
+      # dispatch that shipped nothing must announce nothing; `publishedPackages`
+      # is where the version comes from, so the issue can never name a guess.
+      - name: Tell tenjin its MCP Registry pin is behind
+        if: steps.publish.outputs.published == 'true'
+        run: bash scripts/notify-registry-pin.sh
+        env:
+          # Deliberately NOT the release-bot token minted above: that installation
+          # holds Contents + Pull requests on this repo alone, so it cannot write
+          # an issue on BackTrackCo/tenjin. Owner action: a fine-grained PAT with
+          # Issues write on that repo, stored as RELEASE_CROSSREPO_TOKEN. Until it
+          # exists this step fails the run, loudly, after npm already has the
+          # package: a release nobody was told about is the bug being fixed.
+          GH_TOKEN: ${{ secrets.RELEASE_CROSSREPO_TOKEN }}
+          PUBLISHED_PACKAGES: ${{ steps.publish.outputs.publishedPackages }}

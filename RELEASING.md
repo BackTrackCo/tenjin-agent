@@ -39,6 +39,12 @@ To cut a release (two clicks):
    `latest` alone, so publish tagging and `src/lib/update-check.ts` must change
    together.
 
+A publish that actually shipped then files one issue on `BackTrackCo/tenjin`
+(`scripts/notify-registry-pin.sh`): its MCP Registry manifest pins `tenjin-cli`
+by exact version, and nothing else notices that the pin went stale. Deciding
+whether the release is worth advertising, and publishing the manifest, stay
+manual on that side.
+
 Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived, per-run
 token, so there is **no `NPM_TOKEN`** to store or rotate.
 
@@ -60,3 +66,8 @@ setup. For a fork or a re-setup, the steps are:
    filename `release.yml`, environment `npm-publish`.
 3. **Create a GitHub Environment named `npm-publish`** (Settings ->
    Environments), optionally with required reviewers to gate each publish.
+4. **Add repo secret `RELEASE_CROSSREPO_TOKEN`**: a fine-grained PAT scoped to
+   `BackTrackCo/tenjin` with **Issues: read and write**, used only by the
+   registry-pin notification. The release-bot App cannot stand in for it: it is
+   installed on this repo alone and holds no Issues permission. Without the
+   secret the publish succeeds and the notification step fails the run.
