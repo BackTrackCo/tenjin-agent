@@ -1,6 +1,7 @@
 import { webcrypto } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
+import { declareBuilderCodeExtension } from '@x402/extensions/builder-code';
 import type { PaymentRequired } from '@x402/core/types';
 import type { SessionFile } from './session-present';
 import type { TenjinSigner, WalletProvider } from './wallet/provider';
@@ -78,6 +79,7 @@ export interface PaymentRequiredFixture {
 
 export function buildPaymentRequired(
   over: Partial<PaymentRequired['accepts'][number]> = {},
+  overTop: Partial<Omit<PaymentRequired, 'accepts'>> = {},
 ): PaymentRequiredFixture {
   const paymentRequired: PaymentRequired = {
     x402Version: 2,
@@ -98,8 +100,15 @@ export function buildPaymentRequired(
         ...over,
       },
     ],
+    ...overTop,
   };
   return { header: encodePaymentRequiredHeader(paymentRequired), paymentRequired };
+}
+
+/** A 402 that advertises the ERC-8021 builder-code extension the way Tenjin's own
+ *  paid routes do (app code `a` declared server-side, schema attached). */
+export function withBuilderCode(appCode = 'bc_kc0altv3'): Partial<PaymentRequired> {
+  return { extensions: { 'builder-code': declareBuilderCodeExtension(appCode) } };
 }
 
 export interface ReadBodyFixture {

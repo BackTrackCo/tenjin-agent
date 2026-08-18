@@ -1,5 +1,6 @@
 import { x402Client, x402HTTPClient } from '@x402/core/client';
 import { ExactEvmScheme } from '@x402/evm';
+import { BuilderCodeClientExtension } from '@x402/extensions/builder-code';
 import type { ClientEvmSigner } from '@x402/evm';
 import type { PaymentRequired } from '@x402/core/types';
 import type { TypedDataDefinition } from 'viem';
@@ -54,6 +55,18 @@ const ALLOWED_USDC_BY_NETWORK: Record<string, string> = {
   'eip155:84532': '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
 };
 
+/**
+ * Tenjin's registered ERC-8021 builder code, claimed here as the client service
+ * code (`s`). One value, not a CLI-specific second code: Base registers one code
+ * per account, and Schema 2 already separates the roles structurally, so a
+ * payment this CLI brokers to Tenjin carries the code in BOTH `a` (seller) and
+ * `s` (client) while a payment to any other seller carries it only in `s`. It
+ * names the client, never the user, and is public by construction (it lands in
+ * settlement calldata). Constant, not configurable: a per-install override
+ * would make the code meaningless as a client identity.
+ */
+export const TENJIN_CLI_BUILDER_CODE = 'bc_kc0altv3';
+
 export async function buildExactPayment(
   paymentRequired: PaymentRequired,
   signer: TenjinSigner,
@@ -100,11 +113,17 @@ export async function buildExactPayment(
 
   const core = new x402Client();
   core.register(requirement.network, new ExactEvmScheme(toClientSigner(signer)));
+  // The SDK fires this hook only for sellers whose 402 advertises `builder-code`,
+  // so a seller that never declared the extension still gets an extension-free
+  // payload. That gating is why attribution stays spec-clean; hand-setting
+  // `payload.extensions` here would stuff the key onto sellers who never asked.
+  core.registerExtension(new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE));
   const http = new x402HTTPClient(core);
 
   // Sign EXACTLY the requirement the price check ran against: pass a single-accept
   // challenge so createPaymentPayload cannot re-select a different (e.g. costlier)
-  // accepts entry between the check and the signature.
+  // accepts entry between the check and the signature. Narrow `accepts` only: the
+  // spread must carry `extensions` through, or the builder-code hook never fires.
   const bound: PaymentRequired = { ...paymentRequired, accepts: [requirement] };
 
   let headers: Record<string, string>;
