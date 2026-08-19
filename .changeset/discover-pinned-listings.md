@@ -15,13 +15,12 @@ browse-everything. An endpoint the sweep also lists renders once, in the pinned
 block, carrying the registry's live price. The JSON envelope gains an additive
 `pinned` array with a `kind` field; every existing key is unchanged.
 
-The curated `ecosystem` kind ships empty. Curation is endorsement, so an entry
-is added only once an operator has vetted the seller and confirmed a configured
-registry lists it. Nothing in the block is probed and nothing in it reaches
+The curated `ecosystem` kind ships empty. An entry is added only once a reviewer
+has confirmed a configured registry currently lists the endpoint. Nothing in the block is probed and nothing in it reaches
 `bazaar-listings.json`, the pay lane's evidence store: a pin no registry lists
 still refuses as unlisted at pay time.
 
 `docs/ecosystem.md` (linked from the README) documents how third parties list
-themselves, by pull request: an open Ecosystem directory listing, and the
-curated VIP pins as a stricter, separately reviewed tier with registry evidence
-required.
+themselves, by pull request. Both tiers are entered and reviewed the same way; a
+VIP entry additionally ships inside the CLI as a discover pin, which is why it
+must carry reproducible registry evidence.

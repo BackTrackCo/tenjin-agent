@@ -143,8 +143,8 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
 
 /**
  * One pinned row. The label is the whole honesty of this block: `first-party`
- * says whose endpoint it is, and the VIP label says curated is not vouched-for.
- * A price appears only when the sweep supplied one, because nothing here probes.
+ * says whose endpoint it is, and the VIP label says curated means reviewed, not
+ * guaranteed. A price appears only when the sweep supplied one: nothing probes.
  */
 function pinnedLine(pin: PinnedListing, listed: RegistryResource | undefined): string {
   const label =

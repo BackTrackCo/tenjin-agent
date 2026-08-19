@@ -332,10 +332,11 @@ never authentication, and it decides no entitlement, payment, or spend.
 ## Ecosystem
 
 Building on Tenjin, or selling an x402 endpoint agents should find? List
-yourself by opening a pull request. There are two tiers: **Ecosystem** is an open
-directory listing, and **VIP** is the curated set `tenjin discover` pins ahead of
-the registry sweep, which is an endorsement and has a higher bar. Both flows, and
-what a listing PR must include, are in
+yourself by opening a pull request. There are two tiers, both entered the same
+way and reviewed the same way: an **Ecosystem** row lists your project in that
+file, and a **VIP** entry additionally ships inside the CLI as a pin `tenjin
+discover` prints ahead of the registry sweep, which is why it carries an extra
+bar. Both flows, and what a listing PR must include, are in
 [docs/ecosystem.md](./docs/ecosystem.md).
 
 ## Developing

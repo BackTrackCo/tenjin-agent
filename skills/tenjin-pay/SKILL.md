@@ -42,9 +42,9 @@ Results open with a pinned block (`pinned` in JSON, printed above the sweep),
 which a query filters the same way it filters the sweep. Each entry declares its
 `kind`: `first-party` is a paid endpoint of the deployment you are configured
 against, and `ecosystem` (labeled "VIP (curated, quality not guaranteed)") is a
-seller the CLI's authors curated. Curated is not vouched for, and a pin is not a
-quote: nothing in the block is probed, so a price appears only when a registry
-listed that endpoint too. Pins buy no shortcut at pay time either, so a curated
+seller the CLI's authors reviewed and pinned. Curated means reviewed, not
+guaranteed, and a pin is not a quote: nothing in the block is probed, so a price
+appears only when a registry listed that endpoint too. Pins buy no shortcut at pay time either, so a curated
 seller no registry lists refuses exactly like an uncurated one.
 
 Discovery is also pay-time evidence: `pay` verifies a non-Tenjin 402 against

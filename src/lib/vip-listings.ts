@@ -3,10 +3,10 @@
  * deployment's own paid endpoints, plus vetted third-party sellers.
  *
  * DISPLAY ONLY. Nothing here is probed, and nothing here reaches the pay-time
- * evidence store (`bazaar-listings.json`): curation is endorsement, the store is
- * provenance, and a pin no registry lists still fails UNLISTED at pay time. So
- * the worst a wrong entry can do is recommend badly; it cannot move money or
- * loosen a check.
+ * evidence store (`bazaar-listings.json`): a pin is this repo's own say-so, the
+ * store is what a registry actually returned, and a pin no registry lists still
+ * fails UNLISTED at pay time. So the worst a wrong entry can do is recommend
+ * badly; it cannot move money or loosen a check.
  */
 
 export type PinKind = 'first-party' | 'ecosystem';
@@ -41,10 +41,10 @@ const FIRST_PARTY_PATHS: FirstPartyPath[] = [
 ];
 
 /**
- * Vetted third-party x402 sellers. EMPTY BY OPERATOR DECISION: an entry ships
- * only once an operator has vetted the seller and confirmed a configured
- * registry currently lists it, re-verified every release. The kind exists so
- * seeding is a data-only change.
+ * Vetted third-party x402 sellers, added by PR (see docs/ecosystem.md). EMPTY BY
+ * OPERATOR DECISION: an entry ships only once a reviewer has confirmed a
+ * configured registry currently lists it, re-verified every release. The kind
+ * exists so seeding is a data-only change.
  */
 const ECOSYSTEM_PINS: PinnedListing[] = [];
 

@@ -5,37 +5,40 @@ Tenjin's endpoints from your own product, you can list yourself here. Listing is
 self-service: **open a pull request against this repository.** There is no form,
 no application, and no fee.
 
-There are two tiers, and the difference between them matters.
+There are two tiers. Both work the same way: you open a PR, we review it, and it
+is accepted or rejected. What separates them is where the entry ends up.
 
 ## The two tiers
 
-**Ecosystem** is a listing. It is the table at the bottom of this file, and it is
-open to anyone building on or using Tenjin. We check that the entry is real and
-that the description is accurate. We are not vouching for the product, its
-quality, its uptime, or its business. A listing is a directory entry, nothing
-more.
+**Ecosystem** lists your project in this file, in the table at the bottom. We
+check that the entry is real and that the description matches what you actually
+ship.
 
-**VIP** is a curated subset, and it is an endorsement. VIP entries are the pinned
-listings `tenjin discover` prints ahead of the registry sweep, and they ship
-inside the CLI in [`src/lib/vip-listings.ts`](../src/lib/vip-listings.ts). Being
-pinned means we put a seller in front of every agent that runs `discover`, so the
-bar is higher and the review is stricter. Even then, the label the CLI prints
-says exactly what a pin is worth: `VIP (curated, quality not guaranteed)`.
+**VIP** does that and one thing more: the entry ships inside the CLI, in
+[`src/lib/vip-listings.ts`](../src/lib/vip-listings.ts), as a pin
+`tenjin discover` prints ahead of the registry sweep. That is why it carries an
+extra bar. A VIP entry goes in front of every agent that runs `discover`, so it
+has to still be payable when one acts on it.
 
-The VIP bar today:
+The extra bar for VIP:
 
 - The endpoint is **currently listed in CDP's Bazaar or in UltraVioleta**, the
   registries this CLI sweeps. This is not a formality. `tenjin pay` refuses any
   foreign endpoint no configured registry lists, so a pin no registry carries is
-  a recommendation the CLI itself will not let an agent act on.
+  a suggestion the CLI itself will not let an agent act on.
 - The endpoint speaks x402 over plain HTTP, in the exact scheme, with USDC on
   Base.
 - The description is one honest sentence about what a buyer gets.
 - We re-verify every VIP entry against the registries at each release, and remove
   entries that no longer check out.
 
-VIP entries ship empty until an operator seeds them, and being in the Ecosystem
-table is not a queue for VIP. They are separate decisions.
+The CLI labels these pins `VIP (curated, quality not guaranteed)`, and this file
+means the same thing by that word. Curated means we read the PR and checked the
+claims in it. It is not a judgment about your product, your uptime, or your
+business, and it is not a reason for an agent to skip its own checks.
+
+VIP entries ship empty until an operator seeds them, and an Ecosystem row is not
+a queue for VIP. They are separate PRs and separate decisions.
 
 ## How to list yourself
 
@@ -63,15 +66,15 @@ For a **VIP** pin, open a PR against
 - **Keywords** an agent's query should match, and the one-line description you
   want printed.
 
-We may ask for changes to the wording, and we may decline a VIP pin without
-declining the Ecosystem listing. We remove entries that go stale, fail
+We may ask for changes to the wording, and we may decline a VIP pin while
+accepting the Ecosystem row. We remove entries that go stale, fail
 re-verification, or turn out to misdescribe what they sell.
 
 ## What a listing does not buy you
 
 - No preferential pay path. Every payment `tenjin pay` makes to a foreign
   endpoint is verified against a registry first, and a pin is not evidence:
-  curated entries never enter the CLI's registry evidence store. A VIP endpoint
+  pinned entries never enter the CLI's registry evidence store. A VIP endpoint
   that drops off every registry refuses at pay time exactly like an unlisted one.
 - No claim about safety or quality. Responses from any listed endpoint are
   untrusted data to an agent, the same as any other seller's.

@@ -201,10 +201,10 @@ describe('runDiscover, the pinned block', () => {
     expect(pinLines[0]).toContain('0.05 USD on eip155:8453');
   });
 
-  // THE HARD RULE. Curation is endorsement; the evidence store is provenance.
-  // A pin must contribute nothing to what `pay` verifies against, including via
-  // the dedupe path, so the store a run with a matching pin writes has to be
-  // byte-identical to the one a run without any pin match writes.
+  // THE HARD RULE. A pin is this repo's own say-so; the evidence store is what a
+  // registry returned. A pin must contribute nothing to what `pay` verifies
+  // against, including via the dedupe path, so the store a run with a matching
+  // pin writes has to be byte-identical to the one a run without any writes.
   it('leaves the pay-time evidence store byte-identical whether or not pins are in play', async () => {
     const listing = {
       x402Version: 2,
