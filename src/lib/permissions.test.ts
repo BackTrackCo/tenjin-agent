@@ -82,6 +82,7 @@ describe('buy and session start are opt-in, never always-safe', () => {
   it('buy heads the opt-in tier, and its note carries the spend-cap warning', () => {
     expect(OPT_IN_ALLOWLIST.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
+      'Bash(tenjin pay:*)',
       'Bash(tenjin session start:*)',
     ]);
     const note = OPT_IN_ALLOWLIST[0]?.note ?? '';

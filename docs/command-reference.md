@@ -144,6 +144,37 @@ Mints a read-scoped session key so `tenjin read` can recover pieces you already 
 | ----------------- | ------ | ------------------------------------------------- |
 | `--scope <scope>` | `read` | Session scope. This version only supports `read`. |
 
+## Paying any x402 endpoint
+
+### `tenjin pay <url>`
+
+The standard x402 client verb, for ANY paid endpoint rather than marketplace
+pieces: one probe, a 2xx delivers free, a 402 pays (exact scheme, USDC on Base
+only) under the same spend policy, price cap, and confirm gates as `buy`, and
+retries once. When the 402 advertises the standard sign-in-with-x extension, an
+entitlement re-check runs first with a signature bound to the TARGET origin, so
+something this wallet already bought re-delivers free. There is deliberately no
+library and no dedupe: every paid call pays, so always pass `--max-price` (a
+hard cap `--yes` cannot bypass). Flags: `-X GET|POST`, `-d '<json-body>'`
+(implies POST), `--max-price <usd>`, `--yes`, `--print-body`.
+
+The configured base URL is always payable. Any other https origin is the
+Bazaar lane: it needs the `bazaarPay` config toggle on AND a configured
+registry listing whose terms the live 402 does not exceed (checked against the
+local `discover` cache first, then live); a mismatch refuses with
+`REGISTRY_MISMATCH` before anything is signed, and unreachable registries fail
+the lane closed. While the toggle is on, the optional `tenjin-pay` skill is
+installed beside the others; turning it off removes the skill.
+
+### `tenjin discover [query]`
+
+List (no query) or search the configured x402 discovery registries
+(`bazaarRegistries`; defaults to CDP's Bazaar, UltraVioleta, and PayAI's
+facilitator). Free, keyless, touches no wallet, and works with the toggle off. Listings are
+settlement-derived and unvetted; registries that did not answer are reported so
+a partial sweep never reads as a complete one. The sweep is stored (24h) as the
+pay lane's registry evidence.
+
 ## Reporting outcomes
 
 ### `tenjin outcome`

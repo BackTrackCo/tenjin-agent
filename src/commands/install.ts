@@ -11,7 +11,8 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
 import type { SkillInstallStatus } from '../lib/skill-writer';
-import { resolveSkillsSource, SKILL_NAMES } from '../lib/skills-source';
+import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
+import { placeOptionalSkill } from '../lib/skill-placement';
 import {
   CLI_SKILL_NAMES,
   HARNESS_TARGETS,
@@ -32,7 +33,12 @@ import {
   parseSearchHookModeFlag,
 } from '../lib/config';
 import type { PublishMode, SearchHookMode } from '../lib/config';
-import { persistInstallHarness, persistPublishMode, persistSearchHookMode } from './config';
+import {
+  persistBazaarPay,
+  persistInstallHarness,
+  persistPublishMode,
+  persistSearchHookMode,
+} from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks, isNoWalletCheck } from './doctor';
 import type { DoctorDeps, DoctorChecks } from './doctor';
@@ -232,6 +238,8 @@ export interface InstallDeps {
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
   /** Decision 3: the search-hook mode select; defaults to the clack list. */
   promptSearchHooks?: () => Promise<SearchHookMode | null>;
+  /** Decision 5: the Bazaar pay lane opt-in; defaults to the clack confirm (default no). */
+  confirmBazaarPay?: (question: string) => Promise<boolean>;
   /** Decision 4: "Create a wallet now?"; defaults to the clack confirm (default yes). */
   confirmWallet?: ConfirmFn;
   /** Prompt-sequence chrome. Seams so tests never load the renderer. */
@@ -260,10 +268,10 @@ export interface InstallDeps {
 
 /**
  * `tenjin install`: detect the installed harness(es), copy the packaged skills
- * into each one's skills directory, wire the AGENTS.md pointer, ask AT MOST FOUR
- * questions (publishing, harness permissions, search hooks, wallet), then run the
- * doctor checks over the machine those answers just produced and print a short
- * summary. Everything that is not one of those four decisions is display: the
+ * into each one's skills directory, wire the AGENTS.md pointer, ask AT MOST FIVE
+ * questions (publishing, harness permissions, search hooks, wallet, the Bazaar pay
+ * lane), then run the doctor checks over the machine those answers just produced
+ * and print a short summary. Everything that is not one of those decisions is display: the
  * security reference material lives in docs/agent-permissions.md, not in the
  * middle of a setup flow.
  *
@@ -410,6 +418,7 @@ async function installBody(
   // ENOENT/ENOTEMPTY renames), and 24 concurrent runs pass without a lock. The
   // self-heal is the other writer, and it writes these same bytes to these same
   // paths through the same writer.
+  const rawConfig = await loadRawConfig(ctx.dataDir);
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
     harnesses.push(await applyPlan(plan, skillsSource, dryRun));
@@ -437,7 +446,7 @@ async function installBody(
   // `install` far more often than they would run a cleanup command.
   const pointerCleanup = dryRun ? [] : await removeMarkerLines(home);
 
-  // The four decisions, in order. Each one is skipped (with its own recorded
+  // The five decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
   const publishMode = await underDataDir(ctx.dataDir, () =>
@@ -494,8 +503,35 @@ async function installBody(
   const wallet = await underDataDir(ctx.dataDir, () =>
     resolveWallet(ctx, deps, walletSkip(dryRun, noWallet), canPrompt),
   );
+  // Decision five, the Bazaar pay lane (plan: tenjin-notes cli-x402-pay). Asked
+  // once: a key already in the config (either answer) is remembered and never
+  // re-asked, and a headless run never enables it, because paying non-Tenjin
+  // sellers is an opt-in only a human makes.
+  const bazaarPay = await underDataDir(ctx.dataDir, () =>
+    resolveBazaarPay(ctx, deps, dryRun, canPrompt, rawConfig.bazaarPay),
+  );
+  // The Bazaar lane's teaching lives in its own OPTIONAL skill, and PRESENCE is
+  // the whole mechanism: the tenjin-pay skill is on disk exactly while the
+  // toggle is on, so an agent is never taught a lane the operator turned off.
+  // Placed after the decisions so this run's own answer is what lands; the
+  // doctor snapshot below then sees the final state. Per-plan best-effort like
+  // the writer loop above: a placement failure is doctor's to report.
+  if (!dryRun) {
+    for (const plan of plans) {
+      try {
+        await placeOptionalSkill(
+          OPTIONAL_PAY_SKILL,
+          plan.skillsDir,
+          skillsSource,
+          bazaarPay.enabled,
+        );
+      } catch {
+        // The skills check in the embedded doctor run reports what remains.
+      }
+    }
+  }
 
-  // AFTER all four decisions, never before (#101). The snapshot used to be taken
+  // AFTER every decision, never before (#101). The snapshot used to be taken
   // straight after the skills were written, so a run that created a wallet
   // reported "No wallet" in both the walkthrough and `data.doctor` — the checks
   // described a machine that had stopped existing three steps earlier. Collecting
@@ -525,6 +561,7 @@ async function installBody(
     pointerCleanup,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
+    bazaarPay,
     // Shipped with the install rather than left for the operator to discover after
     // their first auto-mode denial (#33). Static constants, no config key: see
     // lib/permissions.ts for why this is deliberately not operator-editable state.
@@ -1040,6 +1077,37 @@ async function defaultCreateWallet(
 /** The shared confirm, defaulting to YES (setup ergonomics); cancel reads as no. */
 function defaultConfirm(label: string): Promise<boolean> {
   return confirmChoice(label, true);
+}
+
+export const BAZAAR_QUESTION =
+  'Enable the Bazaar pay lane? x402 lets this wallet pay HTTP endpoints that answer with a priced 402, and the Bazaar (https://docs.cdp.coinbase.com/x402/bazaar) is the public catalog of them. When on, `tenjin pay` may pay Bazaar-listed non-Tenjin endpoints under your spend policy. More: https://x402.org';
+
+interface BazaarPayOutcome {
+  enabled: boolean;
+  /** kept = the config already answered (never re-asked); not-asked = headless or dry run. */
+  status: 'kept' | 'enabled' | 'declined' | 'not-asked';
+}
+
+/**
+ * The one decision that is remembered in BOTH directions: a prompted yes or no
+ * is persisted (`bazaarPay: true|false`), so the question is asked at most once
+ * per machine. A headless run persists nothing, leaving the question for the
+ * first interactive install. Default no: this gate opens spending at sellers
+ * Tenjin does not operate.
+ */
+async function resolveBazaarPay(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  dryRun: boolean,
+  canPrompt: boolean,
+  existing: boolean | undefined,
+): Promise<BazaarPayOutcome> {
+  if (existing !== undefined) return { enabled: existing, status: 'kept' };
+  if (dryRun || !canPrompt) return { enabled: false, status: 'not-asked' };
+  const confirm = deps.confirmBazaarPay ?? ((label: string) => confirmChoice(label, false));
+  const yes = await confirm(BAZAAR_QUESTION);
+  await persistBazaarPay(ctx.dataDir, yes);
+  return { enabled: yes, status: yes ? 'enabled' : 'declined' };
 }
 
 /**

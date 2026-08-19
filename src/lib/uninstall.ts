@@ -34,6 +34,7 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
+import { OPTIONAL_SKILL_NAMES } from './skills-source';
 
 /**
  * The reverse of `install`, and ONLY of `install`.
@@ -330,7 +331,7 @@ export async function removeSkills(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string[]> {
   const removed: string[] = [];
-  const names = [...CLI_SKILL_NAMES, HOSTED_SKILL_NAME];
+  const names = [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES, HOSTED_SKILL_NAME];
   // Lenient, like `skill-heal`: uninstall is a cleanup command, so a stray
   // relative HERMES_HOME must not stop it. Resolving it at all is what puts the
   // Hermes skills directory in scope; `skillsDirsFor` requires the argument

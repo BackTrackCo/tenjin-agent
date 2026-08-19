@@ -115,6 +115,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   baseUrl: 'Tenjin API base URL',
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
+  bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
+  bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
   'hooks.searchMode':
@@ -208,6 +210,11 @@ export async function runConfigGet(
  * file — never materializing defaults for keys the user did not set, so
  * provenance stays truthful. The written key now reads `file`.
  */
+export interface ConfigSetDeps {
+  /** Seam for the tenjin-pay skill placement (tests inject homeDir/source). */
+  placeSkill?: { io: CommandContext['io']; homeDir?: string; skillsSourceDir?: string };
+}
+
 export async function runConfigSet(
   { key, value }: { key: string; value: string },
   ctx: CommandContext,
@@ -219,6 +226,19 @@ export async function runConfigSet(
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
+  // The Bazaar lane's teaching is an OPTIONAL skill whose presence follows
+  // this toggle: flipping it places or removes the tenjin-pay skill in every
+  // wired skills directory, immediately (a config set is an operator act, the
+  // same trust class as install). Best-effort AFTER the persist: the set
+  // itself already succeeded, and skill drift is doctor's to report.
+  if (configKey === 'bazaarPay') {
+    try {
+      const { syncBazaarSkill } = await import('../lib/skill-placement');
+      await syncBazaarSkill(stored === true, deps.placeSkill ?? { io: ctx.io });
+    } catch {
+      // `tenjin doctor` reports a presence that does not match the toggle.
+    }
+  }
   const entry = renderSetting(configKey, stored, 'file');
   return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
@@ -496,6 +516,12 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
  * Persist `hooks.searchMode` through the same locked merge-write, for `install`'s
  * hook decision. The mode is already a validated SearchHookMode.
  */
+/** install's Bazaar-lane decision writer; the same locked read-modify-write every
+ *  `config set` uses, so a concurrent set never loses a sibling key. */
+export async function persistBazaarPay(dir: string, enabled: boolean): Promise<void> {
+  await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
+}
+
 export async function persistSearchHookMode(dir: string, mode: SearchHookMode): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,
@@ -604,15 +630,31 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'rpcUrl':
       return parseHttpUrl(value);
     case 'evalCohort':
+    case 'bazaarPay':
       return parseBoolean(value);
+    case 'bazaarRegistries':
+      return parseRegistryList(value);
   }
 }
 
+/** "" clears to []; comma-split, each entry an absolute http(s) URL. */
+function parseRegistryList(value: string): string[] {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => parseHttpUrl(entry));
+}
+
+// on/off ride along with true/false because that is how the CLI's own refusal
+// texts coach these keys (`tenjin config set bazaarPay on`), and the hooks keys
+// already speak on/off; a coached command that exits USAGE teaches an agent the
+// remediation is broken.
 function parseBoolean(value: string): boolean {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
+  if (value === 'true' || value === 'on') return true;
+  if (value === 'false' || value === 'off') return false;
   throw new CliError('USAGE', `Invalid boolean value: ${JSON.stringify(value)}`, {
-    fix: 'Use "true" or "false".',
+    fix: 'Use "on" or "off" (or "true"/"false").',
   });
 }
 

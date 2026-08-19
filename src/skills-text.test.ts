@@ -2,7 +2,11 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { resolveSkillsSource, SHIPPED_SKILL_FILES, SKILL_NAMES } from './lib/skills-source';
+import {
+  PACKAGED_SKILL_NAMES,
+  resolveSkillsSource,
+  SHIPPED_SKILL_FILES,
+} from './lib/skills-source';
 import {
   PERMISSIONS_QUESTION,
   PUBLISH_MODE_CHOICES,
@@ -174,7 +178,7 @@ describe('send and the other money/state verbs stay out of the recommended allow
    * `tenjin` is the vendored hosted mirror, not ours to police: it is fetched
    * verbatim from tenjin.blog and `skill-drift` owns it.
    */
-  const SKILL_FILES: ReadonlyArray<readonly [string, string]> = SKILL_NAMES.filter(
+  const SKILL_FILES: ReadonlyArray<readonly [string, string]> = PACKAGED_SKILL_NAMES.filter(
     (n) => n !== 'tenjin',
   ).flatMap((name) => SHIPPED_SKILL_FILES[name].map((rel) => [name, rel] as const));
 

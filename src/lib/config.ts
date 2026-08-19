@@ -175,6 +175,17 @@ export const ConfigSchema = z.object({
    * 90 days. Off by default; no query text is retained server-side without it.
    */
   evalCohort: z.boolean(),
+  /**
+   * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
+   * x402 endpoint, provided a configured registry lists that exact resource and
+   * the live 402 matches the listed deal. Off by default; `install` asks once.
+   * The lane's teaching is the OPTIONAL tenjin-pay skill, present on disk
+   * exactly while this is on (lib/skill-placement).
+   */
+  bazaarPay: z.boolean(),
+  /** x402 discovery registries (facilitator base URLs) `discover` queries and
+   *  the Bazaar pay lane verifies against. */
+  bazaarRegistries: z.array(z.url()),
   publish: PublishConfigSchema,
   install: InstallConfigSchema,
   hooks: HooksConfigSchema,
@@ -211,6 +222,22 @@ export type PartialConfig = z.infer<typeof RawConfigSchema>;
  */
 export const SEND_MAX_UNSET = 'unset';
 
+/**
+ * Registries verified keyless (CDP/UV on 2026-08-14, PayAI on 2026-08-18): all
+ * answer GET /discovery/resources with no credential in the Bazaar envelope
+ * the sweep parses. CDP's Bazaar is settlement-derived (it indexes what its
+ * facilitator settles, Tenjin's endpoints included); UltraVioleta is the
+ * registry Tenjin also announces to; PayAI's facilitator is settlement-derived
+ * like CDP's (26k+ listings at verification). PayAI has no /discovery/search
+ * and ignores payTo filters, the same shapes UV and CDP already exhibit, which
+ * the query sweep's per-registry errors and the stored-sweep evidence cover.
+ */
+export const DEFAULT_BAZAAR_REGISTRIES = [
+  'https://api.cdp.coinbase.com/platform/v2/x402',
+  'https://facilitator.ultravioletadao.xyz',
+  'https://facilitator.payai.network',
+];
+
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',
@@ -226,6 +253,8 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
+  bazaarPay: false,
+  bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000' },
   install: { harness: [] },
   // `auto` is the default because the hook exists to be useful without being
@@ -357,6 +386,8 @@ export interface EffectiveSettings {
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
+  bazaarPay: ResolvedSetting<boolean>;
+  bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
@@ -396,6 +427,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
+    bazaarPay: fileOrDefault('bazaarPay', config),
+    bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),

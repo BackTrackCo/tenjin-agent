@@ -79,7 +79,12 @@ import {
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import type { PublishMode } from '../lib/config';
 import type { ExecFn } from '../lib/wallet/passphrase';
-import { resolveSkillsSource, SHIPPED_SKILL_FILES, SKILL_NAMES } from '../lib/skills-source';
+import {
+  PACKAGED_SKILL_NAMES,
+  resolveSkillsSource,
+  SHIPPED_SKILL_FILES,
+  SKILL_NAMES,
+} from '../lib/skills-source';
 import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import {
   claudeSettingsPath,
@@ -97,6 +102,7 @@ import type { CommandContext, GlobalFlags } from '../context';
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+
 const MARKER = 'tenjin-cli:skills';
 /** The full marker as it appears in the undo line the walkthrough prints. */
 const MARKER_COMMENT = `<!-- ${MARKER} -->`;
@@ -195,6 +201,7 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // decision-specific tests override them.
     walletExists: async () => false,
     confirmWallet: async () => false,
+    confirmBazaarPay: async () => false,
     // Stubbed by default so the ~140 tests that are not about the wallet do not
     // each pay for a real scrypt key derivation. The wallet tests below opt into
     // the real creator with `realWalletCreate()`, which still goes through the
@@ -242,7 +249,13 @@ type Harnesses = Array<{
     activation: { status: string };
   };
 }>;
-type Data = { dryRun: boolean; skillsSource: string; harnesses: Harnesses; doctor: unknown };
+type Data = {
+  dryRun: boolean;
+  skillsSource: string;
+  harnesses: Harnesses;
+  doctor: unknown;
+  bazaarPay: { enabled: boolean; status: string };
+};
 
 const asData = (d: unknown) => d as Data;
 
@@ -397,6 +410,79 @@ describe('runInstall: dry run', () => {
     expect(existsSync(join(home, '.claude', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'skills'))).toBe(false);
     expect(existsSync(join(home, '.agents', 'AGENTS.md'))).toBe(false);
+  });
+});
+
+describe('runInstall: the bazaarPay decision', () => {
+  const payPath = () => join(home, '.claude', 'skills', 'tenjin-pay', 'SKILL.md');
+
+  it('a headless run never enables it and persists nothing (asked later)', async () => {
+    const { data: out } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(asData(out).bazaarPay).toEqual({ enabled: false, status: 'not-asked' });
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
+    expect((JSON.parse(raw) as { bazaarPay?: boolean }).bazaarPay).toBeUndefined();
+    // The lane's teaching is presence-gated: off means the skill is not there.
+    expect(existsSync(payPath())).toBe(false);
+  });
+
+  it('the tenjin-pay skill is present exactly while the toggle is on', async () => {
+    await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: async () => true }),
+    );
+    expect(await readFile(payPath(), 'utf8')).toContain('name: tenjin-pay');
+
+    // The next install honors the persisted decision without re-asking...
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(existsSync(payPath())).toBe(true);
+
+    // ...and an install after the operator turned it off removes our copy.
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({
+        ...JSON.parse(await readFile(join(data, 'config.json'), 'utf8')),
+        bazaarPay: false,
+      }),
+    );
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(existsSync(payPath())).toBe(false);
+    expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
+  });
+
+  it('an interactive yes persists true; the next install keeps it without re-asking', async () => {
+    const confirm = vi.fn(async () => true);
+    const first = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(first.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const second = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(second.data).bazaarPay).toEqual({ enabled: true, status: 'kept' });
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('an interactive no is remembered too', async () => {
+    const confirm = vi.fn(async () => false);
+    const first = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(first.data).bazaarPay).toEqual({ enabled: false, status: 'declined' });
+    const second = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+    );
+    expect(asData(second.data).bazaarPay).toEqual({ enabled: false, status: 'kept' });
+    expect(confirm).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1239,6 +1325,7 @@ describe('runInstall: interactive walkthrough', () => {
     );
     expect(d.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
+      'Bash(tenjin pay:*)',
       'Bash(tenjin session start:*)',
     ]);
   });
@@ -2280,10 +2367,10 @@ describe('runInstall: permissions decision', () => {
   });
 });
 
-// --- The four decisions, in order, and nothing else -------------------------------
+// --- The five decisions, in order, and nothing else -------------------------------
 
-describe('runInstall: at most four questions', () => {
-  it('asks publishing, permissions, search hooks, then wallet, and stops there', async () => {
+describe('runInstall: at most five questions', () => {
+  it('asks publishing, permissions, search hooks, wallet, bazaarPay, and stops there', async () => {
     const asked: string[] = [];
     await runInstall(
       { harness: ['claude'] },
@@ -2307,9 +2394,13 @@ describe('runInstall: at most four questions', () => {
           asked.push('wallet');
           return false;
         },
+        confirmBazaarPay: async () => {
+          asked.push('bazaar-pay');
+          return false;
+        },
       }),
     );
-    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet']);
+    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet', 'bazaar-pay']);
   });
 
   it('asks nothing at all on a machine run', async () => {
@@ -2333,6 +2424,10 @@ describe('runInstall: at most four questions', () => {
         },
         confirmWallet: async () => {
           asked.push('wallet');
+          return true;
+        },
+        confirmBazaarPay: async () => {
+          asked.push('bazaar-pay');
           return true;
         },
       }),
@@ -2512,7 +2607,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
     await mkdir(join(dir, 'references'), { recursive: true });
     await writeFile(
       join(dir, 'SKILL.md'),
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
     );
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
@@ -2711,8 +2806,8 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    expect(await readFile(join(real, 'SKILL.md'))).toEqual(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    expect(await readFile(join(real, 'SKILL.md'), 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
     );
     expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2749,8 +2844,8 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
-    expect(await readFile(managed)).toEqual(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md')),
+    expect(await readFile(managed, 'utf8')).toBe(
+      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
     );
   });
 
@@ -3092,8 +3187,10 @@ describe('the packaged skills ship a DECLARED file set, which is what uninstall 
   // `uninstall` removes what this list names, on a machine where the packaged
   // source may be long gone. A reference file nobody declares is litter no
   // uninstall can reclaim, so the declaration is pinned against the real tree.
+  // PACKAGED, not required-only: the gated tenjin-pay directory is written to
+  // the operator's disk like any other, so it is reclaimed like any other.
   it('declares exactly the files each skill actually ships', async () => {
-    for (const name of SKILL_NAMES) {
+    for (const name of PACKAGED_SKILL_NAMES) {
       const entries = await readdir(join(SKILLS_SRC, name), {
         recursive: true,
         withFileTypes: true,
@@ -3109,13 +3206,13 @@ describe('the packaged skills ship a DECLARED file set, which is what uninstall 
   });
 
   it('always ships SKILL.md first, the file that proves the directory is ours', () => {
-    for (const name of SKILL_NAMES) expect(SHIPPED_SKILL_FILES[name][0]).toBe('SKILL.md');
+    for (const name of PACKAGED_SKILL_NAMES) expect(SHIPPED_SKILL_FILES[name][0]).toBe('SKILL.md');
   });
 
   // Everything else in the tree is written in place beside the operator's own
   // files, so a shipped path may never climb out of its skill directory.
   it('declares no path that escapes its own skill directory', () => {
-    for (const name of SKILL_NAMES) {
+    for (const name of PACKAGED_SKILL_NAMES) {
       for (const rel of SHIPPED_SKILL_FILES[name]) {
         expect(rel.startsWith('/')).toBe(false);
         expect(rel.split('/')).not.toContain('..');

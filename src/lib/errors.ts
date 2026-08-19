@@ -55,6 +55,8 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   // broadcast: the post-decision failure class (4), like PAYMENT_FAILED.
   SEND_FAILED: 4,
   UPDATE_FAILED: 1,
+  // Refused BEFORE any signature existed: the Bazaar lane's fail-closed check.
+  REGISTRY_MISMATCH: 3,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {

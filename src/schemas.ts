@@ -54,6 +54,10 @@ export const ErrorCodeSchema = z.enum([
   // Exit 1, not the post-decision class: nothing is half-written that the
   // operator must reconcile, and the old build keeps running.
   'UPDATE_FAILED',
+  // `tenjin pay` Bazaar lane: the live 402 does not match what a configured
+  // registry publicly advertises for this resource (understood-but-refused, 3);
+  // nothing was signed and nothing was spent.
+  'REGISTRY_MISMATCH',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 

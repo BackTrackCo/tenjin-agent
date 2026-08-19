@@ -9,6 +9,7 @@ import {
   writeConfig,
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
+  DEFAULT_BAZAAR_REGISTRIES,
 } from './config';
 import { CliError } from './errors';
 
@@ -60,6 +61,19 @@ describe('CONFIG_DEFAULTS.sendMaxAmount placeholder', () => {
     // future caller reading the cap through loadConfig/fileOrDefault must get
     // "send disabled", not silently-uncapped 'none'.
     expect(CONFIG_DEFAULTS.sendMaxAmount).toBe('0');
+  });
+});
+
+describe('DEFAULT_BAZAAR_REGISTRIES', () => {
+  it('pins the verified default registries, in order', () => {
+    // Every entry here was verified keyless (GET /discovery/resources answers
+    // the Bazaar envelope with no credential) before joining the money path;
+    // an addition that skips that verification must fail here first.
+    expect(DEFAULT_BAZAAR_REGISTRIES).toEqual([
+      'https://api.cdp.coinbase.com/platform/v2/x402',
+      'https://facilitator.ultravioletadao.xyz',
+      'https://facilitator.payai.network',
+    ]);
   });
 });
 
