@@ -237,7 +237,7 @@ export type RegistryVerification =
  * (verified live: the Bazaar lists `/search`, callers pay `/search?query=...`).
  * An unparseable listing matches nothing.
  */
-function sameResourceUrl(listed: string, requested: string): boolean {
+export function sameResourceUrl(listed: string, requested: string): boolean {
   const identity = (u: string): string | null => {
     try {
       const parsed = new URL(u);

@@ -1,8 +1,11 @@
 import type { PaymentRequirements } from '@x402/core/types';
-import { saveSweepListings, sweepRegistries } from '../lib/bazaar';
+import { sameResourceUrl, saveSweepListings, sweepRegistries } from '../lib/bazaar';
+import type { RegistryResource } from '../lib/bazaar';
 import { formatUsdDisplay } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
+import { selectPins } from '../lib/vip-listings';
+import type { PinnedListing } from '../lib/vip-listings';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -16,6 +19,10 @@ import type { CommandContext, CommandResult } from '../context';
  * them is other people's content: rendered sanitized, never followed. MCP-type
  * listings are counted but not shown, because `tenjin pay` cannot speak to
  * them; nothing here implies this CLI can pay everything a registry lists.
+ *
+ * Ahead of that sweep sits the pinned block (lib/vip-listings): this
+ * deployment's own paid endpoints and any curated sellers. Pins are labeled for
+ * what they are, are never probed, and NEVER reach the pay-time evidence store.
  */
 
 /** Terminal rows; the machine envelope carries every swept resource. */
@@ -38,13 +45,29 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
   // against these stored listings, because a live per-URL registry lookup is not
   // reliable (see lib/bazaar). Best-effort: a store write failure loses cache,
   // never the sweep output.
+  //
+  // ONLY `sweep.resources` is ever passed here. Pins are computed below, after
+  // this call, so no amount of curation can become the evidence a payment is
+  // checked against.
   try {
     await saveSweepListings(ctx.dataDir, sweep.resources);
   } catch {
     // nothing: the sweep result still stands on its own
   }
 
-  const resources = sweep.resources.map((r) => ({
+  const pins = selectPins(settings.baseUrl, args.query);
+  // A pin the sweep also lists is rendered once, in the pinned block, carrying
+  // the registry's live terms. Identity is the pay lane's own rule, so the two
+  // can never disagree about what "the same endpoint" means.
+  const pinned = pins.map((pin) => ({
+    pin,
+    listed: sweep.resources.find((r) => sameResourceUrl(r.url, pin.url)),
+  }));
+  const unpinnedResources = sweep.resources.filter(
+    (r) => !pins.some((pin) => sameResourceUrl(r.url, pin.url)),
+  );
+
+  const resources = unpinnedResources.map((r) => ({
     url: r.url,
     registry: r.registry,
     ...(r.description !== undefined ? { description: r.description } : {}),
@@ -61,6 +84,26 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
   const data = {
     registries: settings.bazaarRegistries,
     ...(args.query !== undefined ? { query: args.query } : {}),
+    pinned: pinned.map(({ pin, listed }) => ({
+      url: pin.url,
+      kind: pin.kind,
+      description: pin.description,
+      keywords: pin.keywords,
+      // Terms appear only when a registry listed this endpoint. A pin is not
+      // itself a price quote: discover probes nothing.
+      ...(listed !== undefined
+        ? {
+            registry: listed.registry,
+            accepts: listed.accepts.map((a) => ({
+              scheme: a.scheme,
+              network: a.network,
+              asset: a.asset,
+              amount: a.amount,
+              payTo: a.payTo,
+            })),
+          }
+        : {}),
+    })),
     resources,
     skippedNonHttp: sweep.skippedNonHttp,
     // A registry that did not answer makes this sweep PARTIAL; saying so is what
@@ -75,13 +118,17 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
     );
   }
 
-  const humanLines = sweep.resources
-    .slice(0, HUMAN_ROWS)
-    .map((r) => `${sanitizeForTerminal(r.url)} ${priceTag(r.accepts)}${describe(r.description)}`);
-  if (sweep.resources.length > HUMAN_ROWS) {
-    humanLines.push(`… ${sweep.resources.length - HUMAN_ROWS} more in --json`);
+  const humanLines = pinned.map(({ pin, listed }) => pinnedLine(pin, listed));
+  if (humanLines.length > 0) humanLines.push('');
+  humanLines.push(
+    ...unpinnedResources
+      .slice(0, HUMAN_ROWS)
+      .map((r) => `${sanitizeForTerminal(r.url)} ${priceTag(r.accepts)}${describe(r.description)}`),
+  );
+  if (unpinnedResources.length > HUMAN_ROWS) {
+    humanLines.push(`… ${unpinnedResources.length - HUMAN_ROWS} more in --json`);
   }
-  if (sweep.resources.length === 0) {
+  if (unpinnedResources.length === 0) {
     humanLines.push(
       sweep.errors.length > 0
         ? 'No registry answered; nothing to show.'
@@ -92,6 +139,18 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
     humanLines.push(`(${sanitizeForTerminal(err.registry)} did not answer)`);
   }
   return { data, humanLines };
+}
+
+/**
+ * One pinned row. The label is the whole honesty of this block: `first-party`
+ * says whose endpoint it is, and the VIP label says curated means reviewed, not
+ * guaranteed. A price appears only when the sweep supplied one: nothing probes.
+ */
+function pinnedLine(pin: PinnedListing, listed: RegistryResource | undefined): string {
+  const label =
+    pin.kind === 'first-party' ? 'first-party' : 'VIP (curated, quality not guaranteed)';
+  const price = listed !== undefined ? ` ${priceTag(listed.accepts)}` : '';
+  return `${label}  ${sanitizeForTerminal(pin.url)}${price}${describe(pin.description)}`;
 }
 
 function priceTag(accepts: PaymentRequirements[]): string {
