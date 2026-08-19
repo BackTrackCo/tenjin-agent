@@ -18,7 +18,7 @@ Say which line to add and let the operator add it:
 
 ```
 Bash(tenjin search:*)
-Bash(tenjin fund:*)
+Bash(tenjin wallet fund:*)
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)

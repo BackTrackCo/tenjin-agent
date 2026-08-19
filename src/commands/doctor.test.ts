@@ -234,7 +234,7 @@ describe('runDoctor — passing outcomes', () => {
     });
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('warn');
-    expect(balance.fix).toContain('tenjin fund');
+    expect(balance.fix).toContain('tenjin wallet fund');
   });
 
   it('a positive balance is an ok check with dual-form amount', async () => {

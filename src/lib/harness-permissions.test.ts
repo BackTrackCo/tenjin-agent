@@ -189,7 +189,7 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
   it('is exactly the nine free-verb rules, in the README/doctor order', () => {
     expect([...FREE_VERB_RULES]).toEqual([
       'Bash(tenjin search:*)',
-      'Bash(tenjin fund:*)',
+      'Bash(tenjin wallet fund:*)',
       'Bash(tenjin inspect:*)',
       'Bash(tenjin read:*)',
       'Bash(tenjin outcome:*)',
@@ -376,9 +376,16 @@ describe('the publish rule is gated on the mode and nothing else', () => {
  */
 describe('retractModeGatedRules: the tightening direction has no preconditions', () => {
   it('retracts the pair even when the free tier is incomplete', async () => {
+    // Named off FREE_VERB_RULES, never spelled out: a literal here goes stale the
+    // day a free verb is renamed, and a filter that matches nothing leaves the
+    // tier complete, so the incomplete-tier premise disappears while the test
+    // still passes.
+    const dropped = FREE_VERB_RULES[1]!;
     await wireFreeVerbAllowlist(home, 'auto');
     const settings = await readSettings();
-    const allow = (allowOf(settings) as string[]).filter((r) => r !== 'Bash(tenjin fund:*)');
+    const allow = (allowOf(settings) as string[]).filter((r) => r !== dropped);
+    expect(allow).not.toContain(dropped);
+    expect(allow.length).toBe((allowOf(settings) as string[]).length - 1);
     await seedSettings({ ...settings, permissions: { allow } });
 
     const result = await retractModeGatedRules(home);
@@ -388,7 +395,7 @@ describe('retractModeGatedRules: the tightening direction has no preconditions',
     const after = allowOf(await readSettings());
     for (const rule of MODE_GATED_RULES) expect(after).not.toContain(rule);
     // And it took nothing else with it, nor put the missing free rule back.
-    expect(after).not.toContain('Bash(tenjin fund:*)');
+    expect(after).not.toContain(dropped);
     expect(after).toContain('Bash(tenjin search:*)');
   });
 
