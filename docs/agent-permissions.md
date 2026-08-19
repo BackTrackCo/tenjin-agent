@@ -6,7 +6,7 @@ denies the free verbs too, which breaks the whole marketplace loop: the skills
 forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
-behind which verbs are on that list, which two are separate opt-ins, and which are
+behind which verbs are on that list, which three are separate opt-ins, and which are
 never recommended at all, and it is where `tenjin install` and `tenjin doctor`
 send you. The [README](../README.md#permissions) carries the paste block and the
 three-tier summary.
@@ -156,9 +156,24 @@ tenjin config set sessionBudget 2.00
 The allowlist line itself never raises a spend cap. That is true, and it is not the
 same as saying the caps stop an allowlisted `buy`.
 
+## Opt-in: `tenjin pay`
+
+The generic x402 payment verb is its own opt-in, with everything above applying
+unchanged:
+
+```
+Bash(tenjin pay:*)
+```
+
+Two differences from `buy`. The destination set is wider: the configured base
+URL always, and with `bazaarPay` on, any registry-listed foreign seller. And
+there is no library dedupe: `pay` has no owned-content re-read, so a looping
+agent pays on every call, bounded only by `maxAutoSpend`, `sessionBudget`, and
+`--max-price`. Leave `bazaarPay` off unless you mean it.
+
 ## Opt-in: minting a session key
 
-Minting a session key is the **other** explicit opt-in. It spends nothing and
+Minting a session key is the **third** explicit opt-in. It spends nothing and
 cannot spend, but it opens the keystore:
 
 ```

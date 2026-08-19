@@ -770,6 +770,63 @@ describe('runDoctor — skill wiring', () => {
     expect(skills.detail).not.toContain('take precedence');
   });
 
+  // The optional tenjin-pay skill's presence must match the bazaarPay toggle:
+  // install and `config set bazaarPay` place/remove it best-effort and stay
+  // quiet on failure, so doctor is the one surface where the drift shows up.
+  describe('bazaarPay presence-vs-toggle drift', () => {
+    const wireCli = async (): Promise<void> => {
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) await writeSkill(name);
+    };
+
+    it('toggle on, skill missing: warns and coaches the re-sync', async () => {
+      await wireCli();
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ bazaarPay: true }));
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain('bazaarPay is on but the tenjin-pay skill is missing');
+      expect(skills.detail).toContain(claudeSkills());
+      expect(skills.fix).toContain('tenjin config set bazaarPay on');
+    });
+
+    it('toggle off, skill still present: warns that a refused lane is being taught', async () => {
+      await wireCli();
+      await writeSkill('tenjin-pay'); // no config: bazaarPay defaults to off
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain('bazaarPay is off but the tenjin-pay skill is still present');
+      expect(skills.fix).toContain('tenjin config set bazaarPay off');
+    });
+
+    it('toggle on with the skill present: ok', async () => {
+      await wireCli();
+      await writeSkill('tenjin-pay');
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ bazaarPay: true }));
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('ok');
+    });
+  });
+
   // Two directories in different states: the mixed case a developer with both
   // Claude Code and Codex actually hits, and the one a union across directories
   // renders as a self-contradiction.
@@ -1150,6 +1207,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     );
     expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
+      'Bash(tenjin pay:*)',
       'Bash(tenjin session start:*)',
     ]);
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');

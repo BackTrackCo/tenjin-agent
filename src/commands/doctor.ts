@@ -3,7 +3,11 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveSkillsSource } from '../lib/skills-source';
+import {
+  OPTIONAL_PAY_SKILL,
+  OPTIONAL_SKILL_NAMES,
+  resolveSkillsSource,
+} from '../lib/skills-source';
 import { CliError } from '../lib/errors';
 import {
   CLI_SKILL_NAMES,
@@ -186,6 +190,7 @@ export async function collectDoctorChecks(
       deps.homeDir ?? homedir(),
       deps.which ?? ((bin) => onPath(bin, env)),
       config.install?.harness ?? [],
+      settings.bazaarPay.value,
       deps.skillsSourceDir,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
@@ -448,6 +453,7 @@ async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
+  bazaarPay: boolean,
   skillsSourceDir?: string,
 ): Promise<BuiltCheck> {
   const present = detectHarnesses(home, which);
@@ -499,6 +505,33 @@ async function checkSkills(
         required: false,
         detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
         fix: fixFor(home, broken),
+        data,
+      },
+    };
+  }
+
+  // The OPTIONAL tenjin-pay skill's presence must MATCH the `bazaarPay` toggle
+  // (lib/skill-placement): install and `config set bazaarPay` both place/remove
+  // it best-effort and stay quiet on failure, so this is the one surface where
+  // that drift is reported. Toggle off with the skill still teaching the lane,
+  // or on with no teaching, both warn; the runtime gate in pay's resolveLane
+  // keeps the lane itself safe either way, which is why this is warn, not fail.
+  const payDrift: string[] = [];
+  for (const w of inPlay) {
+    if (!harnessInPlay(home, w.dir, present, requested)) continue;
+    const onDisk = await readSkillFile(join(w.dir, OPTIONAL_PAY_SKILL, 'SKILL.md'));
+    if ((onDisk.kind === 'ok') !== bazaarPay) payDrift.push(w.dir);
+  }
+  if (payDrift.length > 0) {
+    return {
+      result: {
+        name: 'skills',
+        status: 'warn',
+        required: false,
+        detail: bazaarPay
+          ? `bazaarPay is on but the ${OPTIONAL_PAY_SKILL} skill is missing under ${payDrift.join(', ')}; agents are not being taught the lane`
+          : `bazaarPay is off but the ${OPTIONAL_PAY_SKILL} skill is still present under ${payDrift.join(', ')}; agents are being taught a lane the runtime gate will refuse`,
+        fix: `Re-run \`tenjin config set bazaarPay ${bazaarPay ? 'on' : 'off'}\` to re-sync the skill's presence.`,
         data,
       },
     };
@@ -591,17 +624,23 @@ async function compareWiredSkills(
   } catch {
     return { stale: [], verifiable: false };
   }
-  // Read once, not once per directory.
+  // Read once, not once per directory. Optional skills join the compare when
+  // present on disk (their presence is gated elsewhere), but only the required
+  // adapters decide `verifiable`: a package missing an optional copy is odd,
+  // not a reason to call every adapter unverifiable.
   const packaged = new Map<string, Buffer>();
-  for (const name of CLI_SKILL_NAMES) {
+  for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
     const read = await readSkillFile(join(source, name, 'SKILL.md'));
     if (read.kind === 'ok') packaged.set(name, read.bytes);
   }
-  if (packaged.size !== CLI_SKILL_NAMES.length) return { stale: [], verifiable: false };
+  if (CLI_SKILL_NAMES.some((name) => !packaged.has(name))) {
+    return { stale: [], verifiable: false };
+  }
 
   const stale: string[] = [];
   for (const dir of dirs) {
-    for (const name of CLI_SKILL_NAMES) {
+    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
+      if (!packaged.has(name)) continue;
       // Guarded: a pipe or device at this path would otherwise block the whole
       // diagnostic. Anything but a readable regular file is the wiring check's
       // business, not this one's.

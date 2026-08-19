@@ -28,6 +28,10 @@ export interface ResolvedSettings {
   policy: SpendPolicy;
   /** Search-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
   evalCohort: boolean;
+  /** Bazaar pay lane opt-in (`tenjin pay` off the configured base URL). */
+  bazaarPay: boolean;
+  /** x402 discovery registries `discover` queries and the pay lane verifies against. */
+  bazaarRegistries: string[];
   /**
    * Hard per-send cap for `tenjin send`: SEND_MAX_UNSET = never configured
    * (send refuses until `config set sendMaxAmount`), null = explicit "none"
@@ -43,6 +47,8 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
     baseUrl: s.baseUrl.value,
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
+    bazaarPay: s.bazaarPay.value,
+    bazaarRegistries: s.bazaarRegistries.value,
     sendMaxAmountAtomic:
       s.sendMaxAmount.value === SEND_MAX_UNSET
         ? SEND_MAX_UNSET

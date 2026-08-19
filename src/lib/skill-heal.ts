@@ -11,7 +11,7 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
-import { resolveSkillsSource } from './skills-source';
+import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
 
 export interface HealDeps {
   io: Io;
@@ -37,7 +37,8 @@ const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
  *
  * It is an UNATTENDED writer into the operator's home, so it is strictly more
  * conservative than `install`, which a human ran on purpose. What it declines to
- * touch is listed on {@link healable}, and it heals only the two CLI adapters:
+ * touch is listed on {@link healable}, and it heals the CLI adapters plus any
+ * optional skill that is present (presence is the gate that placed it):
  * the hosted `tenjin` skill mirrors tenjin.blog/skills.md, so the copy on disk
  * may be a NEWER fetch than this package ships, and rewriting it would undo that
  * and make install's "re-fetch it from tenjin.blog/skills.md" false. Same domain
@@ -114,7 +115,7 @@ function healable(home: string): Target[] {
   const found: Target[] = [];
   for (const dir of skillsDirsFor(home)) {
     if (!isRealDirectory(dir)) continue;
-    for (const name of CLI_SKILL_NAMES) {
+    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;
       const path = join(dir, name, 'SKILL.md');
       if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
