@@ -1,9 +1,10 @@
 # Ecosystem and VIP listings
 
 If you build on Tenjin, sell an x402 endpoint agents should know about, or pay
-Tenjin's endpoints from your own product, you can list yourself here. Listing is
-self-service: **open a pull request against this repository.** There is no form,
-no application, and no fee.
+Tenjin's endpoints from your own product, you can list yourself here. Entry is
+strictly by pull request: **open a PR against this repository.** That is the only
+route in. There is no form and no application, and an issue asking to be added is
+not a listing.
 
 There are two tiers. Both work the same way: you open a PR, we review it, and it
 is accepted or rejected. What separates them is where the entry ends up.
