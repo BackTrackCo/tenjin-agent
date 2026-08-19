@@ -329,6 +329,15 @@ duplicates it.
 This is self-reported telemetry, used for attribution and measurement. It is
 never authentication, and it decides no entitlement, payment, or spend.
 
+## Ecosystem
+
+Building on Tenjin, or selling an x402 endpoint agents should find? List
+yourself by opening a pull request. There are two tiers: **Ecosystem** is an open
+directory listing, and **VIP** is the curated set `tenjin discover` pins ahead of
+the registry sweep, which is an endorsement and has a higher bar. Both flows, and
+what a listing PR must include, are in
+[docs/ecosystem.md](./docs/ecosystem.md).
+
 ## Developing
 
 ```bash

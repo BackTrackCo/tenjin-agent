@@ -20,3 +20,8 @@ is added only once an operator has vetted the seller and confirmed a configured
 registry lists it. Nothing in the block is probed and nothing in it reaches
 `bazaar-listings.json`, the pay lane's evidence store: a pin no registry lists
 still refuses as unlisted at pay time.
+
+`docs/ecosystem.md` (linked from the README) documents how third parties list
+themselves, by pull request: an open Ecosystem directory listing, and the
+curated VIP pins as a stricter, separately reviewed tier with registry evidence
+required.
