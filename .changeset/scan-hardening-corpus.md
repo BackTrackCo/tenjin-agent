@@ -25,11 +25,13 @@ secret value rather than matched as a substring, so a live password containing
 
 The `raw-private-key` to `hex32-value` demotion widens, so quoting a public
 32-byte value no longer refuses a publish: the label set gains `salt`, `id`,
-`topic`, `root`, `digest`, and `commitment`, a label may now sit up to two short
-tokens before the value (`the committee hash was 0x…`, `source_id = 0x…`), and
-well-known public constants such as the ERC-20 `Transfer` event topic0 are
-recognized from a data list. Demotion is to warn only. An unlabeled bare 64-hex
-still blocks, and a real key mislabeled `hash` still surfaces for review.
+`topic`, `root`, `digest`, and `commitment`; a label may now sit up to two short
+tokens before the value, across markdown and quote punctuation, so the inline-code
+form prose actually uses is covered; and well-known public constants such as the
+ERC-20 `Transfer` event topic0 are recognized from a data list. Only the
+separators loosened, never what counts as a label. Demotion is to warn only, an
+unlabeled bare 64-hex still blocks, a secret-named assignment still blocks however
+it is formatted, and a real key mislabeled `hash` still surfaces for review.
 
 A labeled fixture corpus (`src/lib/scan-corpus.json`, positives and benign
 lookalikes for every detector, plus an adversarial transcript-shaped sample)

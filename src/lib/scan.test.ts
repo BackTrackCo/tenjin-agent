@@ -140,6 +140,16 @@ describe('scan — 0x-64-hex is a key or a hash by context', () => {
     expect(checks(`source_id = 0x${HEX64}`)).not.toContain('raw-private-key');
   });
 
+  // The catalog writes hashes as inline code, so the path from label to value
+  // runs through markdown and quote punctuation. Separators are permissive; the
+  // label SET is not.
+  it('demotes across backticks and quotes between the label and the value', () => {
+    expect(checks(`the committee hash was \`0x${HEX64}\``)).toContain('hex32-value');
+    expect(checks(`the committee hash was \`0x${HEX64}\``)).not.toContain('raw-private-key');
+    expect(checks(`"id": "0x${HEX64}"`)).toContain('hex32-value');
+    expect(checks(`the root is “0x${HEX64}”`)).toContain('hex32-value');
+  });
+
   it('demotes the widened identifier label set', () => {
     for (const label of ['salt', 'id', 'topic0', 'root', 'digest', 'commitment']) {
       expect(checks(`${label}: 0x${HEX64}`), label).toContain('hex32-value');
@@ -160,6 +170,10 @@ describe('scan — 0x-64-hex is a key or a hash by context', () => {
     expect(checks(`the grid 0x${HEX64}`)).toContain('raw-private-key');
     expect(checks(`a valid 0x${HEX64}`)).toContain('raw-private-key');
     expect(checks(`PRIVATE_KEY=0x${HEX64}`)).toContain('raw-private-key');
+    // Separator tolerance cannot invent a label: inline-code formatting around a
+    // secret-named assignment still blocks.
+    expect(checks(`PRIVATE_KEY=\`0x${HEX64}\``)).toContain('raw-private-key');
+    expect(checks(`the wallet key is "0x${HEX64}"`)).toContain('raw-private-key');
   });
 
   it('blocks a bare, uncontextualized 64-hex as a raw private key', () => {

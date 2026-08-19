@@ -464,10 +464,15 @@ function isExamplePassword(password: string): boolean {
 // ERC-20 Transfer topic0 (no label at all). Hence the wider label set, up to TWO
 // short intervening tokens, and the constants set. Two is the bound that keeps
 // the window honest: "the hash of the private key is 0x…" is four tokens out and
-// still blocks.
+// still blocks. The replay's last survivor was markdown: the catalog writes
+// ``hash was `0x…` ``, so the separator class carries backticks and quotes.
+//
+// Only the SEPARATOR classes are permissive. What counts as a LABEL is closed,
+// which is why `` PRIVATE_KEY=`0x…` `` still blocks: no punctuation tolerance
+// can invent a label that is not in the set.
 const HEX64_RE = /(?<![0-9a-fx])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])/gi;
 const HASH_LABEL_RE =
-  /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash|salt|id|topic\d*|root|digest|commitment)(?:[\s:=/,._-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._-]*$/i;
+  /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash|salt|id|topic\d*|root|digest|commitment)(?:[\s:=/,._'"`‘’“”-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._'"`‘’“”-]*$/i;
 
 /** Public 64-hex values that are never key material; see scan-rules.json. */
 const PUBLIC_HEX_CONSTANTS = new Set(

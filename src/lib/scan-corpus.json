@@ -489,7 +489,13 @@
       "id": "hex32-value/pos-label-with-intervening-word",
       "label": "positive",
       "detectors": ["hex32-value"],
-      "text": "The committee hash was 0xb2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4 at that height."
+      "text": "The committee hash was `0xb2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4` at that height."
+    },
+    {
+      "id": "hex32-value/pos-quoted-label-value",
+      "label": "positive",
+      "detectors": ["hex32-value"],
+      "text": "\"id\": \"0x4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d\""
     },
     {
       "id": "hex32-value/pos-id-label",
@@ -520,6 +526,12 @@
       "label": "positive",
       "detectors": ["raw-private-key"],
       "text": "Paste 0xf6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18 into the wallet import field."
+    },
+    {
+      "id": "raw-private-key/pos-backticked-key-assignment",
+      "label": "positive",
+      "detectors": ["raw-private-key", "secret-assignment"],
+      "text": "PRIVATE_KEY=`0x907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2907e5c3a18f6d4b2`"
     },
     {
       "id": "bip39-seed-phrase/pos-12",
