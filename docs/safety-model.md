@@ -27,7 +27,9 @@ Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, a
 
 ## Publishing boundaries
 
-Publishing and editing put content on a public marketplace under your identity. The local scan blocks obvious secrets and private-key material in every mode. Other sensitive context can only be warned about, so the agent still has to use judgment before publishing.
+Publishing and editing put content on a public marketplace under your identity. The local scan blocks obvious secrets and private-key material in every mode: provider token shapes, private keys in and out of PEM framing, connection URIs with an embedded password, BIP-39 recovery phrases, and TOTP provisioning URIs. Its rules live as data in `src/lib/scan-rules.json`. Other sensitive context can only be warned about, so the agent still has to use judgment before publishing.
+
+Findings never carry the matched secret. Each one is a detector id, a tier, offsets, and a masked excerpt, so a finding can be shown, logged, or forwarded without republishing what it found.
 
 When in doubt, publish less context and more reproducible evidence.
 

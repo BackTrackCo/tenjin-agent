@@ -43,22 +43,22 @@ where it went. Not a conversation.
 ## The scan, and which warnings deserve the user's time
 
 The CLI runs a deterministic scan in every mode. Its BLOCKING tier is structured
-credential shapes only: provider token formats, private keys, and connection URIs
-with an embedded password. No mode and no `--yes` clears it. Everything else is a
-warning, which `review` surfaces and `--yes` or `full-auto` clear. A secret that
-is not a recognizable shape is a prompt to look, not a stop, and rights and
-employer-internal content have no detector at all.
+credential shapes only — provider tokens, private keys, seed phrases, connection
+URIs with an embedded password — and no mode and no `--yes` clears it. Everything
+else warns: `review` surfaces warnings, `--yes` and `full-auto` clear them. A
+secret with no recognizable shape is a prompt to look, not a stop.
 
 It matches patterns, so warnings split in two and only the second is worth the
 user's attention:
 
-- Usually fine in technical writing, when the piece is genuinely about them:
-  `local-path` in a shell transcript, `wallet-address` in an on-chain piece,
-  `embedded-instruction` in a prompt-engineering piece, `email` in a citation.
-- Usually a real stop: `customer-identifier`, `confidential-marker`,
+- Usually fine when the piece is genuinely about them: `local-path`,
+  `wallet-address`, `embedded-instruction`, `email`, `private-network-endpoint`,
+  `high-entropy-string`.
+- Usually a real stop, because the draft carries context from somewhere it should
+  not have travelled: `customer-identifier`, `confidential-marker`,
   `internal-hostname`, `private-repo-reference`, `secret-assignment`,
-  `paid-content-marker`, `phone`, `long-verbatim-quote`. These say the draft
-  carries context from somewhere it should not have travelled.
+  `paid-content-marker`, `phone`, `long-verbatim-quote`, `collaboration-url`,
+  `cloud-resource-id`, `env-dump-block`.
 
 ## What makes a piece sell
 

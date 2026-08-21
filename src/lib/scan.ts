@@ -5,16 +5,32 @@
  * replace it. `block` findings refuse a publish in every mode and are never
  * `--yes`-clearable; `warn` findings are surfaced for review.
  *
- * A `block` excerpt is ALWAYS masked: the matched secret is never echoed
- * verbatim, only a short type-identifying prefix plus a redaction. `warn`
- * excerpts (wallet addresses, PII, quotes) show the caller their own content.
+ * Three invariants, all pinned by scan.corpus.test.ts and scan.test.ts:
  *
- * The provider token-shape patterns (AWS, GitHub, Slack, Stripe, JWT, PEM) are
- * adapted from the gitleaks ruleset (MIT); the EVM raw-key (0x + 64 hex) and
- * wallet-address checks continue the BlockRun-credited wallet-key leak scanner.
- * Both are attributed in NOTICE.md. No pattern set is vendored as a dependency —
- * this is a wallet-holding CLI, kept offline with a tight dep tree by design.
+ * REDACTION: a `block` excerpt is masked — a type-identifying prefix plus a
+ * redaction count, never the matched secret. `pem-private-key` is the one
+ * exception, its excerpt being the armor header. Secret-shaped warns
+ * (secret-assignment, customer-identifier, high-entropy-string) are masked too.
+ * A finding travels as detector id + tier + offsets + redacted excerpt.
+ *
+ * TIER ORDERING: suppression may downgrade a warn, never a block. Block-tier
+ * suppression is per-detector and anchored to the captured secret value; no
+ * substring rule may reach it (see DOCS_PLACEHOLDER).
+ *
+ * ReDoS: no pattern may contain a quantified group whose body can also match the
+ * group's own separator while a further obligation follows it. Audited against a
+ * single line of hundreds of kilobytes, the shape a JSONL transcript record takes.
+ *
+ * The detector corpus lives as DATA in `scan-rules.json` so the tenjin
+ * server-side ingest gate can vendor it verbatim; this file compiles that data
+ * and implements the handlers and algorithmic detectors it names. Per-rule
+ * attribution is in the data file's `source` field and in NOTICE.md. No pattern
+ * set is a runtime dependency: this is a wallet-holding CLI, kept offline with a
+ * tight dep tree by design.
  */
+
+import corpusJson from './scan-rules.json';
+import wordlistJson from './bip39-wordlist.json';
 
 export type ScanSeverity = 'block' | 'warn';
 
@@ -55,10 +71,234 @@ export function scan(text: string, context: ScanContext = {}): ScanFinding[] {
     ...scanHex64(lines),
     ...scanLineDetectors(lines),
     ...scanPemBlocks(lines),
+    ...scanSeedPhrases(lines),
+    ...scanEnvDumpBlocks(lines),
     ...scanLongVerbatim(lines),
     ...scanProjectMarkers(lines, context.projectMarkers ?? []),
   ];
-  return dedupeAndSort(suppressEmailsInDbUris(findings));
+  const named = dedupeAndSort(suppressEmailsInDbUris(findings));
+  return dedupeAndSort([...named, ...scanHighEntropy(lines, named)]);
+}
+
+// ---------------------------------------------------------------------------
+// Rule corpus: scan-rules.json compiled into executable detectors.
+// ---------------------------------------------------------------------------
+
+interface RuleExcerpt {
+  kind: string;
+  keep?: number;
+  max?: number;
+  head?: number;
+  tail?: number;
+  handler?: string;
+}
+
+interface Rule {
+  id: string;
+  tier: string;
+  description: string;
+  source: string;
+  match: { kind: string; pattern?: string; flags?: string; algorithm?: string };
+  excerpt: RuleExcerpt;
+  skip?: { handler: string };
+}
+
+const CORPUS = corpusJson as unknown as {
+  schemaVersion: number;
+  rules: Rule[];
+  publicHexConstants?: Array<{ value: string; name: string }>;
+};
+
+/** Algorithmic detectors this file implements; a corpus entry naming any other fails to compile. */
+const ALGORITHMS = new Set([
+  'hex64',
+  'pemBlock',
+  'bip39',
+  'envDump',
+  'entropy',
+  'longVerbatim',
+  'projectMarkers',
+]);
+
+const EXCERPT_HANDLERS: Record<string, (m: RegExpExecArray) => string> = {
+  googleKey: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
+  dbConnectionUri: (m) => `${m[1]}://${m[2]}:[redacted]@${m[4]}`,
+  bearerToken: (m) => `Authorization: Bearer [redacted ${m[1]?.length ?? 0} chars]`,
+  labeledValue: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
+  localPath: localPathExcerpt,
+};
+
+const SKIP_HANDLERS: Record<string, (m: RegExpExecArray) => boolean> = {
+  exampleDbPassword: (m) => isPlaceholder(m[3] ?? '') || isExamplePassword(m[3] ?? ''),
+  placeholderGroup1: (m) => isPlaceholder(m[1] ?? ''),
+  nonLiteralValue: skipNonLiteralValue,
+  placeholderUsername: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
+  reservedExampleEmail: (m) => RESERVED_EXAMPLE_DOMAIN.test(m[0]),
+};
+
+interface LineDetector {
+  check: string;
+  severity: ScanSeverity;
+  /** Global regex; `lastIndex` is reset per line. */
+  re: RegExp;
+  /** Build the (possibly masked) excerpt from a single match. */
+  excerpt: (m: RegExpExecArray) => string;
+  /** Drop this match without a finding (e.g. a placeholder value). */
+  skip?: (m: RegExpExecArray) => boolean;
+}
+
+/**
+ * Compile the data corpus. Throws rather than degrading: a corpus entry naming a
+ * handler this build does not implement is a vendoring mistake, and a scan that
+ * silently drops a block-tier detector is worse than one that refuses to start.
+ */
+function compileLineDetectors(rules: Rule[]): LineDetector[] {
+  const out: LineDetector[] = [];
+  for (const rule of rules) {
+    if (rule.tier !== 'block' && rule.tier !== 'warn') {
+      throw new Error(`scan-rules.json: rule ${rule.id} has unknown tier ${rule.tier}`);
+    }
+    if (rule.match.kind === 'algorithm') {
+      if (!ALGORITHMS.has(rule.match.algorithm ?? '')) {
+        throw new Error(`scan-rules.json: rule ${rule.id} names unknown algorithm`);
+      }
+      continue;
+    }
+    if (rule.match.kind !== 'regex' || rule.match.pattern === undefined) {
+      throw new Error(`scan-rules.json: rule ${rule.id} has unknown match kind ${rule.match.kind}`);
+    }
+    const skip = rule.skip === undefined ? undefined : SKIP_HANDLERS[rule.skip.handler];
+    if (rule.skip !== undefined && skip === undefined) {
+      throw new Error(`scan-rules.json: rule ${rule.id} names unknown skip ${rule.skip.handler}`);
+    }
+    out.push({
+      check: rule.id,
+      severity: rule.tier,
+      re: new RegExp(rule.match.pattern, rule.match.flags ?? 'g'),
+      excerpt: compileExcerpt(rule),
+      skip,
+    });
+  }
+  return out;
+}
+
+function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
+  const policy = rule.excerpt;
+  switch (policy.kind) {
+    case 'mask': {
+      const keep = policy.keep ?? 0;
+      return (m) => maskKeeping(m[0], keep);
+    }
+    case 'verbatim': {
+      const max = policy.max;
+      return (m) => (max === undefined ? m[0] : truncate(m[0], max));
+    }
+    case 'abbreviate': {
+      const head = policy.head ?? 6;
+      const tail = policy.tail ?? 4;
+      return (m) => `${m[0].slice(0, head)}…${m[0].slice(-tail)}`;
+    }
+    case 'custom': {
+      const handler = EXCERPT_HANDLERS[policy.handler ?? ''];
+      if (handler === undefined) {
+        throw new Error(`scan-rules.json: rule ${rule.id} names unknown excerpt handler`);
+      }
+      return handler;
+    }
+    default:
+      throw new Error(`scan-rules.json: rule ${rule.id} has unknown excerpt kind ${policy.kind}`);
+  }
+}
+
+const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
+
+function scanLineDetectors(lines: string[]): ScanFinding[] {
+  const out: ScanFinding[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    for (const detector of LINE_DETECTORS) {
+      detector.re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = detector.re.exec(line)) !== null) {
+        if (!isSuppressedAsDocs(detector, m) && detector.skip?.(m) !== true) {
+          out.push({
+            check: detector.check,
+            severity: detector.severity,
+            line: i + 1,
+            span: [m.index, m.index + m[0].length],
+            excerpt: detector.excerpt(m),
+          });
+        }
+        // Every detector pattern matches at least one character, so a global
+        // exec() always advances lastIndex — no zero-width-match loop guard needed.
+      }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Suppression: placeholders and reserved example values.
+// ---------------------------------------------------------------------------
+
+/**
+ * A match that is documentation scaffolding, not a live value: a run of `x`
+ * placeholders, an angle/brace template, or a `your…` label. It exists to cut
+ * warn fatigue, because `<YOUR_KEY>`-shaped samples are what teach an operator
+ * to stop reading findings.
+ *
+ * TIER ORDERING INVARIANT — this test is a SUBSTRING test over the whole match,
+ * so it may only ever suppress a `warn`. A block finding is non-bypassable by
+ * contract, and a substring rule hands the bypass to anyone whose secret merely
+ * CONTAINS a placeholder shape: real passwords carry `<`, `>`, `{`, `}` and
+ * letter runs, so `postgres://app:Str0ng<Pw>Value@prod-db/main` is a live
+ * credential, not a docs sample. Block-tier suppression is per-detector only,
+ * and is anchored to the captured secret VALUE (isPlaceholder via the
+ * `exampleDbPassword` / `placeholderGroup1` handlers), never to a substring of
+ * the match. Pinned by "the block tier is non-bypassable" in scan.test.ts.
+ */
+const DOCS_PLACEHOLDER =
+  /x{6,}|<[^<>]*>|\{\{[^{}]*\}\}|\byour[_-]?(?:key|token|secret|password)\b/i;
+
+function isSuppressedAsDocs(detector: LineDetector, m: RegExpExecArray): boolean {
+  return detector.severity === 'warn' && DOCS_PLACEHOLDER.test(m[0]);
+}
+
+// RFC 2606 reserved second-level domains. The reserved .example TLD is NOT
+// included: `alice@corp.example` is the shape a real internal address takes in a
+// sanitized draft, and the email detector is a warn the author should still see.
+const RESERVED_EXAMPLE_DOMAIN = /@(?:[A-Za-z0-9-]+\.)*example\.(?:com|org|net)$/i;
+
+// A home-path username that is a docs placeholder, not a real machine username.
+const PLACEHOLDER_USERNAME = /^(?:user(?:name)?|you(?:rname)?|example|foo|me|myuser|somebody)$/i;
+
+/**
+ * A db-connection-uri already masks the embedded password; the email detector,
+ * however, would match `password@host` and echo the password verbatim in its
+ * excerpt. Drop any email finding whose span sits inside a db-connection-uri
+ * span on the same line so the masking cannot be bypassed.
+ */
+function suppressEmailsInDbUris(findings: ScanFinding[]): ScanFinding[] {
+  const uris = findings.filter((f) => f.check === 'db-connection-uri');
+  if (uris.length === 0) return findings;
+  return findings.filter(
+    (f) =>
+      f.check !== 'email' ||
+      !uris.some((u) => u.line === f.line && f.span[0] >= u.span[0] && f.span[1] <= u.span[1]),
+  );
+}
+
+/**
+ * Never echo more than a short, non-secret prefix. The kept prefix is a public
+ * type marker (`0x`, `AKIA`, `ghp_`, …), never key material; the rest is dropped.
+ */
+function maskKeeping(match: string, prefixLen: number): string {
+  const prefix = match.slice(0, Math.min(prefixLen, match.length));
+  return `${prefix}…[redacted ${match.length - prefix.length} chars]`;
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 3)}…` : value;
 }
 
 /**
@@ -66,7 +306,7 @@ export function scan(text: string, context: ScanContext = {}): ScanFinding[] {
  * in the text — warn 'private-repo-reference'. Literal case-insensitive match,
  * compiled once per marker (not per line) and executed against the ORIGINAL
  * line, so spans stay exact (a locale-sensitive toLowerCase can change string
- * length — U+0130 — and misalign them; review r5). Token-bounded: `Org/repo`
+ * length — U+0130 — and misalign them). Token-bounded: `Org/repo`
  * must not fire inside a sibling slug (`Org/repo-docs`, `xOrg/repo`), but a
  * trailing `.` stays allowed so a remote-URL mention (`…/Org/repo.git`) fires.
  * Markers shorter than 3 chars are dropped as degenerate. The excerpt names the
@@ -106,340 +346,26 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// A home-path username that is a docs placeholder, not a real machine username.
-const PLACEHOLDER_USERNAME = /^(?:user(?:name)?|you(?:rname)?|example|foo|me|myuser|somebody)$/i;
-
-/**
- * A db-connection-uri already masks the embedded password; the email detector,
- * however, would match `password@host` and echo the password verbatim in its
- * excerpt. Drop any email finding whose span sits inside a db-connection-uri
- * span on the same line so the masking cannot be bypassed.
- */
-function suppressEmailsInDbUris(findings: ScanFinding[]): ScanFinding[] {
-  const uris = findings.filter((f) => f.check === 'db-connection-uri');
-  if (uris.length === 0) return findings;
-  return findings.filter(
-    (f) =>
-      f.check !== 'email' ||
-      !uris.some((u) => u.line === f.line && f.span[0] >= u.span[0] && f.span[1] <= u.span[1]),
-  );
+function localPathExcerpt(m: RegExpExecArray): string {
+  // Splice at the capture's own offsets (d-flag indices): a plain
+  // String.replace masks the FIRST occurrence of the username, which for a
+  // username that is a substring of the /Users|/home prefix mangles the prefix
+  // and echoes the real username.
+  const bounds = m.indices?.[1] ?? m.indices?.[2];
+  const masked =
+    bounds === undefined
+      ? m[0]
+      : `${m[0].slice(0, bounds[0] - m.index)}[user]${m[0].slice(bounds[1] - m.index)}`;
+  return truncate(masked, 60);
 }
 
-/**
- * Never echo more than a short, non-secret prefix. The kept prefix is a public
- * type marker (`0x`, `AKIA`, `ghp_`, …), never key material; the rest is dropped.
- */
-function maskKeeping(match: string, prefixLen: number): string {
-  const prefix = match.slice(0, Math.min(prefixLen, match.length));
-  return `${prefix}…[redacted ${match.length - prefix.length} chars]`;
-}
-
-interface LineDetector {
-  check: string;
-  severity: ScanSeverity;
-  /** Global regex; `lastIndex` is reset per line. */
-  re: RegExp;
-  /** Build the (possibly masked) excerpt from a single match. */
-  excerpt: (m: RegExpExecArray) => string;
-  /** Drop this match without a finding (e.g. a placeholder value). */
-  skip?: (m: RegExpExecArray) => boolean;
-}
-
-const LINE_DETECTORS: LineDetector[] = [
-  // Secrets/keys — severity block, excerpt always masked. Provider patterns
-  // adapted from gitleaks (MIT). The 0x-64-hex EVM key is handled separately
-  // (scanHex64) so a tx/block hash is not hard-blocked. See header + NOTICE.md.
-  {
-    check: 'aws-access-key',
-    severity: 'block',
-    // gitleaks aws-access-token.
-    re: /\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g,
-    excerpt: (m) => maskKeeping(m[0], 4),
-  },
-  {
-    check: 'jwt',
-    severity: 'block',
-    // gitleaks jwt (three base64url segments, header starts eyJ).
-    re: /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g,
-    excerpt: (m) => maskKeeping(m[0], 3),
-  },
-  {
-    check: 'github-token',
-    severity: 'block',
-    // gitleaks github-pat / -oauth / -app / -refresh (36 chars) + fine-grained pat.
-    re: /\b(?:gh[posru]_[0-9A-Za-z]{36}|github_pat_[0-9A-Za-z_]{82})\b/g,
-    excerpt: (m) => maskKeeping(m[0], 4),
-  },
-  {
-    check: 'slack-token',
-    severity: 'block',
-    // gitleaks slack tokens (bot/user/app/refresh/legacy prefixes).
-    re: /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g,
-    excerpt: (m) => maskKeeping(m[0], 5),
-  },
-  {
-    check: 'stripe-token',
-    severity: 'block',
-    // gitleaks stripe-access-token.
-    re: /\b[sr]k_(?:live|test)_[0-9A-Za-z]{10,99}\b/g,
-    excerpt: (m) => maskKeeping(m[0], 8),
-  },
-  {
-    check: 'anthropic-key',
-    severity: 'block',
-    // gitleaks anthropic-api-key. Ordered before openai so sk-ant- isn't
-    // mis-typed as a bare OpenAI sk- key.
-    re: /\bsk-ant-[0-9A-Za-z_-]{20,}\b/g,
-    excerpt: (m) => maskKeeping(m[0], 7),
-  },
-  {
-    check: 'openai-key',
-    severity: 'block',
-    // gitleaks openai-api-key: classic sk- plus the modern sk-proj-/sk-svcacct-/
-    // sk-admin- keys. The body is base62 and MUST contain a digit (real keys are
-    // high-entropy), which keeps sk- kebab identifiers (sk-user-profile-updated…)
-    // from hard-blocking. `(?!ant-)` keeps an Anthropic key out. Only the base62
-    // leading run of a modern key is matched — enough to flag it. The run is
-    // terminated by a non-base62 lookahead (not \b, which a trailing `_` — a word
-    // char — would not fire), so an underscore-adjacent key still matches.
-    // Assumption + chosen tradeoff: a real key opens with a >=20-char base62 run,
-    // so the {20,} floor is what separates a key from a kebab identifier. A key
-    // whose FIRST segment is shorter than 20 (e.g. `sk-proj-abc123_` then more,
-    // broken up by underscores) slips past this BARE-PASTE detector; that is
-    // accepted, because such a value in an assignment still warns via
-    // secret-assignment — the bare-paste path is the only gap.
-    re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])/g,
-    excerpt: (m) => maskKeeping(m[0], 3),
-  },
-  {
-    check: 'google-key',
-    severity: 'block',
-    // gitleaks gcp-api-key (AIza) and gcp-oauth-client-secret (GOCSPX-).
-    re: /\b(?:AIza[0-9A-Za-z_-]{35}|GOCSPX-[0-9A-Za-z_-]{20,})\b/g,
-    excerpt: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
-  },
-  {
-    check: 'npm-token',
-    severity: 'block',
-    // gitleaks npm-access-token.
-    re: /\bnpm_[0-9A-Za-z]{36}\b/g,
-    excerpt: (m) => maskKeeping(m[0], 4),
-  },
-  {
-    check: 'db-connection-uri',
-    severity: 'block',
-    // A connection string with an embedded password (scheme://user:pass@host).
-    // Only the password (group 3) is secret; the excerpt masks it and keeps the
-    // rest so the finding is legible. Placeholder-gated like the other high-
-    // confidence shapes so a docs example (postgres://postgres:postgres@…,
-    // ://user:<password>@…) doesn't hard-block; a real password still blocks.
-    re: /\b([a-z][a-z0-9+.-]*):\/\/([^\s:@/]+):([^\s@/]+)@([^\s/:]+)/gi,
-    excerpt: (m) => `${m[1]}://${m[2]}:[redacted]@${m[4]}`,
-    skip: (m) => isPlaceholder(m[3] ?? '') || isExamplePassword(m[3] ?? ''),
-  },
-  {
-    check: 'bearer-token',
-    severity: 'block',
-    // An Authorization: Bearer header carrying a live token; placeholder-gated
-    // like secret-assignment so `Bearer <token>` examples don't hard-block.
-    re: /\bAuthorization:\s*Bearer\s+(\S{8,})/gi,
-    excerpt: (m) => `Authorization: Bearer [redacted ${m[1]?.length ?? 0} chars]`,
-    skip: (m) => isPlaceholder(m[1] ?? ''),
-  },
-  // Generic secret-named assignment — WARN, not block (review): a keyword match is
-  // lower-confidence than a structured shape, and a warn still forces confirmation
-  // under `review` and `auto`, while benign config (SECRET_NAME=…,
-  // MYSQL_ROOT_PASSWORD=…) is not permanently non-bypassable. `full-auto` and a bare
-  // `--yes` DO clear it unseen, which is the price of that choice; the publish skill
-  // says so rather than implying keys and tokens are all in the blocking tier. The
-  // excerpt stays masked. Placeholder and structural (path/URL/regex) values are
-  // skipped entirely.
-  {
-    check: 'secret-assignment',
-    severity: 'warn',
-    // Key: api[_-]?key, secret, access/private key, passw(or)?d, token,
-    // credential(s), auth token — camelCase-insensitive. Value: a quoted string
-    // (interior spaces allowed) or an unquoted run, ≥6 chars. Value is masked.
-    re: /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\s*[:=]\s*("[^"]{6,}"|'[^']{6,}'|[^\s"']{6,})/gi,
-    excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
-    skip: skipNonLiteralValue,
-  },
-  // Wallet addresses — warn (a contract address may be intentional). Not a secret,
-  // shown abbreviated. viem's checksum validation is deliberately NOT used to gate
-  // this: EIP-55 strict validation rejects the valid all-lowercase/all-uppercase
-  // forms, which a scanner must still surface, so shape matching is the right test.
-  {
-    check: 'wallet-address',
-    severity: 'warn',
-    re: /(?<![0-9a-fx])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/gi,
-    excerpt: (m) => `${m[0].slice(0, 6)}…${m[0].slice(-4)}`,
-  },
-  // Employer-internal markers — warn. Marker-SHAPED, not word-in-phrase (#36):
-  // the detector targets the classification legend a document stamp carries
-  // (CONFIDENTIAL, CONFIDENTIAL DRAFT/INFORMATION, STRICTLY/COMPANY
-  // CONFIDENTIAL, "Acme Inc. Confidential", INTERNAL (USE) ONLY, DO NOT
-  // DISTRIBUTE), so it is case-SENSITIVE — prose about "confidential computing"
-  // never fires. The phrase-vs-legend split is positional, not a blanket
-  // next-word lookahead (review r5: the old lookahead lost CONFIDENTIAL
-  // INFORMATION and every title-case legend):
-  //  - all-caps CONFIDENTIAL is suppressed only when all-caps words flank it on
-  //    BOTH sides — that is what a mid-phrase mention in a shouting heading
-  //    looks like (A SURVEY OF CONFIDENTIAL COMPUTING …). A legend either leads
-  //    its line (CONFIDENTIAL DRAFT) or ends it (ACME CONFIDENTIAL, HIGHLY
-  //    CONFIDENTIAL, PROPRIETARY AND CONFIDENTIAL), so one-sided caps still
-  //    fire (review r6: the caps-prefixed company stamp is the most common real
-  //    legend form, and the old left-only rule missed the whole family).
-  //    Accepted FP: a caps heading that LEADS with the topic word
-  //    (# CONFIDENTIAL COMPUTING ON AWS) warns — fail-safe direction. Accepted
-  //    FN: a caps-flanked legend without a whitelisted prefix (ACME
-  //    CONFIDENTIAL INFORMATION) is indistinguishable from a shouting-heading
-  //    phrase and misses; STRICTLY/COMPANY/HIGHLY prefixes are legend-only
-  //    vocabulary and are whitelisted through.
-  //  - Title-case Confidential fires only before punctuation or end-of-line
-  //    ("Acme Inc. Confidential", "## Confidential: …"), never mid-title
-  //    ("Confidential Computing: a TEE survey").
-  {
-    check: 'confidential-marker',
-    severity: 'warn',
-    re: /\b(?:STRICTLY|COMPANY|HIGHLY)\s+CONFIDENTIAL\b|(?<![A-Z]{2,}[ \t]+)\bCONFIDENTIAL\b|\bCONFIDENTIAL\b(?![ \t]+[A-Z]{2,})|\bConfidential(?=\s*(?:[-:.,;–—]|$))|\b(?:INTERNAL|Internal)(?:\s+(?:USE|Use))?\s+(?:ONLY|Only)\b|\b(?:DO\s+NOT\s+DISTRIBUTE|Do\s+Not\s+Distribute)\b/g,
-    excerpt: (m) => m[0],
-  },
-  {
-    check: 'internal-hostname',
-    severity: 'warn',
-    re: /\b(?:[a-z0-9-]+\.)+(?:internal|corp|local|lan|intranet)\b/gi,
-    excerpt: (m) => m[0],
-  },
-  // Home-anchored local filesystem paths — warn (open-questions publishing-safety:
-  // private paths). A /Users/<name>/… or /home/<name>/… or C:\Users\<name>\…
-  // path leaks the machine username and private project layout. The username
-  // segment is masked in the excerpt; obvious placeholder usernames
-  // (/home/user/…, /Users/username/…) are docs examples and skip. `~/…` paths
-  // deliberately do NOT fire: they are already generalized. The unix branch
-  // requires a non-name left boundary so a web-URL path segment
-  // (docs.example.com/home/…) is not a local path, and the segment class
-  // excludes `?`/`&` so a query string (…?api_key=…) is never swallowed into a
-  // verbatim excerpt a sibling detector would have masked (review r5). Windows
-  // matches [Uu]sers: the filesystem is case-insensitive.
-  {
-    check: 'local-path',
-    severity: 'warn',
-    re: /(?:(?<![\w.-])\/(?:Users|home)\/([A-Za-z0-9._-]+)(?:\/[^\s"'`)\]}>:,;?&]+)+|\b[A-Za-z]:\\[Uu]sers\\([^\\\s"']+)(?:\\[^\\\s"']+)+)/dg,
-    excerpt: (m) => {
-      // Splice at the capture's own offsets (d-flag indices): a plain
-      // String.replace masked the FIRST occurrence of the username, which for a
-      // username that is a substring of the /Users|/home prefix mangled the
-      // prefix and echoed the real username (review r5).
-      const bounds = m.indices?.[1] ?? m.indices?.[2];
-      const masked =
-        bounds === undefined
-          ? m[0]
-          : `${m[0].slice(0, bounds[0] - m.index)}[user]${m[0].slice(bounds[1] - m.index)}`;
-      return masked.length > 60 ? `${masked.slice(0, 57)}…` : masked;
-    },
-    skip: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
-  },
-  // Labeled customer/account identifiers — warn (open-questions publishing-safety:
-  // customer identifiers). Fires only on the explicit label + separator + value
-  // shape (customer_id: 84213, Account Number: ACME-0042); the value is masked
-  // like a secret-assignment value since a customer identifier is third-party
-  // data. Chosen tradeoff: an unlabeled identifier (bare CUST-4812) is a false
-  // negative — an unlabeled token is indistinguishable from a SKU or version tag.
-  {
-    check: 'customer-identifier',
-    severity: 'warn',
-    re: /\b((?:customer|client|account|tenant|subscriber)[ _-]?(?:id|number|no))\b\s*[:=#]\s*("[^"]{2,}"|'[^']{2,}'|[A-Za-z0-9][A-Za-z0-9._-]{2,})/gi,
-    excerpt: (m) => `${m[1]}=[redacted ${dequote(m[2] ?? '').length} chars]`,
-    skip: skipNonLiteralValue,
-  },
-  // Third-party paid/licensed-content markers — warn (open-questions
-  // publishing-safety: third-party copyrighted inputs). A rights LEGEND in the
-  // draft suggests copied licensed material; ambiguity-class (the author may
-  // hold the rights), so warn, never block. Legend shapes only — bare paywall
-  // vocabulary (paywalled, premium content, subscriber-only, behind a paywall)
-  // deliberately does NOT fire: it is this marketplace's own subject matter and
-  // measured 100% false-positive on the dogfood corpus (review r5), the exact
-  // word-in-phrase failure #36 is about.
-  {
-    check: 'paid-content-marker',
-    severity: 'warn',
-    re: /\ball rights reserved\b|\b(?:reprinted|reproduced|used) with permission\b|\bnot for (?:redistribution|republication)\b|\bdo not (?:redistribute|republish)\b|(?:©|\(c\)|copyright)\s*(?:19|20)\d{2}\b/gi,
-    excerpt: (m) => m[0],
-  },
-  // Embedded prompt/tool-output instruction patterns — warn (open-questions
-  // publishing-safety: embedded instructions). Source material captured from
-  // prompts or tool output can carry injection-shaped imperatives that would
-  // ship to every future buyer. High-precision imperative shapes only: a bare
-  // "system prompt" mention, chat-template delimiters (<system>, [INST]), and
-  // persona phrases ("you are an assistant", "as an AI") deliberately do NOT
-  // fire — legitimate agent-engineering exposition quotes all of them
-  // constantly (review r5), and only the imperative shapes are injection-typed.
-  // Two entries under one check name: the imperative shapes are case-INsensitive
-  // (adversarial text uses any case), while BEGIN SYSTEM/HIDDEN PROMPT is
-  // case-SENSITIVE — its signal is that it reads as a document header, and
-  // lowercase "begin system prompt" is ordinary prose on this marketplace's own
-  // subject matter (greptile r7), the #36 word-in-phrase class again.
-  {
-    check: 'embedded-instruction',
-    severity: 'warn',
-    re: /\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|context|messages?)\b|\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\b/gi,
-    excerpt: (m) => m[0],
-  },
-  {
-    check: 'embedded-instruction',
-    severity: 'warn',
-    re: /\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\b/g,
-    excerpt: (m) => m[0],
-  },
-  // Personal data — warn. `email` subsumes corp-domain emails (an internal marker).
-  {
-    check: 'email',
-    severity: 'warn',
-    re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
-    excerpt: (m) => m[0],
-  },
-  {
-    check: 'phone',
-    severity: 'warn',
-    re: /(?<!\d)(?:\+?\d{1,2}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]\d{3}[\s.-]\d{4}(?!\d)/g,
-    excerpt: (m) => m[0],
-  },
-];
-
-function scanLineDetectors(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? '';
-    for (const detector of LINE_DETECTORS) {
-      detector.re.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = detector.re.exec(line)) !== null) {
-        if (!detector.skip?.(m)) {
-          out.push({
-            check: detector.check,
-            severity: detector.severity,
-            line: i + 1,
-            span: [m.index, m.index + m[0].length],
-            excerpt: detector.excerpt(m),
-          });
-        }
-        // Every detector pattern matches at least one character, so a global
-        // exec() always advances lastIndex — no zero-width-match loop guard needed.
-      }
-    }
-  }
-  return out;
-}
-
-// Accepted alpha gaps (owner call, tracked for post-alpha): BIP-39 mnemonic
-// phrases (12/24 dictionary words) are NOT detected — a wordlist match is
-// high-false-positive against prose and deferred. An all-lowercase, digit-free
-// literal (a diceware/xkcd passphrase, e.g. PASSWORD=correcthorsebatterystaple)
-// parses as a bare identifier and yields NO finding for the same reason — a
-// dictionary-word run is indistinguishable from prose; chosen, warn-tier, and
-// filed next to BIP-39. Headerless base64/DER-encoded private keys (no
-// -----BEGIN----- marker) are likewise NOT detected; only the PEM-armored form
-// and the 0x-64-hex form are.
+// Accepted gaps (owner call, tracked): a mnemonic laid out in a numbered grid
+// (`1. abandon  2. ability` across many short lines) breaks the whitespace-only
+// word run bip39 needs and is NOT detected. An all-lowercase, digit-free literal
+// that is not a BIP-39 run (a diceware passphrase, e.g.
+// PASSWORD=correcthorsebatterystaple) still yields no finding — a dictionary-word
+// run is indistinguishable from prose. Headerless base64/DER private keys are
+// detected only for OpenSSH (its magic is base64-stable); other DER encodings are not.
 
 /**
  * Shared skip for labeled-value detectors (secret-assignment,
@@ -521,15 +447,37 @@ function isExamplePassword(password: string): boolean {
   return EXAMPLE_PASSWORDS.has(password.toLowerCase());
 }
 
-// EVM raw private key (0x + 64 hex) vs. a 32-byte hash. On Base the two are
-// syntactically identical, and a block finding is permanently non-bypassable, so
-// a post carrying an x402 receipt / basescan tx hash must not be hard-blocked.
-// A 64-hex is demoted to a warn 'hex32-value' when the context reads as a hash:
-// it sits inside an http(s) URL token, or is labelled tx/txhash/txn/hash/
-// blockhash just before it. A bare, uncontextualized 64-hex stays a block
-// 'raw-private-key' (continuing the BlockRun-credited wallet-key scanner).
+// EVM raw private key (0x + 64 hex) vs. a 32-byte public value. On Base the two
+// are syntactically identical, and a block finding is permanently
+// non-bypassable, so a post quoting a hash, an identifier, or an event topic
+// must not be hard-blocked. A 64-hex demotes to the WARN 'hex32-value' when it
+// sits inside an http(s) URL token, when a hash/identifier label precedes it, or
+// when it is a known public constant. An unlabeled bare 64-hex stays a block
+// 'raw-private-key' (continuing the BlockRun-credited wallet-key scanner): that
+// is the floor, and demotion never silences, so a real key mislabeled `hash`
+// still surfaces for review.
+//
+// The label window is what a replay over 389 published posts (tenjin#723)
+// forced open: every block-tier hit in the live catalog was a public hex
+// constant, and each missed the old rule differently — `hash was 0x…` (a word
+// between label and value), `source_id = 0x…` (an id-class label), and the
+// ERC-20 Transfer topic0 (no label at all). Hence the wider label set, up to TWO
+// short intervening tokens, and the constants set. Two is the bound that keeps
+// the window honest: "the hash of the private key is 0x…" is four tokens out and
+// still blocks. The replay's last survivor was markdown: the catalog writes
+// ``hash was `0x…` ``, so the separator class carries backticks and quotes.
+//
+// Only the SEPARATOR classes are permissive. What counts as a LABEL is closed,
+// which is why `` PRIVATE_KEY=`0x…` `` still blocks: no punctuation tolerance
+// can invent a label that is not in the set.
 const HEX64_RE = /(?<![0-9a-fx])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])/gi;
-const HASH_LABEL_RE = /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash)[\s/:=]*$/i;
+const HASH_LABEL_RE =
+  /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash|salt|id|topic\d*|root|digest|commitment)(?:[\s:=/,._'"`‘’“”-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._'"`‘’“”-]*$/i;
+
+/** Public 64-hex values that are never key material; see scan-rules.json. */
+const PUBLIC_HEX_CONSTANTS = new Set(
+  (CORPUS.publicHexConstants ?? []).map((c) => c.value.toLowerCase()),
+);
 
 function scanHex64(lines: string[]): ScanFinding[] {
   const out: ScanFinding[] = [];
@@ -538,7 +486,7 @@ function scanHex64(lines: string[]): ScanFinding[] {
     HEX64_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = HEX64_RE.exec(line)) !== null) {
-      const hash = isHashContext(line, m.index);
+      const hash = isHashContext(line, m.index, m[0]);
       out.push({
         check: hash ? 'hex32-value' : 'raw-private-key',
         severity: hash ? 'warn' : 'block',
@@ -551,9 +499,23 @@ function scanHex64(lines: string[]): ScanFinding[] {
   return out;
 }
 
-function isHashContext(line: string, matchIndex: number): boolean {
-  const before = line.slice(0, matchIndex);
-  if (HASH_LABEL_RE.test(before)) return true;
+/**
+ * How far back a label or URL scheme may sit. Bounded so the lookback is O(1)
+ * per match rather than a fresh slice of the whole line: a transcript line
+ * carrying hundreds of 64-hex values would otherwise be quadratic. A label is
+ * relevant within ~40 characters and a scheme+host+path prefix within 256; past
+ * that the value stays block, which is the fail-safe direction.
+ */
+const LABEL_LOOKBACK = 256;
+
+function isHashContext(line: string, matchIndex: number, match: string): boolean {
+  if (PUBLIC_HEX_CONSTANTS.has(match.toLowerCase())) return true;
+  const from = Math.max(0, matchIndex - LABEL_LOOKBACK);
+  const before = line.slice(from, matchIndex);
+  // A truncated window must not start mid-word, or `gridhash` cut to `hash`
+  // reads as a label. Underscore is kept: it is the boundary `source_id` needs.
+  const labelWindow = from === 0 ? before : before.replace(/^[A-Za-z0-9]+/, '');
+  if (HASH_LABEL_RE.test(labelWindow)) return true;
   // The whitespace-delimited token containing the match starts with http(s)://.
   const prefix = /(\S*)$/.exec(before)?.[1] ?? '';
   return /^https?:\/\//.test(line.slice(matchIndex - prefix.length));
@@ -579,6 +541,184 @@ function scanPemBlocks(lines: string[]): ScanFinding[] {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// BIP-39 seed phrases — block. A wallet-adjacent CLI that catches a hex key but
+// not a mnemonic is not protecting the thing that actually loses the funds.
+// ---------------------------------------------------------------------------
+
+const BIP39_WORDS = new Set((wordlistJson as { words: string }).words.split(' '));
+/** The shortest valid BIP-39 mnemonic. Below this a run is prose, not a phrase. */
+const SEED_PHRASE_MIN_WORDS = 12;
+
+/**
+ * A run of >=12 consecutive wordlist words separated ONLY by spaces or tabs.
+ * The whitespace-only rule is what keeps prose out: BIP-39 words are common
+ * English, but twelve of them in a row with no punctuation is a phrase, not a
+ * sentence. Tokens are walked rather than matched by one regex so the span is
+ * exact and the pass stays linear on a transcript-length line.
+ */
+function scanSeedPhrases(lines: string[]): ScanFinding[] {
+  const out: ScanFinding[] = [];
+  const token = /\S+/g;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    token.lastIndex = 0;
+    let runStart = -1;
+    let runEnd = -1;
+    let runWords = 0;
+    let m: RegExpExecArray | null;
+    const flush = (): void => {
+      if (runWords >= SEED_PHRASE_MIN_WORDS) {
+        out.push({
+          check: 'bip39-seed-phrase',
+          severity: 'block',
+          line: i + 1,
+          span: [runStart, runEnd],
+          excerpt: `[redacted ${runWords}-word BIP-39 recovery phrase]`,
+        });
+      }
+      runWords = 0;
+    };
+    while ((m = token.exec(line)) !== null) {
+      if (BIP39_WORDS.has(m[0])) {
+        if (runWords === 0) runStart = m.index;
+        runEnd = m.index + m[0].length;
+        runWords++;
+      } else {
+        flush();
+      }
+    }
+    flush();
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// .env dump blocks — warn. One finding per run, naming the KEYS only.
+// ---------------------------------------------------------------------------
+
+const ENV_LINE = /^\s*(?:export\s+)?([A-Z][A-Z0-9_]{2,})=(\S.*)$/;
+/** Three lines is the shortest run that reads as a file rather than one example. */
+const ENV_BLOCK_MIN_LINES = 3;
+/** A run of short values is configuration (PORT=3000); a long literal is a payload. */
+const ENV_SUBSTANTIAL_VALUE = 12;
+
+function scanEnvDumpBlocks(lines: string[]): ScanFinding[] {
+  const out: ScanFinding[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const keys: string[] = [];
+    let substantial = false;
+    const start = i;
+    let m: RegExpExecArray | null;
+    while (i < lines.length && (m = ENV_LINE.exec(lines[i] ?? '')) !== null) {
+      keys.push(m[1] ?? '');
+      const value = dequote((m[2] ?? '').trim());
+      if (value.length >= ENV_SUBSTANTIAL_VALUE && !isPlaceholder(value) && !isStructural(value)) {
+        substantial = true;
+      }
+      i++;
+    }
+    if (keys.length >= ENV_BLOCK_MIN_LINES && substantial) {
+      const shown = keys.slice(0, 3).join(', ');
+      const rest = keys.length - 3;
+      out.push({
+        check: 'env-dump-block',
+        severity: 'warn',
+        line: start + 1,
+        span: [0, (lines[start] ?? '').length],
+        excerpt: `${keys.length} KEY=VALUE lines (${shown}${rest > 0 ? `, +${rest} more` : ''})`,
+      });
+    }
+    if (i === start) i++;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Generic high-entropy token — warn. The catch-all behind the named shapes.
+// ---------------------------------------------------------------------------
+
+// `/` and `=` are deliberately outside the candidate class: with them in, every
+// long URL path (`com/BackTrackCo/tenjin-agent/issues/45`) and every
+// SHOUTY_KEY=value line reads as one high-entropy token, which is the warn
+// fatigue this detector is supposed to avoid causing. The cost is that a
+// standard-base64 payload is split on its `/` bytes; the credential families
+// that actually carry `/`-bearing base64 (JWT, PEM, OpenSSH) have named detectors.
+const ENTROPY_CANDIDATE = /[A-Za-z0-9+_-]{32,}/g;
+/** Below this, base62 tokens of this length are not distinguishable from text. */
+const MIN_ENTROPY_BITS = 3.5;
+/**
+ * Random base62 almost never runs more than eight same-case letters; an
+ * identifier (getUserProfileByAccountIdentifier) always does. This single test
+ * is what keeps long camelCase symbols out of the findings list.
+ */
+const MAX_SAME_CASE_RUN = 8;
+
+/**
+ * Long tokens whose character profile reads as key material. Suppressed when the
+ * token overlaps a finding a named detector already produced, so a JWT or an AWS
+ * key is reported once, by the detector that knows what it is.
+ */
+function scanHighEntropy(lines: string[], named: ScanFinding[]): ScanFinding[] {
+  const out: ScanFinding[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    ENTROPY_CANDIDATE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = ENTROPY_CANDIDATE.exec(line)) !== null) {
+      const token = m[0];
+      // Warn tier, so the substring placeholder test is allowed here.
+      if (!looksRandom(token) || DOCS_PLACEHOLDER.test(token)) continue;
+      const span: [number, number] = [m.index, m.index + token.length];
+      if (named.some((f) => f.line === i + 1 && f.span[0] < span[1] && span[0] < f.span[1])) {
+        continue;
+      }
+      out.push({
+        check: 'high-entropy-string',
+        severity: 'warn',
+        line: i + 1,
+        span,
+        excerpt: maskKeeping(token, 4),
+      });
+    }
+  }
+  return out;
+}
+
+function looksRandom(token: string): boolean {
+  if (!/[a-z]/.test(token) || !/[A-Z]/.test(token) || !/[0-9]/.test(token)) return false;
+  if (longestSameCaseRun(token) > MAX_SAME_CASE_RUN) return false;
+  return shannonBits(token) >= MIN_ENTROPY_BITS;
+}
+
+function longestSameCaseRun(token: string): number {
+  let best = 0;
+  let run = 0;
+  let previous = '';
+  for (const ch of token) {
+    let kind = '';
+    if (/[a-z]/.test(ch)) kind = 'lower';
+    else if (/[A-Z]/.test(ch)) kind = 'upper';
+    if (kind === '') run = 0;
+    else run = kind === previous ? run + 1 : 1;
+    previous = kind;
+    if (run > best) best = run;
+  }
+  return best;
+}
+
+function shannonBits(token: string): number {
+  const counts = new Map<string, number>();
+  for (const ch of token) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let bits = 0;
+  for (const n of counts.values()) {
+    const p = n / token.length;
+    bits -= p * Math.log2(p);
+  }
+  return bits;
 }
 
 const FENCE = /^(\s*)(`{3,}|~{3,})/;
@@ -636,13 +776,12 @@ function pushIfLong(
   const text = body.join(' ').trim();
   const words = text.length === 0 ? 0 : text.split(/\s+/).length;
   if (words < LONG_QUOTE_WORDS) return;
-  const excerpt = text.length > 60 ? `${text.slice(0, 57)}…` : text;
   out.push({
     check: 'long-verbatim-quote',
     severity: 'warn',
     line: startLine + 1,
     span: [0, firstLine.length],
-    excerpt,
+    excerpt: truncate(text, 60),
   });
 }
 
