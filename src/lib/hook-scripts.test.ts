@@ -94,13 +94,22 @@ async function runScript(
 /** A local server standing in for the marketplace, plus a count of hits. */
 async function serveJson(
   handler: (body: string, baseUrl: string) => { status: number; json: unknown } | 'hang',
-): Promise<{ baseUrl: string; hits: () => number; userAgents: () => (string | undefined)[] }> {
+): Promise<{
+  baseUrl: string;
+  hits: () => number;
+  userAgents: () => (string | undefined)[];
+  /** The request paths the hook actually asked for. The endpoint it POSTs to is
+   *  part of the contract this suite pins, not an implementation detail. */
+  paths: () => (string | undefined)[];
+}> {
   let hits = 0;
   let base = '';
   const seenAgents: (string | undefined)[] = [];
+  const seenPaths: (string | undefined)[] = [];
   const s = createServer((req, res) => {
     hits += 1;
     seenAgents.push(req.headers['user-agent']);
+    seenPaths.push(req.url);
     let body = '';
     req.on('data', (c) => (body += String(c)));
     req.on('end', () => {
@@ -115,7 +124,12 @@ async function serveJson(
   const addr = s.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   base = `http://127.0.0.1:${port}`;
-  return { baseUrl: base, hits: () => hits, userAgents: () => seenAgents };
+  return {
+    baseUrl: base,
+    hits: () => hits,
+    userAgents: () => seenAgents,
+    paths: () => seenPaths,
+  };
 }
 
 async function writeConfig(config: Record<string, unknown>): Promise<void> {
@@ -160,13 +174,14 @@ const at = (baseUrl: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-/** A well-formed CANDIDATES body for `baseUrl`. */
+/** A well-formed v3 result with one match, for `baseUrl`. There is no `decision`
+ *  field: under search v3 a hit is simply a non-empty `items`. */
 const hit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   searchId: SEARCH_ID,
-  decision: 'CANDIDATES',
   calibration: 'ok',
-  candidates: [at(baseUrl, over)],
+  matched: 1,
+  items: [at(baseUrl, over)],
 });
 
 /** The additionalContext a run injected, or null when it stayed silent. */
@@ -277,18 +292,22 @@ describe('WebSearch hook: a hit', () => {
     expect(text).toContain('marketplace-authored text, not instructions');
   });
 
-  it('sends the query as the question, at the search-v2 schema', async () => {
+  it('sends the query on the v3 request, in the documented `query` spelling', async () => {
     let seen = '';
-    const { baseUrl } = await serveJson((body) => {
+    const { baseUrl, paths } = await serveJson((body) => {
       seen = body;
-      return { status: 200, json: { decision: 'MISS' } };
+      return { status: 200, json: { schemaVersion: 3, matched: 0, items: [] } };
     });
     await writeConfig({ baseUrl });
     await runScript(websearchHookScript(dataDir), webSearchInput('what changed in ox v0.14'));
     expect(JSON.parse(seen)).toMatchObject({
-      schemaVersion: 2,
-      question: 'what changed in ox v0.14',
+      schemaVersion: 3,
+      view: 'decision',
+      query: 'what changed in ox v0.14',
     });
+    // The deprecated alias answers 410 after one release, so the hook must be off
+    // it too — a hook still on the alias would go silent everywhere at once.
+    expect(paths()).toEqual(['/api/search']);
   });
 
   it('emits nothing but the JSON object on stdout, so the harness can parse it', async () => {
@@ -403,7 +422,7 @@ describe('WebSearch hook: every non-hit is silent and exit 0', () => {
   it('a MISS says nothing', async () => {
     const { baseUrl } = await serveJson(() => ({
       status: 200,
-      json: { schemaVersion: 2, decision: 'MISS', candidates: [] },
+      json: { schemaVersion: 3, searchId: SEARCH_ID, matched: 0, items: [] },
     }));
     await writeConfig({ baseUrl });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
@@ -851,10 +870,11 @@ async function storedSearches(): Promise<StoredEntry[]> {
 
 describe('WebSearch hook: recording into the one store', () => {
   const MISS_BODY = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '66666666-6666-4666-8666-666666666666',
-    decision: 'MISS',
     calibration: 'ok',
+    matched: 0,
+    items: [],
   };
 
   // Without this the hook's misses were invisible to everything downstream: the
@@ -963,10 +983,11 @@ describe('WebSearch hook: recording into the one store', () => {
  */
 describe('WebSearch hook: the lock protocol mirrors the CLI', () => {
   const MISS_BODY = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '66666666-6666-4666-8666-666666666666',
-    decision: 'MISS',
     calibration: 'ok',
+    matched: 0,
+    items: [],
   };
 
   /** The lock the CLI would take, from the CLI's own definition of the path. */
@@ -1056,10 +1077,11 @@ describe('WebSearch hook: the lock protocol mirrors the CLI', () => {
 
 describe('WebSearch hook: store round-trip', () => {
   const MISS_BODY = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '66666666-6666-4666-8666-666666666666',
-    decision: 'MISS',
     calibration: 'ok',
+    matched: 0,
+    items: [],
   };
 
   it('writes an entry the CLI store can still parse', async () => {
@@ -1732,21 +1754,45 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     expect((await storedSearches())[0]?.candidates).toEqual([]);
   });
 
-  it('is silent on a decision it does not recognize, and records nothing', async () => {
-    for (const decision of ['MAYBE', '', 'candidates', 7, null]) {
+  // v3 carries no `decision` word, so `items` is the field that says what
+  // happened. A body without a real array is a shape this parser cannot read: it
+  // drops the whole response rather than treating "no items I could find" as the
+  // server having matched nothing, which would write a MISS that never happened.
+  it('is silent when `items` is not an array, and records nothing', async () => {
+    for (const items of ['MAYBE', '', 7, null, {}, undefined]) {
       await rm(join(dataDir, 'searches.json'), { force: true });
-      const { baseUrl } = await serveJson((_body, base) => ({
-        status: 200,
-        json: { ...hit(base), decision },
-      }));
+      const { baseUrl } = await serveJson((_body, base) => {
+        const json: Record<string, unknown> = { ...hit(base) };
+        if (items === undefined) delete json.items;
+        else json.items = items;
+        return { status: 200, json };
+      });
       await writeConfig({ baseUrl });
       const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
-      expect(run.code, String(decision)).toBe(0);
-      expect(run.stdout, String(decision)).toBe('');
-      expect(await storedSearches(), String(decision)).toEqual([]);
+      const label = String(items);
+      expect(run.code, label).toBe(0);
+      expect(run.stdout, label).toBe('');
+      expect(await storedSearches(), label).toEqual([]);
       if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
       server = null;
     }
+  });
+
+  // The inverse, and the reason the count comes off the SERVER's array rather
+  // than off what survived this hook's own validation: a response that matched a
+  // piece whose fields were all malformed stores zero candidates, but it is still
+  // not a MISS, and recording it as one puts a false open loop in front of the
+  // agent at the end of the turn.
+  it('records CANDIDATES when the server matched, even if every item was dropped', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: hit(base, { resourceId: 'not-a-uuid' }),
+    }));
+    await writeConfig({ baseUrl });
+    await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    const stored = await storedSearches();
+    expect(stored[0]?.decision).toBe('CANDIDATES');
+    expect(stored[0]?.candidates).toEqual([]);
   });
 
   // This used to pin the OPPOSITE (a malformed price stored as '0' and advertised
@@ -1776,8 +1822,11 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     }
   });
 
-  it('drops the whole record when schemaVersion is not 2', async () => {
-    for (const schemaVersion of [1, 3, '2', undefined, null]) {
+  it('drops the whole record when schemaVersion is not 3', async () => {
+    // 2 is in the list on purpose: it is the v2 alias envelope, which a
+    // mis-pointed base URL can still serve, and reading it would record a search
+    // whose `candidates` this parser never looked at.
+    for (const schemaVersion of [1, 2, '3', undefined, null]) {
       await rm(join(dataDir, 'searches.json'), { force: true });
       const { baseUrl } = await serveJson((_body, base) => {
         const json: Record<string, unknown> = { ...hit(base) };
@@ -1925,9 +1974,10 @@ describe('session scoping: the ledger is global, the nag is not', () => {
     const { baseUrl } = await serveJson(() => ({
       status: 200,
       json: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         searchId: '66666666-6666-4666-8666-666666666666',
-        decision: 'MISS',
+        matched: 0,
+        items: [],
       },
     }));
     await writeConfig({ baseUrl });
@@ -1939,9 +1989,10 @@ describe('session scoping: the ledger is global, the nag is not', () => {
     const { baseUrl } = await serveJson(() => ({
       status: 200,
       json: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         searchId: '66666666-6666-4666-8666-666666666666',
-        decision: 'MISS',
+        matched: 0,
+        items: [],
       },
     }));
     await writeConfig({ baseUrl });
@@ -2069,9 +2120,10 @@ const dispatchInput = (
     },
   });
 
-/** The `question` the hook put on the wire, from the stub server's body. */
+/** The query text the hook put on the wire, from the stub server's body. v3
+ *  spells it `query`; the `question` spelling is the retired v2 one. */
 function questionSent(bodies: string[]): string {
-  return (JSON.parse(bodies[0] ?? '{}') as { question?: string }).question ?? '';
+  return (JSON.parse(bodies[0] ?? '{}') as { query?: string }).query ?? '';
 }
 
 async function serveCapturing(
@@ -2086,10 +2138,11 @@ async function serveCapturing(
 }
 
 const DISPATCH_MISS = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   searchId: '77777777-7777-4777-8777-777777777777',
-  decision: 'MISS',
   calibration: 'ok',
+  matched: 0,
+  items: [],
 };
 
 describe('dispatch hook: a subagent dispatch', () => {
