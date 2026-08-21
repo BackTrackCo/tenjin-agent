@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
 import { latestSearch } from '../lib/search-store';
+import { knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -471,6 +472,41 @@ describe('candidate URL origin ingest boundary', () => {
       ],
     };
     const { fetch } = stub(offOrigin);
+    await expect(
+      runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
+  });
+
+  /**
+   * tenjin#738 in one test. The server builds candidate urls from its own global,
+   * so at the cutover every candidate lands on the other origin at once while an
+   * installed CLI still names the old one. Before the alias set that was a
+   * CONTRACT_MISMATCH on the whole response, which is the published CLI going
+   * dark, not degrading.
+   */
+  it('accepts a candidate on the deployment other origin when the base is one of them', async () => {
+    const [base, sibling] = knownDeploymentOrigins();
+    expect(sibling).toBeDefined();
+    const flipped = {
+      ...CANDIDATES,
+      candidates: [
+        { ...(CANDIDATES.candidates[0] as object), url: `${sibling}/api/read/iris/slug` },
+      ],
+    };
+    const { fetch } = stub(flipped);
+    await runSearch({ question: 'q' }, makeCtx({ baseUrl: base }), { fetchImpl: fetch });
+    const stored = await latestSearch(dir);
+    expect(stored?.candidates[0]?.url).toBe(`${sibling}/api/read/iris/slug`);
+  });
+
+  it('still refuses a deployment origin when the configured base is self-hosted', async () => {
+    // makeCtx pins a preview base, which the alias set knows nothing about.
+    const [known] = knownDeploymentOrigins();
+    const foreign = {
+      ...CANDIDATES,
+      candidates: [{ ...(CANDIDATES.candidates[0] as object), url: `${known}/api/read/iris/slug` }],
+    };
+    const { fetch } = stub(foreign);
     await expect(
       runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
