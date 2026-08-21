@@ -67,6 +67,20 @@ describe('PRODUCTION_ORIGIN', () => {
 describe('isSameDeployment', () => {
   const others = knownDeploymentOrigins().filter((o) => o !== PRODUCTION_ORIGIN);
 
+  /**
+   * Exact, not `toContain`. This set ships baked into every released CLI and
+   * into every hook script written at install time, so it is live on machines
+   * the operator no longer controls until each one updates, and whoever holds a
+   * member origin receives wallet-signed credentials from a CLI configured on
+   * the sibling. Adding a member, or failing to remove one that was sold or
+   * repointed, has to be a line a human wrote on purpose in a reviewed diff.
+   * The expected value is written out here rather than read from the module, for
+   * the same reason. Removal runbook: docs/safety-model.md.
+   */
+  it('is exactly the two deployment origins, and nothing has crept in', () => {
+    expect(knownDeploymentOrigins()).toEqual([PRODUCTION_ORIGIN, 'https://tenjin.sh']);
+  });
+
   it('lists the production origin and at least one alias for the cutover', () => {
     expect(knownDeploymentOrigins()).toContain(PRODUCTION_ORIGIN);
     // Without a second member the set is a no-op and tenjin#738 stays broken.

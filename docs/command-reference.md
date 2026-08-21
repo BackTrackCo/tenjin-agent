@@ -158,8 +158,12 @@ library and no dedupe: every paid call pays, so always pass `--max-price` (a
 hard cap `--yes` cannot bypass). Flags: `-X GET|POST`, `-d '<json-body>'`
 (implies POST), `--max-price <usd>`, `--yes`, `--print-body`.
 
-The configured base URL is always payable. Any other https origin is the
-Bazaar lane: it needs the `bazaarPay` config toggle on AND a configured
+The configured base URL is always payable, and so is the deployment's other
+origin (`tenjin.blog` and `tenjin.sh` are one deployment) when the configured
+base is itself one of them: both take the tenjin lane, no `bazaarPay` needed. A
+self-hosted or preview base gets no such alias and matches only itself. Every
+other https origin is the Bazaar lane: it needs the `bazaarPay` config toggle on
+AND a configured
 registry listing whose terms the live 402 does not exceed (checked against the
 local `discover` cache first, then live); a mismatch refuses with
 `REGISTRY_MISMATCH` before anything is signed, and unreachable registries fail

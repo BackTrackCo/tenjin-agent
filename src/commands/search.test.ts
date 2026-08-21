@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
 import { latestSearch } from '../lib/search-store';
-import { knownDeploymentOrigins } from '../lib/production-origin';
+import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -485,7 +485,10 @@ describe('candidate URL origin ingest boundary', () => {
    * dark, not degrading.
    */
   it('accepts a candidate on the deployment other origin when the base is one of them', async () => {
-    const [base, sibling] = knownDeploymentOrigins();
+    // Named, not indexed: reordering the set must not silently change which
+    // origin this configures and which one it flips the candidate onto.
+    const base = PRODUCTION_ORIGIN;
+    const sibling = knownDeploymentOrigins().find((o) => o !== base);
     expect(sibling).toBeDefined();
     const flipped = {
       ...CANDIDATES,
@@ -501,7 +504,7 @@ describe('candidate URL origin ingest boundary', () => {
 
   it('still refuses a deployment origin when the configured base is self-hosted', async () => {
     // makeCtx pins a preview base, which the alias set knows nothing about.
-    const [known] = knownDeploymentOrigins();
+    const known = PRODUCTION_ORIGIN;
     const foreign = {
       ...CANDIDATES,
       candidates: [{ ...(CANDIDATES.candidates[0] as object), url: `${known}/api/read/iris/slug` }],
