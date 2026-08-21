@@ -7,6 +7,7 @@ import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
+import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
@@ -272,7 +273,11 @@ function resolveLane(url: string, settings: ResolvedSettings): Lane {
       fix: 'Pass an absolute http(s) URL.',
     });
   }
-  if (target.origin === new URL(settings.baseUrl).origin) return 'tenjin';
+  // Same deployment, not merely the same spelling: without this a URL on the
+  // deployment's other origin falls through to the Bazaar lane, which then
+  // refuses it as a third-party endpoint or pays it under registry rules meant
+  // for one. The SIWX signature below binds to the TARGET origin either way.
+  if (isSameDeployment(target.origin, new URL(settings.baseUrl).origin)) return 'tenjin';
   if (settings.bazaarPay !== true) {
     // The fix names the operator act without coaching around the gate that just
     // fired: this URL may have arrived in a task, a page, or purchased content.
