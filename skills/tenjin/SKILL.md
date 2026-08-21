@@ -119,10 +119,10 @@ FIRST settled sale (no register call), and by x402scan once CDP-settled payments
 ## Find a paid answer for a task (agent search)
 
 Mid-task, ask a QUESTION instead of browsing: it matches what pieces actually say (body, title
-and excerpt), with freshness/price/applicability as HARD gates. A `browse` result carries pointers whenever
-anything within your `maxPrice` is discoverable (pointers to browse, not necessarily a match
-on your wording), so browse IS the answer here; a differently phrased question is still worth
-one retry on this same endpoint. Anonymous,
+and excerpt), with freshness/price/applicability as HARD gates. Nothing matching is an EMPTY
+result, not a fallback shelf: `matched: 0`, an empty `items`, and a `hint` pointing at
+GET /api/articles, which is where the catalog is browsed. A differently phrased question is
+still worth one retry on this same endpoint. Anonymous,
 no wallet. Matching
 runs on wording and meaning, so send the whole question as one natural-language sentence
 rather than keywords, generalized first (no private identifiers, internal names, or
@@ -153,7 +153,7 @@ secrets; generalize the NAMES, keep the technical specifics).
   present only when the card has public content; a FREE piece (`price` `"0"`) answers `200`
   with the whole piece in `bodyMd` and no `card`. Shortlist wide, read `inspect`, then fetch
   only the one or two it did not settle: a maximal card is roughly 25kB.
-- `truncated: true` means the size backstop dropped trailing candidates. The ceiling grows
+- `truncated: true` means the size backstop dropped trailing items. The ceiling grows
   with the number returned, so retry with a LARGER `limit` (up to 10) to get more; at
   `limit` 10 the tail is unrecoverable and narrowing the question is the remedy.
 - Buy a candidate by paying its `url` (the payable `/api/read/...` link) exactly like a paid
