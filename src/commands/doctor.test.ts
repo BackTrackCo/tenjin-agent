@@ -28,9 +28,9 @@ const balanceMock = vi.mocked(getUsdcBalance);
 const OPENAPI_OK = {
   openapi: '3.1.0',
   info: { title: 'Tenjin', version: '0.1.0' },
-  // A healthy deploy advertises the A2 search endpoint, so the search-contract
+  // A healthy deploy advertises the search endpoint, so the search-contract
   // check is ok (no extra fix line): "all required checks green" stays true.
-  paths: { '/api/agent/search': {} },
+  paths: { '/api/search': {} },
 };
 const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // doctor reads the wallet file's cleartext top-level address without decrypting,
@@ -247,6 +247,35 @@ describe('runDoctor — passing outcomes', () => {
     expect(res.humanLines?.[checkLines]).toBe('');
     expect(res.humanLines?.[checkLines + 1]).toContain(PERMISSIONS_DOC_URL);
     expect((res.humanLines ?? []).length).toBe(checkLines + 2);
+  });
+
+  // The alias is what a stale deployment advertises: it is deprecated and answers
+  // 410 after one release, so a deploy carrying ONLY it is the case this check has
+  // to warn about. Passing on the alias would send `tenjin search` at a path that
+  // is about to stop answering, which is the entire point of the probe.
+  it('search-contract warns when the deploy advertises only the deprecated alias', async () => {
+    const aliasOnly = routeFetch({
+      '/openapi.json': {
+        body: {
+          openapi: '3.1.0',
+          info: { version: '0.1.0' },
+          paths: { '/api/agent/search': {} },
+        },
+      },
+      '/api/articles': { body: ARTICLES_OK },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: aliasOnly,
+    });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    expect(data.status).toBe('pass'); // still passes: search-contract is not required
+    const check = find(data.checks, 'search-contract');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('POST /api/search');
   });
 
   it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
@@ -1596,7 +1625,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
         body: {
           openapi: '3.1.0',
           info: { version: forged },
-          paths: { '/api/agent/search': {} },
+          paths: { '/api/search': {} },
         },
       },
       '/api/articles': { body: ARTICLES_OK },
