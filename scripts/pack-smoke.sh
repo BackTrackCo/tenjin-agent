@@ -59,6 +59,16 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
+# The MCP Registry's npm validator fetches the pinned version from npm and requires
+# its package.json mcpName to equal the server name. Dropping the field breaks
+# BackTrackCo/tenjin's NEXT registry publish, weeks later and nowhere near here,
+# so assert it on the packed artifact the validator would actually read.
+MCP_NAME="$(node -e "process.stdout.write(require('./node_modules/tenjin-cli/package.json').mcpName ?? '')")"
+[ "$MCP_NAME" = "blog.tenjin/tenjin" ] || {
+  echo "pack-smoke: FAIL, packed mcpName is '$MCP_NAME', expected 'blog.tenjin/tenjin'" >&2
+  exit 1
+}
+
 # A skill's SUBDIRECTORY is the part an `files: ["skills"]` entry ships silently
 # and a narrower glob would drop: both CLI skills link a reference file out of
 # their own tree, and install copies whatever is in the packaged one. A miss here

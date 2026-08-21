@@ -157,9 +157,35 @@ jobs:
           bash scripts/pack-smoke.sh
 
       - name: Publish to npm
+        id: publish
         uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1.8.0
         with:
           publish: pnpm exec changeset publish
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # The MCP Registry pins tenjin-cli by exact version from BackTrackCo/tenjin,
+      # so every publish here stales a listing nothing in either repo watches
+      # (tenjin-agent#98). Gated on the action's own outputs, because a dispatch
+      # that shipped nothing must announce nothing, and `publishedPackages` is
+      # where the version comes from, so the issue can never name a guess.
+      #
+      # `!= 'false'` and not `== 'true'`: an action upgrade that renames or drops
+      # `published` yields an empty string, which would skip this step green and
+      # restore the very silence being fixed. Empty runs the step, and the script
+      # fails on it. (actionlint does not catch this: third-party action outputs
+      # are unknown to it, so a bogus `steps.publish.outputs.*` lints clean.)
+      - name: Tell tenjin its MCP Registry pin is behind
+        if: steps.publish.outputs.published != 'false'
+        run: bash scripts/notify-registry-pin.sh
+        env:
+          # A fine-grained PAT with Issues write on BackTrackCo/tenjin, NOT the
+          # release-bot token minted above, which cannot write an issue on another
+          # repo. Rationale and setup: RELEASING.md, "One-time owner setup".
+          GH_TOKEN: ${{ secrets.RELEASE_CROSSREPO_TOKEN }}
+          PUBLISHED: ${{ steps.publish.outputs.published }}
+          PUBLISHED_PACKAGES: ${{ steps.publish.outputs.publishedPackages }}
+          # Pinned here so CI never depends on the script's own defaults.
+          TARGET_REPO: BackTrackCo/tenjin
+          PACKAGE: tenjin-cli
