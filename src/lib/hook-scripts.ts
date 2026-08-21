@@ -29,13 +29,13 @@
 
 import {
   CALLER_USER_AGENT_ENV,
+  OWN_PRODUCT_NAMES,
   PRINTABLE_ASCII_RE,
   PRODUCT_RE,
   TENJIN_COMMENT,
-  TENJIN_PRODUCT,
-  TENJIN_PRODUCT_NAME,
-  TENJIN_USER_AGENT,
   USER_AGENT_MAX_LENGTH,
+  WEBSEARCH_HOOK_PRODUCT,
+  WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
@@ -427,6 +427,10 @@ function emit(hookEventName, additionalContext) {
 /**
  * The identity this hook sends, mirrored from `lib/client-meta.ts`.
  *
+ * It leads with `tenjin-websearch-hook`, NOT `tenjin-cli`, so a query that rode
+ * along with a web search is separable from one an agent chose to look up. See
+ * WEBSEARCH_HOOK_PRODUCT_NAME for the cross-repo contract on that name.
+ *
  * ⚠ MIRRORED, MUST UPDATE TOGETHER with `composeUserAgent`. The hook is the
  * CLI's highest-volume request path and imports nothing, so without this it
  * sends Node's default `User-Agent: node` and every hook-driven search is
@@ -446,10 +450,10 @@ function emit(hookEventName, additionalContext) {
  */
 function userAgentSource(): string {
   return `
-const TENJIN_PRODUCT = ${JSON.stringify(TENJIN_PRODUCT)};
-const TENJIN_USER_AGENT = ${JSON.stringify(TENJIN_USER_AGENT)};
+const HOOK_PRODUCT = ${JSON.stringify(WEBSEARCH_HOOK_PRODUCT)};
+const HOOK_USER_AGENT = ${JSON.stringify(WEBSEARCH_HOOK_USER_AGENT)};
 const UA_COMMENT = ${JSON.stringify(TENJIN_COMMENT)};
-const UA_PRODUCT_NAME = ${JSON.stringify(TENJIN_PRODUCT_NAME.toLowerCase())};
+const UA_OWN_NAMES = ${JSON.stringify(OWN_PRODUCT_NAMES.map((name) => name.toLowerCase()))};
 const UA_MAX_LENGTH = ${USER_AGENT_MAX_LENGTH};
 const UA_PRODUCT_RE = ${PRODUCT_RE.toString()};
 const UA_PRINTABLE_RE = ${PRINTABLE_ASCII_RE.toString()};
@@ -457,24 +461,24 @@ const UA_PRINTABLE_RE = ${PRINTABLE_ASCII_RE.toString()};
 /** A copy of our own identity inside a caller value, in any casing. */
 function isOwnUaIdentity(token) {
   const lower = token.toLowerCase();
-  return lower === UA_COMMENT.toLowerCase() || lower === UA_PRODUCT_NAME ||
-    lower.startsWith(UA_PRODUCT_NAME + '/');
+  if (lower === UA_COMMENT.toLowerCase()) return true;
+  return UA_OWN_NAMES.some((name) => lower === name || lower.startsWith(name + '/'));
 }
 
 /**
  * Our product, then the launching harness's products in their order, then our
  * comment. Rejection is TOTAL: a non-printable, non-product, or overlong handoff
- * is omitted and the CLI identity travels alone, because truncating a product
+ * is omitted and the hook identity travels alone, because truncating a product
  * token would mint a different, false identity. This is self-reported telemetry
  * and never trusted policy input.
  */
 function composedUserAgent() {
   const raw = process.env[${JSON.stringify(CALLER_USER_AGENT_ENV)}];
-  if (typeof raw !== 'string' || !UA_PRINTABLE_RE.test(raw)) return TENJIN_USER_AGENT;
+  if (typeof raw !== 'string' || !UA_PRINTABLE_RE.test(raw)) return HOOK_USER_AGENT;
   const tokens = raw.split(' ').filter((t) => t.length > 0 && !isOwnUaIdentity(t));
-  if (tokens.length === 0 || !tokens.every((t) => UA_PRODUCT_RE.test(t))) return TENJIN_USER_AGENT;
-  const composed = TENJIN_PRODUCT + ' ' + tokens.join(' ') + ' ' + UA_COMMENT;
-  return composed.length <= UA_MAX_LENGTH ? composed : TENJIN_USER_AGENT;
+  if (tokens.length === 0 || !tokens.every((t) => UA_PRODUCT_RE.test(t))) return HOOK_USER_AGENT;
+  const composed = HOOK_PRODUCT + ' ' + tokens.join(' ') + ' ' + UA_COMMENT;
+  return composed.length <= UA_MAX_LENGTH ? composed : HOOK_USER_AGENT;
 }
 `;
 }
@@ -1058,7 +1062,9 @@ function strongLine(s) {
 }
 
 /** ONE line for the whole batch of hook searches, because most of them are not
- *  publishable and the agent is the only one that can tell which are. */
+ *  publishable and the agent is the only one that can tell which are. ONE close
+ *  command too: a per-id one bought seventeen sequential \`outcome\` calls in one
+ *  session. \`--all-open\` sweeps the same set: this session's MISSes only. */
 function weakLine(batch) {
   const items = batch
     .map((s) => "'" + clean(s.question, 80) + "' (" + clean(s.searchId, 64) + ')')
@@ -1067,7 +1073,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    '. Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close them: tenjin outcome --search-id <id> --status regenerated.'
+    ". Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
   );
 }
 

@@ -181,13 +181,14 @@ pay lane's registry evidence.
 
 Reports how a search ended.
 
-| Flag                    | Values                                                                   | Effect                                         |
-| ----------------------- | ------------------------------------------------------------------------ | ---------------------------------------------- |
-| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                       |
-| `--search-id <uuid>`    |                                                                          | Search to report against.                      |
-| `--last`                |                                                                          | Target the most recent manual `tenjin search`. |
-| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                 |
-| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                   |
+| Flag                    | Values                                                                   | Effect                                                                                                                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                                                                                                                                                                                      |
+| `--search-id <uuid>`    |                                                                          | Search to report against. Repeatable; one status covers all of them.                                                                                                                                          |
+| `--last`                |                                                                          | Target the most recent manual `tenjin search`.                                                                                                                                                                |
+| `--all-open`            |                                                                          | Close this session's open web-search-hook MISSes. `regenerated` only. Deliberate searches, and hook searches Tenjin answered, are left open and counted. Another session's loops are that session's to close. |
+| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                                                                                                                                                                                |
+| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                                                                                                                                                                                  |
 
 ## Publishing and editing
 
