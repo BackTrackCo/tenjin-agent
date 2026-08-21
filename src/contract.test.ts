@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { z } from 'zod';
 import fixtureJson from './fixtures/openapi.fixture.json';
-import { searchBrowseSchema, searchCandidateSchema, searchResponseSchema } from './lib/agent-api';
+import { searchCandidateSchema, searchResultSchema } from './lib/agent-api';
 import { OUTCOME_STATUS_VALUES } from './lib/agent-api';
 import { previewCardSchema } from './lib/read-client';
 import {
@@ -55,7 +55,7 @@ function requiredKeys(schema: { shape: Record<string, z.ZodType> }): string[] {
 
 // The contract the CLI relies on, written out long-hand: if either the CLI
 // schema or the fixture drifts from these lists, the drift is the failure.
-const RESPONSE_REQUIRED = ['calibration', 'decision', 'schemaVersion', 'searchId'];
+const RESULT_REQUIRED = ['calibration', 'items', 'matched', 'schemaVersion', 'searchId'];
 // The lean candidate of search v2: eleven keys, no card fields. Everything the
 // candidate used to carry about what a piece actually says now lives on the read
 // route's 402 body, one free unpaid GET away (see READ_CARD_REQUIRED below).
@@ -104,10 +104,6 @@ const READ_CARD_REQUIRED = [
   'temporalMode',
   'validUntil',
 ];
-// The MISS-only browse tail (tenjin#460). Deliberately minimal: if the server
-// ever grows it a matchReasons/confidence field, that is a contract change the
-// CLI must see, because a browse pointer must never read as a scored candidate.
-const BROWSE_REQUIRED = ['creator', 'price', 'resourceId', 'title', 'url'];
 
 /**
  * An operation the CLI calls, pinned with the retirement state the server
@@ -128,15 +124,15 @@ interface PinnedOp {
 
 const AGENT_OPS: PinnedOp[] = [
   {
-    path: '/api/agent/search',
+    path: '/api/search',
     method: 'post',
-    operationId: 'agentSearch',
-    // Already announced: live serves this as an adapter onto POST /api/search
-    // for one release, then answers 410. `src/lib/agent-api.ts` and the hook
-    // `tenjin install` writes into a harness both still call it (#137).
-    deprecated: true,
+    operationId: 'search',
+    // THE search endpoint since #137. The `/api/agent/search` alias this client
+    // used to call is deprecated and answers 410 after one release, so there is
+    // nothing left to fall back to: if this path retires, `tenjin search` stops.
+    deprecated: false,
     migration:
-      'move the search client to POST /api/search with `view: "decision"` (SearchRequestV3 -> SearchResult, #137); the alias answers 410 after one release',
+      'search has no second path since the /api/agent/search alias retired (#137); `tenjin search` stops here',
   },
   {
     path: '/api/searches/{id}/outcomes',
@@ -184,18 +180,22 @@ function assertSchemaDeclares(doc: unknown, schemaName: string, fields: string[]
 }
 
 function assertSearchRequest(doc: unknown): void {
-  const properties = get(doc, 'components', 'schemas', 'SearchRequest', 'properties');
-  for (const field of [
-    'schemaVersion',
-    'question',
-    'freshWithin',
-    'maxPrice',
-    'appliesTo',
-    'limit',
-  ]) {
-    expect(get(properties, field), `SearchRequest.properties.${field} missing`).toBeDefined();
+  const properties = get(doc, 'components', 'schemas', 'SearchRequestV3', 'properties');
+  for (const field of ['schemaVersion', 'query', 'view', 'filters', 'limit']) {
+    expect(get(properties, field), `SearchRequestV3.properties.${field} missing`).toBeDefined();
   }
-  expect(get(properties, 'question', 'maxLength')).toBe(512);
+  expect(get(properties, 'query', 'maxLength')).toBe(512);
+  // `decision` has to be a value `view` accepts, or every search this CLI sends
+  // is a 400. Pinned as membership rather than as the default, because the CLI
+  // names the view explicitly instead of relying on the server's default.
+  expect(get(properties, 'view', 'enum')).toContain('decision');
+  // The narrowings moved UNDER `filters` in v3, and that object is a strictObject
+  // server-side: a top-level `maxPrice` is stripped into `warnings` and the search
+  // silently runs unfiltered, so where these live is load-bearing, not cosmetic.
+  const filters = get(properties, 'filters', 'properties');
+  for (const field of ['freshWithin', 'maxPrice', 'appliesTo']) {
+    expect(get(filters, field), `SearchRequestV3.filters.${field} missing`).toBeDefined();
+  }
 }
 
 function assertOutcomeStatusEnum(doc: unknown): void {
@@ -240,9 +240,26 @@ function patchedFixture(
   return doc;
 }
 
+/** The retired alias, recorded as deprecated, so the "a retirement cannot be
+ *  called off" arm below still has a real deprecated operation to exercise. It is
+ *  deliberately NOT in AGENT_OPS: the CLI does not call it any more, and pinning
+ *  a path nothing depends on would make its eventual deletion a red build for
+ *  nobody. */
+const RETIRED_ALIAS: PinnedOp = {
+  path: '/api/agent/search',
+  method: 'post',
+  operationId: 'agentSearch',
+  deprecated: true,
+  migration: 'the alias is retired; POST /api/search with `view: "decision"` is the endpoint',
+};
+
 describe('contract fixture pins the agent endpoints', () => {
-  it('declares POST /api/agent/search and /api/searches/{id}/outcomes', () => {
+  it('declares POST /api/search and /api/searches/{id}/outcomes', () => {
     assertAgentPaths(fixtureDoc);
+  });
+
+  it('the alias the CLI moved off is still advertised as deprecated, not as live', () => {
+    assertPinnedOp(fixtureDoc, RETIRED_ALIAS);
   });
 
   // The guard exercised against the drift it is for. A pin that has only ever
@@ -255,51 +272,44 @@ describe('contract fixture pins the agent endpoints', () => {
   });
 
   it('fails on a removed operation naming the migration, not undefined-vs-string', () => {
-    expect(() => assertAgentPaths(patchedFixture('/api/agent/search', 'post', null))).toThrow(
-      /gone from the spec: move the search client to POST \/api\/search/,
+    expect(() => assertAgentPaths(patchedFixture('/api/search', 'post', null))).toThrow(
+      /gone from the spec: search has no second path/,
     );
   });
 
   it('fails when a recorded retirement is called off, so the record cannot go stale', () => {
     expect(() =>
-      assertAgentPaths(patchedFixture('/api/agent/search', 'post', { deprecated: false })),
+      assertPinnedOp(
+        patchedFixture('/api/agent/search', 'post', { deprecated: false }),
+        RETIRED_ALIAS,
+      ),
     ).toThrow(/recorded DEPRECATED but the spec no longer marks it/);
   });
 });
 
 describe('contract fixture covers every field the CLI requires', () => {
-  it('the CLI requires exactly the pinned SearchResponse fields', () => {
-    expect(requiredKeys(searchResponseSchema)).toEqual(RESPONSE_REQUIRED);
+  it('the CLI requires exactly the pinned SearchResult fields', () => {
+    expect(requiredKeys(searchResultSchema)).toEqual(RESULT_REQUIRED);
   });
 
   it('the CLI requires exactly the pinned SearchCandidate fields', () => {
     expect(requiredKeys(searchCandidateSchema)).toEqual(CANDIDATE_REQUIRED);
   });
 
-  it.each(RESPONSE_REQUIRED)('SearchResponse declares required field %s', (field) => {
-    assertSchemaDeclares(fixtureDoc, 'SearchResponse', [field]);
+  it.each(RESULT_REQUIRED)('SearchResult declares required field %s', (field) => {
+    assertSchemaDeclares(fixtureDoc, 'SearchResult', [field]);
+  });
+
+  it('SearchResult declares the optional miss hint the CLI renders', () => {
+    // Optional, so it can never fail parsing: it fails SILENTLY instead, and a
+    // renamed `hint` would just stop telling the reader where to browse.
+    const properties = get(fixtureDoc, 'components', 'schemas', 'SearchResult', 'properties');
+    expect(get(properties, 'hint'), 'SearchResult.properties.hint missing').toBeDefined();
+    expect(get(properties, 'truncated'), 'SearchResult.properties.truncated missing').toBeDefined();
   });
 
   it.each(CANDIDATE_REQUIRED)('SearchCandidate declares required field %s', (field) => {
     assertSchemaDeclares(fixtureDoc, 'SearchCandidate', [field]);
-  });
-
-  it('the CLI requires exactly the pinned SearchBrowse fields', () => {
-    expect(requiredKeys(searchBrowseSchema)).toEqual(BROWSE_REQUIRED);
-  });
-
-  it.each(BROWSE_REQUIRED)('SearchBrowse declares required field %s', (field) => {
-    assertSchemaDeclares(fixtureDoc, 'SearchBrowse', [field]);
-  });
-
-  it('SearchBrowse carries no score-like field a candidate would have', () => {
-    const properties = get(fixtureDoc, 'components', 'schemas', 'SearchBrowse', 'properties');
-    for (const scoreish of ['matchReasons', 'estimatedTokens', 'confidence']) {
-      expect(
-        get(properties, scoreish),
-        `SearchBrowse must not declare ${scoreish}`,
-      ).toBeUndefined();
-    }
   });
 
   it('SearchCandidate carries none of the card fields that moved to inspect', () => {
@@ -397,7 +407,7 @@ describe('contract fixture request shapes', () => {
 describe('a response shaped like the fixture parses through the CLI schema', () => {
   // Hand-built to the fixture's declared shapes (the fixture embeds no example):
   // uuid ids, atomic USDC digit-string price, nullable date-times, integer
-  // estimatedTokens, and the CANDIDATES/MISS split on `candidates` presence.
+  // estimatedTokens, and the v3 hit/miss split on whether `items` is empty.
   const candidate = {
     resourceId: '5b3e2b1a-8c4d-4f6e-9a2b-1c3d5e7f9a0b',
     url: 'https://tenjin.blog/api/read/alice/base-fee-snapshot',
@@ -412,11 +422,11 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
     creator: { handle: 'alice' },
   };
   const response = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '0f8b2d4c-6a1e-4b3f-8c5d-7e9f1a2b3c4d',
-    decision: 'CANDIDATES',
     calibration: 'lexical-v1',
-    candidates: [candidate],
+    items: [candidate],
+    matched: 1,
   };
 
   it('the hand-built candidate only uses fields the fixture declares', () => {
@@ -426,25 +436,43 @@ describe('a response shaped like the fixture parses through the CLI schema', () 
     }
   });
 
-  it('searchResponseSchema.parse accepts a CANDIDATES response', () => {
-    const parsed = searchResponseSchema.parse(response);
-    expect(parsed.decision).toBe('CANDIDATES');
-    expect(parsed.candidates).toHaveLength(1);
+  it('searchResultSchema.parse accepts a result with matches', () => {
+    const parsed = searchResultSchema.parse(response);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.items).toHaveLength(1);
   });
 
-  it('searchResponseSchema.parse accepts a MISS with candidates omitted', () => {
+  it('searchResultSchema.parse accepts a miss: empty items, a hint, no decision', () => {
     const miss = {
+      schemaVersion: 3,
+      searchId: response.searchId,
+      calibration: 'lexical-v1',
+      items: [],
+      matched: 0,
+      hint: 'No matches. Browse the catalog at GET /api/articles.',
+    };
+    const parsed = searchResultSchema.parse(miss);
+    expect(parsed.items).toEqual([]);
+    expect(parsed.matched).toBe(0);
+    expect(parsed.hint).toBe('No matches. Browse the catalog at GET /api/articles.');
+  });
+
+  it('searchResultSchema.parse refuses the v2 envelope rather than reading it as a miss', () => {
+    // The alias shape, which a mis-pointed base URL could still serve. `items` is
+    // required, so this is a parse REFUSAL and not a silent zero-match result.
+    const v2 = {
       schemaVersion: 2,
       searchId: response.searchId,
-      decision: 'MISS',
+      decision: 'CANDIDATES',
       calibration: 'lexical-v1',
+      candidates: [candidate],
     };
-    expect(searchResponseSchema.parse(miss).candidates).toBeUndefined();
+    expect(searchResultSchema.safeParse(v2).success).toBe(false);
   });
 
-  it('searchResponseSchema.parse keeps the optional truncated flag', () => {
-    expect(searchResponseSchema.parse({ ...response, truncated: true }).truncated).toBe(true);
-    expect(searchResponseSchema.parse(response).truncated).toBeUndefined();
+  it('searchResultSchema.parse keeps the optional truncated flag', () => {
+    expect(searchResultSchema.parse({ ...response, truncated: true }).truncated).toBe(true);
+    expect(searchResultSchema.parse(response).truncated).toBeUndefined();
   });
 });
 
@@ -815,17 +843,16 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
       liveDoc = await res.json();
     });
 
-    it('declares the agent search and outcomes operations', () => {
+    it('declares the search and outcomes operations', () => {
       assertAgentPaths(liveDoc);
     });
 
-    it('SearchResponse, SearchCandidate and SearchBrowse declare every CLI-required field', () => {
-      assertSchemaDeclares(liveDoc, 'SearchResponse', RESPONSE_REQUIRED);
+    it('SearchResult and SearchCandidate declare every CLI-required field', () => {
+      assertSchemaDeclares(liveDoc, 'SearchResult', RESULT_REQUIRED);
       assertSchemaDeclares(liveDoc, 'SearchCandidate', CANDIDATE_REQUIRED);
-      assertSchemaDeclares(liveDoc, 'SearchBrowse', BROWSE_REQUIRED);
     });
 
-    it('SearchRequest matches what the CLI sends', () => {
+    it('SearchRequestV3 matches what the CLI sends', () => {
       assertSearchRequest(liveDoc);
     });
 

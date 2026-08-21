@@ -36,12 +36,14 @@ function stub(body: unknown, status = 200): { fetch: typeof fetch; bodies: unkno
   return { fetch: fetchFn, bodies };
 }
 
-const CANDIDATES = {
-  schemaVersion: 2,
+/** The v3 decision-view envelope with one match: `items` + `matched`, and no
+ *  `decision` word anywhere on the wire. */
+const HIT = {
+  schemaVersion: 3,
   searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-  decision: 'CANDIDATES',
   calibration: 'lexical-v1',
-  candidates: [
+  matched: 1,
+  items: [
     {
       resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
       url: 'https://preview.example/api/read/iris/slug',
@@ -58,26 +60,44 @@ const CANDIDATES = {
   ],
 };
 
+/** A v3 miss. Not a second envelope shape: the same result with nothing in it,
+ *  plus the server's own pointer at where the catalog is browsed. */
+const MISS = {
+  schemaVersion: 3,
+  searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
+  calibration: 'lexical-v1',
+  matched: 0,
+  items: [],
+  hint: 'No matches. Browse the catalog at GET /api/articles.',
+};
+
 describe('runSearch', () => {
   it('converts a decimal-USD --max-price to atomic and passes the appliesTo map', async () => {
-    const { fetch, bodies } = stub(CANDIDATES);
+    const { fetch, bodies } = stub(HIT);
     await runSearch(
       { question: 'q', maxPrice: '0.10', freshWithin: 'P30D', appliesTo: ['products=Vercel,Next'] },
       makeCtx(),
       { fetchImpl: fetch },
     );
+    // Nested under `filters`, which is where v3 puts every narrowing. A stray
+    // top-level `maxPrice` is not a 400: the server strips it into `warnings` and
+    // runs the search UNFILTERED, so this shape is the price cap actually
+    // applying rather than a cosmetic detail.
     expect(bodies[0]).toEqual({
-      schemaVersion: 2,
-      question: 'q',
-      maxPrice: '100000',
-      freshWithin: 'P30D',
-      appliesTo: { products: ['Vercel', 'Next'] },
+      schemaVersion: 3,
+      view: 'decision',
+      query: 'q',
+      filters: {
+        maxPrice: '100000',
+        freshWithin: 'P30D',
+        appliesTo: { products: ['Vercel', 'Next'] },
+      },
       limit: 5,
     });
   });
 
   it('records the search so outcome --last and buy <id> can use it', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     const latest = await latestSearch(dir);
     expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
@@ -87,7 +107,7 @@ describe('runSearch', () => {
   // The Stop hook scopes its nag on this, so a session that set the variable
   // stops hearing about a sibling session's open loops.
   it('stamps the session from TENJIN_SESSION_ID when it is set', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: 'session-a' },
@@ -98,13 +118,13 @@ describe('runSearch', () => {
   // A harness that exports neither variable. Unstamped means the reminder is
   // raised in every session rather than in none.
   it('records no session when the environment names none', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch, env: {} });
     expect((await latestSearch(dir))?.sessionId).toBeUndefined();
   });
 
   it('ignores a blank TENJIN_SESSION_ID rather than stamping an empty session', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: '   ' },
@@ -115,7 +135,7 @@ describe('runSearch', () => {
   // The ambient harness variable: the same value the hook scripts are handed on
   // stdin, so a CLI search and a hook search in one session stamp identically.
   it('stamps the session from CLAUDE_CODE_SESSION_ID when it is set', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), {
       fetchImpl: fetch,
       env: { CLAUDE_CODE_SESSION_ID: 'harness-session' },
@@ -125,7 +145,7 @@ describe('runSearch', () => {
 
   // Explicit operator override beats the ambient one.
   it('prefers TENJIN_SESSION_ID over CLAUDE_CODE_SESSION_ID', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: 'operator', CLAUDE_CODE_SESSION_ID: 'harness-session' },
@@ -135,7 +155,7 @@ describe('runSearch', () => {
 
   // A blank override falls THROUGH to the harness value rather than blanking it.
   it('falls back to CLAUDE_CODE_SESSION_ID when TENJIN_SESSION_ID is blank', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: '  ', CLAUDE_CODE_SESSION_ID: 'harness-session' },
@@ -147,103 +167,71 @@ describe('runSearch', () => {
   // reading a price has to be able to compare it to `--max-price 0.10` without
   // dividing by a million. Two decimals, so a dime is "0.10" and not "0.1".
   it('renders the candidate line in USD, not atomic units', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines?.[1]).toBe(
       '  1. A resource, 0.10 USD, https://preview.example/api/read/iris/slug',
     );
     expect(res.humanLines?.[1]).not.toContain('atomic');
     // The machine envelope is unaffected: --json still carries exact atomic.
-    expect((res.data as { candidates?: { price: string }[] }).candidates?.[0]?.price).toBe(
-      '100000',
-    );
+    expect((res.data as { items?: { price: string }[] }).items?.[0]?.price).toBe('100000');
   });
 
-  it('returns the MISS verbatim and records it', async () => {
-    const miss = {
-      schemaVersion: 2,
-      searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
-      decision: 'MISS',
-      calibration: 'lexical-v1',
-    };
-    const { fetch } = stub(miss);
+  it('returns the miss verbatim and records it', async () => {
+    const { fetch } = stub(MISS);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    expect((res.data as { decision: string }).decision).toBe('MISS');
-    // A bare MISS offered nothing to buy, and the store has to say so rather than
+    // No `decision` on the wire under v3: the miss IS `matched: 0` with an empty
+    // `items`, and the envelope carries the server's fields untouched.
+    const data = res.data as { matched: number; items: unknown[]; decision?: string };
+    expect(data.matched).toBe(0);
+    expect(data.items).toEqual([]);
+    expect(data).not.toHaveProperty('decision');
+    // A miss offered nothing to buy, and the store has to say so rather than
     // leave it unknown: that is what lets `outcome` refuse purchase_declined here.
     expect(await latestSearch(dir)).toMatchObject({ candidates: [], paidBrowseCount: 0 });
   });
 
-  // The browse tail (tenjin#460) is MISS-only and must stay a hint: one human
-  // line, never merged into candidates, never recorded as a buyable candidate.
-  const BROWSE_MISS = {
-    schemaVersion: 2,
-    searchId: '0197aaaa-bbbb-cccc-dddd-00000000000b',
-    decision: 'MISS',
-    calibration: 'lexical-v1',
-    browse: [
-      {
-        resourceId: '0197aaaa-bbbb-cccc-dddd-00000000000c',
-        url: 'https://preview.example/api/read/iris/one',
-        title: 'Browse one',
-        price: '100000',
-        creator: { handle: 'iris' },
-      },
-      {
-        resourceId: '0197aaaa-bbbb-cccc-dddd-00000000000d',
-        url: 'https://preview.example/api/read/iris/two',
-        title: 'Browse two',
-        price: '200000',
-        creator: { handle: 'iris' },
-      },
-    ],
-  };
+  // The store's CANDIDATES/MISS vocabulary predates v3 and `outcome` still
+  // branches on it, so it is DERIVED from whether anything matched and never read
+  // off a response field that no longer exists.
+  it('derives the stored decision from whether anything matched', async () => {
+    const { fetch } = stub(MISS);
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect((await latestSearch(dir))?.decision).toBe('MISS');
 
-  it('renders a MISS browse tail as exactly one extra hint line', async () => {
-    const { fetch } = stub(BROWSE_MISS);
+    const hit = stub(HIT);
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: hit.fetch });
+    expect((await latestSearch(dir))?.decision).toBe('CANDIDATES');
+  });
+
+  // The v2 MISS browse tail is gone: the decision view draws no fallback shelf,
+  // so there is never a payable pointer this search put in front of the agent.
+  // The field stays on the store because entries written by older CLIs carry a
+  // real count and `undefined` there must keep reading as "unknown", not zero.
+  it('records a zero paid-browse count, because v3 draws no browse tail', async () => {
+    const { fetch } = stub(MISS);
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    expect((await latestSearch(dir))?.paidBrowseCount).toBe(0);
+  });
+
+  // One line, and it is the SERVER's sentence rather than a local paraphrase, so
+  // the two cannot drift when that pointer moves.
+  it('renders the miss hint as exactly one extra line, in the server wording', async () => {
+    const { fetch } = stub(MISS);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    // MISS line, browse tail, publish-back line. The tail is ONE line whatever the
-    // pointer count is, which is what this test is about.
+    // MISS line, hint, publish-back line.
     expect(res.humanLines).toHaveLength(3);
     expect(res.humanLines?.[0]).toContain('MISS, no candidates');
+    expect(res.humanLines?.[1]).toBe('No matches. Browse the catalog at GET /api/articles.');
     expect(res.humanLines?.[2]).toContain('publish it back');
-    // The price is on the line because `buy <browse url>` really does pay: the
-    // URL arm of resolveResourceRef never consults the store, so this is the
-    // only human-visible surface that can warn before the spend. It reads in
-    // dollars, the same unit every spend gate is entered in, and at the canonical
-    // two-decimal precision, so a dime is "0.10" and never "0.1" or "100000".
-    expect(res.humanLines?.[1]).toBe(
-      'no match, 2 piece(s) you could browse: Browse one (0.10 USD); Browse two (0.20 USD)',
-    );
-    expect(res.humanLines?.[1]).not.toContain('atomic');
-    expect(res.humanLines?.[1]).not.toContain('—');
-    // The machine envelope is unaffected: --json still carries exact atomic.
-    expect((res.data as { browse?: { price: string }[] }).browse?.[0]?.price).toBe('100000');
   });
 
-  it('keeps browse pointers out of candidates and out of the local store', async () => {
-    const { fetch } = stub(BROWSE_MISS);
+  it('costs the reader a line rather than an empty bullet when the hint is absent', async () => {
+    const { hint: _hint, ...noHint } = MISS;
+    const { fetch } = stub(noHint);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    expect((res.data as { candidates?: unknown[] }).candidates).toBeUndefined();
-    const latest = await latestSearch(dir);
-    expect(latest?.candidates).toEqual([]);
-    // How many, never which: the count is what tells `outcome` this MISS had a
-    // payable tail, and storing the pointers themselves is what would make
-    // `buy <resourceId>` reach one.
-    expect(latest?.paidBrowseCount).toBe(2);
-    expect(JSON.stringify(latest)).not.toContain('/api/read/iris/one');
-  });
-
-  // A free pointer is not an offer to buy: `read` delivers it for nothing, so it
-  // must not license a purchase_declined against this search.
-  it('counts only the paid pointers in a browse tail', async () => {
-    const free = {
-      ...BROWSE_MISS,
-      browse: [BROWSE_MISS.browse[0], { ...BROWSE_MISS.browse[1], price: '0' }],
-    };
-    const { fetch } = stub(free);
-    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    expect((await latestSearch(dir))?.paidBrowseCount).toBe(1);
+    expect(res.humanLines).toHaveLength(2);
+    expect(res.humanLines?.[1]).toContain('publish it back');
   });
 
   // A plainly different host is the easy case. The two shapes this check exists
@@ -258,8 +246,8 @@ describe('runSearch', () => {
       'a subdomain suffix of the base host',
       'https://preview.example.evil.example/api/read/iris/one',
     ],
-  ])('refuses a browse pointer url off the configured base URL: %s', async (_label, url) => {
-    const evil = { ...BROWSE_MISS, browse: [{ ...BROWSE_MISS.browse[0], url }] };
+  ])('refuses an item url off the configured base URL: %s', async (_label, url) => {
+    const evil = { ...HIT, items: [{ ...(HIT.items[0] as object), url }] };
     const { fetch } = stub(evil);
     await expect(
       runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
@@ -274,7 +262,7 @@ describe('runSearch', () => {
   // CLI knows the limit it sent, so it names the step that applies rather than
   // making the reader work out which half of the rule they are in.
   it('tells a below-maximum search to retry with a larger limit', async () => {
-    const { fetch } = stub({ ...CANDIDATES, truncated: true });
+    const { fetch } = stub({ ...HIT, truncated: true });
     const res = await runSearch({ question: 'q', limit: '3' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines?.at(-1)).toBe(
       'some candidates were dropped for size; retry with --limit 10 (the size ceiling grows with the number of candidates returned)',
@@ -283,7 +271,7 @@ describe('runSearch', () => {
   });
 
   it('tells a search already at the maximum to narrow the question instead', async () => {
-    const { fetch } = stub({ ...CANDIDATES, truncated: true });
+    const { fetch } = stub({ ...HIT, truncated: true });
     const res = await runSearch({ question: 'q', limit: '10' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines?.at(-1)).toBe(
       'some candidates were dropped for size; at --limit 10 the dropped tail cannot be recovered, so narrow the question',
@@ -291,7 +279,7 @@ describe('runSearch', () => {
   });
 
   it('says nothing about truncation when the flag did not fire', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines?.some((l) => l.includes('dropped for size'))).toBe(false);
     expect((res.data as { truncated?: true }).truncated).toBeUndefined();
@@ -300,26 +288,21 @@ describe('runSearch', () => {
   // The default limit is 5, so an unflagged search must still get the larger-limit
   // advice rather than the terminal one.
   it('uses the sent limit, not the maximum, to pick the advice', async () => {
-    const { fetch } = stub({ ...CANDIDATES, truncated: true });
+    const { fetch } = stub({ ...HIT, truncated: true });
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines?.at(-1)).toContain('retry with --limit 10');
   });
 
   it('rejects a malformed --applies-to', async () => {
-    const { fetch } = stub(CANDIDATES);
+    const { fetch } = stub(HIT);
     await expect(
       runSearch({ question: 'q', appliesTo: ['noequals'] }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'USAGE' });
   });
 });
 
-describe('runSearch — the MISS stderr surface', () => {
-  const miss = {
-    schemaVersion: 2,
-    searchId: '0197aaaa-bbbb-cccc-dddd-000000000009',
-    decision: 'MISS',
-    calibration: 'lexical-v1',
-  };
+describe('runSearch — the miss stderr surface', () => {
+  const miss = MISS;
 
   function ctxCapturingStderr(): { ctx: CommandContext; stderr: () => string } {
     const chunks: string[] = [];
@@ -358,7 +341,7 @@ describe('runSearch — the MISS stderr surface', () => {
     expect(existsSync(join(pen, 'draft.md'))).toBe(true);
   });
 
-  describe('publish-back on a fresh MISS', () => {
+  describe('publish-back on a fresh miss', () => {
     const humanText = (res: { humanLines?: string[] }): string => (res.humanLines ?? []).join('\n');
 
     it('names the searchId, the publish arm, and the decline arm', async () => {
@@ -388,7 +371,7 @@ describe('runSearch — the MISS stderr surface', () => {
     it('carries a publishBack hint in the machine envelope', async () => {
       const { fetch } = stub(miss);
       const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-      const data = res.data as { decision: string; publishBack?: Record<string, string> };
+      const data = res.data as { matched: number; publishBack?: Record<string, string> };
       expect(data.publishBack).toEqual({
         searchId: miss.searchId,
         reason: 'Nothing on the marketplace answered this. If you solve it, publish it back.',
@@ -410,15 +393,15 @@ describe('runSearch — the MISS stderr surface', () => {
 
     // The envelope is the server's response verbatim everywhere else, so the one
     // CLI-owned key must not leak onto the path the contract describes.
-    it('adds nothing at all to a CANDIDATES envelope', async () => {
-      const { fetch } = stub(CANDIDATES);
+    it('adds nothing at all to an envelope that carried matches', async () => {
+      const { fetch } = stub(HIT);
       const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
       expect(res.data).not.toHaveProperty('publishBack');
-      expect(res.data).toEqual(CANDIDATES);
+      expect(res.data).toEqual(HIT);
     });
 
     it('says nothing on a HIT, in the rendering either', async () => {
-      const { fetch } = stub(CANDIDATES);
+      const { fetch } = stub(HIT);
       const { ctx, stderr } = ctxCapturingStderr();
       const res = await runSearch({ question: 'q' }, ctx, { fetchImpl: fetch });
       expect(humanText(res)).not.toContain('publish it back');
@@ -432,15 +415,10 @@ describe('evalCohort threading', () => {
     const headers: Array<Record<string, string>> = [];
     const fetchFn = (async (_url: string, init?: RequestInit) => {
       headers.push((init?.headers ?? {}) as Record<string, string>);
-      return new Response(
-        JSON.stringify({
-          schemaVersion: 2,
-          searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-          decision: 'MISS',
-          calibration: 'lexical-v1',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
+      return new Response(JSON.stringify(MISS), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
     }) as unknown as typeof fetch;
     return { fetch: fetchFn, headers };
   }
@@ -459,13 +437,13 @@ describe('evalCohort threading', () => {
   });
 });
 
-describe('candidate URL origin ingest boundary', () => {
-  it('refuses a response whose candidate URL points off the configured base URL', async () => {
+describe('item URL origin ingest boundary', () => {
+  it('refuses a response whose item URL points off the configured base URL', async () => {
     const offOrigin = {
-      ...CANDIDATES,
-      candidates: [
+      ...HIT,
+      items: [
         {
-          ...(CANDIDATES.candidates[0] as object),
+          ...(HIT.items[0] as object),
           url: 'https://evil.example/api/read/iris/slug',
         },
       ],

@@ -1,5 +1,5 @@
 import { CliError } from '../lib/errors';
-import { formatUsdDisplay, isPaidPrice, parseUsdToAtomic } from '../lib/money';
+import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
@@ -9,25 +9,32 @@ import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin search "<question>"`, one POST to /api/agent/search. Prints the compact
- * CANDIDATES/MISS response (spec 10) and records the searchId + candidates
- * locally so `outcome --last` and `buy <resourceId>` can use them. No wallet, no
- * signing: search is anonymous.
+ * `tenjin search "<question>"`, one POST to /api/search with `view: "decision"`.
+ * Prints the compact result (spec 10) and records the searchId + items locally so
+ * `outcome --last` and `buy <resourceId>` can use them. No wallet, no signing:
+ * search is anonymous.
  *
  * The machine envelope is the server's response verbatim plus exactly one
- * CLI-owned key, `publishBack`, and only on a MISS. It carries no server data: it
+ * CLI-owned key, `publishBack`, and only on a miss. It carries no server data: it
  * is the local searchId and the two commands that close the loop, which is
  * information the CLI owns and the contract does not describe.
  *
- * Search is the breadth step: a candidate is a lean hit (identity, price,
- * freshness, why it matched), and the full answer card comes from `tenjin inspect`,
- * which is free. So a candidate line stays short on purpose.
+ * Search is the breadth step: an item is a lean hit (identity, price, freshness,
+ * why it matched), and the full answer card comes from `tenjin inspect`, which is
+ * free. So an item line stays short on purpose.
+ *
+ * A MISS is no longer a `decision` the server sends, it is simply `matched: 0`
+ * with an empty `items` (search v3). The CANDIDATES/MISS wording survives ONLY in
+ * the local store, whose entries predate v3 and whose `decision` field `outcome`
+ * still reads; it is derived here from whether anything matched, and never parsed
+ * off the wire.
  *
  * The response's `searchId` is the outcome-reporting capability for
  * POST /api/searches/<searchId>/outcomes. tenjin#463 renamed the field (from
- * `lookupId`) and tenjin#616 dropped the `/agent` prefix from the path; this
- * client follows both end to end, so nothing on the wire or in the local store
- * still speaks `lookupId` or the prefixed spelling.
+ * `lookupId`), tenjin#616 dropped the `/agent` prefix from the outcomes path, and
+ * tenjin#137 retired the `/api/agent/search` alias; this client follows all three
+ * end to end, so nothing on the wire or in the local store still speaks
+ * `lookupId` or a prefixed spelling.
  */
 
 export interface SearchArgs {
@@ -69,7 +76,7 @@ export async function runSearch(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
-  const candidates = response.candidates ?? [];
+  const candidates = response.items;
   // Ingest trust boundary: a candidate url that points off the configured origin
   // would later route a wallet-signed SIWX header and payment to that host via
   // `buy <resourceId>`. Refuse the whole response as a contract violation.
@@ -84,25 +91,16 @@ export async function runSearch(
       );
     }
   }
-  // Browse pointers are never buyable through `buy <resourceId>` (they are not
-  // recorded), but their urls are still emitted into the agent's transcript, so
-  // they get the same origin check rather than a weaker one.
-  for (const b of response.browse ?? []) {
-    try {
-      assertOnBaseOrigin(b.url, settings.baseUrl, 'browse pointer URL');
-    } catch (err) {
-      throw new CliError(
-        'CONTRACT_MISMATCH',
-        `Browse pointer ${b.resourceId} points off the configured base URL.`,
-        { cause: err },
-      );
-    }
-  }
+  // Derived, never read off the wire: v3 has no `decision` field. The store keeps
+  // the two words because entries written by older CLIs and by the WebSearch hook
+  // carry them and `outcome` branches on them, so a rename here would split the
+  // ledger rather than clean it up.
+  const decision = candidates.length > 0 ? 'CANDIDATES' : 'MISS';
   await recordSearch(ctx.dataDir, {
     searchId: response.searchId,
     at: new Date().toISOString(),
-    question: request.question,
-    decision: response.decision,
+    question: request.query,
+    decision,
     // A deliberate search, as opposed to one the WebSearch hook rode along with.
     // The Stop hook nags on the two differently, so the tag has to be written
     // here rather than inferred later from anything.
@@ -116,42 +114,31 @@ export async function runSearch(
       title: c.title,
       price: c.price,
     })),
-    // The pointers stay unrecorded on purpose (see below); only how many of them
-    // cost money, so `outcome` can tell a MISS that offered a payable browse tail
-    // from one that offered nothing to buy. A zero-priced pointer does not count:
-    // `read` delivers it for nothing, so there was no purchase to decline. Zero on
-    // a CANDIDATES decision, where the contract carries no browse array and the
-    // parser drops any that appears.
-    paidBrowseCount: (response.browse ?? []).filter((b) => isPaidPrice(b.price) === true).length,
+    // Always zero under search v3, and that is a fact about the result rather
+    // than a placeholder: the decision view draws no browse tail at all, so no
+    // pointer was offered and none of them cost money. `outcome` reads this to
+    // tell a search that offered nothing to buy from one that put a payable
+    // pointer in front of the agent, and under v3 the answer is always the
+    // former. The field stays on the store because entries written by older CLIs
+    // still carry a real count, and `undefined` there must keep reading as
+    // "unknown" rather than as zero.
+    paidBrowseCount: 0,
   });
 
-  // A MISS may carry up to 3 browse pointers from the broad corpus. They are
-  // pointers, NOT candidates: rendered as ONE hint line with no scores and no
-  // per-item detail, so a MISS still reads as a MISS and an agent is never
-  // nudged to treat a browse pointer as an answer. The machine JSON keeps the
-  // full `browse` array; this line is only the human tail.
+  // A miss under search v3 carries no browse tail at all: the decision view
+  // returns matches or nothing, and the catalog is browsed at GET /api/articles.
+  // The server says exactly that in `hint`, and rendering the server's own
+  // sentence rather than a local paraphrase is what keeps the two from drifting
+  // when that pointer moves. It is server-authored text on its way to a terminal,
+  // so it is sanitized like every other rendered string, and the parser has
+  // already bounded its length.
   //
-  // The price rides this line because a browse url IS payable: it is the read
-  // endpoint that answers a 402, and `buy <url>` resolves the URL arm by origin
-  // without consulting the search store, so a browse pointer can be bought even
-  // though `buy <resourceId>` can never reach one. All spend gates (price cap,
-  // session budget, allowlist, confirm) still run; showing the price keeps the
-  // only human-visible surface from being a blind spend.
-  //
-  // It renders in DOLLARS, not atomic units, because the whole point of the line
-  // is that a human can size the spend against the gates they set, and every gate
-  // is entered in decimal USD (`--max-price 0.10`, the `maxAutoSpend` config).
-  // `formatUsdDisplay` is the canonical human-copy form (always two decimals, so
-  // a dime reads "0.10" and not "0.1"); the machine `browse` array in --json still
-  // carries the exact atomic string, per the money-units contract in the README.
-  const browse = response.browse ?? [];
-  const browseHint =
-    browse.length > 0
-      ? [
-          `no match, ${browse.length} piece(s) you could browse: ${browse
-            .map((b) => `${sanitizeForTerminal(b.title)} (${formatUsdDisplay(b.price)} USD)`)
-            .join('; ')}`,
-        ]
+  // Absent-but-empty is treated as absent: `hint` is contractually present only
+  // when nothing matched, so a server that omits it costs the reader one line
+  // rather than an empty bullet.
+  const missHint =
+    response.hint !== undefined && response.hint.length > 0
+      ? [sanitizeForTerminal(response.hint)]
       : [];
 
   // `truncated` means the server's size backstop dropped candidates, either a
@@ -183,18 +170,21 @@ export async function runSearch(
   // stderr, which no output mode gates: an agent asking for a machine envelope got
   // ~260 bytes of human prose alongside it.
   const humanLines =
-    response.decision === 'MISS'
+    decision === 'MISS'
       ? [
           `MISS, no candidates (searchId ${response.searchId})`,
-          ...browseHint,
+          ...missHint,
           ...truncatedHint,
           publishBackLine(response.searchId),
         ]
       : [
           `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
-          // Dollars for the same reason the browse hint uses them: this is the
-          // human's cue to size the spend against gates they entered in decimal
-          // USD. The machine `candidates` array in --json keeps atomic.
+          // Dollars, not atomic units: this is the human's cue to size the spend
+          // against gates they entered in decimal USD (`--max-price 0.10`, the
+          // `maxAutoSpend` config). `formatUsdDisplay` is the canonical human-copy
+          // form (always two decimals, so a dime reads "0.10" and not "0.1"); the
+          // machine `items` array in --json keeps the exact atomic string, per the
+          // money-units contract in the README.
           ...candidates.map(
             (c, i) =>
               `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${formatUsdDisplay(c.price)} USD, ${sanitizeForTerminal(c.url)}`,
@@ -204,12 +194,12 @@ export async function runSearch(
 
   // The one CLI-owned field in this envelope. Everything else is the server's
   // response verbatim (spec 10), so the addition is namespaced under a key the
-  // contract does not define and is present ONLY on a MISS: a MISS is the moment
+  // contract does not define and is present ONLY on a miss: a miss is the moment
   // the demand this searcher just expressed can still be met, and the searchId is
-  // what ties the answer they are about to derive back to it. A CANDIDATES
-  // response is byte-identical to what it was.
+  // what ties the answer they are about to derive back to it. A result WITH
+  // matches is the v3 envelope and nothing else.
   const data =
-    response.decision === 'MISS'
+    decision === 'MISS'
       ? { ...response, publishBack: publishBackHint(response.searchId) }
       : response;
 
