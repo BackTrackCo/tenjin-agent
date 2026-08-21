@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { extname, join, relative } from 'node:path';
+import pkg from '../../package.json';
 import { PRODUCTION_HOST, PRODUCTION_ORIGIN } from './production-origin';
 import { CONFIG_DEFAULTS } from './config';
 import { TENJIN_USER_AGENT } from './client-meta';
@@ -44,6 +45,13 @@ describe('PRODUCTION_ORIGIN', () => {
     const auto = SEARCH_HOOKS_CHOICES.find((c) => c.value === 'auto');
     expect(auto?.hint).toContain(PRODUCTION_HOST);
   });
+
+  it('is the origin of the homepage npm shows on the package page', () => {
+    // JSON, so it cannot import the constant; pin it here instead. A stale
+    // homepage is the one copy of the origin a published release advertises to
+    // people who never run the CLI.
+    expect(new URL(pkg.homepage).origin).toBe(PRODUCTION_ORIGIN);
+  });
 });
 
 const srcDir = fileURLToPath(new URL('..', import.meta.url));
@@ -52,8 +60,17 @@ const srcDir = fileURLToPath(new URL('..', import.meta.url));
  * read-test-utils is test scaffolding whose sample URLs happen to use the host.
  */
 const EXEMPT = new Set(['lib/production-origin.ts', 'lib/read-test-utils.ts']);
-/** Both spellings, so a partially-applied cutover fails as loudly as a stale one. */
-const HOST_LITERAL = /tenjin\.(?:blog|sh)/;
+/**
+ * Both spellings and either casing, so a partially-applied cutover fails as
+ * loudly as a stale one and `Tenjin.Blog` does not walk past.
+ */
+const HOST_LITERAL = /tenjin\.(?:blog|sh)/i;
+/**
+ * The obvious dodge: `'tenjin' + '.blog'`, `'tenjin.' + 'blog'`, or the same
+ * split across a template. Matching per line keeps this cheap, which is also its
+ * ceiling (see the ADVISORY note above): a determined split survives it.
+ */
+const SPLIT_HOST = /tenjin\.?['"`]\s*\+|\+\s*['"`]\.?(?:blog|sh)\b/i;
 const COMMENT_LINE = /^(?:\/\/|\/\*|\*)/;
 
 async function sourceFiles(dir: string): Promise<string[]> {
@@ -66,6 +83,13 @@ async function sourceFiles(dir: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * ADVISORY, not a security boundary. This is a sweep over raw lines, so it
+ * catches the honest mistake (a forgotten literal, a stale copy) and nothing
+ * more: anyone writing the host deliberately can build it at runtime out of
+ * pieces no regex here will recognize. Treat a green run as "the sweep found
+ * nothing", never as "the host appears nowhere".
+ */
 describe('no module hardcodes the production host', () => {
   it('names it only in comments, outside src/lib/production-origin.ts', async () => {
     const offenders: string[] = [];
@@ -74,12 +98,50 @@ describe('no module hardcodes the production host', () => {
       if (EXEMPT.has(rel)) continue;
       const lines = (await readFile(file, 'utf8')).split('\n');
       lines.forEach((line, i) => {
-        if (!HOST_LITERAL.test(line)) return;
+        if (!HOST_LITERAL.test(line) && !SPLIT_HOST.test(line)) return;
         // Prose about the site is fine; a literal the CLI can emit is not.
         if (COMMENT_LINE.test(line.trim())) return;
         offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
       });
     }
     expect(offenders, 'import PRODUCTION_ORIGIN / PRODUCTION_HOST instead').toEqual([]);
+  });
+});
+
+const scriptsDir = fileURLToPath(new URL('../../scripts/', import.meta.url));
+
+/**
+ * The skill-mirror automation runs outside the bundle: `sync-skill.mjs` is
+ * dependency-free Node (drift CI runs it with no install) and
+ * `open-skill-resync-pr.sh` is bash, so neither can import the constant. Pin
+ * them from here instead, in the suite that runs on every PR.
+ *
+ * A grep step in `skill-drift.yml` would not do this job: that workflow is
+ * path-filtered to `skills/` and these two scripts, so the cutover commit (which
+ * touches neither) never runs it, and the daily resync would go on fetching the
+ * dead origin with every check green while `skill-writer.ts` tells users to
+ * re-fetch from the new one. This test reds on the commit that causes the drift.
+ */
+describe('the skill-mirror scripts track the same origin', () => {
+  it('fetches the canonical skill from PRODUCTION_ORIGIN', async () => {
+    const mjs = await readFile(join(scriptsDir, 'sync-skill.mjs'), 'utf8');
+    const sh = await readFile(join(scriptsDir, 'open-skill-resync-pr.sh'), 'utf8');
+    expect(mjs).toContain(`const SOURCE_URL = '${PRODUCTION_ORIGIN}/skills.md';`);
+    expect(sh).toContain(`SOURCE_URL=${PRODUCTION_ORIGIN}/skills.md`);
+  });
+
+  it('names no other host, in code or in the copy they emit', async () => {
+    const offenders: string[] = [];
+    for (const name of await readdir(scriptsDir)) {
+      const lines = (await readFile(join(scriptsDir, name), 'utf8')).split('\n');
+      lines.forEach((line, i) => {
+        const found = line.match(new RegExp(HOST_LITERAL.source, 'gi')) ?? [];
+        // Banners, commit messages, and PR bodies name the source too; a stale
+        // one there points a human at the dead site, so hold them to it as well.
+        if (found.every((hit) => hit.toLowerCase() === PRODUCTION_HOST)) return;
+        offenders.push(`${name}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    expect(offenders, `every host in scripts/ must be ${PRODUCTION_HOST}`).toEqual([]);
   });
 });

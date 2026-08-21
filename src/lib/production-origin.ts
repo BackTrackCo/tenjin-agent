@@ -1,16 +1,14 @@
 /**
- * The one place the production Tenjin origin is written down.
- *
- * Every shipped default, fallback, identity string, and piece of operator copy
- * that names the live site derives from here, so moving the CLI to a new origin
- * (the tenjin.sh cutover, tenjin#402) is this line plus a release rather than a
- * sweep that can half-apply. `production-origin.test.ts` holds the other half of
- * that promise: no other module under `src/` may carry the host as a literal.
+ * The one place the production Tenjin origin is written down. Every shipped
+ * default, fallback, identity string, and piece of operator copy that names the
+ * live site derives from here; `production-origin.test.ts` keeps it that way.
  *
  * This is NOT the base URL a command talks to. Ordinary requests resolve
  * `baseUrl` through config/flag/env precedence (`CONFIG_DEFAULTS.baseUrl` merely
  * starts from this value); `fund` alone pins production with no override surface
  * at all (owner decision, 2026-08-12) because its mint signs with the wallet key.
+ * `fund.test.ts` and `client-meta.test.ts` each hold their own written-out copy,
+ * so flipping this line alone reds the suite instead of moving the money path.
  */
 export const PRODUCTION_ORIGIN = 'https://tenjin.blog';
 
