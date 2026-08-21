@@ -75,13 +75,18 @@ const CANDIDATE_REQUIRED = [
 // The card fields that MOVED from the candidate to the 402 preview. Pinned as a
 // negative: a server that puts them back on a candidate has un-done search v2, and
 // the CLI would be re-reading depth from the breadth step.
+//
+// `temporalMode` is deliberately NOT in this list any more. The server put it back
+// on the candidate as a cheap freshness label (it is one open-registry string, not
+// an answer card), and both live `/openapi.json` and the vendored
+// `skills/tenjin/SKILL.md` now document it as a candidate field. The record tracks
+// reality: five fields are still card-only, and those five are what this pins.
 const CANDIDATE_MOVED_TO_INSPECT = [
   'questionsAnswered',
   'tasksSupported',
   'appliesTo',
   'scope',
   'exclusions',
-  'temporalMode',
 ];
 // The answer card on the unpaid 402 body: twelve fields, all required WITHIN the
 // card, with the card itself optional (an uncarded piece omits the key entirely).
