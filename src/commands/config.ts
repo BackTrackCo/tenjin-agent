@@ -12,6 +12,7 @@ import {
 } from '../lib/harness-permissions';
 import { modeGatedPointer } from '../lib/permissions';
 import { stopHookIsCurrent } from '../lib/harness-hooks';
+import { resolveHermesHomeLenient } from '../lib/hermes';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
@@ -403,11 +404,13 @@ async function claudeInPlay(
   const requested = await loadRawConfig(ctx.dataDir)
     .then((c) => c.install?.harness ?? [])
     .catch(() => [] as HarnessTarget[]);
+  const hermesHome = resolveHermesHomeLenient(home, env).home;
   return harnessInPlay(
     home,
-    harnessTargetDir(home, 'claude'),
-    detectHarnesses(home, which),
+    harnessTargetDir(home, 'claude', hermesHome),
+    detectHarnesses(home, which, hermesHome),
     requested,
+    hermesHome,
   );
 }
 

@@ -243,6 +243,11 @@ type Harnesses = Array<{
   codexNetworkRule?: string;
   warnings: string[];
   notes: string[];
+  hermes?: {
+    mcp: { status: string };
+    plugin: { status: string; scriptPaths: string[] };
+    activation: { status: string };
+  };
 }>;
 type Data = {
   dryRun: boolean;
@@ -287,6 +292,56 @@ describe('runInstall: harness override', () => {
   it('dedupes codex + shared onto the one ~/.agents/skills target', async () => {
     const { data: d } = await runInstall({ harness: ['codex', 'shared'] }, makeCtx(), deps());
     expect(asData(d).harnesses).toHaveLength(1);
+  });
+
+  it('installs and activates the native Hermes plugin when explicitly requested', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.harness).toBe('hermes');
+    expect(h.skillsDir).toBe(join(home, '.hermes', 'skills'));
+    expect(h.hermes?.mcp.status).toBe('installed');
+    expect(h.hermes?.plugin.status).toBe('installed');
+    expect(h.hermes?.activation.status).toBe('installed');
+    expect(await readFile(join(home, '.hermes', 'config.yaml'), 'utf8')).toContain(
+      'enabled:\n    - tenjin',
+    );
+  });
+
+  // The README's `--no-hooks` row says "Register no hooks this run; writes no
+  // config", and the Claude path honors it by writing no scripts at all. Anything
+  // less here (withholding only the `plugins.enabled` line) leaves hook code on
+  // disk and then names a fix that cannot move the blocker.
+  it('--no-hooks writes no Hermes hook code, only the MCP entry', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true, noHooks: true },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.hermes?.mcp.status).toBe('installed');
+    expect(h.hermes?.plugin.status).toBe('skipped');
+    expect(h.hermes?.plugin.scriptPaths).toEqual([]);
+    expect(h.hermes?.activation.status).toBe('skipped');
+    await expect(
+      readFile(join(home, '.hermes', 'plugins', 'tenjin', '__init__.py'), 'utf8'),
+    ).rejects.toThrow();
+    await expect(readFile(join(data, 'hooks', 'tenjin-websearch.mjs'), 'utf8')).rejects.toThrow();
+  });
+
+  it('a stored searchMode of off withholds the plugin and names the real blocker', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true, searchHooks: 'off' },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.hermes?.plugin.status).toBe('skipped');
+    // Not "re-run `tenjin install --harness hermes`", which loops forever.
+    expect(h.warnings.join(' ')).toContain('hooks.searchMode auto');
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {

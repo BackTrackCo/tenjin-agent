@@ -15,6 +15,7 @@ import {
   anyTenjinSkill,
   cliSkillsWired,
   detectHarnesses,
+  harnessDetectedBy,
   harnessFlagFor,
   harnessInPlay,
   harnessReads,
@@ -25,6 +26,7 @@ import {
   readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
+import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
 import type {
   DirState,
   HarnessTarget,
@@ -42,7 +44,7 @@ import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/se
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
-import type { PartialConfig, PublishMode } from '../lib/config';
+import type { PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -126,6 +128,8 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
+  /** Hermes home override; defaults through HERMES_HOME using the same resolver as install. */
+  hermesHome?: string;
   /**
    * Passphrase seams for the wallet verification (#70), which reads the OS
    * credential store. Tests inject a platform with no store, or a stubbed exec,
@@ -179,6 +183,17 @@ export async function collectDoctorChecks(
     project: project?.layer,
   });
   const baseUrl = settings.baseUrl.value;
+  const home = deps.homeDir ?? homedir();
+  const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const requested = config.install?.harness ?? [];
+  // NEVER the strict resolver here. Doctor is the command you reach for when
+  // something is already broken, so a stray relative HERMES_HOME must not abort it
+  // before a single check runs: it warns on the Hermes check and falls back.
+  const hermesTarget =
+    deps.hermesHome === undefined
+      ? resolveHermesHomeLenient(home, env)
+      : { home: deps.hermesHome, warning: undefined };
+  const hermesHome = hermesTarget.home;
 
   const built: BuiltCheck[] = [
     checkNode(),
@@ -187,14 +202,25 @@ export async function collectDoctorChecks(
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
     await checkSkills(
-      deps.homeDir ?? homedir(),
-      deps.which ?? ((bin) => onPath(bin, env)),
-      config.install?.harness ?? [],
+      home,
+      which,
+      requested,
       settings.bazaarPay.value,
       deps.skillsSourceDir,
+      hermesHome,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
+
+  const hermes = await checkHermes({
+    home,
+    hermesHome,
+    which,
+    requested,
+    searchMode: config.hooks?.searchMode,
+    homeWarning: hermesTarget.warning,
+  });
+  if (hermes !== null) built.push(hermes);
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
   // describe() and diagnostics(), so doctor never runs its own fs/env probe.
@@ -454,15 +480,17 @@ async function checkSkills(
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
   bazaarPay: boolean,
-  skillsSourceDir?: string,
+  skillsSourceDir: string | undefined,
+  hermesHome: string,
 ): Promise<BuiltCheck> {
-  const present = detectHarnesses(home, which);
-  const wiring = await readAllWiring(home);
+  const resolvedHermesHome = hermesHome;
+  const present = detectHarnesses(home, which, resolvedHermesHome);
+  const wiring = await readAllWiring(home, resolvedHermesHome);
   const data = {
     directories: wiring.map((w) => ({
       ...w,
-      harnessPresent: harnessReads(home, w.dir, present),
-      requested: harnessRequested(home, w.dir, requested),
+      harnessPresent: harnessReads(home, w.dir, present, resolvedHermesHome),
+      requested: harnessRequested(home, w.dir, requested, resolvedHermesHome),
     })),
   };
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
@@ -477,15 +505,15 @@ async function checkSkills(
     // nobody asked to see named.
     const targeted =
       requested.length > 0
-        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested))
+        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome))
         : [];
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
-        fix: targeted.length > 0 ? fixFor(home, targeted) : 'tenjin install',
+        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills, .agents/skills, and Hermes skills)`,
+        fix: targeted.length > 0 ? fixFor(home, targeted, resolvedHermesHome) : 'tenjin install',
         data,
       },
     };
@@ -495,7 +523,7 @@ async function checkSkills(
   // is the defect, whether it is shadowed, half-installed, hosted-only or absent; a
   // directory neither detected nor asked for is described but never warned about.
   const broken = wiring.filter(
-    (w) => harnessInPlay(home, w.dir, present, requested) && !cliSkillsWired(w),
+    (w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome) && !cliSkillsWired(w),
   );
   if (broken.length > 0) {
     return {
@@ -504,7 +532,7 @@ async function checkSkills(
         status: 'warn',
         required: false,
         detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
-        fix: fixFor(home, broken),
+        fix: fixFor(home, broken, resolvedHermesHome),
         data,
       },
     };
@@ -518,7 +546,7 @@ async function checkSkills(
   // keeps the lane itself safe either way, which is why this is warn, not fail.
   const payDrift: string[] = [];
   for (const w of inPlay) {
-    if (!harnessInPlay(home, w.dir, present, requested)) continue;
+    if (!harnessInPlay(home, w.dir, present, requested, resolvedHermesHome)) continue;
     const onDisk = await readSkillFile(join(w.dir, OPTIONAL_PAY_SKILL, 'SKILL.md'));
     if ((onDisk.kind === 'ok') !== bazaarPay) payDrift.push(w.dir);
   }
@@ -579,6 +607,7 @@ async function checkSkills(
         fix: fixFor(
           home,
           wiring.filter((w) => stale.includes(w.dir)),
+          resolvedHermesHome,
         ),
         data,
       },
@@ -592,6 +621,65 @@ async function checkSkills(
       required: false,
       detail: `${CLI_SKILL_NAMES.join(' + ')} wired: ${describeWiring(inPlay)}`,
       data,
+    },
+  };
+}
+
+/** Native Hermes wiring is a separate warn-level check from portable skills. */
+async function checkHermes(args: {
+  home: string;
+  hermesHome: string;
+  which: (bin: string) => boolean;
+  requested: readonly HarnessTarget[];
+  searchMode?: SearchHookMode;
+  homeWarning?: string;
+}): Promise<BuiltCheck | null> {
+  const { home, hermesHome, which, requested, searchMode, homeWarning } = args;
+  const inPlay =
+    requested.includes('hermes') || harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0;
+  if (!inPlay) return null;
+  const status = {
+    ...(await readHermesIntegrationStatus(hermesHome)),
+    ...(homeWarning !== undefined ? { homeWarning } : {}),
+  };
+  const ok =
+    status.mcp === 'configured' && status.plugin === 'installed' && status.activation === 'enabled';
+  if (ok && homeWarning === undefined) {
+    return {
+      result: {
+        name: 'hermes',
+        status: 'ok',
+        required: false,
+        detail: `Native Tenjin retrieval and publish-back plugin enabled in ${hermesHome}`,
+        data: status,
+      },
+    };
+  }
+  const problems: string[] = [];
+  if (status.mcp === 'stale') {
+    problems.push(`MCP command missing (${status.mcpCommand ?? 'unknown'})`);
+  } else if (status.mcp !== 'configured') problems.push(`MCP ${status.mcp}`);
+  if (status.plugin !== 'installed') problems.push(`plugin ${status.plugin}`);
+  // Named `activation`, not a second `plugin`: "plugin missing, plugin not-enabled"
+  // read as one subject twice.
+  if (status.activation !== 'enabled') problems.push(`activation ${status.activation}`);
+  if (homeWarning !== undefined) problems.push('HERMES_HOME ignored');
+  return {
+    result: {
+      name: 'hermes',
+      status: 'warn',
+      required: false,
+      detail: `Hermes Tenjin integration incomplete in ${hermesHome}: ${problems.join(', ')}${
+        homeWarning === undefined ? '' : `. ${homeWarning}`
+      }`,
+      // `tenjin install --harness hermes` alone is a dead end when the stored mode
+      // is `off`: it re-runs, withholds the hook code by design, and prints the same
+      // warning forever. Name the blocker that actually has to move first.
+      fix:
+        searchMode === 'off'
+          ? 'tenjin config set hooks.searchMode auto && tenjin install --harness hermes'
+          : 'tenjin install --harness hermes',
+      data: status,
     },
   };
 }
@@ -702,8 +790,8 @@ function hostedHere(w: HarnessWiring): boolean {
  * the directories detection picks, so a problem in ~/.agents/skills on a
  * Claude-only machine needs `--harness shared` spelled out.
  */
-function fixFor(home: string, dirs: HarnessWiring[]): string {
-  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
+function fixFor(home: string, dirs: HarnessWiring[], hermesHome: string): string {
+  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir, hermesHome)))];
   return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
 }
 

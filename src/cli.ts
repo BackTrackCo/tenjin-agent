@@ -147,11 +147,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('install'))
     .description(
-      'Detect installed harnesses (Claude Code, Codex), wire the Tenjin skills, then run the doctor checks last',
+      'Detect installed harnesses (Claude Code, Codex, Hermes), wire Tenjin, then run doctor last',
     )
     .option(
       '--harness <name>',
-      'target a specific harness: claude | codex | shared (repeatable; overrides detection)',
+      'target a specific harness: claude | codex | hermes | shared (repeatable; overrides detection)',
       collect,
       [],
     )

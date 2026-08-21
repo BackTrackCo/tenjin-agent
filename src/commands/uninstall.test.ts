@@ -129,6 +129,24 @@ describe('runUninstall — a fully installed machine', () => {
     });
   });
 
+  // `skillsDirsFor` requires a Hermes home precisely so a new caller cannot quietly
+  // leave that directory behind. Both spellings are covered: the default and an
+  // absolute HERMES_HOME, which is the one a defaulted argument would have missed.
+  it('removes the Hermes skills, including under an absolute HERMES_HOME', async () => {
+    await seedSkill('.hermes/skills', 'tenjin-search');
+    const custom = join(home, 'custom-hermes');
+    await seedSkill(join('custom-hermes', 'skills'), 'tenjin-publish');
+
+    const bare = (await runUninstall(makeCtx(), { home, env: {} })).data as UninstallReport;
+    expect(bare.skills).toHaveLength(1);
+    expect(existsSync(join(home, '.hermes', 'skills', 'tenjin-search'))).toBe(false);
+
+    const scoped = (await runUninstall(makeCtx(), { home, env: { HERMES_HOME: custom } }))
+      .data as UninstallReport;
+    expect(scoped.skills).toHaveLength(1);
+    expect(existsSync(join(custom, 'skills', 'tenjin-publish'))).toBe(false);
+  });
+
   // Ownership, not position: a rule or entry we did not write keeps its place even
   // when one of ours is removed from in front of it.
   it('leaves another tool’s hook entry and allow rule exactly where they were', async () => {

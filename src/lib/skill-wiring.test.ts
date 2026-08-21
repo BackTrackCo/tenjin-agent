@@ -24,8 +24,11 @@ import {
 } from './skill-wiring';
 
 let home: string;
+/** Required at every call site now, so the tests spell it out the way callers do. */
+let hermesHome: string;
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'tenjin-wiring-'));
+  hermesHome = join(home, '.hermes');
 });
 afterEach(async () => {
   await rm(home, { recursive: true, force: true });
@@ -119,16 +122,17 @@ describe('harnessFlagFor', () => {
   it('maps each skills directory to the --harness value that targets it', () => {
     // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
     // machine, so a fix line naming it has to say `--harness shared`.
-    expect(harnessFlagFor(home, join(home, '.claude', 'skills'))).toBe('claude');
-    expect(harnessFlagFor(home, join(home, '.agents', 'skills'))).toBe('shared');
+    expect(harnessFlagFor(home, join(home, '.claude', 'skills'), hermesHome)).toBe('claude');
+    expect(harnessFlagFor(home, join(home, '.agents', 'skills'), hermesHome)).toBe('shared');
   });
 });
 
 describe('skillsDirsFor', () => {
-  it('covers Claude Code and the shared Agent Skills location, in install order', () => {
-    expect(skillsDirsFor(home)).toEqual([
+  it('covers Claude Code, shared Agent Skills, and Hermes in install order', () => {
+    expect(skillsDirsFor(home, hermesHome)).toEqual([
       join(home, '.claude', 'skills'),
       join(home, '.agents', 'skills'),
+      join(hermesHome, 'skills'),
     ]);
   });
 });
@@ -193,50 +197,64 @@ describe('readAllWiring', () => {
     for (const name of [...CLI_SKILL_NAMES, HOSTED_SKILL_NAME]) {
       await seed(join(home, '.agents', 'skills'), name);
     }
-    const [claude, shared] = await readAllWiring(home);
+    const [claude, shared] = await readAllWiring(home, hermesHome);
     expect(cliSkillsWired(claude!)).toBe(false);
     expect(cliSkillsWired(shared!)).toBe(true);
   });
 });
 
 describe('harness detection', () => {
+  it('does not confuse a standalone React Native hermes binary for Hermes Agent', () => {
+    expect(harnessDetectedBy(home, 'hermes', (bin) => bin === 'hermes', hermesHome)).toEqual([]);
+  });
+
+  it('detects Hermes Agent from its home and records the binary only as corroboration', async () => {
+    await mkdir(join(home, '.hermes'));
+    expect(harnessDetectedBy(home, 'hermes', (bin) => bin === 'hermes', hermesHome)).toEqual([
+      'home-dir',
+      'binary',
+    ]);
+  });
+
   const noBinaries = (): boolean => false;
 
   it('names both probes: the home dir and the binary', async () => {
     await mkdir(join(home, '.codex'), { recursive: true });
-    expect(harnessDetectedBy(home, 'codex', noBinaries)).toEqual(['home-dir']);
-    expect(harnessDetectedBy(home, 'claude', (b) => b === 'claude')).toEqual(['binary']);
-    expect(harnessDetectedBy(home, 'claude', noBinaries)).toEqual([]);
+    expect(harnessDetectedBy(home, 'codex', noBinaries, hermesHome)).toEqual(['home-dir']);
+    expect(harnessDetectedBy(home, 'claude', (b) => b === 'claude', hermesHome)).toEqual([
+      'binary',
+    ]);
+    expect(harnessDetectedBy(home, 'claude', noBinaries, hermesHome)).toEqual([]);
   });
 
   it('a directory is only judged when a harness HERE reads it', async () => {
-    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    const [claudeDir, sharedDir] = skillsDirsFor(home, hermesHome) as [string, string];
     await mkdir(join(home, '.claude'), { recursive: true });
 
-    const claudeOnly = detectHarnesses(home, noBinaries);
-    expect(claudeOnly).toEqual({ claude: true, codex: false });
-    expect(harnessReads(home, claudeDir, claudeOnly)).toBe(true);
+    const claudeOnly = detectHarnesses(home, noBinaries, hermesHome);
+    expect(claudeOnly).toEqual({ claude: true, codex: false, hermes: false });
+    expect(harnessReads(home, claudeDir, claudeOnly, hermesHome)).toBe(true);
     // The leftover-mirror case: nothing here reads ~/.agents/skills.
-    expect(harnessReads(home, sharedDir, claudeOnly)).toBe(false);
+    expect(harnessReads(home, sharedDir, claudeOnly, hermesHome)).toBe(false);
 
-    const both = detectHarnesses(home, (b) => b === 'codex');
-    expect(harnessReads(home, sharedDir, both)).toBe(true);
+    const both = detectHarnesses(home, (b) => b === 'codex', hermesHome);
+    expect(harnessReads(home, sharedDir, both, hermesHome)).toBe(true);
   });
 
   it('with NO harness detected the shared dir is still judged: it is the fallback target', () => {
-    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
-    const none = detectHarnesses(home, noBinaries);
-    expect(none).toEqual({ claude: false, codex: false });
-    expect(harnessReads(home, claudeDir, none)).toBe(false);
-    expect(harnessReads(home, sharedDir, none)).toBe(true);
+    const [claudeDir, sharedDir] = skillsDirsFor(home, hermesHome) as [string, string];
+    const none = detectHarnesses(home, noBinaries, hermesHome);
+    expect(none).toEqual({ claude: false, codex: false, hermes: false });
+    expect(harnessReads(home, claudeDir, none, hermesHome)).toBe(false);
+    expect(harnessReads(home, sharedDir, none, hermesHome)).toBe(true);
   });
 
   it('harnessTargetDir maps every target the way install writes it', () => {
-    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
-    expect(harnessTargetDir(home, 'claude')).toBe(claudeDir);
+    const [claudeDir, sharedDir] = skillsDirsFor(home, hermesHome) as [string, string];
+    expect(harnessTargetDir(home, 'claude', hermesHome)).toBe(claudeDir);
     // Codex and the shared fallback are the same directory, hence one dir, two flags.
-    expect(harnessTargetDir(home, 'codex')).toBe(sharedDir);
-    expect(harnessTargetDir(home, 'shared')).toBe(sharedDir);
+    expect(harnessTargetDir(home, 'codex', hermesHome)).toBe(sharedDir);
+    expect(harnessTargetDir(home, 'shared', hermesHome)).toBe(sharedDir);
   });
 });
 
@@ -244,32 +262,34 @@ describe('an explicitly requested harness', () => {
   const noBinaries = (): boolean => false;
 
   it('puts a directory in play that detection alone would skip', async () => {
-    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    const [claudeDir, sharedDir] = skillsDirsFor(home, hermesHome) as [string, string];
     await mkdir(join(home, '.claude'), { recursive: true });
-    const claudeOnly = detectHarnesses(home, noBinaries);
+    const claudeOnly = detectHarnesses(home, noBinaries, hermesHome);
 
     // `tenjin install --harness shared` on this machine: nothing DETECTED reads the
     // shared dir, but the user named it, so it is still this machine's business.
-    expect(harnessReads(home, sharedDir, claudeOnly)).toBe(false);
-    expect(harnessRequested(home, sharedDir, ['shared'])).toBe(true);
-    expect(harnessInPlay(home, sharedDir, claudeOnly, ['shared'])).toBe(true);
+    expect(harnessReads(home, sharedDir, claudeOnly, hermesHome)).toBe(false);
+    expect(harnessRequested(home, sharedDir, ['shared'], hermesHome)).toBe(true);
+    expect(harnessInPlay(home, sharedDir, claudeOnly, ['shared'], hermesHome)).toBe(true);
     // And the record says nothing about the other directory.
-    expect(harnessRequested(home, claudeDir, ['shared'])).toBe(false);
-    expect(harnessInPlay(home, claudeDir, claudeOnly, ['shared'])).toBe(true); // detected
+    expect(harnessRequested(home, claudeDir, ['shared'], hermesHome)).toBe(false);
+    expect(harnessInPlay(home, claudeDir, claudeOnly, ['shared'], hermesHome)).toBe(true); // detected
   });
 
   it('a recorded `codex` covers the shared directory it writes to', () => {
-    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
-    expect(harnessRequested(home, sharedDir, ['codex'])).toBe(true);
-    expect(harnessRequested(home, claudeDir, ['codex'])).toBe(false);
+    const [claudeDir, sharedDir] = skillsDirsFor(home, hermesHome) as [string, string];
+    expect(harnessRequested(home, sharedDir, ['codex'], hermesHome)).toBe(true);
+    expect(harnessRequested(home, claudeDir, ['codex'], hermesHome)).toBe(false);
   });
 
   it('an empty record changes nothing', async () => {
-    const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
+    const [claudeDir, sharedDir] = skillsDirsFor(home, hermesHome) as [string, string];
     await mkdir(join(home, '.claude'), { recursive: true });
-    const claudeOnly = detectHarnesses(home, noBinaries);
+    const claudeOnly = detectHarnesses(home, noBinaries, hermesHome);
     for (const dir of [claudeDir, sharedDir]) {
-      expect(harnessInPlay(home, dir, claudeOnly, [])).toBe(harnessReads(home, dir, claudeOnly));
+      expect(harnessInPlay(home, dir, claudeOnly, [], hermesHome)).toBe(
+        harnessReads(home, dir, claudeOnly, hermesHome),
+      );
     }
   });
 });

@@ -24,6 +24,7 @@ const HOOK_SCRIPT_FILES = [
   STOP_HOOK_FILE,
 ] as const;
 import { hooksDir } from './paths';
+import { resolveHermesHomeLenient } from './hermes';
 import { SHIPPED_SKILL_FILES } from './skills-source';
 import { resolveThroughLink } from './skill-writer';
 import {
@@ -325,10 +326,17 @@ export async function removeHookScripts(dataDir: string): Promise<{
  * with their own is not ours to delete just for sitting at our path, and neither
  * is a directory reached through a symlink.
  */
-export async function removeSkills(homeDir: string): Promise<string[]> {
+export async function removeSkills(
+  homeDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string[]> {
   const removed: string[] = [];
   const names = [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES, HOSTED_SKILL_NAME];
-  for (const dir of skillsDirsFor(homeDir)) {
+  // Lenient, like `skill-heal`: uninstall is a cleanup command, so a stray
+  // relative HERMES_HOME must not stop it. Resolving it at all is what puts the
+  // Hermes skills directory in scope; `skillsDirsFor` requires the argument
+  // precisely so a new caller cannot quietly leave that directory behind.
+  for (const dir of skillsDirsFor(homeDir, resolveHermesHomeLenient(homeDir, env).home)) {
     if (lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
     for (const name of names) {
       const skillDir = join(dir, name);

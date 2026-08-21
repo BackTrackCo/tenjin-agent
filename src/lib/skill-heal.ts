@@ -12,6 +12,7 @@ import {
   skillsDirsFor,
 } from './skill-wiring';
 import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { resolveHermesHomeLenient } from './hermes';
 
 export interface HealDeps {
   io: Io;
@@ -64,7 +65,9 @@ export async function healWiredSkills(deps: HealDeps): Promise<void> {
 
     const source = deps.skillsSourceDir ?? packagedSource();
     if (source === null) return;
-    const targets = healable(home);
+    // Lenient on purpose: an unattended healer is the last place that should
+    // refuse to run over a stray relative HERMES_HOME.
+    const targets = healable(home, resolveHermesHomeLenient(home, env).home);
     if (targets.length === 0) return;
     await heal(targets, source, deps.io);
   } catch {
@@ -111,9 +114,9 @@ interface Target {
  * edited under a healthy SKILL.md is restored on the same pass. The other gate,
  * that the file is ours at all, needs its content and so lives at the write.
  */
-function healable(home: string): Target[] {
+function healable(home: string, hermesHome: string): Target[] {
   const found: Target[] = [];
-  for (const dir of skillsDirsFor(home)) {
+  for (const dir of skillsDirsFor(home, hermesHome)) {
     if (!isRealDirectory(dir)) continue;
     for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;

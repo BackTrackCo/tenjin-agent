@@ -59,19 +59,21 @@ interface HookRun {
 
 /**
  * Write the script and run it exactly as a harness would: stdin in, stdout out.
+ * `args` carries the harness selector the native adapters pass (`--hermes`), and
  * `env` is what the launching harness would have exported: the caller handoff for
  * the User-Agent cases, `TENJIN_PUBLISH_MODE` or `HOME` for the mode cases.
  */
 async function runScript(
   source: string,
   stdin: string,
+  args: string[] = [],
   env: Record<string, string> = {},
 ): Promise<HookRun> {
   const path = join(scriptDir, `hook-${Math.random().toString(36).slice(2)}.mjs`);
   await writeFile(path, source, { mode: 0o755 });
   const started = Date.now();
   return await new Promise<HookRun>((resolve, reject) => {
-    const child = spawn(process.execPath, [path], {
+    const child = spawn(process.execPath, [path, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       // A CLEAN environment plus whatever the case sets, rather than an inherited
       // one. The hook reads `TENJIN_PUBLISH_MODE` and `HOME`, so inheriting would
@@ -199,6 +201,26 @@ describe('the update signal on hook output', () => {
     expect(text).toContain('Run tenjin update');
     // Still exactly one parseable object on stdout.
     expect(JSON.parse(run.stdout)).toBeTruthy();
+  });
+
+  // Two features share one `emit`: the update line and the Hermes envelope. A
+  // resolution that kept only one of them leaves every Claude-shaped test green.
+  it('rides inside the Hermes context envelope too', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
+      ['--hermes'],
+    );
+    expect(run.code).toBe(0);
+    const parsed = JSON.parse(run.stdout) as { context?: string };
+    expect(parsed).not.toHaveProperty('hookSpecificOutput');
+    expect(parsed.context).toContain(
+      'tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)',
+    );
   });
 
   it('says nothing when no newer version is recorded', async () => {
@@ -498,7 +520,7 @@ describe('WebSearch hook: the hook identity on the wire', () => {
       json: hit(base),
     }));
     await writeConfig({ baseUrl });
-    await runScript(websearchHookScript(dataDir), webSearchInput('a question'), env);
+    await runScript(websearchHookScript(dataDir), webSearchInput('a question'), [], env);
     return userAgents()[0];
   };
 
@@ -584,6 +606,18 @@ function callerComposingTo(length: number): string {
 }
 
 describe('WebSearch hook: modes', () => {
+  it('uses Hermes web_search input and emits its native context envelope', async () => {
+    await writeConfig({ hooks: { searchMode: 'remind' } });
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
+      ['--hermes'],
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(JSON.parse(run.stdout)).toEqual({ context: REMIND_LINE });
+  });
+
   it('remind emits the static line and sends nothing', async () => {
     const { baseUrl, hits } = await serveJson((_body, base) => ({
       status: 200,
@@ -706,6 +740,30 @@ describe('Stop hook: open-loop collection', () => {
     expect(text).toContain('If not, close it');
     expect(text).not.toContain('park');
     expect(loopLines(run)).toHaveLength(1);
+  });
+
+  // The search half has had a `--hermes` test since the envelope landed; this is
+  // the publish-back half, and its body is the one #131 rewrote. The Python plugin
+  // sends a bare `{}` and reads only `context`, so a regression in either the
+  // envelope or the payload tolerance would silently cost Hermes the whole nag
+  // while all 30 Claude-shaped stop tests stayed green.
+  it('emits the Hermes context envelope from the same nag body', async () => {
+    await seedSearches([OPEN_MISS]);
+    const run = await runScript(stopHookScript(dataDir), '{}', ['--hermes']);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    const parsed = JSON.parse(run.stdout) as { context?: string };
+    expect(parsed).not.toHaveProperty('hookSpecificOutput');
+    const text = parsed.context ?? '';
+    // Not a second copy of the text: the same body Claude gets, current wording and
+    // all. The publish.mode line is asserted here too, because it is resolved on the
+    // way into the body: a Hermes envelope that carried the loop line without it
+    // would be a second, quietly weaker rendering of the same nag.
+    expect(text).toContain('publish.mode=review: publishing asks first.');
+    expect(text).toContain(`'${OPEN_MISS.question}' was a MISS`);
+    expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
+    expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
+    expect(text).not.toContain('candidate add');
   });
 
   it('nags exactly once: the second run is silent', async () => {
@@ -1292,7 +1350,7 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     await writeConfig({ publish: { mode: 'review' } });
     const text =
       injected(
-        await runScript(stopHookScript(dataDir), stopInput, {
+        await runScript(stopHookScript(dataDir), stopInput, [], {
           TENJIN_PUBLISH_MODE: 'full-auto',
         }),
       ) ?? '';
@@ -1337,7 +1395,7 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
       );
       const text =
         injected(
-          await runScript(stopHookScript(dataDir), stopIn(project), {
+          await runScript(stopHookScript(dataDir), stopIn(project), [], {
             TENJIN_PUBLISH_MODE: 'auto',
           }),
         ) ?? '';
@@ -1430,7 +1488,8 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
             JSON.stringify({ publish: { mode: 'auto' } }),
           );
           const text =
-            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), { HOME: home })) ?? '';
+            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), [], { HOME: home })) ??
+            '';
           expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
         } finally {
           await rm(base, { recursive: true, force: true });
@@ -1457,7 +1516,8 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
           const cwd = join(home, 'work');
           await mkdir(cwd, { recursive: true });
           const text =
-            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), { HOME: home })) ?? '';
+            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), [], { HOME: home })) ??
+            '';
           expect(text.split('\n')[0]).toBe(
             'publish.mode=auto: a clean publish proceeds without asking.',
           );
@@ -1546,7 +1606,7 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
   it('falls back to the file when the env names no mode', async () => {
     await seedSearches([OPEN_MISS]);
     await writeConfig({ publish: { mode: 'auto' } });
-    const text = injected(await runScript(stopHookScript(dataDir), stopInput, {})) ?? '';
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput, [], {})) ?? '';
     expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
   });
 
@@ -1555,7 +1615,9 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     await writeConfig({ publish: { mode: 'auto' } });
     const text =
       injected(
-        await runScript(stopHookScript(dataDir), stopInput, { TENJIN_PUBLISH_MODE: 'whatever' }),
+        await runScript(stopHookScript(dataDir), stopInput, [], {
+          TENJIN_PUBLISH_MODE: 'whatever',
+        }),
       ) ?? '';
     expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
   });
