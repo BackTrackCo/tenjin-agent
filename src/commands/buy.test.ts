@@ -13,9 +13,11 @@ import {
   reply,
   testSigner,
   testWalletProvider,
+  withBuilderCode,
   withTrailingSlashRedirect,
 } from '../lib/read-test-utils';
 import { TENJIN_USER_AGENT } from '../lib/client-meta';
+import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -329,6 +331,33 @@ describe('runBuy, paid path', () => {
     ).resolves.toBe(true);
     expect(auth.from).toBe(testSigner().address);
     expect(JSON.stringify(envelope)).not.toContain('tenjin-cli/');
+  });
+
+  // A first-party buy is Tenjin paying Tenjin: the one registered code fills the
+  // seller role (`a`, from the 402) and the client role (`s`, from this CLI).
+  it('attributes the paid retry with the builder code when the 402 advertises one', async () => {
+    const pr = buildPaymentRequired({}, withBuilderCode());
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+    await runBuy({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    const paid = calls.find((c) => c.phase === 'payment');
+    const envelope = JSON.parse(
+      Buffer.from(paid?.headers['payment-signature'] ?? '', 'base64').toString('utf8'),
+    ) as X402Envelope & { extensions?: Record<string, { info?: { a?: string; s?: string[] } }> };
+    expect(envelope.extensions?.['builder-code']?.info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    expect(envelope.extensions?.['builder-code']?.info?.a).toBe(TENJIN_CLI_BUILDER_CODE);
+    // Terms are untouched by attribution: still the advertised price and payee.
+    expect(envelope.payload.authorization.value).toBe('100000');
+    expect(envelope.payload.authorization.to.toLowerCase()).toBe(
+      '0x1111111111111111111111111111111111111111',
+    );
   });
 });
 
