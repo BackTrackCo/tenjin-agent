@@ -45,6 +45,21 @@ by exact version, and nothing else notices that the pin went stale. Deciding
 whether the release is worth advertising, and publishing the manifest, stay
 manual on that side.
 
+**If that step fails, re-running the job does not fix it.** The publish already
+happened, so a re-run has no changesets left to consume, `published` comes back
+`false`, and the notification is skipped for good. Send it by hand instead, with
+a PAT that has Issues write on `BackTrackCo/tenjin` (the same one
+`RELEASE_CROSSREPO_TOKEN` holds):
+
+```sh
+PUBLISHED=true \
+  PUBLISHED_PACKAGES='[{"name":"tenjin-cli","version":"0.1.0-alpha.15"}]' \
+  GH_TOKEN=<PAT> bash scripts/notify-registry-pin.sh
+```
+
+Use the version the failed run actually published. The script skips an open issue
+that already asks for that exact bump, so running it twice is safe.
+
 Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived, per-run
 token, so there is **no `NPM_TOKEN`** to store or rotate.
 
