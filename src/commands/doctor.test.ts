@@ -19,6 +19,7 @@ import { saveSessionFile } from '../lib/session-key';
 import { sessionPath } from '../lib/paths';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
+import { wireHermesIntegration } from '../lib/hermes';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -129,6 +130,98 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
+  it('reports a working native Hermes integration separately from portable skills', async () => {
+    await wireHermesIntegration({
+      // A path that EXISTS: doctor now stats the baked command, because an
+      // `npx`/`dlx` cache path can be pruned out from under a green check.
+      hermesHome: join(skillHome, '.hermes'),
+      dataDir: dir,
+      tenjinCommand: process.execPath,
+      nodeCommand: process.execPath,
+      dryRun: false,
+      explicit: true,
+      hooks: { enabled: true, mode: 'auto' },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(find(checks, 'hermes')).toMatchObject({ status: 'ok', required: false });
+    expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
+  });
+
+  // Doctor is the command you reach for when something is already broken, so the
+  // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
+  // some other tool would return CONFIG_INVALID and run zero checks on a machine
+  // with no Hermes at all.
+  it('a relative HERMES_HOME warns and falls back instead of aborting every check', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: { HERMES_HOME: 'relative/hermes' },
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(checks.length).toBeGreaterThan(1);
+    expect(find(checks, 'node').status).toBe('ok');
+  });
+
+  it('a baked MCP command that no longer exists warns instead of reading green', async () => {
+    const hermesHome = join(skillHome, '.hermes');
+    await wireHermesIntegration({
+      hermesHome,
+      dataDir: dir,
+      tenjinCommand: join(skillHome, 'pruned-npx-cache', 'tenjin'),
+      nodeCommand: process.execPath,
+      dryRun: false,
+      explicit: true,
+      hooks: { enabled: true, mode: 'auto' },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
+    expect(hermes.status).toBe('warn');
+    expect(hermes.detail).toContain('MCP command missing');
+    // One subject per problem: prefixing the activation with `plugin` too reads as
+    // one subject named twice.
+    expect(hermes.detail).not.toContain('plugin plugin');
+  });
+
+  // `tenjin install --harness hermes` alone is a dead end with the mode stored off:
+  // it re-runs, withholds the hook code by design, and prints the same warning
+  // forever. The `native-harness` fix string in this same PR already names the
+  // config command; doctor has to as well.
+  it('names the config command when the stored searchMode is what blocks the plugin', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { searchMode: 'off' } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
+    expect(hermes.status).toBe('warn');
+    expect(hermes.fix).toContain('tenjin config set hooks.searchMode auto');
+  });
+
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -770,6 +863,63 @@ describe('runDoctor — skill wiring', () => {
     expect(skills.detail).not.toContain('take precedence');
   });
 
+  // The optional tenjin-pay skill's presence must match the bazaarPay toggle:
+  // install and `config set bazaarPay` place/remove it best-effort and stay
+  // quiet on failure, so doctor is the one surface where the drift shows up.
+  describe('bazaarPay presence-vs-toggle drift', () => {
+    const wireCli = async (): Promise<void> => {
+      for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) await writeSkill(name);
+    };
+
+    it('toggle on, skill missing: warns and coaches the re-sync', async () => {
+      await wireCli();
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ bazaarPay: true }));
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain('bazaarPay is on but the tenjin-pay skill is missing');
+      expect(skills.detail).toContain(claudeSkills());
+      expect(skills.fix).toContain('tenjin config set bazaarPay on');
+    });
+
+    it('toggle off, skill still present: warns that a refused lane is being taught', async () => {
+      await wireCli();
+      await writeSkill('tenjin-pay'); // no config: bazaarPay defaults to off
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('warn');
+      expect(skills.detail).toContain('bazaarPay is off but the tenjin-pay skill is still present');
+      expect(skills.fix).toContain('tenjin config set bazaarPay off');
+    });
+
+    it('toggle on with the skill present: ok', async () => {
+      await wireCli();
+      await writeSkill('tenjin-pay');
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ bazaarPay: true }));
+      const res = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
+      expect(skills.status).toBe('ok');
+    });
+  });
+
   // Two directories in different states: the mixed case a developer with both
   // Claude Code and Codex actually hits, and the one a union across directories
   // renders as a self-contradiction.
@@ -1150,6 +1300,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     );
     expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
+      'Bash(tenjin pay:*)',
       'Bash(tenjin session start:*)',
     ]);
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');

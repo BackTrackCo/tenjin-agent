@@ -32,9 +32,9 @@ Useful flags:
 
 ### Hooks
 
-`install` can register two Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. Nothing fires on a `WebFetch`. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
-**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself.
+**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch misses are never raised at all: they are demand data, not questions you asked to be reminded about, and they hold at most 15 of the store's 50 slots so a wide fan-out cannot evict a search you may still want to buy from.
 
 Hooks are read once at session start, so restart Claude Code after registering them.
 
@@ -144,19 +144,51 @@ Mints a read-scoped session key so `tenjin read` can recover pieces you already 
 | ----------------- | ------ | ------------------------------------------------- |
 | `--scope <scope>` | `read` | Session scope. This version only supports `read`. |
 
+## Paying any x402 endpoint
+
+### `tenjin pay <url>`
+
+The standard x402 client verb, for ANY paid endpoint rather than marketplace
+pieces: one probe, a 2xx delivers free, a 402 pays (exact scheme, USDC on Base
+only) under the same spend policy, price cap, and confirm gates as `buy`, and
+retries once. When the 402 advertises the standard sign-in-with-x extension, an
+entitlement re-check runs first with a signature bound to the TARGET origin, so
+something this wallet already bought re-delivers free. There is deliberately no
+library and no dedupe: every paid call pays, so always pass `--max-price` (a
+hard cap `--yes` cannot bypass). Flags: `-X GET|POST`, `-d '<json-body>'`
+(implies POST), `--max-price <usd>`, `--yes`, `--print-body`.
+
+The configured base URL is always payable. Any other https origin is the
+Bazaar lane: it needs the `bazaarPay` config toggle on AND a configured
+registry listing whose terms the live 402 does not exceed (checked against the
+local `discover` cache first, then live); a mismatch refuses with
+`REGISTRY_MISMATCH` before anything is signed, and unreachable registries fail
+the lane closed. While the toggle is on, the optional `tenjin-pay` skill is
+installed beside the others; turning it off removes the skill.
+
+### `tenjin discover [query]`
+
+List (no query) or search the configured x402 discovery registries
+(`bazaarRegistries`; defaults to CDP's Bazaar, UltraVioleta, and PayAI's
+facilitator). Free, keyless, touches no wallet, and works with the toggle off. Listings are
+settlement-derived and unvetted; registries that did not answer are reported so
+a partial sweep never reads as a complete one. The sweep is stored (24h) as the
+pay lane's registry evidence.
+
 ## Reporting outcomes
 
 ### `tenjin outcome`
 
 Reports how a search ended.
 
-| Flag                    | Values                                                                   | Effect                                         |
-| ----------------------- | ------------------------------------------------------------------------ | ---------------------------------------------- |
-| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                       |
-| `--search-id <uuid>`    |                                                                          | Search to report against.                      |
-| `--last`                |                                                                          | Target the most recent manual `tenjin search`. |
-| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                 |
-| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                   |
+| Flag                    | Values                                                                   | Effect                                                                                                                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                                                                                                                                                                                      |
+| `--search-id <uuid>`    |                                                                          | Search to report against. Repeatable; one status covers all of them.                                                                                                                                          |
+| `--last`                |                                                                          | Target the most recent manual `tenjin search`.                                                                                                                                                                |
+| `--all-open`            |                                                                          | Close this session's open web-search-hook MISSes. `regenerated` only. Deliberate searches, and hook searches Tenjin answered, are left open and counted. Another session's loops are that session's to close. |
+| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                                                                                                                                                                                |
+| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                                                                                                                                                                                  |
 
 ## Publishing and editing
 
@@ -253,8 +285,9 @@ Common keys:
 | `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                    |
 | `publish.mode`         | `review`                   | Publish consent mode.                                                        |
 | `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                               |
-| `hooks.searchMode`     | `auto`                     | WebSearch hook behavior.                                                     |
+| `hooks.searchMode`     | `auto`                     | WebSearch and subagent-dispatch hook behavior.                               |
 | `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.  |
+| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                              |
 
 ## MCP
 

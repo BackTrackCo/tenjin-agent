@@ -11,7 +11,8 @@ import {
   skillFrontmatterName,
   skillsDirsFor,
 } from './skill-wiring';
-import { resolveSkillsSource } from './skills-source';
+import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { resolveHermesHomeLenient } from './hermes';
 
 export interface HealDeps {
   io: Io;
@@ -37,7 +38,8 @@ const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
  *
  * It is an UNATTENDED writer into the operator's home, so it is strictly more
  * conservative than `install`, which a human ran on purpose. What it declines to
- * touch is listed on {@link healable}, and it heals only the two CLI adapters:
+ * touch is listed on {@link healable}, and it heals the CLI adapters plus any
+ * optional skill that is present (presence is the gate that placed it):
  * the hosted `tenjin` skill mirrors tenjin.blog/skills.md, so the copy on disk
  * may be a NEWER fetch than this package ships, and rewriting it would undo that
  * and make install's "re-fetch it from tenjin.blog/skills.md" false. Same domain
@@ -63,7 +65,9 @@ export async function healWiredSkills(deps: HealDeps): Promise<void> {
 
     const source = deps.skillsSourceDir ?? packagedSource();
     if (source === null) return;
-    const targets = healable(home);
+    // Lenient on purpose: an unattended healer is the last place that should
+    // refuse to run over a stray relative HERMES_HOME.
+    const targets = healable(home, resolveHermesHomeLenient(home, env).home);
     if (targets.length === 0) return;
     await heal(targets, source, deps.io);
   } catch {
@@ -110,11 +114,11 @@ interface Target {
  * edited under a healthy SKILL.md is restored on the same pass. The other gate,
  * that the file is ours at all, needs its content and so lives at the write.
  */
-function healable(home: string): Target[] {
+function healable(home: string, hermesHome: string): Target[] {
   const found: Target[] = [];
-  for (const dir of skillsDirsFor(home)) {
+  for (const dir of skillsDirsFor(home, hermesHome)) {
     if (!isRealDirectory(dir)) continue;
-    for (const name of CLI_SKILL_NAMES) {
+    for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;
       const path = join(dir, name, 'SKILL.md');
       if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;

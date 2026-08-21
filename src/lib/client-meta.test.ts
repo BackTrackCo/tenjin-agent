@@ -4,6 +4,8 @@ import {
   CALLER_USER_AGENT_ENV,
   TENJIN_PRODUCT,
   TENJIN_USER_AGENT,
+  WEBSEARCH_HOOK_PRODUCT,
+  WEBSEARCH_HOOK_USER_AGENT,
   composeUserAgent,
 } from './client-meta';
 
@@ -52,6 +54,30 @@ describe('TENJIN_USER_AGENT', () => {
     // the entire CLI drops to `none`.
     const collapsed = TENJIN_USER_AGENT.replace(' (', '(');
     expect(FIRST_PRODUCT_RE.exec(collapsed)).toBeNull();
+  });
+});
+
+/**
+ * The WebSearch hook's own identity, pinned as a literal because it is the name
+ * the server stores in `client_name` and anything classifying hook demand keys
+ * on, across a repo boundary that no type checks.
+ */
+describe('WEBSEARCH_HOOK_USER_AGENT', () => {
+  it('is the package version behind a `tenjin-websearch-hook` product token', () => {
+    const [product, ...rest] = WEBSEARCH_HOOK_USER_AGENT.split(' ');
+    expect(product).toBe(`tenjin-websearch-hook/${pkg.version}`);
+    expect(rest.join(' ')).toBe('(+https://tenjin.blog)');
+  });
+
+  it("parses to the hook's attribution label under the server's product regex", () => {
+    const match = FIRST_PRODUCT_RE.exec(WEBSEARCH_HOOK_USER_AGENT);
+    expect(match?.[1]).toBe('tenjin-websearch-hook');
+    expect(match?.[2]).toBe(pkg.version);
+  });
+
+  it('is a different client from a deliberate `tenjin search`', () => {
+    expect(FIRST_PRODUCT_RE.exec(TENJIN_USER_AGENT)?.[1]).toBe('tenjin-cli');
+    expect(WEBSEARCH_HOOK_USER_AGENT.length).toBeLessThanOrEqual(USER_AGENT_MAX_LENGTH);
   });
 });
 
@@ -110,6 +136,22 @@ describe('composeUserAgent', () => {
       `${TENJIN_PRODUCT} codex/1.2.0 (+https://tenjin.blog)`,
     );
     expect(composeUserAgent({ caller: 'tenjin-cli', env: NO_ENV })).toBe(TENJIN_USER_AGENT);
+  });
+
+  it('leads with the product it is given, and drops both of ours from a handoff', () => {
+    const product = WEBSEARCH_HOOK_PRODUCT;
+    expect(composeUserAgent({ env: NO_ENV, product })).toBe(WEBSEARCH_HOOK_USER_AGENT);
+    // Either identity handed back to us is a stale copy, never a second product.
+    expect(
+      composeUserAgent({
+        caller: 'tenjin-cli/0.0.1 tenjin-websearch-hook/0.0.1 codex/1',
+        env: NO_ENV,
+        product,
+      }),
+    ).toBe(`${product} codex/1 (+https://tenjin.blog)`);
+    expect(composeUserAgent({ caller: 'tenjin-websearch-hook/0.0.1 codex/1', env: NO_ENV })).toBe(
+      `${TENJIN_PRODUCT} codex/1 (+https://tenjin.blog)`,
+    );
   });
 
   it('omits a handoff that is not a bare product sequence, rather than sanitizing it', () => {

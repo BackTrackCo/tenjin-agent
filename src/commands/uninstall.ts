@@ -34,6 +34,8 @@ import type { CommandContext, CommandResult } from '../context';
 export interface UninstallDeps {
   /** Home whose harness directories are cleaned; tests inject a temp dir. */
   home?: string;
+  /** Environment the Hermes home is resolved from; defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runUninstall(
@@ -48,7 +50,7 @@ export async function runUninstall(
   // at one that does not.
   const settings = await removeFromSettings(home);
   const scripts = await removeHookScripts(ctx.dataDir);
-  const skills = await removeSkills(home);
+  const skills = await removeSkills(home, deps.env);
   const markers = await removeMarkerLines(home);
 
   const report: UninstallReport = {

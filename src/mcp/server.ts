@@ -123,8 +123,19 @@ const buyInput = {
 
 const outcomeInput = {
   status: z.string().describe('used | partially_used | rejected | regenerated | purchase_declined'),
-  searchId: z.string().optional().describe('The search to report against'),
+  // A lone string stays valid: agents already send one, and the batch is additive.
+  searchId: z
+    .union([z.string(), z.array(z.string())])
+    .optional()
+    .describe('The search to report against, or several the same status describes'),
   last: z.boolean().optional().describe('Target the most recent local search instead of an id'),
+  allOpen: z
+    .boolean()
+    .optional()
+    .describe(
+      "Close this session's open WebSearch-hook MISSes, or every open one when the " +
+        'harness names no session (regenerated only)',
+    ),
   resource: z.string().optional().describe('The resourceId the outcome concerns'),
   contentHash: z.string().optional().describe('sha256:<64hex> of the exact body read'),
 } satisfies Record<keyof OutcomeArgs, z.ZodTypeAny>;
@@ -385,7 +396,10 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
       description:
         'Report honestly how a search ended (used, partially_used, rejected, regenerated, ' +
         'purchase_declined), closing the loop the marketplace learns from. No wallet: the searchId ' +
-        'is the capability. Use --last (last:true) to target the most recent local search.',
+        'is the capability. Use --last (last:true) to target the most recent local search, a ' +
+        'searchId array to close several at one status, or allOpen:true to close this ' +
+        "session's unanswered WebSearch-hook loops as regenerated (every open one when " +
+        'the harness names no session).',
       inputSchema: outcomeInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
@@ -396,6 +410,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             status: args.status,
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.last !== undefined ? { last: args.last } : {}),
+            ...(args.allOpen !== undefined ? { allOpen: args.allOpen } : {}),
             ...(args.resource !== undefined ? { resource: args.resource } : {}),
             ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
           },

@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
+import { fileURLToPath } from 'node:url';
+import { resolveSkillsSource } from '../lib/skills-source';
 import {
   claudeSettingsPath,
   FREE_VERB_RULES,
@@ -14,6 +16,8 @@ import {
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import type { CommandContext, GlobalFlags } from '../context';
+
+const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let dir: string;
 beforeEach(async () => {
@@ -85,8 +89,11 @@ describe('runConfigList', () => {
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
+    expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    expect(humanLines).toHaveLength(13);
+    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 3 hooks.*
+    // (incl. sessionPrimer) + 1 update.mode.
+    expect(humanLines).toHaveLength(16);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -379,6 +386,18 @@ describe('evalCohort key', () => {
     await runConfigSet({ key: 'evalCohort', value }, makeCtx());
     const { data } = await runConfigGet({ key: 'evalCohort' }, makeCtx());
     expect(data).toMatchObject({ key: 'evalCohort', value: value === 'true', source: 'file' });
+  });
+
+  // on/off must parse because the CLI's own refusal texts coach exactly
+  // `tenjin config set bazaarPay on` (pay.ts, discover.ts): a coached command
+  // that exits USAGE teaches an agent the remediation is broken.
+  it.each([
+    ['on', true],
+    ['off', false],
+  ] as const)('accepts the coached %s spelling', async (value, expected) => {
+    await runConfigSet({ key: 'evalCohort', value }, makeCtx());
+    const { data } = await runConfigGet({ key: 'evalCohort' }, makeCtx());
+    expect(data).toMatchObject({ key: 'evalCohort', value: expected, source: 'file' });
   });
 
   it.each(['1', '0', 'True', 'yes', ''])('rejects %j as USAGE', async (bad) => {
@@ -911,11 +930,12 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 });
 
 describe('the hooks block is set through config, which stays human-gated', () => {
-  it('round-trips both hook keys and rejects a value outside the enum', async () => {
+  it('round-trips every hook key and rejects a value outside the enum', async () => {
     const ctx = makeCtx();
     for (const [key, value] of [
       ['hooks.searchMode', 'remind'],
       ['hooks.stopNag', 'off'],
+      ['hooks.sessionPrimer', 'off'],
     ] as const) {
       const set = await runConfigSet({ key, value }, ctx);
       expect(set.data).toMatchObject({ key, value, source: 'file' });
@@ -923,11 +943,20 @@ describe('the hooks block is set through config, which stays human-gated', () =>
         data: { key, value, source: 'file' },
       });
     }
-    // Both subkeys survive each other's write, so silencing one hook cannot
-    // silently reset the other.
+    // Every subkey survives the others' writes, so silencing one hook cannot
+    // silently reset another.
     expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
       data: { value: 'remind' },
     });
+    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
+
+    const primer = await caught(() =>
+      runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
+    );
+    expect(primer.code).toBe('USAGE');
+    expect(primer.fix).toContain('"off"');
 
     const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
     expect(bad.code).toBe('USAGE');
@@ -982,5 +1011,55 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     });
     expect(off.data).not.toHaveProperty('hookScriptStale');
     expect(off.humanLines).toHaveLength(1);
+  });
+});
+
+describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () => {
+  it('places on true, removes on false, and only for bazaarPay', async () => {
+    const ctx = makeCtx();
+    const home = await mkdtemp(join(tmpdir(), 'tenjin-cfg-home-'));
+    try {
+      // A wired directory (any shipped skill present) is the consent gate.
+      const wired = join(home, '.claude', 'skills', 'tenjin-search');
+      await mkdir(wired, { recursive: true });
+      await writeFile(join(wired, 'SKILL.md'), '---\nname: tenjin-search\n---\nx\n');
+      const placeSkill = { io: ctx.io, homeDir: home, skillsSourceDir: SKILLS_SRC };
+      const payPath = join(home, '.claude', 'skills', 'tenjin-pay', 'SKILL.md');
+
+      await runConfigSet({ key: 'bazaarPay', value: 'true' }, ctx, { placeSkill });
+      expect(await readFile(payPath, 'utf8')).toContain('name: tenjin-pay');
+
+      await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx, { placeSkill });
+      expect(existsSync(payPath)).toBe(true); // untouched by an unrelated key
+
+      await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, { placeSkill });
+      expect(existsSync(payPath)).toBe(false);
+      expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('a placement failure never fails the set itself', async () => {
+    const ctx = makeCtx();
+    const result = await runConfigSet({ key: 'bazaarPay', value: 'false' }, ctx, {
+      placeSkill: { io: ctx.io, homeDir: 'relative-home' },
+    });
+    expect((result.data as { value: boolean }).value).toBe(false);
+  });
+
+  it('bazaarRegistries accepts a comma list of https origins and rejects garbage', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet(
+      { key: 'bazaarRegistries', value: 'https://a.test, https://b.test/x402' },
+      ctx,
+    );
+    expect((set.data as { value: string[] }).value).toEqual([
+      'https://a.test',
+      'https://b.test/x402',
+    ]);
+    await expect(
+      runConfigSet({ key: 'bazaarRegistries', value: 'not a url' }, ctx),
+    ).rejects.toThrow(CliError);
   });
 });

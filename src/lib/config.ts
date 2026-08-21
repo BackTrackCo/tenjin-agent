@@ -79,17 +79,31 @@ export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
   });
 }
 
+/** Whether the SessionStart hook prints its primer. Two values and no middle
+ *  one: one paragraph either belongs at the top of a session or does not. */
+export const SessionPrimerModeSchema = z.enum(['on', 'off']);
+export type SessionPrimerMode = z.infer<typeof SessionPrimerModeSchema>;
+
+export function parseSessionPrimerFlag(value: string, flagName: string): SessionPrimerMode {
+  const parsed = SessionPrimerModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
 /**
- * The harness-hook block. BOTH keys are read by the installed scripts at run
+ * The harness-hook block. EVERY key is read by the installed scripts at run
  * time, which is what makes them runtime toggles rather than install-time
- * choices: `tenjin config set hooks.searchMode off` or `hooks.stopNag off`
- * silences a hook immediately, with no re-install and nothing to unwire. The
- * scripts stay registered and no-op, which is also what lets turning one back on
- * be a single `config set`.
+ * choices: `tenjin config set hooks.searchMode off`, `hooks.stopNag off` or
+ * `hooks.sessionPrimer off` silences a hook immediately, with no re-install and
+ * nothing to unwire. The scripts stay registered and no-op, which is also what
+ * lets turning one back on be a single `config set`.
  */
 const HooksConfigSchema = z.object({
   searchMode: SearchHookModeSchema,
   stopNag: StopNagModeSchema,
+  sessionPrimer: SessionPrimerModeSchema,
 });
 
 /**
@@ -161,6 +175,17 @@ export const ConfigSchema = z.object({
    * 90 days. Off by default; no query text is retained server-side without it.
    */
   evalCohort: z.boolean(),
+  /**
+   * The Bazaar pay lane opt-in: when true, `tenjin pay` may pay a NON-Tenjin
+   * x402 endpoint, provided a configured registry lists that exact resource and
+   * the live 402 matches the listed deal. Off by default; `install` asks once.
+   * The lane's teaching is the OPTIONAL tenjin-pay skill, present on disk
+   * exactly while this is on (lib/skill-placement).
+   */
+  bazaarPay: z.boolean(),
+  /** x402 discovery registries (facilitator base URLs) `discover` queries and
+   *  the Bazaar pay lane verifies against. */
+  bazaarRegistries: z.array(z.url()),
   publish: PublishConfigSchema,
   install: InstallConfigSchema,
   hooks: HooksConfigSchema,
@@ -197,6 +222,22 @@ export type PartialConfig = z.infer<typeof RawConfigSchema>;
  */
 export const SEND_MAX_UNSET = 'unset';
 
+/**
+ * Registries verified keyless (CDP/UV on 2026-08-14, PayAI on 2026-08-18): all
+ * answer GET /discovery/resources with no credential in the Bazaar envelope
+ * the sweep parses. CDP's Bazaar is settlement-derived (it indexes what its
+ * facilitator settles, Tenjin's endpoints included); UltraVioleta is the
+ * registry Tenjin also announces to; PayAI's facilitator is settlement-derived
+ * like CDP's (26k+ listings at verification). PayAI has no /discovery/search
+ * and ignores payTo filters, the same shapes UV and CDP already exhibit, which
+ * the query sweep's per-registry errors and the stored-sweep evidence cover.
+ */
+export const DEFAULT_BAZAAR_REGISTRIES = [
+  'https://api.cdp.coinbase.com/platform/v2/x402',
+  'https://facilitator.ultravioletadao.xyz',
+  'https://facilitator.payai.network',
+];
+
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: '0',
   sessionBudget: '0',
@@ -212,12 +253,14 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
+  bazaarPay: false,
+  bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000' },
   install: { harness: [] },
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json.
-  hooks: { searchMode: 'auto', stopNag: 'on' },
+  hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on' },
   update: { mode: 'nudge' },
 };
 
@@ -239,7 +282,11 @@ export const PUBLISH_CONFIG_KEYS = ['publish.mode', 'publish.defaultPrice'] as c
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
-export const HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.stopNag'] as const;
+export const HOOKS_CONFIG_KEYS = [
+  'hooks.searchMode',
+  'hooks.stopNag',
+  'hooks.sessionPrimer',
+] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
 
 /** The dotted key `config get/set` accepts for the nested update block. */
@@ -298,6 +345,7 @@ export async function loadConfig(dir: string): Promise<Config> {
     hooks: {
       searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
       stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
+      sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
   };
@@ -338,10 +386,13 @@ export interface EffectiveSettings {
   baseUrl: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
+  bazaarPay: ResolvedSetting<boolean>;
+  bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
+  hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
   updateMode: ResolvedSetting<UpdateMode>;
 }
 
@@ -376,10 +427,13 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     baseUrl: resolveBaseUrl(config, flags, env),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
+    bazaarPay: fileOrDefault('bazaarPay', config),
+    bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),
     hooksStopNag: resolveHooksStopNag(config),
+    hooksSessionPrimer: resolveHooksSessionPrimer(config),
     updateMode: resolveUpdateMode(config),
   };
 }
@@ -390,6 +444,13 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   const fromFile = config.update?.mode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
+}
+
+/** hooks.sessionPrimer: file or default, same shape as hooks.searchMode. */
+function resolveHooksSessionPrimer(config: PartialConfig): ResolvedSetting<SessionPrimerMode> {
+  const fromFile = config.hooks?.sessionPrimer;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.sessionPrimer, source: 'default' };
 }
 
 /** hooks.stopNag: file or default, same shape as hooks.searchMode. */
