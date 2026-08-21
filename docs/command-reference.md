@@ -216,6 +216,8 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 | `--provenance <text>`      | How evidence was obtained.                                               |
 | `--methodology <text>`     | How it was established.                                                  |
 
+The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
+
 ### `tenjin edit <post-id>`
 
 With no change flag, prints one of your posts and its card. With change flags, merge-updates the post.

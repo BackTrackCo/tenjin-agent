@@ -368,8 +368,8 @@ describe('outcome batch flags (the dispatcher mapping)', () => {
 });
 
 /**
- * An option that did not collect would keep the LAST id and drop the rest. Read
- * back through the cap refusal, which only eleven surviving ids can trip.
+ * An option that did not collect would keep the LAST id and drop the rest, so it
+ * is read back through the cap, which only eleven surviving ids can trip.
  */
 describe('publish --search-id collects (the dispatcher mapping)', () => {
   it('repeats rather than replacing, and the cap counts every id given', async () => {

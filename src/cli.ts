@@ -510,7 +510,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option(
       '--search-id <id>',
-      'the search this file answers (closes its open loop, and prefills its question); repeatable, up to 10, when one piece answers a whole research thread',
+      'the search this file answers (closes its open loop, and prefills its question); repeatable up to 10 when one piece answers a whole research thread, and the server accepts or refuses the named searches as one batch',
       collect,
       [],
     )

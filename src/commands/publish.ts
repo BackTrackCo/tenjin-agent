@@ -105,12 +105,12 @@ export async function runPublish(
 
   const raw = await readSource(args);
   // Read the named searches ONCE, here: one prefills the card's question below,
-  // and each id's presence decides what its close reports. A missing store reads
-  // as no entries rather than failing the publish.
+  // and each id's presence decides what its close reports (and what is warned).
   const stored = await loadNamedSearches(ctx, searchIds);
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
+  if (status !== 'draft') warnUnrecorded(ctx, searchIds, stored);
   const title = resolveTitle(frontmatter, body);
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
@@ -119,7 +119,8 @@ export async function runPublish(
   // fallback: an explicit --question OR a frontmatter questionsAnswered still
   // wins. That phrasing is what the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  // One card, so one prefill: the first recorded id. The rest are attribution.
+  // One card, so one prefill: the first id you typed that this machine happens
+  // to hold. The rest are attribution, not phrasing.
   const prefillFrom = searchIds.find((id) => stored.get(id)?.question !== undefined);
   const wanted = prefillFrom === undefined ? undefined : stored.get(prefillFrom)?.question;
   const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
@@ -274,6 +275,25 @@ export async function runPublish(
     );
   }
   return receipt(result, runtime.baseUrl, searches);
+}
+
+/**
+ * Which named searches this machine has no record of, said BEFORE the wallet
+ * touch: the server takes the batch as a unit, so one id it cannot match refuses
+ * the whole publish, after the signature. Ordinary rather than exotic, with a
+ * 50-entry store against a 90-day sweep. A warning and never a refusal, because
+ * an id recorded on another machine is absent here and valid there.
+ */
+function warnUnrecorded(
+  ctx: CommandContext,
+  searchIds: string[],
+  stored: Map<string, StoredSearch>,
+): void {
+  const unrecorded = searchIds.filter((id) => !stored.has(id));
+  if (unrecorded.length === 0) return;
+  ctx.io.stderr.write(
+    `Not in this machine's search store: ${unrecorded.join(', ')}. The server accepts or refuses the named searches as one batch, so if it has no record of one either, this publish is refused after it is signed. Drop that id to publish without it.\n`,
+  );
 }
 
 async function loadNamedSearches(

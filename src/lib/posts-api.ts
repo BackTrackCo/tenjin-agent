@@ -72,14 +72,19 @@ const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
  */
 export const SEARCH_ID_WIRE_RE =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
-/** How many searches one piece may claim, mirroring the server's cap. */
+/**
+ * How many searches one create request may name. The server's cap is stricter in
+ * kind: it bounds a post's claims over its whole lifetime, across every later
+ * update, so N requests of 10 cannot land 10N. The numbers coincide only because
+ * the CLI never sends `searchId` on the update path, and an `edit --search-id`
+ * reusing this bound would pass here and still be refused there.
+ */
 export const SEARCH_ID_MAX = 10;
 
 /**
- * The searchIds a publish claims: deduped (naming one twice says it once, not
- * twice), each checked against the shape the SERVER declares, and capped. Run
- * by the command edge before the wallet touch, so a typo costs a message rather
- * than a signature, and again by the builder, the last gate before a signed body.
+ * The searchIds a publish claims: deduped (naming one twice says it once), each
+ * checked against the shape the SERVER declares, and capped. Run by the command
+ * edge before the wallet touch, and again by the builder, the last gate there is.
  */
 export function normalizeSearchIds(
   searchId: string | string[] | undefined,
@@ -106,10 +111,7 @@ export function normalizeSearchIds(
   return ids;
 }
 
-/**
- * A lone id ships as the bare string it has always been, byte-identical against
- * a server that predates the array; several need that server deployed.
- */
+/** A lone id ships as the bare string it has always been; several as an array. */
 function toWireSearchId(ids: string[]): string | string[] | undefined {
   if (ids.length === 0) return undefined;
   return ids.length === 1 ? ids[0] : ids;

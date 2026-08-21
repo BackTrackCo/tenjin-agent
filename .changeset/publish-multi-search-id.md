@@ -19,7 +19,11 @@ recorded warns for itself instead of taking the rest down with it. A lone id
 keeps the flat `search` field callers already read. Repeats collapse. A `--draft`
 still answers nobody and sends no attribution at all.
 
+Before anything is signed, any named search this machine has no record of is
+warned about by id. Tenjin accepts or refuses the named searches as one batch, so
+a single id it cannot match refuses the whole publish, and that refusal used to
+arrive only after the wallet had signed.
+
 On the wire, one id ships as the bare string it has always been, so a
-single-search publish is byte-identical against a server that predates this;
-several ship as an array, which needs the array-accepting post-create deployed
-first.
+single-search publish is byte-identical to what shipped before; several ship as
+an array, which the live post-create takes.

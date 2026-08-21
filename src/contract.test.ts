@@ -9,6 +9,7 @@ import {
   buildPostUpdateBody,
   ownPostSchema,
   resourceEchoSchema,
+  SEARCH_ID_MAX,
   SEARCH_ID_WIRE_RE,
 } from './lib/posts-api';
 import { deriveCard } from './lib/card';
@@ -551,11 +552,16 @@ function assertPublishContract(doc: unknown): void {
   expect(bound(top, 'price', 'pattern')).toBe('^(0|[1-9]\\d{0,12})$');
   expect(bound(top, 'handle', 'pattern')).toBe('^[a-z0-9-]{2,32}$');
   expect(bound(top, 'status', 'enum')).toEqual(['draft', 'published', 'unlisted']);
-  // searchId is SENT now, and the server's shape is narrower than lib/ids.ts's
-  // UUID_RE (it pins the RFC version and variant nibbles). The CLI mirrors the
-  // declared pattern so a bad id is refused at the command edge rather than as a
-  // 400 collected after the wallet signature.
-  expect(bound(top, 'searchId', 'pattern')).toBe(SEARCH_ID_WIRE_RE.source);
+  // searchId is SENT, in two declared shapes: one id bare, several as an array.
+  // The pattern is narrower than lib/ids.ts's UUID_RE and the CLI mirrors it, and
+  // SEARCH_ID_MAX copies a number the server owns; nothing else would notice
+  // either of them moving.
+  const searchIdForms = get(top, 'searchId', 'anyOf');
+  expect(get(searchIdForms, 0, 'pattern')).toBe(SEARCH_ID_WIRE_RE.source);
+  expect(get(searchIdForms, 1, 'type')).toBe('array');
+  expect(get(searchIdForms, 1, 'items', 'pattern')).toBe(SEARCH_ID_WIRE_RE.source);
+  expect(get(searchIdForms, 1, 'minItems')).toBe(1);
+  expect(get(searchIdForms, 1, 'maxItems')).toBe(SEARCH_ID_MAX);
 
   const card = cardInputProps(doc);
   expect(bound(card, 'mediaType', 'maxLength')).toBe(100);
@@ -678,6 +684,36 @@ describe('contract fixture pins the publish endpoints', () => {
     expect(withId.searchId).toBe(SEARCH_ID);
     const without = buildPostCreateBody({ status: 'published', title: 'T', bodyMd: 'B' });
     expect('searchId' in without).toBe(false);
+  });
+
+  // Each emitted shape against the branch it lands on: the value loop above
+  // skips this field now that its bounds live under `anyOf`.
+  it('emits a searchId that satisfies the declared branch it takes', () => {
+    const forms = get(postCreateProps(fixtureDoc), 'searchId', 'anyOf');
+    const scalar = new RegExp(String(get(forms, 0, 'pattern')));
+    const item = new RegExp(String(get(forms, 1, 'items', 'pattern')));
+    const many = [SEARCH_ID, '0197aaaa-bbbb-7ccc-8ddd-ffffffffffff'];
+
+    const one = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      searchId: [SEARCH_ID],
+    }).searchId;
+    expect(typeof one).toBe('string');
+    expect(scalar.test(String(one))).toBe(true);
+
+    const batch = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      searchId: many,
+    }).searchId as string[];
+    expect(Array.isArray(batch)).toBe(true);
+    expect(batch.length).toBeGreaterThanOrEqual(Number(get(forms, 1, 'minItems')));
+    expect(batch.length).toBeLessThanOrEqual(Number(get(forms, 1, 'maxItems')));
+    for (const id of batch)
+      expect(item.test(id), `${id} violates the declared item pattern`).toBe(true);
   });
 
   // Refused at the builder too, not only at the command edge: PostCreate is a

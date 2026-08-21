@@ -1011,6 +1011,39 @@ describe('runPublish — a piece that answers a whole thread', () => {
     expect(searchesIn(res)?.every((s) => (s as { closed: boolean }).closed === false)).toBe(true);
   });
 
+  // The caller has to hear the risk while a message still costs less than a
+  // signature. Proven on the refusal path: the consent gate stops the run before
+  // the wallet, and the warning is already out.
+  it('warns about an unrecorded id before the wallet is touched', async () => {
+    await seed(A, 'recorded here');
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: [A, D], mode: 'review' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    ).catch(() => undefined);
+    expect(stderr()).toContain(D);
+    expect(stderr()).not.toContain(A);
+    expect(stderr()).toContain('as one batch');
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('says nothing when every named search is recorded here', async () => {
+    await seed(A, 'first');
+    await seed(B, 'second');
+    const { stderr } = await publishWith([A, B]);
+    expect(stderr()).not.toContain('as one batch');
+  });
+
+  // A draft sends no attribution, so there is no batch for the server to refuse.
+  it('does not warn on a draft, which claims nothing', async () => {
+    const { stderr } = await publishWith([D], { draft: true });
+    expect(stderr()).not.toContain('as one batch');
+  });
+
   // `search` is what callers have read since #161: it survives for a lone id.
   it('keeps the flat search field for one id and drops it for several', async () => {
     await seed(A, 'first');
