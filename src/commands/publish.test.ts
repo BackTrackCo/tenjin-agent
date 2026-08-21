@@ -1031,6 +1031,17 @@ describe('runPublish — a piece that answers a whole thread', () => {
     expect(getSignerCount()).toBe(0);
   });
 
+  // An id passed back in another spelling closes its real loop instead of
+  // reporting a stranger, and the ledger write still lands on the record.
+  it('finds, closes and does not warn about a case-variant of a recorded id', async () => {
+    await seed(A, 'recorded lowercase');
+    const { res, stderr, body } = await publishWith([A.toUpperCase()]);
+    expect(stderr()).not.toContain('as one batch');
+    expect(body()?.searchId).toBe(A);
+    expect(searchesIn(res)).toEqual([{ id: A, closed: true, prefill: 'applied' }]);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
   it('says nothing when every named search is recorded here', async () => {
     await seed(A, 'first');
     await seed(B, 'second');
@@ -1060,19 +1071,6 @@ describe('runPublish — a piece that answers a whole thread', () => {
 });
 
 describe('runPublish — the public preview (--excerpt)', () => {
-  /** A stub server that also captures the parsed request body. */
-  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
-    let captured: Record<string, unknown> | undefined;
-    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
-      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      return new Response(JSON.stringify(CREATED), {
-        status: 201,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as unknown as typeof fetch;
-    return { fetch: fetchFn, body: () => captured };
-  }
-
   const withFrontmatter = (excerpt: string): string =>
     ['---', `excerpt: ${excerpt}`, '---', '# The Answer', '', 'A plain body.'].join('\n');
 
@@ -1171,21 +1169,6 @@ describe('runPublish — public card text is sanitized', () => {
   // into text every future buyer reads.
   const CSI = '\x1b[31mred\x1b[0m';
   const RTL = 'safe‮txet dekcirt';
-
-  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
-    let captured: Record<string, unknown> | undefined;
-    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
-      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      return new Response(JSON.stringify(CREATED), {
-        status: 201,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as unknown as typeof fetch;
-    return { fetch: fetchFn, body: () => captured };
-  }
-
-  const questionsIn = (b: Record<string, unknown> | undefined): string[] | undefined =>
-    (b?.resource as { questionsAnswered?: string[] } | undefined)?.questionsAnswered;
 
   async function seed(question: string): Promise<void> {
     await recordSearch(dir, {
@@ -1315,18 +1298,6 @@ describe('runPublish — the dropped prefill is reported', () => {
 describe('runPublish — every wire field is stripped, not just the two', () => {
   const CSI = '\x1b[31mred\x1b[0m';
   const RTL = 'a‮tricked';
-
-  function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown> | undefined } {
-    let captured: Record<string, unknown> | undefined;
-    const fetchFn = (async (_u: string | URL, init?: RequestInit) => {
-      captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      return new Response(JSON.stringify(CREATED), {
-        status: 201,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as unknown as typeof fetch;
-    return { fetch: fetchFn, body: () => captured };
-  }
 
   /** Publish with `payload` in every text field, and hand back what went out. */
   async function publishWith(payload: string): Promise<Record<string, unknown>> {

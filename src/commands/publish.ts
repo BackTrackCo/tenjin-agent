@@ -88,6 +88,10 @@ export interface PublishDeps {
   env?: NodeJS.ProcessEnv;
   /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
   cwd?: string;
+  /** How this surface spells the search-id input, for edge errors: the CLI flag
+   *  by default, `searchId` from the MCP tool. A dep and not an arg because
+   *  `publishInput`'s `satisfies` would expose a new PublishArgs key to agents. */
+  searchIdLabel?: string;
 }
 
 export async function runPublish(
@@ -101,11 +105,11 @@ export async function runPublish(
   // typo like `--mode Review` must never be silently dropped onto a looser mode
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
-  const searchIds = normalizeSearchIds(args.searchId, '--search-id');
+  const searchIds = normalizeSearchIds(args.searchId, deps.searchIdLabel ?? '--search-id');
 
   const raw = await readSource(args);
-  // Read the named searches ONCE, here: one prefills the card's question below,
-  // and each id's presence decides what its close reports (and what is warned).
+  // Read the named searches ONCE: one prefills the card, and each id's presence
+  // decides what its close reports and what is warned about below.
   const stored = await loadNamedSearches(ctx, searchIds);
   const { frontmatter, body } = parseFrontmatter(raw);
 
@@ -119,8 +123,7 @@ export async function runPublish(
   // fallback: an explicit --question OR a frontmatter questionsAnswered still
   // wins. That phrasing is what the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  // One card, so one prefill: the first id you typed that this machine happens
-  // to hold. The rest are attribution, not phrasing.
+  // One card, one prefill: the first id you typed that this machine holds.
   const prefillFrom = searchIds.find((id) => stored.get(id)?.question !== undefined);
   const wanted = prefillFrom === undefined ? undefined : stored.get(prefillFrom)?.question;
   const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
@@ -280,9 +283,8 @@ export async function runPublish(
 /**
  * Which named searches this machine has no record of, said BEFORE the wallet
  * touch: the server takes the batch as a unit, so one id it cannot match refuses
- * the whole publish, after the signature. Ordinary rather than exotic, with a
- * 50-entry store against a 90-day sweep. A warning and never a refusal, because
- * an id recorded on another machine is absent here and valid there.
+ * the whole publish, after the signature. Ordinary, with a 50-entry store against
+ * a 90-day sweep. A warning: an id recorded elsewhere is absent here, valid there.
  */
 function warnUnrecorded(
   ctx: CommandContext,
@@ -296,6 +298,10 @@ function warnUnrecorded(
   );
 }
 
+/**
+ * The local records for the named searches, keyed case-folded like the ids that
+ * look them up, so an entry recorded in another spelling is still found.
+ */
 async function loadNamedSearches(
   ctx: CommandContext,
   searchIds: string[],
@@ -303,7 +309,11 @@ async function loadNamedSearches(
   if (searchIds.length === 0) return new Map();
   const searches = await loadSearches(ctx.dataDir);
   const wanted = new Set(searchIds);
-  return new Map(searches.filter((s) => wanted.has(s.searchId)).map((s) => [s.searchId, s]));
+  return new Map(
+    searches
+      .filter((s) => wanted.has(s.searchId.toLowerCase()))
+      .map((s) => [s.searchId.toLowerCase(), s]),
+  );
 }
 
 /**
@@ -374,7 +384,8 @@ async function closeNamedSearch(
   if (stored === null) {
     return open(`Published, but search ${searchId} is not in the local store.`);
   }
-  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish', undefined, {
+  // The record's OWN spelling: the store matches ids by exact string.
+  const outcome = await markSearchResolved(ctx.dataDir, stored.searchId, 'publish', undefined, {
     relink: true,
   });
   if (outcome === 'failed') {

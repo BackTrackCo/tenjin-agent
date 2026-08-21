@@ -216,6 +216,8 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 | `--provenance <text>`      | How evidence was obtained.                                               |
 | `--methodology <text>`     | How it was established.                                                  |
 
+On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
+
 The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
 ### `tenjin edit <post-id>`

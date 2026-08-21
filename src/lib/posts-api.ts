@@ -74,24 +74,27 @@ export const SEARCH_ID_WIRE_RE =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 /**
  * How many searches one create request may name. The server's cap is stricter in
- * kind: it bounds a post's claims over its whole lifetime, across every later
- * update, so N requests of 10 cannot land 10N. The numbers coincide only because
- * the CLI never sends `searchId` on the update path, and an `edit --search-id`
- * reusing this bound would pass here and still be refused there.
+ * kind, bounding a post's claims across its whole lifetime, so N requests of 10
+ * cannot land 10N; the numbers coincide only because the CLI never sends
+ * `searchId` on the update path, where an `edit` reusing this would be refused.
  */
 export const SEARCH_ID_MAX = 10;
 
 /**
- * The searchIds a publish claims: deduped (naming one twice says it once), each
- * checked against the shape the SERVER declares, and capped. Run by the command
- * edge before the wallet touch, and again by the builder, the last gate there is.
+ * The searchIds a publish claims: lowercased, deduped, each checked against the
+ * shape the SERVER declares, and capped. Run by the command edge before the
+ * wallet touch, and again by the builder. Case-folded BEFORE the dedupe, because
+ * the wire regex takes mixed-case hex while a Set compares exact strings, so two
+ * spellings of one uuid would otherwise reach the server as two claims on one
+ * search. Postgres stores `uuid` lowercased anyway.
  */
 export function normalizeSearchIds(
   searchId: string | string[] | undefined,
   label: string,
 ): string[] {
   if (searchId === undefined) return [];
-  const ids = [...new Set(typeof searchId === 'string' ? [searchId] : searchId)];
+  const given = typeof searchId === 'string' ? [searchId] : searchId;
+  const ids = [...new Set(given.map((id) => id.toLowerCase()))];
   for (const id of ids) {
     if (!SEARCH_ID_WIRE_RE.test(id)) {
       throw new CliError('USAGE', `Invalid ${label}: ${JSON.stringify(id)}`, {
@@ -752,14 +755,17 @@ function authError(code: string | undefined, res: HttpResponse): CliError {
 
 /** Any non-recoverable non-2xx after approval is a write failure (exit 4). */
 function publishFailed(res: HttpResponse): CliError {
-  return new CliError(
-    'PUBLISH_FAILED',
-    serverMessage(res.json) ?? `Publish failed (${res.status}).`,
-    {
-      fix: 'Review the server error, then re-run `tenjin publish`.',
-      details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
-    },
-  );
+  const message = serverMessage(res.json);
+  // A 400 naming searchId against a post-create that predates the array is a
+  // rollout mismatch, not a bad id, and it lands after the signature, where
+  // "review the server error" is the least useful thing to read.
+  const rollout = res.status === 400 && message !== undefined && /searchid/i.test(message);
+  return new CliError('PUBLISH_FAILED', message ?? `Publish failed (${res.status}).`, {
+    fix: rollout
+      ? 'Review the server error, then re-run `tenjin publish`. Naming several --search-id values needs a deployment whose post-create accepts an array; against an older one, publish with a single id.'
+      : 'Review the server error, then re-run `tenjin publish`.',
+    details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+  });
 }
 
 /** A transport/timeout failure never reached the write; a network-class error. */

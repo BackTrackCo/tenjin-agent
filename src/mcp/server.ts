@@ -458,7 +458,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
           },
           ctx,
-          deps.publish,
+          { ...deps.publish, searchIdLabel: 'searchId' },
         ),
       ),
   );
