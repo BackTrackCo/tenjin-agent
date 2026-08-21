@@ -239,7 +239,7 @@ const walletInput = {
 // a tool call must not block for minutes), pinned off at the call site.
 //
 // It also takes no `--base-url` equivalent, which is what makes this narrower
-// than a `Bash(tenjin fund:*)` allowlist rule and is why the Bash verb stays a
+// than a `Bash(tenjin wallet fund:*)` allowlist rule and is why the Bash verb stays a
 // human decision (lib/permissions.ts NEVER_ALLOWLISTED): a prefix rule pins the
 // verb, not the flags, and a mint against an attacker-named host is a wallet
 // signature the operator did not intend to make.

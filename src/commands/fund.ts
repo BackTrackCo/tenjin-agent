@@ -16,7 +16,7 @@ import { openInBrowser } from '../lib/open-url';
 import type { CommandContext, CommandResult } from '../context';
 
 /*
- * `tenjin fund`: card-fund THIS wallet via Coinbase Onramp. The CLI signs a
+ * `tenjin wallet fund`: card-fund THIS wallet via Coinbase Onramp. The CLI signs a
  * SIWX proof with the wallet's own key and asks the Tenjin backend to mint a
  * Coinbase-hosted checkout URL for that same address (the server refuses any
  * other address, per Coinbase's onboarding-verified auth model). The money
@@ -193,7 +193,7 @@ function parsePreset(raw: string | undefined): number | undefined {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0 || n > MAX_PRESET_USD) {
     throw new CliError('USAGE', `Amount must be a positive USD number up to ${MAX_PRESET_USD}.`, {
-      fix: 'Example: tenjin fund 5',
+      fix: 'Example: tenjin wallet fund 5',
     });
   }
   return n;

@@ -173,7 +173,7 @@ describe('runWalletCreate', () => {
   it('emits the exact funding line', async () => {
     const res = await runWalletCreate(makeCtx());
     expect(res.humanLines).toContain(
-      'Fund it with `tenjin fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
+      'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
     );
   });
 

@@ -248,7 +248,7 @@ Prints the wallet address and key source. It never prints the private key.
 
 Reads the USDC balance on Base.
 
-### `tenjin fund [amountUsd]`
+### `tenjin wallet fund [amountUsd]`
 
 Opens or prints a Coinbase Onramp checkout for this wallet. The payment itself happens in Coinbase.
 

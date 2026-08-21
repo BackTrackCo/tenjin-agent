@@ -104,8 +104,8 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
   `--max-price` with it: that cap is a hard gate `--yes` cannot bypass.
 - The body saves to `~/.tenjin/library/`; stdout gets the path and a heading
   outline; `--sections <budget>` or `--print-body` for more.
-- Out of USDC? `tenjin fund [amountUsd]` mints a Coinbase checkout link only the
-  human can pay. Hand it over, then check `tenjin wallet balance`.
+- Out of USDC? `tenjin wallet fund [amountUsd]` mints a Coinbase checkout link
+  only the human can pay. Hand it over, then check `tenjin wallet balance`.
 
 
 ## Report the outcome (always)

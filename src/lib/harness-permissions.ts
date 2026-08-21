@@ -74,7 +74,7 @@ export function claudeSettingsPath(homeDir: string): string {
  */
 export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin search:*)',
-  'Bash(tenjin fund:*)',
+  'Bash(tenjin wallet fund:*)',
   'Bash(tenjin inspect:*)',
   'Bash(tenjin read:*)',
   'Bash(tenjin outcome:*)',

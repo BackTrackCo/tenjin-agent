@@ -308,12 +308,14 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  // Funds-IN via Coinbase Onramp. Unlike `send`, this IS also an MCP tool
+  // Funds-IN via Coinbase Onramp, grouped under `wallet` with show/balance
+  // because it operates on the wallet and nothing else. Unlike `send`, this IS
+  // also an MCP tool
   // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
   // checkout page. The browser open and balance poll below are CLI-only, and
   // both are off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
   // run takes it off stderr immediately rather than off a poll that outlives it.
-  addGlobalFlags(program.command('fund [amountUsd]'))
+  addGlobalFlags(wallet.command('fund [amountUsd]'))
     .description(
       'Fund THIS wallet by card via Coinbase Onramp: mint a checkout link bound to this machine, open it in the browser, and wait for the USDC to land on Base',
     )
@@ -323,7 +325,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'return once the link is issued instead of polling the balance (already the default when not at a TTY)',
     )
     .action(async function (this: Command, amountUsd: string | undefined) {
-      await runCommand('fund', this, async (ctx) => {
+      await runCommand('wallet.fund', this, async (ctx) => {
         const o = this.opts();
         const { runFund } = await import('./commands/fund');
         return runFund(ctx, {
