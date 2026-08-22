@@ -227,7 +227,8 @@ describe('runSearch', () => {
   });
 
   it('costs the reader a line rather than an empty bullet when the hint is absent', async () => {
-    const { hint: _hint, ...noHint } = MISS;
+    const noHint: Record<string, unknown> = { ...MISS };
+    delete noHint.hint;
     const { fetch } = stub(noHint);
     const res = await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
     expect(res.humanLines).toHaveLength(2);
