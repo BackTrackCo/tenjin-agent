@@ -16,6 +16,10 @@ import {
 } from './hook-scripts';
 import {
   PUSH_LEDGER_FILE,
+  PUSH_PROMPT_BODY_TIMEOUT_MS,
+  PUSH_PROMPT_BUDGET_MS,
+  PUSH_PROMPT_SEARCH_TIMEOUT_MS,
+  PUSH_PROMPT_WATCHDOG_MS,
   pushContextHookScript,
   pushFailureHookScript,
   pushPromptHookScript,
@@ -82,7 +86,7 @@ interface StubRequest {
 
 /** The marketplace, and the free-body endpoint a candidate url points at. */
 async function serve(
-  handler: (req: StubRequest) => { status: number; json: unknown } | 'hang',
+  handler: (req: StubRequest) => { status: number; json: unknown; delayMs?: number } | 'hang',
 ): Promise<{
   baseUrl: string;
   hits: () => number;
@@ -107,8 +111,12 @@ async function serve(
       }
       const out = handler({ url, body, base });
       if (out === 'hang') return;
-      res.writeHead(out.status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(out.json));
+      const answer = (): void => {
+        res.writeHead(out.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(out.json));
+      };
+      if (out.delayMs === undefined) answer();
+      else setTimeout(answer, out.delayMs).unref();
     });
   });
   server = s;
@@ -682,6 +690,55 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       }),
     );
     expect(injected(run)).toContain(BODY_MD);
+  });
+
+  /**
+   * The invariant behind the case below, pinned as arithmetic because the way it
+   * broke was arithmetic: someone tightened the watchdog without looking at what
+   * the arm spends under it, and the whole cost of a lookup was paid for an
+   * injection that was killed before it could happen.
+   */
+  it('cannot start more work than its watchdog allows', () => {
+    expect(PUSH_PROMPT_SEARCH_TIMEOUT_MS + PUSH_PROMPT_BODY_TIMEOUT_MS).toBeLessThan(
+      PUSH_PROMPT_BUDGET_MS,
+    );
+    expect(PUSH_PROMPT_BUDGET_MS).toBeLessThan(PUSH_PROMPT_WATCHDOG_MS);
+  });
+
+  /**
+   * The arm sits between a keypress and the first token, so its watchdog has to
+   * be bigger than the work it starts. It was not: search (1500) plus body
+   * (1500) overran a 2500ms kill, and a killed run injected nothing AND wrote no
+   * ledger row, while the search it had already paid for sat in searches.json.
+   */
+  it('gives up on a slow body rather than being killed holding one', async () => {
+    const slow = echo();
+    const { baseUrl } = await serve((req) => ({ ...slow(req), delayMs: 1200 }));
+    await pushOn(baseUrl);
+
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(run.code).toBe(0);
+    // The search fitted, the body did not: the pointer is what it says.
+    const text = injected(run);
+    expect(text).toContain('Read it free: tenjin read');
+    expect(text).not.toContain(BODY_MD);
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ trigger: 'prompt', action: 'injected', form: 'short' });
+  });
+
+  /** A run that overruns anyway is visible: the ledger is what `push status`
+   *  tunes the thresholds from, so a silent death is the one outcome it cannot
+   *  afford. */
+  it('records the overrun when the marketplace never answers at all', async () => {
+    const { baseUrl } = await serve(() => 'hang');
+    await pushOn(baseUrl);
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(['no-answer', 'watchdog']).toContain(rows[0]!.reason);
   });
 
   it('stays silent when the marketplace never answers', async () => {

@@ -67,8 +67,17 @@ export const PUSH_HOOK_TIMEOUT_SECONDS = 8;
 /** The prompt arm's own budgets, tighter than every other arm's: it runs between
  *  the human pressing enter and the model starting, so the whole point is lost
  *  if it is felt. A lookup that does not fit is simply not made. */
-export const PUSH_PROMPT_WATCHDOG_MS = 2500;
+export const PUSH_PROMPT_WATCHDOG_MS = 3000;
 export const PUSH_PROMPT_SEARCH_TIMEOUT_MS = 1500;
+/** The prompt arm's own body budget, half the other arms'. THE WATCHDOG MUST
+ *  EXCEED SEARCH + BODY + SLACK, or the arm pays for a lookup, blocks the human
+ *  for it, and is killed before it can say or record anything: 1500 + 800 fits
+ *  under 3000 with room for the search-store write in between. */
+export const PUSH_PROMPT_BODY_TIMEOUT_MS = 800;
+/** When the prompt arm gives up on its own and writes the row saying so. Under
+ *  the watchdog, so a run that overruns is VISIBLE in the ledger rather than
+ *  vanishing — `tenjin push status` cannot tune a threshold it cannot see. */
+export const PUSH_PROMPT_BUDGET_MS = 2700;
 
 /** Escape a plain JS body for interpolation into a TS template literal. */
 function jsBody(js: string): string {
@@ -781,15 +790,18 @@ function scrub(text) {
 }
 `;
 
-/** The push core, with the constants above baked in. */
-export function pushSource(): string {
+/** The push core, with the constants above baked in. \`bodyTimeoutMs\` is the
+ *  one an arm may tighten: the prompt arm runs between a keypress and the first
+ *  token, so it waits half as long for a body as an arm running beside a tool
+ *  call that has already been made. */
+export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string {
   const js = PUSH_CORE_JS.replaceAll('__PUSH_DIR__', JSON.stringify(PUSH_DIR_NAME))
     .replaceAll('__NOTES_DIR__', JSON.stringify(NOTES_DIR_NAME))
     .replaceAll('__LEDGER_FILE__', JSON.stringify(PUSH_LEDGER_FILE))
     .replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
     .replaceAll('__LOOKUP_MAX__', String(PUSH_LOOKUP_MAX_PER_SESSION))
     .replaceAll('__BODY_MAX__', String(PUSH_BODY_MAX_CHARS))
-    .replaceAll('__BODY_TIMEOUT__', String(PUSH_BODY_TIMEOUT_MS))
+    .replaceAll('__BODY_TIMEOUT__', String(bodyTimeoutMs))
     .replaceAll('__STRONG__', String(PUSH_STRONG))
     .replaceAll('__MODERATE__', String(PUSH_MODERATE))
     .replaceAll('__MARGIN__', String(PUSH_MARGIN))
@@ -844,14 +856,34 @@ async function main() {
   // own tokens, so this would spend a request that cannot produce a hit.
   if (tokens(query).size < 3) return quiet();
 
+  const sessionId = sessionIdOf(input);
+  // The arm's own deadline, inside the process watchdog. Whatever is in flight
+  // when it fires is abandoned, but the ledger LEARNS THAT IT WAS: a run killed
+  // by the bare watchdog left a paid-for search in searches.json and no row at
+  // all here, which reads afterwards as a lookup that never happened.
+  const overrun = setTimeout(() => {
+    ledgerAppend({
+      at: new Date().toISOString(),
+      session: sessionId,
+      trigger: 'prompt',
+      event: 'UserPromptSubmit',
+      query,
+      action: 'skipped',
+      reason: 'watchdog',
+    });
+    process.exit(0);
+  }, __PROMPT_BUDGET__);
+  overrun.unref();
+
   const decided = await pushDecide({
     trigger: 'prompt',
     event: 'UserPromptSubmit',
     query,
     config,
-    sessionId: sessionIdOf(input),
+    sessionId,
     mode: 'inject',
   });
+  clearTimeout(overrun);
   if (decided === null) return quiet();
   emit('UserPromptSubmit', decided.text);
 }
@@ -860,7 +892,7 @@ main().catch(quiet);
 `;
 
 export function pushPromptHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('push-prompt', PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource()}${PROMPT_JS}`;
+  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('push-prompt', PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
 }
 
 /**
