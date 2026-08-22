@@ -451,7 +451,7 @@ function packagesInSource(text) {
  *  machine is the shape of the problem, never the address of it. */
 function scrub(text) {
   return String(text)
-    .replace(/\[[0-9;]*[A-Za-z]/g, ' ')
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
     .replace(/(?:^|[\s'"(=:])(?:\/[\w.@-]+){2,}/g, ' ')
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
