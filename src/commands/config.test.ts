@@ -89,12 +89,13 @@ describe('runConfigList', () => {
       source: 'default',
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['hooks.dispatchMode']).toEqual({ value: 'inherit', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 3 hooks.*
-    // (incl. sessionPrimer) + 1 update.mode.
-    expect(humanLines).toHaveLength(16);
+    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 4 hooks.*
+    // (incl. dispatchMode, sessionPrimer) + 1 update.mode.
+    expect(humanLines).toHaveLength(17);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -935,6 +936,7 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     const ctx = makeCtx();
     for (const [key, value] of [
       ['hooks.searchMode', 'remind'],
+      ['hooks.dispatchMode', 'off'],
       ['hooks.stopNag', 'off'],
       ['hooks.sessionPrimer', 'off'],
     ] as const) {
@@ -952,6 +954,16 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
       data: { value: 'off' },
     });
+
+    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
+
+    const dispatch = await caught(() =>
+      runConfigSet({ key: 'hooks.dispatchMode', value: 'sometimes' }, ctx),
+    );
+    expect(dispatch.code).toBe('USAGE');
+    expect(dispatch.fix).toContain('"inherit"');
 
     const primer = await caught(() =>
       runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
