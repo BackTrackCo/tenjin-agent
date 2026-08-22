@@ -751,6 +751,28 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect((await ledger())[0]).toMatchObject({ action: 'skipped', reason: 'no-answer' });
   });
 
+  /**
+   * An unanswered lookup used to be free: pushBudget counted rows carrying a
+   * searchId, and an outage writes rows that carry none. So a session could ask
+   * a dead marketplace forever, paying the fetch timeout in front of every turn.
+   */
+  it('stops asking a marketplace that is not answering', async () => {
+    // Nothing is listening here; every attempt fails at once.
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1', hooks: { push: 'on' } });
+    const asks = [
+      'The zod resolver throws on an optional chain during parse and I want to know if pinning helps',
+      'The drizzle snapshot check passes but the next generate breaks, is the hand patch the cause here',
+      'The pgvector testcontainer flips its collation when the image is swapped, does the seed order matter',
+    ];
+    for (const ask of asks) {
+      const run = await runScript(pushPromptHookScript(dataDir), prompt(ask));
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+    }
+    const rows = await ledger();
+    expect(rows.map((r) => r.reason)).toEqual(['no-answer', 'no-answer', 'quiet']);
+  });
+
   it('does nothing at all with push off', async () => {
     const { baseUrl, hits } = await serve(echo());
     await writeConfig({ baseUrl });

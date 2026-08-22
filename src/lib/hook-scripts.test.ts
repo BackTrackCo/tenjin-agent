@@ -236,14 +236,14 @@ describe('HOOK_SCRIPT_VERSION', () => {
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '6224bc858b452100a9fb4b25cb5f6b46',
-      dispatch: '761b3f4829751a8fa3b33bfcc0269ace',
+      websearch: '16b182148acb3b567b38c232a5214af1',
+      dispatch: '1ba46fef97fae945040dcc42d55dc9bf',
       sessionPrimer: '6acf14d73e72072b743fb940f36ed14a',
       stop: '70fab848c8556a30f17a1aee9ce229e4',
-      pushPrompt: '365280a94ba383bee221d0358506553d',
-      pushFailure: '400b3d2a4c1b20a657f5bee40593d451',
-      pushSubagent: '80aae96c788f7fb69efb168e151f30b3',
-      pushContext: '8533ed16fcfa1364438d0cc2bfdc6489',
+      pushPrompt: 'c3829520a4840af699cf90f28a7cffe0',
+      pushFailure: '36027844b25b696c873bf7d96963822f',
+      pushSubagent: '9c5eec4a4a5b2f730d5e341913dc512e',
+      pushContext: '1fce3a6f015567710a204157c9e3c78c',
     });
   });
 

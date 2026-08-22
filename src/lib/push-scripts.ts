@@ -40,6 +40,14 @@ export const PUSH_INJECT_MAX_PER_SESSION = 5;
  *  front of (or beside) a tool call, so a runaway loop of failing commands is
  *  bounded here, not by the server. */
 export const PUSH_LOOKUP_MAX_PER_SESSION = 30;
+/** Consecutive unanswered lookups that silence the public leg, and for how long
+ *  — the push core's copy of the dispatch hook's self-healing stop
+ *  (DISPATCH_FAILURE_STOP / DISPATCH_QUIET_MS in lib/hook-scripts.ts). A dead
+ *  marketplace otherwise costs the full fetch timeout in front of every tool
+ *  call for the rest of the session. The window expires on its own, so a
+ *  recovered server needs no intervention. */
+export const PUSH_FAILURE_STOP = 2;
+export const PUSH_QUIET_MS = 10 * 60 * 1000;
 /** The full-form body cap, in characters (~1,500 tokens). */
 export const PUSH_BODY_MAX_CHARS = 6000;
 /** How long an arm waits for a free body after the search answered. */
@@ -90,6 +98,8 @@ const PUSH_DIR = join(DATA_DIR, __PUSH_DIR__);
 const LEDGER_PATH = join(DATA_DIR, __LEDGER_FILE__);
 const PUSH_INJECT_MAX = __INJECT_MAX__;
 const PUSH_LOOKUP_MAX = __LOOKUP_MAX__;
+const PUSH_FAILURE_STOP = __FAILURE_STOP__;
+const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
 const PUSH_BODY_TIMEOUT = __BODY_TIMEOUT__;
 const PUSH_STRONG = __STRONG__;
@@ -389,14 +399,24 @@ function sessionRows(sessionId) {
   return rows;
 }
 
-/** What this session has already spent and already seen. */
+/**
+ * What this session has already spent, already seen, and just failed at.
+ *
+ * A LOOKUP IS AN ATTEMPT, NOT AN ANSWER. Counting only rows that carry a
+ * searchId made a FAILING lookup free — during an outage every row is
+ * 'no-answer' with no searchId, the counter stays at zero, and the cap that
+ * exists to bound a runaway session never engages while each attempt burns the
+ * full fetch timeout in front of a tool call. That is precisely the case worth
+ * bounding, so it is counted, and \`failStreak\` sits under it as the faster
+ * brake.
+ */
 function pushBudget(sessionId) {
   const rows = sessionRows(sessionId);
   const seen = new Set();
   let injected = 0;
   let lookups = 0;
   for (const r of rows) {
-    if (typeof r.searchId === 'string') lookups += 1;
+    if (typeof r.searchId === 'string' || r.reason === 'no-answer') lookups += 1;
     if (r.action === 'injected') {
       injected += 1;
       // A marketplace piece is keyed by its resourceId and a note by its id;
@@ -407,7 +427,21 @@ function pushBudget(sessionId) {
       }
     }
   }
-  return { injected, lookups, seen };
+  // The trailing run of unanswered lookups, newest first. A 'quiet' row is the
+  // stop itself, so it neither breaks the run nor extends it.
+  let failStreak = 0;
+  let lastFailAtMs = 0;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const reason = rows[i].reason;
+    if (reason === 'quiet') continue;
+    if (reason !== 'no-answer') break;
+    if (failStreak === 0) {
+      const at = Date.parse(String(rows[i].at));
+      if (Number.isFinite(at)) lastFailAtMs = at;
+    }
+    failStreak += 1;
+  }
+  return { injected, lookups, seen, failStreak, lastFailAtMs };
 }
 
 /** The free body of \`candidate\`, capped, or null. GET of the candidate url is
@@ -592,6 +626,16 @@ async function pushDecide(args) {
   base.shelf = 'public';
   if (budget.lookups >= PUSH_LOOKUP_MAX) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap' });
+    return null;
+  }
+  // The marketplace is not answering: stop asking it for a while. Self-healing,
+  // and recorded, so \`push status\` shows an outage as an outage rather than as
+  // a sidecar that quietly did nothing.
+  if (
+    budget.failStreak >= PUSH_FAILURE_STOP &&
+    Date.now() - budget.lastFailAtMs < PUSH_QUIET_MS
+  ) {
+    ledgerAppend({ ...base, action: 'skipped', reason: 'quiet' });
     return null;
   }
   let found = null;
@@ -800,6 +844,8 @@ export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string
     .replaceAll('__LEDGER_FILE__', JSON.stringify(PUSH_LEDGER_FILE))
     .replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
     .replaceAll('__LOOKUP_MAX__', String(PUSH_LOOKUP_MAX_PER_SESSION))
+    .replaceAll('__FAILURE_STOP__', String(PUSH_FAILURE_STOP))
+    .replaceAll('__QUIET_MS__', String(PUSH_QUIET_MS))
     .replaceAll('__BODY_MAX__', String(PUSH_BODY_MAX_CHARS))
     .replaceAll('__BODY_TIMEOUT__', String(bodyTimeoutMs))
     .replaceAll('__STRONG__', String(PUSH_STRONG))
