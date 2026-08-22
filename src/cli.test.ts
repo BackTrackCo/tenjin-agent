@@ -368,6 +368,28 @@ describe('outcome batch flags (the dispatcher mapping)', () => {
 });
 
 /**
+ * An option that did not collect would keep the LAST id and drop the rest, so it
+ * is read back through the cap, which only eleven surviving ids can trip.
+ */
+describe('publish --search-id collects (the dispatcher mapping)', () => {
+  it('repeats rather than replacing, and the cap counts every id given', async () => {
+    const ids = Array.from(
+      { length: 11 },
+      (_, i) => `0197bbbb-cccc-7ddd-8eee-0000000000${String(i).padStart(2, '0')}`,
+    );
+    const cap = captureIo();
+    const code = await main(
+      ['publish', 'nope.md', ...ids.flatMap((id) => ['--search-id', id]), '--json'],
+      cap.io,
+    );
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('publish');
+    expect(parsed.error.message).toContain('at most 10 searches (got 11)');
+  });
+});
+
+/**
  * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
  * so the cases here are the ones that resolve BEFORE it — the group exists, the
  * leaf exists, and a bad `--scope` is USAGE.
