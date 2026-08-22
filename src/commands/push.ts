@@ -1,19 +1,12 @@
 import { homedir } from 'node:os';
 import { open, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { persistPushMode } from './config';
 import { hooksDisclosure } from './install';
 import { CliError } from '../lib/errors';
-import { wireSearchHooks } from '../lib/harness-hooks';
-import type { HooksResult } from '../lib/harness-hooks';
-import { hooksDir, pushLedgerPath } from '../lib/paths';
-import {
-  PUSH_CONTEXT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-} from '../lib/push-scripts';
+import { countPushHookEntries, pushScriptsPresent, wireSearchHooks } from '../lib/harness-hooks';
+import type { HooksResult, PushHookEntryCount } from '../lib/harness-hooks';
+import { pushLedgerPath } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -40,13 +33,6 @@ const LEDGER_WINDOW_DAYS = 7;
  *  reason: the ledger is append-only and never rotated, so a machine that has
  *  had the experiment on for months has a file no reader should parse whole. */
 const LEDGER_TAIL_BYTES = 262144;
-
-const PUSH_SCRIPT_FILES = [
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-  PUSH_CONTEXT_HOOK_FILE,
-] as const;
 
 export interface PushOnDeps {
   /** Home whose `.claude/settings.json` gets the push entries; defaults to os.homedir(). */
@@ -147,6 +133,10 @@ export async function runPushOff(ctx: CommandContext): Promise<CommandResult> {
 export interface PushStatusDeps {
   /** Seam for "are the push scripts on disk"; defaults to a real stat of hooksDir. */
   scriptsWired?: (dataDir: string) => Promise<boolean>;
+  /** Seam for "are the push arms registered in settings.json". */
+  hookEntries?: (homeDir: string, dataDir: string) => Promise<PushHookEntryCount>;
+  /** Home whose `.claude/settings.json` is read; defaults to os.homedir(). */
+  homeDir?: string;
   /** Seam for the ledger read; defaults to the real file read. */
   ledgerTallies?: (dataDir: string, nowMs: number) => Promise<PushLedgerTallies>;
   now?: () => number;
@@ -322,21 +312,13 @@ function candidateKey(candidate: unknown): string | null {
   return null;
 }
 
-/** All four push scripts on disk under `<dataDir>/hooks`. Not a settings.json
- *  read (a script can be written without an entry, or vice versa mid-refusal) —
- *  this answers "did `tenjin push on` (or a compatible install) actually write
- *  the scripts", which is what an operator debugging silence wants to know
- *  first. */
+/** All four push scripts on disk under `<dataDir>/hooks`. HALF the answer, and
+ *  it says so: a script can be written without an entry (a `push on` whose
+ *  settings write refused) or an entry can outlive its script (a half-finished
+ *  uninstall), and in both cases nothing runs. {@link countPushHookEntries} is
+ *  the other half, and `status` prints both. */
 export async function pushScriptsWired(dataDir: string): Promise<boolean> {
-  const dir = hooksDir(dataDir);
-  for (const file of PUSH_SCRIPT_FILES) {
-    try {
-      await stat(join(dir, file));
-    } catch {
-      return false;
-    }
-  }
-  return true;
+  return await pushScriptsPresent(dataDir);
 }
 
 export async function runPushStatus(
@@ -349,6 +331,10 @@ export async function runPushStatus(
     env: process.env,
   });
   const wired = await (deps.scriptsWired ?? pushScriptsWired)(ctx.dataDir);
+  const entries = await (deps.hookEntries ?? countPushHookEntries)(
+    deps.homeDir ?? homedir(),
+    ctx.dataDir,
+  );
   const ledger = await (deps.ledgerTallies ?? readLedgerTallies)(
     ctx.dataDir,
     (deps.now ?? Date.now)(),
@@ -357,6 +343,7 @@ export async function runPushStatus(
     mode: settings.hooksPush.value,
     captureMode: settings.hooksCapture.value,
     scriptsWired: wired,
+    hookEntries: entries,
     ledger,
   };
   return { data, humanLines: renderStatusLines(data) };
@@ -366,16 +353,25 @@ function renderStatusLines(data: {
   mode: string;
   captureMode: string;
   scriptsWired: boolean;
+  hookEntries: PushHookEntryCount;
   ledger: PushLedgerTallies;
 }): string[] {
-  const { mode, captureMode, scriptsWired, ledger } = data;
+  const { mode, captureMode, scriptsWired, hookEntries, ledger } = data;
+  // "Wired" is both halves and nothing less: files on disk that no settings
+  // entry points at never run, and entries pointing at files that are gone fail
+  // silently. Either alone reporting healthy is how an operator spends an hour
+  // wondering why a sidecar they can see installed says nothing.
+  const armed = scriptsWired && hookEntries.present === hookEntries.planned;
   const lines = [
     // `tenjin push on` is the verb that wires them AND the one that got the
     // operator here; `tenjin install` only wires the arms when hooks.push is
     // already `on`, so naming it turns a one-command fix into a guess.
-    `push: ${mode}${mode === 'on' && !scriptsWired ? ' (scripts not wired yet; run `tenjin push on`)' : ''}`,
+    `push: ${mode}${mode === 'on' && !armed ? ' (not fully wired yet; run `tenjin push on`)' : ''}`,
     `capture: ${captureMode}`,
     `scripts wired: ${scriptsWired ? 'yes' : 'no'}`,
+    `hook entries: ${hookEntries.present}/${hookEntries.planned}${
+      hookEntries.path === null ? ' (no settings.json found)' : ` in ${hookEntries.path}`
+    }`,
     `ledger, last ${ledger.windowDays}d${ledger.tail ? ' (retained tail only; the ledger is larger than the 256 KB read, so these are floors)' : ''}: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
   ];
   for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {

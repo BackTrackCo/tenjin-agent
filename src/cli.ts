@@ -744,7 +744,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
   addGlobalFlags(push.command('status'))
     .description(
-      'Show push mode, capture mode, whether the hook scripts are actually wired, and the last 7 days of ledger tallies',
+      'Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, and the last 7 days of ledger tallies',
     )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {

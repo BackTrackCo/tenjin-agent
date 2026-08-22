@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { claudeSettingsPath } from './harness-permissions';
@@ -638,6 +638,82 @@ function refuse(
   warning: string,
 ): HooksResult {
   return skip(reason, { harness: 'claude', path, scriptsDir, mode, warning, fix: fixFor(reason) });
+}
+
+/** The four generated push arms, by filename: what `push on` writes and what
+ *  `uninstall` removes. */
+export const PUSH_SCRIPT_FILES = [
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+  PUSH_CONTEXT_HOOK_FILE,
+] as const;
+
+/** Are all four push scripts on disk under `<dataDir>/hooks`? Half of "wired";
+ *  {@link countPushHookEntries} is the other half. */
+export async function pushScriptsPresent(dataDir: string): Promise<boolean> {
+  const dir = hooksDir(dataDir);
+  for (const file of PUSH_SCRIPT_FILES) {
+    try {
+      await stat(join(dir, file));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** What {@link countPushHookEntries} found in settings.json. */
+export interface PushHookEntryCount {
+  /** Entries a `push on` would plan: six, across four events. */
+  planned: number;
+  /** How many of them are registered right now, matched by the SAME ownership
+   *  predicate the writer uses, so "present" here and "already up to date"
+   *  there can never disagree. */
+  present: number;
+  /** The settings file consulted. Null when there is none to read at all. */
+  path: string | null;
+}
+
+/**
+ * How many push arms are actually REGISTERED, as opposed to written to disk.
+ *
+ * The two halves come apart, and each one alone reports healthy while the
+ * sidecar does nothing: scripts with no entries is a `push on` that refused the
+ * settings write, entries with no scripts is a half-finished uninstall. Nothing
+ * runs in either case, so both are asked and both are printed.
+ *
+ * Read-only and best-effort: an unreadable or unparseable settings file answers
+ * "none present", never an error — this is a diagnostic, and a diagnostic that
+ * throws is one an operator meets at the worst moment.
+ */
+export async function countPushHookEntries(
+  homeDir: string,
+  dataDir: string,
+): Promise<PushHookEntryCount> {
+  const plan = specs(dataDir, { push: true }).filter((spec) => spec.arm === 'push');
+  const declaredPath = claudeSettingsPath(homeDir);
+  let raw: string;
+  try {
+    raw = await readFile(declaredPath, 'utf8');
+  } catch {
+    return { planned: plan.length, present: 0, path: null };
+  }
+  let hooks: unknown;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
+  } catch {
+    return { planned: plan.length, present: 0, path: declaredPath };
+  }
+  if (!isPlainObject(hooks)) return { planned: plan.length, present: 0, path: declaredPath };
+  let present = 0;
+  for (const spec of plan) {
+    const list = hooks[spec.event];
+    if (!Array.isArray(list)) continue;
+    if (list.some((entry) => ownsEntry(entry, spec.scriptFile))) present += 1;
+  }
+  return { planned: plan.length, present, path: declaredPath };
 }
 
 interface SettingsInspection {

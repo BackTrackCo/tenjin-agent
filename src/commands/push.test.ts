@@ -175,11 +175,12 @@ describe('runPushOff', () => {
 
 describe('runPushStatus', () => {
   it('reports off/off/not-wired/empty-ledger on a fresh dir', async () => {
-    const result = await runPushStatus(makeCtx());
+    const result = await runPushStatus(makeCtx(), { homeDir: home });
     expect(result.data).toEqual({
       mode: 'off',
       captureMode: 'off',
       scriptsWired: false,
+      hookEntries: { planned: 6, present: 0, path: null },
       ledger: {
         windowDays: 7,
         rows: 0,
@@ -199,17 +200,17 @@ describe('runPushStatus', () => {
       join(dir, 'config.json'),
       JSON.stringify({ hooks: { push: 'on', capture: 'block' } }),
     );
-    const before = await runPushStatus(makeCtx());
+    const before = await runPushStatus(makeCtx(), { homeDir: home });
     expect(before.data).toMatchObject({ mode: 'on', captureMode: 'block', scriptsWired: false });
     // The verb that actually wires them. `tenjin install` only does so when
     // hooks.push is already on, so it is not the one-command fix.
-    expect(before.humanLines?.join('\n')).toContain('scripts not wired yet; run `tenjin push on`');
+    expect(before.humanLines?.join('\n')).toContain('not fully wired yet; run `tenjin push on`');
 
     await mkdir(hooksDir(dir), { recursive: true });
     for (const file of PUSH_SCRIPT_FILES) {
       await writeFile(join(hooksDir(dir), file), '// stub\n');
     }
-    const after = await runPushStatus(makeCtx());
+    const after = await runPushStatus(makeCtx(), { homeDir: home });
     expect(after.data).toMatchObject({ scriptsWired: true });
   });
 
@@ -218,8 +219,57 @@ describe('runPushStatus', () => {
     for (const file of PUSH_SCRIPT_FILES.slice(1)) {
       await writeFile(join(hooksDir(dir), file), '// stub\n');
     }
-    const result = await runPushStatus(makeCtx());
+    const result = await runPushStatus(makeCtx(), { homeDir: home });
     expect(result.data).toMatchObject({ scriptsWired: false });
+  });
+
+  /**
+   * "Wired" used to mean four files on disk and nothing else — its own comment
+   * said so, while `push status`'s help promised the arms were actually wired.
+   * Files with no settings entries pointing at them never run, so that reported
+   * a healthy sidecar for a machine where nothing fires. Both halves, counted
+   * by the same ownership predicate the writer uses.
+   */
+  it('counts the settings.json entries, not just the files on disk', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    await mkdir(hooksDir(dir), { recursive: true });
+    for (const file of PUSH_SCRIPT_FILES) {
+      await writeFile(join(hooksDir(dir), file), '// stub\n');
+    }
+
+    // Scripts present, settings.json absent: the half that used to read healthy.
+    const halfWired = await runPushStatus(makeCtx(), { homeDir: home });
+    expect(halfWired.data).toMatchObject({
+      scriptsWired: true,
+      hookEntries: { planned: 6, present: 0, path: null },
+    });
+    const lines = halfWired.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('not fully wired yet; run `tenjin push on`');
+    expect(lines).toContain('hook entries: 0/6');
+
+    // A real wiring run registers all six.
+    await runPushOn(makeCtx(), { homeDir: home });
+    const wired = await runPushStatus(makeCtx(), { homeDir: home });
+    expect(wired.data).toMatchObject({
+      scriptsWired: true,
+      hookEntries: { planned: 6, present: 6 },
+    });
+    expect(wired.humanLines?.join('\n')).toContain('hook entries: 6/6');
+    expect(wired.humanLines?.join('\n')).not.toContain('not fully wired yet');
+
+    // Entries removed behind its back — a half-finished uninstall.
+    const settingsPath = claudeSettingsPath(home);
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+      hooks: Record<string, unknown>;
+    };
+    delete settings.hooks.UserPromptSubmit;
+    await writeFile(settingsPath, JSON.stringify(settings));
+    const gone = await runPushStatus(makeCtx(), { homeDir: home });
+    expect(gone.data).toMatchObject({
+      scriptsWired: true,
+      hookEntries: { planned: 6, present: 5 },
+    });
+    expect(gone.humanLines?.join('\n')).toContain('not fully wired yet');
   });
 
   it('tallies the last 7 days of ledger rows by trigger x action, shelf, denies, and tokens', async () => {
@@ -261,7 +311,7 @@ describe('runPushStatus', () => {
     ].join('\n');
     await writeFile(pushLedgerPath(dir), `${lines}\n`);
 
-    const result = await runPushStatus(makeCtx(), { now: () => now });
+    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
     expect(result.data).toMatchObject({
       ledger: {
         windowDays: 7,
@@ -336,7 +386,7 @@ describe('runPushStatus', () => {
     ].join('\n');
     await writeFile(pushLedgerPath(dir), `${lines}\n`);
 
-    const result = await runPushStatus(makeCtx(), { now: () => now });
+    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
     expect(result.data).toMatchObject({
       ledger: {
         rows: 6,
@@ -379,7 +429,7 @@ describe('runPushStatus', () => {
     await writeFile(pushLedgerPath(dir), `${lines.join('\n')}\n`);
     expect((await stat(pushLedgerPath(dir))).size).toBeGreaterThan(262144);
 
-    const result = await runPushStatus(makeCtx(), { now: () => now });
+    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
     const ledger = (result.data as { ledger: { rows: number; tail: boolean } }).ledger;
     expect(ledger.tail).toBe(true);
     // Bounded by the tail, not by the file: every row is inside the 7-day
