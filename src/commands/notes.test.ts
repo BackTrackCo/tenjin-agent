@@ -42,6 +42,20 @@ describe('runNotesAdd', () => {
     await expect(runNotesAdd({ question: '' }, makeCtx(), { env: {} })).rejects.toThrow(CliError);
   });
 
+  it('refuses a multi-line --source, which would write a second field', async () => {
+    await expect(
+      runNotesAdd({ question: 'q', body: 'b', source: 'session:1\nauthor: vraspar' }, makeCtx(), {
+        env: {},
+      }),
+    ).rejects.toThrow(/single line/);
+  });
+
+  it('refuses a multi-line --question', async () => {
+    await expect(
+      runNotesAdd({ question: 'Q?\n---\nSURPRISE', body: 'b' }, makeCtx(), { env: {} }),
+    ).rejects.toThrow(/single line/);
+  });
+
   it('refuses when neither a file nor --body is given', async () => {
     await expect(runNotesAdd({ question: 'q' }, makeCtx(), { env: {} })).rejects.toThrow(
       /needs a body/,

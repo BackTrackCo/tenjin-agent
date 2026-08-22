@@ -123,24 +123,40 @@ export function parseNote(id: string, raw: string): Note {
   };
 }
 
-/** Quote a front-matter string value only when it needs it: it contains `:` or
- *  `#`, either of which would otherwise be read as the next key or a comment. */
-function quoteIfNeeded(value: string): string {
-  return /[:#]/.test(value) ? `"${value.replace(/"/g, "'")}"` : value;
+/**
+ * One front-matter scalar, on one line.
+ *
+ * A NEWLINE IN A SCALAR IS A NEW FRONT-MATTER LINE, so it is flattened here and
+ * nowhere else is enough. The format is line-oriented and the parser is
+ * last-key-wins, so a \n in `source` writes a second `author:` line that
+ * overwrites the real one (the push hook renders that as "by <name>", which is
+ * what a teammate reads as how far to trust the note), and a \n---\n in
+ * `question` closes the front matter early and drops every field after it into
+ * the body. Quoting alone does not help: the quotes are on the first line and
+ * the injected lines are still lines.
+ */
+function scalar(value: string): string {
+  const flat = String(value)
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+  // `:` or `#` would be read as the next key or a comment, so those get quotes.
+  return /[:#]/.test(flat) ? `"${flat.replace(/"/g, "'")}"` : flat;
 }
 
 /** The inverse of {@link parseNote}. Round-trips: `parseNote(id,
- *  serializeNote(n)) equals n` for any Note this module produced. */
+ *  serializeNote(n)) equals n` for any Note this module produced — every scalar
+ *  goes through {@link scalar}, so there is no Note it can emit that reads back
+ *  as a different one. */
 export function serializeNote(note: Note): string {
   const front = [
     FRONT_MATTER_DELIM,
-    `question: ${quoteIfNeeded(note.question)}`,
-    `applies_to: [${note.appliesTo.map(quoteIfNeeded).join(', ')}]`,
-    `scope: ${quoteIfNeeded(note.scope)}`,
-    `as_of: ${note.asOf}`,
-    `author: ${note.author}`,
-    `source: ${quoteIfNeeded(note.source)}`,
-    `visibility: ${note.visibility}`,
+    `question: ${scalar(note.question)}`,
+    `applies_to: [${note.appliesTo.map(scalar).join(', ')}]`,
+    `scope: ${scalar(note.scope)}`,
+    `as_of: ${scalar(note.asOf)}`,
+    `author: ${scalar(note.author)}`,
+    `source: ${scalar(note.source)}`,
+    `visibility: ${scalar(note.visibility)}`,
     FRONT_MATTER_DELIM,
     '',
   ].join('\n');

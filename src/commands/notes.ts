@@ -51,15 +51,24 @@ export async function runNotesAdd(
       fix: 'tenjin notes add --question "..." --body "..."',
     });
   }
+  const appliesTo = parseAppliesTo(args.appliesTo);
+  const scope = args.scope?.trim() ?? '';
+  const source = args.source?.trim() ?? '';
+  // Front matter is line-oriented, so a newline in a scalar is a new FIELD.
+  // serializeNote flattens them as its own last line of defence; this is the
+  // first, and it is the one that tells the author what happened instead of
+  // silently changing what they wrote.
+  rejectNewlines({ '--question': question, '--scope': scope, '--source': source });
+  rejectNewlines(Object.fromEntries(appliesTo.map((a) => ['--applies-to', a])));
   const body = await resolveBody(args, deps);
   const env = deps.env ?? process.env;
   const note = await addNote(ctx.dataDir, {
     question,
-    appliesTo: parseAppliesTo(args.appliesTo),
-    scope: args.scope?.trim() ?? '',
+    appliesTo,
+    scope,
     body,
     author: defaultAuthor(env),
-    source: args.source?.trim() ?? '',
+    source,
     ...(deps.now !== undefined ? { now: deps.now } : {}),
   });
   const warning = await commitAndPushNote(ctx.dataDir, note.id);
@@ -94,6 +103,17 @@ async function resolveBody(args: NotesAddArgs, deps: NotesAddDeps): Promise<stri
   throw new CliError('USAGE', 'A note needs a body: pass a file, or --body "...".', {
     fix: 'tenjin notes add --question "..." --body "..."',
   });
+}
+
+/** A note's one-line fields really do have to be one line. */
+function rejectNewlines(fields: Record<string, string>): void {
+  for (const [flag, value] of Object.entries(fields)) {
+    if (/[\r\n]/.test(value)) {
+      throw new CliError('USAGE', `${flag} must be a single line.`, {
+        fix: 'Put the detail in the body; the front matter is one line per field.',
+      });
+    }
+  }
 }
 
 function parseAppliesTo(raw: string | undefined): string[] {

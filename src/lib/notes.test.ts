@@ -89,6 +89,34 @@ describe('parseNote / serializeNote', () => {
     expect(note.body).toBe('body text');
   });
 
+  /**
+   * Front matter is line-oriented and the parser is last-key-wins, so a newline
+   * inside a scalar is a new FIELD. `source` spoofing `author` is the sharp end:
+   * the push hook renders the author as "by <name>" in every teammate's context,
+   * which is what says how far to trust the note.
+   */
+  it('cannot be made to write a second field out of one scalar', () => {
+    const note: Note = {
+      ...SAMPLE,
+      author: 'mallory',
+      source: 'session:1\nauthor: vraspar',
+    };
+    const raw = serializeNote(note);
+    expect(raw.split('\n').filter((l) => l.startsWith('author:'))).toHaveLength(1);
+    expect(parseNote(note.id, raw).author).toBe('mallory');
+  });
+
+  it('cannot be made to close its own front matter', () => {
+    const note: Note = { ...SAMPLE, question: 'Q?\n---\nSURPRISE' };
+    const raw = serializeNote(note);
+    const parsed = parseNote(note.id, raw);
+    // Everything after the injected delimiter would otherwise have been lost.
+    expect(parsed.appliesTo).toEqual(SAMPLE.appliesTo);
+    expect(parsed.author).toBe(SAMPLE.author);
+    expect(parsed.body).toBe(SAMPLE.body);
+    expect(parsed.question).not.toContain('\n');
+  });
+
   it('throws when the opening delimiter is missing', () => {
     expect(() => parseNote('x', 'question: y\n---\nbody')).toThrow();
   });
