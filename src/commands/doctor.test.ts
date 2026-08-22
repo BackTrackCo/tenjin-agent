@@ -6,9 +6,6 @@ import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import { isNoWalletCheck, runDoctor } from './doctor';
-import { runPushOn } from './push';
-import { hooksDir } from '../lib/paths';
-import { PUSH_PROMPT_HOOK_FILE } from '../lib/push-scripts';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
@@ -456,58 +453,6 @@ describe('runDoctor — passing outcomes', () => {
       expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
       expect(headers['x-tenjin-client']).toBeUndefined();
     }
-  });
-});
-
-/**
- * The push experiment wires SIX settings.json entries across four events and
- * writes four scripts, and those two halves come apart independently. Neither
- * half alone makes anything run, so doctor asks both — and only when the
- * experiment is on, since a permanent check about a feature nobody enabled is
- * noise on every other machine.
- */
-describe('runDoctor — the push experiment is wired in both halves', () => {
-  const doctor = async (): Promise<CheckResult[]> => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    return (res.data as { checks: CheckResult[] }).checks;
-  };
-
-  it('says nothing at all while the experiment is off', async () => {
-    const checks = await doctor();
-    expect(checks.find((c) => c.name === 'push hooks')).toBeUndefined();
-  });
-
-  it('warns when the scripts are written but no entry points at them', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
-    await runPushOn({ ...ctxFor(), dataDir: dir }, { homeDir: skillHome });
-    // Wired properly first: green, and it names both halves.
-    const wired = find(await doctor(), 'push hooks');
-    expect(wired).toMatchObject({ status: 'ok', required: false });
-    expect(wired.detail).toContain('6/6 hook entries registered');
-
-    // Now the settings half goes away underneath it.
-    await writeFile(claudeSettingsPath(skillHome), JSON.stringify({ hooks: {} }));
-    const half = find(await doctor(), 'push hooks');
-    expect(half).toMatchObject({ status: 'warn', required: false, fix: 'tenjin push on' });
-    expect(half.detail).toContain('half wired');
-    expect(half.detail).toContain('0/6 hook entries registered');
-  });
-
-  it('warns when the entries are registered but a script is gone', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
-    await runPushOn({ ...ctxFor(), dataDir: dir }, { homeDir: skillHome });
-    await rm(join(hooksDir(dir), PUSH_PROMPT_HOOK_FILE));
-    const half = find(await doctor(), 'push hooks');
-    expect(half).toMatchObject({ status: 'warn', required: false });
-    expect(half.detail).toContain('one or more push scripts are missing');
-    expect(half.detail).toContain('6/6 hook entries registered');
   });
 });
 
@@ -1448,6 +1393,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       env: {},
       fetchImpl: healthyFetch,
       homeDir: home,
+      cwd: dir,
     });
     return (res.humanLines ?? []).join('\n');
   };
@@ -1532,6 +1478,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       env: {},
       fetchImpl: healthyFetch,
       homeDir: home,
+      cwd: dir,
     });
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
     expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([

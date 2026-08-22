@@ -1,5 +1,5 @@
 ---
-'tenjin-cli': patch
+'tenjin-cli': minor
 ---
 
 Search now speaks schemaVersion 3 to `POST /api/search` with

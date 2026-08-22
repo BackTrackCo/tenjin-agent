@@ -471,7 +471,7 @@ describe('item URL origin ingest boundary', () => {
     expect(sibling).toBeDefined();
     const flipped = {
       ...HIT,
-      items: [{ ...HIT.items[0], url: `${sibling}/api/read/iris/slug` }],
+      items: [{ ...(HIT.items[0] as object), url: `${sibling}/api/read/iris/slug` }],
     };
     const { fetch } = stub(flipped);
     await runSearch({ question: 'q' }, makeCtx({ baseUrl: base }), { fetchImpl: fetch });
@@ -484,7 +484,7 @@ describe('item URL origin ingest boundary', () => {
     const known = PRODUCTION_ORIGIN;
     const foreign = {
       ...HIT,
-      items: [{ ...HIT.items[0], url: `${known}/api/read/iris/slug` }],
+      items: [{ ...(HIT.items[0] as object), url: `${known}/api/read/iris/slug` }],
     };
     const { fetch } = stub(foreign);
     await expect(
