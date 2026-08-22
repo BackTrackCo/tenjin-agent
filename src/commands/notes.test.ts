@@ -82,7 +82,7 @@ describe('runNotesAdd', () => {
       makeCtx(),
       { env: {} },
     );
-    expect(res.humanLines[0]).toContain('Saved note');
+    expect(res.humanLines?.[0]).toContain('Saved note');
   });
 
   it('refuses a multi-line --source, which would write a second field', async () => {
