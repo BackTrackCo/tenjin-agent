@@ -2,10 +2,11 @@ import { CliError } from './errors';
 import { findStoredCandidate } from './search-store';
 import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
+import { isSameDeployment } from './production-origin';
 
 /**
  * Resolve a `<resource-url-or-id>` CLI argument to the payable read URL. A full
- * http(s) URL must live on the configured base URL's origin; a bare uuid is a
+ * http(s) URL must live on the configured deployment; a bare uuid is a
  * resourceId, resolved to its URL through the local search store (the read route
  * is keyed by handle/slug, so an id alone cannot build the URL). Anything else is
  * a usage error with a clear fix.
@@ -14,8 +15,9 @@ import { UUID_RE } from './ids';
  * wallet-signed SIWX header (a bearer credential scoped to the configured
  * domain) and an EIP-3009 payment authorization to whatever host the resolved
  * URL names. An off-origin URL, whether typed by hand or planted in a search
- * candidate, would hand both to that host. Nothing signed may leave for a host
- * the user did not configure.
+ * candidate, would hand both to that host. Nothing signed may leave for a
+ * deployment the user did not configure: `isSameDeployment` widens "origin" to
+ * the alias set of the one deployment the base already names, never past it.
  *
  * This is also the one place a read URL is CANONICALIZED, because it is the one
  * place `read`, `buy`, and `inspect` all resolve through: a trailing slash is
@@ -31,7 +33,13 @@ export interface ResourceRef {
   resourceId?: string;
 }
 
-/** Throws USAGE unless `url` parses and shares the base URL's origin. */
+/**
+ * Throws USAGE unless `url` parses and shares the base URL's origin, or names
+ * the same deployment under `isSameDeployment` — which is the SAME server, not a
+ * second one the CLI now trusts. Aliasing applies only when the configured base
+ * is one of the deployment's own origins; a self-hosted base keeps the exact
+ * compare, and every other origin is refused on the terms it always was.
+ */
 export function assertOnBaseOrigin(url: string, baseUrl: string, what: string): void {
   let target: URL;
   let base: URL;
@@ -43,7 +51,7 @@ export function assertOnBaseOrigin(url: string, baseUrl: string, what: string): 
       fix: 'Pass an absolute https URL on the configured base URL.',
     });
   }
-  if (target.origin !== base.origin) {
+  if (!isSameDeployment(target.origin, base.origin)) {
     throw new CliError(
       'USAGE',
       `${what} origin ${target.origin} does not match the configured base URL ${base.origin}.`,

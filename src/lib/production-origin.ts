@@ -17,3 +17,37 @@ export const PRODUCTION_ORIGIN = 'https://tenjin.blog';
  * it. Derived, not written twice: a flip cannot leave the two disagreeing.
  */
 export const PRODUCTION_HOST = new URL(PRODUCTION_ORIGIN).host;
+
+/**
+ * Every origin the ONE production deployment answers on, as `URL.origin` spells
+ * it. Membership means a request to any of them reaches the same server,
+ * publishers, prices, and SIWX domain acceptance. It exists because the server
+ * builds candidate URLs from its own `NEXT_PUBLIC_APP_URL`, not the request
+ * host, so the moment tenjin#402 flips that global a CLI on the other origin
+ * sees every candidate as off-origin (tenjin#738).
+ *
+ * Membership is NOT trust and NOT an allowlist of places the CLI may pay, but it
+ * IS the widest set a wallet-signed credential can reach, so widening it is a
+ * security change. Removal runbook: docs/safety-model.md.
+ */
+const KNOWN_DEPLOYMENT_ORIGINS: ReadonlySet<string> = new Set([
+  PRODUCTION_ORIGIN,
+  'https://tenjin.sh',
+]);
+
+/**
+ * Do these two origins name the same deployment? Exact match, or two members of
+ * the set. BOTH sides must be members, so a self-hosted or preview base gains no
+ * alias and keeps today's strict compare, and a differing scheme or port is a
+ * different origin that aliases to nothing. Takes `URL.origin` strings; anything
+ * else is not a member and falls through to the exact compare.
+ */
+export function isSameDeployment(a: string, b: string): boolean {
+  if (a === b) return true;
+  return KNOWN_DEPLOYMENT_ORIGINS.has(a) && KNOWN_DEPLOYMENT_ORIGINS.has(b);
+}
+
+/** The set as a plain array, for the generated hook script that cannot import. */
+export function knownDeploymentOrigins(): string[] {
+  return [...KNOWN_DEPLOYMENT_ORIGINS];
+}

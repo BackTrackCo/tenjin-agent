@@ -3,7 +3,12 @@ import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { extname, join, relative } from 'node:path';
 import pkg from '../../package.json';
-import { PRODUCTION_HOST, PRODUCTION_ORIGIN } from './production-origin';
+import {
+  PRODUCTION_HOST,
+  PRODUCTION_ORIGIN,
+  isSameDeployment,
+  knownDeploymentOrigins,
+} from './production-origin';
 import { CONFIG_DEFAULTS } from './config';
 import { TENJIN_USER_AGENT } from './client-meta';
 import { websearchHookScript } from './hook-scripts';
@@ -51,6 +56,70 @@ describe('PRODUCTION_ORIGIN', () => {
     // homepage is the one copy of the origin a published release advertises to
     // people who never run the CLI.
     expect(new URL(pkg.homepage).origin).toBe(PRODUCTION_ORIGIN);
+  });
+});
+
+/**
+ * The alias set exists so an installed CLI survives the cutover, and it is also
+ * the widest place a signed credential may now be sent. Both halves get pinned:
+ * a sibling origin is the same deployment, and everything else still is not.
+ */
+describe('isSameDeployment', () => {
+  const others = knownDeploymentOrigins().filter((o) => o !== PRODUCTION_ORIGIN);
+
+  /**
+   * Exact, not `toContain`. This set ships baked into every released CLI and
+   * into every hook script written at install time, so it is live on machines
+   * the operator no longer controls until each one updates, and whoever holds a
+   * member origin receives wallet-signed credentials from a CLI configured on
+   * the sibling. Adding a member, or failing to remove one that was sold or
+   * repointed, has to be a line a human wrote on purpose in a reviewed diff.
+   * The expected value is written out here rather than read from the module, for
+   * the same reason. Removal runbook: docs/safety-model.md.
+   */
+  it('is exactly the two deployment origins, and nothing has crept in', () => {
+    expect(knownDeploymentOrigins()).toEqual([PRODUCTION_ORIGIN, 'https://tenjin.sh']);
+  });
+
+  it('lists the production origin and at least one alias for the cutover', () => {
+    expect(knownDeploymentOrigins()).toContain(PRODUCTION_ORIGIN);
+    // Without a second member the set is a no-op and tenjin#738 stays broken.
+    expect(others.length).toBeGreaterThan(0);
+    for (const origin of knownDeploymentOrigins()) {
+      expect(origin).toBe(new URL(origin).origin);
+      expect(new URL(origin).protocol).toBe('https:');
+    }
+  });
+
+  it('aliases the deployment origins to each other, in both directions', () => {
+    for (const other of others) {
+      expect(isSameDeployment(PRODUCTION_ORIGIN, other)).toBe(true);
+      expect(isSameDeployment(other, PRODUCTION_ORIGIN)).toBe(true);
+    }
+  });
+
+  it('gives an origin outside the set no aliasing in either position', () => {
+    for (const other of others) {
+      expect(isSameDeployment('https://evil.example', other)).toBe(false);
+      expect(isSameDeployment(other, 'https://evil.example')).toBe(false);
+    }
+    // A self-hosted deployment is aliased to nothing but itself.
+    expect(isSameDeployment('https://notes.internal', PRODUCTION_ORIGIN)).toBe(false);
+    expect(isSameDeployment('https://notes.internal', 'https://notes.internal')).toBe(true);
+  });
+
+  it('does not alias across scheme or port, which are part of the origin', () => {
+    const downgraded = PRODUCTION_ORIGIN.replace('https://', 'http://');
+    const ported = `${PRODUCTION_ORIGIN}:8443`;
+    for (const other of others) {
+      expect(isSameDeployment(downgraded, other)).toBe(false);
+      expect(isSameDeployment(ported, other)).toBe(false);
+    }
+  });
+
+  it('is inlined into the generated hook script, which cannot import it', () => {
+    const script = websearchHookScript('/tmp/tenjin-data');
+    expect(script).toContain(`const KNOWN_ORIGINS = ${JSON.stringify(knownDeploymentOrigins())};`);
   });
 });
 
