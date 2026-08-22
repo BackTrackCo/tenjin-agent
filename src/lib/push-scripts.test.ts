@@ -341,10 +341,19 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     });
   });
 
-  it("promotes a moderate hit the server calls 'high' to a deny", async () => {
-    // Three of the query's seven content words on the title: 0.43, moderate on
-    // its own, and exactly the PUSH_MIN_HITS floor. Strong only because the
-    // server vouches. The filler shares nothing, so the margin is the score.
+  /**
+   * THE BUCKET DEMOTES AND NEVER PROMOTES, and this is the case that used to be
+   * promoted: three of the query's seven content words on the title (0.43,
+   * moderate on its own), exactly the PUSH_MIN_HITS floor, a real rank 2 the
+   * filler shares nothing with, and the server saying 'high'.
+   *
+   * It stays moderate. Only the three locally-computed requirements may
+   * authorize a deny, because only they are computed here, over both ranks,
+   * from the query and the cards — and #746's 'high' bucket is reachable by
+   * dense-only (uncorroborated) hits, the weakest evidence class the pipeline
+   * produces. The row still records the bucket, so the rule stays measurable.
+   */
+  it("will not let 'high' promote a moderate hit into a deny", async () => {
     const { baseUrl } = await serve(echo({ title: 'zod resolver parse', confidence: 'high' }));
     await pushOn(baseUrl);
 
@@ -352,53 +361,13 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
       websearchHookScript(dataDir),
       webSearch('zod resolver parse throws optional chain lately'),
     );
-    expect(denied(run)).toContain(BODY_MD);
-    expect((await ledger())[0]).toMatchObject({
-      strength: 'strong',
-      confidence: 'high',
-      deny: true,
-    });
-  });
-
-  /**
-   * The promotion is one step towards what the local words support, not a
-   * bypass of the requirement that says the pipeline picked ONE piece. On a
-   * dead tie there is nothing to promote: both cards cover the same three
-   * words, and denying the user's search would be asserting a choice the
-   * scores did not make.
-   */
-  it('will not promote a tie to a deny, however confident the server is', async () => {
-    const tied = (req: StubRequest): { status: number; json: unknown } => {
-      if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
-      const card = (id: string, handle: string) => ({
-        resourceId: id,
-        url: `${req.base}/@${handle}/p`,
-        title: 'zod resolver parse',
-        price: '0',
-        excerpt: 'about that',
-        creator: { handle },
-        confidence: 'high',
-      });
-      return {
-        status: 200,
-        json: {
-          schemaVersion: 3,
-          searchId: SEARCH_ID,
-          items: [card(RESOURCE_ID, 'vraspar'), card(SECOND_RESOURCE_ID, 'someone')],
-        },
-      };
-    };
-    const { baseUrl } = await serve(tied);
-    await pushOn(baseUrl);
-
-    const run = await runScript(
-      websearchHookScript(dataDir),
-      webSearch('zod resolver parse throws optional chain lately'),
-    );
     expect(denied(run)).toBeNull();
+    // Offered as a pointer, which is what a moderate hit has always been.
+    expect(injected(run)).toContain('Read it free: tenjin read');
     expect((await ledger())[0]).toMatchObject({
       strength: 'moderate',
       confidence: 'high',
+      form: 'short',
       deny: false,
     });
   });

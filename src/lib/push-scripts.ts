@@ -203,30 +203,25 @@ function judge(query, found) {
   } else if (card.ratio >= PUSH_MODERATE || confirmed.ratio >= PUSH_MODERATE) {
     strength = 'moderate';
   }
-  // The server's bucket, when it sends one (tenjin#746), moves the verdict ONE
-  // step and only towards what the local words already half-support: 'high'
-  // promotes a moderate hit with enough matched words and a real rank 2 to
-  // strong; 'low' demotes a strong hit to moderate, so the deny arm never fires
-  // on a match the server itself called weak. 'medium' and absent change nothing.
+  // THE SERVER'S BUCKET (tenjin#746) DEMOTES, AND NEVER PROMOTES. 'low' takes a
+  // locally-strong hit down to moderate, so the deny arm never fires on a match
+  // the server itself called weak; 'high', 'medium' and absent change nothing at
+  // all.
   //
-  // THE MARGIN SURVIVES THE PROMOTION, at half strength. A promotion authorizes
-  // the deny arm to cancel a tool call, and the margin is the requirement that
-  // says the pipeline picked ONE piece rather than shrugged at two: without it a
-  // dead tie — rank 1 and rank 2 scoring the same — denies a user's research on
-  // the strength of a bucket that cannot see either card. Relaxed, because the
-  // server vouching is real evidence and the full margin would leave the 'high'
-  // path with nothing to add; not dropped, because a tie is a tie.
+  // One-directional on purpose. Only the three local requirements above may
+  // authorize a deny, because only they are computed here, from the query and
+  // the cards, over both ranks — and 'strong' is what lets this tree cancel a
+  // tool call the user's agent asked for. A promotion would let a field the hook
+  // cannot check hand out that authority: #746's 'high' bucket is reachable by
+  // dense-only, i.e. UNCORROBORATED, hits, the weakest evidence class the
+  // pipeline produces, so the promoted case was precisely the one least entitled
+  // to it. A demotion needs no such trust: it can only ever say less.
+  //
+  // \`confidence\` is still recorded on every row (see pushDecide), so what a
+  // promotion rule WOULD have done stays measurable from the ledger without
+  // anything acting on it yet.
   const confidence = typeof top.confidence === 'string' ? top.confidence : null;
   if (confidence === 'low' && strength === 'strong') strength = 'moderate';
-  if (
-    confidence === 'high' &&
-    strength === 'moderate' &&
-    found.rich.length > 1 &&
-    card.hit >= PUSH_MIN_HITS &&
-    card.ratio - second >= PUSH_MARGIN * 0.5
-  ) {
-    strength = 'strong';
-  }
   return { top, score: round3(card.ratio), second: round3(second), strength, confidence };
 }
 
