@@ -1149,7 +1149,11 @@ async function main() {
   // subagent to start consumes it.
   if (config.push === 'on' && sessionId !== null) {
     const judged = judge(question, found);
-    if (judged.top !== null) {
+    // \`top\` is non-null for ANY candidate the server returned, including one
+    // that shares not a word with the question — judge() reports that as
+    // strength 'none'. Caching it would hand the next subagent a pointer the
+    // parent hook would itself have skipped as 'weak'.
+    if (judged.top !== null && judged.strength !== 'none') {
       const state = loadState(sessionId);
       state.cache = {
         at: new Date().toISOString(),

@@ -1031,6 +1031,13 @@ async function main() {
     strength: cache.strength,
     agentType,
   };
+  // The same gate pushDecide applies to its own judgement, applied to a cached
+  // one: a stale cache from an older build, or a dispatch hook that cached
+  // before this check existed, must not turn into an injection here.
+  if (cache.strength !== 'strong' && cache.strength !== 'moderate') {
+    ledgerAppend({ ...base, action: 'skipped', reason: 'weak' });
+    return quiet();
+  }
   const budget = pushBudget(sessionId);
   if (budget.seen.has(top.resourceId)) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'already-injected' });

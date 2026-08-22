@@ -827,6 +827,61 @@ describe('the subagent arm (SubagentStart)', () => {
     const second = await runScript(pushSubagentHookScript(dataDir), start);
     expect(second.stdout).toBe('');
   });
+
+  /**
+   * A dispatch that got any candidate at all used to cache it, strength and all,
+   * and this arm only checked that the cache had a resourceId. So every subagent
+   * of a push-on session opened with a pointer the parent hook would itself have
+   * skipped as 'weak'.
+   */
+  it('says nothing when the dispatch found only an unrelated piece', async () => {
+    const { baseUrl } = await serve((req) =>
+      req.url.startsWith('/api/search')
+        ? {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              items: [
+                {
+                  resourceId: RESOURCE_ID,
+                  url: `${req.base}/@a/p`,
+                  title: 'pgvector collation flips on a testcontainer image swap',
+                  price: '0',
+                  excerpt: 'nothing to do with the question',
+                  creator: { handle: 'someone' },
+                },
+              ],
+            },
+          }
+        : { status: 200, json: { bodyMd: BODY_MD } },
+    );
+    await pushOn(baseUrl);
+
+    await runScript(
+      dispatchHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Task',
+        tool_input: {
+          prompt: 'Review the authentication middleware refactor across the billing service',
+        },
+      }),
+    );
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'SubagentStart',
+        agent_id: 'a1',
+        agent_type: 'general-purpose',
+      }),
+    );
+    expect(run.stdout).toBe('');
+    // Nothing was cached, so there is nothing to log either.
+    expect(await ledger()).toEqual([]);
+  });
 });
 
 describe('the context arm (log-only)', () => {
