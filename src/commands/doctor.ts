@@ -399,10 +399,15 @@ async function checkApiContract(
 }
 
 /**
- * WARN-level (never fails doctor): is the A2 search endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates A2 (the buy/search path will
- * not work against it yet). Warn-only because doctor's job is a working READ path,
- * and search is additive.
+ * WARN-level (never fails doctor): is the search endpoint advertised in the
+ * OpenAPI doc? Absent means the deployment predates search v3 (tenjin#137), so
+ * `tenjin search` and the buy path that starts there will not work against it.
+ * Warn-only because doctor's job is a working READ path, and search is additive.
+ *
+ * It probes `/api/search`, the path the client actually calls. The
+ * `/api/agent/search` alias it replaced is deprecated and answers 410 after one
+ * release, so a deployment advertising ONLY the alias is exactly the case this
+ * check has to warn about rather than pass.
  */
 async function checkSearchContract(
   baseUrl: string,
@@ -435,8 +440,8 @@ async function checkSearchContract(
           name: 'search-contract',
           status: 'warn',
           required: false,
-          detail: 'This deployment does not advertise POST /api/agent/search (A2 not deployed)',
-          fix: 'search/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
+          detail: 'This deployment does not advertise POST /api/search (it predates search v3)',
+          fix: 'search/buy need search v3 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
         },
   };
 }
@@ -444,7 +449,7 @@ async function checkSearchContract(
 function hasSearchPath(json: unknown): boolean {
   if (!isRecord(json)) return false;
   const paths = json.paths;
-  return isRecord(paths) && '/api/agent/search' in paths;
+  return isRecord(paths) && '/api/search' in paths;
 }
 
 /**
@@ -984,7 +989,7 @@ async function checkReadPath(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
-  // The shipped public read path. The A2 search-contract check is a B2 follow-up.
+  // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
