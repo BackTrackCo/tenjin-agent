@@ -146,6 +146,45 @@ describe('publish block', () => {
   });
 });
 
+describe('hooks block: push and capture (docs/push.md)', () => {
+  it('default off for both, read at run time by the installed scripts', async () => {
+    expect(CONFIG_DEFAULTS.hooks.push).toBe('off');
+    expect(CONFIG_DEFAULTS.hooks.capture).toBe('off');
+    expect((await loadConfig(dir)).hooks.push).toBe('off');
+    expect((await loadConfig(dir)).hooks.capture).toBe('off');
+  });
+
+  it('merges a partial hooks block per-subkey (keeps the defaults it omits)', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on' } }));
+    const cfg = await loadConfig(dir);
+    expect(cfg.hooks.push).toBe('on');
+    expect(cfg.hooks.capture).toBe('off');
+    expect(cfg.hooks.searchMode).toBe(CONFIG_DEFAULTS.hooks.searchMode);
+  });
+
+  it('resolveSettings exposes hooksPush and hooksCapture, file over default', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on', capture: 'nudge' } }));
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.hooksPush).toEqual({ value: 'on', source: 'file' });
+    expect(s.hooksCapture).toEqual({ value: 'nudge', source: 'file' });
+  });
+
+  it('resolveSettings reports default provenance when unset', async () => {
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.hooksPush).toEqual({ value: 'off', source: 'default' });
+    expect(s.hooksCapture).toEqual({ value: 'off', source: 'default' });
+  });
+
+  it('rejects a value outside either enum', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'sometimes' } }));
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+    await writeFile(configFile(), JSON.stringify({ hooks: { capture: 'sometimes' } }));
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+  });
+});
+
 describe('install block', () => {
   it('defaults to no recorded harness', async () => {
     expect(CONFIG_DEFAULTS.install).toEqual({ harness: [] });

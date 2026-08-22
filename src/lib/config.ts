@@ -94,6 +94,43 @@ export function parseSessionPrimerFlag(value: string, flagName: string): Session
 }
 
 /**
+ * Whether the push experiment's hook scripts are wired and speaking (docs/push.md).
+ * `on` is what `tenjin push on` writes: `tenjin install` then wires the extra hook
+ * entries (prompt, failure, subagent, context) alongside the search hooks it always
+ * wires. `off` (the default) leaves any already-wired push scripts on disk but
+ * inert — every push arm reads this at run time before it spends a request, so
+ * turning the experiment off never needs a re-install.
+ */
+export const PushModeSchema = z.enum(['on', 'off']);
+export type PushMode = z.infer<typeof PushModeSchema>;
+
+export function parsePushModeFlag(value: string, flagName: string): PushMode {
+  const parsed = PushModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
+/**
+ * What the Stop hook does with an end-of-session capture prompt (docs/push.md's
+ * notes half): `block` raises a blocking reason, once per session, when the
+ * session carried a research signal (a recorded search, or a push-ledger row) and
+ * nothing has captured it yet; `nudge` says the same thing as additionalContext
+ * with no block; `off` is silent. Default `off`.
+ */
+export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);
+export type CaptureMode = z.infer<typeof CaptureModeSchema>;
+
+export function parseCaptureModeFlag(value: string, flagName: string): CaptureMode {
+  const parsed = CaptureModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "block", "nudge", or "off".',
+  });
+}
+
+/**
  * The harness-hook block. EVERY key is read by the installed scripts at run
  * time, which is what makes them runtime toggles rather than install-time
  * choices: `tenjin config set hooks.searchMode off`, `hooks.stopNag off` or
@@ -105,6 +142,8 @@ const HooksConfigSchema = z.object({
   searchMode: SearchHookModeSchema,
   stopNag: StopNagModeSchema,
   sessionPrimer: SessionPrimerModeSchema,
+  push: PushModeSchema,
+  capture: CaptureModeSchema,
 });
 
 /**
@@ -260,8 +299,10 @@ export const CONFIG_DEFAULTS: Config = {
   install: { harness: [] },
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
-  // leaves the installed script inert without touching settings.json.
-  hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on' },
+  // leaves the installed script inert without touching settings.json. `push` and
+  // `capture` default `off`: the push experiment (docs/push.md) is opt-in only,
+  // through `tenjin push on`.
+  hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on', push: 'off', capture: 'off' },
   update: { mode: 'nudge' },
 };
 
@@ -287,6 +328,8 @@ export const HOOKS_CONFIG_KEYS = [
   'hooks.searchMode',
   'hooks.stopNag',
   'hooks.sessionPrimer',
+  'hooks.push',
+  'hooks.capture',
 ] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
 
@@ -347,6 +390,8 @@ export async function loadConfig(dir: string): Promise<Config> {
       searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
       stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
       sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
+      push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
+      capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
   };
@@ -394,6 +439,8 @@ export interface EffectiveSettings {
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
   hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
+  hooksPush: ResolvedSetting<PushMode>;
+  hooksCapture: ResolvedSetting<CaptureMode>;
   updateMode: ResolvedSetting<UpdateMode>;
 }
 
@@ -435,6 +482,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     hooksSearchMode: resolveHooksSearchMode(config),
     hooksStopNag: resolveHooksStopNag(config),
     hooksSessionPrimer: resolveHooksSessionPrimer(config),
+    hooksPush: resolveHooksPush(config),
+    hooksCapture: resolveHooksCapture(config),
     updateMode: resolveUpdateMode(config),
   };
 }
@@ -467,6 +516,21 @@ function resolveHooksSearchMode(config: PartialConfig): ResolvedSetting<SearchHo
   const fromFile = config.hooks?.searchMode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.hooks.searchMode, source: 'default' };
+}
+
+/** hooks.push: file or default, same shape as hooks.searchMode — read at run time
+ *  by every push arm, so a set takes effect with no re-install. */
+function resolveHooksPush(config: PartialConfig): ResolvedSetting<PushMode> {
+  const fromFile = config.hooks?.push;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.push, source: 'default' };
+}
+
+/** hooks.capture: file or default, same shape as hooks.searchMode. */
+function resolveHooksCapture(config: PartialConfig): ResolvedSetting<CaptureMode> {
+  const fromFile = config.hooks?.capture;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.capture, source: 'default' };
 }
 
 /**
