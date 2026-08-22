@@ -543,6 +543,35 @@ describe('the failure arm (PostToolUse Bash)', () => {
     });
     expect(injected(run)).toContain(BODY_MD);
   });
+
+  /**
+   * An auth failure is the failure this arm fires on most often, so the token in
+   * it is the common case and not the edge. Nothing credential-shaped may reach
+   * the wire, and nothing credential-shaped may reach the ledger either: the
+   * ledger row carries the same string the request did.
+   */
+  it('strips the credential out of an auth failure before it leaves the machine', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'git push origin main' },
+        error:
+          'fatal: Authentication failed for token ghp_16C7e42F292c6912E7710c838347Ae178B4a using account vraspar-ops',
+      }),
+    );
+    expect(run.code).toBe(0);
+    const sent = queries()[0] ?? '';
+    expect(sent).toContain('Authentication');
+    expect(sent).not.toContain('ghp_');
+    expect(sent).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
+    const rows = await ledger();
+    expect(String(rows[0]!.query)).not.toContain('ghp_');
+  });
 });
 
 describe('the subagent arm (SubagentStart)', () => {

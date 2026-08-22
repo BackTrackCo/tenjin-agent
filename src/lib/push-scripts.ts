@@ -677,11 +677,43 @@ function packagesInSource(text) {
   return [...found];
 }
 
-/** Drop every scheme-less path, hostname, hex id and number: what leaves the
- *  machine is the shape of the problem, never the address of it. */
+/**
+ * Credential shapes, by vendor prefix. Named prefixes first because they are
+ * unambiguous: nothing that is not a secret looks like \`ghp_\` followed by
+ * sixteen base62 characters. The list is not a promise of completeness — the
+ * generic rule below it is what catches the vendor nobody has heard of yet.
+ */
+const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|xox[baprse]-[A-Za-z0-9-]{10,}|ya29\.[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)/g;
+/** \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
+ *  secret, so the value goes whatever it happens to look like. */
+const SECRET_ASSIGN_RE =
+  /\b[\w.-]*(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]*\s*[=:]\s*\S+/gi;
+/** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
+ *  rule cannot see because that one starts at a slash. */
+const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
+/** The catch-all: a long opaque run mixing letters and digits is not a word
+ *  anybody typed as part of a question. Dropping a rare long identifier costs
+ *  one topic word; keeping a key costs the key. */
+const SECRET_ENTROPY_RE = /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g;
+
+/**
+ * Drop every credential, scheme-less path, hostname, hex id and number: what
+ * leaves the machine is the shape of the problem, never the address of it and
+ * never the key to it.
+ *
+ * THE CREDENTIAL RULES RUN FIRST, and they run on every arm, because the arm
+ * most likely to be handed a secret is the failure arm and the failure it fires
+ * on most often is an auth failure. The hex rule further down is not a
+ * credential rule and never was: a PAT is mixed case with an underscore, so
+ * \`\b[a-f0-9]{16,}\b\` cannot match one.
+ */
 function scrub(text) {
   return String(text)
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
+    .replace(SECRET_USERINFO_RE, ' ')
+    .replace(SECRET_ASSIGN_RE, ' ')
+    .replace(SECRET_TOKEN_RE, ' ')
+    .replace(SECRET_ENTROPY_RE, ' ')
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
     .replace(/(?:^|[\s'"(=:])(?:\/[\w.@-]+){2,}/g, ' ')
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
