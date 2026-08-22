@@ -116,6 +116,8 @@ describe('runPushStatus', () => {
         rows: 0,
         byTriggerAction: {},
         byShelf: {},
+        byReason: {},
+        candidates: 0,
         denies: 0,
         injectedTokens: 0,
       },
@@ -158,6 +160,7 @@ describe('runPushStatus', () => {
         trigger: 'failure',
         shelf: 'public',
         action: 'injected',
+        candidate: { resourceId: 'res-1', title: 'a', price: '0.05' },
         deny: true,
         tokens: 120,
       }),
@@ -166,6 +169,7 @@ describe('runPushStatus', () => {
         trigger: 'failure',
         shelf: 'public',
         action: 'skipped',
+        candidate: { resourceId: 'res-1', title: 'a' },
         reason: 'weak',
       }),
       JSON.stringify({ at: recent, trigger: 'read', shelf: 'team', action: 'logged' }),
@@ -175,6 +179,8 @@ describe('runPushStatus', () => {
         trigger: 'failure',
         shelf: 'public',
         action: 'injected',
+        candidate: { resourceId: 'res-stale' },
+        reason: 'weak',
         tokens: 999,
       }),
       // Torn line: tolerated, never fatal.
@@ -193,13 +199,83 @@ describe('runPushStatus', () => {
           read: { logged: 1 },
         },
         byShelf: { public: 2, team: 1 },
+        byReason: { weak: 1 },
+        // Two rows about the same piece are one finding; the third row reached
+        // no candidate at all; the stale row is outside the window.
+        candidates: 1,
         denies: 1,
         injectedTokens: 120,
       },
     });
     const human = result.humanLines?.join('\n') ?? '';
     expect(human).toContain('3 row(s)');
+    expect(human).toContain('1 finding(s)');
     expect(human).toContain('failure: injected=1, skipped=1');
     expect(human).toContain('shelf: public=2, team=1');
+    expect(human).toContain('reasons: weak=1');
+  });
+
+  it('counts a note and a marketplace piece as separate findings, and sorts reasons by count', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const recent = new Date(now - 60_000).toISOString();
+    const lines = [
+      // Team shelf: a note carries `{id}`, never `{resourceId}`.
+      JSON.stringify({
+        at: recent,
+        trigger: 'failure',
+        shelf: 'team',
+        action: 'injected',
+        candidate: { id: '20260822-k3x9q2', title: 'note' },
+        tokens: 40,
+      }),
+      JSON.stringify({
+        at: recent,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        candidate: { resourceId: 'res-9', title: 'piece' },
+        tokens: 60,
+      }),
+      JSON.stringify({
+        at: recent,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'skipped',
+        reason: 'inject-cap',
+      }),
+      JSON.stringify({
+        at: recent,
+        trigger: 'read',
+        shelf: 'public',
+        action: 'skipped',
+        reason: 'inject-cap',
+      }),
+      JSON.stringify({
+        at: recent,
+        trigger: 'churn',
+        shelf: 'public',
+        action: 'skipped',
+        reason: 'miss',
+        // A candidate with neither key is no candidate.
+        candidate: { title: 'nameless' },
+      }),
+      // An empty reason is not a reason.
+      JSON.stringify({ at: recent, trigger: 'read', shelf: 'team', action: 'logged', reason: '' }),
+    ].join('\n');
+    await writeFile(pushLedgerPath(dir), `${lines}\n`);
+
+    const result = await runPushStatus(makeCtx(), { now: () => now });
+    expect(result.data).toMatchObject({
+      ledger: {
+        rows: 6,
+        byReason: { 'inject-cap': 2, miss: 1 },
+        candidates: 2,
+        injectedTokens: 100,
+      },
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('2 finding(s)');
+    // Sorted by count, so the dominant brake reads first.
+    expect(human).toContain('reasons: inject-cap=2, miss=1');
   });
 });

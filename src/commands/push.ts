@@ -111,6 +111,16 @@ interface LedgerRow {
   trigger?: unknown;
   shelf?: unknown;
   action?: unknown;
+  reason?: unknown;
+  /**
+   * TWO SHAPES, ONE FIELD. The team shelf writes `{id, title}` (a note has no
+   * resource id and no searchId behind it); the public shelf writes
+   * `{resourceId, title, price, url}`. Reading only one of the two keys would
+   * make every note the sidecar surfaced invisible here, which is the half of
+   * the experiment that costs nothing to run and is therefore the half most
+   * worth counting.
+   */
+  candidate?: unknown;
   deny?: unknown;
   tokens?: unknown;
 }
@@ -120,6 +130,14 @@ export interface PushLedgerTallies {
   rows: number;
   byTriggerAction: Record<string, Record<string, number>>;
   byShelf: Record<string, number>;
+  /** Why a row did not inject: `weak`, `miss`, `already-injected`, `inject-cap`,
+   *  `lookup-cap`, `no-answer`, and whatever a later build adds — the values are
+   *  taken from the rows, never from a list here, so a new reason shows up in
+   *  `status` the day the script starts writing it. */
+  byReason: Record<string, number>;
+  /** Distinct findings surfaced in the window, counted across BOTH candidate
+   *  shapes (team `{id}` and public `{resourceId}`) — see {@link LedgerRow}. */
+  candidates: number;
   denies: number;
   injectedTokens: number;
 }
@@ -129,6 +147,8 @@ const EMPTY_TALLIES: PushLedgerTallies = {
   rows: 0,
   byTriggerAction: {},
   byShelf: {},
+  byReason: {},
+  candidates: 0,
   denies: 0,
   injectedTokens: 0,
 };
@@ -156,6 +176,8 @@ export async function readLedgerTallies(
   let rows = 0;
   const byTriggerAction: Record<string, Record<string, number>> = {};
   const byShelf: Record<string, number> = {};
+  const byReason: Record<string, number> = {};
+  const candidates = new Set<string>();
   let denies = 0;
   let injectedTokens = 0;
   for (const line of text.split('\n')) {
@@ -177,12 +199,41 @@ export async function readLedgerTallies(
     byAction[action] = (byAction[action] ?? 0) + 1;
     const shelf = typeof row.shelf === 'string' ? row.shelf : 'unknown';
     byShelf[shelf] = (byShelf[shelf] ?? 0) + 1;
+    if (typeof row.reason === 'string' && row.reason !== '') {
+      byReason[row.reason] = (byReason[row.reason] ?? 0) + 1;
+    }
+    const key = candidateKey(row.candidate);
+    if (key !== null) candidates.add(`${shelf}:${key}`);
     if (row.deny === true) denies += 1;
     if (action === 'injected' && typeof row.tokens === 'number' && Number.isFinite(row.tokens)) {
       injectedTokens += row.tokens;
     }
   }
-  return { windowDays: LEDGER_WINDOW_DAYS, rows, byTriggerAction, byShelf, denies, injectedTokens };
+  return {
+    windowDays: LEDGER_WINDOW_DAYS,
+    rows,
+    byTriggerAction,
+    byShelf,
+    byReason,
+    candidates: candidates.size,
+    denies,
+    injectedTokens,
+  };
+}
+
+/**
+ * The identity of the finding a row is about, under EITHER shelf's shape:
+ * `candidate.resourceId` for a marketplace piece, `candidate.id` for a team
+ * note. Null for a row that reached no candidate at all (a `miss`, a capped
+ * lookup), which is a row to count in `rows` and not in `candidates`.
+ */
+function candidateKey(candidate: unknown): string | null {
+  if (!isRecord(candidate)) return null;
+  if (typeof candidate.resourceId === 'string' && candidate.resourceId !== '') {
+    return candidate.resourceId;
+  }
+  if (typeof candidate.id === 'string' && candidate.id !== '') return candidate.id;
+  return null;
 }
 
 /** All five push scripts on disk under `<dataDir>/hooks`. Not a settings.json
@@ -236,7 +287,7 @@ function renderStatusLines(data: {
     `push: ${mode}${mode === 'on' && !scriptsWired ? ' (scripts not wired yet; run `tenjin install`)' : ''}`,
     `capture: ${captureMode}`,
     `scripts wired: ${scriptsWired ? 'yes' : 'no'}`,
-    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
+    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
   ];
   for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {
     const byAction = Object.entries(actions)
@@ -247,6 +298,13 @@ function renderStatusLines(data: {
   const shelfEntries = Object.entries(ledger.byShelf);
   if (shelfEntries.length > 0) {
     lines.push(`  shelf: ${shelfEntries.map(([shelf, n]) => `${shelf}=${n}`).join(', ')}`);
+  }
+  // Sorted by count: an operator reading this wants to know what is holding the
+  // sidecar back most often, and `inject-cap` climbing that list means the cap
+  // itself is the throttle rather than the matcher.
+  const reasonEntries = Object.entries(ledger.byReason).sort((a, b) => b[1] - a[1]);
+  if (reasonEntries.length > 0) {
+    lines.push(`  reasons: ${reasonEntries.map(([reason, n]) => `${reason}=${n}`).join(', ')}`);
   }
   return lines;
 }
