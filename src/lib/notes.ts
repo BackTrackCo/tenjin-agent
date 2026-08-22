@@ -438,13 +438,33 @@ export async function commitAndPushNote(dataDir: string, id: string): Promise<st
   if (!add.ok) return warningLine(describeGitFailure('git add', add));
   const commit = await runGit(['commit', '-m', `note: ${id}`], dir);
   if (!commit.ok) return warningLine(describeGitFailure('git commit', commit));
+  // ONE TEAMMATE'S PUSH BREAKS EVERY LATER `notes add` ON EVERY OTHER MACHINE.
+  // From the moment their commit lands, ours is behind, the push is
+  // non-fast-forward, and it stays that way until somebody thinks to run `team
+  // sync` — which nothing told them to do. So: rebase first. The ordinary case
+  // is one local commit onto theirs, which needs no decisions from anybody.
+  //
+  // Best-effort, exactly like the rest of this function. A conflict, an offline
+  // machine or no upstream leaves the pull failing, and the push runs anyway:
+  // it may well still work (a first push, an unrelated failure), and where it
+  // does not, the warning below names the command that will fix it. The note is
+  // already saved locally either way.
+  const pulled = await runGit(['pull', '--rebase'], dir);
   const push = await runGit(['push'], dir);
-  if (!push.ok) return warningLine(describeGitFailure('git push', push));
+  if (!push.ok) {
+    return warningLine(
+      describeGitFailure('git push', push) +
+        (pulled.ok ? '' : ` (${describeGitFailure('git pull --rebase', pulled)})`),
+      'Run `tenjin team sync` to reconcile, then `tenjin notes add` again if it is still missing.',
+    );
+  }
   return undefined;
 }
 
-function warningLine(reason: string): string {
-  return `Warning: ${reason}; the note is saved locally but not synced to the team repo.`;
+function warningLine(reason: string, remedy?: string): string {
+  return `Warning: ${reason}; the note is saved locally but not synced to the team repo.${
+    remedy === undefined ? '' : ` ${remedy}`
+  }`;
 }
 
 // ---- Stop-hook capture markers (docs/command-reference.md: capture) ----

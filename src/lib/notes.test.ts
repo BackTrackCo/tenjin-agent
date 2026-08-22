@@ -315,6 +315,55 @@ describe('commitAndPushNote', () => {
   });
 });
 
+/**
+ * The failure mode this exists to stop: one teammate pushes, and from that
+ * moment every OTHER machine's `notes add` is behind, so its push is
+ * non-fast-forward — permanently, because nothing in the warning ever told
+ * anyone to sync. A best-effort rebase in front of the push makes the ordinary
+ * case (our one commit onto theirs) need no decisions from anybody.
+ */
+describe('commitAndPushNote after a teammate has pushed', () => {
+  it('rebases onto their commit instead of failing forever', async () => {
+    const { origin } = await makeClonedTeamRepo();
+
+    // A teammate, on their own clone, lands a note first.
+    const theirs = join(root, 'teammate');
+    git(root, ['clone', '--quiet', origin, theirs]);
+    git(theirs, ['config', 'user.email', 'them@example.com']);
+    git(theirs, ['config', 'user.name', 'Them']);
+    await writeFile(join(theirs, 'THEIRS.md'), 'their note\n');
+    git(theirs, ['add', '-A']);
+    git(theirs, ['commit', '--quiet', '-m', 'note: theirs']);
+    git(theirs, ['push', '--quiet']);
+
+    // Ours is now behind. Without the rebase this push is non-fast-forward.
+    const note = await addNote(dataDir, { question: 'q', body: 'b' });
+    const warning = await commitAndPushNote(dataDir, note.id);
+    expect(warning).toBeUndefined();
+
+    const log = execFileSync('git', ['--git-dir', origin, 'log', '--format=%s'], {
+      encoding: 'utf8',
+    });
+    expect(log).toContain(`note: ${note.id}`);
+    expect(log).toContain('note: theirs');
+  });
+
+  /** When the rebase cannot save it, the warning has to name what will. */
+  it('names `tenjin team sync` when the push still fails', async () => {
+    await makeClonedTeamRepo();
+    // Point the remote at nothing: pull and push both fail, exactly as they do
+    // offline or against a revoked credential.
+    git(notesDir(dataDir), ['remote', 'set-url', 'origin', join(root, 'gone.git')]);
+    const note = await addNote(dataDir, { question: 'q', body: 'b' });
+
+    const warning = await commitAndPushNote(dataDir, note.id);
+    expect(warning).toContain('git push');
+    expect(warning).toContain('tenjin team sync');
+    // The note itself is untouched by any of it.
+    expect(await getNote(dataDir, note.id)).not.toBeNull();
+  });
+});
+
 describe('writeCaptureMarker', () => {
   it('uses CLAUDE_SESSION_ID when set, and cleans up capture-pending', async () => {
     const dir = pushDir(dataDir);
