@@ -360,6 +360,49 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     });
   });
 
+  /**
+   * The promotion is one step towards what the local words support, not a
+   * bypass of the requirement that says the pipeline picked ONE piece. On a
+   * dead tie there is nothing to promote: both cards cover the same three
+   * words, and denying the user's search would be asserting a choice the
+   * scores did not make.
+   */
+  it('will not promote a tie to a deny, however confident the server is', async () => {
+    const tied = (req: StubRequest): { status: number; json: unknown } => {
+      if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+      const card = (id: string, handle: string) => ({
+        resourceId: id,
+        url: `${req.base}/@${handle}/p`,
+        title: 'zod resolver parse',
+        price: '0',
+        excerpt: 'about that',
+        creator: { handle },
+        confidence: 'high',
+      });
+      return {
+        status: 200,
+        json: {
+          schemaVersion: 3,
+          searchId: SEARCH_ID,
+          items: [card(RESOURCE_ID, 'vraspar'), card(SECOND_RESOURCE_ID, 'someone')],
+        },
+      };
+    };
+    const { baseUrl } = await serve(tied);
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain lately'),
+    );
+    expect(denied(run)).toBeNull();
+    expect((await ledger())[0]).toMatchObject({
+      strength: 'moderate',
+      confidence: 'high',
+      deny: false,
+    });
+  });
+
   it('ignores a confidence value it does not know', async () => {
     const { baseUrl } = await serve(echo({ confidence: 'certain' }));
     await pushOn(baseUrl);
