@@ -1482,7 +1482,12 @@ async function resolveHooks(args: {
 }): Promise<HooksResult> {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
-  const stored = (await loadRawConfig(dataDir)).hooks?.searchMode;
+  const hooksRaw = (await loadRawConfig(dataDir)).hooks;
+  const stored = hooksRaw?.searchMode;
+  // Whether a past `tenjin push on` armed the push experiment (docs/push.md): a
+  // durable config key, read here rather than passed in, so this run's hooks
+  // stay in step with it with no separate flag to remember.
+  const pushOn = hooksRaw?.push === 'on';
   const hasClaude = plans.some((p) => p.harness === 'claude');
   const hasHermes = plans.some((p) => p.harness === 'hermes');
 
@@ -1533,7 +1538,7 @@ async function resolveHooks(args: {
   // mode back to `auto` re-runs install, which is what the fix string says.
   if (mode === 'off') return hooksSkipped(resultHarness, home, dataDir, mode, 'mode-off');
   if (!hasClaude) return hooksSkipped('hermes', home, dataDir, mode, 'native-harness');
-  return wireSearchHooks({ homeDir: home, dataDir, mode });
+  return wireSearchHooks({ homeDir: home, dataDir, mode, push: pushOn });
 }
 
 /**

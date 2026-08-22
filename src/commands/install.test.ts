@@ -3324,7 +3324,7 @@ describe('runInstall: search hooks', () => {
     }
 
     const hooks = (await settings()).hooks as Record<string, { matcher?: string }[]>;
-    expect(hooks.PreToolUse?.[0]?.matcher).toBe('WebSearch');
+    expect(hooks.PreToolUse?.[0]?.matcher).toBe('WebSearch|WebFetch');
     expect(hooks.PreToolUse?.[1]?.matcher).toBe('Agent|Task');
     expect(hooks.SessionStart?.[0]?.matcher).toBe('startup|clear|compact');
     expect(hooks.Stop).toHaveLength(1);

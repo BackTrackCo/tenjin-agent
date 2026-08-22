@@ -13,6 +13,17 @@ import {
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
+import {
+  PUSH_CONTEXT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_HOOK_TIMEOUT_SECONDS,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+  pushContextHookScript,
+  pushFailureHookScript,
+  pushPromptHookScript,
+  pushSubagentHookScript,
+} from './push-scripts';
 import type { SearchHookMode } from './config';
 
 /**
@@ -29,25 +40,53 @@ import type { SearchHookMode } from './config';
  *    is no argument, no config key, and no call path that lets a caller point a
  *    hook at some other program, and the scripts themselves are generated from
  *    constants in lib/hook-scripts.ts rather than from anything on the wire.
- *  - No hook can block, deny, or modify a tool call. The PreToolUse hooks emit
- *    `additionalContext` and never `permissionDecision`, so the tool always
- *    proceeds; the Stop and SessionStart hooks only ever add a line.
+ *  - Almost no hook can block, deny, or modify a tool call. Every PreToolUse
+ *    entry but one emits `additionalContext` and never `permissionDecision`, so
+ *    the tool always proceeds; the Stop and SessionStart hooks only ever add a
+ *    line. The one exception is the push experiment's abort-and-answer arm
+ *    (docs/push.md): on a strong, free hit it may `permissionDecision: 'deny'`
+ *    the WebSearch/WebFetch call it fired on and hand the model the finding in
+ *    its place, and only that arm ever does.
  *
- * OWNERSHIP IS BY PATH. An entry is ours when its command mentions one of our
- * script filenames, and each script owns AT MOST ONE ENTRY: two entries naming
- * one script would be collapsed by the idempotent rewrite, which is why the
- * dispatch hook takes a single alternation matcher rather than an entry per tool.
- * That is what makes a re-install idempotent, lets a drifted command (an older
- * install's path, a moved data dir) be rewritten in place instead of duplicated,
- * and keeps every entry someone else wrote untouched.
+ * OWNERSHIP IS BY PATH, PER EVENT. An entry is ours when its command mentions one
+ * of our script filenames, and each script owns AT MOST ONE ENTRY PER EVENT IT IS
+ * PLANNED AGAINST: two entries naming one script under the SAME event would be
+ * collapsed by the idempotent rewrite, which is why the dispatch hook takes a
+ * single alternation matcher rather than an entry per tool. Two push scripts are
+ * planned against two DIFFERENT events on purpose — push-failure covers both
+ * PostToolUse and PostToolUseFailure (harness versions differ on which one a
+ * failed Bash call raises), and push-context covers both PostToolUse (its read
+ * arm) and PreToolUse (its churn arm) — and those pairs live in separate lists,
+ * so they never collapse into each other. Per-event ownership is what makes a
+ * re-install idempotent, lets a drifted command (an older install's path, a moved
+ * data dir) be rewritten in place instead of duplicated, and keeps every entry
+ * someone else wrote untouched.
  */
 
-/** The hook events this module writes, in the order they are reported. */
-export const HOOK_EVENTS = ['PreToolUse', 'SessionStart', 'Stop'] as const;
+/**
+ * The hook events this module writes, in the order they are reported. The last
+ * four (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart) exist
+ * only for the push experiment's arms (docs/push.md) and carry no entry at all
+ * unless `push: true` is passed to {@link wireSearchHooks}.
+ */
+export const HOOK_EVENTS = [
+  'PreToolUse',
+  'SessionStart',
+  'Stop',
+  'UserPromptSubmit',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'SubagentStart',
+] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
-/** The tool the WebSearch hook fires on. Never `WebFetch`, never a wildcard. */
-export const WEBSEARCH_MATCHER = 'WebSearch';
+/**
+ * The tools the WebSearch hook fires on. `WebFetch` joined `WebSearch` (T3/push
+ * work): a fetched page is exactly as good a moment to ask Tenjin first as a
+ * search is, and the hook body already treats the two identically. Never a
+ * wildcard.
+ */
+export const WEBSEARCH_MATCHER = 'WebSearch|WebFetch';
 
 /** The tools the dispatch hook fires on: one subagent dispatch under two names
  *  across Claude Code versions. */
@@ -57,6 +96,18 @@ export const DISPATCH_MATCHER = 'Agent|Task';
  *  deliberately absent: a resumed session restores its transcript, so the primer
  *  the original SessionStart printed is already in context. */
 export const SESSION_START_MATCHER = 'startup|clear|compact';
+
+/** The push failure arm (docs/push.md, T3) fires on a Bash tool only, on both the
+ *  ordinary post-use event and the failure-specific one some harness versions
+ *  raise instead. */
+export const PUSH_FAILURE_MATCHER = 'Bash';
+
+/** The push context arm's read half: packages a file imports, once it has been
+ *  read. */
+export const PUSH_CONTEXT_READ_MATCHER = 'Read';
+
+/** The push context arm's churn half: the Nth edit to one file in one session. */
+export const PUSH_CONTEXT_EDIT_MATCHER = 'Edit|Write|MultiEdit';
 
 /**
  * Seconds the harness allows each hook before killing it, and the HARD bound on
@@ -194,12 +245,18 @@ function commandFor(scriptPath: string, platform?: string): string {
   return `node ${quoteForShell(scriptPath, platform)}`;
 }
 
-/** One hook handler, exactly as it is written into settings.json. */
-function handlerFor(scriptPath: string, platform?: string): Record<string, unknown> {
+/** One hook handler, exactly as it is written into settings.json. `timeoutSeconds`
+ *  defaults to the search hooks' bound; the push arms pass their own, longer one
+ *  (they may fetch a free body after the search answers). */
+function handlerFor(
+  scriptPath: string,
+  platform?: string,
+  timeoutSeconds: number = HOOK_TIMEOUT_SECONDS,
+): Record<string, unknown> {
   return {
     type: 'command',
     command: commandFor(scriptPath, platform),
-    timeout: HOOK_TIMEOUT_SECONDS,
+    timeout: timeoutSeconds,
   };
 }
 
@@ -218,12 +275,26 @@ interface HookSpec {
   event: HookEvent;
   scriptFile: string;
   script: string;
-  /** Absent for Stop, which the harness fires on every occurrence with no matcher. */
+  /** Absent for Stop and the push subagent/prompt arms, which the harness fires
+   *  on every occurrence of the event with no matcher. */
   matcher?: string;
+  /** Defaults to {@link HOOK_TIMEOUT_SECONDS}; the push arms override it. */
+  timeoutSeconds?: number;
 }
 
-function specs(dataDir: string): HookSpec[] {
-  return [
+/**
+ * The base four search-hook entries, always planned. `opts.push` adds the five
+ * push-experiment entries (docs/push.md) on top: the prompt, subagent, and
+ * context-read arms carry one entry each, and the failure and context-churn arms
+ * carry one MORE entry apiece because they fire on two different events (a Bash
+ * failure surfaces as either PostToolUse or PostToolUseFailure depending on
+ * harness version; the context arm's read and churn halves are different events
+ * entirely) — so push, when on, plans seven entries across five scripts. Callers
+ * that only ever write the base bundle (`writeSharedHookScripts`, the Hermes
+ * adapter, `stopHookIsCurrent`) pass no opts and get `push: false`.
+ */
+function specs(dataDir: string, opts: { push: boolean } = { push: false }): HookSpec[] {
+  const base: HookSpec[] = [
     {
       event: 'PreToolUse',
       scriptFile: WEBSEARCH_HOOK_FILE,
@@ -243,6 +314,50 @@ function specs(dataDir: string): HookSpec[] {
       matcher: SESSION_START_MATCHER,
     },
     { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir) },
+  ];
+  if (!opts.push) return base;
+  return [
+    ...base,
+    {
+      event: 'UserPromptSubmit',
+      scriptFile: PUSH_PROMPT_HOOK_FILE,
+      script: pushPromptHookScript(dataDir),
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+    },
+    {
+      event: 'PostToolUse',
+      scriptFile: PUSH_FAILURE_HOOK_FILE,
+      script: pushFailureHookScript(dataDir),
+      matcher: PUSH_FAILURE_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+    },
+    {
+      event: 'PostToolUseFailure',
+      scriptFile: PUSH_FAILURE_HOOK_FILE,
+      script: pushFailureHookScript(dataDir),
+      matcher: PUSH_FAILURE_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+    },
+    {
+      event: 'SubagentStart',
+      scriptFile: PUSH_SUBAGENT_HOOK_FILE,
+      script: pushSubagentHookScript(dataDir),
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+    },
+    {
+      event: 'PostToolUse',
+      scriptFile: PUSH_CONTEXT_HOOK_FILE,
+      script: pushContextHookScript(dataDir),
+      matcher: PUSH_CONTEXT_READ_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+    },
+    {
+      event: 'PreToolUse',
+      scriptFile: PUSH_CONTEXT_HOOK_FILE,
+      script: pushContextHookScript(dataDir),
+      matcher: PUSH_CONTEXT_EDIT_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+    },
   ];
 }
 
@@ -294,6 +409,11 @@ export interface WireHooksOptions {
   mode: SearchHookMode;
   /** Shell-quoting target; injected so both branches are testable on one machine. */
   platform?: string;
+  /** Also plan the five push-experiment entries (docs/push.md). Defaults to
+   *  false: `tenjin install` on a normal machine registers nothing new, and only
+   *  `tenjin push on` (or a later install with `hooks.push` already `on`) passes
+   *  true. */
+  push?: boolean;
 }
 
 /**
@@ -310,9 +430,9 @@ export interface WireHooksOptions {
  * changed.
  */
 export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResult> {
-  const { homeDir, dataDir, mode, platform } = opts;
+  const { homeDir, dataDir, mode, platform, push = false } = opts;
   const scriptsDir = hooksDir(dataDir);
-  const plan = specs(dataDir);
+  const plan = specs(dataDir, { push });
 
   const found = await inspectSettings(homeDir, scriptsDir, mode);
   if ('result' in found) return found.result;
@@ -346,7 +466,7 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
     const list: unknown[] = existing ?? [];
     const desired = {
       ...(spec.matcher !== undefined ? { matcher: spec.matcher } : {}),
-      hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform)],
+      hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform, spec.timeoutSeconds)],
     };
     const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
     if (idx === -1) {
