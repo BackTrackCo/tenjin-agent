@@ -1071,6 +1071,36 @@ describe('the failure arm (PostToolUse Bash)', () => {
     const rows = await ledger();
     expect(String(rows[0]!.query)).not.toContain('ghp_');
   });
+
+  /**
+   * The vendor nobody has heard of yet is what the entropy rule is for, and the
+   * best-known secret shape in the world is standard base64: an AWS secret key
+   * carries `/`, which a url-safe-only class treats as a separator, leaving
+   * three short runs that all clear the floor and a key that leaves whole.
+   */
+  it('strips a standard-base64 secret, slashes and all', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'aws s3 ls' },
+        error: `fatal: SignatureDoesNotMatch, computed with ${secret} on the presign path`,
+      }),
+    );
+    expect(run.code).toBe(0);
+    const sent = queries()[0] ?? '';
+    expect(sent).toContain('SignatureDoesNotMatch');
+    expect(sent).not.toContain(secret);
+    // Not merely split on the slashes: no run of it survives either.
+    expect(sent).not.toContain('wJalrXUtnFEMI');
+    expect(sent).not.toContain('bPxRfiCYEXAMPLEKEY');
+    expect(String((await ledger())[0]!.query)).not.toContain('wJalrXUtnFEMI');
+  });
 });
 
 describe('the subagent arm (SubagentStart)', () => {

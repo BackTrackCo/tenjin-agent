@@ -847,8 +847,16 @@ const SECRET_ASSIGN_RE =
 const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
- *  one topic word; keeping a key costs the key. */
-const SECRET_ENTROPY_RE = /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g;
+ *  one topic word; keeping a key costs the key.
+ *
+ *  THE ALPHABET IS STANDARD BASE64, not just the url-safe one. A canonical AWS
+ *  secret (\`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\`) contains \`/\`, so a
+ *  class without it splits the key into three short runs and every one of them
+ *  falls under the length floor — the key leaves whole. \`+\`, \`/\` and the
+ *  \`=\` padding are in; the floor moves to 28 to pay for the wider alphabet,
+ *  which is still under any real key's length. */
+const SECRET_ENTROPY_RE =
+  /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
 
 /**
  * Drop every credential, scheme-less path, hostname, hex id and number: what
