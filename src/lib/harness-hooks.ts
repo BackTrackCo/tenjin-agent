@@ -301,15 +301,15 @@ interface HookSpec {
 }
 
 /**
- * The base four search-hook entries, always planned. `opts.push` adds the five
- * push-experiment entries (docs/push.md) on top: the prompt, subagent, and
- * context-read arms carry one entry each, and the failure and context-churn arms
- * carry one MORE entry apiece because they fire on two different events (a Bash
- * failure surfaces as either PostToolUse or PostToolUseFailure depending on
- * harness version; the context arm's read and churn halves are different events
- * entirely) — so push, when on, plans seven entries across five scripts. Callers
- * that only ever write the base bundle (`writeSharedHookScripts`, the Hermes
- * adapter, `stopHookIsCurrent`) pass no opts and get `push: false`.
+ * The base four search-hook entries, always planned. `opts.push` adds the six
+ * push-experiment entries (docs/push.md) on top, across FOUR scripts: the prompt
+ * and subagent arms carry one entry each, and the failure and context arms carry
+ * two apiece because each fires on two different events (a Bash failure surfaces
+ * as either PostToolUse or PostToolUseFailure depending on harness version; the
+ * context arm's read and churn halves are different events entirely) — so push,
+ * when on, plans six entries across four scripts. Callers that only ever write
+ * the base bundle (`writeSharedHookScripts`, the Hermes adapter,
+ * `stopHookIsCurrent`) pass no opts and get `push: false`.
  */
 function specs(dataDir: string, opts: { push: boolean } = { push: false }): HookSpec[] {
   const base: HookSpec[] = [
@@ -436,7 +436,7 @@ export interface WireHooksOptions {
   mode: SearchHookMode;
   /** Shell-quoting target; injected so both branches are testable on one machine. */
   platform?: string;
-  /** Also plan the five push-experiment entries (docs/push.md). Defaults to
+  /** Also plan the six push-experiment entries (docs/push.md). Defaults to
    *  false: `tenjin install` on a normal machine registers nothing new, and only
    *  `tenjin push on` (or a later install with `hooks.push` already `on`) passes
    *  true. */

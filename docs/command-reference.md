@@ -34,7 +34,7 @@ Useful flags:
 
 `install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a `WebSearch` or `WebFetch` call. The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
-`tenjin push on` registers five more, described in [Push (experimental)](#push-experimental) below; a plain `tenjin install` on a machine that has never run `tenjin push on` adds nothing beyond these four.
+`tenjin push on` registers six more, across four scripts, described in [Push (experimental)](#push-experimental) below; a plain `tenjin install` on a machine that has never run `tenjin push on` adds nothing beyond these four.
 
 **The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch misses are never raised at all: they are demand data, not questions you asked to be reminded about, and they hold at most 15 of the store's 50 slots so a wide fan-out cannot evict a search you may still want to buy from.
 
@@ -309,7 +309,7 @@ The push experiment (`docs/push.md` in the plan of record) flips Tenjin from a t
 
 ### `tenjin push on`
 
-Sets `hooks.push` to `on` and immediately wires the five push hook scripts into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe):
+Sets `hooks.push` to `on` and immediately wires the four push hook scripts (six settings entries) into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe):
 
 | Script                     | Event(s)                                   | Matcher                           | What it does                                                                                     |
 | -------------------------- | ------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -328,7 +328,7 @@ To take the scripts and their settings entries away entirely, run `tenjin uninst
 
 ### `tenjin push status [--json]`
 
-Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), whether the five scripts are actually present on disk, and a tally of the last 7 days of ledger rows: total rows, broken down by trigger x action, by shelf (`public` vs. a team's private notes), how many denied a tool call outright, and the total tokens injected.
+Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), whether the four scripts are actually present on disk, and a tally of the last 7 days of ledger rows: total rows, broken down by trigger x action, by shelf (`public` vs. a team's private notes), how many denied a tool call outright, and the total tokens injected.
 
 ```bash
 tenjin push on

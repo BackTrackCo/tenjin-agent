@@ -26,7 +26,7 @@ import type { CommandContext, CommandResult } from '../context';
  * (`hooks.push`), through the same locked read-modify-write every `config set`
  * uses (see `persistPushMode` in commands/config.ts) — this command is a
  * convenience front end over that key plus the wiring step, not a second
- * mechanism. `on` additionally wires the five push hook scripts immediately
+ * mechanism. `on` additionally wires the four push hook scripts immediately
  * (idempotent, like every `wireSearchHooks` call: a second run registers nothing
  * new), so an operator does not have to separately remember to re-run `tenjin
  * install`. `off` writes the key and stops: every push arm reads `hooks.push` at
@@ -281,7 +281,7 @@ function candidateKey(candidate: unknown): string | null {
   return null;
 }
 
-/** All five push scripts on disk under `<dataDir>/hooks`. Not a settings.json
+/** All four push scripts on disk under `<dataDir>/hooks`. Not a settings.json
  *  read (a script can be written without an entry, or vice versa mid-refusal) —
  *  this answers "did `tenjin push on` (or a compatible install) actually write
  *  the scripts", which is what an operator debugging silence wants to know

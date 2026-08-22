@@ -724,7 +724,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   );
   addGlobalFlags(push.command('on'))
     .description(
-      'Turn the push experiment on: persist hooks.push=on, then wire its five hook scripts (idempotent; safe to re-run)',
+      'Turn the push experiment on: persist hooks.push=on, then wire its four hook scripts (idempotent; safe to re-run)',
     )
     .action(async function (this: Command) {
       await runCommand('push.on', this, async (ctx) => {

@@ -206,7 +206,7 @@ describe('wireSearchHooks: push experiment entries', () => {
     }
   });
 
-  it('wires all five push scripts across seven entries when push is true', async () => {
+  it('wires all four push scripts across six entries when push is true', async () => {
     const result = await wireSearchHooks({
       homeDir: home,
       dataDir: data,
@@ -222,14 +222,23 @@ describe('wireSearchHooks: push experiment entries', () => {
       'PostToolUseFailure',
       'SubagentStart',
     ]);
-    for (const file of [
+    const pushFiles = [
       PUSH_PROMPT_HOOK_FILE,
       PUSH_FAILURE_HOOK_FILE,
       PUSH_SUBAGENT_HOOK_FILE,
       PUSH_CONTEXT_HOOK_FILE,
-    ]) {
+    ];
+    for (const file of pushFiles) {
       expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
     }
+    // The two numbers the docs, the help text and the disclosure all quote, held
+    // here so a new arm cannot make every one of them wrong in silence: FOUR
+    // scripts, SIX entries. Entries, not events — `added` above collapses the
+    // three PreToolUse entries into one.
+    expect(pushFiles).toHaveLength(4);
+    expect(result.pushArms).toBe(6);
+    // The base bundle's own events, uncounted by the push half.
+    expect(result.searchWrote).toBe(3);
 
     const settings = await readSettings();
 

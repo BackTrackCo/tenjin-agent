@@ -42,7 +42,7 @@ const PUSH_SCRIPT_FILES = [
 ];
 
 describe('runPushOn', () => {
-  it('persists hooks.push=on and wires the five push scripts', async () => {
+  it('persists hooks.push=on and wires the four push scripts', async () => {
     const result = await runPushOn(makeCtx(), { homeDir: home });
 
     expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
