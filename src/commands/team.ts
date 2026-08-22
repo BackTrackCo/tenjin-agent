@@ -59,7 +59,11 @@ function assertCloneUrl(gitUrl: string): void {
     });
   };
   if (gitUrl.trim() === '') refuse('`tenjin team init` needs a git URL.');
-  if (/[\u0000-\u001f]/.test(gitUrl)) refuse('That git URL contains a control character.');
+  // No regex: a control-character class is exactly what `no-control-regex`
+  // exists to flag, and the check reads more plainly this way anyway.
+  for (const ch of gitUrl) {
+    if (ch.codePointAt(0)! < 0x20) refuse('That git URL contains a control character.');
+  }
   // Before anything else: git reads it as an option, not as a repository.
   if (gitUrl.startsWith('-')) {
     refuse(`git would read ${JSON.stringify(gitUrl)} as an option, not a repository.`);
