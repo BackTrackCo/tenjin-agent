@@ -41,7 +41,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 19;
+export const HOOK_SCRIPT_VERSION = 20;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -77,10 +77,9 @@ const MAX_WEAK_LOOPS = 3;
 /** Candidates the WebSearch hook asks for, and mentions. Two lines is the cap the
  *  hint has to live inside; asking for more would only be thrown away. */
 const SEARCH_LIMIT = 2;
-/** agent-api.ts's searchBrowseSchema owns this bound; candidate urls are a bare
- *  string there, so the hook ADOPTS the browse bound for its own persisted
- *  candidate projection. Over it the candidate is dropped, never clipped: a
- *  clipped url is a different url. */
+/** The bound the hook applies to a persisted candidate url. Candidate urls are a
+ *  bare string in agent-api.ts's schema, so the hook owns this one itself. Over
+ *  it the candidate is dropped, never clipped: a clipped url is a different url. */
 const BROWSE_URL_MAX = 512;
 /**
  * How long the WebSearch hook waits for the search store's lock before giving up
@@ -634,16 +633,25 @@ function usd(atomic) {
 async function askTenjin(question, config) {
   let url;
   try {
-    url = new URL('/api/agent/search', config.baseUrl);
+    url = new URL('/api/search', config.baseUrl);
   } catch {
     return null;
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
 
+  // The v3 body, same as src/lib/agent-api.ts buildSearchRequest: the documented
+  // \`query\` spelling, \`view\` named rather than defaulted, and no narrowings at
+  // all (this hook rides along with a web search, it does not price-gate). The
+  // \`/api/agent/search\` alias this replaced answers 410 after one release.
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'user-agent': composedUserAgent() },
-    body: JSON.stringify({ schemaVersion: 2, question, limit: ${SEARCH_LIMIT} }),
+    body: JSON.stringify({
+      schemaVersion: 3,
+      view: 'decision',
+      query: question,
+      limit: ${SEARCH_LIMIT},
+    }),
     signal: AbortSignal.timeout(${SEARCH_TIMEOUT_MS}),
   });
   if (res.status !== 200) return null;
@@ -656,26 +664,27 @@ async function askTenjin(question, config) {
   // is invited to run, and a url is a payable pointer a later \`buy\` resolves.
   // IT DROPS, IT NEVER REPAIRS. Nothing here is coerced, truncated or defaulted
   // into a usable-looking value: a field that does not match its shape drops its
-  // candidate, and a bad schemaVersion, searchId or decision drops the whole
+  // candidate, and a bad schemaVersion, searchId or items array drops the whole
   // response. Repairing an actionable field does not recover it, it invents a
   // DIFFERENT one that still looks legitimate: a clipped url is a different
   // pointer, a defaulted price is a different amount, a stringified title is text
   // nobody wrote. The only shortening left is the display title, which is not
-  // actionable. Mirrors searchResponseSchema in src/lib/agent-api.ts.
-  if (body.schemaVersion !== 2) return null;
+  // actionable. Mirrors searchResultSchema in src/lib/agent-api.ts.
+  if (body.schemaVersion !== 3) return null;
   // typeof BEFORE the regex: String() would stringify ["<uuid>"] into a passing
   // uuid, emitting a hint whose searchId the store then refuses to record.
   if (typeof body.searchId !== 'string' || !UUID_RE.test(body.searchId)) return null;
-  if (body.decision !== 'CANDIDATES' && body.decision !== 'MISS') return null;
-  const decision = body.decision;
+  // v3 has no \`decision\` field: a miss is an EMPTY result. \`items\` is required,
+  // so a body without one is a shape this hook cannot read and drops whole rather
+  // than recording as a miss that never happened. The CANDIDATES/MISS words are
+  // then DERIVED, because the local store keeps them and the Stop hook branches
+  // on them.
+  if (!Array.isArray(body.items)) return null;
   // Sliced after parsing, so this caps PROJECTION AND STORAGE, not the download
   // or the JSON parse: those already happened, bounded by the fetch timeout. What
-  // it buys is that a ten-thousand-candidate response cannot put ten thousand
+  // it buys is that a ten-thousand-item response cannot put ten thousand
   // entries in searches.json or ten thousand lines in the hint.
-  const candidates = (Array.isArray(body.candidates) ? body.candidates : []).slice(
-    0,
-    ${SEARCH_LIMIT},
-  );
+  const candidates = body.items.slice(0, ${SEARCH_LIMIT});
 
   // Store the LEAN projection the CLI stores, so \`buy <resourceId>\` can resolve
   // the payable read URL from an entry this hook wrote.
@@ -708,6 +717,11 @@ async function askTenjin(question, config) {
       price: c.price,
     });
   }
+  // Derived from what the SERVER matched, not from what survived this hook's own
+  // validation: a response that matched pieces whose fields were all malformed is
+  // still not a MISS, and recording it as one would put a false open loop in
+  // front of the agent at the end of the turn.
+  const decision = body.items.length > 0 ? 'CANDIDATES' : 'MISS';
   return { searchId: body.searchId, decision, stored };
 }
 

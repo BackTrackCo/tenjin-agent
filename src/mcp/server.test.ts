@@ -129,10 +129,11 @@ describe('buildTenjinMcpServer, tool surface', () => {
 describe('tenjin_search', () => {
   it('returns the exact success envelope as structuredContent with a non-empty text summary', async () => {
     const miss = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      decision: 'MISS',
       calibration: 'no match',
+      matched: 0,
+      items: [],
     };
     const fetchImpl = (async () =>
       new Response(JSON.stringify(miss), {
@@ -153,7 +154,9 @@ describe('tenjin_search', () => {
     const sc = res.structuredContent as SuccessEnvelope;
     expect(sc.ok).toBe(true);
     expect(sc.command).toBe('search');
-    expect(sc.data.decision).toBe('MISS');
+    // v3: a miss is an empty result, not a `decision` word to branch on.
+    expect(sc.data.matched).toBe(0);
+    expect(sc.data.items).toEqual([]);
     expect((res.content as { text: string }[])[0]?.text ?? '').not.toBe('');
   });
 });
@@ -604,10 +607,11 @@ describe('tenjin_edit', () => {
 describe('MCP adapter never writes to real stdout', () => {
   it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      decision: 'MISS',
       calibration: 'no match',
+      matched: 0,
+      items: [],
     };
     const searchFetch = (async () =>
       new Response(JSON.stringify(miss), {
