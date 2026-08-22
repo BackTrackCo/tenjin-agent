@@ -61,6 +61,7 @@ export async function runNotesAdd(
   rejectNewlines({ '--question': question, '--scope': scope, '--source': source });
   rejectNewlines(Object.fromEntries(appliesTo.map((a) => ['--applies-to', a])));
   const body = await resolveBody(args, deps);
+  rejectSecrets([question, scope, source, body, ...appliesTo].join('\n'));
   const env = deps.env ?? process.env;
   const note = await addNote(ctx.dataDir, {
     question,
@@ -102,6 +103,29 @@ async function resolveBody(args: NotesAddArgs, deps: NotesAddDeps): Promise<stri
   }
   throw new CliError('USAGE', 'A note needs a body: pass a file, or --body "...".', {
     fix: 'tenjin notes add --question "..." --body "..."',
+  });
+}
+
+/**
+ * Credential shapes a note must not carry.
+ *
+ * A NOTE IS PUSHED, NOT SAVED. `notes add` commits and pushes to the team's
+ * shared git remote, so a secret in one is in a history nobody can recall, and
+ * every teammate's push hook will read it into a model's context. The Stop hook
+ * asks for a note at the end of every research session and the agent writing it
+ * is summarizing a debugging session it just had — a connection string with a
+ * password in it is the ordinary way this happens, not an exotic one.
+ *
+ * A refusal, never a redaction: rewriting somebody's note behind their back
+ * would leave them believing they published something they did not.
+ */
+const SECRET_RE =
+  /(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{16,}|\bgh[oprsu]_[A-Za-z0-9]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bglpat-[A-Za-z0-9_-]{16,}|\bA(?:KIA|SIA)[0-9A-Z]{16}\b|\bxox[baprse]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|\b(?:password|passwd|secret|api[_-]?key|apikey|token)\s*[=:]\s*\S{8,}|:\/\/[^\s:@/]+:[^\s@/]+@)/i;
+
+function rejectSecrets(text: string): void {
+  if (!SECRET_RE.test(text)) return;
+  throw new CliError('USAGE', 'That note looks like it contains a credential.', {
+    fix: 'A note is committed and pushed to the shared team repo. Remove the secret (or write <REDACTED> in its place) and retry.',
   });
 }
 

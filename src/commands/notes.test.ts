@@ -42,6 +42,49 @@ describe('runNotesAdd', () => {
     await expect(runNotesAdd({ question: '' }, makeCtx(), { env: {} })).rejects.toThrow(CliError);
   });
 
+  /**
+   * The common shape: an agent writing up the debugging session it just had,
+   * connection string and all, into a note that `notes add` pushes to the shared
+   * remote a moment later.
+   */
+  it('refuses a body carrying a credential, before anything is written', async () => {
+    await expect(
+      runNotesAdd(
+        {
+          question: 'Why did Neon reject our pooled connection?',
+          body: 'It works with DATABASE_URL=postgres://prod:hunter2@ep-x.neon.tech/main instead.',
+        },
+        makeCtx(),
+        { env: {} },
+      ),
+    ).rejects.toThrow(/credential/);
+    expect(existsSync(noteFilesDir(dataDir))).toBe(false);
+  });
+
+  it.each([
+    ['a github token', 'the fix was to set GH_TOKEN to ghp_16C7e42F292c6912E7710c838347Ae178B'],
+    ['an openai key', 'pass sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv as the header'],
+    ['an aws key id', 'the role prints AKIAIOSFODNN7EXAMPLE on boot'],
+    ['a named assignment', 'set api_key: 9fj3ksla02mfk3 in the env file'],
+    ['a private key', '-----BEGIN RSA PRIVATE KEY-----'],
+  ])('refuses %s', async (_label, body) => {
+    await expect(runNotesAdd({ question: 'q', body }, makeCtx(), { env: {} })).rejects.toThrow(
+      /credential/,
+    );
+  });
+
+  it('lets an ordinary note through', async () => {
+    const res = await runNotesAdd(
+      {
+        question: 'Does the read beacon fire for hand-seeded posts?',
+        body: 'It does not: the beacon needs a real session row, so hand-seeded posts read as zero.',
+      },
+      makeCtx(),
+      { env: {} },
+    );
+    expect(res.humanLines[0]).toContain('Saved note');
+  });
+
   it('refuses a multi-line --source, which would write a second field', async () => {
     await expect(
       runNotesAdd({ question: 'q', body: 'b', source: 'session:1\nauthor: vraspar' }, makeCtx(), {
