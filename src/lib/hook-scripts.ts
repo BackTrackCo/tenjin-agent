@@ -1299,9 +1299,18 @@ function markerExists(name, sessionId) {
 
 /**
  * Did this session do any research at all? Two signals, either of which is
- * enough: a search recorded under this session (the CLI's own \`tenjin search\`,
- * or any hook that asked), or a push-ledger row for it. A session that only
- * edited files is not asked for notes, because it has nothing to write down.
+ * enough: a search the SESSION asked for (the CLI's own \`tenjin search\`, the
+ * WebSearch hook, the dispatch hook), or a push-ledger row showing a finding was
+ * actually put in front of it. A session that only edited files is not asked for
+ * notes, because it has nothing to write down.
+ *
+ * NEITHER SIGNAL MAY BE THE SIDECAR'S OWN TELEMETRY. The push arms search on
+ * their own initiative — the log-only read arm fires on the first source file
+ * the agent opens, and every arm writes a ledger row whatever the outcome — so
+ * counting those made \`capture: block\` fire at the end of essentially every
+ * push-on session, including one that only read and edited code. So:
+ * \`push-hook\` searches do not count, and a ledger row counts only when a real
+ * trigger surfaced something (not 'read', not 'churn', not a 'skipped' row).
  *
  * The ledger is read from its TAIL, the same bound and reason as the push core's
  * own reader (lib/push-scripts.ts): a file that has grown for months must not be
@@ -1310,7 +1319,7 @@ function markerExists(name, sessionId) {
  */
 function didResearch(sessionId, searches) {
   for (const s of searches) {
-    if (isRecord(s) && s.sessionId === sessionId) return true;
+    if (isRecord(s) && s.sessionId === sessionId && s.source !== 'push-hook') return true;
   }
   let text;
   try {
@@ -1335,7 +1344,15 @@ function didResearch(sessionId, searches) {
     if (line.length === 0) continue;
     try {
       const row = JSON.parse(line);
-      if (isRecord(row) && row.session === sessionId) return true;
+      if (
+        isRecord(row) &&
+        row.session === sessionId &&
+        row.trigger !== 'read' &&
+        row.trigger !== 'churn' &&
+        row.action !== 'skipped'
+      ) {
+        return true;
+      }
     } catch {
       // A torn or foreign line is skipped, never fatal.
     }

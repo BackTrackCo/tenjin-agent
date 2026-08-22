@@ -239,7 +239,7 @@ describe('HOOK_SCRIPT_VERSION', () => {
       websearch: '16b182148acb3b567b38c232a5214af1',
       dispatch: '1ba46fef97fae945040dcc42d55dc9bf',
       sessionPrimer: '6acf14d73e72072b743fb940f36ed14a',
-      stop: '70fab848c8556a30f17a1aee9ce229e4',
+      stop: '02fb4d91c774800df87e3f53feb22ff0',
       pushPrompt: 'c3829520a4840af699cf90f28a7cffe0',
       pushFailure: '36027844b25b696c873bf7d96963822f',
       pushSubagent: '9c5eec4a4a5b2f730d5e341913dc512e',

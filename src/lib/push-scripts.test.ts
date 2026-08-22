@@ -1122,15 +1122,64 @@ describe('the capture ask (Stop)', () => {
     expect(second.stdout).toBe('');
   });
 
-  it('takes a push-ledger row as the research signal too', async () => {
+  it('takes an injected push-ledger row as the research signal too', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     await mkdir(dataDir, { recursive: true });
     await writeFile(
       join(dataDir, PUSH_LEDGER_FILE),
-      `${JSON.stringify({ at: new Date().toISOString(), session: SESSION, trigger: 'prompt', action: 'skipped' })}\n`,
+      `${JSON.stringify({ at: new Date().toISOString(), session: SESSION, trigger: 'prompt', action: 'injected' })}\n`,
     );
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: CAPTURE_REASON });
+  });
+
+  /**
+   * The sidecar's own telemetry is not the session's research. The log-only read
+   * arm fires on the first source file the agent opens and writes both a
+   * push-hook search and a ledger row, which used to mean nearly every push-on
+   * session ended in a block — including one that only read and edited code.
+   */
+  it('is not fooled by the sidecar looking things up on its own', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, PUSH_LEDGER_FILE),
+      [
+        JSON.stringify({
+          at: new Date().toISOString(),
+          session: SESSION,
+          trigger: 'read',
+          action: 'logged',
+        }),
+        JSON.stringify({
+          at: new Date().toISOString(),
+          session: SESSION,
+          trigger: 'prompt',
+          action: 'skipped',
+          reason: 'miss',
+        }),
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      join(dataDir, 'searches.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        searches: [
+          {
+            searchId: SEARCH_ID,
+            at: new Date().toISOString(),
+            question: 'zod gotcha bug workaround',
+            decision: 'MISS',
+            candidates: [],
+            source: 'push-hook',
+            sessionId: SESSION,
+          },
+        ],
+      }),
+    );
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
   });
 
   it('says the same thing as context under nudge, and blocks nothing', async () => {
