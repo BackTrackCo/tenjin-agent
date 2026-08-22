@@ -217,12 +217,23 @@ function judge(query, found) {
   // pipeline produces, so the promoted case was precisely the one least entitled
   // to it. A demotion needs no such trust: it can only ever say less.
   //
-  // \`confidence\` is still recorded on every row (see pushDecide), so what a
-  // promotion rule WOULD have done stays measurable from the ledger without
-  // anything acting on it yet.
+  // BOTH SERVER FIELDS ARE CARRIED OUT, and only one of them acts. \`confidence\`
+  // demotes; \`corroborated\` — whether the server's own retrieval agreed with
+  // itself, or the hit was dense-only — does nothing at all here. It rides along
+  // so that pushDecide can put it on the row beside the verdict this function
+  // actually reached, which is what makes "should an uncorroborated hit ever be
+  // treated as strong" a question a week of real rows can answer.
   const confidence = typeof top.confidence === 'string' ? top.confidence : null;
   if (confidence === 'low' && strength === 'strong') strength = 'moderate';
-  return { top, score: round3(card.ratio), second: round3(second), strength, confidence };
+  const corroborated = typeof top.corroborated === 'boolean' ? top.corroborated : null;
+  return {
+    top,
+    score: round3(card.ratio),
+    second: round3(second),
+    strength,
+    confidence,
+    corroborated,
+  };
 }
 
 function round3(n) {
@@ -754,7 +765,12 @@ async function pushDecide(args) {
     score: j.score,
     second: j.second,
     strength: j.strength,
+    // Both descriptive server fields, on EVERY public-shelf row including the
+    // misses and the weak ones: the rows a rule would have changed are exactly
+    // the ones a rule has to be judged against, so recording only the rows that
+    // injected would answer the question with the cases that already agreed.
     confidence: j.confidence ?? null,
+    corroborated: j.corroborated ?? null,
   };
   if (j.top === null) {
     ledgerAppend({ ...row, action: 'skipped', reason: 'miss' });

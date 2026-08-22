@@ -47,7 +47,7 @@ import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 31;
+export const HOOK_SCRIPT_VERSION = 32;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -813,6 +813,14 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}) {
         c.confidence === 'high' || c.confidence === 'medium' || c.confidence === 'low'
           ? c.confidence
           : null,
+      // Whether the server's own retrieval agreed with itself — a hit both legs
+      // found, rather than dense-only. DESCRIPTIVE, exactly like \`confidence\`:
+      // nothing in judge() reads it, and no verdict moves on it. It is recorded
+      // so the question "should an uncorroborated hit ever be treated as strong"
+      // can be answered from a week of real rows instead of from a guess. A
+      // non-boolean reads as absent, never as false — "the deployment did not
+      // say" and "the deployment said no" are different facts.
+      corroborated: typeof c.corroborated === 'boolean' ? c.corroborated : null,
     });
   }
   // The rank-1 answer card the decision view inlines (\`inspect\`): the questions

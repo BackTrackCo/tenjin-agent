@@ -372,6 +372,54 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     });
   });
 
+  /**
+   * DESCRIPTIVE, NOT ACTED ON. `corroborated` says whether the server's own
+   * retrieval agreed with itself or the hit was dense-only, and nothing in
+   * judge() reads it. It is on the row so that "should an uncorroborated hit
+   * ever be treated as strong" is answerable from a week of real rows rather
+   * than from a guess — which needs it on the rows a rule WOULD have changed,
+   * not only the ones that injected.
+   */
+  it('records corroborated beside confidence without acting on it', async () => {
+    const { baseUrl } = await serve(echo({ corroborated: false, confidence: 'high' }));
+    await pushOn(baseUrl);
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    // Locally strong, so it denies exactly as it did before the field existed:
+    // an uncorroborated hit is not demoted by this value.
+    expect(denied(run)).toContain(BODY_MD);
+    expect((await ledger())[0]).toMatchObject({
+      strength: 'strong',
+      confidence: 'high',
+      corroborated: false,
+      deny: true,
+    });
+  });
+
+  it('reads a non-boolean corroborated as absent, never as false', async () => {
+    const { baseUrl } = await serve(echo({ corroborated: 'yes' }));
+    await pushOn(baseUrl);
+    await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    // "The deployment did not say" and "the deployment said no" are different
+    // facts, and the judge reading this ledger has to be able to tell them apart.
+    expect((await ledger())[0]!.corroborated).toBeNull();
+  });
+
+  it('records it on a row no finding was injected for', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl);
+    await runScript(websearchHookScript(dataDir), webSearch('zod parse throws here'));
+    const row = (await ledger())[0]!;
+    expect(row).toMatchObject({ action: 'skipped', reason: 'miss' });
+    expect(row).toHaveProperty('corroborated', null);
+    expect(row).toHaveProperty('confidence', null);
+  });
+
   it('ignores a confidence value it does not know', async () => {
     const { baseUrl } = await serve(echo({ confidence: 'certain' }));
     await pushOn(baseUrl);
