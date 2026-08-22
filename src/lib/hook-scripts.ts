@@ -38,10 +38,16 @@ import {
   WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
+// The push core, embedded in the three scripts here that grew a push arm (the
+// research arm denies, the dispatch arm caches, and both need the shared
+// scoring). lib/push-scripts.ts imports the prelude from this file in turn, so
+// the two modules are a CYCLE; it is safe because neither one calls into the
+// other at module scope, only from inside a generator that runs later.
+import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 19;
+export const HOOK_SCRIPT_VERSION = 20;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -110,6 +116,22 @@ export const PRIMER_TEXT =
   'Tenjin knowledge marketplace is installed. Before spending real effort on a research question that is public, durable, and costly to reproduce (version-specific gotchas, integration probes, dated operational checks, maintained comparisons), state it as one line and run `tenjin search "<question>"` first: a hit costs cents and settles it, a miss takes seconds. When enumerating research sources in a subagent or research prompt, include Tenjin. Skip it for private-repo questions, live data, and anything the docs answer in a line.';
 
 /**
+ * The capture ask, raised at Stop once per session that did any research.
+ *
+ * It is the sidecar's only WRITE surface: the loop is capture → team shelf →
+ * push, and nothing reaches the shelf unless the agent is asked while its own
+ * context still holds what it learned. A transcript re-read recovers less, and
+ * the publish reflex on its own recovered none of it
+ * (2026-08-19-agent-spend-ceiling §3c: 0/6 in-session, 6/6 post-hoc).
+ *
+ * TWO EXITS, both cheap, and that is what makes the block acceptable: a note, or
+ * `tenjin notes none`. Either one writes the done-marker, so the ask never comes
+ * back in this session.
+ */
+export const CAPTURE_REASON =
+  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison), save each as a note: `tenjin notes add --question "..." --applies-to pkg@ver --body "..."`. If nothing durable was learned, run `tenjin notes none`. Then stop again.';
+
+/**
  * The dispatch hook's bounds. The slice is a PRIVACY bound, not a display one: a
  * subagent prompt is the most sensitive payload any of these hooks sees, so no
  * more of it than this leaves the machine, whatever the server would accept.
@@ -147,12 +169,16 @@ import {
   mkdirSync,
   rmSync,
   statSync,
+  readdirSync,
   openSync,
   readSync,
   closeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+// For the SessionStart hook's detached \`git pull\` of the team shelf, and for
+// nothing else. Importing a builtin costs a script that never spawns nothing.
+import { spawn } from 'node:child_process';
 
 const DATA_DIR = ${JSON.stringify(dataDir)};
 const IS_HERMES = process.argv.includes('--hermes');
@@ -327,6 +353,7 @@ function readConfig() {
   const nag = hooks.stopNag;
   const primer = hooks.sessionPrimer;
   const push = hooks.push;
+  const capture = hooks.capture;
   // env over file, matching lib/config.ts's resolvePublishMode; an unrecognized
   // value in either place falls through to the shipped default rather than
   // failing, exactly like every other key here.
@@ -341,6 +368,10 @@ function readConfig() {
     // The push experiment (docs/push.md). OFF unless the operator ran
     // \`tenjin push on\`: every push arm checks this before it spends a request.
     push: push === 'on' ? 'on' : 'off',
+    // The Stop hook's capture ask. OFF unless the operator chose one of the two
+    // forms: \`block\` ends the turn with a decision the agent has to answer,
+    // \`nudge\` says the same thing as context and lets the turn end.
+    capture: capture === 'block' || capture === 'nudge' ? capture : 'off',
     publishMode: isPublishMode(publishMode) ? publishMode : 'review',
     envPinned,
     baseUrl,
@@ -541,8 +572,15 @@ function composedUserAgent() {
  * Everything a hook that ASKS the marketplace needs. The WebSearch and dispatch
  * hooks differ only in the question they build, the source they record it under,
  * and whether they may speak. `hookLabel` names the lock's meta holder.
+ *
+ * `searchTimeoutMs` is the fetch budget. It is a parameter for exactly one
+ * caller, the prompt arm, which sits between a human pressing enter and the
+ * model starting to answer and so cannot afford the default.
  */
-export function marketplaceSource(hookLabel: string): string {
+export function marketplaceSource(
+  hookLabel: string,
+  searchTimeoutMs: number = SEARCH_TIMEOUT_MS,
+): string {
   return `
 const LOCK_PATH = SEARCH_STORE + '.lock';
 
@@ -692,7 +730,7 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}) {
       query: question,
       limit,
     }),
-    signal: AbortSignal.timeout(${SEARCH_TIMEOUT_MS}),
+    signal: AbortSignal.timeout(${searchTimeoutMs}),
   });
   if (res.status !== 200) return null;
   const body = await res.json();
@@ -825,33 +863,91 @@ function hintLines(stored) {
 }
 
 /**
- * The PreToolUse/WebSearch hook. It asks the marketplace the same question the
- * agent is about to ask the web, and mentions a tested answer when one exists.
+ * The PreToolUse/WebSearch hook, which `tenjin push on` turns into the sidecar's
+ * RESEARCH arm. It asks the marketplace the same question the agent is about to
+ * ask the web, and mentions a tested answer when one exists.
  *
- * It NEVER decides permission: no `permissionDecision` is emitted, so the
- * WebSearch always proceeds and the hint rides alongside the result. A MISS, a
- * timeout, a dead network, a malformed payload, and a `searchMode: off` config
- * are all the same outcome here: exit 0 with nothing on stdout.
+ * With push OFF it is what it always was: no `permissionDecision` is emitted, so
+ * the WebSearch always proceeds and the hint rides alongside the result, and a
+ * WebFetch is ignored outright. A MISS, a timeout, a dead network, a malformed
+ * payload, and a `searchMode: off` config are all the same outcome: exit 0 with
+ * nothing on stdout.
+ *
+ * With push ON it may DENY (abort-and-answer) on a strong, free hit whose body
+ * it holds, and it also reads WebFetch, whose url path and prompt are the
+ * question the agent is about to send a page to answer. Hermes keeps the old
+ * behavior exactly: it has no deny, and no WebFetch tool of this shape.
  */
 export function websearchHookScript(dataDir: string): string {
-  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('websearch')}
+  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('websearch')}${pushSource()}
+/**
+ * The question a WebFetch is really asking: the url's own words (path segments
+ * and query VALUES, which is where a docs site keeps the topic) plus the prompt
+ * the agent attached. Scrubbed like every other push query, so the host itself
+ * never leaves the machine — only the shape of what was wanted from it.
+ */
+function fetchQuestion(toolInput) {
+  const raw = typeof toolInput.url === 'string' ? toolInput.url : '';
+  let words = '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    // Segments become WORDS before anything else looks at them: left as a path
+    // they are exactly the shape \`scrub\` strips, and the topic would leave with
+    // the address. Splitting them first keeps the topic and loses the path.
+    const path = decodeURIComponent(url.pathname)
+      .replace(/\\.(html?|php|aspx?|md|txt)$/i, '')
+      .replace(/[/_]+/g, ' ');
+    const params = [...url.searchParams.values()].join(' ');
+    words = (path + ' ' + params).replace(/[^A-Za-z0-9@._-]+/g, ' ');
+  } catch {
+    return '';
+  }
+  const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.slice(0, 400) : '';
+  return clean(scrub(words + ' ' + prompt), ${QUESTION_MAX});
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
-  // Defense in depth behind the settings.json matcher: this hook is for WebSearch
-  // and nothing else, and it must never fire on WebFetch.
+  // Defense in depth behind the settings.json matcher: these tools and nothing
+  // else. WebFetch is read only by the push arm, so a machine that never ran
+  // \`tenjin push on\` behaves exactly as it did before.
   const expectedTool = IS_HERMES ? 'web_search' : 'WebSearch';
-  if (input.tool_name !== expectedTool) return quiet();
+  const isSearch = input.tool_name === expectedTool;
+  const isFetch = !IS_HERMES && input.tool_name === 'WebFetch';
+  if (!isSearch && !isFetch) return quiet();
   const toolInput = IS_HERMES
     ? (isRecord(input.args) ? input.args : {})
     : (isRecord(input.tool_input) ? input.tool_input : {});
-  const question = typeof toolInput.query === 'string' ? toolInput.query.trim() : '';
+  const config = readConfig();
+  const push = !IS_HERMES && config.push === 'on';
+  if (isFetch && !push) return quiet();
+  const question = isFetch
+    ? fetchQuestion(toolInput)
+    : (typeof toolInput.query === 'string' ? toolInput.query.trim() : '');
   // A query over the server's cap is not truncated into a different question, it
   // is simply not looked up.
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
-  const config = readConfig();
   if (config.mode === 'off') return quiet();
+  // The push arm outranks \`remind\`, which is the standing reminder for an agent
+  // that has to ask for itself; it does not outrank \`off\`, which is the kill
+  // switch for this script whatever else is configured.
+  if (push) {
+    const decided = await pushDecide({
+      trigger: 'research',
+      event: 'PreToolUse',
+      query: question,
+      config,
+      sessionId: sessionIdOf(input),
+      mode: 'inject',
+      allowDeny: true,
+    });
+    if (decided === null) return quiet();
+    if (decided.deny === true) return emitDeny(decided.text);
+    return emit('PreToolUse', decided.text);
+  }
   if (config.mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const found = await askTenjin(question, config);
@@ -884,7 +980,7 @@ main().catch(quiet);
  * session, and a session gets a fixed number of lookups however wide it fans out.
  */
 export function dispatchHookScript(dataDir: string): string {
-  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('dispatch')}
+  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('dispatch')}${pushSource()}
 const HEALTH_PATH = join(DATA_DIR, 'hook-health.json');
 
 /** A fan-out re-dispatches near-identical prompts; case and spacing carry no
@@ -1014,6 +1110,27 @@ async function main() {
     'dispatch-hook',
   );
   if (found.decision !== 'CANDIDATES') return quiet();
+  // The subagent arm's handoff (docs/push.md T5). SubagentStart carries the agent
+  // type and nothing else, so what the subagent is being sent to find out is
+  // knowable ONLY here, seconds earlier, in the dispatch that spawned it. The
+  // judged candidate is parked in this session's push state and the first
+  // subagent to start consumes it.
+  if (config.push === 'on' && sessionId !== null) {
+    const judged = judge(question, found);
+    if (judged.top !== null) {
+      const state = loadState(sessionId);
+      state.cache = {
+        at: new Date().toISOString(),
+        query: question,
+        searchId: found.searchId,
+        top: judged.top,
+        score: judged.score,
+        second: judged.second,
+        strength: judged.strength,
+      };
+      saveState(sessionId, state);
+    }
+  }
   const lines = hintLines(found.stored);
   if (lines.length === 0) return quiet();
   // The hint lands in the PARENT's context only: tool_input is already formed, so
@@ -1025,12 +1142,46 @@ main().catch(quiet);
 `;
 }
 
-/** The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}. */
+/**
+ * The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}.
+ *
+ * It is also where the team shelf is refreshed. A session that starts is the one
+ * moment a pull is free — nothing is waiting on it — so `git pull --rebase` is
+ * spawned DETACHED and never waited on: the notes this session searches are
+ * whatever is on disk when a trigger fires, which is last session's clone at
+ * worst. Offline, unauthenticated, mid-rebase and no-clone-at-all are all the
+ * same silent outcome.
+ */
 export function sessionPrimerHookScript(dataDir: string): string {
   return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}
+const NOTES_DIR = join(DATA_DIR, 'notes');
+
+function pullTeamShelf() {
+  try {
+    statSync(join(NOTES_DIR, '.git'));
+  } catch {
+    // No clone: \`tenjin team init\` has not been run here. Nothing to pull.
+    return;
+  }
+  try {
+    const child = spawn('git', ['pull', '--rebase', '--quiet'], {
+      cwd: NOTES_DIR,
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    // No git on PATH, or a spawn this platform refused.
+  }
+}
+
 async function main() {
   // Drained even though nothing reads it: an unread stdin can block the writer.
   await readStdin();
+  // BEFORE the primer gate: the shelf is its own feature, and an operator who
+  // silenced the primer line still wants this session's notes to be current.
+  pullTeamShelf();
   if (readConfig().sessionPrimer === 'off') return quiet();
   // fd 1 directly, not emit(), which would append the update signal.
   try {
@@ -1059,6 +1210,11 @@ main().catch(quiet);
  * a question the marketplace could not answer is reminded to publish it back
  * while the work is still in the session.
  *
+ * It is ALSO the sidecar's capture surface (`hooks.capture`, {@link
+ * CAPTURE_REASON}): a session that did research is asked once, at the end, to
+ * write down what it settled. `block` is the only output in this file that ends
+ * a turn, and it is spent on the one thing the loop cannot recover later.
+ *
  * TWO KINDS OF OPEN LOOP, and they are not worth the same attention. A `cli` MISS
  * is a question the agent decided was worth looking up and nobody had answered:
  * each one gets its own line naming the searchId. A `websearch-hook` MISS rode
@@ -1086,6 +1242,115 @@ main().catch(quiet);
 export function stopHookScript(dataDir: string): string {
   return `${prelude(dataDir, STOP_WATCHDOG_MS)}
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
+const PUSH_DIR = join(DATA_DIR, ${JSON.stringify(PUSH_DIR_NAME)});
+const LEDGER_PATH = join(DATA_DIR, ${JSON.stringify(PUSH_LEDGER_FILE)});
+const LEDGER_TAIL_BYTES = 262144;
+const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
+
+/** A session id as a filename component. */
+function markerPath(name, sessionId) {
+  return join(PUSH_DIR, name + '-' + sessionId.replace(/[^A-Za-z0-9_-]/g, '_'));
+}
+
+function markerExists(name, sessionId) {
+  try {
+    statSync(markerPath(name, sessionId));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Did this session do any research at all? Two signals, either of which is
+ * enough: a search recorded under this session (the CLI's own \`tenjin search\`,
+ * or any hook that asked), or a push-ledger row for it. A session that only
+ * edited files is not asked for notes, because it has nothing to write down.
+ *
+ * The ledger is read from its TAIL, the same bound and reason as the push core's
+ * own reader (lib/push-scripts.ts): a file that has grown for months must not be
+ * parsed whole at the end of every turn. Duplicated rather than shared because
+ * this script embeds no push core; it only reads one field.
+ */
+function didResearch(sessionId, searches) {
+  for (const s of searches) {
+    if (isRecord(s) && s.sessionId === sessionId) return true;
+  }
+  let text;
+  try {
+    const size = statSync(LEDGER_PATH).size;
+    if (size <= LEDGER_TAIL_BYTES) {
+      text = readFileSync(LEDGER_PATH, 'utf8');
+    } else {
+      const fd = openSync(LEDGER_PATH, 'r');
+      try {
+        const buf = Buffer.alloc(LEDGER_TAIL_BYTES);
+        readSync(fd, buf, 0, LEDGER_TAIL_BYTES, size - LEDGER_TAIL_BYTES);
+        text = buf.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+      text = text.slice(text.indexOf('\\n') + 1);
+    }
+  } catch {
+    return false;
+  }
+  for (const line of text.split('\\n')) {
+    if (line.length === 0) continue;
+    try {
+      const row = JSON.parse(line);
+      if (isRecord(row) && row.session === sessionId) return true;
+    } catch {
+      // A torn or foreign line is skipped, never fatal.
+    }
+  }
+  return false;
+}
+
+/**
+ * Should this turn end ask for notes, and how? Null is the common answer.
+ *
+ * ASKED-ONCE IS RECORDED BEFORE THE ASK, like the nag record below and for the
+ * same reason: an ask we cannot mark is an ask that repeats at every turn end,
+ * and a block that repeats is a session the operator cannot leave. \`notes add\`
+ * and \`notes none\` write the done-marker; \`capture-pending\` is how they learn
+ * which session to write it for when the harness exported no id.
+ */
+function captureAsk(config, sessionId, searches) {
+  if (config.capture === 'off') return null;
+  // No session id means no marker to write and no way to clear it: the ask would
+  // fire at every turn end forever. The nag arm degrades to machine-global here;
+  // this one degrades to silence, because it is the one that can block.
+  if (sessionId === null) return null;
+  if (markerExists('capture-done', sessionId)) return null;
+  if (markerExists('capture-asked', sessionId)) return null;
+  if (!didResearch(sessionId, searches)) return null;
+  try {
+    mkdirSync(PUSH_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(markerPath('capture-asked', sessionId), new Date().toISOString(), {
+      mode: 0o600,
+    });
+    writeFileSync(join(PUSH_DIR, 'capture-pending'), sessionId, { mode: 0o600 });
+  } catch {
+    // Unwritable state directory: ask anyway, once, and accept that the marker
+    // \`notes none\` writes may be the only one either side manages.
+  }
+  return config.capture;
+}
+
+/**
+ * The block, and NOTHING ELSE on stdout: this output is a control decision, so
+ * the update line and the hint block that \`emit\` would append are both left
+ * out. Claude Code shows \`reason\` to the model and lets it continue.
+ */
+function emitBlock(reason) {
+  try {
+    writeFileSync(1, JSON.stringify({ decision: 'block', reason }));
+  } catch {
+    // A closed or full stdout is not this hook's problem to report.
+  }
+  process.exit(0);
+}
 
 /** The string-valued members of a record, dropping anything else. */
 function stampsOf(value) {
@@ -1206,7 +1471,18 @@ async function main() {
     // Unparseable stdin: fall back to machine-global behavior.
   }
   const config = readConfig();
-  if (config.stopNag === 'off') return quiet();
+  const searches = loadSearches();
+  // FIRST, because a block ends the turn and everything below it is a reminder
+  // that will still be there next time. \`nudge\` says the same words as context
+  // and rides along with whatever else this turn had to say.
+  const ask = captureAsk(config, sessionId, searches);
+  if (ask === 'block') emitBlock(CAPTURE_REASON);
+  const nudge = ask === 'nudge' ? CAPTURE_REASON : null;
+
+  if (config.stopNag === 'off') {
+    if (nudge !== null) emit('Stop', nudge);
+    return quiet();
+  }
   // The mode the next publish IN THIS DIRECTORY would actually run under. The
   // Stop hook's cwd IS the session's working directory, so it is the place that
   // publish runs. Precedence follows lib/config.ts: an env var outranks the
@@ -1214,7 +1490,6 @@ async function main() {
   const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
   const publishMode = project === null ? config.publishMode : project;
 
-  const searches = loadSearches();
   const now = Date.now();
   const { nagged, sessions } = loadNags();
 
@@ -1257,7 +1532,10 @@ async function main() {
     }
   }
   const surfaced = strong.concat(weak);
-  if (surfaced.length === 0) return quiet();
+  if (surfaced.length === 0) {
+    if (nudge !== null) emit('Stop', nudge);
+    return quiet();
+  }
 
   const stamp = new Date(now).toISOString();
   for (const s of surfaced) nagged[s.searchId] = stamp;
@@ -1279,6 +1557,7 @@ async function main() {
   const lines = [modeLine(publishMode)];
   for (const s of strong) lines.push(strongLine(s));
   if (weak.length > 0) lines.push(weakLine(weak));
+  if (nudge !== null) lines.push(nudge);
   emit('Stop', lines.join('\\n'));
 }
 

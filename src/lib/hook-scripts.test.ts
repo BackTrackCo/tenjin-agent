@@ -17,6 +17,12 @@ import {
   websearchHookScript,
 } from './hook-scripts';
 import {
+  pushContextHookScript,
+  pushFailureHookScript,
+  pushPromptHookScript,
+  pushSubagentHookScript,
+} from './push-scripts';
+import {
   CALLER_USER_AGENT_ENV,
   TENJIN_COMMENT,
   TENJIN_PRODUCT_NAME,
@@ -208,25 +214,36 @@ function injected(run: HookRun): string | null {
 describe('HOOK_SCRIPT_VERSION', () => {
   // Fixed, because DATA_DIR is substituted into every script.
   const PIN_DIR = '/tmp/tenjin-hook-version-pin';
+  // The push arms are pinned here too, and by the SAME number: they embed the
+  // same prelude and the same core, so a change to either drifts scripts on both
+  // sides of the split and one version stamp is what the installer rewrites on.
   const scripts = () => ({
     websearch: websearchHookScript(PIN_DIR),
     dispatch: dispatchHookScript(PIN_DIR),
     sessionPrimer: sessionPrimerHookScript(PIN_DIR),
     stop: stopHookScript(PIN_DIR),
+    pushPrompt: pushPromptHookScript(PIN_DIR),
+    pushFailure: pushFailureHookScript(PIN_DIR),
+    pushSubagent: pushSubagentHookScript(PIN_DIR),
+    pushContext: pushContextHookScript(PIN_DIR),
   });
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
   it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(19);
+    expect(HOOK_SCRIPT_VERSION).toBe(20);
     const digests = Object.fromEntries(
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: 'f91f571970c2c079c16063522c4732dc',
-      dispatch: 'c41010c09b5496db673b807b628cef81',
-      sessionPrimer: '59e806e124295b57165e013fc4df0081',
-      stop: 'd13e469ac6e3e53aeab2fb1835abe857',
+      websearch: '1a131f664cc1bc76cc7bb328e65da3db',
+      dispatch: '4babfa6b4fb84284e6d1801ea9ff8d33',
+      sessionPrimer: '7d4f7134ecabc6c6008befb495c20951',
+      stop: '23c85920bfc0dbbb41af83aaec88cead',
+      pushPrompt: '446d7f540aa76e006eb6f758894766b3',
+      pushFailure: '65360a704cd9d45a18b3c4f7f0147ebb',
+      pushSubagent: 'ad31003de50811ae6dfe37b246d173aa',
+      pushContext: 'ec1fed04a77630780ea3991f1c93f8a3',
     });
   });
 
