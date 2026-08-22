@@ -118,12 +118,34 @@ async function resolveBody(args: NotesAddArgs, deps: NotesAddDeps): Promise<stri
  *
  * A refusal, never a redaction: rewriting somebody's note behind their back
  * would leave them believing they published something they did not.
+ *
+ * Best-effort, and only that. It catches the shapes that actually leak in
+ * write-ups; it is not a proof of absence, and a note that passes is not
+ * certified clean.
  */
 const SECRET_RE =
   /(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{16,}|\bgh[oprsu]_[A-Za-z0-9]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bglpat-[A-Za-z0-9_-]{16,}|\bA(?:KIA|SIA)[0-9A-Z]{16}\b|\bxox[baprse]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|\b(?:password|passwd|secret|api[_-]?key|apikey|token)\s*[=:]\s*\S{8,}|:\/\/[^\s:@/]+:[^\s@/]+@)/i;
 
+/**
+ * Screaming-snake env names, which the case-insensitive class above misses:
+ * `_` is a word character, so `\b(?:secret)` never fires inside
+ * `AWS_SECRET_ACCESS_KEY`. Case-sensitive on purpose — lowercase prose
+ * ("the secret access key was wrong") is not an assignment.
+ */
+const ENV_SECRET_RE =
+  /\b[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY)[A-Z0-9_]*\s*[=:]\s*\S{8,}/;
+
+/**
+ * The remedy the refusal advises must not re-trip the refusal. `<REDACTED>` is
+ * `\S{8,}`, so `password=<REDACTED>` matches the generic assignment branch and
+ * the user who did exactly as they were told is refused again, with the same
+ * advice. Blank the placeholders out before scanning.
+ */
+const PLACEHOLDER_RE = /<REDACTED>|\[REDACTED\]|\bREDACTED\b|\*{3,}|x{8,}/gi;
+
 function rejectSecrets(text: string): void {
-  if (!SECRET_RE.test(text)) return;
+  const scanned = text.replace(PLACEHOLDER_RE, ' ');
+  if (!SECRET_RE.test(scanned) && !ENV_SECRET_RE.test(scanned)) return;
   throw new CliError('USAGE', 'That note looks like it contains a credential.', {
     fix: 'A note is committed and pushed to the shared team repo. Remove the secret (or write <REDACTED> in its place) and retry.',
   });

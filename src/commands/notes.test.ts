@@ -73,6 +73,34 @@ describe('runNotesAdd', () => {
     );
   });
 
+  /**
+   * The refusal names `<REDACTED>` as the remedy. Following it must not land the
+   * writer back in the same refusal with the same advice.
+   */
+  it.each([
+    [
+      'a redacted connection string',
+      'use DATABASE_URL=postgres://prod:<REDACTED>@ep-x.neon.tech/main',
+    ],
+    ['a redacted assignment', 'set api_key: <REDACTED> in the env file'],
+    ['a bracket placeholder', 'set OPENAI_API_KEY=[REDACTED] before running it'],
+    ['a starred placeholder', 'the header was authorization: ******** all along'],
+  ])('accepts %s, the remedy it advises', async (_label, body) => {
+    const res = await runNotesAdd({ question: 'q', body }, makeCtx(), { env: {} });
+    expect(res.humanLines?.[0]).toContain('Saved note');
+  });
+
+  /** `_` is a word character, so `\bsecret` never fires inside a screaming-snake name. */
+  it.each([
+    ['an aws secret', 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY fixed it'],
+    ['a prefixed token', 'export CIRCLE_CI_TOKEN=9fj3ksla02mfk3zz and retry'],
+    ['a suffixed api key', 'STRIPE_API_KEY_LIVE: 9fj3ksla02mfk3zz was the wrong one'],
+  ])('refuses %s in a screaming-snake env name', async (_label, body) => {
+    await expect(runNotesAdd({ question: 'q', body }, makeCtx(), { env: {} })).rejects.toThrow(
+      /credential/,
+    );
+  });
+
   it('lets an ordinary note through', async () => {
     const res = await runNotesAdd(
       {
