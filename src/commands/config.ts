@@ -23,6 +23,8 @@ import {
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
+  parseCaptureModeFlag,
+  parsePushModeFlag,
   parseSearchHookModeFlag,
   parseSessionPrimerFlag,
   parseStopNagFlag,
@@ -30,14 +32,18 @@ import {
   resolveSettings,
 } from '../lib/config';
 import type {
+  CaptureMode,
   EffectiveSettings,
   HooksConfigKey,
   PartialConfig,
   Provenance,
   PublishConfigKey,
   PublishMode,
+  PushMode,
   ScalarConfigKey,
   SearchHookMode,
+  SessionPrimerMode,
+  StopNagMode,
   UpdateConfigKey,
 } from '../lib/config';
 import {
@@ -126,6 +132,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'hooks.sessionPrimer':
     'one-paragraph search-first primer at session start: on=print it, off=print nothing',
+  'hooks.push':
+    'the push experiment (docs/push.md): on=wire the prompt/failure/subagent/context hooks (`tenjin install`), off=any wired scripts stay but are inert',
+  'hooks.capture':
+    'end-of-session save prompt for durable findings: block=Stop hook blocks once until `tenjin notes add|none`, nudge=same text with no block, off=silent',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
@@ -447,13 +457,21 @@ async function setHooksKey(
       ? 'searchMode'
       : key === 'hooks.stopNag'
         ? 'stopNag'
-        : 'sessionPrimer';
-  const parsed =
+        : key === 'hooks.sessionPrimer'
+          ? 'sessionPrimer'
+          : key === 'hooks.push'
+            ? 'push'
+            : 'capture';
+  const parsed: SearchHookMode | StopNagMode | SessionPrimerMode | PushMode | CaptureMode =
     key === 'hooks.searchMode'
       ? parseSearchHookModeFlag(value, key)
       : key === 'hooks.stopNag'
         ? parseStopNagFlag(value, key)
-        : parseSessionPrimerFlag(value, key);
+        : key === 'hooks.sessionPrimer'
+          ? parseSessionPrimerFlag(value, key)
+          : key === 'hooks.push'
+            ? parsePushModeFlag(value, key)
+            : parseCaptureModeFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
@@ -461,10 +479,15 @@ async function setHooksKey(
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   // ONE honest line, not a nag loop: the value is stored either way, and the
   // operator is told the running script predates it rather than left believing a
-  // setting took that did not.
-  const current = await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir);
+  // setting took that did not. Only `hooks.stopNag` has a value an older script
+  // misreads (`deliberate-only`); the other keys' scripts read every value they
+  // could ever be set to.
+  const current =
+    key === 'hooks.stopNag'
+      ? await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir)
+      : true;
   const stale =
-    parsed === 'deliberate-only' && !current
+    key === 'hooks.stopNag' && parsed === 'deliberate-only' && !current
       ? `The installed Stop hook predates ${JSON.stringify(parsed)} and will keep treating it as "on". Run \`tenjin install\` to update it.`
       : undefined;
   return {
@@ -527,6 +550,17 @@ export async function persistSearchHookMode(dir: string, mode: SearchHookMode): 
   await persist(dir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, searchMode: mode },
+  }));
+}
+
+/**
+ * Persist `hooks.push` through the same locked read-modify-write every `config
+ * set` uses. Used by `tenjin push on|off`, mirroring `persistPublishMode`.
+ */
+export async function persistPushMode(dir: string, mode: PushMode): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, push: mode },
   }));
 }
 
@@ -597,7 +631,11 @@ function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): R
       ? settings.hooksSearchMode
       : key === 'hooks.stopNag'
         ? settings.hooksStopNag
-        : settings.hooksSessionPrimer;
+        : key === 'hooks.sessionPrimer'
+          ? settings.hooksSessionPrimer
+          : key === 'hooks.push'
+            ? settings.hooksPush
+            : settings.hooksCapture;
   return { value: resolved.value, source: resolved.source };
 }
 
