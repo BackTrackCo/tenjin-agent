@@ -25,11 +25,15 @@ import { trimSlash } from './url';
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
-/** The server's `limit` ceiling. Exported because the truncation advice in
- *  `search` has to name it: past search v2 the response budget scales with the
- *  candidates returned, so a truncated page is recovered by asking for MORE, and
- *  this is the value to ask for. One definition, so the cap the CLI enforces and
- *  the number it tells the operator to retry with cannot drift apart. */
+/** The DECISION view's `limit` ceiling. The v3 schema admits `limit` up to 100
+ *  across views and the server clamps per view (tenjin lib/search/understand.ts
+ *  VIEW_LIMITS: decision 10, display 100, suggest 10); the CLI only ever sends
+ *  `view: "decision"`, so 10 is the real bound and asking for more would be
+ *  silently clamped back to it. Exported because the truncation advice in
+ *  `search` has to name it: the response budget scales with the items returned,
+ *  so a truncated page is recovered by asking for MORE, and this is the value
+ *  to ask for. One definition, so the cap the CLI enforces and the number it
+ *  tells the operator to retry with cannot drift apart. */
 export const MAX_LIMIT = 10;
 
 /** Client-side search request (mirrors the server lookupRequestSchema bounds
@@ -268,13 +272,21 @@ export async function postSearch(
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   if (res.status !== 200) {
     // A deployment that predates v3 has no route here AT ALL, so it answers 404
-    // from the Next router rather than anything contract-shaped. That is now the
-    // arm that fires in practice against a stale server, and without it the
-    // operator is told to "retry" a path that will never exist on that deploy.
+    // from the Next router rather than anything contract-shaped. That is the arm
+    // that fires in practice against a stale server, and without it the operator
+    // is told to "retry" a path that will never exist on that deploy. A 404 is
+    // equally what a wrong base URL path or a gateway that does not route
+    // POST /api/search answers, so the remedy names both causes rather than
+    // asserting the server's age.
     if (res.status === 404) {
-      throw outdatedServerError(`${url} is not deployed: this server predates search v3.`, {
-        details: res.json,
-      });
+      throw new CliError(
+        'CONTRACT_MISMATCH',
+        `${url} answered 404: either this server predates search v3, or the configured base URL does not route POST /api/search.`,
+        {
+          fix: 'Check the base URL (`tenjin config get baseUrl`; `tenjin doctor` probes it), then point it at an updated deployment or install an older tenjin-cli.',
+          details: res.json,
+        },
+      );
     }
     // The REQUEST gate: a server that HAS the route but pins an older
     // `schemaVersion` refuses the body before the handler runs. The v2 alias
