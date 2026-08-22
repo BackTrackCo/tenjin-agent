@@ -202,16 +202,58 @@ export async function addNote(dataDir: string, input: AddNoteInput): Promise<Not
 /** One note by id, read directly (no directory scan), or null if it does not
  *  exist or fails to parse. */
 export async function getNote(dataDir: string, id: string): Promise<Note | null> {
+  const read = await readNote(dataDir, id);
+  return read.kind === 'ok' ? read.note : null;
+}
+
+/** Why a note could not be produced — everything {@link getNote} collapses into
+ *  null. `absent` is the ordinary answer; the rest are a file that IS there. */
+export type NoteRead =
+  | { kind: 'ok'; note: Note }
+  | { kind: 'absent' }
+  | { kind: 'unparseable'; reason: string }
+  | { kind: 'not-a-file' }
+  | { kind: 'oversized'; size: number }
+  | { kind: 'unreadable'; reason: string };
+
+/**
+ * One note by id, read directly (no directory scan), WITH the reason when there
+ * is no note to return.
+ *
+ * "No note <id>." is the right thing to say about a note that is not there and
+ * a lie about one that is: a file a hand-edit or a half-finished rebase left
+ * unparseable reported as missing, and vanished from `list` too, so an operator
+ * looking straight at the file on disk was told it did not exist. Callers that
+ * only need the note keep using {@link getNote}; the one that has to explain
+ * itself to a person uses this.
+ */
+export async function readNote(dataDir: string, id: string): Promise<NoteRead> {
+  const path = join(noteFilesDir(dataDir), `${id}.md`);
+  let entry;
   try {
-    const path = join(noteFilesDir(dataDir), `${id}.md`);
     // The same lstat gate `listNotes` applies, for the same reason: a pulled
     // repo can carry `<id>.md` as a symlink to anywhere on this machine.
-    const entry = await lstat(path);
-    if (!entry.isFile() || entry.size > NOTES_MAX_BYTES) return null;
-    return parseNote(id, await readFile(path, 'utf8'));
-  } catch {
-    return null;
+    entry = await lstat(path);
+  } catch (err) {
+    return isEnoent(err) ? { kind: 'absent' } : { kind: 'unreadable', reason: reasonOf(err) };
   }
+  if (!entry.isFile()) return { kind: 'not-a-file' };
+  if (entry.size > NOTES_MAX_BYTES) return { kind: 'oversized', size: entry.size };
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch (err) {
+    return { kind: 'unreadable', reason: reasonOf(err) };
+  }
+  try {
+    return { kind: 'ok', note: parseNote(id, raw) };
+  } catch (err) {
+    return { kind: 'unparseable', reason: reasonOf(err) };
+  }
+}
+
+function reasonOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

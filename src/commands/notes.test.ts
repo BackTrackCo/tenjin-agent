@@ -204,6 +204,33 @@ describe('runNotesList / runNotesShow / runNotesSearch', () => {
     await expect(runNotesShow({ id: '20260101-zzzzzz' }, makeCtx())).rejects.toThrow(CliError);
   });
 
+  /**
+   * "No note <id>." is true of a note that is not there and a lie about one that
+   * is. An unparseable file — a hand-edit, a half-finished rebase — is also
+   * silently dropped from `list`, so the two together told an operator looking
+   * straight at the file that it did not exist.
+   */
+  it('says a corrupt note is corrupt, not missing', async () => {
+    const dir = noteFilesDir(dataDir);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, '20260101-abcdef.md'), 'no front matter at all\n');
+
+    const absent = await runNotesShow({ id: '20260101-zzzzzz' }, makeCtx()).catch(
+      (e: unknown) => e as CliError,
+    );
+    expect(absent.code).toBe('RESOURCE_NOT_FOUND');
+    expect(absent.message).toContain('No note');
+
+    const corrupt = await runNotesShow({ id: '20260101-abcdef' }, makeCtx()).catch(
+      (e: unknown) => e as CliError,
+    );
+    expect(corrupt.code).not.toBe('RESOURCE_NOT_FOUND');
+    expect(corrupt.message).toContain('exists');
+    expect(corrupt.message).toContain('does not parse');
+    // And it names the file, because `notes list` will not.
+    expect(corrupt.fix).toContain('20260101-abcdef.md');
+  });
+
   it('preserves multi-line bodies across separate humanLines entries', async () => {
     const note = await addNote(dataDir, { question: 'q', body: 'line one\nline two' });
     const shown = await runNotesShow({ id: note.id }, makeCtx());

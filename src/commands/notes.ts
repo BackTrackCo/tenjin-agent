@@ -1,16 +1,20 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { userInfo } from 'node:os';
 import { CliError } from '../lib/errors';
 import {
   NOTE_ID_RE,
+  NOTES_MAX_BYTES,
   addNote,
   commitAndPushNote,
-  getNote,
   listNotes,
+  noteFilesDir,
+  readNote,
   removeNote,
   searchNotes,
   writeCaptureMarker,
   type Note,
+  type NoteRead,
   type NoteSearchResult,
 } from '../lib/notes';
 import { sanitizeForTerminal } from '../lib/output';
@@ -211,8 +215,12 @@ export async function runNotesShow(
   ctx: CommandContext,
 ): Promise<CommandResult> {
   assertNoteId(args.id);
-  const note = await getNote(ctx.dataDir, args.id);
-  if (note === null) throw notFound(args.id);
+  const read = await readNote(ctx.dataDir, args.id);
+  // A file that IS there is never reported as missing: "No note <id>." sends an
+  // operator to `notes list`, where an unparseable note is also absent, and the
+  // two silences together say the file they are looking at does not exist.
+  if (read.kind !== 'ok') throw describeUnreadable(ctx.dataDir, args.id, read);
+  const note = read.note;
   const humanLines = [
     `${note.id}  "${sanitizeForTerminal(note.question)}"`,
     ...(note.appliesTo.length > 0 ? [`applies_to: ${note.appliesTo.join(', ')}`] : []),
@@ -304,4 +312,42 @@ function notFound(id: string): CliError {
   return new CliError('RESOURCE_NOT_FOUND', `No note ${id}.`, {
     fix: 'Run `tenjin notes list` to see what exists.',
   });
+}
+
+/** The refusal for a note that could not be produced, saying WHICH kind of
+ *  nothing it is. Only `absent` is "no note"; every other state is a file on
+ *  disk that `list` also drops, so this is the only place a person can learn it
+ *  is there at all. */
+function describeUnreadable(
+  dataDir: string,
+  id: string,
+  read: Exclude<NoteRead, { kind: 'ok' }>,
+): CliError {
+  const path = join(noteFilesDir(dataDir), `${id}.md`);
+  switch (read.kind) {
+    case 'absent':
+      return notFound(id);
+    case 'unparseable':
+      return new CliError(
+        'INTERNAL',
+        `Note ${id} exists but its front matter does not parse (${read.reason}).`,
+        {
+          fix: `Fix or delete ${path}; \`tenjin notes list\` skips it silently until you do.`,
+        },
+      );
+    case 'not-a-file':
+      return new CliError('INTERNAL', `Note ${id} is not a regular file, so it was not read.`, {
+        fix: `Notes are plain files this CLI wrote; ${path} is something else (a symlink or a directory). Remove it.`,
+      });
+    case 'oversized':
+      return new CliError(
+        'INTERNAL',
+        `Note ${id} is ${read.size} bytes, past the ${NOTES_MAX_BYTES}-byte cap, so it was not read.`,
+        { fix: `Split or delete ${path}.` },
+      );
+    case 'unreadable':
+      return new CliError('INTERNAL', `Note ${id} could not be read (${read.reason}).`, {
+        fix: `Check the permissions on ${path}.`,
+      });
+  }
 }
