@@ -323,6 +323,54 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect((await ledger())[0]).toMatchObject({ action: 'injected', form: 'short', deny: false });
   });
 
+  it("demotes a strong hit the server calls 'low', so it never denies on one", async () => {
+    const { baseUrl } = await serve(echo({ confidence: 'low' }));
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(denied(run)).toBeNull();
+    expect(injected(run)).toContain('Read it free: tenjin read');
+    expect((await ledger())[0]).toMatchObject({
+      strength: 'moderate',
+      confidence: 'low',
+      form: 'short',
+      deny: false,
+    });
+  });
+
+  it("promotes a moderate hit the server calls 'high' to a deny", async () => {
+    // Three of the query's seven content words on the title: 0.43, moderate on
+    // its own, and exactly the PUSH_MIN_HITS floor. Strong only because the
+    // server vouches. The filler shares nothing, so the margin is the score.
+    const { baseUrl } = await serve(echo({ title: 'zod resolver parse', confidence: 'high' }));
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain lately'),
+    );
+    expect(denied(run)).toContain(BODY_MD);
+    expect((await ledger())[0]).toMatchObject({
+      strength: 'strong',
+      confidence: 'high',
+      deny: true,
+    });
+  });
+
+  it('ignores a confidence value it does not know', async () => {
+    const { baseUrl } = await serve(echo({ confidence: 'certain' }));
+    await pushOn(baseUrl);
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(denied(run)).toContain(BODY_MD);
+    expect((await ledger())[0]).toMatchObject({ strength: 'strong', confidence: null });
+  });
+
   it('reads a WebFetch as the question the page was meant to answer', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);

@@ -47,7 +47,7 @@ import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 22;
+export const HOOK_SCRIPT_VERSION = 23;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -806,6 +806,12 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}) {
       price: c.price,
       excerpt: typeof c.excerpt === 'string' ? clean(c.excerpt, 400) : '',
       handle: isRecord(c.creator) && typeof c.creator.handle === 'string' ? clean(c.creator.handle, 80) : '',
+      // The server's coarse match bucket (tenjin#746), when the deployment sends
+      // one. Three values, nothing else: a value outside them reads as absent.
+      confidence:
+        c.confidence === 'high' || c.confidence === 'medium' || c.confidence === 'low'
+          ? c.confidence
+          : null,
     });
   }
   // The rank-1 answer card the decision view inlines (\`inspect\`): the questions

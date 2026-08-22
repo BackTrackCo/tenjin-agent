@@ -203,7 +203,22 @@ function judge(query, found) {
   } else if (card.ratio >= PUSH_MODERATE || confirmed.ratio >= PUSH_MODERATE) {
     strength = 'moderate';
   }
-  return { top, score: round3(card.ratio), second: round3(second), strength };
+  // The server's bucket, when it sends one (tenjin#746), moves the verdict ONE
+  // step and only towards what the local words already half-support: 'high'
+  // promotes a moderate hit with enough matched words and a real rank 2 to
+  // strong; 'low' demotes a strong hit to moderate, so the deny arm never fires
+  // on a match the server itself called weak. 'medium' and absent change nothing.
+  const confidence = typeof top.confidence === 'string' ? top.confidence : null;
+  if (confidence === 'low' && strength === 'strong') strength = 'moderate';
+  if (
+    confidence === 'high' &&
+    strength === 'moderate' &&
+    found.rich.length > 1 &&
+    card.hit >= PUSH_MIN_HITS
+  ) {
+    strength = 'strong';
+  }
+  return { top, score: round3(card.ratio), second: round3(second), strength, confidence };
 }
 
 function round3(n) {
@@ -669,6 +684,7 @@ async function pushDecide(args) {
     score: j.score,
     second: j.second,
     strength: j.strength,
+    confidence: j.confidence ?? null,
   };
   if (j.top === null) {
     ledgerAppend({ ...row, action: 'skipped', reason: 'miss' });
