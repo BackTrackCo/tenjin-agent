@@ -570,11 +570,21 @@ const TEAM_OPENER =
  * Two locks, because one is cheap: the fence carries a per-injection nonce the
  * body cannot know, and any body line that looks like a fence or opens with our
  * own \`[Tenjin]\` prefix is indented so it cannot be read as either.
+ *
+ * THE READER IS A MODEL, NOT A PARSER, so "looks like a fence" is the test, not
+ * "is byte-equal to one". \`---tenjin-body abc ---\` with no space and the
+ * four-dash variants read exactly like the closing fence to the thing actually
+ * reading this, and everything after a line that reads as the close speaks in
+ * our voice. So: indent any dash-leading line that mentions tenjin at all,
+ * whatever the spacing or dash count. Indenting a real prose bullet costs a
+ * nested list item; missing one costs the boundary.
  */
 function fenceSafeBody(body) {
   return String(body)
     .split('\n')
-    .map((line) => (/^\s*(?:-{3,}\s*$|\[Tenjin\]|--- tenjin-body )/.test(line) ? '  ' + line : line))
+    .map((line) =>
+      /^\s*(?:-{3,}\s*$|\[Tenjin\]|-+[^\n]*tenjin)/i.test(line) ? '  ' + line : line,
+    )
     .join('\n');
 }
 
