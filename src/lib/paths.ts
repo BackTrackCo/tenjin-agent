@@ -60,6 +60,25 @@ export function hooksDir(dir: string = dataDir()): string {
 }
 
 /**
+ * The push experiment's decision ledger (docs/push.md): one JSON line per push
+ * arm's decision, append-only. Mirrors `PUSH_LEDGER_FILE` in lib/push-scripts.ts —
+ * kept as a literal here rather than an import, so this foundational module never
+ * pulls in the (generator-heavy) push-scripts/hook-scripts chain.
+ */
+export function pushLedgerPath(dir: string = dataDir()): string {
+  return join(dir, 'push-ledger.jsonl');
+}
+
+/**
+ * The push experiment's per-session working state and candidate cache (docs/push.md):
+ * edits seen, packages seen, error signatures seen. Mirrors `PUSH_DIR_NAME` in
+ * lib/push-scripts.ts, same reason as {@link pushLedgerPath}.
+ */
+export function pushDir(dir: string = dataDir()): string {
+  return join(dir, 'push');
+}
+
+/**
  * Which searchIds the Stop hook has already nagged about, so each open loop is
  * raised once per turn-end rather than every turn.
  *
