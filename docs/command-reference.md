@@ -300,3 +300,66 @@ Common keys:
 ## MCP
 
 `tenjin mcp` runs a local stdio MCP server over the same command cores. It exposes search, inspect, buy, outcome, publish, edit, wallet, and fund tools. The wallet stays local, and the same spend and publish gates apply.
+
+## Team notes (sidecar)
+
+A team note is a durable, reusable finding — a probe result, a version-specific gotcha, a tested workaround or comparison — written once so the team never re-discovers it. Notes are flat Markdown files with a small hand-rolled front matter, kept in a separate git repo (the "sidecar") cloned under `~/.tenjin/notes`, independent of everything else the CLI stores.
+
+```
+---
+question: "Does X do Y under Z?"
+applies_to: [pkg@1.2, product]
+scope: "where it holds"
+as_of: 2026-08-22
+author: vraspar
+source: "session:<id>" | "search:<uuid>" | ""
+visibility: team
+---
+<body markdown>
+```
+
+### `tenjin team init <git-url>`
+
+Clones `<git-url>` into the sidecar. Refuses (without touching anything) if the directory already holds a repo or other content — remove or empty it first, or use `tenjin team sync` if it is already your team's repo.
+
+### `tenjin team sync`
+
+`git pull --rebase`, then `git push`. Unlike `notes add`/`notes rm` below, a failure here is the whole point of the command and is reported as a real error, not a warning.
+
+### `tenjin notes add [file]`
+
+Saves a new note. The body comes from `file` or from `--body`, never both.
+
+| Flag                  | Effect                                                        |
+| --------------------- | ------------------------------------------------------------- |
+| `--question <q>`      | Required. What the note answers.                              |
+| `--applies-to <list>` | Comma-separated applicability tags, e.g. `pkg@1.2,product`.   |
+| `--scope <s>`         | Where the finding holds.                                      |
+| `--body <text>`       | The note body, instead of a file argument.                    |
+| `--source <s>`        | Where this came from, e.g. `session:<id>` or `search:<uuid>`. |
+
+If the sidecar is a git repo, `add` commits and pushes the change (`git add -A && git commit -m "note: <id>" && git push`), best-effort with a 10s timeout per git call: a failure here never fails the command, only prints one warning line, since the note is already saved locally either way. `add` never runs on a machine that has not run `tenjin team init` — the git step is a silent no-op there.
+
+### `tenjin notes list [--json]`
+
+Lists every note (id, question, tags, scope, provenance — not the body).
+
+### `tenjin notes show <id>`
+
+Prints one note in full, including its body.
+
+### `tenjin notes search "<query>" [--json]`
+
+Lexical search over `question + applies_to + body head (first 600 chars)`: content words (lowercased, stopwords and short tokens dropped) of the query against each note's, scored as the overlap fraction. A match at `score >= 0.5` with at least a `0.15` lead over the next-best match is `strong`; `score >= 0.25` is `moderate`. Results are ranked best first; nothing below `0.25` is returned.
+
+### `tenjin notes rm <id>`
+
+Removes a note. Same best-effort commit-and-push as `add`.
+
+### `tenjin notes none`
+
+Records that nothing durable came out of this session — the honest complement to `notes add`. Use it when the Stop hook's capture reminder fires and there is nothing worth saving.
+
+### Stop-hook capture
+
+When enabled, the Stop hook checks whether the session had a research signal (a search, or a push-hook decision) and, once per session, blocks the end of the turn with a reminder to run `notes add` for anything durable or `notes none` otherwise. `notes add`/`notes none` are what clears that reminder: either one writes a marker (`~/.tenjin/push/capture-done-<session>`) the Stop hook checks before it blocks again.
