@@ -974,6 +974,10 @@ async function main() {
       config,
       sessionId: sessionIdOf(input),
       mode: 'inject',
+      // The agent asked for this WebSearch, so the lookup is recorded as the
+      // unpushed path records it. Anything else hides every web-search MISS
+      // from the Stop reminder, the demand budget, and didResearch().
+      source: 'websearch-hook',
       allowDeny: true,
     });
     if (decided === null) return quiet();

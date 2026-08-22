@@ -575,6 +575,14 @@ function fullForm(opener, header, body) {
  * allowed to interrupt anyone. \`allowDeny\` is the research arm's alone; every
  * other arm fires beside a call that has already been made or allowed.
  *
+ * \`source\` is what a public lookup is recorded as in searches.json, and it is
+ * NOT cosmetic. The research arm stands in front of a WebSearch the agent asked
+ * for, so it records 'websearch-hook' exactly as the unpushed path did: that is
+ * the source the Stop hook's MISS reminder nags on, the demand budget counts,
+ * and didResearch() reads. Every other arm looked the query up on its own
+ * initiative, nobody asked, and it records 'push-hook' so those three never
+ * mistake a sidecar's curiosity for the agent's own research.
+ *
  * TEAM FIRST IS THE WHOLE ORDER. The public shelf does not cover what a working
  * day looks like (README v3: a framework module error matches nothing), our own
  * notes do, and a team hit costs no request, no wire, and no lookup budget — the
@@ -582,6 +590,7 @@ function fullForm(opener, header, body) {
  */
 async function pushDecide(args) {
   const { trigger, query, config, sessionId, mode, event } = args;
+  const source = typeof args.source === 'string' ? args.source : 'push-hook';
   const at = new Date().toISOString();
   const base = { at, session: sessionId, trigger, event, query: clean(query, 512) };
   const budget = pushBudget(sessionId);
@@ -648,7 +657,7 @@ async function pushDecide(args) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'no-answer' });
     return null;
   }
-  await recordSearch(found.searchId, query, found.decision, found.stored, sessionId, 'push-hook');
+  await recordSearch(found.searchId, query, found.decision, found.stored, sessionId, source);
   const j = judge(query, found);
   const row = {
     ...base,
@@ -928,6 +937,7 @@ async function main() {
     config,
     sessionId,
     mode: 'inject',
+    source: 'push-hook',
   });
   clearTimeout(overrun);
   if (decided === null) return quiet();
@@ -1062,6 +1072,7 @@ async function main() {
     config,
     sessionId,
     mode: 'inject',
+    source: 'push-hook',
   });
   if (decided === null) return quiet();
   emit(event, decided.text);
@@ -1221,6 +1232,7 @@ async function main() {
           config,
           sessionId,
           mode: 'log',
+          source: 'push-hook',
         }),
       ),
     );
@@ -1240,7 +1252,15 @@ async function main() {
     const packages = packagesInSource(fileHead(filePath)).slice(0, 3);
     const query = clean((packages.join(' ') + ' ' + name.replace(/\.[^.]+$/, '').replace(/[-_.]/g, ' ')).trim(), 300);
     if (tokens(query).size < 2) return quiet();
-    await pushDecide({ trigger: 'churn', event, query, config, sessionId, mode: 'log' });
+    await pushDecide({
+      trigger: 'churn',
+      event,
+      query,
+      config,
+      sessionId,
+      mode: 'log',
+      source: 'push-hook',
+    });
     return quiet();
   }
   quiet();

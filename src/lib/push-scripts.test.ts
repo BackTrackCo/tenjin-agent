@@ -577,6 +577,64 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(run.stdout).toBe('');
     expect((await ledger())[0]).toMatchObject({ action: 'skipped', reason: 'miss' });
   });
+
+  /**
+   * The research arm stands in FRONT of a WebSearch the agent asked for, so the
+   * lookup it makes is that web search's lookup and has to be recorded as one.
+   * Recorded as 'push-hook' instead, turning push on silently deleted every
+   * web-search MISS from the three things that read the source: the Stop hook's
+   * weak batch below, the searches.json demand budget, and didResearch().
+   */
+  it('records its lookup as the web search it replaced, so the Stop nag still fires', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl);
+
+    const run = await runScript(websearchHookScript(dataDir), webSearch('zod parse throws here'));
+    expect(run.stdout).toBe('');
+    const stored = JSON.parse(await readFile(join(dataDir, 'searches.json'), 'utf8')) as {
+      searches: { source?: string; decision?: string }[];
+    };
+    expect(stored.searches).toHaveLength(1);
+    expect(stored.searches[0]).toMatchObject({ source: 'websearch-hook', decision: 'MISS' });
+
+    const stop = await runScript(
+      stopHookScript(dataDir),
+      JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/tmp' }),
+    );
+    const text = injected(stop);
+    expect(text).toContain('1 web search(es) this session had no Tenjin answer');
+    expect(text).toContain('zod parse throws here');
+  });
+
+  /**
+   * The mirror of the case above: an arm nobody asked for is the sidecar's own
+   * curiosity, and must NOT be able to raise the end-of-session nag.
+   */
+  it('records an arm nobody asked for as push-hook, which the Stop nag ignores', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl);
+
+    await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'UserPromptSubmit',
+        prompt:
+          'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps',
+      }),
+    );
+    const stored = JSON.parse(await readFile(join(dataDir, 'searches.json'), 'utf8')) as {
+      searches: { source?: string }[];
+    };
+    expect(stored.searches).toHaveLength(1);
+    expect(stored.searches[0]).toMatchObject({ source: 'push-hook' });
+
+    const stop = await runScript(
+      stopHookScript(dataDir),
+      JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/tmp' }),
+    );
+    expect(stop.stdout).toBe('');
+  });
 });
 
 describe('the team shelf', () => {
