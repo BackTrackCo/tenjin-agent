@@ -470,10 +470,8 @@ describe('item URL origin ingest boundary', () => {
     const sibling = knownDeploymentOrigins().find((o) => o !== base);
     expect(sibling).toBeDefined();
     const flipped = {
-      ...CANDIDATES,
-      candidates: [
-        { ...(CANDIDATES.candidates[0] as object), url: `${sibling}/api/read/iris/slug` },
-      ],
+      ...HIT,
+      items: [{ ...HIT.items[0], url: `${sibling}/api/read/iris/slug` }],
     };
     const { fetch } = stub(flipped);
     await runSearch({ question: 'q' }, makeCtx({ baseUrl: base }), { fetchImpl: fetch });
@@ -485,8 +483,8 @@ describe('item URL origin ingest boundary', () => {
     // makeCtx pins a preview base, which the alias set knows nothing about.
     const known = PRODUCTION_ORIGIN;
     const foreign = {
-      ...CANDIDATES,
-      candidates: [{ ...(CANDIDATES.candidates[0] as object), url: `${known}/api/read/iris/slug` }],
+      ...HIT,
+      items: [{ ...HIT.items[0], url: `${known}/api/read/iris/slug` }],
     };
     const { fetch } = stub(foreign);
     await expect(
