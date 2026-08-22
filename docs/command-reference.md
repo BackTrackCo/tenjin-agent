@@ -318,7 +318,7 @@ Sets `hooks.push` to `on` and immediately wires the five push hook scripts into 
 | `tenjin-push-subagent.mjs` | `SubagentStart`                            | —                                 | Hands a subagent the finding the dispatch hook cached for it seconds earlier, at its first turn. |
 | `tenjin-push-context.mjs`  | `PostToolUse` (read), `PreToolUse` (churn) | `Read` / `Edit\|Write\|MultiEdit` | Notices packages a file imports, and a stuck edit loop (the same file edited repeatedly).        |
 
-On a strong, free hit the prompt, failure, and subagent arms may attach the finding's full body inline; the context arm is log-only in this phase, recording what it would have said so its precision earns out before it is allowed to speak. Separately, on a strong, free hit at the moment of the search itself, the WebSearch/WebFetch hook may deny the call outright and hand back the finding in its place (abort-and-answer) — the one hook entry in this CLI that can ever do that. Every decision, spoken or not, is written to the ledger (`~/.tenjin/push-ledger.jsonl`) that `tenjin push status` summarizes.
+A hit is `strong` only when the marketplace returned a rank 2 to beat it (scored over the same title-and-excerpt text), rank 1 leads it by `0.15`, and at least three whole query words matched; a lone candidate is at most `moderate`, which is offered as a pointer and denies nothing. On a strong, free hit the prompt, failure, and subagent arms may attach the finding's full body inline; the context arm is log-only in this phase, recording what it would have said so its precision earns out before it is allowed to speak. Separately, on a strong, free hit at the moment of the search itself, the WebSearch/WebFetch hook may deny the call outright and hand back the finding in its place (abort-and-answer) — the one hook entry in this CLI that can ever do that. Every decision, spoken or not, is written to the ledger (`~/.tenjin/push-ledger.jsonl`) that `tenjin push status` summarizes.
 
 ### `tenjin push off`
 
@@ -377,6 +377,8 @@ Saves a new note. The body comes from `file` or from `--body`, never both.
 | `--body <text>`       | The note body, instead of a file argument.                    |
 | `--source <s>`        | Where this came from, e.g. `session:<id>` or `search:<uuid>`. |
 
+Every field except the body is one line: a newline in `--question`, `--scope`, `--source` or an `--applies-to` entry is refused rather than written, since front matter is line-oriented and a second line is a second field. `add` also refuses a note whose text carries something credential-shaped (a private key block, a vendor token, a `password=`/`api_key:` assignment, a connection string with a password in it) — a note is pushed to the shared team repo and read into every teammate's model context, so the fix is to remove or redact the secret, not to publish it.
+
 If the sidecar is a git repo, `add` commits and pushes the change (`git add -A && git commit -m "note: <id>" && git push`), best-effort with a 10s timeout per git call: a failure here never fails the command, only prints one warning line, since the note is already saved locally either way. `add` never runs on a machine that has not run `tenjin team init` — the git step is a silent no-op there.
 
 ### `tenjin notes list [--json]`
@@ -401,4 +403,4 @@ Records that nothing durable came out of this session — the honest complement 
 
 ### Stop-hook capture
 
-When enabled, the Stop hook checks whether the session had a research signal (a search, or a push-hook decision) and, once per session, blocks the end of the turn with a reminder to run `notes add` for anything durable or `notes none` otherwise. `notes add`/`notes none` are what clears that reminder: either one writes a marker (`~/.tenjin/push/capture-done-<session>`) the Stop hook checks before it blocks again.
+When enabled, the Stop hook checks whether the session had a research signal — a search the session itself asked for (`tenjin search`, the WebSearch hook, the dispatch hook), or a push-ledger row where an arm actually surfaced something. The sidecar's own log-only telemetry does not count, so a session that only read and edited code is never asked. Once per session it blocks the end of the turn with a reminder to run `notes add` for anything durable or `notes none` otherwise. `notes add`/`notes none` are what clears that reminder: either one writes a marker (`~/.tenjin/push/capture-done-<session>`) the Stop hook checks before it blocks again.
