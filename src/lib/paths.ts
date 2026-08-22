@@ -137,3 +137,13 @@ export function passphraseBlobPathFor(account: string, dir: string = dataDir()):
 export function archivedWalletPath(account: string, dir: string = dataDir()): string {
   return join(dir, `wallet.${account}.json.bak`);
 }
+
+/**
+ * The team notes repo (docs/command-reference.md: `tenjin team`/`tenjin notes`):
+ * `git clone`d by `tenjin team init`, holding a README and any project config at
+ * its root. Notes themselves live one level down, at `<notesDir>/notes/*.md`,
+ * so a note's filename can never collide with something the repo root carries.
+ */
+export function notesDir(dir: string = dataDir()): string {
+  return join(dir, 'notes');
+}

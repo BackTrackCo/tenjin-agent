@@ -25,7 +25,6 @@ export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
 export const PUSH_FAILURE_HOOK_FILE = 'tenjin-push-failure.mjs';
 export const PUSH_SUBAGENT_HOOK_FILE = 'tenjin-push-subagent.mjs';
 export const PUSH_CONTEXT_HOOK_FILE = 'tenjin-push-context.mjs';
-export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
 
 /** The ledger: one row per push decision, append-only JSON lines. */
 export const PUSH_LEDGER_FILE = 'push-ledger.jsonl';
@@ -66,16 +65,6 @@ export const PUSH_HOOK_TIMEOUT_SECONDS = 8;
  *  if it is felt. A lookup that does not fit is simply not made. */
 export const PUSH_PROMPT_WATCHDOG_MS = 2500;
 export const PUSH_PROMPT_SEARCH_TIMEOUT_MS = 1500;
-
-// TEMPORARY STUB (agent B, tenjin-agent push sidecar build): agent C owns the real
-// UserPromptSubmit arm (the prompt trigger, T-whatever the prompt spec calls it)
-// in parallel on this same branch. This placeholder exists only so
-// harness-hooks.ts — which wires all five push scripts, including the prompt one —
-// typechecks and its tests pass before C's version lands; that version replaces
-// this whole function, prelude included, on merge.
-export function pushPromptHookScript(dataDir: string): string {
-  return prelude(dataDir, PUSH_WATCHDOG_MS);
-}
 
 /** Escape a plain JS body for interpolation into a TS template literal. */
 function jsBody(js: string): string {
