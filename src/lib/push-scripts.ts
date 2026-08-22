@@ -1161,16 +1161,23 @@ async function main() {
     if (take.length === 0) return quiet();
     state.packages = [...state.packages, ...take];
     saveState(sessionId, state);
-    for (const pkg of take) {
-      await pushDecide({
-        trigger: 'read',
-        event,
-        query: pkg + ' gotcha bug workaround',
-        config,
-        sessionId,
-        mode: 'log',
-      });
-    }
+    // CONCURRENT, not sequential. This arm is log-only: nothing it learns
+    // reaches the model, and it runs in front of the agent's next step, so the
+    // two lookups cost ONE round trip of waiting rather than two. Awaited all
+    // the same — a hook that exits with a request in flight loses the row it
+    // exists to write.
+    await Promise.all(
+      take.map((pkg) =>
+        pushDecide({
+          trigger: 'read',
+          event,
+          query: pkg + ' gotcha bug workaround',
+          config,
+          sessionId,
+          mode: 'log',
+        }),
+      ),
+    );
     return quiet();
   }
 

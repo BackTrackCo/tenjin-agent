@@ -1010,6 +1010,40 @@ describe('the context arm (log-only)', () => {
     expect(rows[0]).toMatchObject({ trigger: 'read', action: 'logged', form: 'full' });
     expect(rows[0]!.query).toContain('zod');
   });
+
+  /**
+   * Two packages in one file used to cost two round trips of blocking hook time
+   * IN FRONT OF the agent's next step, for telemetry the model never sees. They
+   * are one round trip now, and the deadline here is what says so: sequential
+   * would be ~2x the stub's own delay.
+   */
+  it('looks two packages up in one round trip, not two', async () => {
+    const slow = echo();
+    const { baseUrl } = await serve((req) => ({ ...slow(req), delayMs: 700 }));
+    await pushOn(baseUrl);
+    const file = join(scriptDir, 'thing.ts');
+    await writeFile(
+      file,
+      "import { z } from 'zod';\nimport pino from 'pino';\nexport const s = z.string();\n",
+    );
+
+    const started = Date.now();
+    const run = await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: file },
+      }),
+    );
+    const elapsed = Date.now() - started;
+    expect(run.stdout).toBe('');
+    const rows = await ledger();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.action)).toEqual(['logged', 'logged']);
+    expect(elapsed).toBeLessThan(1400);
+  });
 });
 
 describe('the team shelf pull (SessionStart)', () => {

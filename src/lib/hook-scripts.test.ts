@@ -243,7 +243,7 @@ describe('HOOK_SCRIPT_VERSION', () => {
       pushPrompt: '365280a94ba383bee221d0358506553d',
       pushFailure: '400b3d2a4c1b20a657f5bee40593d451',
       pushSubagent: '80aae96c788f7fb69efb168e151f30b3',
-      pushContext: 'b66a60f1da81ebd83eb4c9a4c755eecf',
+      pushContext: '8533ed16fcfa1364438d0cc2bfdc6489',
     });
   });
 
