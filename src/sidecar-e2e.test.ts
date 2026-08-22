@@ -119,7 +119,7 @@ async function serveJson(): Promise<Stub> {
         res.end(JSON.stringify(json));
       };
       if (url.startsWith('/api/search')) {
-        let query = '';
+        let query: string;
         try {
           query = String((JSON.parse(body) as { query?: unknown }).query ?? '');
         } catch {
