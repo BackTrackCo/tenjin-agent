@@ -15,6 +15,7 @@ import {
   MODE_GATED_RULES,
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
@@ -76,7 +77,7 @@ describe('runConfigList', () => {
     expect(d.sessionBudget).toEqual({ value: { atomic: '0', usd: '0' }, source: 'default' });
     expect(d.confirm).toEqual({ value: 'always', source: 'default' });
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
-    expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
+    expect(d.baseUrl).toEqual({ value: PRODUCTION_ORIGIN, source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
     // No numeric or 'none' default: absent resolves to the 'unset' sentinel and

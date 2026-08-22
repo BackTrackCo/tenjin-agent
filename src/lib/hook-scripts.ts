@@ -37,6 +37,7 @@ import {
   WEBSEARCH_HOOK_PRODUCT,
   WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
+import { PRODUCTION_ORIGIN } from './production-origin';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
@@ -321,7 +322,7 @@ function readConfig() {
   const fromEnv = process.env.TENJIN_PUBLISH_MODE;
   const envPinned = isPublishMode(fromEnv);
   const publishMode = envPinned ? fromEnv : publish.mode;
-  const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://tenjin.blog';
+  const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '${PRODUCTION_ORIGIN}';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',

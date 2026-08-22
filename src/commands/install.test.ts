@@ -96,6 +96,7 @@ import {
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
+import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -1152,7 +1153,9 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).toContain('Before a web search or a subagent dispatch, the hooks ask tenjin.blog');
+    expect(text).toContain(
+      `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST}`,
+    );
     // The subagent prompt is the surprising half of what leaves the machine, so
     // the disclosure names it and its bound rather than only "the query".
     expect(text).toContain(

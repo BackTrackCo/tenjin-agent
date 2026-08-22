@@ -13,7 +13,10 @@ import {
  * These assertions pin the STRING, not the constant: every other test in the
  * suite compares TENJIN_USER_AGENT to itself, so a shape change (dropping the
  * space before the comment, renaming the product) would keep the whole suite
- * green while the server silently attributes the CLI as `none`.
+ * green while the server silently attributes the CLI as `none`. The origin in
+ * the comment stays a literal here for the same reason: the source reads it from
+ * PRODUCTION_ORIGIN, so this file is the second, independent copy that makes an
+ * origin flip a deliberate two-file diff rather than one line.
  */
 
 /**
