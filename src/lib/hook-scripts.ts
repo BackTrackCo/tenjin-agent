@@ -47,7 +47,7 @@ import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 28;
+export const HOOK_SCRIPT_VERSION = 29;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -1395,8 +1395,14 @@ function captureAsk(config, sessionId, searches) {
     });
     writeFileSync(join(PUSH_DIR, 'capture-pending'), sessionId, { mode: 0o600 });
   } catch {
-    // Unwritable state directory: ask anyway, once, and accept that the marker
-    // \`notes none\` writes may be the only one either side manages.
+    // UNWRITABLE STATE DIRECTORY IS THE ONE CASE WITH NO FLOOR UNDER IT. The
+    // marker is what makes the ask once-per-session, and \`notes add\`,
+    // \`notes none\` and \`config set\` all write under the same directory — so
+    // if this write failed, so will the two remedies the ask names, and the ask
+    // fires again at the next turn end, and the next. A nudge that repeats is
+    // noise the operator can work through; a BLOCK that repeats is a session
+    // they cannot end. Degrade to the nudge and let them out.
+    return config.capture === 'block' ? 'nudge' : config.capture;
   }
   return config.capture;
 }

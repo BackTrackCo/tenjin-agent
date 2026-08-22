@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1369,6 +1369,34 @@ describe('the capture ask (Stop)', () => {
 
     const second = await runScript(stopHookScript(dataDir), stopInput);
     expect(second.stdout).toBe('');
+  });
+
+  /**
+   * The one generated output with no fail-open floor under it. The ask is made
+   * once because a marker records it; the marker lives under the data dir, and
+   * so do `notes add`, `notes none` and `config set` — the three ways out the
+   * block itself names. If the marker cannot be written, none of them can
+   * either, and an opted-in `block` blocks every turn end forever.
+   */
+  it('degrades a block to a nudge when the marker cannot be written', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    // No push/ subdirectory yet, and the data dir it would go in is read-only.
+    await chmod(dataDir, 0o500);
+    try {
+      const run = await runScript(stopHookScript(dataDir), stopInput);
+      expect(run.code).toBe(0);
+      // A nudge, not a block: the session can end.
+      expect(run.stdout).not.toContain('"decision":"block"');
+      expect(injected(run)).toBe(CAPTURE_REASON);
+      // And it repeats, because nothing could record it — which is exactly why
+      // it must not be the blocking form.
+      const second = await runScript(stopHookScript(dataDir), stopInput);
+      expect(injected(second)).toBe(CAPTURE_REASON);
+      expect(second.stdout).not.toContain('"decision":"block"');
+    } finally {
+      await chmod(dataDir, 0o700);
+    }
   });
 
   it('takes an injected push-ledger row as the research signal too', async () => {
