@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { readFile, stat } from 'node:fs/promises';
+import { open, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { persistPushMode } from './config';
@@ -36,6 +36,10 @@ import type { CommandContext, CommandResult } from '../context';
 
 const LEDGER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const LEDGER_WINDOW_DAYS = 7;
+/** ⚠ MIRRORS `LEDGER_TAIL_BYTES` in lib/push-scripts.ts, and for the same
+ *  reason: the ledger is append-only and never rotated, so a machine that has
+ *  had the experiment on for months has a file no reader should parse whole. */
+const LEDGER_TAIL_BYTES = 262144;
 
 const PUSH_SCRIPT_FILES = [
   PUSH_PROMPT_HOOK_FILE,
@@ -185,6 +189,13 @@ export interface PushLedgerTallies {
   candidates: number;
   denies: number;
   injectedTokens: number;
+  /**
+   * True when the ledger was larger than the retained tail, so these numbers
+   * cover the last {@link LEDGER_TAIL_BYTES} of it rather than the whole
+   * window. A floor, not a total — and said out loud, because the alternative
+   * is a count an operator reads as complete when it is not.
+   */
+  tail: boolean;
 }
 
 const EMPTY_TALLIES: PushLedgerTallies = {
@@ -196,24 +207,53 @@ const EMPTY_TALLIES: PushLedgerTallies = {
   candidates: 0,
   denies: 0,
   injectedTokens: 0,
+  tail: false,
 };
 
 /**
  * Tally the last {@link LEDGER_WINDOW_DAYS} days of push-ledger rows: total rows,
  * a trigger x action breakdown, a shelf breakdown, how many rows denied a tool
- * call, and the injected-token total. Read from the whole file (the ledger is
- * append-only JSON lines, one status call is not on any tool call's critical
- * path the way the hook scripts' own tail-only read is), and every line is
- * parsed defensively: a torn or foreign line, or one missing a field, is
- * skipped rather than failing the command.
+ * call, and the injected-token total. Every line is parsed defensively: a torn
+ * or foreign line, or one missing a field, is skipped rather than failing the
+ * command.
+ *
+ * READ FROM THE TAIL, the same 256 KB the hook scripts read (see
+ * `sessionRows` in lib/push-scripts.ts). Nothing rotates this file: every arm
+ * of every session appends to it forever, so "one status call is not on a tool
+ * call's critical path" was an argument about latency that ignored the size.
+ * The tail is also where the 7-day window's rows are, by construction.
+ *
+ * The cost is that on a large ledger the tally covers the retained tail rather
+ * than the whole window, so it reports {@link PushLedgerTallies.tail} and the
+ * human line says so — a number an operator might read as "the experiment fired
+ * this many times" must not quietly be a floor with no sign of it.
  */
 export async function readLedgerTallies(
   dataDir: string,
   nowMs: number,
 ): Promise<PushLedgerTallies> {
   let text: string;
+  let tail = false;
   try {
-    text = await readFile(pushLedgerPath(dataDir), 'utf8');
+    const path = pushLedgerPath(dataDir);
+    const size = (await stat(path)).size;
+    if (size <= LEDGER_TAIL_BYTES) {
+      text = await readFile(path, 'utf8');
+    } else {
+      const fd = await open(path, 'r');
+      try {
+        const buf = Buffer.alloc(LEDGER_TAIL_BYTES);
+        await fd.read(buf, 0, LEDGER_TAIL_BYTES, size - LEDGER_TAIL_BYTES);
+        text = buf.toString('utf8');
+      } finally {
+        await fd.close();
+      }
+      // The first line is a fragment of whatever row straddles the cut. It would
+      // parse as nothing, but dropping it keeps "lines that failed to parse" a
+      // signal about the ledger rather than about where we started reading.
+      text = text.slice(text.indexOf('\n') + 1);
+      tail = true;
+    }
   } catch {
     return EMPTY_TALLIES;
   }
@@ -263,6 +303,7 @@ export async function readLedgerTallies(
     candidates: candidates.size,
     denies,
     injectedTokens,
+    tail,
   };
 }
 
@@ -335,7 +376,7 @@ function renderStatusLines(data: {
     `push: ${mode}${mode === 'on' && !scriptsWired ? ' (scripts not wired yet; run `tenjin push on`)' : ''}`,
     `capture: ${captureMode}`,
     `scripts wired: ${scriptsWired ? 'yes' : 'no'}`,
-    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
+    `ledger, last ${ledger.windowDays}d${ledger.tail ? ' (retained tail only; the ledger is larger than the 256 KB read, so these are floors)' : ''}: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
   ];
   for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {
     const byAction = Object.entries(actions)

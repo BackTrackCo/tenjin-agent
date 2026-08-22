@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPushOff, runPushOn, runPushStatus } from './push';
@@ -189,6 +189,7 @@ describe('runPushStatus', () => {
         candidates: 0,
         denies: 0,
         injectedTokens: 0,
+        tail: false,
       },
     });
   });
@@ -348,5 +349,43 @@ describe('runPushStatus', () => {
     expect(human).toContain('2 finding(s)');
     // Sorted by count, so the dominant brake reads first.
     expect(human).toContain('reasons: inject-cap=2, miss=1');
+    // Read whole, so nothing is a floor and the line does not say otherwise.
+    expect((result.data as { ledger: { tail: boolean } }).ledger.tail).toBe(false);
+    expect(human).not.toContain('retained tail');
+  });
+
+  /**
+   * Nothing rotates this file: every arm of every session appends to it forever.
+   * `status` used to parse the whole thing, so the one command an operator runs
+   * to see whether the experiment is doing anything got slower every day it was
+   * left on. It reads the same 256 KB tail the hook scripts read — and says so,
+   * because a tally over a window it did not fully see is a floor, and a floor
+   * printed as a total is the kind of number people plan against.
+   */
+  it('reads only the retained tail of a large ledger, and says the counts are floors', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const at = new Date(now - 60_000).toISOString();
+    // One padded row per line, ~1 KB each: comfortably over the 256 KB tail.
+    const row = (i: number): string =>
+      JSON.stringify({
+        at,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        candidate: { resourceId: `res-${i}`, title: 'x'.repeat(900) },
+        tokens: 1,
+      });
+    const lines = Array.from({ length: 700 }, (_, i) => row(i));
+    await writeFile(pushLedgerPath(dir), `${lines.join('\n')}\n`);
+    expect((await stat(pushLedgerPath(dir))).size).toBeGreaterThan(262144);
+
+    const result = await runPushStatus(makeCtx(), { now: () => now });
+    const ledger = (result.data as { ledger: { rows: number; tail: boolean } }).ledger;
+    expect(ledger.tail).toBe(true);
+    // Bounded by the tail, not by the file: every row is inside the 7-day
+    // window, so a whole-file read would have counted all 700.
+    expect(ledger.rows).toBeGreaterThan(0);
+    expect(ledger.rows).toBeLessThan(700);
+    expect(result.humanLines?.join('\n')).toContain('retained tail only');
   });
 });

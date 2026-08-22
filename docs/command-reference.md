@@ -328,7 +328,7 @@ To take the scripts and their settings entries away entirely, run `tenjin uninst
 
 ### `tenjin push status [--json]`
 
-Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), whether the four scripts are actually present on disk, and a tally of the last 7 days of ledger rows: total rows, broken down by trigger x action, by shelf (`public` vs. a team's private notes), how many denied a tool call outright, and the total tokens injected.
+Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), whether the four scripts are actually present on disk, and a tally of the last 7 days of ledger rows: total rows, broken down by trigger x action, by shelf (`public` vs. a team's private notes), how many denied a tool call outright, and the total tokens injected. The ledger is read from its last 256 KB (nothing rotates it); on a file larger than that the tally says `retained tail only` and its counts are floors.
 
 ```bash
 tenjin push on
