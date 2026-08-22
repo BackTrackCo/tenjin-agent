@@ -388,9 +388,19 @@ function ledgerAppend(row) {
   }
 }
 
-/** This session's ledger rows, read from the tail of the file. */
+/**
+ * This session's ledger rows, read from the tail of the file.
+ *
+ * A NULL SESSION IS A BUCKET, NOT AN EXEMPTION. Returning [] here zeroed every
+ * per-session bound at once — the lookup cap, the inject cap, the once-per-piece
+ * set and the outage brake all read this — so a payload with no \`session_id\`
+ * bought an unbounded one. The rows it writes carry \`session: null\`, so they
+ * are their own machine-global bucket and the same caps apply to them. Coarser
+ * than a real session (two concurrent session-less harnesses share one budget)
+ * and that is the right way round: the bound holds, and the cost of the coarse
+ * bucket is a lookup deferred, never a bound skipped.
+ */
 function sessionRows(sessionId) {
-  if (sessionId === null) return [];
   let text;
   try {
     const size = statSync(LEDGER_PATH).size;
@@ -415,7 +425,9 @@ function sessionRows(sessionId) {
     if (line.length === 0) continue;
     try {
       const r = JSON.parse(line);
-      if (isRecord(r) && r.session === sessionId) rows.push(r);
+      if (!isRecord(r)) continue;
+      const rowSession = typeof r.session === 'string' && r.session.length > 0 ? r.session : null;
+      if (rowSession === sessionId) rows.push(r);
     } catch {
       // A torn or foreign line is skipped, never fatal.
     }

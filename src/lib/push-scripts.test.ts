@@ -826,6 +826,34 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     });
   });
 
+  /**
+   * A payload with no `session_id` used to get its bounds for free: the row
+   * filter matched nothing, so the seen-set was empty, the lookup cap read
+   * zero, and the outage brake never engaged. Null means "do not scope", so
+   * these rows are one machine-global bucket and the caps apply to it — here,
+   * the same piece is not injected twice.
+   */
+  it('bounds a session-less payload against a machine-global bucket', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    const anonymous = JSON.stringify({
+      hook_event_name: 'UserPromptSubmit',
+      prompt: QUESTION,
+    });
+
+    const first = await runScript(pushPromptHookScript(dataDir), anonymous);
+    expect(injected(first)).toContain(BODY_MD);
+
+    const second = await runScript(pushPromptHookScript(dataDir), anonymous);
+    // The piece is recognized as already seen, so nothing is said and no body is
+    // fetched for it.
+    expect(second.stdout).toBe('');
+    const rows = await ledger();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ action: 'injected', session: null });
+    expect(rows[1]).toMatchObject({ action: 'skipped', reason: 'already-injected' });
+  });
+
   it('skips a short prompt and a slash command without asking anything', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
