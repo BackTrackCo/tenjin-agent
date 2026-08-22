@@ -210,8 +210,22 @@ export async function getNote(dataDir: string, id: string): Promise<Note | null>
   }
 }
 
-/** Every note, newest id first. A note file that fails to parse is skipped —
- *  one corrupt hand-edit should not sink `tenjin notes list`. */
+/**
+ * ⚠ MIRRORS `NOTES_MAX_FILES` / `NOTES_MAX_BYTES` in the generated push core
+ * (lib/push-scripts.ts), and for the same reason it has them: the notes
+ * directory is a git clone a TEAMMATE writes to, so its size is not this
+ * machine's decision. The hook core has always been bounded because it runs in
+ * front of a tool call; this side read every `.md` whole into memory, which is
+ * the same pulled repo and the same unbounded allocation with nothing in front
+ * of it. Change both together.
+ */
+export const NOTES_MAX_FILES = 500;
+export const NOTES_MAX_BYTES = 65536;
+
+/** Every note, newest id first, bounded. A note file that fails to parse is
+ *  skipped — one corrupt hand-edit should not sink `tenjin notes list` — and so
+ *  is one past {@link NOTES_MAX_BYTES}; past {@link NOTES_MAX_FILES} entries the
+ *  walk stops. */
 export async function listNotes(dataDir: string): Promise<Note[]> {
   const dir = noteFilesDir(dataDir);
   let entries: string[];
@@ -221,11 +235,17 @@ export async function listNotes(dataDir: string): Promise<Note[]> {
     return [];
   }
   const notes: Note[] = [];
+  let seen = 0;
   for (const name of entries) {
     if (!name.endsWith('.md')) continue;
+    seen += 1;
+    if (seen > NOTES_MAX_FILES) break;
     const id = name.slice(0, -'.md'.length);
+    const path = join(dir, name);
     try {
-      notes.push(parseNote(id, await readFile(join(dir, name), 'utf8')));
+      // Size first, so an enormous file is never read at all.
+      if ((await stat(path)).size > NOTES_MAX_BYTES) continue;
+      notes.push(parseNote(id, await readFile(path, 'utf8')));
     } catch {
       // Skipped: a corrupt or unreadable note should not sink the whole list.
     }

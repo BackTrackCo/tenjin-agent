@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   NOTE_ID_RE,
+  NOTES_MAX_BYTES,
+  NOTES_MAX_FILES,
   addNote,
   commitAndPushNote,
   getNote,
@@ -163,6 +165,32 @@ describe('addNote / getNote / listNotes / removeNote', () => {
 
     const notes = await listNotes(dataDir);
     expect(notes.map((n) => n.id)).toEqual([newer.id, older.id]);
+  });
+
+  /**
+   * The notes directory is a git clone a TEAMMATE writes to, so its size is not
+   * this machine's decision. The generated hook core has always been bounded
+   * because it runs in front of a tool call; this side read every `.md` whole
+   * into memory over the same pulled repo.
+   */
+  it('reads a bounded number of notes, and never an oversized one', async () => {
+    const dir = noteFilesDir(dataDir);
+    await mkdir(dir, { recursive: true });
+    const write = async (id: string, body: string): Promise<void> => {
+      await writeFile(
+        join(dir, `${id}.md`),
+        ['---', 'question: "q"', 'author: t', '---', body, ''].join('\n'),
+      );
+    };
+    for (let i = 0; i < NOTES_MAX_FILES + 20; i += 1) {
+      await write(`20260101-${String(i).padStart(6, '0')}`, 'b');
+    }
+    // One note past the byte cap, which must not be read at all.
+    await write('20261231-999999', 'x'.repeat(NOTES_MAX_BYTES + 1));
+
+    const notes = await listNotes(dataDir);
+    expect(notes.length).toBeLessThanOrEqual(NOTES_MAX_FILES);
+    expect(notes.some((n) => n.id === '20261231-999999')).toBe(false);
   });
 
   it('removeNote deletes an existing note and reports false for a missing one', async () => {
