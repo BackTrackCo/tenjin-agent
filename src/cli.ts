@@ -719,7 +719,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     program
       .command('push')
       .description(
-        'The push experiment (docs/push.md): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push on|off|status`',
+        'The push experiment (docs/command-reference.md, "Push (experimental)"): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push on|off|status`',
       ),
   );
   addGlobalFlags(push.command('on'))
