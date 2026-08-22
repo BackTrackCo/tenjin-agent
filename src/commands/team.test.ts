@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTeamInit, runTeamSync } from './team';
+import type { TeamInitDeps } from './team';
 import { notesDir } from '../lib/paths';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
@@ -80,6 +82,75 @@ describe('runTeamInit', () => {
     await expect(runTeamInit({ gitUrl: bogus }, makeCtx())).rejects.toMatchObject({
       code: 'INTERNAL',
     });
+  });
+
+  /**
+   * The retry the error message asks for has to be able to run. A failed clone
+   * that leaves its directory behind is neither a repo (so `team sync` refuses
+   * it) nor empty (so the guard in `team init` refuses it) — the command would
+   * be stuck on its own wreckage with no documented way out.
+   */
+  it('leaves no directory behind after a failed clone, so the retry works', async () => {
+    const bogus = join(root, 'does-not-exist.git');
+    await expect(runTeamInit({ gitUrl: bogus }, makeCtx())).rejects.toMatchObject({
+      code: 'INTERNAL',
+    });
+    expect(existsSync(notesDir(dataDir))).toBe(false);
+
+    // And the retry the fix line names now succeeds.
+    const origin = makeOrigin();
+    const result = await runTeamInit({ gitUrl: origin }, makeCtx());
+    expect((result.data as { dir: string }).dir).toBe(notesDir(dataDir));
+    expect(existsSync(join(notesDir(dataDir), 'README.md'))).toBe(true);
+  });
+
+  /**
+   * The case git cannot be asked to produce: a clone KILLED at the timeout. Git
+   * tidies up after its own errors, but not after SIGKILL, so this is the one
+   * that actually leaves a half-written directory behind — and the one the
+   * cleanup exists for. The seam stands in for the killed clone.
+   */
+  it('removes the half-written directory a killed clone leaves behind', async () => {
+    const killed: TeamInitDeps['git'] = async (args) => {
+      // What a killed `git clone` leaves: the target directory, partly written.
+      const target = args[2]!;
+      await mkdir(join(target, '.git'), { recursive: true });
+      await writeFile(join(target, '.git', 'FETCH_HEAD'), 'partial\n');
+      return { ok: false, code: null, timedOut: true, stderr: '' };
+    };
+    await expect(
+      runTeamInit({ gitUrl: 'https://example.invalid/x.git' }, makeCtx(), { git: killed }),
+    ).rejects.toMatchObject({ code: 'INTERNAL', message: /timed out after 120s/ });
+    expect(existsSync(notesDir(dataDir))).toBe(false);
+  });
+
+  /** An empty directory the operator made themselves is theirs; the cleanup puts
+   *  it back rather than taking it away. */
+  it('puts back an empty directory it was handed, after a killed clone', async () => {
+    await mkdir(notesDir(dataDir), { recursive: true });
+    const killed: TeamInitDeps['git'] = async (args) => {
+      await mkdir(join(args[2]!, '.git'), { recursive: true });
+      return { ok: false, code: null, timedOut: true, stderr: '' };
+    };
+    await expect(
+      runTeamInit({ gitUrl: 'https://example.invalid/x.git' }, makeCtx(), { git: killed }),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect(existsSync(notesDir(dataDir))).toBe(true);
+    expect(await readdir(notesDir(dataDir))).toEqual([]);
+  });
+
+  /** The budget a clone gets, which is NOT `runGit`'s 10s default: that default
+   *  is sized for the local one-object operations `notes add` does. */
+  it('gives the clone its own 120s budget', async () => {
+    let sawTimeout: number | undefined;
+    const spy: TeamInitDeps['git'] = async (_args, _cwd, timeoutMs) => {
+      sawTimeout = timeoutMs;
+      return { ok: false, code: 1, timedOut: false, stderr: 'nope' };
+    };
+    await expect(
+      runTeamInit({ gitUrl: 'https://example.invalid/x.git' }, makeCtx(), { git: spy }),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect(sawTimeout).toBe(120_000);
   });
 });
 

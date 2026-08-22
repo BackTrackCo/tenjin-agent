@@ -1,4 +1,4 @@
-import { readdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
 import { isGitRepo, runGit } from '../lib/notes';
 import { notesDir } from '../lib/paths';
@@ -15,9 +15,29 @@ export interface TeamInitArgs {
   gitUrl: string;
 }
 
-export async function runTeamInit(args: TeamInitArgs, ctx: CommandContext): Promise<CommandResult> {
+export interface TeamInitDeps {
+  /** Seam for the clone itself. The case worth testing is the one git cannot be
+   *  asked to produce on demand: a clone KILLED at the timeout, which leaves its
+   *  half-written directory behind (git only tidies up after its own errors). */
+  git?: typeof runGit;
+}
+
+/**
+ * A clone is a network operation over a repo of unknown size, so it gets its own
+ * budget rather than `runGit`'s 10s default — that default is sized for the
+ * local, one-object operations `notes add` does, and it turned a large or slow
+ * team repo into a hard failure that no retry could get past.
+ */
+const CLONE_TIMEOUT_MS = 120_000;
+
+export async function runTeamInit(
+  args: TeamInitArgs,
+  ctx: CommandContext,
+  deps: TeamInitDeps = {},
+): Promise<CommandResult> {
   const dir = notesDir(ctx.dataDir);
-  if (await pathExists(dir)) {
+  const preExisted = await pathExists(dir);
+  if (preExisted) {
     const isRepo = await isGitRepo(dir);
     const empty = isRepo ? false : await isEmptyDir(dir);
     if (isRepo || !empty) {
@@ -32,11 +52,23 @@ export async function runTeamInit(args: TeamInitArgs, ctx: CommandContext): Prom
       );
     }
   }
-  const clone = await runGit(['clone', args.gitUrl, dir], process.cwd());
+  const clone = await (deps.git ?? runGit)(
+    ['clone', args.gitUrl, dir],
+    process.cwd(),
+    CLONE_TIMEOUT_MS,
+  );
   if (!clone.ok) {
+    // A KILLED CLONE LEAVES THE DIRECTORY BEHIND, half written. That half is
+    // worse than nothing: it is not a repo, so `team sync` refuses it, and it is
+    // not empty, so the guard above refuses the retry this error tells the
+    // operator to run — the command would be permanently stuck on its own
+    // wreckage. Removing it puts the machine back exactly where it started;
+    // where the directory was the operator's own (empty) one, it is put back.
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    if (preExisted) await mkdir(dir, { recursive: true }).catch(() => {});
     throw new CliError(
       'INTERNAL',
-      `git clone failed: ${clone.timedOut ? 'timed out' : clone.stderr || `exit ${clone.code}`}`,
+      `git clone failed: ${clone.timedOut ? `timed out after ${CLONE_TIMEOUT_MS / 1000}s` : clone.stderr || `exit ${clone.code}`}`,
       { fix: 'Check the git URL and your credentials, then retry.' },
     );
   }
