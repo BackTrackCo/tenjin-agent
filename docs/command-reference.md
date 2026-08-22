@@ -32,7 +32,9 @@ Useful flags:
 
 ### Hooks
 
-`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. Nothing fires on a `WebFetch`. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a `WebSearch` or `WebFetch` call. The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
+
+`tenjin push on` registers five more, described in [Push (experimental)](#push-experimental) below; a plain `tenjin install` on a machine that has never run `tenjin push on` adds nothing beyond these four.
 
 **The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch misses are never raised at all: they are demand data, not questions you asked to be reminded about, and they hold at most 15 of the store's 50 slots so a wide fan-out cannot evict a search you may still want to buy from.
 
@@ -281,21 +283,54 @@ Escape hatch for moving USDC out of the agent wallet. It is deliberately not par
 
 Common keys:
 
-| Key                    | Default                    | Effect                                                                       |
-| ---------------------- | -------------------------- | ---------------------------------------------------------------------------- |
-| `maxAutoSpend`         | `0`                        | Auto-approve a read up to this amount.                                       |
-| `sessionBudget`        | `0`                        | Session auto-spend ceiling; `0` means no ceiling once auto-spend is enabled. |
-| `confirm`              | `always`                   | When to ask before paying.                                                   |
-| `sendMaxAmount`        | unset                      | Hard per-send cap. Unset means `send` refuses.                               |
-| `allowlistCreators`    | empty                      | Restrict auto-pay by creator handle.                                         |
-| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL.                                                         |
-| `rpcUrl`               | `https://mainnet.base.org` | Base RPC endpoint.                                                           |
-| `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                    |
-| `publish.mode`         | `review`                   | Publish consent mode.                                                        |
-| `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                               |
-| `hooks.searchMode`     | `auto`                     | WebSearch and subagent-dispatch hook behavior.                               |
-| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.  |
-| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                              |
+| Key                    | Default                    | Effect                                                                                                                                |
+| ---------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxAutoSpend`         | `0`                        | Auto-approve a read up to this amount.                                                                                                |
+| `sessionBudget`        | `0`                        | Session auto-spend ceiling; `0` means no ceiling once auto-spend is enabled.                                                          |
+| `confirm`              | `always`                   | When to ask before paying.                                                                                                            |
+| `sendMaxAmount`        | unset                      | Hard per-send cap. Unset means `send` refuses.                                                                                        |
+| `allowlistCreators`    | empty                      | Restrict auto-pay by creator handle.                                                                                                  |
+| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL.                                                                                                                  |
+| `rpcUrl`               | `https://mainnet.base.org` | Base RPC endpoint.                                                                                                                    |
+| `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                                                                             |
+| `publish.mode`         | `review`                   | Publish consent mode.                                                                                                                 |
+| `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                                                                                        |
+| `hooks.searchMode`     | `auto`                     | WebSearch and subagent-dispatch hook behavior.                                                                                        |
+| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.                                                           |
+| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                                                                                       |
+| `hooks.push`           | `off`                      | Push experiment master switch: `on`, `off`. Set through `tenjin push on/off`, not `config set`, so the wiring step runs alongside it. |
+| `hooks.capture`        | `off`                      | End-of-session save prompt: `block`, `nudge`, `off`. See [Push (experimental)](#push-experimental).                                   |
+
+## Push (experimental)
+
+The push experiment (`docs/push.md` in the plan of record) flips Tenjin from a tool the agent calls into a sidecar that watches beside it: a published finding surfaces next to a failing command, a stuck edit loop, or a subagent's first turn, without anyone asking for it. It is off by default and costs nothing until turned on.
+
+### `tenjin push on`
+
+Sets `hooks.push` to `on` and immediately wires the five push hook scripts into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe):
+
+| Script                     | Event(s)                                   | Matcher                           | What it does                                                                                     |
+| -------------------------- | ------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `tenjin-push-prompt.mjs`   | `UserPromptSubmit`                         | —                                 | Looks the prompt up before the turn starts.                                                      |
+| `tenjin-push-failure.mjs`  | `PostToolUse`, `PostToolUseFailure`        | `Bash`                            | On a failing command, looks up the error signature and attaches a known finding beside it.       |
+| `tenjin-push-subagent.mjs` | `SubagentStart`                            | —                                 | Hands a subagent the finding the dispatch hook cached for it seconds earlier, at its first turn. |
+| `tenjin-push-context.mjs`  | `PostToolUse` (read), `PreToolUse` (churn) | `Read` / `Edit\|Write\|MultiEdit` | Notices packages a file imports, and a stuck edit loop (the same file edited repeatedly).        |
+
+On a strong, free hit the prompt, failure, and subagent arms may attach the finding's full body inline; the context arm is log-only in this phase, recording what it would have said so its precision earns out before it is allowed to speak. Separately, on a strong, free hit at the moment of the search itself, the WebSearch/WebFetch hook may deny the call outright and hand back the finding in its place (abort-and-answer) — the one hook entry in this CLI that can ever do that. Every decision, spoken or not, is written to the ledger (`~/.tenjin/push-ledger.jsonl`) that `tenjin push status` summarizes.
+
+### `tenjin push off`
+
+Sets `hooks.push` to `off` and returns immediately. Nothing is unwired: every push script reads this key at the top of its own run and exits in milliseconds when it is not `on`, so the change takes effect on the very next hook invocation with no re-install.
+
+### `tenjin push status [--json]`
+
+Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), whether the five scripts are actually present on disk, and a tally of the last 7 days of ledger rows: total rows, broken down by trigger x action, by shelf (`public` vs. a team's private notes), how many denied a tool call outright, and the total tokens injected.
+
+```bash
+tenjin push on
+tenjin push status --json
+tenjin push off
+```
 
 ## MCP
 
