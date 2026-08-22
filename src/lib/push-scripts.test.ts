@@ -327,6 +327,42 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(denied(run)).toContain(BODY_MD);
   });
 
+  /**
+   * A url's query string is where an api key and an account id live. The path
+   * segments are the topic and they are what gets sent; a param value rides
+   * along only under a key that names a topic.
+   */
+  it('sends a WebFetch url path without the credentials in its query string', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'WebFetch',
+        tool_input: {
+          url: 'https://api.internal.acme.com/v1/usage/report?api_key=sk-live-9f3QQAbCdEfGhIjK&account=acct_882&q=monthly+revenue',
+          prompt:
+            'Summarise the revenue for this account, my key is sk-ant-api03-AbC_dEf-1234567890',
+        },
+      }),
+    );
+    expect(run.code).toBe(0);
+    const sent = queries()[0] ?? '';
+    expect(sent).toContain('usage');
+    expect(sent).toContain('report');
+    // The one allow-listed key's value survives; everything else in the query
+    // string does not, whatever it looks like.
+    expect(sent).toContain('monthly');
+    expect(sent).not.toContain('sk-live');
+    expect(sent).not.toContain('9f3QQ');
+    expect(sent).not.toContain('acct_882');
+    expect(sent).not.toContain('sk-ant');
+    expect(sent).not.toContain('acme.com');
+  });
+
   it('leaves WebSearch alone and WebFetch untouched when push is off', async () => {
     const { baseUrl, hits } = await serve(echo());
     await writeConfig({ baseUrl });

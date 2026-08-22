@@ -47,7 +47,7 @@ import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 20;
+export const HOOK_SCRIPT_VERSION = 21;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -881,10 +881,42 @@ function hintLines(stored) {
 export function websearchHookScript(dataDir: string): string {
   return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('websearch')}${pushSource()}
 /**
- * The question a WebFetch is really asking: the url's own words (path segments
- * and query VALUES, which is where a docs site keeps the topic) plus the prompt
- * the agent attached. Scrubbed like every other push query, so the host itself
- * never leaves the machine — only the shape of what was wanted from it.
+ * Query-string keys whose VALUE is a topic rather than a credential. An
+ * allow-list, not a deny-list: \`?api_key=\`, \`?access_token=\`, \`?sig=\` and
+ * every vendor spelling nobody has thought of are all handled by not being on
+ * this list. The path segments already carry the topic; a param only adds to it.
+ */
+const SAFE_PARAM_KEY_RE = /^(?:q|query|search|keywords?|topic|tags?|section|category|lang|locale|version|v)$/i;
+
+/** The words of an allow-listed param value. A value is a phrase, so it is read
+ *  word by word, and a word that reads as an opaque handle rather than as
+ *  language is dropped even here. */
+function paramWords(url) {
+  const out = [];
+  let budget = 120;
+  for (const [key, value] of url.searchParams) {
+    if (!SAFE_PARAM_KEY_RE.test(key)) continue;
+    for (const word of String(value).split(/[^A-Za-z0-9@._-]+/)) {
+      if (word.length === 0 || word.length > 24) continue;
+      if (word.length >= 12 && /\\d/.test(word) && /[A-Za-z]/.test(word)) continue;
+      budget -= word.length + 1;
+      if (budget < 0) return out.join(' ');
+      out.push(word);
+    }
+  }
+  return out.join(' ');
+}
+
+/**
+ * The question a WebFetch is really asking: the url's own words (path segments,
+ * plus the values of the few query keys that hold a topic) and the prompt the
+ * agent attached. Scrubbed like every other push query, so the host itself never
+ * leaves the machine — only the shape of what was wanted from it.
+ *
+ * PARAM VALUES ARE NOT SENT WHOLESALE. A url's query string is where an api key,
+ * an account id and a presigned signature live, and \`scrub\` is a backstop, not
+ * a licence to ship the whole string at it: only {@link SAFE_PARAM_KEY_RE} keys
+ * are read at all.
  */
 function fetchQuestion(toolInput) {
   const raw = typeof toolInput.url === 'string' ? toolInput.url : '';
@@ -898,7 +930,7 @@ function fetchQuestion(toolInput) {
     const path = decodeURIComponent(url.pathname)
       .replace(/\\.(html?|php|aspx?|md|txt)$/i, '')
       .replace(/[/_]+/g, ' ');
-    const params = [...url.searchParams.values()].join(' ');
+    const params = paramWords(url);
     words = (path + ' ' + params).replace(/[^A-Za-z0-9@._-]+/g, ' ');
   } catch {
     return '';
