@@ -134,6 +134,12 @@ export function parseNote(id: string, raw: string): Note {
  * `question` closes the front matter early and drops every field after it into
  * the body. Quoting alone does not help: the quotes are on the first line and
  * the injected lines are still lines.
+ *
+ * LOSSY ON PURPOSE, twice: a newline becomes a space, and an inner `"` becomes
+ * `'` when the value has to be quoted, so `say "hi"` reads back as `say 'hi'`.
+ * Escaping the quote properly would need an unescaping parser on the other
+ * side, and the format's whole point is that `cat` is a reader. What survives
+ * is the meaning, not the bytes.
  */
 function scalar(value: string): string {
   const flat = String(value)
@@ -143,10 +149,13 @@ function scalar(value: string): string {
   return /[:#]/.test(flat) ? `"${flat.replace(/"/g, "'")}"` : flat;
 }
 
-/** The inverse of {@link parseNote}. Round-trips: `parseNote(id,
- *  serializeNote(n)) equals n` for any Note this module produced — every scalar
- *  goes through {@link scalar}, so there is no Note it can emit that reads back
- *  as a different one. */
+/** The inverse of {@link parseNote}, and STABLE rather than lossless:
+ *  `serializeNote(parseNote(id, serializeNote(n)))` equals `serializeNote(n)`,
+ *  because every scalar goes through {@link scalar} and {@link scalar} is
+ *  idempotent. The note that comes back can differ from the one that went in —
+ *  a newline flattens to a space, an inner `"` comes back `'` — but it never
+ *  differs a second time, and no Note it emits reads back as a DIFFERENT one
+ *  than the file says. */
 export function serializeNote(note: Note): string {
   const front = [
     FRONT_MATTER_DELIM,

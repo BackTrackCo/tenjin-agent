@@ -32,7 +32,7 @@ Useful flags:
 
 ### Hooks
 
-`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a `WebSearch` or `WebFetch` call. The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a `WebSearch` (and, with the push experiment on, before a `WebFetch`). The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
 `tenjin push on` registers six more, across four scripts, described in [Push (experimental)](#push-experimental) below; a plain `tenjin install` on a machine that has never run `tenjin push on` adds nothing beyond these four.
 
@@ -109,7 +109,7 @@ Searches public reusable knowledge. The question should be generalized public te
 | --------------------------- | ------------ | ---------------------------------------------- |
 | `--max-price <usd>`         | decimal USD  | Only return candidates at or below this price. |
 | `--fresh-within <duration>` | `P<n>[DWMY]` | Freshness window, such as `P30D`.              |
-| `--limit <n>`               | `1` to `10`  | Maximum candidates.                            |
+| `--limit <n>`               | `1` to `10`  | Maximum items.                                 |
 | `--applies-to <key=v1,v2>`  | repeatable   | Applicability filter.                          |
 
 An honest miss exits 0. Use `tenjin outcome` later so the marketplace learns whether a search helped.
