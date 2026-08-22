@@ -147,6 +147,21 @@ export interface HooksResult {
   updated: HookEvent[];
   /** Script files this run wrote or refreshed. */
   scripts: string[];
+  /**
+   * Hook EVENTS this run registered (added or updated) for the BASE search
+   * bundle alone, so a summary can say how many search hooks it wired without
+   * counting the push experiment's events in the same number. Undefined on the
+   * paths that register nothing.
+   */
+  searchWrote?: number;
+  /**
+   * Push-experiment ENTRIES now registered, whether this run wrote them or found
+   * them already there. Counted as entries, not events, because `added` and the
+   * lists beside it are per-EVENT and one event can carry both a search hook and
+   * a push arm — PreToolUse carries three. Undefined when nothing was wired; 0
+   * when the experiment is off.
+   */
+  pushArms?: number;
   skipped?: HooksSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
@@ -275,6 +290,9 @@ interface HookSpec {
   event: HookEvent;
   scriptFile: string;
   script: string;
+  /** Which bundle this entry belongs to; the two are counted separately so a
+   *  summary never reports a push arm as a search hook. */
+  arm: 'search' | 'push';
   /** Absent for Stop and the push subagent/prompt arms, which the harness fires
    *  on every occurrence of the event with no matcher. */
   matcher?: string;
@@ -300,20 +318,23 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       scriptFile: WEBSEARCH_HOOK_FILE,
       script: websearchHookScript(dataDir),
       matcher: WEBSEARCH_MATCHER,
+      arm: 'search',
     },
     {
       event: 'PreToolUse',
       scriptFile: DISPATCH_HOOK_FILE,
       script: dispatchHookScript(dataDir),
       matcher: DISPATCH_MATCHER,
+      arm: 'search',
     },
     {
       event: 'SessionStart',
       scriptFile: SESSIONSTART_HOOK_FILE,
       script: sessionPrimerHookScript(dataDir),
       matcher: SESSION_START_MATCHER,
+      arm: 'search',
     },
-    { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir) },
+    { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir), arm: 'search' },
   ];
   if (!opts.push) return base;
   return [
@@ -323,6 +344,7 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       scriptFile: PUSH_PROMPT_HOOK_FILE,
       script: pushPromptHookScript(dataDir),
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
     },
     {
       event: 'PostToolUse',
@@ -330,6 +352,7 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       script: pushFailureHookScript(dataDir),
       matcher: PUSH_FAILURE_MATCHER,
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
     },
     {
       event: 'PostToolUseFailure',
@@ -337,12 +360,14 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       script: pushFailureHookScript(dataDir),
       matcher: PUSH_FAILURE_MATCHER,
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
     },
     {
       event: 'SubagentStart',
       scriptFile: PUSH_SUBAGENT_HOOK_FILE,
       script: pushSubagentHookScript(dataDir),
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
     },
     {
       event: 'PostToolUse',
@@ -350,6 +375,7 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       script: pushContextHookScript(dataDir),
       matcher: PUSH_CONTEXT_READ_MATCHER,
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
     },
     {
       event: 'PreToolUse',
@@ -357,6 +383,7 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       script: pushContextHookScript(dataDir),
       matcher: PUSH_CONTEXT_EDIT_MATCHER,
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
     },
   ];
 }
@@ -444,10 +471,30 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // strongest outcome: two lists would say two contradictory things about it.
   // Each spec appends to the RUNNING list, not to what was read from disk.
   const outcomes = new Map<HookEvent, 'added' | 'updated' | 'alreadyPresent'>();
+  // The same collapse, over the BASE bundle only. `outcomes` cannot answer "how
+  // many search hooks did this run wire" once push is on, because PreToolUse
+  // carries entries from both bundles and reports as one event either way.
+  const searchOutcomes = new Map<HookEvent, 'added' | 'updated' | 'alreadyPresent'>();
+  // ENTRIES, not events, and every outcome counts: this is "how many push arms
+  // are wired now", which is what the disclosure has to be true about on a
+  // re-run that found them all already present.
+  let pushArms = 0;
   const rank = { added: 3, updated: 2, alreadyPresent: 1 } as const;
-  const note = (outcome: 'added' | 'updated' | 'alreadyPresent', event: HookEvent): void => {
+  const note = (
+    outcome: 'added' | 'updated' | 'alreadyPresent',
+    event: HookEvent,
+    arm: 'search' | 'push',
+  ): void => {
     const seen = outcomes.get(event);
     if (seen === undefined || rank[outcome] > rank[seen]) outcomes.set(event, outcome);
+    if (arm === 'push') {
+      pushArms += 1;
+      return;
+    }
+    const seenSearch = searchOutcomes.get(event);
+    if (seenSearch === undefined || rank[outcome] > rank[seenSearch]) {
+      searchOutcomes.set(event, outcome);
+    }
   };
   const eventsWith = (outcome: 'added' | 'updated' | 'alreadyPresent'): HookEvent[] =>
     HOOK_EVENTS.filter((event) => outcomes.get(event) === outcome);
@@ -471,28 +518,43 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
     const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
     if (idx === -1) {
       nextHooks[spec.event] = [...list, desired];
-      note('added', spec.event);
+      note('added', spec.event, spec.arm);
       continue;
     }
     if (JSON.stringify(list[idx]) === JSON.stringify(desired)) {
-      note('alreadyPresent', spec.event);
+      note('alreadyPresent', spec.event, spec.arm);
       continue;
     }
     // Ours, but stale: an older install's path, or a data dir that moved. Rewritten
     // IN PLACE so the entry keeps its position among whatever else is registered.
     nextHooks[spec.event] = list.map((e, i) => (i === idx ? desired : e));
-    note('updated', spec.event);
+    note('updated', spec.event, spec.arm);
   }
 
   const added = eventsWith('added');
   const updated = eventsWith('updated');
   const alreadyPresent = eventsWith('alreadyPresent');
+  const searchWrote = HOOK_EVENTS.filter((event) => {
+    const outcome = searchOutcomes.get(event);
+    return outcome === 'added' || outcome === 'updated';
+  }).length;
 
   // Nothing to register: no guard is involved, so the scripts are simply brought
   // up to date. This is the path a re-run takes after an upgrade changed a body.
   if (added.length === 0 && updated.length === 0) {
     const scripts = await writeScripts(plan, scriptsDir);
-    return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+    return {
+      harness: 'claude',
+      path,
+      scriptsDir,
+      mode,
+      added,
+      alreadyPresent,
+      updated,
+      scripts,
+      searchWrote,
+      pushArms,
+    };
   }
 
   const next = { ...settings, hooks: nextHooks };
@@ -518,7 +580,18 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // and the re-run the fix names simply registers it.
   if (await changed()) return refuseChanged(path, scriptsDir, mode, scripts);
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+  return {
+    harness: 'claude',
+    path,
+    scriptsDir,
+    mode,
+    added,
+    alreadyPresent,
+    updated,
+    scripts,
+    searchWrote,
+    pushArms,
+  };
 }
 
 /**

@@ -1163,6 +1163,38 @@ describe('runInstall: interactive walkthrough', () => {
     );
     expect(text).toContain('tenjin config set hooks.searchMode off');
     expect(text).toContain(join(data, 'hooks'));
+    // The promise only the UNPUSHED bundle can make. See the push case below.
+    expect(text).toContain('They can never block or change the tool call.');
+    expect(text).not.toContain('Push arms:');
+  });
+
+  /**
+   * With the experiment armed the disclosure has to stop promising the hooks are
+   * advisory: the research arm can deny a WebSearch or WebFetch outright and
+   * answer it from the marketplace. It also has to stop reporting the six push
+   * entries inside the search-hook count, which is the number an operator reads
+   * to decide whether the experiment wired anything at all.
+   */
+  it('discloses the deny and counts the push arms apart, once push is on', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).not.toContain('They can never block or change the tool call.');
+    expect(text).toContain(
+      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+    );
+    expect(text).toContain('The push experiment is on, so 6 more hook entries run beside these');
+    expect(text).toContain('Turn it off: tenjin push off');
+    // Three search EVENTS wired (PreToolUse carries two of the four base
+    // entries), and the six push entries reported as their own count rather than
+    // folded into that number — which is what the combined count used to do.
+    // Without the split this line reads 'auto mode, 7 hook event(s)'.
+    expect(text).toContain('auto mode, 3 hook event(s) registered');
+    expect(text).toContain('Push arms: 6');
   });
 
   // The disclosure names the count, the file and the undo. It does NOT recite the
