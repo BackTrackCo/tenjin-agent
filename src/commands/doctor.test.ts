@@ -1393,6 +1393,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       env: {},
       fetchImpl: healthyFetch,
       homeDir: home,
+      cwd: dir,
     });
     return (res.humanLines ?? []).join('\n');
   };
@@ -1477,6 +1478,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       env: {},
       fetchImpl: healthyFetch,
       homeDir: home,
+      cwd: dir,
     });
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
     expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([
