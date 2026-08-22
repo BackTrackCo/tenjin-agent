@@ -84,6 +84,75 @@ describe('runPushOn', () => {
     // mode rather than asserting anything is literally 'remind' in the file.
     expect((await loadRawConfig(dir)).hooks?.searchMode).toBe('remind');
   });
+
+  /**
+   * `install` refuses to write a single hook entry when `hooks.searchMode` is
+   * `off` — that is what the kill switch means. This command called
+   * `wireSearchHooks` directly and so wired six entries straight past it, which
+   * made `off` mean two different things depending on which verb you typed.
+   */
+  it('refuses when hooks.searchMode is off, and leaves the key as it was', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { searchMode: 'off' } }));
+    await expect(runPushOn(makeCtx(), { homeDir: home })).rejects.toMatchObject({
+      code: 'USAGE',
+      exitCode: 2,
+      fix: 'tenjin config set hooks.searchMode auto, then tenjin push on',
+    });
+    // Nothing written: not the mode, not a script, not settings.json.
+    expect((await loadRawConfig(dir)).hooks?.push).toBeUndefined();
+    expect(
+      await readFile(join(hooksDir(dir), PUSH_PROMPT_HOOK_FILE), 'utf8').catch(() => null),
+    ).toBeNull();
+    expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
+  });
+
+  /**
+   * A recorded `--harness` set without Claude Code is the operator saying their
+   * harness is not the one these arms hook. `install` skips there out loud, and
+   * so must this — silence would look like it worked.
+   */
+  it('skips with a reason when the recorded harness is not Claude Code', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: ['hermes'] } }));
+    const result = await runPushOn(makeCtx(), { homeDir: home });
+
+    expect(result.data).toMatchObject({ mode: 'on', skipped: 'harness-not-claude' });
+    const text = result.humanLines?.join('\n') ?? '';
+    expect(text).toContain('nothing was wired (harness-not-claude)');
+    expect(text).toContain('tenjin install --harness claude');
+    expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
+    // The preference is still durable, so a later install on a Claude machine
+    // wires the arms with no second command.
+    expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
+  });
+
+  /** An EMPTY record means no past install passed `--harness`. That is the
+   *  common case, and it must not read as "no Claude Code". */
+  it('wires as normal when no harness was ever recorded', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: [] } }));
+    const result = await runPushOn(makeCtx(), { homeDir: home });
+    expect(result.data).toMatchObject({ mode: 'on' });
+    expect((result.data as { skipped?: string }).skipped).toBeUndefined();
+  });
+
+  /**
+   * Six entries into the operator's home, written by a verb that is not
+   * `install`, owe the same disclosure `install` gives — including the sentence
+   * `install` only says with push on: one arm can deny a tool call.
+   */
+  it("discloses what the arms do, in install's words, above the undo line", async () => {
+    const result = await runPushOn(makeCtx(), { homeDir: home });
+    const lines = result.humanLines ?? [];
+    const text = lines.join('\n');
+    expect(text).toContain('The push experiment is on, so 6 more hook entries run beside these');
+    expect(text).toContain(
+      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+    );
+    expect(text).not.toContain('They can never block or change the tool call.');
+    const disclosure = lines.findIndex((l) => l.includes('The push experiment is on'));
+    const undo = lines.findIndex((l) => l.startsWith('Undo anytime:'));
+    expect(disclosure).toBeGreaterThanOrEqual(0);
+    expect(undo).toBeGreaterThan(disclosure);
+  });
 });
 
 describe('runPushOff', () => {

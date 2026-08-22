@@ -3,6 +3,8 @@ import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { persistPushMode } from './config';
+import { hooksDisclosure } from './install';
+import { CliError } from '../lib/errors';
 import { wireSearchHooks } from '../lib/harness-hooks';
 import type { HooksResult } from '../lib/harness-hooks';
 import { hooksDir, pushLedgerPath } from '../lib/paths';
@@ -50,23 +52,66 @@ export interface PushOnDeps {
 }
 
 /**
- * Turn the push experiment on: persist `hooks.push=on`, then wire the five push
+ * Turn the push experiment on: persist `hooks.push=on`, then wire the four push
  * hook scripts (prompt, failure, subagent, context) alongside whatever search
- * hooks are already configured. Unconditional, on purpose: typing `tenjin push
- * on` IS the operator's consent to wire Claude Code hooks, the only harness the
- * push arms target today, the same way `tenjin config set hooks.searchMode auto`
- * is consent enough for the search hooks it governs.
+ * hooks are already configured. Typing `tenjin push on` IS the operator's
+ * consent to wire Claude Code hooks, the only harness the push arms target
+ * today, the same way `tenjin config set hooks.searchMode auto` is consent
+ * enough for the search hooks it governs.
+ *
+ * IT IS NOT CONSENT TO OVERRIDE THE TWO GATES `install` APPLIES, and this
+ * command used to call `wireSearchHooks` straight past both of them:
+ *
+ *  - `hooks.searchMode: off` is the kill switch for this whole bundle, and
+ *    `install` on that setting writes NOTHING into settings.json. Wiring six
+ *    more entries there because a different verb was typed would make `off` mean
+ *    something different depending on which command you reached for, so this
+ *    refuses and names the command that lifts it. Refused BEFORE the config
+ *    write: a command that declines to act must not leave the key flipped.
+ *  - A recorded `--harness` set that does not include Claude Code says the
+ *    operator's harness is not the one these arms hook. `install` skips there
+ *    (`harness-not-claude`) and so does this, out loud. An EMPTY record is not
+ *    that statement: it only means no past install passed `--harness`, which is
+ *    the common case and wires as before.
+ *
+ * And a run that does wire six entries into the operator's home has to disclose
+ * what they do, in the same words `install` uses, including the one arm that can
+ * deny a tool call.
  */
 export async function runPushOn(
   ctx: CommandContext,
   deps: PushOnDeps = {},
 ): Promise<CommandResult> {
-  await persistPushMode(ctx.dataDir, 'on');
+  const raw = await loadRawConfig(ctx.dataDir);
   const settings = resolveSettings({
-    config: await loadRawConfig(ctx.dataDir),
+    config: raw,
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
   });
+  if (settings.hooksSearchMode.value === 'off') {
+    throw new CliError(
+      'USAGE',
+      'hooks.searchMode is off, which is the kill switch for every hook this CLI writes, so the push arms were not wired and hooks.push was left as it was.',
+      { fix: 'tenjin config set hooks.searchMode auto, then tenjin push on' },
+    );
+  }
+  // The set a past `--harness` install recorded; empty means nothing was ever
+  // recorded, NOT that Claude Code is absent.
+  const recorded = raw.install?.harness ?? [];
+  if (recorded.length > 0 && !recorded.includes('claude')) {
+    // The mode is still persisted: it is a durable preference, it costs nothing
+    // without scripts, and it is what makes a later `tenjin install` on a
+    // machine that does have Claude Code wire the arms with no second command.
+    await persistPushMode(ctx.dataDir, 'on');
+    return {
+      data: { mode: 'on', hooks: null, skipped: 'harness-not-claude' },
+      humanLines: [
+        `hooks.push is on, but nothing was wired (harness-not-claude): your recorded install harness is ${recorded.join(', ')}, and the push arms are Claude Code hooks.`,
+        'Wire them: tenjin install --harness claude, then tenjin push on',
+      ],
+    };
+  }
+  await persistPushMode(ctx.dataDir, 'on');
   const result = await (deps.wire ?? wireSearchHooks)({
     homeDir: deps.homeDir ?? homedir(),
     dataDir: ctx.dataDir,
@@ -325,6 +370,11 @@ function renderWireLines(result: HooksResult): string[] {
     `hooks.push is on. Wired ${registered.length > 0 ? registered.join(', ') : '(nothing new; already up to date)'} in ${
       result.path ?? result.scriptsDir
     }.`,
+    // THE SAME WORDS `install` USES, from the same function: this command writes
+    // the same entries into the same file, and an operator who reached it by a
+    // different verb is owed the same disclosure — above the undo, because the
+    // undo is only meaningful once you know what there is to undo.
+    hooksDisclosure(result),
     'Undo anytime: `tenjin push off` (the scripts stay, but go inert on their next run).',
   ];
 }
