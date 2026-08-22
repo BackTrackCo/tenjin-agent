@@ -44,7 +44,9 @@ Hooks are read once at session start, so restart Claude Code after registering t
 
 Removes what `tenjin install` wrote: Tenjin skills, hook scripts, Tenjin hook entries, Tenjin permission rules, and older pointer lines in `CLAUDE.md` or `AGENTS.md`.
 
-Your wallet, config, library, search history, and older candidate data under `~/.tenjin` stay in place. The one thing it removes there is the generated hook scripts in `~/.tenjin/hooks`, which `install` wrote and puts back. It is safe to run twice.
+Your wallet, config, library, search history, team notes, push ledger, and older candidate data under `~/.tenjin` stay in place. The one thing it removes there is the generated hook scripts in `~/.tenjin/hooks`, which `install` wrote and puts back. It is safe to run twice.
+
+The push arms count as hook scripts here: `uninstall` removes `tenjin-push-prompt.mjs`, `tenjin-push-failure.mjs`, `tenjin-push-subagent.mjs`, `tenjin-push-context.mjs` and all of their settings entries whatever `hooks.push` says, since `tenjin push off` deliberately leaves them on disk.
 
 ### `tenjin doctor`
 
@@ -321,6 +323,8 @@ On a strong, free hit the prompt, failure, and subagent arms may attach the find
 ### `tenjin push off`
 
 Sets `hooks.push` to `off` and returns immediately. Nothing is unwired: every push script reads this key at the top of its own run and exits in milliseconds when it is not `on`, so the change takes effect on the very next hook invocation with no re-install.
+
+To take the scripts and their settings entries away entirely, run `tenjin uninstall`.
 
 ### `tenjin push status [--json]`
 

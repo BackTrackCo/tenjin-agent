@@ -11,6 +11,13 @@ import {
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
 } from '../lib/hook-scripts';
+import {
+  PUSH_CONTEXT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+} from '../lib/push-scripts';
+import { wireSearchHooks } from '../lib/harness-hooks';
 import { hooksDir } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
 import type { CommandContext } from '../context';
@@ -482,5 +489,98 @@ describe('runUninstall — partial and repeat states', () => {
     expect(report.settings.skipped).toBe('unparsable');
     expect(report.scripts).toHaveLength(4);
     expect(text).toContain('not valid JSON');
+  });
+});
+
+/**
+ * The push experiment's arms, wired by the REAL wiring code rather than by a
+ * hand-written fixture: uninstall's whole claim is that it is the exact reverse
+ * of what install (and `tenjin push on`) wrote, and a fixture I typed here would
+ * go stale the day a seventh entry or a fifth script is added, silently passing
+ * while the real machine keeps a file forever.
+ */
+describe('runUninstall — the push experiment’s arms', () => {
+  it('removes every push script and every push settings.json entry', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeSettingsPath(home), '{}\n');
+    const wired = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    expect(wired.skipped).toBeUndefined();
+
+    // What the wiring actually put on disk, so this asserts against the writer
+    // instead of against a second copy of the plan.
+    const pushFiles = [
+      PUSH_PROMPT_HOOK_FILE,
+      PUSH_FAILURE_HOOK_FILE,
+      PUSH_SUBAGENT_HOOK_FILE,
+      PUSH_CONTEXT_HOOK_FILE,
+    ];
+    for (const f of pushFiles) expect(existsSync(join(hooksDir(data), f))).toBe(true);
+
+    const { report } = await run();
+
+    for (const f of pushFiles) expect(existsSync(join(hooksDir(data), f))).toBe(false);
+    for (const f of pushFiles) {
+      expect(report.scripts.some((p) => p.endsWith(f))).toBe(true);
+    }
+    // Every event the push arms are registered under is reported as cleared.
+    expect(report.settings.hooks.sort()).toEqual(
+      [
+        'PostToolUse',
+        'PostToolUseFailure',
+        'PreToolUse',
+        'SessionStart',
+        'Stop',
+        'SubagentStart',
+        'UserPromptSubmit',
+      ].sort(),
+    );
+    // Nothing of ours is left anywhere in the file.
+    const after = await readFile(claudeSettingsPath(home), 'utf8');
+    for (const f of pushFiles) expect(after).not.toContain(f);
+    expect(JSON.parse(after)).toEqual({});
+  });
+
+  it('removes them even after `tenjin push off`, and keeps the ledger and the notes', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeSettingsPath(home), '{}\n');
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    // `push off` writes the config key and nothing else: the scripts and entries
+    // stay on disk on purpose, which is exactly the state uninstall must clear.
+    await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'off' } }));
+    const ledger = join(data, 'push-ledger.jsonl');
+    await writeFile(ledger, '{"at":"2026-08-22T00:00:00.000Z"}\n');
+    const note = join(data, 'notes', 'notes', '20260822-aaaaaa.md');
+    await mkdir(join(data, 'notes', 'notes'), { recursive: true });
+    await writeFile(note, '---\nquestion: "q"\n---\nbody\n');
+
+    const { report, text } = await run();
+
+    expect(report.scripts.some((p) => p.endsWith(PUSH_PROMPT_HOOK_FILE))).toBe(true);
+    expect(report.settings.hooks).toContain('UserPromptSubmit');
+    // Under the data dir, so untouched — and said so in the receipt.
+    expect(existsSync(ledger)).toBe(true);
+    expect(existsSync(note)).toBe(true);
+    expect(existsSync(join(data, 'config.json'))).toBe(true);
+    expect(text).toContain('team notes and the push ledger');
+  });
+
+  it('leaves a stranger’s entry on a push-only event alone', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      `${JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] }],
+        },
+      })}\n`,
+    );
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    await run();
+    const after = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
+      hooks: { UserPromptSubmit: unknown[] };
+    };
+    expect(after.hooks.UserPromptSubmit).toEqual([
+      { hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] },
+    ]);
   });
 });
