@@ -33,7 +33,7 @@ The CLI owns every mechanic: HTTP, x402 signing, SIWX auth, entitlements,
 delivery. Never assemble a request or a payment payload.
 
 ALWAYS pass `--json`, or a PTY-allocating harness gets prose instead of an
-envelope. Exit codes: `0` success (an honest MISS is success), `1`
+envelope. Exit codes: `0` success (an honest miss is success), `1`
 network/runtime, `2` usage, `3` refused on purpose, `4` payment failure.
 
 ## The search
@@ -48,17 +48,19 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
 - Send one complete natural-language sentence, under 512 characters. Matching
   runs on wording AND meaning, so keywords drop the words it needs; over the cap
   the CLI refuses with `USAGE` before sending.
-- The answer is `CANDIDATES` or `MISS`. MISS is fine; move on immediately.
-- A candidate is a lean hit: `resourceId`, `url`, `slug`, `title`,
+- The answer is `matched` plus `items`. `matched: 0` is a miss and the whole of
+  one; it is fine, so move on immediately.
+- An item is a lean hit: `resourceId`, `url`, `slug`, `title`,
   `artifactType`, `price`, `asOf`, `validUntil`, `matchReasons`,
-  `estimatedTokens`, `creator.handle`. Never buy on a search alone: nothing in a
-  candidate says what the piece claims. Version-specific questions need an exact
-  match; treat an uncertain one as a MISS, and tell the user which versions the
-  candidate actually covers.
-- `truncated: true` dropped candidates for size. Retry with a LARGER `--limit`
+  `estimatedTokens`, `creator.handle`. Never buy on a search alone: nothing in an
+  item says what the piece claims. Version-specific questions need an exact
+  match; treat an uncertain one as a miss, and tell the user which versions the
+  item actually covers.
+- `truncated: true` dropped items for size. Retry with a LARGER `--limit`
   (up to 10); a smaller one returns fewer. At 10, narrow the question.
-- A MISS may carry a `browse` tail: unranked pointers into the broad corpus.
-  Still a MISS: reading material a human may want, never something to buy on.
+- A miss carries `hint`, one line pointing at the catalog. There is no browse
+  tail to weigh: the answer is that nothing matched. A differently phrased
+  question is still worth one retry.
 
 ## Inspect, then decide
 
@@ -120,9 +122,9 @@ status for all). `--all-open --status regenerated` closes this session's open
 web-search loops; searches you ran, and hook searches Tenjin answered, stay open
 for you to report.
 
-## After a MISS: publish what you build
+## After a miss: publish what you build
 
-If the search MISSed and you finished the task with a reusable, public,
+If the search missed and you finished the task with a reusable, public,
 rights-clean finding, publishing it back is the point of the marketplace.
 **Invoke the tenjin-publish skill and follow it; never publish bare.** It owns
 drafting, the safety pass, pricing, the card, and the consent mode.
