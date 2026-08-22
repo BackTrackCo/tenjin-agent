@@ -710,6 +710,49 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
     });
 
+  // ---- push (sidecar) ----
+  // `tenjin push on|off|status` (docs/push.md): the runtime toggle for the push
+  // experiment, which surfaces a Tenjin finding beside a failing command, a
+  // stuck edit loop, or a subagent dispatch, without being asked. See
+  // commands/push.ts for the mechanism; this block only wires the three verbs.
+  const push = addGlobalFlags(
+    program
+      .command('push')
+      .description(
+        'The push experiment (docs/push.md): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push on|off|status`',
+      ),
+  );
+  addGlobalFlags(push.command('on'))
+    .description(
+      'Turn the push experiment on: persist hooks.push=on, then wire its five hook scripts (idempotent; safe to re-run)',
+    )
+    .action(async function (this: Command) {
+      await runCommand('push.on', this, async (ctx) => {
+        const { runPushOn } = await import('./commands/push');
+        return runPushOn(ctx);
+      });
+    });
+  addGlobalFlags(push.command('off'))
+    .description(
+      'Turn the push experiment off: persists hooks.push=off and exits instantly; any wired scripts stay on disk but go inert on their next run',
+    )
+    .action(async function (this: Command) {
+      await runCommand('push.off', this, async (ctx) => {
+        const { runPushOff } = await import('./commands/push');
+        return runPushOff(ctx);
+      });
+    });
+  addGlobalFlags(push.command('status'))
+    .description(
+      'Show push mode, capture mode, whether the hook scripts are actually wired, and the last 7 days of ledger tallies',
+    )
+    .action(async function (this: Command) {
+      await runCommand('push.status', this, async (ctx) => {
+        const { runPushStatus } = await import('./commands/push');
+        return runPushStatus(ctx);
+      });
+    });
+
   return program;
 }
 
