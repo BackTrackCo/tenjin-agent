@@ -758,6 +758,53 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   /**
+   * The REAL Bash tool_response shape: {stdout, stderr, interrupted, isImage},
+   * with no exit_code at all, and a runner that printed its failure to stdout.
+   * Reading only stderr when the code is unknown made the whole arm dead on the
+   * harness it ships against.
+   */
+  it('reads a failure the runner printed to stdout with no exit code', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run' },
+        tool_response: {
+          stdout: "FAIL src/x.test.ts\nTypeError: Cannot find module 'left-pad' from the resolver",
+          stderr: '',
+          interrupted: false,
+          isImage: false,
+        },
+      }),
+    );
+    expect(run.code).toBe(0);
+    expect(queries()[0] ?? '').toContain('left-pad');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+  });
+
+  it('stays out of the way of a command that printed nothing wrong', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
+  });
+
+  /**
    * An auth failure is the failure this arm fires on most often, so the token in
    * it is the common case and not the edge. Nothing credential-shaped may reach
    * the wire, and nothing credential-shaped may reach the ledger either: the

@@ -241,7 +241,7 @@ describe('HOOK_SCRIPT_VERSION', () => {
       sessionPrimer: '6acf14d73e72072b743fb940f36ed14a',
       stop: '70fab848c8556a30f17a1aee9ce229e4',
       pushPrompt: '2229488e3ed9a5aadb11c783821ab8fa',
-      pushFailure: 'dc664a76a24f05a0ea55f598251cc1a2',
+      pushFailure: '400b3d2a4c1b20a657f5bee40593d451',
       pushSubagent: '80aae96c788f7fb69efb168e151f30b3',
       pushContext: 'b66a60f1da81ebd83eb4c9a4c755eecf',
     });

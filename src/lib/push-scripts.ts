@@ -932,8 +932,16 @@ function failureText(input) {
   if (exit === 0) return '';
   const stderr = typeof r.stderr === 'string' ? r.stderr : '';
   const stdout = typeof r.stdout === 'string' ? r.stdout : '';
-  // A zero-less response (an older harness) counts only if stderr looks wrong.
-  if (exit === null && !ERROR_LINE_RE.test(stderr)) return '';
+  // NO EXIT CODE IS THE NORMAL CASE, not an old harness: Claude Code's Bash
+  // tool_response is {stdout, stderr, interrupted, isImage}. So an absent code
+  // means "unknown", and both streams are inspected — a test runner or a
+  // compiler prints its failure to STDOUT with an empty stderr, which is exactly
+  // the failure this arm exists for. Only the tail of stdout is read: a passing
+  // run that mentions the word "error" in a log line one page in is not a
+  // failure, and the tail is where a runner puts its verdict.
+  if (exit === null && !ERROR_LINE_RE.test(stderr) && !ERROR_LINE_RE.test(stdout.slice(-4000))) {
+    return '';
+  }
   return stdout + '\n' + stderr;
 }
 
