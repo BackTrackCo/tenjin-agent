@@ -63,6 +63,49 @@ describe('runTeamInit', () => {
     );
   });
 
+  /**
+   * The URL is not merely an address. A value starting with `-` is parsed by
+   * git as an OPTION to `clone` — `--upload-pack=<cmd>` runs `<cmd>` — and the
+   * `ext::` transport exists to execute a command. An argv array does not help
+   * with either: the parsing that matters is git's own.
+   */
+  it.each([
+    ['a leading-dash option', '--upload-pack=touch /tmp/pwned'],
+    ['a short-flag option', '-uecho'],
+    ['the ext transport', "ext::sh -c 'touch /tmp/pwned'"],
+    ['an unknown scheme', 'javascript:alert(1)'],
+    ['a relative path', '../../etc'],
+    ['a bare word', 'origin'],
+    ['nothing at all', '   '],
+  ])('refuses %s before git is invoked', async (_label, gitUrl) => {
+    let invoked = false;
+    const git: TeamInitDeps['git'] = async () => {
+      invoked = true;
+      return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false };
+    };
+    await expect(runTeamInit({ gitUrl }, makeCtx(), { git })).rejects.toMatchObject({
+      code: 'USAGE',
+    });
+    expect(invoked).toBe(false);
+    expect(existsSync(notesDir(dataDir))).toBe(false);
+  });
+
+  it.each([
+    ['https', 'https://github.com/org/repo.git'],
+    ['ssh', 'ssh://git@github.com/org/repo.git'],
+    ['git', 'git://github.com/org/repo.git'],
+    ['file', 'file:///srv/notes.git'],
+    ['scp-like', 'git@github.com:org/repo.git'],
+  ])('accepts a %s URL', async (_label, gitUrl) => {
+    let seen: readonly string[] = [];
+    const git: TeamInitDeps['git'] = async (argv) => {
+      seen = argv;
+      return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false };
+    };
+    await runTeamInit({ gitUrl }, makeCtx(), { git });
+    expect(seen[1]).toBe(gitUrl);
+  });
+
   it('refuses when notesDir already has content that is not a repo', async () => {
     await mkdir(notesDir(dataDir), { recursive: true });
     await writeFile(join(notesDir(dataDir), 'stray.txt'), 'not a note repo');

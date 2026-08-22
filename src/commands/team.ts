@@ -30,11 +30,59 @@ export interface TeamInitDeps {
  */
 const CLONE_TIMEOUT_MS = 120_000;
 
+/** Transports a clone URL may name. Deliberately short, and \`ext\` is the one
+ *  that matters by its absence: \`ext::sh -c '<anything>'\` is a documented git
+ *  transport that RUNS A SHELL COMMAND during clone, so a URL is not merely an
+ *  address — it is potentially a program. */
+const CLONE_SCHEMES = new Set(['ssh', 'https', 'git', 'file']);
+/** \`git@github.com:org/repo.git\`, the form everyone actually pastes. The
+ *  negative lookahead keeps it from swallowing a \`scheme://\` that got here by
+ *  another route. */
+const SCP_LIKE_RE = /^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:(?!\/\/)/;
+/** A local path, which is what a bare origin on a shared mount looks like. */
+const LOCAL_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])/;
+
+/**
+ * The URL goes into git's argv, so it is checked before it gets there.
+ *
+ * TWO SEPARATE HOLES, both closed here. A value starting with \`-\` is not an
+ * argument to \`clone\` at all, it is an OPTION to it — \`--upload-pack=<cmd>\`
+ * runs \`<cmd>\` on the way past, and argv arrays do not help because the
+ * problem is git's own parsing, not the shell's. And \`ext::\` is a transport
+ * whose whole purpose is executing a command, so even a well-formed URL can be
+ * a payload. Hence: never a leading dash, and only transports that transport.
+ */
+function assertCloneUrl(gitUrl: string): void {
+  const refuse = (why: string): never => {
+    throw new CliError('USAGE', `${why}`, {
+      fix: 'Pass an https://, ssh://, git://, file:// URL, a git@host:org/repo.git address, or an absolute local path.',
+    });
+  };
+  if (gitUrl.trim() === '') refuse('`tenjin team init` needs a git URL.');
+  if (/[\u0000-\u001f]/.test(gitUrl)) refuse('That git URL contains a control character.');
+  // Before anything else: git reads it as an option, not as a repository.
+  if (gitUrl.startsWith('-')) {
+    refuse(`git would read ${JSON.stringify(gitUrl)} as an option, not a repository.`);
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(gitUrl)?.[1];
+  if (scheme !== undefined && !LOCAL_PATH_RE.test(gitUrl) && !SCP_LIKE_RE.test(gitUrl)) {
+    if (!CLONE_SCHEMES.has(scheme.toLowerCase())) {
+      refuse(
+        `${JSON.stringify(scheme)} is not a git transport \`tenjin team init\` will clone from.`,
+      );
+    }
+    return;
+  }
+  if (SCP_LIKE_RE.test(gitUrl) || LOCAL_PATH_RE.test(gitUrl)) return;
+  refuse(`${JSON.stringify(gitUrl)} is not a git URL this command recognizes.`);
+}
+
 export async function runTeamInit(
   args: TeamInitArgs,
   ctx: CommandContext,
   deps: TeamInitDeps = {},
 ): Promise<CommandResult> {
+  assertCloneUrl(args.gitUrl);
   const dir = notesDir(ctx.dataDir);
   const preExisted = await pathExists(dir);
   if (preExisted) {
