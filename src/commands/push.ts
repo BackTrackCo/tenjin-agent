@@ -329,7 +329,10 @@ function renderStatusLines(data: {
 }): string[] {
   const { mode, captureMode, scriptsWired, ledger } = data;
   const lines = [
-    `push: ${mode}${mode === 'on' && !scriptsWired ? ' (scripts not wired yet; run `tenjin install`)' : ''}`,
+    // `tenjin push on` is the verb that wires them AND the one that got the
+    // operator here; `tenjin install` only wires the arms when hooks.push is
+    // already `on`, so naming it turns a one-command fix into a guess.
+    `push: ${mode}${mode === 'on' && !scriptsWired ? ' (scripts not wired yet; run `tenjin push on`)' : ''}`,
     `capture: ${captureMode}`,
     `scripts wired: ${scriptsWired ? 'yes' : 'no'}`,
     `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,

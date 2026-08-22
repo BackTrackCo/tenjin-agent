@@ -200,7 +200,9 @@ describe('runPushStatus', () => {
     );
     const before = await runPushStatus(makeCtx());
     expect(before.data).toMatchObject({ mode: 'on', captureMode: 'block', scriptsWired: false });
-    expect(before.humanLines?.join('\n')).toContain('scripts not wired yet');
+    // The verb that actually wires them. `tenjin install` only does so when
+    // hooks.push is already on, so it is not the one-command fix.
+    expect(before.humanLines?.join('\n')).toContain('scripts not wired yet; run `tenjin push on`');
 
     await mkdir(hooksDir(dir), { recursive: true });
     for (const file of PUSH_SCRIPT_FILES) {
