@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runTeamInit, runTeamSync } from './team';
 import type { TeamInitDeps } from './team';
 import { notesDir } from '../lib/paths';
@@ -112,6 +112,37 @@ describe('runTeamInit', () => {
     await expect(
       runTeamInit({ gitUrl: 'https://example.invalid/x.git' }, makeCtx()),
     ).rejects.toThrow(CliError);
+  });
+
+  /**
+   * What `isEmptyDir` answers authorizes a delete: "empty" is what gets past the
+   * overwrite guard, and a failed clone then `rm -rf`s the path. Returning true
+   * on any readdir error handed that authorization to every case it could not
+   * look at — a regular file raises ENOTDIR and was read as empty.
+   */
+  it('refuses a plain file at notesDir instead of deleting it', async () => {
+    await mkdir(dirname(notesDir(dataDir)), { recursive: true });
+    await writeFile(notesDir(dataDir), "somebody else's file");
+    const bogus = join(root, 'does-not-exist.git');
+
+    await expect(runTeamInit({ gitUrl: bogus }, makeCtx())).rejects.toMatchObject({
+      code: 'USAGE',
+    });
+    // Still there, still theirs.
+    await expect(readFile(notesDir(dataDir), 'utf8')).resolves.toBe("somebody else's file");
+  });
+
+  it('refuses a symlink at notesDir rather than cloning through it', async () => {
+    const elsewhere = join(root, 'elsewhere');
+    await mkdir(elsewhere, { recursive: true });
+    await writeFile(join(elsewhere, 'keep.txt'), 'not ours to touch');
+    await mkdir(dirname(notesDir(dataDir)), { recursive: true });
+    await symlink(elsewhere, notesDir(dataDir));
+
+    await expect(
+      runTeamInit({ gitUrl: join(root, 'does-not-exist.git') }, makeCtx()),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    await expect(readFile(join(elsewhere, 'keep.txt'), 'utf8')).resolves.toBe('not ours to touch');
   });
 
   it('refuses when notesDir is already an initialized repo', async () => {

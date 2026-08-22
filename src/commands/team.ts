@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
 import { isGitRepo, runGit } from '../lib/notes';
 import { notesDir } from '../lib/paths';
@@ -93,9 +93,12 @@ export async function runTeamInit(
     const isRepo = await isGitRepo(dir);
     const empty = isRepo ? false : await isEmptyDir(dir);
     if (isRepo || !empty) {
+      const isDir = await lstat(dir)
+        .then((e) => e.isDirectory())
+        .catch(() => false);
       throw new CliError(
         'USAGE',
-        `${dir} already ${isRepo ? 'is a team notes repo' : 'has content'}; \`tenjin team init\` will not overwrite it.`,
+        `${dir} already ${isRepo ? 'is a team notes repo' : isDir ? 'has content' : 'exists and is not a directory'}; \`tenjin team init\` will not overwrite it.`,
         {
           fix: isRepo
             ? 'Run `tenjin team sync` to pull the latest notes.'
@@ -162,10 +165,25 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * An empty DIRECTORY, and nothing else.
+ *
+ * WHAT THIS ANSWERS AUTHORIZES A DELETE. "Empty" is what lets `team init` past
+ * its own overwrite guard, and a failed clone then `rm -rf`s the path. So the
+ * old shape — true on any readdir error — handed that authorization to every
+ * case it could not look at: a regular file at the path raises ENOTDIR, read as
+ * "empty", cloned over, and deleted on the way out. A symlink is worse, because
+ * the thing it names is somebody else's.
+ *
+ * Only a real directory (lstat, so a link to one does not count) that readdir
+ * reports as having nothing in it. Everything else, including every error, is
+ * NOT empty: "I could not look" must never mean "there is nothing there".
+ */
 async function isEmptyDir(dir: string): Promise<boolean> {
   try {
+    if (!(await lstat(dir)).isDirectory()) return false;
     return (await readdir(dir)).length === 0;
   } catch {
-    return true;
+    return false;
   }
 }
