@@ -215,15 +215,20 @@ describe('runNotesList / runNotesShow / runNotesSearch', () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, '20260101-abcdef.md'), 'no front matter at all\n');
 
-    const absent = await runNotesShow({ id: '20260101-zzzzzz' }, makeCtx()).catch(
-      (e: unknown) => e as CliError,
-    );
+    const thrownBy = async (id: string): Promise<CliError> => {
+      try {
+        await runNotesShow({ id }, makeCtx());
+      } catch (err) {
+        return err as CliError;
+      }
+      throw new Error(`notes show ${id} did not throw`);
+    };
+
+    const absent = await thrownBy('20260101-zzzzzz');
     expect(absent.code).toBe('RESOURCE_NOT_FOUND');
     expect(absent.message).toContain('No note');
 
-    const corrupt = await runNotesShow({ id: '20260101-abcdef' }, makeCtx()).catch(
-      (e: unknown) => e as CliError,
-    );
+    const corrupt = await thrownBy('20260101-abcdef');
     expect(corrupt.code).not.toBe('RESOURCE_NOT_FOUND');
     expect(corrupt.message).toContain('exists');
     expect(corrupt.message).toContain('does not parse');
