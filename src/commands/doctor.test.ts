@@ -1383,11 +1383,16 @@ describe('runDoctor — the rule the publish mode carries', () => {
     await rm(home, { recursive: true, force: true });
   });
 
+  // homeDir is threaded through so inspectFreeVerbRules reads the empty temp
+  // home, not the developer's real ~/.claude/settings.json: a machine that
+  // already carries the publish rules would otherwise make these cases pass or
+  // fail by accident of its own config.
   const run = async (): Promise<string> => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
+      homeDir: home,
     });
     return (res.humanLines ?? []).join('\n');
   };
@@ -1471,6 +1476,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
+      homeDir: home,
     });
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
     expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([

@@ -80,6 +80,10 @@ export async function runSearch(
   // Ingest trust boundary: a candidate url that points off the configured origin
   // would later route a wallet-signed SIWX header and payment to that host via
   // `buy <resourceId>`. Refuse the whole response as a contract violation.
+  // This deliberately diverges from the hook path (lib/hook-scripts.ts
+  // askTenjin), which DROPS the one off-origin candidate and keeps the rest: a
+  // hook hint is advisory and never pays, so one bad row should not blank the
+  // hint, whereas a `search` result feeds `buy` and must fail closed as a whole.
   for (const c of candidates) {
     try {
       assertOnBaseOrigin(c.url, settings.baseUrl, 'search candidate URL');
