@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -7,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  HOOK_SCRIPT_VERSION,
   PRIMER_TEXT,
   REMIND_LINE,
   dispatchHookScript,
@@ -23,6 +25,7 @@ import {
   WEBSEARCH_HOOK_USER_AGENT,
   composeUserAgent,
 } from './client-meta';
+import { PRODUCTION_HOST, PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { loadSearches, recordSearch, searchStoreLockPath } from './search-store';
 
 /**
@@ -192,6 +195,47 @@ function injected(run: HookRun): string | null {
   };
   return parsed.hookSpecificOutput?.additionalContext ?? null;
 }
+
+/**
+ * The installer rewrites an installed hook only when HOOK_SCRIPT_VERSION moves,
+ * and every script stamps that number in its own header. So a body change with a
+ * forgotten bump is doubly quiet: existing installs keep running the old script,
+ * and the header on the new one names a version whose bytes it is not. No other
+ * test catches it, because every one of them compares a generated script to
+ * itself. These digests are the forced pause. Changing a body reds them; the fix
+ * is to bump HOOK_SCRIPT_VERSION and paste the new digests in, in one diff.
+ */
+describe('HOOK_SCRIPT_VERSION', () => {
+  // Fixed, because DATA_DIR is substituted into every script.
+  const PIN_DIR = '/tmp/tenjin-hook-version-pin';
+  const scripts = () => ({
+    websearch: websearchHookScript(PIN_DIR),
+    dispatch: dispatchHookScript(PIN_DIR),
+    sessionPrimer: sessionPrimerHookScript(PIN_DIR),
+    stop: stopHookScript(PIN_DIR),
+  });
+  const digest = (source: string): string =>
+    createHash('sha256').update(source).digest('hex').slice(0, 32);
+
+  it('labels these exact bytes, and no others', () => {
+    expect(HOOK_SCRIPT_VERSION).toBe(20);
+    const digests = Object.fromEntries(
+      Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
+    );
+    expect(digests).toEqual({
+      websearch: '4dc7f96bf7a3f2c455e2d6d638768b9d',
+      dispatch: '8dad784f12a07f073764d2a96b1031d0',
+      sessionPrimer: '6bf9d532feaf02eb00ec3baa9dd24ebb',
+      stop: '8c4f580c55459ff6959778e72e366903',
+    });
+  });
+
+  it('is stamped into the header of every script the installer writes', () => {
+    for (const [name, source] of Object.entries(scripts())) {
+      expect(source, name).toContain(`(v${HOOK_SCRIPT_VERSION}). Safe to delete.`);
+    }
+  });
+});
 
 // The agent-visible half of the update check. A harness reads
 // additionalContext; it never sees the dim stderr line the CLI prints to a
@@ -1742,6 +1786,55 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     expect(run.stdout).toBe('');
     expect((await storedSearches())[0]?.candidates).toEqual([]);
     expect(JSON.stringify(await storedSearches())).not.toContain('evil.example');
+  });
+
+  /**
+   * The alias rule is two-sided on purpose, and this is the side that matters.
+   * The stub server is an ordinary listener, not a deployment origin, so a
+   * candidate it hands back pointing AT the deployment has to be dropped. A
+   * regression to a one-sided `KNOWN_ORIGINS.includes(candidateOrigin)` would
+   * keep it, letting anything the operator ever pointed `baseUrl` at launder a
+   * payable pointer at the real marketplace into the store, where a later `buy`
+   * signs for it. The real shipped bytes and the real set, no substitution.
+   */
+  it('drops a deployment-origin candidate when the configured base is not a member', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: hit(base, { url: `${PRODUCTION_ORIGIN}/@a/p` }),
+    }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+
+    expect(run.stdout).toBe('');
+    expect((await storedSearches())[0]?.candidates).toEqual([]);
+    expect(JSON.stringify(await storedSearches())).not.toContain(PRODUCTION_HOST);
+  });
+
+  /**
+   * The other side: when the configured base IS a member, a sibling member's url
+   * is the same deployment and survives, which is the whole point of the set
+   * (tenjin#738). Both origins have to be local for the run to stay offline, so
+   * this rewrites the one generated line that inlines the set and asserts the
+   * rewrite landed; everything the rewrite does not touch is the shipped script.
+   */
+  it('keeps a sibling-origin candidate when the configured base is a member', async () => {
+    const sibling = 'http://127.0.0.1:9';
+    const { baseUrl } = await serveJson((_body) => ({
+      status: 200,
+      json: hit(sibling, { url: `${sibling}/@a/p` }),
+    }));
+    await writeConfig({ baseUrl });
+
+    const shipped = `const KNOWN_ORIGINS = ${JSON.stringify(knownDeploymentOrigins())};`;
+    const source = websearchHookScript(dataDir);
+    expect(source, 'the inlined set moved; this rewrite tests nothing').toContain(shipped);
+    const run = await runScript(
+      source.replace(shipped, `const KNOWN_ORIGINS = ${JSON.stringify([baseUrl, sibling])};`),
+      webSearchInput('a question'),
+    );
+
+    expect(run.code).toBe(0);
+    expect((await storedSearches())[0]?.candidates.map((c) => c.url)).toEqual([`${sibling}/@a/p`]);
   });
 
   it('drops a candidate whose url does not parse', async () => {

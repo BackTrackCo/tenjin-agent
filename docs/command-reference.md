@@ -158,8 +158,12 @@ library and no dedupe: every paid call pays, so always pass `--max-price` (a
 hard cap `--yes` cannot bypass). Flags: `-X GET|POST`, `-d '<json-body>'`
 (implies POST), `--max-price <usd>`, `--yes`, `--print-body`.
 
-The configured base URL is always payable. Any other https origin is the
-Bazaar lane: it needs the `bazaarPay` config toggle on AND a configured
+The configured base URL is always payable, and so is the deployment's other
+origin (`tenjin.blog` and `tenjin.sh` are one deployment) when the configured
+base is itself one of them: both take the tenjin lane, no `bazaarPay` needed. A
+self-hosted or preview base gets no such alias and matches only itself. Every
+other https origin is the Bazaar lane: it needs the `bazaarPay` config toggle on
+AND a configured
 registry listing whose terms the live 402 does not exceed (checked against the
 local `discover` cache first, then live); a mismatch refuses with
 `REGISTRY_MISMATCH` before anything is signed, and unreachable registries fail
@@ -196,25 +200,29 @@ Reports how a search ended.
 
 Publishes Markdown with optional metadata and a local safety scan. Hard blocks cannot be bypassed.
 
-| Flag                       | Effect                                              |
-| -------------------------- | --------------------------------------------------- |
-| `--search-id <uuid>`       | Link the piece to the search it answers.            |
-| `--draft`                  | Save privately instead of publishing.               |
-| `--price <usd>`            | Set the post price.                                 |
-| `--excerpt <text>`         | Public preview.                                     |
-| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.      |
-| `--yes`                    | Clear warning findings and the review confirmation. |
-| `--question <text>`        | Question this piece answers. Repeatable.            |
-| `--task <text>`            | Task this piece supports. Repeatable.               |
-| `--scope <text>`           | What the piece covers.                              |
-| `--exclusions <text>`      | What it does not cover.                             |
-| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                 |
-| `--as-of <time>`           | When evidence was gathered.                         |
-| `--valid-until <time>`     | When the answer expires.                            |
-| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                  |
-| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.           |
-| `--provenance <text>`      | How evidence was obtained.                          |
-| `--methodology <text>`     | How it was established.                             |
+| Flag                       | Effect                                                                   |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `--search-id <uuid>`       | Link the piece to the search it answers. Repeatable, up to 10 per piece. |
+| `--draft`                  | Save privately instead of publishing.                                    |
+| `--price <usd>`            | Set the post price.                                                      |
+| `--excerpt <text>`         | Public preview.                                                          |
+| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.                           |
+| `--yes`                    | Clear warning findings and the review confirmation.                      |
+| `--question <text>`        | Question this piece answers. Repeatable.                                 |
+| `--task <text>`            | Task this piece supports. Repeatable.                                    |
+| `--scope <text>`           | What the piece covers.                                                   |
+| `--exclusions <text>`      | What it does not cover.                                                  |
+| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                                      |
+| `--as-of <time>`           | When evidence was gathered.                                              |
+| `--valid-until <time>`     | When the answer expires.                                                 |
+| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                                       |
+| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.                                |
+| `--provenance <text>`      | How evidence was obtained.                                               |
+| `--methodology <text>`     | How it was established.                                                  |
+
+On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
+
+The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
 ### `tenjin edit <post-id>`
 

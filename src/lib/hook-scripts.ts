@@ -37,10 +37,11 @@ import {
   WEBSEARCH_HOOK_PRODUCT,
   WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
+import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 18;
+export const HOOK_SCRIPT_VERSION = 20;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -320,7 +321,7 @@ function readConfig() {
   const fromEnv = process.env.TENJIN_PUBLISH_MODE;
   const envPinned = isPublishMode(fromEnv);
   const publishMode = envPinned ? fromEnv : publish.mode;
-  const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://tenjin.blog';
+  const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '${PRODUCTION_ORIGIN}';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
@@ -360,15 +361,25 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ATOMIC_RE = /^\\d{1,39}$/;
 
 /**
- * Does \`candidate\` sit on the same origin the request went to? The CLI refuses a
+ * The deployment's own origins, inlined at generation time because this script
+ * imports nothing; src/lib/production-origin.ts is the source of truth.
+ */
+const KNOWN_ORIGINS = ${JSON.stringify(knownDeploymentOrigins())};
+
+/**
+ * Does \`candidate\` sit on the deployment the request went to? The CLI refuses a
  * whole response whose candidate points elsewhere, because that url is what a
  * later \`buy\` would pay. Here the candidate is simply dropped: the hook is
  * advisory, and losing one hint beats recording a payable pointer at an origin
- * the operator never configured.
+ * the operator never configured. Same aliasing rule as the CLI's own check, so
+ * an origin flip does not silently drop every candidate a hook ever sees: both
+ * sides must be listed, and a self-hosted base still matches only itself.
  */
 function sameOrigin(candidate, requestUrl) {
   try {
-    return new URL(candidate).origin === requestUrl.origin;
+    const origin = new URL(candidate).origin;
+    if (origin === requestUrl.origin) return true;
+    return KNOWN_ORIGINS.includes(origin) && KNOWN_ORIGINS.includes(requestUrl.origin);
   } catch {
     return false;
   }

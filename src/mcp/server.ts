@@ -142,11 +142,12 @@ const outcomeInput = {
 
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
+  // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
-    .string()
+    .union([z.string(), z.array(z.string())])
     .optional()
     .describe(
-      'The search this file answers; closes its open loop and prefills its question when the draft names none',
+      'The search this file answers, or every search of one thread it answers (max 10, accepted or refused as one batch); closes each open loop and prefills the first question when the draft names none',
     ),
   draft: z.boolean().optional().describe('Save as a private draft instead of publishing'),
   yes: z
@@ -457,7 +458,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
           },
           ctx,
-          deps.publish,
+          { ...deps.publish, searchIdLabel: 'searchId' },
         ),
       ),
   );

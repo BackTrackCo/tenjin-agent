@@ -179,8 +179,10 @@ tenjin publish <file.md> --json [--search-id <id>] [--draft]
 Pass `--search-id <id>` when the piece answers a search that MISSed: it closes
 that loop, prefills the searched question into `questionsAnswered` when the draft
 names none, and travels to the server as this piece's attribution. It re-links a
-loop an `outcome` already closed, so a premature close is recoverable. `--draft`
-saves a private draft, leaves the loop open, and sends no attribution.
+loop an `outcome` already closed, so a premature close is recoverable. Repeat it
+(up to 10) when one thread fanned out into several searches this one piece
+answers, rather than closing the siblings as `regenerated`. `--draft` saves a
+private draft, leaves the loop open, and sends no attribution.
 
 **On any exit 3, render THAT payload's findings and price as one yes/no, then
 re-run with `--yes` on an explicit yes.** Never ask a generic "shall I publish?"

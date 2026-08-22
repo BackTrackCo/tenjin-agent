@@ -1,4 +1,5 @@
 import pkg from '../../package.json';
+import { PRODUCTION_ORIGIN } from './production-origin';
 
 /**
  * The RFC 9110 product token naming this CLI. It leads every User-Agent the
@@ -31,7 +32,7 @@ export const OWN_PRODUCT_NAMES = [TENJIN_PRODUCT_NAME, WEBSEARCH_HOOK_PRODUCT_NA
  * they were handed off in, and so stripping it is enough to recover the caller's
  * sequence from an already-composed field (see `composeUserAgent`).
  */
-export const TENJIN_COMMENT = '(+https://tenjin.blog)';
+export const TENJIN_COMMENT = `(+${PRODUCTION_ORIGIN})`;
 
 /**
  * The CLI's identity on every HTTP request, sent as the standard `User-Agent`

@@ -10,6 +10,7 @@ import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
+import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -766,7 +767,7 @@ function hooksDisclosure(h: HooksResult): string {
   if (h.mode === 'remind') {
     return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}`;
   }
-  return `Before a web search or a subagent dispatch, the hooks ask tenjin.blog the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine. They can never block or change the tool call. ${shared}`;
+  return `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine. They can never block or change the tool call. ${shared}`;
 }
 
 /**
@@ -1450,7 +1451,7 @@ export const SEARCH_HOOKS_CHOICES = [
   {
     value: 'auto',
     label: 'Yes, check Tenjin first (recommended)',
-    hint: 'before a WebSearch or a subagent dispatch, ask tenjin.blog the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine',
+    hint: `before a WebSearch or a subagent dispatch, ask ${PRODUCTION_HOST} the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine`,
   },
   {
     value: 'remind',

@@ -510,7 +510,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option(
       '--search-id <id>',
-      'the search this file answers (closes its open loop, and prefills its question)',
+      'the search this file answers (closes its open loop, and prefills its question); repeatable up to 10 when one piece answers a whole research thread, and the server accepts or refuses the named searches as one batch',
+      collect,
+      [],
     )
     .option('--draft', 'save as a private draft instead of publishing')
     .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
@@ -538,7 +540,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
-            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
+            ...(Array.isArray(o.searchId) && o.searchId.length > 0
+              ? { searchId: o.searchId as string[] }
+              : {}),
             ...(o.draft === true ? { draft: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
