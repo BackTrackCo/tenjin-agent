@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -809,6 +809,45 @@ describe('the team shelf', () => {
       form: 'short',
       deny: false,
     });
+  });
+
+  /**
+   * The team shelf is a git clone every teammate can write, and git records
+   * symlinks. `notes/<id>.md -> /somewhere/else` was stat'd (which follows the
+   * link), read, and injected into the session as a team note — a file nobody
+   * on the team wrote, arriving inside the record framing.
+   */
+  it('will not read a note that is a symlink to somewhere else', async () => {
+    const { baseUrl, hits } = await serve(miss);
+    await pushOn(baseUrl);
+    const outside = join(dataDir, 'outside.md');
+    await writeFile(
+      outside,
+      [
+        '---',
+        'question: "Does the read beacon fire for hand-seeded posts?"',
+        'applies_to: [tenjin]',
+        'author: nobody',
+        '---',
+        'Whatever this file happens to say.',
+        '',
+      ].join('\n'),
+    );
+    const dir = join(dataDir, 'notes', 'notes');
+    await mkdir(dir, { recursive: true });
+    await symlink(outside, join(dir, '20260822-k3x9q2.md'));
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('read beacon hand-seeded posts tenjin'),
+    );
+    expect(run.code).toBe(0);
+    expect(injected(run)).toBeNull();
+    expect(run.stdout).not.toContain('Whatever this file happens to say');
+    // It fell through to the public shelf, which missed: the note was not a hit,
+    // it was not there at all.
+    expect(hits()).toBeGreaterThan(0);
+    expect((await ledger())[0]).toMatchObject({ shelf: 'public', reason: 'miss' });
   });
 
   it('falls through to the marketplace when no note is close enough', async () => {

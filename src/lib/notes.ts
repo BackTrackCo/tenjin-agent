@@ -14,7 +14,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { notesDir, pushDir } from './paths';
@@ -203,8 +203,12 @@ export async function addNote(dataDir: string, input: AddNoteInput): Promise<Not
  *  exist or fails to parse. */
 export async function getNote(dataDir: string, id: string): Promise<Note | null> {
   try {
-    const raw = await readFile(join(noteFilesDir(dataDir), `${id}.md`), 'utf8');
-    return parseNote(id, raw);
+    const path = join(noteFilesDir(dataDir), `${id}.md`);
+    // The same lstat gate `listNotes` applies, for the same reason: a pulled
+    // repo can carry `<id>.md` as a symlink to anywhere on this machine.
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.size > NOTES_MAX_BYTES) return null;
+    return parseNote(id, await readFile(path, 'utf8'));
   } catch {
     return null;
   }
@@ -243,8 +247,15 @@ export async function listNotes(dataDir: string): Promise<Note[]> {
     const id = name.slice(0, -'.md'.length);
     const path = join(dir, name);
     try {
-      // Size first, so an enormous file is never read at all.
-      if ((await stat(path)).size > NOTES_MAX_BYTES) continue;
+      // LSTAT, NOT STAT. A note file arrives by `git pull` from a repo any
+      // teammate can write, and git records symlinks: `notes/<id>.md ->
+      // /etc/hosts`, or -> a private key, gets listed, shown, and injected into
+      // a session by the push hook if its bytes happen to parse. A note is a
+      // file we wrote; a link to somewhere else is not one, whatever it points
+      // at. Size first too, so an enormous file is never read at all.
+      const entry = await lstat(path);
+      if (!entry.isFile()) continue;
+      if (entry.size > NOTES_MAX_BYTES) continue;
       notes.push(parseNote(id, await readFile(path, 'utf8')));
     } catch {
       // Skipped: a corrupt or unreadable note should not sink the whole list.

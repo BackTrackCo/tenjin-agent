@@ -340,7 +340,13 @@ function notesSearch(query) {
     const path = join(NOTES_DIR, name);
     let note = null;
     try {
-      if (statSync(path).size > NOTES_MAX_BYTES) continue;
+      // LSTAT, NOT STAT, and the injection path is why it matters most here: a
+      // pulled repo can carry \`<id>.md\` as a symlink to anywhere on this
+      // machine, and whatever the target's bytes parse as would be injected
+      // into a session as a team note. A note is a file we wrote.
+      const entry = lstatSync(path);
+      if (!entry.isFile()) continue;
+      if (entry.size > NOTES_MAX_BYTES) continue;
       note = parseNote(readFileSync(path, 'utf8'));
     } catch {
       continue;

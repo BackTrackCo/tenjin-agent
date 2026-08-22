@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -191,6 +191,28 @@ describe('addNote / getNote / listNotes / removeNote', () => {
     const notes = await listNotes(dataDir);
     expect(notes.length).toBeLessThanOrEqual(NOTES_MAX_FILES);
     expect(notes.some((n) => n.id === '20261231-999999')).toBe(false);
+  });
+
+  /**
+   * A note file arrives by `git pull` from a repo any teammate can write, and
+   * git records symlinks. `<id>.md -> /somewhere/else` whose target happens to
+   * parse was listed, shown, and — through the push hook's team shelf —
+   * injected into a session. A note is a file we wrote, not a pointer at one.
+   */
+  it('skips a note that is a symlink, in both list and show', async () => {
+    const dir = noteFilesDir(dataDir);
+    await mkdir(dir, { recursive: true });
+    const real = await addNote(dataDir, { question: 'ours', body: 'b' });
+    // A well-formed note living outside the repo, linked in.
+    const outside = join(root, 'outside.md');
+    await writeFile(
+      outside,
+      ['---', 'question: "not ours"', 'author: mallory', '---', 'their body', ''].join('\n'),
+    );
+    await symlink(outside, join(dir, '20261231-aaaaaa.md'));
+
+    expect((await listNotes(dataDir)).map((n) => n.id)).toEqual([real.id]);
+    expect(await getNote(dataDir, '20261231-aaaaaa')).toBeNull();
   });
 
   it('removeNote deletes an existing note and reports false for a missing one', async () => {
