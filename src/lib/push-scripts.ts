@@ -49,6 +49,10 @@ export const PUSH_BODY_TIMEOUT_MS = 1500;
 export const PUSH_STRONG = 0.5;
 export const PUSH_MODERATE = 0.25;
 export const PUSH_MARGIN = 0.15;
+/** Whole query words rank 1 must actually cover before it can be 'strong'.
+ *  The ratio alone is too coarse to authorize a deny: three content words make
+ *  two shared ones look like 0.667. */
+export const PUSH_MIN_HITS = 3;
 /** The dispatch cache's shelf life: a subagent that starts later than this
  *  after the lookup is working on something else. */
 export const PUSH_CACHE_TTL_MS = 120_000;
@@ -82,6 +86,7 @@ const PUSH_BODY_TIMEOUT = __BODY_TIMEOUT__;
 const PUSH_STRONG = __STRONG__;
 const PUSH_MODERATE = __MODERATE__;
 const PUSH_MARGIN = __MARGIN__;
+const PUSH_MIN_HITS = __MIN_HITS__;
 /** The team shelf: the git clone \`tenjin team init\` writes, whose notes live one
  *  level down so the repo root can hold a README. */
 const NOTES_DIR = join(DATA_DIR, __NOTES_DIR__, 'notes');
@@ -121,16 +126,21 @@ function tokens(text) {
   return out;
 }
 
-/** Share of the query's content words the candidate's card covers, 0..1. */
+/**
+ * Share of the query's content words the candidate's card covers, 0..1, WITH the
+ * raw count beside it. Both, because a ratio alone hides how little it can be
+ * made of: a query that reduces to three content words scores 0.667 on two
+ * shared words, and two shared words is not evidence.
+ */
 function overlap(query, candidate, inspect) {
   const q = tokens(query);
-  if (q.size < 3) return 0;
+  if (q.size < 3) return { ratio: 0, hit: 0 };
   let cardText = candidate.title + ' ' + candidate.excerpt;
   if (inspect !== null) cardText += ' ' + inspect.questions.join(' ') + ' ' + inspect.scope;
   const card = tokens(cardText);
   let hit = 0;
   for (const t of q) if (card.has(t)) hit += 1;
-  return hit / q.size;
+  return { ratio: hit / q.size, hit };
 }
 
 /**
@@ -138,19 +148,43 @@ function overlap(query, candidate, inspect) {
  * phase 1 is this local overlap and nothing else: no model runs in a hook, and
  * the wire carries no score. A strong hit needs a clear lead over rank 2, so two
  * pieces that both plausibly apply are offered, never asserted.
+ *
+ * THREE THINGS MAKE A MARGIN MEAN SOMETHING, and 'strong' is what authorizes the
+ * research arm to cancel a tool call, so all three are hard requirements:
+ *
+ *  - THERE IS A RANK 2. With one candidate back, \`second\` is 0 and the margin
+ *    test passes itself; a lone piece is at most 'moderate', which is offered as
+ *    a pointer and denies nothing.
+ *  - BOTH RANKS ARE SCORED OVER THE SAME TEXT. The server inlines its answer card
+ *    for rank 1 alone (up to ~1,500 characters of questions and scope), so
+ *    folding it into rank 1's number would inflate exactly the quantity rank 2 is
+ *    measured against. It confirms instead: rank 1 must be strong on its card
+ *    alone AND still strong with the answer card added.
+ *  - ENOUGH WORDS ACTUALLY MATCHED. A ratio over three content words is coarse,
+ *    so a floor in whole words sits under it.
  */
 function judge(query, found) {
   if (found === null || found.rich.length === 0) {
     return { top: null, score: 0, second: 0, strength: 'none' };
   }
-  const scores = found.rich.map((c, i) => overlap(query, c, i === 0 ? found.inspect : null));
+  const cards = found.rich.map((c) => overlap(query, c, null));
   const top = found.rich[0];
-  const score = scores[0];
-  const second = scores.length > 1 ? scores[1] : 0;
+  const card = cards[0];
+  const second = cards.length > 1 ? cards[1].ratio : 0;
+  const confirmed = found.inspect === null ? card : overlap(query, top, found.inspect);
   let strength = 'none';
-  if (score >= PUSH_STRONG && score - second >= PUSH_MARGIN) strength = 'strong';
-  else if (score >= PUSH_MODERATE) strength = 'moderate';
-  return { top, score: round3(score), second: round3(second), strength };
+  if (
+    found.rich.length > 1 &&
+    card.ratio >= PUSH_STRONG &&
+    card.hit >= PUSH_MIN_HITS &&
+    card.ratio - second >= PUSH_MARGIN &&
+    confirmed.ratio >= PUSH_STRONG
+  ) {
+    strength = 'strong';
+  } else if (card.ratio >= PUSH_MODERATE || confirmed.ratio >= PUSH_MODERATE) {
+    strength = 'moderate';
+  }
+  return { top, score: round3(card.ratio), second: round3(second), strength };
 }
 
 function round3(n) {
@@ -758,7 +792,8 @@ export function pushSource(): string {
     .replaceAll('__BODY_TIMEOUT__', String(PUSH_BODY_TIMEOUT_MS))
     .replaceAll('__STRONG__', String(PUSH_STRONG))
     .replaceAll('__MODERATE__', String(PUSH_MODERATE))
-    .replaceAll('__MARGIN__', String(PUSH_MARGIN));
+    .replaceAll('__MARGIN__', String(PUSH_MARGIN))
+    .replaceAll('__MIN_HITS__', String(PUSH_MIN_HITS));
   // Plain JS, returned verbatim: this is not a template, so nothing to escape.
   return js;
 }

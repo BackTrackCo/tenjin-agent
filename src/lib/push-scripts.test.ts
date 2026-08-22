@@ -127,10 +127,15 @@ const BODY_MD = 'Pin the resolver to 4.1 and the parse stops throwing. Verified 
 const SESSION = 'sess-1';
 
 /**
- * A marketplace that answers with ONE candidate whose title is the query it was
+ * A marketplace that answers with a candidate whose title is the query it was
  * asked. That makes the overlap score 1.0, which is what puts every case that
  * wants a strong hit on the strong path without hand-tuning words; a case that
  * wants a weak one passes its own title.
+ *
+ * A SECOND, UNRELATED CANDIDATE RIDES ALONG, because 'strong' now requires a
+ * rank 2 to have beaten: with one piece back the margin test compares against
+ * zero and proves nothing, so a lone piece is at most 'moderate'. This filler
+ * shares no content word with any query here, so the margin is the whole score.
  */
 const echo =
   (over: Record<string, unknown> = {}) =>
@@ -156,6 +161,14 @@ const echo =
               excerpt: 'the excerpt',
               creator: { handle: 'vraspar' },
               ...over,
+            },
+            {
+              resourceId: SECOND_RESOURCE_ID,
+              url: `${req.base}/@b/q`,
+              title: 'unrelated pgvector snapshot slot',
+              price: '0',
+              excerpt: 'about something else entirely',
+              creator: { handle: 'someone' },
             },
           ],
         },
@@ -385,6 +398,106 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     // One request, from the WebSearch: the fetch never reached the wire.
     expect(hits()).toBe(1);
     expect(await ledger()).toEqual([]);
+  });
+
+  /**
+   * A deny is the one output in this tree that changes what the harness does, so
+   * the margin that authorizes it has to be a real comparison. With ONE candidate
+   * back there is nothing to compare against and `second` is 0, which passes the
+   * margin test by construction.
+   */
+  it('will not deny on a lone candidate, however well it scores', async () => {
+    const { baseUrl } = await serve((req) =>
+      req.url.startsWith('/api/search')
+        ? {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              items: [
+                {
+                  resourceId: RESOURCE_ID,
+                  url: `${req.base}/@a/p`,
+                  title: 'zod resolver parse throws optional chain',
+                  price: '0',
+                  excerpt: 'the excerpt',
+                  creator: { handle: 'vraspar' },
+                },
+              ],
+            },
+          }
+        : { status: 200, json: { bodyMd: BODY_MD } },
+    );
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(denied(run)).toBeNull();
+    // Offered as a pointer instead: the search proceeds and the agent decides.
+    expect(injected(run)).toContain('Read it free: tenjin read');
+    expect((await ledger())[0]).toMatchObject({
+      strength: 'moderate',
+      action: 'injected',
+      form: 'short',
+      deny: false,
+    });
+  });
+
+  /**
+   * The server inlines its answer card for rank 1 alone. Scoring rank 1 over
+   * title + excerpt + that card, and rank 2 over title + excerpt, measures two
+   * different quantities and calls the difference a margin.
+   */
+  it('measures the margin on text both ranks have', async () => {
+    const { baseUrl } = await serve((req) =>
+      req.url.startsWith('/api/search')
+        ? {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              items: [
+                {
+                  resourceId: RESOURCE_ID,
+                  url: `${req.base}/@a/p`,
+                  title: 'drizzle snapshot collation',
+                  price: '0',
+                  excerpt: 'one',
+                  creator: { handle: 'vraspar' },
+                },
+                {
+                  resourceId: SECOND_RESOURCE_ID,
+                  url: `${req.base}/@b/q`,
+                  title: 'drizzle snapshot collation',
+                  price: '0',
+                  excerpt: 'two',
+                  creator: { handle: 'someone' },
+                },
+              ],
+              // Rank 1's answer card, naming the query words its own card missed.
+              inspect: {
+                resourceId: RESOURCE_ID,
+                questionsAnswered: ['Does pgvector flip the testcontainer image?'],
+                scope: 'pgvector testcontainer image swaps',
+              },
+            },
+          }
+        : { status: 200, json: { bodyMd: BODY_MD } },
+    );
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('drizzle snapshot collation pgvector testcontainer image'),
+    );
+    // Both cards cover the same three words, so the margin is zero and the extra
+    // card cannot buy a deny.
+    expect(denied(run)).toBeNull();
+    const row = (await ledger())[0]!;
+    expect(row).toMatchObject({ strength: 'moderate', form: 'short' });
+    expect(row.score).toBe(row.second);
   });
 
   /**
