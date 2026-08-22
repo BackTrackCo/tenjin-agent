@@ -10,6 +10,7 @@ import {
   getNote,
   isGitRepo,
   listNotes,
+  NOTE_MODERATE,
   newNoteId,
   noteFilesDir,
   parseNote,
@@ -217,6 +218,38 @@ describe('scoreNote / searchNotes', () => {
 
     const results = await searchNotes(dataDir, 'redis cluster failover timeout');
     expect(results[0]!.strength).toBe('moderate');
+  });
+
+  /**
+   * The command reference promises nothing below 0.25 comes back, and it has to
+   * be true here rather than at the caller: a note sharing one word out of six
+   * with the query is not a result, and shipped as one it reads to the operator
+   * as "the team has something on this" when the team does not.
+   */
+  it('returns nothing below the moderate floor, however many notes score above zero', async () => {
+    await addNote(dataDir, {
+      question: 'drizzle migration slot collision renumber',
+      body: 'the generator will not catch a taken slot',
+      now: new Date(2026, 0, 1),
+    });
+    // Shares exactly one of the six query words ('timeout'), so it scores
+    // ~0.167: above zero, under the floor.
+    await addNote(dataDir, {
+      question: 'redis timeout',
+      body: 'connection pool exhaustion under load',
+      now: new Date(2026, 0, 2),
+    });
+
+    const query = 'drizzle migration slot collision renumber timeout';
+    const results = await searchNotes(dataDir, query);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.note.question).toContain('drizzle');
+    // The hidden row really did score, and really is under the floor: this is a
+    // filter, not a query that happened to match nothing.
+    const hidden = (await listNotes(dataDir)).find((n) => n.question === 'redis timeout');
+    const hiddenScore = scoreNote(query, hidden!);
+    expect(hiddenScore).toBeGreaterThan(0);
+    expect(hiddenScore).toBeLessThan(NOTE_MODERATE);
   });
 });
 

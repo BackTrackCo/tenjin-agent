@@ -321,9 +321,19 @@ function strengthOf(score: number, marginOverNext: number): NoteStrength {
   return 'none';
 }
 
-/** Every note that scores above zero, ranked best first. Only rank 1 is
- *  margin-checked against rank 2 for `strong`; every other result stands on its
- *  own score. */
+/**
+ * Every note that clears {@link NOTE_MODERATE}, ranked best first. Only rank 1
+ * is margin-checked against rank 2 for `strong`; every other result stands on
+ * its own score.
+ *
+ * THE FLOOR IS THE RESULT SET, NOT JUST A LABEL. A note scoring above zero but
+ * under 0.25 is `none` — it shares a word or two with the query and nothing
+ * more — and returning it made `notes search` answer a question about
+ * migrations with a note about Redis, ranked last and labelled 'none', which no
+ * reader distinguishes from a real weak hit. The margin is still measured
+ * against the true rank 2, scored BEFORE the floor is applied: hiding a row must
+ * not silently promote the row above it to `strong`.
+ */
 export async function searchNotes(dataDir: string, query: string): Promise<NoteSearchResult[]> {
   const notes = await listNotes(dataDir);
   const scored = notes
@@ -331,13 +341,15 @@ export async function searchNotes(dataDir: string, query: string): Promise<NoteS
     .filter((m) => m.score > 0)
     .sort((a, b) => b.score - a.score);
   const second = scored[1]?.score ?? 0;
-  return scored.map((m, i) => ({
-    ...m,
-    // Rank 1 alone is margin-checked (against rank 2); everything below it has
-    // no "next" to compare against, so its own score is the whole story —
-    // Infinity always clears the margin gate in strengthOf.
-    strength: strengthOf(m.score, i === 0 ? m.score - second : Infinity),
-  }));
+  return scored
+    .map((m, i) => ({
+      ...m,
+      // Rank 1 alone is margin-checked (against rank 2); everything below it has
+      // no "next" to compare against, so its own score is the whole story —
+      // Infinity always clears the margin gate in strengthOf.
+      strength: strengthOf(m.score, i === 0 ? m.score - second : Infinity),
+    }))
+    .filter((m) => m.score >= NOTE_MODERATE);
 }
 
 // ---- git sync: best-effort, spawned, 10s timeout, never fails the command ----

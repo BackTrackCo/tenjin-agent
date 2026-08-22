@@ -391,7 +391,7 @@ Prints one note in full, including its body.
 
 ### `tenjin notes search "<query>" [--json]`
 
-Lexical search over `question + applies_to + body head (first 600 chars)`: content words (lowercased, stopwords and short tokens dropped) of the query against each note's, scored as the overlap fraction. A match at `score >= 0.5` with at least a `0.15` lead over the next-best match is `strong`; `score >= 0.25` is `moderate`. Results are ranked best first; nothing below `0.25` is returned.
+Lexical search over `question + applies_to + body head (first 600 chars)`: content words (lowercased, stopwords and short tokens dropped) of the query against each note's, scored as the overlap fraction. A match at `score >= 0.5` with at least a `0.15` lead over the next-best match is `strong`; `score >= 0.25` is `moderate`. Results are ranked best first; nothing below `0.25` is returned (the margin for `strong` is still measured against the true next-best note, scored before that floor is applied).
 
 ### `tenjin notes rm <id>`
 
