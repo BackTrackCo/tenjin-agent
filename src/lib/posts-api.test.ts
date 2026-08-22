@@ -5,11 +5,15 @@ import {
   getOwnPost,
   publishPost,
   updatePost,
+  SEARCH_ID_MAX,
   type PublishInput,
 } from './posts-api';
 import type { SignableRequest, WriteAuth } from './session-key';
 
 const OPTS = { baseUrl: 'https://tenjin.blog', timeoutMs: 5000 };
+
+const SEARCH_A = '0197aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee';
+const SEARCH_B = '0197aaaa-bbbb-7ccc-8ddd-ffffffffffff';
 
 interface CapturedCall {
   url: string;
@@ -128,6 +132,62 @@ describe('buildPostCreateBody — bounds', () => {
     ).toThrow();
     expect(() => buildPostCreateBody({ status: 'draft', priceAtomic: '1a' })).toThrow();
     expect(() => buildPostCreateBody({ status: 'draft', handle: 'A!' })).toThrow();
+  });
+
+  // The wire rule the server rollout turns on: one search stays the bare string
+  // a post-create that predates the array still takes.
+  it('ships one searchId as a bare string and several as an array', () => {
+    const base = { status: 'published', title: 'T', bodyMd: 'B' } as const;
+    expect(buildPostCreateBody({ ...base, searchId: SEARCH_A }).searchId).toBe(SEARCH_A);
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A] }).searchId).toBe(SEARCH_A);
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A, SEARCH_B] }).searchId).toEqual([
+      SEARCH_A,
+      SEARCH_B,
+    ]);
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A, SEARCH_A] }).searchId).toBe(
+      SEARCH_A,
+    );
+  });
+
+  // Without folding first, two spellings of one uuid reach the server as two
+  // claims on one search and inflate its conversion count.
+  it('folds case before deduping, so one search claims one slot', () => {
+    const base = { status: 'published', title: 'T', bodyMd: 'B' } as const;
+    const upper = SEARCH_A.toUpperCase();
+    expect(buildPostCreateBody({ ...base, searchId: [SEARCH_A, upper] }).searchId).toBe(SEARCH_A);
+    expect(buildPostCreateBody({ ...base, searchId: upper }).searchId).toBe(SEARCH_A);
+    expect(buildPostCreateBody({ ...base, searchId: [upper, SEARCH_B] }).searchId).toEqual([
+      SEARCH_A,
+      SEARCH_B,
+    ]);
+  });
+
+  // Exactly at the cap is the legal case a `>`/`>=` slip would start refusing,
+  // and folding must not cost a slot: ten spellings of ten ids are still ten.
+  it('accepts exactly SEARCH_ID_MAX ids', () => {
+    const ids = Array.from(
+      { length: SEARCH_ID_MAX },
+      (_, i) => `0197aaaa-bbbb-7ccc-8ddd-0000000000${String(i).padStart(2, '0')}`,
+    );
+    const body = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      searchId: ids.map((id, i) => (i % 2 === 0 ? id.toUpperCase() : id)),
+    });
+    expect(body.searchId).toEqual(ids);
+  });
+
+  it('refuses a bad searchId anywhere in the list, and more than ten of them', () => {
+    const base = { status: 'published', title: 'T', bodyMd: 'B' } as const;
+    expect(() => buildPostCreateBody({ ...base, searchId: [SEARCH_A, 'nope'] })).toThrow(
+      /Invalid searchId/,
+    );
+    const eleven = Array.from(
+      { length: 11 },
+      (_, i) => `0197aaaa-bbbb-7ccc-8ddd-0000000000${String(i).padStart(2, '0')}`,
+    );
+    expect(() => buildPostCreateBody({ ...base, searchId: eleven })).toThrow(/at most 10 searches/);
   });
 
   it('emits only defined keys (strictObject-safe), status last', () => {
@@ -310,6 +370,35 @@ describe('publishPost — write failures after approval', () => {
         fetchImpl: fetch,
       }),
     ).rejects.toMatchObject({ code: 'PUBLISH_FAILED', exitCode: 4 });
+  });
+
+  // Against a post-create that predates the array, several ids come back as a
+  // bare zod complaint about searchId, after the signature, cause unexplained.
+  it('names the rollout cause on a 400 about searchId, and only then', async () => {
+    const four00 = (message: string) =>
+      capturingFetch(
+        () =>
+          new Response(JSON.stringify({ error: { code: 'validation_failed', message } }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ).fetch;
+    const publish = (fetchImpl: typeof fetch) =>
+      publishPost({ status: 'published', title: 'T', bodyMd: 'B' }, fakeAuth().auth, {
+        ...OPTS,
+        fetchImpl,
+      });
+
+    await expect(
+      publish(four00('Expected string, received array at searchId')),
+    ).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+      fix: expect.stringContaining('accepts an array'),
+    });
+    await expect(publish(four00('bad card'))).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+      fix: expect.not.stringContaining('accepts an array'),
+    });
   });
 
   it('maps a 429 to RATE_LIMITED so an agent backs off', async () => {

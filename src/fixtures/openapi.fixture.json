@@ -2146,10 +2146,24 @@
             "additionalProperties": false
           },
           "searchId": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it while the column is still empty, on a draft or on an already-published piece, but never change a set value."
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "minItems": 1,
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              }
+            ],
+            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, or an array, so the marketplace can attribute the piece to that unmet demand. Each must be a recorded search. Stored server-side only, never returned. Claims accumulate whatever form you send: a later PUT adds ids and removes none, up to 10 per piece."
           }
         },
         "additionalProperties": false
@@ -2352,10 +2366,24 @@
             "additionalProperties": false
           },
           "searchId": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, so the marketplace can attribute it to the unmet demand. Stored server-side only and never returned. Set-once: a later PUT may set it while the column is still empty, on a draft or on an already-published piece, but never change a set value."
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "minItems": 1,
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              }
+            ],
+            "description": "Optional. The searchId (uuid) of the agent search whose MISS motivated this publish, or an array, so the marketplace can attribute the piece to that unmet demand. Each must be a recorded search. Stored server-side only, never returned. Claims accumulate whatever form you send: a later PUT adds ids and removes none, up to 10 per piece."
           }
         },
         "additionalProperties": false

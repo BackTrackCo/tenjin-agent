@@ -196,25 +196,29 @@ Reports how a search ended.
 
 Publishes Markdown with optional metadata and a local safety scan. Hard blocks cannot be bypassed.
 
-| Flag                       | Effect                                              |
-| -------------------------- | --------------------------------------------------- |
-| `--search-id <uuid>`       | Link the piece to the search it answers.            |
-| `--draft`                  | Save privately instead of publishing.               |
-| `--price <usd>`            | Set the post price.                                 |
-| `--excerpt <text>`         | Public preview.                                     |
-| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.      |
-| `--yes`                    | Clear warning findings and the review confirmation. |
-| `--question <text>`        | Question this piece answers. Repeatable.            |
-| `--task <text>`            | Task this piece supports. Repeatable.               |
-| `--scope <text>`           | What the piece covers.                              |
-| `--exclusions <text>`      | What it does not cover.                             |
-| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                 |
-| `--as-of <time>`           | When evidence was gathered.                         |
-| `--valid-until <time>`     | When the answer expires.                            |
-| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                  |
-| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.           |
-| `--provenance <text>`      | How evidence was obtained.                          |
-| `--methodology <text>`     | How it was established.                             |
+| Flag                       | Effect                                                                   |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `--search-id <uuid>`       | Link the piece to the search it answers. Repeatable, up to 10 per piece. |
+| `--draft`                  | Save privately instead of publishing.                                    |
+| `--price <usd>`            | Set the post price.                                                      |
+| `--excerpt <text>`         | Public preview.                                                          |
+| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.                           |
+| `--yes`                    | Clear warning findings and the review confirmation.                      |
+| `--question <text>`        | Question this piece answers. Repeatable.                                 |
+| `--task <text>`            | Task this piece supports. Repeatable.                                    |
+| `--scope <text>`           | What the piece covers.                                                   |
+| `--exclusions <text>`      | What it does not cover.                                                  |
+| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                                      |
+| `--as-of <time>`           | When evidence was gathered.                                              |
+| `--valid-until <time>`     | When the answer expires.                                                 |
+| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                                       |
+| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.                                |
+| `--provenance <text>`      | How evidence was obtained.                                               |
+| `--methodology <text>`     | How it was established.                                                  |
+
+On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
+
+The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
 ### `tenjin edit <post-id>`
 
