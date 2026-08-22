@@ -421,8 +421,12 @@ function warningLine(reason: string): string {
 
 // ---- Stop-hook capture markers (docs/command-reference.md: capture) ----
 
-/** Filename-safe session id, matching push-scripts.ts's statePath sanitizer so
- *  the same session id always maps to the same marker name. */
+/** Filename-safe session id. It MUST stay character-for-character identical to
+ *  the generated Stop hook's `markerPath` (lib/hook-scripts.ts) and to the push
+ *  core's `statePath` (lib/push-scripts.ts): the hook writes `capture-pending`
+ *  and then looks for the `capture-done-<key>` this writes, so a sanitizer that
+ *  drifts on either side turns the capture ask into a block nothing can clear.
+ *  commands/notes.test.ts runs both halves against each other to hold the line. */
 function sanitizeSessionId(id: string): string {
   return id.replace(/[^A-Za-z0-9_-]/g, '_');
 }
