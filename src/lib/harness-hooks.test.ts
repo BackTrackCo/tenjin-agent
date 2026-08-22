@@ -44,7 +44,14 @@ import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { quoteForShell, wireSearchHooks, hooksSkipped } from './harness-hooks';
+import {
+  quoteForShell,
+  wireSearchHooks,
+  hooksSkipped,
+  PUSH_CONTEXT_EDIT_MATCHER,
+  PUSH_CONTEXT_READ_MATCHER,
+  PUSH_FAILURE_MATCHER,
+} from './harness-hooks';
 import { claudeSettingsPath } from './harness-permissions';
 import {
   DISPATCH_HOOK_FILE,
@@ -52,6 +59,13 @@ import {
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
 } from './hook-scripts';
+import {
+  PUSH_CONTEXT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_HOOK_TIMEOUT_SECONDS,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+} from './push-scripts';
 
 let home: string;
 let data: string;
@@ -109,7 +123,7 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     const settings = await readSettings();
     const pre = entriesFor(settings, 'PreToolUse');
     expect(pre).toHaveLength(2);
-    expect(pre[0]!.matcher).toBe('WebSearch');
+    expect(pre[0]!.matcher).toBe('WebSearch|WebFetch');
     expect(pre[0]!.hooks[0]!.type).toBe('command');
     expect(pre[0]!.hooks[0]!.command).toContain(WEBSEARCH_HOOK_FILE);
     expect(pre[1]!.matcher).toBe('Agent|Task');
@@ -128,15 +142,14 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     expect(stop[0]!.hooks[0]!.command).toContain(STOP_HOOK_FILE);
   });
 
-  // Neither PreToolUse entry reaches WebFetch: nothing fires on a fetch, and the
-  // WebSearch entry stays exactly as narrow as it was.
-  it('matches WebSearch and the two dispatch names, never WebFetch or a wildcard', async () => {
+  // WebFetch joined WebSearch on the same entry (T3/push); neither reaches a
+  // wildcard, and the dispatch entry stays exactly as narrow as it was.
+  it('matches WebSearch|WebFetch and the two dispatch names, never a wildcard', async () => {
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     const pre = entriesFor(await readSettings(), 'PreToolUse');
-    expect(pre[0]!.matcher).toBe('WebSearch');
+    expect(pre[0]!.matcher).toBe('WebSearch|WebFetch');
     expect(pre[1]!.matcher).toBe('Agent|Task');
     expect(pre.some((e) => e.matcher === '*')).toBe(false);
-    expect(JSON.stringify(await readSettings())).not.toContain('WebFetch');
   });
 
   // Ownership is by script filename, so two entries naming one script would be
@@ -171,6 +184,141 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'remind' });
     expect(result.mode).toBe('remind');
     expect(existsSync(join(data, 'hooks', WEBSEARCH_HOOK_FILE))).toBe(true);
+  });
+});
+
+describe('wireSearchHooks: push experiment entries', () => {
+  it('wires nothing extra when push is left off (the default)', async () => {
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    expect(result.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
+    const settings = await readSettings();
+    expect((settings.hooks as Record<string, unknown>).UserPromptSubmit).toBeUndefined();
+    expect((settings.hooks as Record<string, unknown>).PostToolUse).toBeUndefined();
+    expect((settings.hooks as Record<string, unknown>).PostToolUseFailure).toBeUndefined();
+    expect((settings.hooks as Record<string, unknown>).SubagentStart).toBeUndefined();
+    for (const file of [
+      PUSH_PROMPT_HOOK_FILE,
+      PUSH_FAILURE_HOOK_FILE,
+      PUSH_SUBAGENT_HOOK_FILE,
+      PUSH_CONTEXT_HOOK_FILE,
+    ]) {
+      expect(existsSync(join(data, 'hooks', file)), file).toBe(false);
+    }
+  });
+
+  it('wires all four push scripts across six entries when push is true', async () => {
+    const result = await wireSearchHooks({
+      homeDir: home,
+      dataDir: data,
+      mode: 'auto',
+      push: true,
+    });
+    expect(result.added).toEqual([
+      'PreToolUse',
+      'SessionStart',
+      'Stop',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'SubagentStart',
+    ]);
+    const pushFiles = [
+      PUSH_PROMPT_HOOK_FILE,
+      PUSH_FAILURE_HOOK_FILE,
+      PUSH_SUBAGENT_HOOK_FILE,
+      PUSH_CONTEXT_HOOK_FILE,
+    ];
+    for (const file of pushFiles) {
+      expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
+    }
+    // The two numbers the docs, the help text and the disclosure all quote, held
+    // here so a new arm cannot make every one of them wrong in silence: FOUR
+    // scripts, SIX entries. Entries, not events — `added` above collapses the
+    // three PreToolUse entries into one.
+    expect(pushFiles).toHaveLength(4);
+    expect(result.pushArms).toBe(6);
+    // The base bundle's own events, uncounted by the push half.
+    expect(result.searchWrote).toBe(3);
+
+    const settings = await readSettings();
+
+    // PreToolUse gains a third entry: the context arm's churn half.
+    const pre = entriesFor(settings, 'PreToolUse');
+    expect(pre).toHaveLength(3);
+    expect(pre[2]!.matcher).toBe(PUSH_CONTEXT_EDIT_MATCHER);
+    expect(pre[2]!.hooks[0]!.command).toContain(PUSH_CONTEXT_HOOK_FILE);
+
+    // PostToolUse carries two DIFFERENT scripts: failure and the context arm's
+    // read half. Neither collapses into the other.
+    const post = entriesFor(settings, 'PostToolUse');
+    expect(post).toHaveLength(2);
+    expect(post[0]!.matcher).toBe(PUSH_FAILURE_MATCHER);
+    expect(post[0]!.hooks[0]!.command).toContain(PUSH_FAILURE_HOOK_FILE);
+    expect(post[1]!.matcher).toBe(PUSH_CONTEXT_READ_MATCHER);
+    expect(post[1]!.hooks[0]!.command).toContain(PUSH_CONTEXT_HOOK_FILE);
+
+    const postFailure = entriesFor(settings, 'PostToolUseFailure');
+    expect(postFailure).toHaveLength(1);
+    expect(postFailure[0]!.matcher).toBe(PUSH_FAILURE_MATCHER);
+    expect(postFailure[0]!.hooks[0]!.command).toContain(PUSH_FAILURE_HOOK_FILE);
+
+    const subagent = entriesFor(settings, 'SubagentStart');
+    expect(subagent).toHaveLength(1);
+    expect(subagent[0]!.matcher).toBeUndefined();
+    expect(subagent[0]!.hooks[0]!.command).toContain(PUSH_SUBAGENT_HOOK_FILE);
+
+    const prompt = entriesFor(settings, 'UserPromptSubmit');
+    expect(prompt).toHaveLength(1);
+    expect(prompt[0]!.matcher).toBeUndefined();
+    expect(prompt[0]!.hooks[0]!.command).toContain(PUSH_PROMPT_HOOK_FILE);
+
+    // Every push entry gets the longer push timeout, not the search hooks' one.
+    for (const event of [
+      'UserPromptSubmit',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'SubagentStart',
+    ]) {
+      for (const entry of entriesFor(settings, event)) {
+        expect(entry.hooks[0]!.timeout).toBe(PUSH_HOOK_TIMEOUT_SECONDS);
+      }
+    }
+  });
+
+  it('a second push:true run registers nothing new and rewrites nothing', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    const first = await readFile(settingsPath(), 'utf8');
+
+    const result = await wireSearchHooks({
+      homeDir: home,
+      dataDir: data,
+      mode: 'auto',
+      push: true,
+    });
+    expect(result.added).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(result.alreadyPresent).toEqual([
+      'PreToolUse',
+      'SessionStart',
+      'Stop',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'SubagentStart',
+    ]);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(first);
+  });
+
+  // Once wired, push:false on a later call must not tear the entries back out —
+  // `tenjin push off` is a config write, never a re-wire (see commands/push.ts).
+  it('a later push:false run leaves already-wired push entries alone', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    const before = await readFile(settingsPath(), 'utf8');
+
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    expect(result.added).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
   });
 });
 

@@ -461,14 +461,14 @@ class UntrustedFileContent(unittest.TestCase):
             ("curl -L https://tenjin.blog/api/posts", "REDIRECT-MARKER"),
             (
                 'curl -s --header="Content-Type: application/json" '
-                "--max-time=20 https://tenjin.blog/api/agent/search",
+                "--max-time=20 https://tenjin.blog/api/search",
                 "EQUALS-MARKER",
             ),
             # Multi-line curl with continuations is one command.
             (
-                'curl -s -X POST https://tenjin.blog/api/agent/search \\\n'
+                'curl -s -X POST https://tenjin.blog/api/search \\\n'
                 '  -H "Content-Type: application/json" \\\n'
-                '  -d \'{"question":"why?"}\'',
+                '  -d \'{"query":"why?"}\'',
                 "MULTILINE-MARKER",
             ),
         ):

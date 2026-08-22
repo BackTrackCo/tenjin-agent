@@ -44,6 +44,7 @@ import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/se
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
+import { countPushHookEntries, pushScriptsPresent } from '../lib/harness-hooks';
 import type { PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -211,6 +212,12 @@ export async function collectDoctorChecks(
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
+
+  // Only when the experiment is on. Off, there is nothing to be half-wired and
+  // a permanently-present check about a feature nobody enabled is noise.
+  if (config.hooks?.push === 'on') {
+    built.push(await checkPushHooks(home, ctx.dataDir));
+  }
 
   const hermes = await checkHermes({
     home,
@@ -399,10 +406,15 @@ async function checkApiContract(
 }
 
 /**
- * WARN-level (never fails doctor): is the A2 search endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates A2 (the buy/search path will
- * not work against it yet). Warn-only because doctor's job is a working READ path,
- * and search is additive.
+ * WARN-level (never fails doctor): is the search endpoint advertised in the
+ * OpenAPI doc? Absent means the deployment predates search v3 (tenjin#137), so
+ * `tenjin search` and the buy path that starts there will not work against it.
+ * Warn-only because doctor's job is a working READ path, and search is additive.
+ *
+ * It probes `/api/search`, the path the client actually calls. The
+ * `/api/agent/search` alias it replaced is deprecated and answers 410 after one
+ * release, so a deployment advertising ONLY the alias is exactly the case this
+ * check has to warn about rather than pass.
  */
 async function checkSearchContract(
   baseUrl: string,
@@ -435,8 +447,8 @@ async function checkSearchContract(
           name: 'search-contract',
           status: 'warn',
           required: false,
-          detail: 'This deployment does not advertise POST /api/agent/search (A2 not deployed)',
-          fix: 'search/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
+          detail: 'This deployment does not advertise POST /api/search (it predates search v3)',
+          fix: 'search/buy need search v3 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
         },
   };
 }
@@ -444,7 +456,7 @@ async function checkSearchContract(
 function hasSearchPath(json: unknown): boolean {
   if (!isRecord(json)) return false;
   const paths = json.paths;
-  return isRecord(paths) && '/api/agent/search' in paths;
+  return isRecord(paths) && '/api/search' in paths;
 }
 
 /**
@@ -857,6 +869,45 @@ const POSTURE: Record<DirState, string> = {
  * the private JWK never reach this output — doctor's payload is the single most
  * likely thing in this CLI to be pasted into an issue.
  */
+/**
+ * The push experiment's TWO halves, asked separately, because either one alone
+ * reports a healthy sidecar that does nothing: four generated scripts on disk
+ * with no settings.json entries pointing at them (a `push on` whose settings
+ * write refused), or six entries pointing at scripts that are gone (a
+ * half-finished uninstall, a moved data dir). This PR wires six entries across
+ * four events, so "half-wired" is now a state with several ways in.
+ *
+ * Never required and never a fail: an experiment that is off-by-default cannot
+ * take down the verb an operator runs when something else is broken.
+ */
+async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
+  const scripts = await pushScriptsPresent(dataDir);
+  const entries = await countPushHookEntries(homeDir, dataDir);
+  const where = entries.path === null ? 'no settings.json found' : entries.path;
+  const registered = `${entries.present}/${entries.planned} hook entries registered (${where})`;
+  if (scripts && entries.present === entries.planned) {
+    return {
+      result: {
+        name: 'push hooks',
+        status: 'ok',
+        required: false,
+        detail: `hooks.push is on: all four push scripts written, ${registered}`,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'push hooks',
+      status: 'warn',
+      required: false,
+      detail: `hooks.push is on, but the sidecar is only half wired: ${
+        scripts ? 'the four push scripts are written' : 'one or more push scripts are missing'
+      }, ${registered}. Nothing runs unless both halves are there`,
+      fix: 'tenjin push on',
+    },
+  };
+}
+
 async function checkSession(
   dataDir: string,
   now: () => number,
@@ -984,7 +1035,7 @@ async function checkReadPath(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
 ): Promise<BuiltCheck> {
-  // The shipped public read path. The A2 search-contract check is a B2 follow-up.
+  // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.

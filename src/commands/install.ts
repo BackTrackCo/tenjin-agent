@@ -760,14 +760,34 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
   ];
 }
 
-/** What the hooks do, in one line each, at the moment they are written. */
-function hooksDisclosure(h: HooksResult): string {
+/**
+ * What the hooks do, in one line each, at the moment they are written.
+ *
+ * THE PUSH SENTENCE IS THE WHOLE POINT OF THE SPLIT. Without the experiment the
+ * hooks are advisory and the disclosure says so: they can never block or change
+ * the tool call. With it on, the research arm CAN deny a WebSearch or WebFetch
+ * and answer it from the marketplace instead, which is the one thing here that
+ * changes what the harness does — so a disclosure that still promised otherwise
+ * would be false exactly where it matters most.
+ *
+ * Read off the result rather than a flag, so what is disclosed is what was
+ * actually wired.
+ */
+export function hooksDisclosure(h: HooksResult): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
+  const push = pushArmed(h)
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries run beside these: they look a question up on your own notes first and then on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    : '';
   if (h.mode === 'remind') {
-    return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}`;
+    return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}${push}`;
   }
-  return `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine. They can never block or change the tool call. ${shared}`;
+  return `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine.${pushArmed(h) ? '' : ' They can never block or change the tool call.'} ${shared}${push}`;
+}
+
+/** Whether the push experiment's arms are registered in the outcome disclosed. */
+function pushArmed(h: HooksResult): boolean {
+  return (h.pushArms ?? 0) > 0;
 }
 
 /**
@@ -778,11 +798,21 @@ function hooksDisclosure(h: HooksResult): string {
 function hooksLine(io: Io, h: HooksResult): string {
   const label = paint(io, 'bold', 'Search hooks:');
   const wrote = h.added.length + h.updated.length;
+  // SEARCH EVENTS ONLY where the split is known. `added` and `updated` are
+  // per-event and the push bundle shares PreToolUse with the search bundle, so
+  // the combined count reports push arms as search hooks — which is the one
+  // number an operator would use to decide the experiment did nothing.
+  const searchWrote = h.searchWrote ?? wrote;
+  // Its own clause, never folded into the count above: the push arms are the
+  // half that can deny a tool call.
+  const arms = pushArmed(h)
+    ? ` ${paint(io, 'bold', 'Push arms:')} ${h.pushArms}, from tenjin push on (off: tenjin push off).`
+    : '';
   if (wrote > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${wrote} hook event(s) registered in ${h.path}. Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${searchWrote} hook event(s) registered in ${h.path}.${arms} Change: tenjin config set hooks.searchMode <auto|remind|off>`;
   }
   if (h.skipped === undefined) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}${arms}`;
   }
   if (h.skipped === 'harness-not-claude') {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only).`;
@@ -1482,7 +1512,12 @@ async function resolveHooks(args: {
 }): Promise<HooksResult> {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
-  const stored = (await loadRawConfig(dataDir)).hooks?.searchMode;
+  const hooksRaw = (await loadRawConfig(dataDir)).hooks;
+  const stored = hooksRaw?.searchMode;
+  // Whether a past `tenjin push on` armed the push experiment (docs/push.md): a
+  // durable config key, read here rather than passed in, so this run's hooks
+  // stay in step with it with no separate flag to remember.
+  const pushOn = hooksRaw?.push === 'on';
   const hasClaude = plans.some((p) => p.harness === 'claude');
   const hasHermes = plans.some((p) => p.harness === 'hermes');
 
@@ -1533,7 +1568,7 @@ async function resolveHooks(args: {
   // mode back to `auto` re-runs install, which is what the fix string says.
   if (mode === 'off') return hooksSkipped(resultHarness, home, dataDir, mode, 'mode-off');
   if (!hasClaude) return hooksSkipped('hermes', home, dataDir, mode, 'native-harness');
-  return wireSearchHooks({ homeDir: home, dataDir, mode });
+  return wireSearchHooks({ homeDir: home, dataDir, mode, push: pushOn });
 }
 
 /**

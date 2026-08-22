@@ -50,6 +50,9 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * was going to run anyway, which is a much weaker signal, because nobody judged
  * the question suitable for the marketplace before it was sent.
  *
+ * `push-hook` is the push experiment's arms (docs/push.md): lookups made on an
+ * error or a file the agent touched, never chosen by the agent, so they share
+ * the demand budget below and the Stop hook never raises them.
  * `dispatch-hook` is weaker still: DEMAND DATA about what an agent was about to
  * research, which the Stop hook never raises and which holds a bounded share of
  * the store, because nothing ever closes one.
@@ -64,7 +67,7 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
  * source field, and those entries were all explicit searches.
  */
-export const SearchSourceSchema = z.enum(['cli', 'websearch-hook', 'dispatch-hook']);
+export const SearchSourceSchema = z.enum(['cli', 'websearch-hook', 'dispatch-hook', 'push-hook']);
 export type SearchSource = z.infer<typeof SearchSourceSchema>;
 
 const StoredSearchSchema = z.object({
@@ -159,7 +162,7 @@ function budgeted(entries: StoredSearch[]): StoredSearch[] {
   const kept: StoredSearch[] = [];
   let demand = 0;
   for (const entry of entries) {
-    if (entry.source === 'dispatch-hook') {
+    if (entry.source === 'dispatch-hook' || entry.source === 'push-hook') {
       if (demand >= DEMAND_MAX_ENTRIES) continue;
       demand += 1;
     }

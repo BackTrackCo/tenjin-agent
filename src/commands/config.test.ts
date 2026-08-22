@@ -91,10 +91,12 @@ describe('runConfigList', () => {
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
+    expect(d['hooks.push']).toEqual({ value: 'off', source: 'default' });
+    expect(d['hooks.capture']).toEqual({ value: 'off', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 3 hooks.*
-    // (incl. sessionPrimer) + 1 update.mode.
-    expect(humanLines).toHaveLength(16);
+    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 5 hooks.*
+    // (searchMode, stopNag, sessionPrimer, push, capture) + 1 update.mode.
+    expect(humanLines).toHaveLength(18);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -937,6 +939,8 @@ describe('the hooks block is set through config, which stays human-gated', () =>
       ['hooks.searchMode', 'remind'],
       ['hooks.stopNag', 'off'],
       ['hooks.sessionPrimer', 'off'],
+      ['hooks.push', 'on'],
+      ['hooks.capture', 'block'],
     ] as const) {
       const set = await runConfigSet({ key, value }, ctx);
       expect(set.data).toMatchObject({ key, value, source: 'file' });
@@ -952,6 +956,12 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
       data: { value: 'off' },
     });
+    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
+      data: { value: 'on' },
+    });
+    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
+      data: { value: 'block' },
+    });
 
     const primer = await caught(() =>
       runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
@@ -965,6 +975,38 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     // The middle setting is offered by name, or an operator hunting for it
     // finds only the cliff.
     expect(bad.fix).toContain('"deliberate-only"');
+
+    const badPush = await caught(() =>
+      runConfigSet({ key: 'hooks.push', value: 'sometimes' }, ctx),
+    );
+    expect(badPush.code).toBe('USAGE');
+    expect(badPush.fix).toContain('"on"');
+    expect(badPush.fix).toContain('"off"');
+
+    const badCapture = await caught(() =>
+      runConfigSet({ key: 'hooks.capture', value: 'sometimes' }, ctx),
+    );
+    expect(badCapture.code).toBe('USAGE');
+    expect(badCapture.fix).toContain('"block"');
+    expect(badCapture.fix).toContain('"nudge"');
+  });
+
+  // hooks.push and hooks.capture are runtime toggles like their siblings: no
+  // stopHookIsCurrent check applies to them (that staleness only exists for
+  // hooks.stopNag's `deliberate-only`, a value an older Stop hook misreads).
+  it('never reports hookScriptStale for push or capture', async () => {
+    const ctx = makeCtx();
+    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(push.data).not.toHaveProperty('hookScriptStale');
+    expect(push.humanLines).toHaveLength(1);
+
+    const capture = await runConfigSet({ key: 'hooks.capture', value: 'block' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(capture.data).not.toHaveProperty('hookScriptStale');
+    expect(capture.humanLines).toHaveLength(1);
   });
 
   // The arm-level toggle (#162): silencing the batched web-search reminders

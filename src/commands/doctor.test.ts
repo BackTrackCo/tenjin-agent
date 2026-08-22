@@ -6,6 +6,9 @@ import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import { isNoWalletCheck, runDoctor } from './doctor';
+import { runPushOn } from './push';
+import { hooksDir } from '../lib/paths';
+import { PUSH_PROMPT_HOOK_FILE } from '../lib/push-scripts';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
@@ -28,9 +31,9 @@ const balanceMock = vi.mocked(getUsdcBalance);
 const OPENAPI_OK = {
   openapi: '3.1.0',
   info: { title: 'Tenjin', version: '0.1.0' },
-  // A healthy deploy advertises the A2 search endpoint, so the search-contract
+  // A healthy deploy advertises the search endpoint, so the search-contract
   // check is ok (no extra fix line): "all required checks green" stays true.
-  paths: { '/api/agent/search': {} },
+  paths: { '/api/search': {} },
 };
 const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // doctor reads the wallet file's cleartext top-level address without decrypting,
@@ -249,6 +252,35 @@ describe('runDoctor — passing outcomes', () => {
     expect((res.humanLines ?? []).length).toBe(checkLines + 2);
   });
 
+  // The alias is what a stale deployment advertises: it is deprecated and answers
+  // 410 after one release, so a deploy carrying ONLY it is the case this check has
+  // to warn about. Passing on the alias would send `tenjin search` at a path that
+  // is about to stop answering, which is the entire point of the probe.
+  it('search-contract warns when the deploy advertises only the deprecated alias', async () => {
+    const aliasOnly = routeFetch({
+      '/openapi.json': {
+        body: {
+          openapi: '3.1.0',
+          info: { version: '0.1.0' },
+          paths: { '/api/agent/search': {} },
+        },
+      },
+      '/api/articles': { body: ARTICLES_OK },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: aliasOnly,
+    });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    expect(data.status).toBe('pass'); // still passes: search-contract is not required
+    const check = find(data.checks, 'search-contract');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('POST /api/search');
+  });
+
   it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
     const noSearch = routeFetch({
       '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
@@ -424,6 +456,58 @@ describe('runDoctor — passing outcomes', () => {
       expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
       expect(headers['x-tenjin-client']).toBeUndefined();
     }
+  });
+});
+
+/**
+ * The push experiment wires SIX settings.json entries across four events and
+ * writes four scripts, and those two halves come apart independently. Neither
+ * half alone makes anything run, so doctor asks both — and only when the
+ * experiment is on, since a permanent check about a feature nobody enabled is
+ * noise on every other machine.
+ */
+describe('runDoctor — the push experiment is wired in both halves', () => {
+  const doctor = async (): Promise<CheckResult[]> => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    return (res.data as { checks: CheckResult[] }).checks;
+  };
+
+  it('says nothing at all while the experiment is off', async () => {
+    const checks = await doctor();
+    expect(checks.find((c) => c.name === 'push hooks')).toBeUndefined();
+  });
+
+  it('warns when the scripts are written but no entry points at them', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    await runPushOn({ ...ctxFor(), dataDir: dir }, { homeDir: skillHome });
+    // Wired properly first: green, and it names both halves.
+    const wired = find(await doctor(), 'push hooks');
+    expect(wired).toMatchObject({ status: 'ok', required: false });
+    expect(wired.detail).toContain('6/6 hook entries registered');
+
+    // Now the settings half goes away underneath it.
+    await writeFile(claudeSettingsPath(skillHome), JSON.stringify({ hooks: {} }));
+    const half = find(await doctor(), 'push hooks');
+    expect(half).toMatchObject({ status: 'warn', required: false, fix: 'tenjin push on' });
+    expect(half.detail).toContain('half wired');
+    expect(half.detail).toContain('0/6 hook entries registered');
+  });
+
+  it('warns when the entries are registered but a script is gone', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    await runPushOn({ ...ctxFor(), dataDir: dir }, { homeDir: skillHome });
+    await rm(join(hooksDir(dir), PUSH_PROMPT_HOOK_FILE));
+    const half = find(await doctor(), 'push hooks');
+    expect(half).toMatchObject({ status: 'warn', required: false });
+    expect(half.detail).toContain('one or more push scripts are missing');
+    expect(half.detail).toContain('6/6 hook entries registered');
   });
 });
 
@@ -1354,11 +1438,16 @@ describe('runDoctor — the rule the publish mode carries', () => {
     await rm(home, { recursive: true, force: true });
   });
 
+  // homeDir is threaded through so inspectFreeVerbRules reads the empty temp
+  // home, not the developer's real ~/.claude/settings.json: a machine that
+  // already carries the publish rules would otherwise make these cases pass or
+  // fail by accident of its own config.
   const run = async (): Promise<string> => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
+      homeDir: home,
     });
     return (res.humanLines ?? []).join('\n');
   };
@@ -1442,6 +1531,7 @@ describe('runDoctor — the rule the publish mode carries', () => {
       walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
+      homeDir: home,
     });
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
     expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([
@@ -1596,7 +1686,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
         body: {
           openapi: '3.1.0',
           info: { version: forged },
-          paths: { '/api/agent/search': {} },
+          paths: { '/api/search': {} },
         },
       },
       '/api/articles': { body: ARTICLES_OK },

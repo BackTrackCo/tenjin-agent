@@ -14,14 +14,35 @@ import {
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
 } from './hook-scripts';
+import {
+  PUSH_CONTEXT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+} from './push-scripts';
 
-/** Every script `install` generates, which is exactly what uninstall claims and
- *  removes: ownership is by filename in both directions. */
+/**
+ * Every script `install` (or `tenjin push on`) generates, which is exactly what
+ * uninstall claims and removes: ownership is by filename in both directions.
+ *
+ * THE PUSH ARMS ARE IN THIS LIST UNCONDITIONALLY, whatever `hooks.push` says.
+ * They are written only when push is on, but uninstall is the command an
+ * operator reaches for to get their machine back, and `hooks.push` is a KEPT
+ * value under the data dir — reading it here would mean an operator who ran
+ * `tenjin push off` before `tenjin uninstall` kept four generated scripts and
+ * seven settings.json entries pointing at files that no longer exist. Removal
+ * stays ownership-gated either way: a filename we never wrote is not found, and
+ * a hook entry naming somebody else's script is left alone.
+ */
 const HOOK_SCRIPT_FILES = [
   WEBSEARCH_HOOK_FILE,
   DISPATCH_HOOK_FILE,
   SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+  PUSH_CONTEXT_HOOK_FILE,
 ] as const;
 import { hooksDir } from './paths';
 import { resolveHermesHomeLenient } from './hermes';
@@ -110,6 +131,7 @@ export type SettingsSkipReason =
  */
 export const KEPT_ITEMS: readonly string[] = [
   'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
+  'your team notes and the push ledger under ~/.tenjin (notes are your own writing, and the ledger is the experiment’s only record)',
   'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
 ];
 

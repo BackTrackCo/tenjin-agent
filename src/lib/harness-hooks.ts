@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { claudeSettingsPath } from './harness-permissions';
@@ -13,6 +13,17 @@ import {
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
+import {
+  PUSH_CONTEXT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_HOOK_TIMEOUT_SECONDS,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+  pushContextHookScript,
+  pushFailureHookScript,
+  pushPromptHookScript,
+  pushSubagentHookScript,
+} from './push-scripts';
 import type { SearchHookMode } from './config';
 
 /**
@@ -29,25 +40,53 @@ import type { SearchHookMode } from './config';
  *    is no argument, no config key, and no call path that lets a caller point a
  *    hook at some other program, and the scripts themselves are generated from
  *    constants in lib/hook-scripts.ts rather than from anything on the wire.
- *  - No hook can block, deny, or modify a tool call. The PreToolUse hooks emit
- *    `additionalContext` and never `permissionDecision`, so the tool always
- *    proceeds; the Stop and SessionStart hooks only ever add a line.
+ *  - Almost no hook can block, deny, or modify a tool call. Every PreToolUse
+ *    entry but one emits `additionalContext` and never `permissionDecision`, so
+ *    the tool always proceeds; the Stop and SessionStart hooks only ever add a
+ *    line. The one exception is the push experiment's abort-and-answer arm
+ *    (docs/push.md): on a strong, free hit it may `permissionDecision: 'deny'`
+ *    the WebSearch/WebFetch call it fired on and hand the model the finding in
+ *    its place, and only that arm ever does.
  *
- * OWNERSHIP IS BY PATH. An entry is ours when its command mentions one of our
- * script filenames, and each script owns AT MOST ONE ENTRY: two entries naming
- * one script would be collapsed by the idempotent rewrite, which is why the
- * dispatch hook takes a single alternation matcher rather than an entry per tool.
- * That is what makes a re-install idempotent, lets a drifted command (an older
- * install's path, a moved data dir) be rewritten in place instead of duplicated,
- * and keeps every entry someone else wrote untouched.
+ * OWNERSHIP IS BY PATH, PER EVENT. An entry is ours when its command mentions one
+ * of our script filenames, and each script owns AT MOST ONE ENTRY PER EVENT IT IS
+ * PLANNED AGAINST: two entries naming one script under the SAME event would be
+ * collapsed by the idempotent rewrite, which is why the dispatch hook takes a
+ * single alternation matcher rather than an entry per tool. Two push scripts are
+ * planned against two DIFFERENT events on purpose — push-failure covers both
+ * PostToolUse and PostToolUseFailure (harness versions differ on which one a
+ * failed Bash call raises), and push-context covers both PostToolUse (its read
+ * arm) and PreToolUse (its churn arm) — and those pairs live in separate lists,
+ * so they never collapse into each other. Per-event ownership is what makes a
+ * re-install idempotent, lets a drifted command (an older install's path, a moved
+ * data dir) be rewritten in place instead of duplicated, and keeps every entry
+ * someone else wrote untouched.
  */
 
-/** The hook events this module writes, in the order they are reported. */
-export const HOOK_EVENTS = ['PreToolUse', 'SessionStart', 'Stop'] as const;
+/**
+ * The hook events this module writes, in the order they are reported. The last
+ * four (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart) exist
+ * only for the push experiment's arms (docs/push.md) and carry no entry at all
+ * unless `push: true` is passed to {@link wireSearchHooks}.
+ */
+export const HOOK_EVENTS = [
+  'PreToolUse',
+  'SessionStart',
+  'Stop',
+  'UserPromptSubmit',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'SubagentStart',
+] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
-/** The tool the WebSearch hook fires on. Never `WebFetch`, never a wildcard. */
-export const WEBSEARCH_MATCHER = 'WebSearch';
+/**
+ * The tools the WebSearch hook fires on. `WebFetch` joined `WebSearch` (T3/push
+ * work): a fetched page is exactly as good a moment to ask Tenjin first as a
+ * search is, and the hook body already treats the two identically. Never a
+ * wildcard.
+ */
+export const WEBSEARCH_MATCHER = 'WebSearch|WebFetch';
 
 /** The tools the dispatch hook fires on: one subagent dispatch under two names
  *  across Claude Code versions. */
@@ -57,6 +96,18 @@ export const DISPATCH_MATCHER = 'Agent|Task';
  *  deliberately absent: a resumed session restores its transcript, so the primer
  *  the original SessionStart printed is already in context. */
 export const SESSION_START_MATCHER = 'startup|clear|compact';
+
+/** The push failure arm (docs/push.md, T3) fires on a Bash tool only, on both the
+ *  ordinary post-use event and the failure-specific one some harness versions
+ *  raise instead. */
+export const PUSH_FAILURE_MATCHER = 'Bash';
+
+/** The push context arm's read half: packages a file imports, once it has been
+ *  read. */
+export const PUSH_CONTEXT_READ_MATCHER = 'Read';
+
+/** The push context arm's churn half: the Nth edit to one file in one session. */
+export const PUSH_CONTEXT_EDIT_MATCHER = 'Edit|Write|MultiEdit';
 
 /**
  * Seconds the harness allows each hook before killing it, and the HARD bound on
@@ -96,6 +147,21 @@ export interface HooksResult {
   updated: HookEvent[];
   /** Script files this run wrote or refreshed. */
   scripts: string[];
+  /**
+   * Hook EVENTS this run registered (added or updated) for the BASE search
+   * bundle alone, so a summary can say how many search hooks it wired without
+   * counting the push experiment's events in the same number. Undefined on the
+   * paths that register nothing.
+   */
+  searchWrote?: number;
+  /**
+   * Push-experiment ENTRIES now registered, whether this run wrote them or found
+   * them already there. Counted as entries, not events, because `added` and the
+   * lists beside it are per-EVENT and one event can carry both a search hook and
+   * a push arm — PreToolUse carries three. Undefined when nothing was wired; 0
+   * when the experiment is off.
+   */
+  pushArms?: number;
   skipped?: HooksSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
@@ -194,12 +260,18 @@ function commandFor(scriptPath: string, platform?: string): string {
   return `node ${quoteForShell(scriptPath, platform)}`;
 }
 
-/** One hook handler, exactly as it is written into settings.json. */
-function handlerFor(scriptPath: string, platform?: string): Record<string, unknown> {
+/** One hook handler, exactly as it is written into settings.json. `timeoutSeconds`
+ *  defaults to the search hooks' bound; the push arms pass their own, longer one
+ *  (they may fetch a free body after the search answers). */
+function handlerFor(
+  scriptPath: string,
+  platform?: string,
+  timeoutSeconds: number = HOOK_TIMEOUT_SECONDS,
+): Record<string, unknown> {
   return {
     type: 'command',
     command: commandFor(scriptPath, platform),
-    timeout: HOOK_TIMEOUT_SECONDS,
+    timeout: timeoutSeconds,
   };
 }
 
@@ -218,31 +290,101 @@ interface HookSpec {
   event: HookEvent;
   scriptFile: string;
   script: string;
-  /** Absent for Stop, which the harness fires on every occurrence with no matcher. */
+  /** Which bundle this entry belongs to; the two are counted separately so a
+   *  summary never reports a push arm as a search hook. */
+  arm: 'search' | 'push';
+  /** Absent for Stop and the push subagent/prompt arms, which the harness fires
+   *  on every occurrence of the event with no matcher. */
   matcher?: string;
+  /** Defaults to {@link HOOK_TIMEOUT_SECONDS}; the push arms override it. */
+  timeoutSeconds?: number;
 }
 
-function specs(dataDir: string): HookSpec[] {
-  return [
+/**
+ * The base four search-hook entries, always planned. `opts.push` adds the six
+ * push-experiment entries (docs/push.md) on top, across FOUR scripts: the prompt
+ * and subagent arms carry one entry each, and the failure and context arms carry
+ * two apiece because each fires on two different events (a Bash failure surfaces
+ * as either PostToolUse or PostToolUseFailure depending on harness version; the
+ * context arm's read and churn halves are different events entirely) — so push,
+ * when on, plans six entries across four scripts. Callers that only ever write
+ * the base bundle (`writeSharedHookScripts`, the Hermes adapter,
+ * `stopHookIsCurrent`) pass no opts and get `push: false`.
+ */
+function specs(dataDir: string, opts: { push: boolean } = { push: false }): HookSpec[] {
+  const base: HookSpec[] = [
     {
       event: 'PreToolUse',
       scriptFile: WEBSEARCH_HOOK_FILE,
       script: websearchHookScript(dataDir),
       matcher: WEBSEARCH_MATCHER,
+      arm: 'search',
     },
     {
       event: 'PreToolUse',
       scriptFile: DISPATCH_HOOK_FILE,
       script: dispatchHookScript(dataDir),
       matcher: DISPATCH_MATCHER,
+      arm: 'search',
     },
     {
       event: 'SessionStart',
       scriptFile: SESSIONSTART_HOOK_FILE,
       script: sessionPrimerHookScript(dataDir),
       matcher: SESSION_START_MATCHER,
+      arm: 'search',
     },
-    { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir) },
+    { event: 'Stop', scriptFile: STOP_HOOK_FILE, script: stopHookScript(dataDir), arm: 'search' },
+  ];
+  if (!opts.push) return base;
+  return [
+    ...base,
+    {
+      event: 'UserPromptSubmit',
+      scriptFile: PUSH_PROMPT_HOOK_FILE,
+      script: pushPromptHookScript(dataDir),
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
+    {
+      event: 'PostToolUse',
+      scriptFile: PUSH_FAILURE_HOOK_FILE,
+      script: pushFailureHookScript(dataDir),
+      matcher: PUSH_FAILURE_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
+    {
+      event: 'PostToolUseFailure',
+      scriptFile: PUSH_FAILURE_HOOK_FILE,
+      script: pushFailureHookScript(dataDir),
+      matcher: PUSH_FAILURE_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
+    {
+      event: 'SubagentStart',
+      scriptFile: PUSH_SUBAGENT_HOOK_FILE,
+      script: pushSubagentHookScript(dataDir),
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
+    {
+      event: 'PostToolUse',
+      scriptFile: PUSH_CONTEXT_HOOK_FILE,
+      script: pushContextHookScript(dataDir),
+      matcher: PUSH_CONTEXT_READ_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
+    {
+      event: 'PreToolUse',
+      scriptFile: PUSH_CONTEXT_HOOK_FILE,
+      script: pushContextHookScript(dataDir),
+      matcher: PUSH_CONTEXT_EDIT_MATCHER,
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
   ];
 }
 
@@ -294,6 +436,11 @@ export interface WireHooksOptions {
   mode: SearchHookMode;
   /** Shell-quoting target; injected so both branches are testable on one machine. */
   platform?: string;
+  /** Also plan the six push-experiment entries (docs/push.md). Defaults to
+   *  false: `tenjin install` on a normal machine registers nothing new, and only
+   *  `tenjin push on` (or a later install with `hooks.push` already `on`) passes
+   *  true. */
+  push?: boolean;
 }
 
 /**
@@ -310,9 +457,9 @@ export interface WireHooksOptions {
  * changed.
  */
 export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResult> {
-  const { homeDir, dataDir, mode, platform } = opts;
+  const { homeDir, dataDir, mode, platform, push = false } = opts;
   const scriptsDir = hooksDir(dataDir);
-  const plan = specs(dataDir);
+  const plan = specs(dataDir, { push });
 
   const found = await inspectSettings(homeDir, scriptsDir, mode);
   if ('result' in found) return found.result;
@@ -324,10 +471,30 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // strongest outcome: two lists would say two contradictory things about it.
   // Each spec appends to the RUNNING list, not to what was read from disk.
   const outcomes = new Map<HookEvent, 'added' | 'updated' | 'alreadyPresent'>();
+  // The same collapse, over the BASE bundle only. `outcomes` cannot answer "how
+  // many search hooks did this run wire" once push is on, because PreToolUse
+  // carries entries from both bundles and reports as one event either way.
+  const searchOutcomes = new Map<HookEvent, 'added' | 'updated' | 'alreadyPresent'>();
+  // ENTRIES, not events, and every outcome counts: this is "how many push arms
+  // are wired now", which is what the disclosure has to be true about on a
+  // re-run that found them all already present.
+  let pushArms = 0;
   const rank = { added: 3, updated: 2, alreadyPresent: 1 } as const;
-  const note = (outcome: 'added' | 'updated' | 'alreadyPresent', event: HookEvent): void => {
+  const note = (
+    outcome: 'added' | 'updated' | 'alreadyPresent',
+    event: HookEvent,
+    arm: 'search' | 'push',
+  ): void => {
     const seen = outcomes.get(event);
     if (seen === undefined || rank[outcome] > rank[seen]) outcomes.set(event, outcome);
+    if (arm === 'push') {
+      pushArms += 1;
+      return;
+    }
+    const seenSearch = searchOutcomes.get(event);
+    if (seenSearch === undefined || rank[outcome] > rank[seenSearch]) {
+      searchOutcomes.set(event, outcome);
+    }
   };
   const eventsWith = (outcome: 'added' | 'updated' | 'alreadyPresent'): HookEvent[] =>
     HOOK_EVENTS.filter((event) => outcomes.get(event) === outcome);
@@ -346,33 +513,48 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
     const list: unknown[] = existing ?? [];
     const desired = {
       ...(spec.matcher !== undefined ? { matcher: spec.matcher } : {}),
-      hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform)],
+      hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform, spec.timeoutSeconds)],
     };
     const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
     if (idx === -1) {
       nextHooks[spec.event] = [...list, desired];
-      note('added', spec.event);
+      note('added', spec.event, spec.arm);
       continue;
     }
     if (JSON.stringify(list[idx]) === JSON.stringify(desired)) {
-      note('alreadyPresent', spec.event);
+      note('alreadyPresent', spec.event, spec.arm);
       continue;
     }
     // Ours, but stale: an older install's path, or a data dir that moved. Rewritten
     // IN PLACE so the entry keeps its position among whatever else is registered.
     nextHooks[spec.event] = list.map((e, i) => (i === idx ? desired : e));
-    note('updated', spec.event);
+    note('updated', spec.event, spec.arm);
   }
 
   const added = eventsWith('added');
   const updated = eventsWith('updated');
   const alreadyPresent = eventsWith('alreadyPresent');
+  const searchWrote = HOOK_EVENTS.filter((event) => {
+    const outcome = searchOutcomes.get(event);
+    return outcome === 'added' || outcome === 'updated';
+  }).length;
 
   // Nothing to register: no guard is involved, so the scripts are simply brought
   // up to date. This is the path a re-run takes after an upgrade changed a body.
   if (added.length === 0 && updated.length === 0) {
     const scripts = await writeScripts(plan, scriptsDir);
-    return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+    return {
+      harness: 'claude',
+      path,
+      scriptsDir,
+      mode,
+      added,
+      alreadyPresent,
+      updated,
+      scripts,
+      searchWrote,
+      pushArms,
+    };
   }
 
   const next = { ...settings, hooks: nextHooks };
@@ -398,7 +580,18 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // and the re-run the fix names simply registers it.
   if (await changed()) return refuseChanged(path, scriptsDir, mode, scripts);
   await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-  return { harness: 'claude', path, scriptsDir, mode, added, alreadyPresent, updated, scripts };
+  return {
+    harness: 'claude',
+    path,
+    scriptsDir,
+    mode,
+    added,
+    alreadyPresent,
+    updated,
+    scripts,
+    searchWrote,
+    pushArms,
+  };
 }
 
 /**
@@ -445,6 +638,82 @@ function refuse(
   warning: string,
 ): HooksResult {
   return skip(reason, { harness: 'claude', path, scriptsDir, mode, warning, fix: fixFor(reason) });
+}
+
+/** The four generated push arms, by filename: what `push on` writes and what
+ *  `uninstall` removes. */
+export const PUSH_SCRIPT_FILES = [
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+  PUSH_CONTEXT_HOOK_FILE,
+] as const;
+
+/** Are all four push scripts on disk under `<dataDir>/hooks`? Half of "wired";
+ *  {@link countPushHookEntries} is the other half. */
+export async function pushScriptsPresent(dataDir: string): Promise<boolean> {
+  const dir = hooksDir(dataDir);
+  for (const file of PUSH_SCRIPT_FILES) {
+    try {
+      await stat(join(dir, file));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** What {@link countPushHookEntries} found in settings.json. */
+export interface PushHookEntryCount {
+  /** Entries a `push on` would plan: six, across four events. */
+  planned: number;
+  /** How many of them are registered right now, matched by the SAME ownership
+   *  predicate the writer uses, so "present" here and "already up to date"
+   *  there can never disagree. */
+  present: number;
+  /** The settings file consulted. Null when there is none to read at all. */
+  path: string | null;
+}
+
+/**
+ * How many push arms are actually REGISTERED, as opposed to written to disk.
+ *
+ * The two halves come apart, and each one alone reports healthy while the
+ * sidecar does nothing: scripts with no entries is a `push on` that refused the
+ * settings write, entries with no scripts is a half-finished uninstall. Nothing
+ * runs in either case, so both are asked and both are printed.
+ *
+ * Read-only and best-effort: an unreadable or unparseable settings file answers
+ * "none present", never an error — this is a diagnostic, and a diagnostic that
+ * throws is one an operator meets at the worst moment.
+ */
+export async function countPushHookEntries(
+  homeDir: string,
+  dataDir: string,
+): Promise<PushHookEntryCount> {
+  const plan = specs(dataDir, { push: true }).filter((spec) => spec.arm === 'push');
+  const declaredPath = claudeSettingsPath(homeDir);
+  let raw: string;
+  try {
+    raw = await readFile(declaredPath, 'utf8');
+  } catch {
+    return { planned: plan.length, present: 0, path: null };
+  }
+  let hooks: unknown;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
+  } catch {
+    return { planned: plan.length, present: 0, path: declaredPath };
+  }
+  if (!isPlainObject(hooks)) return { planned: plan.length, present: 0, path: declaredPath };
+  let present = 0;
+  for (const spec of plan) {
+    const list = hooks[spec.event];
+    if (!Array.isArray(list)) continue;
+    if (list.some((entry) => ownsEntry(entry, spec.scriptFile))) present += 1;
+  }
+  return { planned: plan.length, present, path: declaredPath };
 }
 
 interface SettingsInspection {

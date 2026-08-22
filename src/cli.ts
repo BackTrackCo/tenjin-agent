@@ -710,6 +710,143 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
     });
 
+  // ---- push (sidecar) ----
+  // `tenjin push on|off|status` (docs/push.md): the runtime toggle for the push
+  // experiment, which surfaces a Tenjin finding beside a failing command, a
+  // stuck edit loop, or a subagent dispatch, without being asked. See
+  // commands/push.ts for the mechanism; this block only wires the three verbs.
+  const push = addGlobalFlags(
+    program
+      .command('push')
+      .description(
+        'The push experiment (docs/command-reference.md, "Push (experimental)"): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push on|off|status`',
+      ),
+  );
+  addGlobalFlags(push.command('on'))
+    .description(
+      'Turn the push experiment on: persist hooks.push=on, then wire its four hook scripts (idempotent; safe to re-run)',
+    )
+    .action(async function (this: Command) {
+      await runCommand('push.on', this, async (ctx) => {
+        const { runPushOn } = await import('./commands/push');
+        return runPushOn(ctx);
+      });
+    });
+  addGlobalFlags(push.command('off'))
+    .description(
+      'Turn the push experiment off: persists hooks.push=off and exits instantly; any wired scripts stay on disk but go inert on their next run',
+    )
+    .action(async function (this: Command) {
+      await runCommand('push.off', this, async (ctx) => {
+        const { runPushOff } = await import('./commands/push');
+        return runPushOff(ctx);
+      });
+    });
+  addGlobalFlags(push.command('status'))
+    .description(
+      'Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, and the last 7 days of ledger tallies',
+    )
+    .action(async function (this: Command) {
+      await runCommand('push.status', this, async (ctx) => {
+        const { runPushStatus } = await import('./commands/push');
+        return runPushStatus(ctx);
+      });
+    });
+
+  // ---- notes + team (sidecar) ----
+  // Team-shared reusable findings (plan of record: tenjin-notes/plans/sidecar).
+  // Notes live in a git-cloned sidecar repo (`tenjin team init`); `notes` reads
+  // and writes it, `team` manages the clone itself.
+  const notes = addGlobalFlags(
+    program.command('notes').description('Team-shared reusable findings (sidecar notes repo)'),
+  );
+  addGlobalFlags(notes.command('add [file]'))
+    .description('Save a durable finding as a team note (pass a file, or --body)')
+    .requiredOption('--question <q>', 'what the note answers')
+    .option('--applies-to <list>', 'comma-separated applicability tags, e.g. pkg@1.2,product')
+    .option('--scope <s>', 'where the finding holds')
+    .option('--body <text>', 'the note body (alternative to a file argument)')
+    .option('--source <s>', 'where this came from, e.g. session:<id> or search:<uuid>')
+    .action(async function (this: Command, file: string | undefined) {
+      await runCommand('notes.add', this, async (ctx) => {
+        const o = this.opts();
+        const { runNotesAdd } = await import('./commands/notes');
+        return runNotesAdd(
+          {
+            ...(file !== undefined ? { file } : {}),
+            question: String(o.question),
+            ...(typeof o.appliesTo === 'string' ? { appliesTo: o.appliesTo } : {}),
+            ...(typeof o.scope === 'string' ? { scope: o.scope } : {}),
+            ...(typeof o.body === 'string' ? { body: o.body } : {}),
+            ...(typeof o.source === 'string' ? { source: o.source } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+  addGlobalFlags(notes.command('list'))
+    .description('List team notes')
+    .action(async function (this: Command) {
+      await runCommand('notes.list', this, async (ctx) => {
+        const { runNotesList } = await import('./commands/notes');
+        return runNotesList(ctx);
+      });
+    });
+  addGlobalFlags(notes.command('show <id>'))
+    .description('Show one team note in full')
+    .action(async function (this: Command, id: string) {
+      await runCommand('notes.show', this, async (ctx) => {
+        const { runNotesShow } = await import('./commands/notes');
+        return runNotesShow({ id }, ctx);
+      });
+    });
+  addGlobalFlags(notes.command('search <query>'))
+    .description('Search team notes lexically')
+    .action(async function (this: Command, query: string) {
+      await runCommand('notes.search', this, async (ctx) => {
+        const { runNotesSearch } = await import('./commands/notes');
+        return runNotesSearch({ query }, ctx);
+      });
+    });
+  addGlobalFlags(notes.command('rm <id>'))
+    .description('Remove a team note')
+    .action(async function (this: Command, id: string) {
+      await runCommand('notes.rm', this, async (ctx) => {
+        const { runNotesRm } = await import('./commands/notes');
+        return runNotesRm({ id }, ctx);
+      });
+    });
+  addGlobalFlags(notes.command('none'))
+    .description(
+      'Record that nothing durable was learned this session (clears the Stop-hook capture nag)',
+    )
+    .action(async function (this: Command) {
+      await runCommand('notes.none', this, async (ctx) => {
+        const { runNotesNone } = await import('./commands/notes');
+        return runNotesNone(ctx);
+      });
+    });
+
+  const team = addGlobalFlags(
+    program.command('team').description('Manage the shared team notes repo'),
+  );
+  addGlobalFlags(team.command('init <gitUrl>'))
+    .description('Clone the team notes repo into the local sidecar')
+    .action(async function (this: Command, gitUrl: string) {
+      await runCommand('team.init', this, async (ctx) => {
+        const { runTeamInit } = await import('./commands/team');
+        return runTeamInit({ gitUrl }, ctx);
+      });
+    });
+  addGlobalFlags(team.command('sync'))
+    .description('Pull (rebase), then push, the team notes repo')
+    .action(async function (this: Command) {
+      await runCommand('team.sync', this, async (ctx) => {
+        const { runTeamSync } = await import('./commands/team');
+        return runTeamSync(ctx);
+      });
+    });
+
   return program;
 }
 
