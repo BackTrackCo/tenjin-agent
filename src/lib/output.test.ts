@@ -113,6 +113,37 @@ describe('emitFailure', () => {
     expect(out.indexOf('review then --yes')).toBeLessThan(out.indexOf('aws-access-key'));
   });
 
+  it('at a TTY, names the source of a finding the server gate contributed', () => {
+    const cap = captureIo(true);
+    const err = new CliError('NEEDS_CONFIRMATION', 'held', {
+      details: {
+        findings: [
+          {
+            check: 'wallet-address',
+            severity: 'warn',
+            line: 2,
+            excerpt: '0xab…cd',
+            source: 'both',
+          },
+          // A detector this release predates still renders, name and all.
+          {
+            check: 'semantic-pii',
+            severity: 'warn',
+            line: 1,
+            excerpt: 'reads as…',
+            source: 'server',
+          },
+          { check: 'email', severity: 'warn', line: 4, excerpt: 'a@b.com', source: 'local' },
+        ],
+      },
+    });
+    emitFailure(cap.io, 'publish', err);
+    const out = cap.stdout();
+    expect(out).toContain('wallet-address [local+server] (line 2): 0xab…cd');
+    expect(out).toContain('semantic-pii [server] (line 1): reads as…');
+    expect(out).toContain('email (line 4): a@b.com');
+  });
+
   it('leaves the machine envelope unchanged when details.findings is present', () => {
     const cap = captureIo(false);
     const details = {

@@ -31,8 +31,10 @@ import {
   needsConfirmation,
   publicFinding,
   resolveWriteAuth,
+  throughScanGate,
   writeModeNotices,
 } from '../lib/consent';
+import { parseScanSuccessReport, scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -104,6 +106,11 @@ export interface EditDeps {
   env?: NodeJS.ProcessEnv;
   /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
   cwd?: string;
+  /**
+   * Force the answer to the server gate's warn tier, whatever `publish.mode`
+   * says. The unattended observer lane (PR 5) passes `false`: it never acks.
+   */
+  ackServerWarnings?: boolean;
 }
 
 export async function runEdit(
@@ -243,7 +250,19 @@ export async function runEdit(
     });
   }
 
-  const updated = await updatePost(args.postId, input, auth, client);
+  // The server ingest gate covers the edit path too (it sits in the shared write
+  // path, not in the publish route), so its warn tier joins this command's
+  // exit-3 flow instead of arriving as an opaque exit-4 write failure.
+  const updated = await throughScanGate({
+    send: (scanAck) =>
+      updatePost(args.postId, scanAck === undefined ? input : { ...input, scanAck }, auth, client),
+    localWarns: warns,
+    mode: settings.mode,
+    yes: args.yes === true,
+    ...(deps.ackServerWarnings !== undefined ? { ackOverride: deps.ackServerWarnings } : {}),
+    detail: { mode: settings.mode, postId: stored.id, changes },
+    noun: 'Edit',
+  });
   return updateReceipt(updated, changes, notes, settings.mode);
 }
 
@@ -279,18 +298,28 @@ function updateReceipt(
   mode: PublishMode,
 ): CommandResult {
   const card = post.resource;
+  // The gate's advisory report rides the response as a raw `scan` field; replace
+  // it in the receipt with the normalized shape so both writing commands report
+  // findings identically, and drop it when the server sent none.
+  const report = parseScanSuccessReport(post);
   const lines = [
     `Updated ${sanitizeForTerminal(post.title)} → ${sanitizeForTerminal(post.url)}`,
     eligibilityLine(card),
+    ...scanNoteLines(report ?? undefined),
     ...(post.warnings ?? []).map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
-  return {
-    // `mode` is echoed because a per-call --mode (or the MCP `mode` argument) is
-    // otherwise invisible in a transcript: the receipt would look identical
-    // whether the caller loosened the gate for this run or not.
-    data: { ...post, mode, changes, ...(notes.length > 0 ? { notes } : {}) },
-    humanLines: lines,
+  // `mode` is echoed because a per-call --mode (or the MCP `mode` argument) is
+  // otherwise invisible in a transcript: the receipt would look identical
+  // whether the caller loosened the gate for this run or not.
+  const data: Record<string, unknown> = {
+    ...post,
+    mode,
+    changes,
+    ...(notes.length > 0 ? { notes } : {}),
   };
+  if (report !== null) data.scan = scanReceipt(report);
+  else delete data.scan;
+  return { data, humanLines: lines };
 }
 
 /** Nothing to write: the post as it stands, and an empty change list to prove it. */

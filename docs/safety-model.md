@@ -40,6 +40,8 @@ Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, a
 
 Publishing and editing put content on a public marketplace under your identity. The local scan blocks obvious secrets and private-key material in every mode. Other sensitive context can only be warned about, so the agent still has to use judgment before publishing.
 
+The marketplace runs its own scan at ingest, and it is authoritative. The local scan still runs first, for one reason: it fails before a signature is made, so a block-tier secret never leaves the machine. Server-side, the block tier has no acknowledgement path, and the warn tier is held with a token that `--yes` acknowledges, exactly like a local warn. Findings the server contributed are marked as such where they are rendered, including detectors this release has never heard of.
+
 When in doubt, publish less context and more reproducible evidence.
 
 ## Permission boundaries
