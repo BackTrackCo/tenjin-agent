@@ -301,14 +301,16 @@ function parseNote(text) {
   };
 }
 
-/** Share of the query's content words \`text\` covers: the same measure
- *  \`overlap\` applies to a marketplace card, over a card we wrote ourselves. */
+/** Share of the query's content words \`text\` covers, WITH the raw count beside
+ *  it: the same measure \`overlap\` applies to a marketplace card, over a card we
+ *  wrote ourselves, and the same reason for carrying both — a three-word query
+ *  scores 0.667 on two shared words, and two shared words is not evidence. */
 function textScore(q, text) {
-  if (q.size < 3) return 0;
+  if (q.size < 3) return { ratio: 0, hit: 0 };
   const words = tokens(text);
   let hit = 0;
   for (const t of q) if (words.has(t)) hit += 1;
-  return hit / q.size;
+  return { ratio: hit / q.size, hit };
 }
 
 /**
@@ -346,15 +348,23 @@ function notesSearch(query) {
     if (note === null) continue;
     const card =
       note.question + ' ' + note.appliesTo.join(' ') + ' ' + note.body.slice(0, NOTES_HEAD_CHARS);
-    scored.push({ note, id: name.slice(0, -3), score: textScore(q, card) });
+    const m = textScore(q, card);
+    scored.push({ note, id: name.slice(0, -3), score: m.ratio, hit: m.hit });
   }
   if (scored.length === 0) return none;
   scored.sort((a, b) => b.score - a.score);
   const score = round3(scored[0].score);
   const second = round3(scored.length > 1 ? scored[1].score : 0);
+  // THE SAME FLOOR THE PUBLIC SHELF GETS. A note is ours, but it arrives over a
+  // git remote any teammate can write, and \`strong\` here is what puts a whole
+  // 6,000-character body inline in the session. Without the raw-word floor a
+  // three-word query matching two words scores 0.667 and clears PUSH_STRONG, so
+  // two shared words injected remotely-writable text — the exact case
+  // PUSH_MIN_HITS exists to stop on the other shelf.
   let strength = 'none';
-  if (score >= PUSH_STRONG && score - second >= PUSH_MARGIN) strength = 'strong';
-  else if (score >= PUSH_MODERATE) strength = 'moderate';
+  if (score >= PUSH_STRONG && scored[0].hit >= PUSH_MIN_HITS && score - second >= PUSH_MARGIN) {
+    strength = 'strong';
+  } else if (score >= PUSH_MODERATE) strength = 'moderate';
   if (strength === 'none') return { top: null, score, second, strength: 'none', body: '' };
   const top = scored[0];
   const body =
@@ -528,6 +538,18 @@ function headerLine(candidate) {
   );
 }
 
+/** A note's pointer form: the header and where to read the rest, with none of
+ *  the note's own text inline. What a team hit that did not clear the full-body
+ *  floor is offered as — the note is still worth knowing about, and the agent
+ *  can fetch it deliberately. */
+function teamShortForm(top) {
+  return [
+    TEAM_OPENER,
+    teamHeaderLine(top),
+    'Read it: tenjin notes show ' + top.id,
+  ].join('\n');
+}
+
 /** ~80 tokens: the pointer plus a one-line excerpt. */
 function shortForm(candidate) {
   const lines = [
@@ -651,31 +673,47 @@ async function pushDecide(args) {
       second: team.second,
       strength: team.strength,
     };
-    // Both strengths inject the WHOLE note. The margin that makes a marketplace
-    // hit "offered, never asserted" is a stranger-risk; a note our own team
-    // wrote about our own stack is worth the tokens at moderate too.
+    // ONLY A STRONG HIT PUTS THE WHOLE NOTE INLINE. A note is ours, which is why
+    // it is framed as a record rather than as third-party text — but the shelf
+    // is a git remote every teammate can write, so the decision that inlines
+    // 6,000 characters of it needs the same evidence the public shelf needs:
+    // the raw-word floor and the rank-2 margin. A moderate hit is not dropped,
+    // it is pointed at: the header and 'notes show <id>', none of its text.
+    const form = team.strength === 'strong' ? 'full' : 'short';
     if (mode === 'log') {
-      ledgerAppend({ ...row, action: 'logged', form: 'full' });
+      ledgerAppend({ ...row, action: 'logged', form });
       return null;
     }
     if (budget.seen.has(team.top.id)) {
       ledgerAppend({ ...row, action: 'skipped', reason: 'already-injected' });
       return null;
     }
-    if (budget.injected >= PUSH_INJECT_MAX) {
-      // A note has no pointer form to fall back to: it is the body or nothing.
-      ledgerAppend({ ...row, action: 'skipped', reason: 'inject-cap' });
-      return null;
+    if (form === 'full' && budget.injected >= PUSH_INJECT_MAX) {
+      // Over the cap the body is not inlined, but the pointer costs three lines
+      // and still tells the agent the note exists.
+      const text = teamShortForm(team.top);
+      ledgerAppend({
+        ...row,
+        action: 'injected',
+        form: 'short',
+        deny: false,
+        reason: 'inject-cap-pointer',
+        tokens: Math.ceil(text.length / 4),
+      });
+      return { text, form: 'short', deny: false };
     }
-    const text = fullForm(TEAM_OPENER, teamHeaderLine(team.top), team.body);
+    const text =
+      form === 'full'
+        ? fullForm(TEAM_OPENER, teamHeaderLine(team.top), team.body)
+        : teamShortForm(team.top);
     ledgerAppend({
       ...row,
       action: 'injected',
-      form: 'full',
+      form,
       deny: false,
       tokens: Math.ceil(text.length / 4),
     });
-    return { text, form: 'full', deny: false };
+    return { text, form, deny: false };
   }
 
   base.shelf = 'public';
