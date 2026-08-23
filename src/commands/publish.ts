@@ -107,6 +107,9 @@ export async function runPublish(
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
   const searchIds = normalizeSearchIds(args.searchId, deps.searchIdLabel ?? '--search-id');
 
+  // Resolved FIRST because team mode changes what the rest of this function
+  // does, not just where the POST goes.
+  const runtime = await resolveContextSettings(ctx);
   const raw = await readSource(args);
   // Read the named searches ONCE: one prefills the card, and each id's presence
   // decides what its close reports and what is warned about below.
@@ -156,32 +159,43 @@ export async function runPublish(
   });
   // The resolver's downgrade warnings, a mistyped env mode, and the one-line
   // explainer for an unconfigured mode: all stderr, all invisible to --json.
-  writeModeNotices(
-    ctx.io.stderr,
-    settings,
-    env,
-    'each publish asks you once. Set auto to publish clean scans automatically',
+  // Silent in team mode, where the consent cascade below does not run and
+  // coaching the operator toward `auto` would be advice about a gate that is
+  // already not in the way.
+  if (!runtime.teamMode) {
+    writeModeNotices(
+      ctx.io.stderr,
+      settings,
+      env,
+      'each publish asks you once. Set auto to publish clean scans automatically',
+    );
+  }
+  // FREE BY DEFAULT ON THE TEAM SHELF. The default price exists to stop a public
+  // piece being given away by accident; a team shelf has no buyers, and a
+  // teammate hitting a 402 on their own team's finding is the loop not working.
+  // An explicit --price or a frontmatter price still wins, because that is
+  // somebody saying what they meant.
+  const priceAtomic = resolvePrice(
+    args,
+    frontmatter,
+    runtime.teamMode ? '0' : settings.defaultPriceAtomic,
   );
-  const priceAtomic = resolvePrice(args, frontmatter, settings.defaultPriceAtomic);
 
-  // The scan runs in EVERY mode (D38): it gates the gate, it does not replace it.
-  // Scan the whole file AND the derived card's text, so a secret reaches the same
-  // gates whether it arrives in the body, in frontmatter, or via a card-authoring
-  // flag (--provenance, --scope, …) — the card ships to the PUBLIC card, so a flag
-  // secret must block exactly like an in-file one. Dedupe by check+excerpt so a
-  // frontmatter value (present in both raw and the card) is not double-counted.
-  // The scan context carries the source project's git remote slugs (offline FS
-  // read, best-effort): a draft quoting its own project's repo/org warns as a
-  // private-by-default reference (open-questions publishing-safety check-set).
-  // Markers derive from the DRAFT's project, not the shell's cwd (review r5): a
-  // file publish walks up from the file's own directory, so the process cwd is
-  // unrelated to where the draft actually lives.
-  const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
-  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
-  const findings = dedupeFindings([
-    ...scan(raw, scanContext),
-    ...scan(cardScanText(card), scanContext),
-  ]);
+  // The scan runs in EVERY publish mode (D38): it gates the gate, it does not
+  // replace it. What it covers and why is on `scanDraft` below.
+  //
+  // BUT NOT IN TEAM MODE, and this is the one place the two modes really diverge.
+  // The scan asks "is this safe to make public": it blocks on a secret and warns
+  // on a private-looking reference — a repo slug, an internal hostname, an
+  // employer's name. A team shelf is a second deployment only this team can
+  // reach, so every one of those warnings is a false positive on exactly the
+  // findings the loop exists to capture ("a quirk of THIS codebase"), and each
+  // one costs a --yes round trip the agent has to be taught to do. The block on
+  // credentials is dropped with it, deliberately: this is a private deployment,
+  // the operator configured it themselves, and a gate that fires on every note
+  // is a gate nobody reads. `tenjin config set shelfBypassSecret ""` puts the
+  // whole cascade back.
+  const findings = runtime.teamMode ? [] : await scanDraft(args, cwd, raw, card);
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 
@@ -201,8 +215,10 @@ export async function runPublish(
     });
   }
 
-  // --yes clears the soft findings and the review confirm alike.
-  if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
+  // --yes clears the soft findings and the review confirm alike. In team mode
+  // there is nothing to confirm: no scan ran, and `review` asking once per note
+  // is the ask that made in-session capture fail in the first place.
+  if (!runtime.teamMode && needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
     throw new CliError('NEEDS_CONFIRMATION', confirmMessage(warns.length, price.usd), {
       fix: 'Review the findings, then re-run with --yes (or resolve the source and re-run).',
       details: {
@@ -217,8 +233,9 @@ export async function runPublish(
 
   // Approved (or nothing to confirm): from here a wallet is required. The write
   // base URL is resolved through the shared settings seam and used for BOTH the
-  // SIWX/session header domain and the POST host, so the two never diverge.
-  const runtime = await resolveContextSettings(ctx);
+  // SIWX/session header domain and the POST host, so the two never diverge. In
+  // team mode that is the team shelf and nowhere else — a publish never reaches
+  // `publicShelfUrl`, which is consume-only.
   const provider = resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
@@ -255,6 +272,7 @@ export async function runPublish(
   const result = await publishPost(input, auth, {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
+    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
@@ -409,6 +427,31 @@ async function closeNamedSearch(
     return { id: searchId, closed: true, alreadyAnswered: true, prefill };
   }
   return { id: searchId, closed: true, prefill };
+}
+
+/**
+ * The deterministic scan over the draft AND the derived card's text, so a secret
+ * reaches the same gates whether it arrives in the body, in frontmatter, or via a
+ * card-authoring flag (`--provenance`, `--scope`, …) — the card ships to the
+ * PUBLIC card, so a flag secret must block exactly like an in-file one. Deduped
+ * by check+excerpt so a frontmatter value (present in both raw and the card) is
+ * not double-counted.
+ *
+ * The scan context carries the source project's git remote slugs (offline FS
+ * read, best-effort): a draft quoting its own project's repo/org warns as a
+ * private-by-default reference. Markers derive from the DRAFT's project, not the
+ * shell's cwd (review r5): a file publish walks up from the file's own directory,
+ * so the process cwd is unrelated to where the draft actually lives.
+ */
+async function scanDraft(
+  args: PublishArgs,
+  cwd: string,
+  raw: string,
+  card: ResourceCardInput | undefined,
+): Promise<ScanFinding[]> {
+  const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
+  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
+  return dedupeFindings([...scan(raw, scanContext), ...scan(cardScanText(card), scanContext)]);
 }
 
 /** The Markdown to publish. A missing path is USAGE before any wallet touch. */

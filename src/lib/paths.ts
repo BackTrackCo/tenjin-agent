@@ -60,20 +60,18 @@ export function hooksDir(dir: string = dataDir()): string {
 }
 
 /**
- * THE ONE PLACE each of these three names is written.
+ * THE ONE PLACE each of these two names is written.
  *
- * They used to be literals here AND in lib/push-scripts.ts AND, for the notes
- * dir, a third time inside the SessionStart script lib/hook-scripts.ts emits —
- * the split justified by keeping this foundational module clear of the
- * generator-heavy push-scripts/hook-scripts chain. The dependency only ever
- * needed to point the other way: this module imports nothing but `node:os` and
- * `node:path`, so the generators can import IT. Every reader of these paths
- * fails closed to empty on a rename, which is a sidecar that has quietly stopped
- * seeing anything rather than an error anybody notices.
+ * They used to be literals here AND in lib/push-scripts.ts — the split justified
+ * by keeping this foundational module clear of the generator-heavy
+ * push-scripts/hook-scripts chain. The dependency only ever needed to point the
+ * other way: this module imports nothing but `node:os` and `node:path`, so the
+ * generators can import IT. Every reader of these paths fails closed to empty on
+ * a rename, which is a sidecar that has quietly stopped seeing anything rather
+ * than an error anybody notices.
  */
 export const PUSH_LEDGER_FILE = 'push-ledger.jsonl';
 export const PUSH_DIR_NAME = 'push';
-export const NOTES_DIR_NAME = 'notes';
 
 /** The push experiment's decision ledger (docs/command-reference.md#push-experimental):
  *  one JSON line per push arm's decision, append-only. */
@@ -145,14 +143,4 @@ export function passphraseBlobPathFor(account: string, dir: string = dataDir()):
  */
 export function archivedWalletPath(account: string, dir: string = dataDir()): string {
   return join(dir, `wallet.${account}.json.bak`);
-}
-
-/**
- * The team notes repo (docs/command-reference.md: `tenjin team`/`tenjin notes`):
- * `git clone`d by `tenjin team init`, holding a README and any project config at
- * its root. Notes themselves live one level down, at `<notesDir>/notes/*.md`,
- * so a note's filename can never collide with something the repo root carries.
- */
-export function notesDir(dir: string = dataDir()): string {
-  return join(dir, NOTES_DIR_NAME);
 }

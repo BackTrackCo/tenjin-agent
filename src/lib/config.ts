@@ -208,6 +208,31 @@ export const ConfigSchema = z.object({
   sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
+  /**
+   * The PUBLIC marketplace, consume-only, and the second shelf a team-mode
+   * lookup falls through to. Distinct from `baseUrl` because in team mode
+   * `baseUrl` is the team's own deployment: `publish`, `read` and the first leg
+   * of every search go there, and this is the shelf that still gets asked when
+   * the team's own has nothing. In public mode the two are the same origin and
+   * nothing falls through.
+   */
+  publicShelfUrl: z.url(),
+  /**
+   * The team shelf's Vercel "Protection Bypass for Automation" secret, and the
+   * ONE key that decides which mode this CLI is in: empty (the default) is
+   * public mode, byte-for-byte what it always did; non-empty is team mode.
+   *
+   * It is a DOOR KEY, not a credential of the operator's: it gets a request past
+   * Deployment Protection on the team's preview deployment and authenticates
+   * nobody. Stored in plain config.json alongside everything else for exactly
+   * that reason — anything that can read this file can already read the wallet's
+   * keystore path and rewrite `baseUrl`. It is redacted from `config get` and
+   * `config list` all the same, because those outputs are pasted into issues.
+   *
+   * Sent ONLY to `baseUrl`'s origin; see lib/http.ts's `bypass` option, which
+   * derives that from the request URL rather than from the caller's intent.
+   */
+  shelfBypassSecret: z.string(),
   rpcUrl: z.url(),
   /**
    * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
@@ -291,6 +316,9 @@ export const CONFIG_DEFAULTS: Config = {
   sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: PRODUCTION_ORIGIN,
+  publicShelfUrl: PRODUCTION_ORIGIN,
+  // Empty = public mode. Setting it is the whole of "turn on team mode".
+  shelfBypassSecret: '',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   bazaarPay: false,
@@ -430,6 +458,8 @@ export interface EffectiveSettings {
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
+  publicShelfUrl: ResolvedSetting<string>;
+  shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
   bazaarPay: ResolvedSetting<boolean>;
@@ -473,6 +503,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
+    publicShelfUrl: fileOrDefault('publicShelfUrl', config),
+    shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
     bazaarPay: fileOrDefault('bazaarPay', config),

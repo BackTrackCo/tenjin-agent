@@ -107,6 +107,7 @@ export async function runOutcome(
       const result = await postOutcomes(target.searchId, [item], {
         baseUrl: settings.baseUrl,
         timeoutMs: ctx.flags.timeout,
+        ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       });
       // The loop is closed, so the Stop hook has nothing left to raise about it.

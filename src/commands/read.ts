@@ -69,7 +69,12 @@ export async function runRead(
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
   const sectionsBudget = parseSectionsBudget(args.sections);
-  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl);
+  const ref = await resolveResourceRef(
+    args.ref,
+    ctx.dataDir,
+    settings.baseUrl,
+    settings.publicShelfUrl,
+  );
   const presentOpts: PresentOpts = { printBody: args.printBody === true, sectionsBudget };
 
   // 1. Library idempotence, BEFORE any network: an owned resource re-delivers
@@ -85,6 +90,7 @@ export async function runRead(
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
+    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 

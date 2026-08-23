@@ -33,7 +33,7 @@ import type {
   HarnessWiring,
   NotInvocableReason,
 } from '../lib/skill-wiring';
-import { fetchJson } from '../lib/http';
+import { fetchJson, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { loadProjectConfig } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
@@ -184,6 +184,11 @@ export async function collectDoctorChecks(
     project: project?.layer,
   });
   const baseUrl = settings.baseUrl.value;
+  // Paired with baseUrl's origin exactly as resolveContextSettings does it; the
+  // transport refuses to send it anywhere else.
+  const secret = settings.shelfBypassSecret.value;
+  const bypass: ShelfBypass | undefined =
+    secret.length > 0 ? { origin: new URL(baseUrl).origin, secret } : undefined;
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
@@ -199,9 +204,12 @@ export async function collectDoctorChecks(
   const built: BuiltCheck[] = [
     checkNode(),
     configCheck,
-    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    // The three baseUrl probes carry the team shelf's bypass. Without it every
+    // one of them reports a protected team deployment as unreachable, which is
+    // the check saying "your CLI is broken" about the one setting that is right.
+    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
     await checkSkills(
       home,
       which,
@@ -364,9 +372,10 @@ async function checkApiContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl, ...(bypass !== undefined ? { bypass } : {}) });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -420,9 +429,10 @@ async function checkSearchContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl, ...(bypass !== undefined ? { bypass } : {}) });
   if (!res.ok) {
     return {
       result: {
@@ -1037,13 +1047,14 @@ async function checkReadPath(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, { timeoutMs, fetchImpl, ...(bypass !== undefined ? { bypass } : {}) });
   if (!res.ok) {
     return {
       result: {

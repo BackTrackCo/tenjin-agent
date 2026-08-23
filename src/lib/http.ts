@@ -14,6 +14,8 @@ export interface FetchJsonOptions {
   fetchImpl?: typeof fetch;
   /** Optional request headers, merged onto the User-Agent this module always sends. */
   headers?: Record<string, string>;
+  /** The team shelf's bypass secret and its origin; see {@link ShelfBypass}. */
+  bypass?: ShelfBypass;
   /**
    * INTERNAL. A caller's own product sequence, composed BEHIND the CLI's
    * identity (see `composeUserAgent`). The package ships a `bin` and no
@@ -24,6 +26,51 @@ export interface FetchJsonOptions {
    * does not carry.
    */
   callerUserAgent?: string;
+}
+
+/**
+ * The team shelf's Vercel "Protection Bypass for Automation" header.
+ *
+ * A door key for a protected preview deployment, not a credential of anyone's:
+ * it gets a request past Deployment Protection and authenticates nobody. It is
+ * NOT in {@link CREDENTIAL_HEADERS} for that reason — it signs nothing, so a
+ * redirect carrying it cannot be replayed into a signature — but it is still a
+ * secret, so where it may go is decided here and nowhere else.
+ */
+export const SHELF_BYPASS_HEADER = 'x-vercel-protection-bypass';
+
+/**
+ * A bypass secret and the origin it belongs to.
+ *
+ * THE ORIGIN IS PART OF THE VALUE, and that is the whole design. The CLI talks
+ * to two shelves in team mode — the team's own deployment and the public
+ * marketplace — and a caller that decides "this request is to the team shelf, so
+ * attach the key" is a caller that eventually gets it wrong once. So callers
+ * pass the pair and this transport does the compare: the header is attached from
+ * the REQUEST URL, so a request to any other host cannot carry it, whatever the
+ * call site believed.
+ */
+export interface ShelfBypass {
+  /** `URL.origin` of the shelf the secret opens (the configured `baseUrl`). */
+  origin: string;
+  secret: string;
+}
+
+/** The bypass header for `url`, or nothing. Exported for the hook-script mirror
+ *  test, which runs the generated copy of this rule against this one. */
+export function shelfBypassHeaders(
+  url: string,
+  bypass: ShelfBypass | undefined,
+): Record<string, string> {
+  if (bypass === undefined || bypass.secret.length === 0) return {};
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return {};
+  }
+  if (origin !== bypass.origin) return {};
+  return { [SHELF_BYPASS_HEADER]: bypass.secret };
 }
 
 /**
@@ -131,7 +178,10 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     try {
       res = await doFetch(url, {
         signal: controller.signal,
-        headers: withUserAgent(opts.headers, opts.callerUserAgent),
+        headers: withUserAgent(
+          { ...opts.headers, ...shelfBypassHeaders(url, opts.bypass) },
+          opts.callerUserAgent,
+        ),
       });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
@@ -211,6 +261,8 @@ export interface HttpRequestOptions {
   method?: 'GET' | 'POST' | 'PUT';
   timeoutMs: number;
   headers?: Record<string, string>;
+  /** The team shelf's bypass secret and its origin; see {@link ShelfBypass}. */
+  bypass?: ShelfBypass;
   /** INTERNAL; see `FetchJsonOptions.callerUserAgent`. */
   callerUserAgent?: string;
   /** A JSON body (POST); serialized with a content-type header set automatically. */
@@ -263,7 +315,9 @@ interface PreparedRequest {
 function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest | FetchJsonFailure {
   try {
     let body: string | undefined;
-    const merged = new Headers(opts.headers ?? {});
+    // The bypass rides in with the caller's headers rather than being set after
+    // them, so a caller cannot spell it a second way and win the slot.
+    const merged = new Headers({ ...opts.headers, ...shelfBypassHeaders(url, opts.bypass) });
     if (opts.jsonBody !== undefined) {
       body = JSON.stringify(opts.jsonBody);
       merged.set('content-type', 'application/json');

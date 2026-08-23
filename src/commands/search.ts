@@ -1,6 +1,6 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
-import { resolveContextSettings } from '../lib/settings';
+import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/search-store';
 import { readSessionId } from '../lib/session';
@@ -69,28 +69,130 @@ export async function runSearch(
 
   const sessionId = readSessionId(deps.env ?? process.env);
   const request = buildSearchRequest(input);
-  const response = await postSearch(request, {
-    baseUrl: settings.baseUrl,
-    timeoutMs: ctx.flags.timeout,
-    evalCohort: settings.evalCohort,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+
+  // SHELF ONE IS ALWAYS `baseUrl`, and the label follows the mode: in team mode
+  // that origin IS the team shelf, in public mode it is the marketplace.
+  const legs: ShelfLeg[] = [];
+  legs.push(
+    await queryShelf({
+      shelf: settings.teamMode ? 'team' : 'public',
+      baseUrl: settings.baseUrl,
+      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
+      request,
+      ctx,
+      settings,
+      sessionId,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+  );
+  // SHELF TWO, TEAM MODE ONLY, AND ONLY ON A MISS. Same order the push hooks
+  // use, for the same reason: the team's own shelf covers the working day and
+  // the public marketplace is the fallback, so a team hit is never buried under
+  // a page of marketplace results. No bypass here — the transport would drop it
+  // anyway, since this is a different origin.
+  if (settings.teamMode && legs[0]!.response.items.length === 0) {
+    legs.push(
+      await queryShelf({
+        shelf: 'public',
+        baseUrl: settings.publicShelfUrl,
+        request,
+        ctx,
+        settings,
+        sessionId,
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      }),
+    );
+  }
+
+  // The envelope is ONE shelf's response verbatim: the one that answered, or the
+  // first (the shelf a publish would go to) when neither did. A merged envelope
+  // would be a shape the contract does not describe and `outcome`/`buy` cannot
+  // key off, so the second shelf rides in `shelves` instead, and only when there
+  // was a second shelf at all.
+  const primary = legs.find((leg) => leg.response.items.length > 0) ?? legs[0]!;
+  const decision = primary.response.items.length > 0 ? 'CANDIDATES' : 'MISS';
+
+  const humanLines: string[] =
+    decision === 'MISS'
+      ? [
+          `MISS, no candidates (searchId ${primary.response.searchId})`,
+          ...missedShelfLines(legs),
+          ...missHint(primary.response),
+          ...truncatedHint(primary.response, request.limit),
+          publishBackLine(primary.response.searchId),
+        ]
+      : legs.flatMap((leg) => shelfLines(leg, legs.length > 1, request.limit));
+
+  const data =
+    decision === 'MISS'
+      ? { ...primary.response, publishBack: publishBackHint(primary.response.searchId) }
+      : primary.response;
+
+  return {
+    data:
+      legs.length > 1
+        ? {
+            ...(data as object),
+            shelves: legs.map((leg) => ({
+              shelf: leg.shelf,
+              baseUrl: leg.baseUrl,
+              searchId: leg.response.searchId,
+              matched: leg.response.items.length,
+            })),
+          }
+        : data,
+    humanLines,
+  };
+}
+
+/** Which shelf answered, and what it said. */
+interface ShelfLeg {
+  shelf: 'team' | 'public';
+  baseUrl: string;
+  response: Awaited<ReturnType<typeof postSearch>>;
+}
+
+interface ShelfQuery {
+  shelf: 'team' | 'public';
+  baseUrl: string;
+  bypass?: ResolvedSettings['bypass'];
+  request: ReturnType<typeof buildSearchRequest>;
+  ctx: CommandContext;
+  settings: ResolvedSettings;
+  sessionId: string | undefined;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * One shelf's POST, origin-checked and recorded. Everything here was already
+ * true of the single-shelf version; the only new thing is that the origin check
+ * and the stored candidates are scoped to THIS shelf's base URL, not to the
+ * configured one — a public-shelf candidate is on the public shelf's origin, and
+ * checking it against the team's would refuse every result the fallback found.
+ */
+async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
+  const response = await postSearch(q.request, {
+    baseUrl: q.baseUrl,
+    timeoutMs: q.ctx.flags.timeout,
+    evalCohort: q.settings.evalCohort,
+    ...(q.bypass !== undefined ? { bypass: q.bypass } : {}),
+    ...(q.fetchImpl !== undefined ? { fetchImpl: q.fetchImpl } : {}),
   });
 
-  const candidates = response.items;
-  // Ingest trust boundary: a candidate url that points off the configured origin
-  // would later route a wallet-signed SIWX header and payment to that host via
+  // Ingest trust boundary: a candidate url that points off the shelf that served
+  // it would later route a wallet-signed SIWX header and payment to that host via
   // `buy <resourceId>`. Refuse the whole response as a contract violation.
   // This deliberately diverges from the hook path (lib/hook-scripts.ts
   // askTenjin), which DROPS the one off-origin candidate and keeps the rest: a
   // hook hint is advisory and never pays, so one bad row should not blank the
   // hint, whereas a `search` result feeds `buy` and must fail closed as a whole.
-  for (const c of candidates) {
+  for (const c of response.items) {
     try {
-      assertOnBaseOrigin(c.url, settings.baseUrl, 'search candidate URL');
+      assertOnBaseOrigin(c.url, q.baseUrl, 'search candidate URL');
     } catch (err) {
       throw new CliError(
         'CONTRACT_MISMATCH',
-        `Search candidate ${c.resourceId} points off the configured base URL.`,
+        `Search candidate ${c.resourceId} points off the ${q.shelf} shelf's base URL.`,
         { cause: err },
       );
     }
@@ -99,11 +201,11 @@ export async function runSearch(
   // the two words because entries written by older CLIs and by the WebSearch hook
   // carry them and `outcome` branches on them, so a rename here would split the
   // ledger rather than clean it up.
-  const decision = candidates.length > 0 ? 'CANDIDATES' : 'MISS';
-  await recordSearch(ctx.dataDir, {
+  const decision = response.items.length > 0 ? 'CANDIDATES' : 'MISS';
+  await recordSearch(q.ctx.dataDir, {
     searchId: response.searchId,
     at: new Date().toISOString(),
-    question: request.query,
+    question: q.request.query,
     decision,
     // A deliberate search, as opposed to one the WebSearch hook rode along with.
     // The Stop hook nags on the two differently, so the tag has to be written
@@ -111,8 +213,8 @@ export async function runSearch(
     source: 'cli',
     // Usually absent; see readSessionId. An unstamped entry is raised in every
     // session, which is the safe direction for a reminder.
-    ...(sessionId !== undefined ? { sessionId } : {}),
-    candidates: candidates.map((c) => ({
+    ...(q.sessionId !== undefined ? { sessionId: q.sessionId } : {}),
+    candidates: response.items.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,
       title: c.title,
@@ -128,86 +230,90 @@ export async function runSearch(
     // "unknown" rather than as zero.
     paidBrowseCount: 0,
   });
+  return { shelf: q.shelf, baseUrl: q.baseUrl, response };
+}
 
-  // A miss under search v3 carries no browse tail at all: the decision view
-  // returns matches or nothing, and the catalog is browsed at GET /api/articles.
-  // The server says exactly that in `hint`, and rendering the server's own
-  // sentence rather than a local paraphrase is what keeps the two from drifting
-  // when that pointer moves. It is server-authored text on its way to a terminal,
-  // so it is sanitized like every other rendered string, and the parser has
-  // already bounded its length.
-  //
-  // Absent-but-empty is treated as absent: `hint` is contractually present only
-  // when nothing matched, so a server that omits it costs the reader one line
-  // rather than an empty bullet.
-  const missHint =
-    response.hint !== undefined && response.hint.length > 0
-      ? [sanitizeForTerminal(response.hint)]
-      : [];
+/**
+ * One shelf's candidates. `labelled` is false for a lone shelf, which keeps the
+ * public-mode rendering exactly what it always was: a machine reading these
+ * lines should not have to learn a new header because a second shelf exists on
+ * somebody else's machine.
+ */
+function shelfLines(leg: ShelfLeg, labelled: boolean, limit: number): string[] {
+  const { response } = leg;
+  if (response.items.length === 0) return [];
+  const head = labelled
+    ? `${response.items.length} candidate(s) on the ${leg.shelf} shelf (searchId ${response.searchId}):`
+    : `${response.items.length} candidate(s) (searchId ${response.searchId}):`;
+  return [
+    head,
+    // Dollars, not atomic units: this is the human's cue to size the spend
+    // against gates they entered in decimal USD (`--max-price 0.10`, the
+    // `maxAutoSpend` config). `formatUsdDisplay` is the canonical human-copy
+    // form (always two decimals, so a dime reads "0.10" and not "0.1"); the
+    // machine `items` array in --json keeps the exact atomic string, per the
+    // money-units contract in the README.
+    ...response.items.map(
+      (c, i) =>
+        `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${formatUsdDisplay(c.price)} USD, ${sanitizeForTerminal(c.url)}`,
+    ),
+    ...truncatedHint(response, limit),
+  ];
+}
 
-  // `truncated` means the server's size backstop dropped candidates, either a
-  // trailing few the limit had room for or a single oversized one. The response
-  // ceiling GROWS with the number of candidates returned (tenjin#501), so the
-  // remedy is counter-intuitive and worth stating outright: a larger --limit
-  // recovers the tail, a smaller one returns strictly fewer. Only at the maximum
-  // is the tail unrecoverable and narrowing the question the answer.
-  //
-  // The CLI knows the limit it sent, so it names the next step instead of
-  // restating the rule and leaving the reader to work out which half applies.
-  // The flag stays in the machine envelope (--json) untouched, where it is
-  // omitted rather than false when it did not fire.
-  //
-  // Rendering it on a MISS too is DEFENSIVE, not wire behavior: the server only
-  // ever sets the flag alongside candidates it dropped. Handling both keeps the
-  // flag from going unrendered if that ever changes.
-  const truncatedHint =
-    response.truncated === true
-      ? [
-          request.limit < MAX_LIMIT
-            ? `some candidates were dropped for size; retry with --limit ${MAX_LIMIT} (the size ceiling grows with the number of candidates returned)`
-            : `some candidates were dropped for size; at --limit ${MAX_LIMIT} the dropped tail cannot be recovered, so narrow the question`,
-        ]
-      : [];
+/** On a total miss with two shelves, name both, so the reader knows the fallback
+ *  ran rather than assuming the team shelf was the only thing asked. */
+function missedShelfLines(legs: ShelfLeg[]): string[] {
+  if (legs.length < 2) return [];
+  return [`Asked both shelves: ${legs.map((leg) => leg.shelf).join(', then ')}.`];
+}
 
-  // The publish-back line rides humanLines like every other rendering, so `--json`
-  // suppresses it the way that flag's own help promises. It used to go straight to
-  // stderr, which no output mode gates: an agent asking for a machine envelope got
-  // ~260 bytes of human prose alongside it.
-  const humanLines =
-    decision === 'MISS'
-      ? [
-          `MISS, no candidates (searchId ${response.searchId})`,
-          ...missHint,
-          ...truncatedHint,
-          publishBackLine(response.searchId),
-        ]
-      : [
-          `${candidates.length} candidate(s) (searchId ${response.searchId}):`,
-          // Dollars, not atomic units: this is the human's cue to size the spend
-          // against gates they entered in decimal USD (`--max-price 0.10`, the
-          // `maxAutoSpend` config). `formatUsdDisplay` is the canonical human-copy
-          // form (always two decimals, so a dime reads "0.10" and not "0.1"); the
-          // machine `items` array in --json keeps the exact atomic string, per the
-          // money-units contract in the README.
-          ...candidates.map(
-            (c, i) =>
-              `  ${i + 1}. ${sanitizeForTerminal(c.title)}, ${formatUsdDisplay(c.price)} USD, ${sanitizeForTerminal(c.url)}`,
-          ),
-          ...truncatedHint,
-        ];
+/**
+ * A miss under search v3 carries no browse tail at all: the decision view
+ * returns matches or nothing, and the catalog is browsed at GET /api/articles.
+ * The server says exactly that in `hint`, and rendering the server's own
+ * sentence rather than a local paraphrase is what keeps the two from drifting
+ * when that pointer moves. It is server-authored text on its way to a terminal,
+ * so it is sanitized like every other rendered string, and the parser has
+ * already bounded its length.
+ *
+ * Absent-but-empty is treated as absent: `hint` is contractually present only
+ * when nothing matched, so a server that omits it costs the reader one line
+ * rather than an empty bullet.
+ */
+function missHint(response: Awaited<ReturnType<typeof postSearch>>): string[] {
+  return response.hint !== undefined && response.hint.length > 0
+    ? [sanitizeForTerminal(response.hint)]
+    : [];
+}
 
-  // The one CLI-owned field in this envelope. Everything else is the server's
-  // response verbatim (spec 10), so the addition is namespaced under a key the
-  // contract does not define and is present ONLY on a miss: a miss is the moment
-  // the demand this searcher just expressed can still be met, and the searchId is
-  // what ties the answer they are about to derive back to it. A result WITH
-  // matches is the v3 envelope and nothing else.
-  const data =
-    decision === 'MISS'
-      ? { ...response, publishBack: publishBackHint(response.searchId) }
-      : response;
-
-  return { data, humanLines };
+/**
+ * `truncated` means the server's size backstop dropped candidates, either a
+ * trailing few the limit had room for or a single oversized one. The response
+ * ceiling GROWS with the number of candidates returned (tenjin#501), so the
+ * remedy is counter-intuitive and worth stating outright: a larger --limit
+ * recovers the tail, a smaller one returns strictly fewer. Only at the maximum
+ * is the tail unrecoverable and narrowing the question the answer.
+ *
+ * The CLI knows the limit it sent, so it names the next step instead of
+ * restating the rule and leaving the reader to work out which half applies.
+ * The flag stays in the machine envelope (--json) untouched, where it is
+ * omitted rather than false when it did not fire.
+ *
+ * Rendering it on a MISS too is DEFENSIVE, not wire behavior: the server only
+ * ever sets the flag alongside candidates it dropped. Handling both keeps the
+ * flag from going unrendered if that ever changes.
+ */
+function truncatedHint(
+  response: Awaited<ReturnType<typeof postSearch>>,
+  limit: number,
+): string[] {
+  if (response.truncated !== true) return [];
+  return [
+    limit < MAX_LIMIT
+      ? `some candidates were dropped for size; retry with --limit ${MAX_LIMIT} (the size ceiling grows with the number of candidates returned)`
+      : `some candidates were dropped for size; at --limit ${MAX_LIMIT} the dropped tail cannot be recovered, so narrow the question`,
+  ];
 }
 
 /** The publish-back hint, as machine fields rather than prose to re-parse. */

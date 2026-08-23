@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CliError } from './errors';
-import { httpRequest, type HttpResponse, type HttpResult } from './http';
+import { httpRequest, type HttpResponse, type HttpResult, type ShelfBypass } from './http';
 import { rateLimitError } from './agent-api';
 import { sanitizeWireText } from './output';
 import { trimSlash } from './url';
@@ -340,6 +340,10 @@ export interface PublishClientOptions {
   baseUrl: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  /** The team shelf's bypass secret and its origin; the transport attaches the
+   *  header only for that origin. Writes only ever go to `baseUrl`, so this is
+   *  what gets a publish past a protected team deployment. */
+  bypass?: ShelfBypass;
 }
 
 /** Bounded 401 recovery: the initial attempt plus at most this many re-signs. */
@@ -371,6 +375,7 @@ export async function publishPost(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -554,6 +559,7 @@ export async function getOwnPost(
       method: 'GET',
       timeoutMs: opts.timeoutMs,
       headers: { accept: 'application/json', ...authHeaders },
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -612,6 +618,7 @@ export async function updatePost(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);

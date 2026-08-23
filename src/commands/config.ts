@@ -119,7 +119,11 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  baseUrl: 'Tenjin API base URL',
+  baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
+  publicShelfUrl:
+    'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
+  shelfBypassSecret:
+    "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
   bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
@@ -648,6 +652,15 @@ function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): R
 }
 
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
+  // REDACTED IN THE MACHINE ENVELOPE TOO, not just in the human line. `config
+  // --json` is what an agent reads and what a bug report pastes, and the whole
+  // point of a door key is that it opens the door for whoever holds it. What a
+  // caller actually needs from this key is whether team mode is on, and
+  // set/unset says exactly that. The value is still readable, by the operator,
+  // in ~/.tenjin/config.json.
+  if (key === 'shelfBypassSecret') {
+    return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
+  }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
@@ -674,8 +687,13 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
+    case 'publicShelfUrl':
     case 'rpcUrl':
       return parseHttpUrl(value);
+    case 'shelfBypassSecret':
+      // A free string: it is whatever Vercel generated. Empty clears it, which
+      // is how team mode is turned back off.
+      return value.trim();
     case 'evalCohort':
     case 'bazaarPay':
       return parseBoolean(value);

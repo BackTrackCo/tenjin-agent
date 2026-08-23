@@ -32,10 +32,16 @@ export async function runInspect(
   deps: InspectDeps = {},
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
-  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl);
+  const ref = await resolveResourceRef(
+    args.ref,
+    ctx.dataDir,
+    settings.baseUrl,
+    settings.publicShelfUrl,
+  );
 
   const result = await fetchRead(ref.url, {
     timeoutMs: ctx.flags.timeout,
+    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 

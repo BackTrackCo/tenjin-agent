@@ -13,6 +13,7 @@ import {
   resolveSettings,
 } from './config';
 import type { Provenance, ProjectPublishLayer, PublishMode } from './config';
+import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
@@ -24,6 +25,18 @@ import type { CommandContext } from '../context';
  */
 export interface ResolvedSettings {
   baseUrl: string;
+  /** The public marketplace: the second shelf a team-mode search falls through
+   *  to, and the one other origin `read`/`buy`/`inspect` will resolve against. */
+  publicShelfUrl: string;
+  /**
+   * The team shelf's bypass secret paired with `baseUrl`'s origin, or undefined
+   * in public mode. Handed to the transport, which attaches the header from the
+   * REQUEST URL — so it cannot reach `publicShelfUrl` however it is passed.
+   */
+  bypass?: ShelfBypass;
+  /** True exactly when a bypass secret is configured: the one switch between
+   *  public mode and team mode. */
+  teamMode: boolean;
   rpcUrl: string;
   policy: SpendPolicy;
   /** Search-only privacy opt-in; sends X-Tenjin-Eval-Cohort: 1 when true. */
@@ -43,8 +56,16 @@ export interface ResolvedSettings {
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   const s = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
+  const secret = s.shelfBypassSecret.value;
+  // Paired with the origin here, once, so no command has to remember to.
+  // `new URL` cannot throw: baseUrl is z.url()-validated on the way in, and the
+  // flag/env overrides are parsed at their own edges.
+  const bypass = secret.length > 0 ? { origin: new URL(s.baseUrl.value).origin, secret } : undefined;
   return {
     baseUrl: s.baseUrl.value,
+    publicShelfUrl: s.publicShelfUrl.value,
+    ...(bypass !== undefined ? { bypass } : {}),
+    teamMode: bypass !== undefined,
     rpcUrl: s.rpcUrl.value,
     evalCohort: s.evalCohort.value,
     bazaarPay: s.bazaarPay.value,

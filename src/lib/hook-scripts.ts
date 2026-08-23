@@ -43,7 +43,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // scoring). lib/push-scripts.ts imports the prelude from this file in turn, so
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
-import { NOTES_DIR_NAME, PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
+import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
@@ -118,18 +118,34 @@ export const PRIMER_TEXT =
 /**
  * The capture ask, raised at Stop once per session that did any research.
  *
- * It is the sidecar's only WRITE surface: the loop is capture → team shelf →
- * push, and nothing reaches the shelf unless the agent is asked while its own
- * context still holds what it learned. A transcript re-read recovers less, and
- * the publish reflex on its own recovered none of it
+ * It is the sidecar's only WRITE surface: the loop is capture → shelf → push,
+ * and nothing reaches the shelf unless the agent is asked while its own context
+ * still holds what it learned. A transcript re-read recovers less, and the
+ * publish reflex on its own recovered none of it
  * (2026-08-19-agent-spend-ceiling §3c: 0/6 in-session, 6/6 post-hoc).
  *
- * TWO EXITS, both cheap, and that is what makes the block acceptable: a note, or
- * `tenjin notes none`. Either one writes the done-marker, so the ask never comes
- * back in this session.
+ * TWO WORDINGS, ONE ASK, and the difference is the BAR, not the mechanism.
+ *
+ * The public ask keeps the marketplace's bar: public, durable, rights-clean, and
+ * worth a stranger's money. The team ask drops it to "would a teammate on this
+ * project want to know", because a team shelf is a second deployment only this
+ * team can reach: nothing there needs to be publishable, so the judgement that
+ * killed in-session capture — "is this public-shaped?" — is not asked at all.
+ *
+ * Both name `tenjin publish` and nothing else. The ask is answered by publishing
+ * or by stopping again; the once-per-session marker is what makes the second
+ * stop silent, so there is no "nothing to save" command to run and no marker for
+ * a command to write.
  */
 export const CAPTURE_REASON =
-  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison), save each as a note: `tenjin notes add --question "..." --applies-to pkg@ver --body "..."`. If nothing durable was learned, run `tenjin notes none`. Then stop again.';
+  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: write it to a file and run `tenjin publish <file> --title "..."` (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
+
+/**
+ * The team-mode capture ask. `<mode>` is substituted with the resolved
+ * publish.mode at run time, exactly as in the public wording above.
+ */
+export const CAPTURE_REASON_TEAM =
+  'Before ending: if this session settled anything a teammate on this project would want to know (a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why), publish it to the team shelf now: write it to a file and run `tenjin publish <file> --title "..."` (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
 
 /**
  * The dispatch hook's bounds. The slice is a PRIVACY bound, not a display one: a
@@ -177,9 +193,6 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-// For the SessionStart hook's detached \`git pull\` of the team shelf, and for
-// nothing else. Importing a builtin costs a script that never spawns nothing.
-import { spawn } from 'node:child_process';
 
 const DATA_DIR = ${JSON.stringify(dataDir)};
 const IS_HERMES = process.argv.includes('--hermes');
@@ -362,6 +375,9 @@ function readConfig() {
   const envPinned = isPublishMode(fromEnv);
   const publishMode = envPinned ? fromEnv : publish.mode;
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '${PRODUCTION_ORIGIN}';
+  const publicShelfUrl =
+    typeof cfg.publicShelfUrl === 'string' ? cfg.publicShelfUrl : '${PRODUCTION_ORIGIN}';
+  const secret = typeof cfg.shelfBypassSecret === 'string' ? cfg.shelfBypassSecret : '';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
@@ -376,7 +392,36 @@ function readConfig() {
     publishMode: isPublishMode(publishMode) ? publishMode : 'review',
     envPinned,
     baseUrl,
+    // The public marketplace, consume-only, and the ONE place the team shelf's
+    // door key lives. A non-empty secret is what puts this CLI in team mode:
+    // \`baseUrl\` is then the team's own deployment and \`publicShelfUrl\` is the
+    // second shelf a miss falls through to.
+    publicShelfUrl,
+    shelfBypassSecret: secret,
   };
+}
+
+/**
+ * The team shelf's Vercel "Protection Bypass for Automation" header, for a
+ * request to \`url\` — and ONLY when \`url\` is on the SAME ORIGIN as the
+ * configured \`baseUrl\`.
+ *
+ * THE ORIGIN TEST IS THE WHOLE POINT, and it is here rather than at each call
+ * site so it cannot be forgotten at one of them. This secret opens a
+ * deployment; the public shelf is a different host that has no business seeing
+ * it, and the sidecar talks to both in the same session, sometimes within one
+ * fire. Deciding per call site means one arm eventually sends the team's key to
+ * tenjin.blog. Deciding here means it cannot: the header is attached from the
+ * URL, not from the caller's intent.
+ */
+function shelfBypassHeaders(url, config) {
+  if (typeof config.shelfBypassSecret !== 'string' || config.shelfBypassSecret === '') return {};
+  try {
+    if (new URL(url).origin !== new URL(config.baseUrl).origin) return {};
+  } catch {
+    return {};
+  }
+  return { 'x-vercel-protection-bypass': config.shelfBypassSecret };
 }
 
 const SEARCH_STORE = join(DATA_DIR, 'searches.json');
@@ -706,13 +751,16 @@ function usd(atomic) {
   }
 }
 
-/** Ask the marketplace; return only what survived validation. A network error or
- *  timeout throws instead, which \`main().catch(quiet)\` turns into the same
- *  silent exit 0. */
-async function askTenjin(question, config, limit = ${SEARCH_LIMIT}) {
+/** Ask a shelf; return only what survived validation. A network error or timeout
+ *  throws instead, which \`main().catch(quiet)\` turns into the same silent exit
+ *  0. \`shelfBaseUrl\` defaults to \`config.baseUrl\`; the push core passes
+ *  \`config.publicShelfUrl\` for the second leg of a team-mode lookup. */
+async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl) {
+  const target =
+    typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0 ? shelfBaseUrl : config.baseUrl;
   let url;
   try {
-    url = new URL('/api/search', config.baseUrl);
+    url = new URL('/api/search', target);
   } catch {
     return null;
   }
@@ -724,7 +772,11 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}) {
   // \`/api/agent/search\` alias this replaced answers 410 after one release.
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'user-agent': composedUserAgent() },
+    headers: {
+      'content-type': 'application/json',
+      'user-agent': composedUserAgent(),
+      ...shelfBypassHeaders(url.href, config),
+    },
     body: JSON.stringify({
       schemaVersion: 3,
       view: 'decision',
@@ -1177,6 +1229,11 @@ async function main() {
       state.cache = {
         at: new Date().toISOString(),
         query: question,
+        // WHICH SHELF ANSWERED, carried so the subagent arm's ledger row says the
+        // truth. This hook asks \`baseUrl\`, which in team mode IS the team shelf;
+        // a hard-coded 'public' there would file every team hit under the wrong
+        // shelf in the one tally the dogfood reads.
+        shelf: config.shelfBypassSecret === '' ? 'public' : 'team',
         searchId: found.searchId,
         top: judged.top,
         score: judged.score,
@@ -1200,43 +1257,16 @@ main().catch(quiet);
 /**
  * The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}.
  *
- * It is also where the team shelf is refreshed. A session that starts is the one
- * moment a pull is free — nothing is waiting on it — so `git pull --rebase` is
- * spawned DETACHED and never waited on: the notes this session searches are
- * whatever is on disk when a trigger fires, which is last session's clone at
- * worst. Offline, unauthenticated, mid-rebase and no-clone-at-all are all the
- * same silent outcome.
+ * Purely local and purely advisory. It used to also `git pull` a cloned team
+ * notes repo; the team shelf is a Tenjin DEPLOYMENT now (plan of record v3.1),
+ * so there is nothing on disk to refresh and a session starts with whatever the
+ * shelf serves at the moment a trigger fires.
  */
 export function sessionPrimerHookScript(dataDir: string): string {
   return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}
-const NOTES_DIR = join(DATA_DIR, ${JSON.stringify(NOTES_DIR_NAME)});
-
-function pullTeamShelf() {
-  try {
-    statSync(join(NOTES_DIR, '.git'));
-  } catch {
-    // No clone: \`tenjin team init\` has not been run here. Nothing to pull.
-    return;
-  }
-  try {
-    const child = spawn('git', ['pull', '--rebase', '--quiet'], {
-      cwd: NOTES_DIR,
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.on('error', () => {});
-    child.unref();
-  } catch {
-    // No git on PATH, or a spawn this platform refused.
-  }
-}
-
 async function main() {
   // Drained even though nothing reads it: an unread stdin can block the writer.
   await readStdin();
-  // BEFORE the primer gate: the shelf is its own feature, and an operator who
-  // silenced the primer line still wants this session's notes to be current.
-  pullTeamShelf();
   if (readConfig().sessionPrimer === 'off') return quiet();
   // fd 1 directly, not emit(), which would append the update signal.
   try {
@@ -1266,9 +1296,12 @@ main().catch(quiet);
  * while the work is still in the session.
  *
  * It is ALSO the sidecar's capture surface (`hooks.capture`, {@link
- * CAPTURE_REASON}): a session that did research is asked once, at the end, to
- * write down what it settled. `block` is the only output in this file that ends
- * a turn, and it is spent on the one thing the loop cannot recover later.
+ * CAPTURE_REASON} / {@link CAPTURE_REASON_TEAM}): a session that did research is
+ * asked once, at the end, to publish what it settled. `block` is the only output
+ * in this file that ends a turn, and it is spent on the one thing the loop cannot
+ * recover later. While capture is on it REPLACES the MISS nag below rather than
+ * joining it — both say "publish what you learned", and one turn end does not
+ * need three of them.
  *
  * TWO KINDS OF OPEN LOOP, and they are not worth the same attention. A `cli` MISS
  * is a question the agent decided was worth looking up and nobody had answered:
@@ -1301,6 +1334,15 @@ const PUSH_DIR = join(DATA_DIR, ${JSON.stringify(PUSH_DIR_NAME)});
 const LEDGER_PATH = join(DATA_DIR, ${JSON.stringify(PUSH_LEDGER_FILE)});
 const LEDGER_TAIL_BYTES = 262144;
 const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
+const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
+
+/** The ask for this machine's mode, with the resolved publish.mode spliced in.
+ *  The mode is in the ask itself rather than on a line above it because it is
+ *  what decides whether the agent may run the command it was just handed. */
+function captureReason(config, publishMode) {
+  const text = config.shelfBypassSecret === '' ? CAPTURE_REASON : CAPTURE_REASON_TEAM;
+  return text.replace('<mode>', publishMode);
+}
 
 /** A session id as a filename component. */
 function markerPath(name, sessionId) {
@@ -1380,13 +1422,18 @@ function didResearch(sessionId, searches) {
 }
 
 /**
- * Should this turn end ask for notes, and how? Null is the common answer.
+ * Should this turn end ask for a publish, and how? Null is the common answer.
  *
- * ASKED-ONCE IS RECORDED BEFORE THE ASK, like the nag record below and for the
- * same reason: an ask we cannot mark is an ask that repeats at every turn end,
- * and a block that repeats is a session the operator cannot leave. \`notes add\`
- * and \`notes none\` write the done-marker; \`capture-pending\` is how they learn
- * which session to write it for when the harness exported no id.
+ * ONCE PER SESSION, AND THAT MARKER IS THE WHOLE SIGNAL. The ask is answered by
+ * publishing or by stopping again, and both look identical from here — a hook
+ * cannot see what the agent did with a block, and the ledger row a publish would
+ * leave is not written by anything this script reads. So the ask fires once, and
+ * the second stop is silent whatever happened in between. Coarse on purpose: the
+ * cost of the coarse version is an unanswered ask, and the cost of the precise
+ * one is a session the operator cannot end.
+ *
+ * RECORDED BEFORE THE ASK, like the nag record below and for the same reason: an
+ * ask we cannot mark is an ask that repeats at every turn end.
  */
 function captureAsk(config, sessionId, searches) {
   if (config.capture === 'off') return null;
@@ -1394,7 +1441,6 @@ function captureAsk(config, sessionId, searches) {
   // fire at every turn end forever. The nag arm degrades to machine-global here;
   // this one degrades to silence, because it is the one that can block.
   if (sessionId === null) return null;
-  if (markerExists('capture-done', sessionId)) return null;
   if (markerExists('capture-asked', sessionId)) return null;
   if (!didResearch(sessionId, searches)) return null;
   try {
@@ -1402,14 +1448,11 @@ function captureAsk(config, sessionId, searches) {
     writeFileSync(markerPath('capture-asked', sessionId), new Date().toISOString(), {
       mode: 0o600,
     });
-    writeFileSync(join(PUSH_DIR, 'capture-pending'), sessionId, { mode: 0o600 });
   } catch {
     // UNWRITABLE STATE DIRECTORY IS THE ONE CASE WITH NO FLOOR UNDER IT. The
-    // marker is what makes the ask once-per-session, and \`notes add\`,
-    // \`notes none\` and \`config set\` all write under the same directory — so
-    // if this write failed, so will the two remedies the ask names, and the ask
-    // fires again at the next turn end, and the next. A nudge that repeats is
-    // noise the operator can work through; a BLOCK that repeats is a session
+    // marker is what makes the ask once-per-session, so if this write failed the
+    // ask fires again at the next turn end, and the next. A nudge that repeats
+    // is noise the operator can work through; a BLOCK that repeats is a session
     // they cannot end. Degrade to the nudge and let them out.
     return config.capture === 'block' ? 'nudge' : config.capture;
   }
@@ -1550,23 +1593,32 @@ async function main() {
   }
   const config = readConfig();
   const searches = loadSearches();
-  // FIRST, because a block ends the turn and everything below it is a reminder
-  // that will still be there next time. \`nudge\` says the same words as context
-  // and rides along with whatever else this turn had to say.
-  const ask = captureAsk(config, sessionId, searches);
-  if (ask === 'block') emitBlock(CAPTURE_REASON);
-  const nudge = ask === 'nudge' ? CAPTURE_REASON : null;
-
-  if (config.stopNag === 'off') {
-    if (nudge !== null) emit('Stop', nudge);
-    return quiet();
-  }
   // The mode the next publish IN THIS DIRECTORY would actually run under. The
   // Stop hook's cwd IS the session's working directory, so it is the place that
   // publish runs. Precedence follows lib/config.ts: an env var outranks the
   // project file, so the project layer is consulted only when nothing pinned it.
+  // Resolved BEFORE the capture ask, because the ask names it.
   const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
   const publishMode = project === null ? config.publishMode : project;
+
+  // FIRST, because a block ends the turn and everything below it is a reminder
+  // that will still be there next time. \`nudge\` says the same words as context
+  // and rides along with whatever else this turn had to say.
+  const ask = captureAsk(config, sessionId, searches);
+  const reason = captureReason(config, publishMode);
+  if (ask === 'block') emitBlock(reason);
+  const nudge = ask === 'nudge' ? reason : null;
+
+  // CAPTURE OUTRANKS THE MISS NAG, and replaces it rather than joining it. Both
+  // arms end a turn by saying "publish what you learned"; with capture on, the
+  // ask below has already said it once, from the session's own context, with the
+  // exact command. Letting the per-search lines run beside it stacks three
+  // publish prompts on one turn end, which is how a product reads as harness
+  // debug output (tenjin-agent #162). \`hooks.capture off\` restores them.
+  if (config.stopNag === 'off' || config.capture !== 'off') {
+    if (nudge !== null) emit('Stop', nudge);
+    return quiet();
+  }
 
   const now = Date.now();
   const { nagged, sessions } = loadNags();

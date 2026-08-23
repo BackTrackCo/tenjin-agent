@@ -72,7 +72,12 @@ export async function runBuy(
   const sectionsBudget = parseSectionsBudget(args.sections);
   const maxPriceAtomic =
     args.maxPrice !== undefined ? BigInt(parseUsdToAtomic(args.maxPrice)) : undefined;
-  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl);
+  const ref = await resolveResourceRef(
+    args.ref,
+    ctx.dataDir,
+    settings.baseUrl,
+    settings.publicShelfUrl,
+  );
 
   // 1. Library idempotence, BEFORE any network or pay: a resource already on disk
   //    re-delivers from disk. Works for both an id ref and a url ref (the url is
@@ -98,6 +103,7 @@ export async function runBuy(
   // never converts is not over-counted if the server ever classifies reads.
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
+    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -137,8 +143,12 @@ export async function runBuy(
   // 3. Entitlement re-check FIRST (SIWX): an entitled wallet re-reads free. This
   //    request is ALSO the fresh 402 refetch, so the challenge signed below is the
   //    latest one, never the stale first look.
+  // Signed for the shelf the URL is ON, which in public mode IS the configured
+  // base and in team mode may be the public shelf a fallback search surfaced. A
+  // SIWX header is bound to a domain, so signing for the configured origin while
+  // requesting another one produces a credential that host will refuse.
   const siwxHeader = await buildSiwxHeader(signer, {
-    baseUrl: settings.baseUrl,
+    baseUrl: ref.shelfBaseUrl,
     chainId: firstRequirement.network,
   });
   const recheck = await fetchRead(ref.url, { ...fetchOpts, siwxHeader });
@@ -236,7 +246,7 @@ export async function runBuy(
       return await siwxRedeliver(
         ctx,
         ref.url,
-        settings.baseUrl,
+        ref.shelfBaseUrl,
         signer,
         fetchOpts,
         presentOpts,
