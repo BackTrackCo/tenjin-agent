@@ -510,15 +510,64 @@ export async function isGitRepo(dir: string): Promise<boolean> {
 }
 
 /**
- * `git add -A && git commit -m "note: <id>" && git push`, best-effort: a
- * missing repo is a silent no-op (most machines never run `tenjin team init`),
- * and any step that fails leaves the note saved locally, reported as a single
- * warning line rather than a thrown error — the note write already succeeded
- * before this runs.
+ * Whether a rebase is half-finished in `dir`. Git leaves one of two state
+ * directories behind for the duration: `rebase-merge` (the merge backend, which
+ * `pull --rebase` uses) or `rebase-apply` (the am backend, and `git am`).
+ *
+ * A stat, not a spawn, to stay as cheap as `isGitRepo` — and like it, this reads
+ * `<dir>/.git/<marker>` directly, which is right for a clone. A linked worktree
+ * (`.git` as a file) keeps its rebase state elsewhere and reports false here;
+ * the shelf is always a plain clone, and false is the fail-open answer anyway.
+ */
+export async function rebaseInProgress(dir: string): Promise<boolean> {
+  for (const marker of ['rebase-merge', 'rebase-apply']) {
+    try {
+      await stat(join(dir, '.git', marker));
+      return true;
+    } catch {
+      // Not this backend's marker; try the other, then answer no.
+    }
+  }
+  return false;
+}
+
+/**
+ * Undo a rebase THIS PROCESS just started and could not finish, putting the
+ * branch back on its own tip with the local commits intact. Returns whether
+ * there was one to abort.
+ *
+ * Only ever called on the failure of a pull we ran ourselves, and only where an
+ * entry guard already established that no rebase was in progress beforehand —
+ * so this can never throw away a human's half-done rebase.
+ */
+export async function abortRebase(dir: string): Promise<boolean> {
+  if (!(await rebaseInProgress(dir))) return false;
+  await runGit(['rebase', '--abort'], dir);
+  return true;
+}
+
+const REBASE_FIX =
+  'Finish it with `git rebase --continue` or abandon it with `git rebase --abort` in that directory, then run the command again.';
+
+/**
+ * `git add -A && git commit -m "note: <id>" && git pull --rebase && git push`,
+ * best-effort: a missing repo is a silent no-op (most machines never run
+ * `tenjin team init`), and any step that fails leaves the note saved locally,
+ * reported as a single warning line rather than a thrown error — the note write
+ * already succeeded before this runs.
  */
 export async function commitAndPushNote(dataDir: string, id: string): Promise<string | undefined> {
   const dir = notesDir(dataDir);
   if (!(await isGitRepo(dir))) return undefined;
+  // `git add -A` MID-REBASE IS DESTRUCTIVE, and nothing below would notice.
+  // A conflicted rebase leaves conflict markers in the tree, a `UU` path and a
+  // detached HEAD. `add -A` stages the markers AND marks the path resolved, the
+  // commit then succeeds on the detached HEAD, and the note rides a commit that
+  // `git rebase --abort` — the fix git itself suggests — throws away. So the
+  // shelf is left exactly as it was found, and the operator is told what to do.
+  if (await rebaseInProgress(dir)) {
+    return warningLine(`a rebase is in progress in ${dir}`, REBASE_FIX);
+  }
   const add = await runGit(['add', '-A'], dir);
   if (!add.ok) return warningLine(describeGitFailure('git add', add));
   const commit = await runGit(['commit', '-m', `note: ${id}`], dir);
@@ -534,12 +583,20 @@ export async function commitAndPushNote(dataDir: string, id: string): Promise<st
   // it may well still work (a first push, an unrelated failure), and where it
   // does not, the warning below names the command that will fix it. The note is
   // already saved locally either way.
+  //
+  // A CONFLICT MUST NOT BE LEFT HALF-APPLIED. Where the pull stopped in the
+  // middle of a rebase, aborting puts the branch back on our own tip — the
+  // commit made two lines up, note included — instead of stranding the shelf
+  // detached, where the guard at the top of this function would refuse every
+  // later `notes add` and `team sync` would fail on the same pull forever.
   const pulled = await runGit(['pull', '--rebase'], dir);
+  const aborted = pulled.ok ? false : await abortRebase(dir);
   const push = await runGit(['push'], dir);
   if (!push.ok) {
     return warningLine(
       describeGitFailure('git push', push) +
-        (pulled.ok ? '' : ` (${describeGitFailure('git pull --rebase', pulled)})`),
+        (pulled.ok ? '' : ` (${describeGitFailure('git pull --rebase', pulled)})`) +
+        (aborted ? '; the rebase was aborted, so the note is committed on your branch' : ''),
       'Run `tenjin team sync` to reconcile, then `tenjin notes add` again if it is still missing.',
     );
   }

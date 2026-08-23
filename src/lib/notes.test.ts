@@ -16,6 +16,7 @@ import {
   newNoteId,
   noteFilesDir,
   parseNote,
+  rebaseInProgress,
   removeNote,
   runGit,
   scoreNote,
@@ -430,6 +431,89 @@ describe('commitAndPushNote after a teammate has pushed', () => {
     expect(warning).toContain('git push');
     expect(warning).toContain('tenjin team sync');
     // The note itself is untouched by any of it.
+    expect(await getNote(dataDir, note.id)).not.toBeNull();
+  });
+});
+
+/**
+ * The shelf holds a README and project config at its root as well as notes, so a
+ * conflicting rebase is reachable even though two note ids never collide. What
+ * used to happen then: the pull stopped mid-rebase on a detached HEAD, the next
+ * `notes add` ran `git add -A` over the conflict markers, committed them there,
+ * and `git rebase --abort` — the fix git itself suggests — took the note with it.
+ */
+describe('commitAndPushNote when the rebase conflicts', () => {
+  /** Bare origin, our clone, and a teammate clone that has changed README.md at
+   *  the root. Ours changes it too, so the next pull --rebase must conflict. */
+  async function makeConflictingShelves(): Promise<{ origin: string; dir: string }> {
+    const { origin } = await makeClonedTeamRepo();
+    const dir = notesDir(dataDir);
+
+    const theirs = join(root, 'teammate');
+    git(root, ['clone', '--quiet', origin, theirs]);
+    git(theirs, ['config', 'user.email', 'them@example.com']);
+    git(theirs, ['config', 'user.name', 'Them']);
+    await writeFile(join(theirs, 'README.md'), 'team notes, their wording\n');
+    git(theirs, ['add', '-A']);
+    git(theirs, ['commit', '--quiet', '-m', 'readme: theirs']);
+    git(theirs, ['push', '--quiet']);
+
+    // Our own edit to the same path, uncommitted: `notes add`'s `git add -A`
+    // sweeps it into the note commit, which is what the rebase then conflicts on.
+    await writeFile(join(dir, 'README.md'), 'team notes, our wording\n');
+    return { origin, dir };
+  }
+
+  it('aborts the rebase, keeps the note committed, and leaves the next add working', async () => {
+    const { dir } = await makeConflictingShelves();
+
+    const first = await addNote(dataDir, { question: 'q1', body: 'b1' });
+    const warning = await commitAndPushNote(dataDir, first.id);
+
+    // The push cannot fast-forward, so this still warns — but it warns from a
+    // clone that is back in one piece, not from a stranded one.
+    expect(warning).toContain('tenjin team sync');
+    expect(await rebaseInProgress(dir)).toBe(false);
+    // On a branch, not the detached HEAD a half-finished rebase leaves behind.
+    expect(git(dir, ['symbolic-ref', '--short', 'HEAD']).trim()).toBe('main');
+    // THE NOTE IS NOT LOST: still on disk, and on our branch rather than on a
+    // dangling commit the abort discarded.
+    expect(await getNote(dataDir, first.id)).not.toBeNull();
+    expect(git(dir, ['log', '--format=%s'])).toContain(`note: ${first.id}`);
+    // And no conflict markers were committed anywhere.
+    expect(git(dir, ['show', `HEAD:README.md`])).not.toContain('<<<<<<<');
+
+    // The next add is not refused by the mid-rebase guard, and commits.
+    const second = await addNote(dataDir, { question: 'q2', body: 'b2' });
+    const again = await commitAndPushNote(dataDir, second.id);
+    expect(again).not.toContain('a rebase is in progress');
+    expect(git(dir, ['log', '--format=%s'])).toContain(`note: ${second.id}`);
+  });
+
+  /** A rebase somebody else started is theirs. It is reported, never swept up. */
+  it('refuses to commit into a rebase that was already in progress', async () => {
+    const { dir } = await makeConflictingShelves();
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '--quiet', '-m', 'readme: ours']);
+    // A hand-run pull, left mid-conflict exactly as an interrupted one would be.
+    try {
+      git(dir, ['pull', '--rebase']);
+    } catch {
+      // Expected: the conflict is the point.
+    }
+    expect(await rebaseInProgress(dir)).toBe(true);
+    const headBefore = git(dir, ['rev-parse', 'HEAD']).trim();
+
+    const note = await addNote(dataDir, { question: 'q', body: 'b' });
+    const warning = await commitAndPushNote(dataDir, note.id);
+
+    expect(warning).toContain('a rebase is in progress');
+    expect(warning).toContain('git rebase --abort');
+    // Nothing was staged, committed or aborted on the operator's behalf.
+    expect(git(dir, ['rev-parse', 'HEAD']).trim()).toBe(headBefore);
+    expect(await rebaseInProgress(dir)).toBe(true);
+    expect(git(dir, ['status', '--porcelain'])).toContain('README.md');
+    // The note is still saved locally, which is the promise `notes add` makes.
     expect(await getNote(dataDir, note.id)).not.toBeNull();
   });
 });

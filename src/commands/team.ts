@@ -1,6 +1,6 @@
 import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
-import { isGitRepo, runGit } from '../lib/notes';
+import { abortRebase, isGitRepo, rebaseInProgress, runGit } from '../lib/notes';
 import { notesDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -137,12 +137,30 @@ export async function runTeamSync(ctx: CommandContext): Promise<CommandResult> {
       fix: 'Run `tenjin team init <git-url>` first.',
     });
   }
+  // A rebase already under way is somebody's unfinished work, so it is reported,
+  // never aborted. The abort below only ever undoes the pull THIS call made.
+  if (await rebaseInProgress(dir)) {
+    throw new CliError('USAGE', `a rebase is in progress in ${dir}.`, {
+      fix: 'Finish it with `git rebase --continue` or abandon it with `git rebase --abort` in that directory, then retry `tenjin team sync`.',
+    });
+  }
   const pull = await runGit(['pull', '--rebase'], dir);
   if (!pull.ok) {
+    // Leaving the conflict half-applied strands the shelf: detached HEAD, so
+    // every later `notes add` refuses and every retry of this command fails on
+    // the same pull. Aborting puts the clone back where it started, which makes
+    // the fix below something the operator can actually carry out.
+    const aborted = await abortRebase(dir);
     throw new CliError(
       'INTERNAL',
-      `git pull --rebase failed: ${pull.timedOut ? 'timed out' : pull.stderr || `exit ${pull.code}`}`,
-      { fix: `Resolve it in ${dir}, then retry \`tenjin team sync\`.` },
+      `git pull --rebase failed: ${pull.timedOut ? 'timed out' : pull.stderr || `exit ${pull.code}`}${
+        aborted ? ' (the rebase was aborted; the clone is back on your own commits)' : ''
+      }`,
+      {
+        fix: aborted
+          ? `Rebase by hand in ${dir}: \`git pull --rebase\`, resolve the conflict, \`git rebase --continue\`, then retry \`tenjin team sync\`.`
+          : `Resolve it in ${dir}, then retry \`tenjin team sync\`.`,
+      },
     );
   }
   const push = await runGit(['push'], dir);

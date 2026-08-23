@@ -253,4 +253,59 @@ describe('runTeamSync', () => {
       'hi',
     );
   });
+
+  /**
+   * The old fix text — "resolve it in <dir>, then retry" — could not be carried
+   * out: the failed pull left a detached HEAD mid-rebase, so every retry hit the
+   * same conflict and `notes add` was stuck behind it too. Abort, then say what
+   * actually reconciles the two sides.
+   */
+  it('aborts a conflicting rebase and names a fix the operator can run', async () => {
+    const origin = makeOrigin();
+    await runTeamInit({ gitUrl: origin }, makeCtx());
+    const dir = notesDir(dataDir);
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+
+    // A teammate rewrites the shelf's README; so do we, on our own clone.
+    const other = join(root, 'other-clone');
+    execFileSync('git', ['clone', '--quiet', origin, other]);
+    execFileSync('git', ['config', 'user.email', 'them@example.com'], { cwd: other });
+    execFileSync('git', ['config', 'user.name', 'Them'], { cwd: other });
+    await writeFile(join(other, 'README.md'), 'their wording\n');
+    execFileSync('git', ['add', '-A'], { cwd: other });
+    execFileSync('git', ['commit', '--quiet', '-m', 'readme: theirs'], { cwd: other });
+    execFileSync('git', ['push', '--quiet'], { cwd: other });
+
+    await writeFile(join(dir, 'README.md'), 'our wording\n');
+    execFileSync('git', ['add', '-A'], { cwd: dir });
+    execFileSync('git', ['commit', '--quiet', '-m', 'readme: ours'], { cwd: dir });
+
+    const err = await runTeamSync(makeCtx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).fix).toContain('git rebase --continue');
+    // Back on our own branch with our commit, not stranded mid-rebase.
+    expect(existsSync(join(dir, '.git', 'rebase-merge'))).toBe(false);
+    expect(existsSync(join(dir, '.git', 'rebase-apply'))).toBe(false);
+    expect(
+      execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: dir, encoding: 'utf8' }),
+    ).toContain('main');
+    expect(execFileSync('git', ['log', '--format=%s'], { cwd: dir, encoding: 'utf8' })).toContain(
+      'readme: ours',
+    );
+  });
+
+  /** A rebase the operator started is theirs to finish; sync reports it. */
+  it('refuses, without aborting, when a rebase is already in progress', async () => {
+    const origin = makeOrigin();
+    await runTeamInit({ gitUrl: origin }, makeCtx());
+    const dir = notesDir(dataDir);
+    await mkdir(join(dir, '.git', 'rebase-merge'), { recursive: true });
+
+    const err = await runTeamSync(makeCtx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).message).toContain('a rebase is in progress');
+    // Left exactly where it was found.
+    expect(existsSync(join(dir, '.git', 'rebase-merge'))).toBe(true);
+  });
 });
