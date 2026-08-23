@@ -1198,6 +1198,29 @@ describe('runInstall: interactive walkthrough', () => {
   });
 
   /**
+   * The undo line prints directly under a disclosure that includes the push
+   * arms, and `hooks.searchMode` does not reach them: every arm reads
+   * `hooks.push` and nothing in the generated push core reads `mode` at all.
+   * Naming one key for both was the CLI telling an operator to flip the wrong
+   * switch.
+   */
+  it('names both switches in the undo line, but only once the arms are armed', async () => {
+    const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
+    const base = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
+    expect(base).toContain('`tenjin config set hooks.searchMode off` silences them');
+    expect(base).not.toContain('tenjin push off` silences');
+
+    await rm(join(home, '.claude', 'settings.json'), { force: true });
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ hooks: { searchMode: 'auto', push: 'on' } }),
+    );
+    const armed = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
+    expect(armed).toContain('`tenjin push off` silences the push arms');
+    expect(armed).toContain('neither covers the other');
+  });
+
+  /**
    * The run that wires the experiment and nothing else: `config set hooks.push
    * on` on a machine whose search entries are already current. Branching the
    * message on the COMBINED count while printing the search-only one made this

@@ -717,7 +717,15 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
     lines.push(paint(io, 'dim', hooksDisclosure(s.hooks)));
     lines.push(
-      paint(io, 'dim', hooksUndo(s.hooks.path ?? '~/.claude/settings.json', s.hooks.scriptsDir)),
+      paint(
+        io,
+        'dim',
+        hooksUndo(
+          s.hooks.path ?? '~/.claude/settings.json',
+          s.hooks.scriptsDir,
+          pushArmed(s.hooks),
+        ),
+      ),
     );
     // NOT dim, unlike the disclosure above it: settings.json hooks are read once
     // at session start, so an operator who does not restart gets no hook activity

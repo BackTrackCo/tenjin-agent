@@ -185,9 +185,21 @@ export interface HooksResult {
   fix?: string;
 }
 
-/** The undo, stated the same way everywhere it is shown. */
-export function hooksUndo(settingsPath: string, scriptsDir: string): string {
-  return `Undo anytime: \`tenjin config set hooks.searchMode off\` disarms them, or delete the tenjin hook entries from ${settingsPath} and the scripts in ${scriptsDir}.`;
+/**
+ * The undo, stated the same way everywhere it is shown.
+ *
+ * ONE KEY PER BUNDLE, and this line used to claim otherwise. It said
+ * `hooks.searchMode off` "disarms them" while printing directly under a
+ * disclosure that includes the push arms — and it does not reach those: every
+ * push arm's first act is to read `hooks.push`, and nothing in the generated
+ * push core reads `mode` at all. So when the arms are armed, both keys are
+ * named, because neither one covers the other.
+ */
+export function hooksUndo(settingsPath: string, scriptsDir: string, pushArmed = false): string {
+  const switches = pushArmed
+    ? '`tenjin config set hooks.searchMode off` silences the search hooks and `tenjin push off` silences the push arms — each is read by its own scripts, so neither covers the other'
+    : '`tenjin config set hooks.searchMode off` silences them';
+  return `Undo anytime: ${switches}, or delete the tenjin hook entries from ${settingsPath} and the scripts in ${scriptsDir}.`;
 }
 
 function skip(

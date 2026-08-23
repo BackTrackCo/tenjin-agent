@@ -81,7 +81,12 @@ export async function runPushOn(
   if (settings.hooksSearchMode.value === 'off') {
     throw new CliError(
       'USAGE',
-      'hooks.searchMode is off, which is the kill switch for every hook this CLI writes, so the push arms were not wired and hooks.push was left as it was.',
+      // NOT "the kill switch for every hook this CLI writes", which this used to
+      // say and which is false about push arms that are already wired: those read
+      // `hooks.push` at run time and nothing else. What `searchMode off` is, is
+      // the decision not to REGISTER anything — which is why there is no wiring
+      // path for these arms to join.
+      'hooks.searchMode is off, which is the decision not to register any hook entries at all, so the push arms were not wired and hooks.push was left as it was. (Once wired, the push arms are switched by `tenjin push off`; this key does not reach them.)',
       { fix: 'tenjin config set hooks.searchMode auto, then tenjin push on' },
     );
   }
