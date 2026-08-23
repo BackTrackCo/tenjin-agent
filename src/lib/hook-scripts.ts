@@ -1362,8 +1362,8 @@ function markerExists(name, sessionId) {
  * Did this session do any research at all? Two signals, either of which is
  * enough: a search the SESSION asked for (the CLI's own \`tenjin search\`, the
  * WebSearch hook, the dispatch hook), or a push-ledger row showing a finding was
- * actually put in front of it. A session that only edited files is not asked for
- * notes, because it has nothing to write down.
+ * actually put in front of it. A session that only edited files is not asked to
+ * publish anything, because it has nothing to write down.
  *
  * NEITHER SIGNAL MAY BE THE SIDECAR'S OWN TELEMETRY. The push arms search on
  * their own initiative — the log-only read arm fires on the first source file

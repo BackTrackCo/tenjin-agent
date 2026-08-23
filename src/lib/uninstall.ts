@@ -333,7 +333,7 @@ export async function removeHookScripts(dataDir: string): Promise<{
  * Remove the skills we installed, in every harness location.
  *
  * REMOVES THE FILES WE SHIPPED, NOT THE DIRECTORY THEY SIT IN. Everything else in
- * that directory belongs to the operator — notes, a local override, anything
+ * that directory belongs to the operator — a local override, anything
  * they put beside our files — and a recursive delete of a directory we only
  * partly own is the data-loss shape this repo already unlearned once on the
  * write side (see lib/skill-writer.ts: "Only the files this package SHIPS are

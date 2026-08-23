@@ -157,12 +157,11 @@ interface LedgerRow {
   action?: unknown;
   reason?: unknown;
   /**
-   * TWO SHAPES, ONE FIELD. The team shelf writes `{id, title}` (a note has no
-   * resource id and no searchId behind it); the public shelf writes
-   * `{resourceId, title, price, url}`. Reading only one of the two keys would
-   * make every note the sidecar surfaced invisible here, which is the half of
-   * the experiment that costs nothing to run and is therefore the half most
-   * worth counting.
+   * Both shelves write `{resourceId, title, price, url}` now that the team shelf
+   * is a Tenjin deployment. `{id, title}` is what the retired git-backed shelf
+   * wrote, and a ledger written before this release still holds those rows — the
+   * file is append-only and nothing rewrites it, so reading only the current
+   * spelling would silently zero the team half of the first week's numbers.
    */
   candidate?: unknown;
   deny?: unknown;
@@ -179,8 +178,9 @@ export interface PushLedgerTallies {
    *  taken from the rows, never from a list here, so a new reason shows up in
    *  `status` the day the script starts writing it. */
   byReason: Record<string, number>;
-  /** Distinct findings surfaced in the window, counted across BOTH candidate
-   *  shapes (team `{id}` and public `{resourceId}`) — see {@link LedgerRow}. */
+  /** Distinct findings surfaced in the window, counted across both candidate
+   *  shapes (current `{resourceId}` and the retired `{id}`) — see
+   *  {@link LedgerRow}. */
   candidates: number;
   denies: number;
   injectedTokens: number;
@@ -303,10 +303,10 @@ export async function readLedgerTallies(
 }
 
 /**
- * The identity of the finding a row is about, under EITHER shelf's shape:
- * `candidate.resourceId` for a marketplace piece, `candidate.id` for a team
- * note. Null for a row that reached no candidate at all (a `miss`, a capped
- * lookup), which is a row to count in `rows` and not in `candidates`.
+ * The identity of the finding a row is about: `candidate.resourceId` for a piece
+ * on either shelf, `candidate.id` for a row the retired git-backed shelf wrote.
+ * Null for a row that reached no candidate at all (a `miss`, a capped lookup),
+ * which is a row to count in `rows` and not in `candidates`.
  */
 function candidateKey(candidate: unknown): string | null {
   if (!isRecord(candidate)) return null;
