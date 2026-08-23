@@ -562,6 +562,36 @@ describe('runDoctor — passing outcomes', () => {
         for (const headers of seen) expect(headers[BYPASS_HEADER]).toBeUndefined();
       }
     });
+
+    it('says the key was withheld rather than claiming a team mode this run has not got', async () => {
+      // The check reports what the probes DID. Re-deriving "am I in team mode"
+      // from the config would have it announce a bypass header the run never
+      // sent, which is the failure mode the whole check exists against.
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: TEAM }),
+      );
+      const res = await runDoctor(
+        {
+          flags: { json: false, timeout: 5000, baseUrl: 'https://elsewhere.example' },
+          dataDir: dir,
+          io: captureIo().io,
+        },
+        {
+          walletPassphrase: NO_OS_STORE,
+          homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
+          env: {},
+          fetchImpl: healthyFetch,
+        },
+      );
+      const check = checkNamed(res, 'team shelf');
+      expect(check?.status).toBe('warn');
+      expect(check?.detail).toContain('--base-url');
+      expect(check?.detail).toContain('withheld');
+      // Not the half-wired warning: the config is fine, this run is not.
+      expect(check?.detail).not.toContain('PUBLIC mode');
+    });
   });
 });
 

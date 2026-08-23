@@ -228,7 +228,7 @@ export async function collectDoctorChecks(
   }
 
   // Same rule: only when a secret is set is there a team shelf to be wrong about.
-  const teamShelf = checkTeamShelf(settings);
+  const teamShelf = checkTeamShelf(settings, bypass);
   if (teamShelf !== null) built.push(teamShelf);
 
   const hermes = await checkHermes({
@@ -888,18 +888,45 @@ const POSTURE: Record<DirState, string> = {
  * operator who believes they are on the team shelf would keep writing internal
  * notes at a command that sends them to tenjin.blog. Warn, never fail: public
  * mode is a working machine, just not the one they meant to configure.
+ *
+ * Reports what the probes ACTUALLY DID — it is handed the same `bypass` they
+ * were, rather than re-deriving the answer — so a run whose base URL came from
+ * `--base-url` reports the key as withheld instead of claiming a team mode this
+ * run does not have.
  */
-function checkTeamShelf(settings: EffectiveSettings): BuiltCheck | null {
+function checkTeamShelf(
+  settings: EffectiveSettings,
+  bypass: ShelfBypass | undefined,
+): BuiltCheck | null {
   if (settings.shelfBypassSecret.value.length === 0) return null;
   const baseUrl = settings.baseUrl.value;
-  const origin = tryOriginOf(baseUrl);
-  if (origin !== null && isTeamShelfOrigin(origin, settings.publicShelfUrl.value)) {
+  if (bypass !== undefined) {
     return {
       result: {
         name: 'team shelf',
         status: 'ok',
         required: false,
         detail: `team mode: baseUrl is ${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
+      },
+    };
+  }
+  // The secret is set and the shelf is a real one, but THIS run was pointed
+  // elsewhere, so the key was withheld. Not a misconfiguration — the config is
+  // fine — which is why it reads differently from the half-wired case below.
+  const origin = tryOriginOf(baseUrl);
+  if (
+    settings.baseUrl.source !== 'file' &&
+    settings.baseUrl.source !== 'default' &&
+    origin !== null &&
+    isTeamShelfOrigin(origin, settings.publicShelfUrl.value)
+  ) {
+    return {
+      result: {
+        name: 'team shelf',
+        status: 'warn',
+        required: false,
+        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? '--base-url' : 'TENJIN_BASE_URL'} (${sanitizeForTerminal(baseUrl)}), not from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
+        fix: 'Run doctor without the override to check the configured team shelf.',
       },
     };
   }
