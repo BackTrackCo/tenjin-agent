@@ -291,7 +291,10 @@ export async function listNotes(dataDir: string): Promise<Note[]> {
   }
   const notes: Note[] = [];
   let seen = 0;
-  for (const name of entries) {
+  // Newest first BEFORE the cap: ids sort by date, and readdir order is whatever
+  // the filesystem feels like, so capping first would drop an arbitrary subset
+  // (the newest notes included) once the shelf passes NOTES_MAX_FILES.
+  for (const name of [...entries].sort().reverse()) {
     if (!name.endsWith('.md')) continue;
     seen += 1;
     if (seen > NOTES_MAX_FILES) break;

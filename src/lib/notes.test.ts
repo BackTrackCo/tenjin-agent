@@ -193,6 +193,26 @@ describe('addNote / getNote / listNotes / removeNote', () => {
     expect(notes.some((n) => n.id === '20261231-999999')).toBe(false);
   });
 
+  it('keeps the newest notes when the cap bites, whatever order readdir returns', async () => {
+    const dir = noteFilesDir(dataDir);
+    await mkdir(dir, { recursive: true });
+    const write = async (id: string): Promise<void> => {
+      await writeFile(
+        join(dir, `${id}.md`),
+        ['---', 'question: "q"', 'author: t', '---', 'b', ''].join('\n'),
+      );
+    };
+    // Old notes in bulk, then one newer than all of them. Written LAST so a
+    // creation-ordered readdir would put it past the cap.
+    for (let i = 0; i < NOTES_MAX_FILES + 5; i += 1) {
+      await write(`20240101-${String(i).padStart(6, '0')}`);
+    }
+    await write('20261201-newest');
+    const notes = await listNotes(dataDir);
+    expect(notes[0]?.id).toBe('20261201-newest');
+    expect(notes.length).toBe(NOTES_MAX_FILES);
+  });
+
   /**
    * A note file arrives by `git pull` from a repo any teammate can write, and
    * git records symlinks. `<id>.md -> /somewhere/else` whose target happens to

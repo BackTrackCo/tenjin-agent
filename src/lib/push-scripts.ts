@@ -383,7 +383,7 @@ function notesSearch(query) {
     top.note.body.length <= PUSH_BODY_MAX
       ? top.note.body
       : top.note.body.slice(0, PUSH_BODY_MAX) +
-        '\n[truncated; the whole note: tenjin notes show ' + top.id + ']';
+        '\n[truncated; the whole note: tenjin notes show ' + clean(top.id, 64) + ']';
   return {
     top: {
       id: top.id,
@@ -558,7 +558,10 @@ function teamShortForm(top) {
   return [
     TEAM_OPENER,
     teamHeaderLine(top),
-    'Read it: tenjin notes show ' + top.id,
+    // The id is a FILENAME from a git-pulled shelf, which can carry newlines and
+    // control bytes; cleaned like every other field that speaks in the hook's
+    // voice, and bounded to the id shape's length.
+    'Read it: tenjin notes show ' + clean(top.id, 64),
   ].join('\n');
 }
 
