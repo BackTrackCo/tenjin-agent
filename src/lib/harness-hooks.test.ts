@@ -123,7 +123,7 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     const settings = await readSettings();
     const pre = entriesFor(settings, 'PreToolUse');
     expect(pre).toHaveLength(2);
-    expect(pre[0]!.matcher).toBe('WebSearch|WebFetch');
+    expect(pre[0]!.matcher).toBe('WebSearch');
     expect(pre[0]!.hooks[0]!.type).toBe('command');
     expect(pre[0]!.hooks[0]!.command).toContain(WEBSEARCH_HOOK_FILE);
     expect(pre[1]!.matcher).toBe('Agent|Task');
@@ -142,14 +142,31 @@ describe('wireSearchHooks: what a fresh machine gets', () => {
     expect(stop[0]!.hooks[0]!.command).toContain(STOP_HOOK_FILE);
   });
 
-  // WebFetch joined WebSearch on the same entry (T3/push); neither reaches a
-  // wildcard, and the dispatch entry stays exactly as narrow as it was.
-  it('matches WebSearch|WebFetch and the two dispatch names, never a wildcard', async () => {
+  // Neither reaches a wildcard, and the dispatch entry stays exactly as narrow
+  // as it was.
+  it('matches WebSearch and the two dispatch names, never a wildcard', async () => {
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     const pre = entriesFor(await readSettings(), 'PreToolUse');
-    expect(pre[0]!.matcher).toBe('WebSearch|WebFetch');
+    expect(pre[0]!.matcher).toBe('WebSearch');
     expect(pre[1]!.matcher).toBe('Agent|Task');
     expect(pre.some((e) => e.matcher === '*')).toBe(false);
+  });
+
+  /**
+   * WebFetch is the push experiment's widening, and the script's first act on a
+   * WebFetch is to read the config key and exit when push is not on. Registering
+   * it on a machine that never opted in bought a process spawn and a config read
+   * per WebFetch for a hook that provably says nothing.
+   */
+  it('widens the WebSearch entry to WebFetch only when push is planned', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    expect(entriesFor(await readSettings(), 'PreToolUse')[0]!.matcher).toBe('WebSearch');
+
+    // `push on` rewrites the entry in place rather than adding a second one.
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    const wide = entriesFor(await readSettings(), 'PreToolUse');
+    expect(wide[0]!.matcher).toBe('WebSearch|WebFetch');
+    expect(wide.filter((e) => e.hooks[0]!.command.includes(WEBSEARCH_HOOK_FILE))).toHaveLength(1);
   });
 
   // Ownership is by script filename, so two entries naming one script would be
@@ -309,16 +326,30 @@ describe('wireSearchHooks: push experiment entries', () => {
     expect(await readFile(settingsPath(), 'utf8')).toBe(first);
   });
 
-  // Once wired, push:false on a later call must not tear the entries back out —
-  // `tenjin push off` is a config write, never a re-wire (see commands/push.ts).
-  it('a later push:false run leaves already-wired push entries alone', async () => {
+  /**
+   * Once wired, push:false on a later call must not tear the six push entries
+   * back out — `tenjin push off` is a config write, never a re-wire (see
+   * commands/push.ts), and this path is the later `tenjin install`.
+   *
+   * The ONE thing it does put back is the WebSearch entry's matcher: WebFetch is
+   * the push widening, it is in the base plan either way, and the ordinary
+   * drift rewrite narrows it in place. Nothing is removed.
+   */
+  it('a later push:false run keeps the push entries and narrows the matcher back', async () => {
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
-    const before = await readFile(settingsPath(), 'utf8');
 
     const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     expect(result.added).toEqual([]);
-    expect(result.updated).toEqual([]);
-    expect(await readFile(settingsPath(), 'utf8')).toBe(before);
+    expect(result.updated).toEqual(['PreToolUse']);
+
+    const settings = await readSettings();
+    expect(entriesFor(settings, 'PreToolUse')[0]!.matcher).toBe('WebSearch');
+    // Every push entry is still registered, on all four of its events.
+    for (const event of ['UserPromptSubmit', 'PostToolUseFailure', 'SubagentStart']) {
+      expect(entriesFor(settings, event), event).toHaveLength(1);
+    }
+    expect(entriesFor(settings, 'PostToolUse')).toHaveLength(2);
+    expect(entriesFor(settings, 'PreToolUse')).toHaveLength(3);
   });
 });
 

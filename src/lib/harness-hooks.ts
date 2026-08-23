@@ -81,12 +81,28 @@ export const HOOK_EVENTS = [
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
 /**
- * The tools the WebSearch hook fires on. `WebFetch` joined `WebSearch` (T3/push
- * work): a fetched page is exactly as good a moment to ask Tenjin first as a
- * search is, and the hook body already treats the two identically. Never a
+ * The tools the WebSearch hook fires on WITHOUT the push experiment. Never a
  * wildcard.
  */
-export const WEBSEARCH_MATCHER = 'WebSearch|WebFetch';
+export const WEBSEARCH_MATCHER = 'WebSearch';
+
+/**
+ * And with it. A fetched page is exactly as good a moment to ask Tenjin first as
+ * a search is, and the hook body already treats the two identically — but only
+ * when push is on: the script's own first act on a `WebFetch` is to check the
+ * key and exit silently if it is not `on`. Registering the wide matcher on a
+ * machine that has never opted in bought a process spawn and a config read per
+ * WebFetch for a provably silent hook, so the base bundle keeps the narrow one
+ * and `tenjin push on` rewrites that entry in place.
+ *
+ * `tenjin push off` itself narrows nothing, deliberately: it unwires nothing at
+ * all (every arm gates on the config key at run time), and a command documented
+ * as "no unwiring step" should not start editing settings.json. The next
+ * `tenjin install` puts it back on its own — `push` comes from the config there,
+ * so the base plan carries the narrow matcher and the ordinary drift rewrite
+ * fixes the entry in place. No branch anywhere has to know about the widening.
+ */
+export const WEBSEARCH_PUSH_MATCHER = 'WebSearch|WebFetch';
 
 /** The tools the dispatch hook fires on: one subagent dispatch under two names
  *  across Claude Code versions. */
@@ -317,7 +333,8 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
       event: 'PreToolUse',
       scriptFile: WEBSEARCH_HOOK_FILE,
       script: websearchHookScript(dataDir),
-      matcher: WEBSEARCH_MATCHER,
+      // Widened only when push is planned; see WEBSEARCH_PUSH_MATCHER.
+      matcher: opts.push ? WEBSEARCH_PUSH_MATCHER : WEBSEARCH_MATCHER,
       arm: 'search',
     },
     {
