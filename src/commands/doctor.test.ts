@@ -587,8 +587,11 @@ describe('runDoctor — passing outcomes', () => {
       );
       const check = checkNamed(res, 'team shelf');
       expect(check?.status).toBe('warn');
-      expect(check?.detail).toContain('--base-url');
+      expect(check?.detail).toContain('command-line override');
       expect(check?.detail).toContain('withheld');
+      // And it never spells the flag: doctor's lines reach an unattended agent,
+      // and coaching the override is the move the skills forbid (FLAG_CAVEAT).
+      expect(`${check?.detail} ${check?.fix}`).not.toContain('--base-url');
       // Not the half-wired warning: the config is fine, this run is not.
       expect(check?.detail).not.toContain('PUBLIC mode');
     });

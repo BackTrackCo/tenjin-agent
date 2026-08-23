@@ -925,8 +925,12 @@ function checkTeamShelf(
         name: 'team shelf',
         status: 'warn',
         required: false,
-        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? '--base-url' : 'TENJIN_BASE_URL'} (${sanitizeForTerminal(baseUrl)}), not from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
-        fix: 'Run doctor without the override to check the configured team shelf.',
+        // NAMING THE FLAG HERE IS ITSELF THE HAZARD (see FIX_POINT_AT_TENJIN_API
+        // and lib/permissions FLAG_CAVEAT): doctor's lines reach an unattended
+        // agent, and an override is what a prompt-injected one would reach for.
+        // So this says an override happened, never how to make one.
+        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}) rather than from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
+        fix: 'Run doctor with no base-URL override to check the configured team shelf.',
       },
     };
   }
