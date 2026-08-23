@@ -304,10 +304,7 @@ function missHint(response: Awaited<ReturnType<typeof postSearch>>): string[] {
  * ever sets the flag alongside candidates it dropped. Handling both keeps the
  * flag from going unrendered if that ever changes.
  */
-function truncatedHint(
-  response: Awaited<ReturnType<typeof postSearch>>,
-  limit: number,
-): string[] {
+function truncatedHint(response: Awaited<ReturnType<typeof postSearch>>, limit: number): string[] {
   if (response.truncated !== true) return [];
   return [
     limit < MAX_LIMIT

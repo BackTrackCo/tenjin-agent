@@ -785,7 +785,7 @@ export function hooksDisclosure(h: HooksResult): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries run beside these: they look a question up on your own notes first and then on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries run beside these: they look a question up on your configured shelf first and then, in team mode, on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}${push}`;

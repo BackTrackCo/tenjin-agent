@@ -131,7 +131,7 @@ export type SettingsSkipReason =
  */
 export const KEPT_ITEMS: readonly string[] = [
   'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
-  'your team notes and the push ledger under ~/.tenjin (notes are your own writing, and the ledger is the experiment’s only record)',
+  'the push ledger under ~/.tenjin (it is the experiment’s only record)',
   'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
 ];
 

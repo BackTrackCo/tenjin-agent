@@ -21,9 +21,9 @@ import type { CommandContext, CommandResult } from '../context';
  * arms (prompt, failure, subagent, context) and all six of their settings.json
  * entries, whatever `hooks.push` currently says: `tenjin push off` leaves the
  * files on disk on purpose, so uninstall is the only thing that takes them away.
- * It does NOT remove the wallet, the config, the library, the team notes, the
- * push ledger, the search ledger, or parked candidates: `install` did not create
- * those, and a wallet holds funds while a note is the team's own writing. The hook scripts are
+ * It does NOT remove the wallet, the config, the library, the push ledger, the
+ * search ledger, or parked candidates: `install` did not create those, a wallet
+ * holds funds, and the ledger is the experiment's only record. The hook scripts are
  * the one thing under `~/.tenjin` it does remove, because `install` generated
  * them. The receipt names both halves on every run, so the operator learns the
  * boundary from the command rather than from the docs.

@@ -375,7 +375,11 @@ async function checkApiContract(
   bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl, ...(bypass !== undefined ? { bypass } : {}) });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -432,7 +436,11 @@ async function checkSearchContract(
   bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl, ...(bypass !== undefined ? { bypass } : {}) });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     return {
       result: {
@@ -1054,7 +1062,11 @@ async function checkReadPath(
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl, ...(bypass !== undefined ? { bypass } : {}) });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     return {
       result: {

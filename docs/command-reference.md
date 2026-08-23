@@ -44,7 +44,7 @@ Hooks are read once at session start, so restart Claude Code after registering t
 
 Removes what `tenjin install` wrote: Tenjin skills, hook scripts, Tenjin hook entries, Tenjin permission rules, and older pointer lines in `CLAUDE.md` or `AGENTS.md`.
 
-Your wallet, config, library, search history, team notes, push ledger, and older candidate data under `~/.tenjin` stay in place. The one thing it removes there is the generated hook scripts in `~/.tenjin/hooks`, which `install` wrote and puts back. It is safe to run twice.
+Your wallet, config, library, search history, push ledger, and older candidate data under `~/.tenjin` stay in place. The one thing it removes there is the generated hook scripts in `~/.tenjin/hooks`, which `install` wrote and puts back. It is safe to run twice.
 
 The push arms count as hook scripts here: `uninstall` removes `tenjin-push-prompt.mjs`, `tenjin-push-failure.mjs`, `tenjin-push-subagent.mjs`, `tenjin-push-context.mjs` and all of their settings entries whatever `hooks.push` says, since `tenjin push off` deliberately leaves them on disk.
 
@@ -292,7 +292,9 @@ Common keys:
 | `confirm`              | `always`                   | When to ask before paying.                                                                                                            |
 | `sendMaxAmount`        | unset                      | Hard per-send cap. Unset means `send` refuses.                                                                                        |
 | `allowlistCreators`    | empty                      | Restrict auto-pay by creator handle.                                                                                                  |
-| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL.                                                                                                                  |
+| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL: what `publish`/`read`/`search` talk to. See [Team shelf](#team-shelf).                                           |
+| `publicShelfUrl`       | `https://tenjin.blog`      | The public marketplace, consume-only: the second shelf a team-mode search falls through to.                                           |
+| `shelfBypassSecret`    | unset                      | The team shelf's protection-bypass secret; setting it turns team mode on. Printed as `set`/`unset`, never echoed.                     |
 | `rpcUrl`               | `https://mainnet.base.org` | Base RPC endpoint.                                                                                                                    |
 | `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                                                                             |
 | `publish.mode`         | `review`                   | Publish consent mode.                                                                                                                 |
@@ -301,7 +303,7 @@ Common keys:
 | `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.                                                           |
 | `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                                                                                       |
 | `hooks.push`           | `off`                      | Push experiment master switch: `on`, `off`. Set through `tenjin push on/off`, not `config set`, so the wiring step runs alongside it. |
-| `hooks.capture`        | `off`                      | End-of-session save prompt: `block`, `nudge`, `off`. See [Push (experimental)](#push-experimental).                                   |
+| `hooks.capture`        | `off`                      | End-of-session publish prompt: `block`, `nudge`, `off`. See [Stop-hook capture](#stop-hook-capture).                                  |
 
 ## Push (experimental)
 
@@ -328,9 +330,9 @@ To take the scripts and their settings entries away entirely, run `tenjin uninst
 
 ### `tenjin push status [--json]`
 
-Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), and BOTH halves of "wired": whether the four scripts are present on disk, and how many of the six settings entries are actually registered (`present/planned`, with the settings file named). Either half alone reports a healthy sidecar that does nothing — scripts with no entries never run, entries with no scripts fail silently — so `push: on` is flagged as not fully wired unless both agree.
+Reports the push mode, the capture mode (`hooks.capture` — see [Stop-hook capture](#stop-hook-capture) for what it prompts), and BOTH halves of "wired": whether the four scripts are present on disk, and how many of the six settings entries are actually registered (`present/planned`, with the settings file named). Either half alone reports a healthy sidecar that does nothing — scripts with no entries never run, entries with no scripts fail silently — so `push: on` is flagged as not fully wired unless both agree.
 
-Then a tally of the last 7 days of ledger rows: total rows, how many distinct findings they touched, how many denied a tool call outright, the total tokens injected, and the breakdowns by trigger x action, by shelf (`public` vs. a team's private notes), and by `reason` (why a fire said nothing: `miss`, `weak`, `already-injected`, `lookup-cap`, `quiet`, `no-answer`, `inject-cap-pointer`), sorted by count. The ledger is read from its last 256 KB (nothing rotates it); on a file larger than that the tally says `retained tail only` and its counts are floors.
+Then a tally of the last 7 days of ledger rows: total rows, how many distinct findings they touched, how many denied a tool call outright, the total tokens injected, and the breakdowns by trigger x action, by shelf (`public` vs. `team`), and by `reason` (why a fire said nothing: `miss`, `weak`, `already-injected`, `lookup-cap`, `quiet`, `no-answer`, `inject-cap-pointer`), sorted by count. The ledger is read from its last 256 KB (nothing rotates it); on a file larger than that the tally says `retained tail only` and its counts are floors.
 
 ```bash
 tenjin push on
@@ -342,67 +344,40 @@ tenjin push off
 
 `tenjin mcp` runs a local stdio MCP server over the same command cores. It exposes search, inspect, buy, outcome, publish, edit, wallet, and fund tools. The wallet stays local, and the same spend and publish gates apply.
 
-## Team notes (sidecar)
+## Team shelf
 
-A team note is a durable, reusable finding — a probe result, a version-specific gotcha, a tested workaround or comparison — written once so the team never re-discovers it. Notes are flat Markdown files with a small hand-rolled front matter, kept in a separate git repo (the "sidecar") cloned under `~/.tenjin/notes`, independent of everything else the CLI stores.
+A team shelf is a **second deployment of Tenjin itself** — the same app, its own empty database, its own domain, Deployment Protection on. A team publishes findings to it freely, consumes from it first, and falls through to the public marketplace when it has nothing. There are no extra commands: `publish`, `search`, `read`, `inspect` and `buy` all work as they always did, against a different `baseUrl`.
 
+Two keys decide it:
+
+| Key                 | Default               | Effect                                                                                                             |
+| ------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `baseUrl`           | `https://tenjin.blog` | Where `publish` writes and where the first search leg goes. In team mode, the team's own deployment.               |
+| `publicShelfUrl`    | `https://tenjin.blog` | The public marketplace, consume-only: the second leg a team-mode search falls through to.                          |
+| `shelfBypassSecret` | unset                 | The team deployment's Vercel "Protection Bypass for Automation" secret. **Setting it is what turns team mode on.** |
+
+```bash
+tenjin config set baseUrl https://backtrack.tenjin.sh
+tenjin config set shelfBypassSecret <secret>
 ```
----
-question: "Does X do Y under Z?"
-applies_to: [pkg@1.2, product]
-scope: "where it holds"
-as_of: 2026-08-22
-author: vraspar
-source: "session:<id>" | "search:<uuid>" | ""
-visibility: team
----
-<body markdown>
-```
 
-### `tenjin team init <git-url>`
+`config get shelfBypassSecret` and `config` print `set` or `unset`, never the value, in both the human lines and `--json`. The value itself is in `~/.tenjin/config.json`.
 
-Clones `<git-url>` into the sidecar. Refuses (without touching anything) if the directory already holds a repo or other content — remove or empty it first, or use `tenjin team sync` if it is already your team's repo. The URL must name an authenticated transport: `https://`, `ssh://`, `file://`, a `git@host:org/repo.git` address, or an absolute local path. `git://` and `http://` are refused (neither authenticates the server, and every note body the shelf serves is read into a teammate's context), and so is anything git would read as an option or as a command to run.
+### What changes in team mode
 
-### `tenjin team sync`
+- **The bypass header.** Every request to `baseUrl`'s origin carries `x-vercel-protection-bypass`. Nothing else ever does: the header is attached from the request URL, not from the call site's intent, so a request to `publicShelfUrl` cannot carry it however it is issued. The generated hook scripts apply the same rule to their own fetches.
+- **Search asks two shelves.** `tenjin search` and every push hook query `baseUrl` first (labelled `team`), and only when that returns nothing do they query `publicShelfUrl` (labelled `public`). The human output labels each block by shelf, team first; `--json` carries the answering shelf's response verbatim plus a `shelves` array naming both legs and their searchIds. The push ledger's `shelf` field records which one a row came from.
+- **`read`, `inspect` and `buy` accept candidates from either origin**, since a search surfaced both. A `buy` signs its SIWX header for the shelf the URL is actually on, never for whichever origin happens to be configured.
+- **`publish` goes to `baseUrl` only,** never to `publicShelfUrl`, and it skips the public-shaped gates: no client-side scan, no `needs_confirmation` ack, no publish-mode coaching, and the price defaults to `0` instead of `publish.defaultPrice`. An explicit `--price` or a frontmatter `price` still wins. The scan asks "is this safe to make public" and a team shelf is not public, so on a team shelf every one of its warnings fires on exactly the findings the shelf exists to hold. Clearing `shelfBypassSecret` puts the whole cascade back.
 
-`git pull --rebase`, then `git push`. Unlike `notes add`/`notes rm` below, a failure here is the whole point of the command and is reported as a real error, not a warning. A conflicting rebase is aborted before the error is raised, so the clone is left on your own commits and the fix it prints (rebase by hand, resolve, `git rebase --continue`, retry) is one you can actually run. A rebase that was already in progress before the command started is reported untouched — that one is yours to finish.
-
-### `tenjin notes add [file]`
-
-Saves a new note. The body comes from `file` or from `--body`, never both.
-
-| Flag                  | Effect                                                        |
-| --------------------- | ------------------------------------------------------------- |
-| `--question <q>`      | Required. What the note answers.                              |
-| `--applies-to <list>` | Comma-separated applicability tags, e.g. `pkg@1.2,product`.   |
-| `--scope <s>`         | Where the finding holds.                                      |
-| `--body <text>`       | The note body, instead of a file argument.                    |
-| `--source <s>`        | Where this came from, e.g. `session:<id>` or `search:<uuid>`. |
-
-Every field except the body is one line: a newline in `--question`, `--scope`, `--source` or an `--applies-to` entry is refused rather than written, since front matter is line-oriented and a second line is a second field. `add` also refuses a note whose text carries something credential-shaped (a private key block, a vendor token, an assignment whose name says secret — `password=`, `api_key:`, `AWS_SECRET_ACCESS_KEY=` and their lowercase and hyphenated forms — an `Authorization: Bearer` header, or a connection string with a password in it) — a note is pushed to the shared team repo and read into every teammate's model context, so the fix is to remove or redact the secret, not to publish it. It is a best-effort scan of the shapes that actually leak in write-ups, not a proof of absence.
-
-If the sidecar is a git repo, `add` commits, rebases onto the team's latest, and pushes (`git add -A && git commit -m "note: <id>" && git pull --rebase && git push`), best-effort with a 10s timeout per git call: a failure here never fails the command, only prints one warning line, since the note is already saved locally either way. The pull is what keeps one teammate's push from making every later `notes add` on every other machine non-fast-forward. If it conflicts, the rebase is aborted rather than left half-applied, so the note stays committed on your own branch and the next `notes add` still works; the warning names `tenjin team sync`. If a rebase is already in progress in the sidecar when `notes add` runs, it refuses the git step entirely and says so rather than committing into it. The git step as a whole is a silent no-op on a machine that has not run `tenjin team init`; the note itself is still written.
-
-### `tenjin notes list [--json]`
-
-Lists every note (id, question, tags, scope, provenance — not the body).
-
-### `tenjin notes show <id>`
-
-Prints one note in full, including its body.
-
-### `tenjin notes search "<query>" [--json]`
-
-Lexical search over `question + applies_to + body head (first 600 chars)`: content words (lowercased, stopwords and short tokens dropped) of the query against each note's, scored as the overlap fraction. A match at `score >= 0.5` with at least a `0.15` lead over the next-best match is `strong`; `score >= 0.25` is `moderate`. Results are ranked best first; nothing below `0.25` is returned (the margin for `strong` is still measured against the true next-best note, scored before that floor is applied).
-
-### `tenjin notes rm <id>`
-
-Removes a note. Same best-effort commit-and-push as `add`.
-
-### `tenjin notes none`
-
-Records that nothing durable came out of this session — the honest complement to `notes add`. Use it when the Stop hook's capture reminder fires and there is nothing worth saving.
+Public mode — no `shelfBypassSecret` — is unchanged in every one of those respects.
 
 ### Stop-hook capture
 
-When enabled, the Stop hook checks whether the session had a research signal — a search the session itself asked for (`tenjin search`, the WebSearch hook, the dispatch hook), or a push-ledger row where an arm actually surfaced something. The sidecar's own log-only telemetry does not count, so a session that only read and edited code is never asked. Once per session it blocks the end of the turn with a reminder to run `notes add` for anything durable or `notes none` otherwise. `notes add`/`notes none` are what clears that reminder: either one writes a marker (`~/.tenjin/push/capture-done-<session>`) the Stop hook checks before it blocks again.
+When enabled (`hooks.capture`), the Stop hook checks whether the session had a research signal — a search the session itself asked for (`tenjin search`, the WebSearch hook, the dispatch hook), or a push-ledger row where an arm actually surfaced something. The sidecar's own log-only telemetry does not count, so a session that only read and edited code is never asked.
+
+Once per session it ends the turn (`block`) or adds a line (`nudge`) asking the agent to publish what it settled, naming the resolved `publish.mode` so the agent knows whether it may run the command without asking. The bar differs by mode: in public mode it is the marketplace's (public, durable, rights-clean); in team mode it is "anything a teammate on this project would want to know" — a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why.
+
+The ask fires **once per session and no more**, whatever the agent does with it: the marker (`~/.tenjin/push/capture-asked-<session>`) is written before the ask, so the next Stop is silent. Publishing and simply stopping again are both valid answers, and there is no command to run to say "nothing to save".
+
+While capture is on it **replaces** the open-loop MISS reminder rather than joining it: both arms end a turn by saying "publish what you learned", and one turn end does not need three of them. `tenjin config set hooks.capture off` restores the reminder.

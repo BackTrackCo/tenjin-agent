@@ -60,7 +60,8 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
   // Paired with the origin here, once, so no command has to remember to.
   // `new URL` cannot throw: baseUrl is z.url()-validated on the way in, and the
   // flag/env overrides are parsed at their own edges.
-  const bypass = secret.length > 0 ? { origin: new URL(s.baseUrl.value).origin, secret } : undefined;
+  const bypass =
+    secret.length > 0 ? { origin: new URL(s.baseUrl.value).origin, secret } : undefined;
   return {
     baseUrl: s.baseUrl.value,
     publicShelfUrl: s.publicShelfUrl.value,
