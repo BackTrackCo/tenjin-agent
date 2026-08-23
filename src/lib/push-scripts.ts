@@ -339,6 +339,13 @@ function notesSearch(query) {
   }
   const scored = [];
   let seen = 0;
+  // Newest first BEFORE the cap, exactly as \`listNotes\` does it (lib/notes.ts):
+  // ids sort by date, and readdir order is whatever the filesystem feels like,
+  // so capping first would score an arbitrary subset once the shelf passes
+  // NOTES_MAX_FILES — and the CLI, which does sort, would then be searching
+  // different notes than the hook.
+  names.sort();
+  names.reverse();
   for (const name of names) {
     if (!name.endsWith('.md')) continue;
     seen += 1;

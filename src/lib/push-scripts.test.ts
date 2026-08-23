@@ -939,6 +939,37 @@ describe('the team shelf', () => {
     expect(injected(run)).not.toContain('· by ');
   });
 
+  /**
+   * The round-2 "sort before the file cap" fix landed on the CLI reader only, so
+   * past 500 notes the hook scored whatever subset readdir handed it — the CLI
+   * and the hook searching different shelves. Same order on both sides, or
+   * `notes search` finding a note the injection never will.
+   */
+  it('scores the newest notes when the file cap bites, whatever readdir order', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    // Filler first, then the matching note with the newest id — written LAST so
+    // a creation-ordered readdir puts it past the cap.
+    for (let i = 0; i < 505; i += 1) {
+      await writeNote(`20240101-${String(i).padStart(6, '0')}`, `unrelated question ${i}`, 'x');
+    }
+    await writeNote(
+      '20261201-zzzzzz',
+      'Does the read beacon fire for hand-seeded posts?',
+      'It does not. The beacon needs a real session row, so hand-seeded posts read as zero.',
+    );
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('read beacon hand-seeded posts tenjin'),
+    );
+    expect(injected(run)).toContain('The beacon needs a real session row');
+    expect((await ledger())[0]).toMatchObject({
+      shelf: 'team',
+      candidate: { id: '20261201-zzzzzz' },
+    });
+  });
+
   it('falls through to the marketplace when no note is close enough', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
