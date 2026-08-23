@@ -69,8 +69,18 @@ export const PUSH_CACHE_TTL_MS = 120_000;
 export const PUSH_CHURN_EDITS = 4;
 /** Packages the read arm looks up per session; per Read it takes at most two. */
 export const PUSH_READ_PACKAGES_MAX = 10;
-/** Watchdogs: a search plus a body fetch must fit under the settings.json
- *  timeout, which is set from this with headroom. */
+/**
+ * Watchdogs: a search plus a body fetch must fit under the settings.json
+ * timeout, which is set from this with headroom.
+ *
+ * "A SEARCH" IS THE WHOLE LOOKUP, NOT ONE REQUEST. Team mode asks two shelves,
+ * and they divide one search-plus-body wall clock between them (`legTimeoutMs`
+ * in lib/hook-scripts.ts), precisely so this arithmetic does not have to grow a
+ * second search term: a two-shelf lookup costs what a one-shelf lookup always
+ * cost. Sizing the watchdog for search + search + body instead would mean making
+ * the prompt arm's own budget long enough to be felt by the human waiting
+ * behind it.
+ */
 export const PUSH_WATCHDOG_MS = 4500;
 export const PUSH_HOOK_TIMEOUT_SECONDS = 8;
 /** The prompt arm's own budgets, tighter than every other arm's: it runs between
@@ -81,7 +91,10 @@ export const PUSH_PROMPT_SEARCH_TIMEOUT_MS = 1500;
 /** The prompt arm's own body budget, half the other arms'. THE WATCHDOG MUST
  *  EXCEED SEARCH + BODY + SLACK, or the arm pays for a lookup, blocks the human
  *  for it, and is killed before it can say or record anything: 1500 + 800 fits
- *  under 3000 with room for the search-store write in between. */
+ *  under 3000 with room for the search-store write in between. SEARCH is the
+ *  lookup's whole budget however many shelves it asks — the two legs share the
+ *  1500 rather than taking it each, which is what keeps this sum true in team
+ *  mode. */
 export const PUSH_PROMPT_BODY_TIMEOUT_MS = 800;
 /** When the prompt arm gives up on its own and writes the row saying so. Under
  *  the watchdog, so a run that overruns is VISIBLE in the ledger rather than
@@ -538,7 +551,26 @@ async function pushDecide(args) {
   // baseUrl still on the marketplace there is no second shelf to fall through
   // to, only the same origin asked twice and filed as a team hit.
   const teamMode = teamShelfOrigin(config) !== null;
-  const first = await shelfDecide(args, base, budget, teamMode ? 'team' : 'public', config.baseUrl);
+  // ONE WALL CLOCK FOR THE WHOLE LOOKUP: EXACTLY WHAT ONE SHELF ALWAYS COST, a
+  // search plus a body, which is the sum every arm's watchdog and the harness
+  // \`timeout\` were sized against. Two legs on fixed timeouts instead made the
+  // worst case search + search + body, and the arm that paid for it was the
+  // prompt one: a slow team shelf spent its 1500ms, the public leg answered
+  // inside its own, and the 2700ms overrun timer had already written a
+  // \`watchdog\` row and exited — the hit computed, never emitted. Each leg is
+  // clamped to what is left before this deadline, less the body that still has
+  // to fit; the FIRST leg is unaffected by construction (at t=0 the clamp is
+  // exactly SEARCH_TIMEOUT_MS), so only a second shelf can be squeezed, and it
+  // is squeezed rather than allowed to overrun the arm.
+  const deadline = Date.now() + SEARCH_TIMEOUT_MS + PUSH_BODY_TIMEOUT;
+  const first = await shelfDecide(
+    args,
+    base,
+    budget,
+    teamMode ? 'team' : 'public',
+    config.baseUrl,
+    deadline,
+  );
   if (first.kind !== 'miss') return first.decided ?? null;
   if (!teamMode) return null;
   // Shelf 2, team mode only: the public marketplace, consume-only. A SECOND
@@ -551,6 +583,7 @@ async function pushDecide(args) {
     pushBudget(sessionId),
     'public',
     config.publicShelfUrl,
+    deadline,
   );
   return second.decided ?? null;
 }
@@ -569,7 +602,7 @@ async function pushDecide(args) {
  *              because the same piece already landed this session. \`decided\` is
  *              what the arm emits (null for a log-only or skipped outcome).
  */
-async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl) {
+async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadline) {
   const { query, config, sessionId, mode } = args;
   const source = typeof args.source === 'string' ? args.source : 'push-hook';
   const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
@@ -587,9 +620,19 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'quiet' });
     return { kind: 'stop' };
   }
+  // Out of wall clock: the first leg spent what this one would have needed.
+  // Recorded on its own reason rather than as \`no-answer\`, because this shelf
+  // was never asked — filing it as an outage would build a failure streak
+  // against a shelf that may be perfectly healthy and quiet the arm for the rest
+  // of the session.
+  const leg = legTimeoutMs(deadline, PUSH_BODY_TIMEOUT);
+  if (leg < SEARCH_MIN_LEG_MS) {
+    ledgerAppend({ ...base, action: 'skipped', reason: 'no-time' });
+    return { kind: 'stop' };
+  }
   let found = null;
   try {
-    found = await askTenjin(query, config, undefined, shelfBaseUrl);
+    found = await askTenjin(query, config, undefined, shelfBaseUrl, leg);
   } catch {
     found = null;
   }

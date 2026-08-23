@@ -1141,6 +1141,62 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       PUSH_PROMPT_BUDGET_MS,
     );
     expect(PUSH_PROMPT_BUDGET_MS).toBeLessThan(PUSH_PROMPT_WATCHDOG_MS);
+    // AND THAT SUM DOES NOT GROW WITH A SECOND SHELF. The team leg and the
+    // public leg divide one search-plus-body wall clock; if a two-shelf lookup
+    // were allowed a second full search, this arm's worst case would be 1500 +
+    // 1500 + 800 against a 2700ms budget, which is a lookup paid for and killed.
+    expect(2 * PUSH_PROMPT_SEARCH_TIMEOUT_MS + PUSH_PROMPT_BODY_TIMEOUT_MS).toBeGreaterThan(
+      PUSH_PROMPT_BUDGET_MS,
+    );
+  });
+
+  /**
+   * THE TWO-SHELF TAIL. A team shelf that answers late and a public shelf that
+   * then answers at all used to overrun the arm together: the overrun timer
+   * fired at 2700ms, wrote `watchdog`, and exited while the public hit was still
+   * being turned into text. The legs now share one deadline, so the arm gives up
+   * on the second shelf instead of on itself.
+   */
+  it('drops the second shelf rather than overrunning, when the first leg was slow', async () => {
+    const team = await serve((req) =>
+      req.url.startsWith('/api/search')
+        ? { status: 200, json: { schemaVersion: 3, searchId: SEARCH_ID, items: [] }, delayMs: 1400 }
+        : { status: 200, json: {} },
+    );
+    // Slow too, which is the reproduction: 1400 + 1300 used to land past the
+    // 2700ms overrun timer, so the arm wrote `watchdog` and exited while this
+    // shelf's hit was being turned into text.
+    const slow = echo();
+    const pub = await serve((req) => ({ ...slow(req), delayMs: 1300 }));
+    await teamMode(team, pub);
+
+    const startedAt = Date.now();
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(run.code).toBe(0);
+    // Home before the arm's own overrun timer, which is the whole point.
+    expect(Date.now() - startedAt).toBeLessThan(PUSH_PROMPT_BUDGET_MS);
+
+    const rows = await ledger();
+    expect(rows.map((r) => r.reason)).not.toContain('watchdog');
+    // The team leg missed; the public leg was never asked, and says so on its
+    // own reason rather than as an outage that would quiet the arm.
+    expect(rows[0]).toMatchObject({ shelf: 'team', reason: 'miss' });
+    expect(rows[1]).toMatchObject({ shelf: 'public', action: 'skipped', reason: 'no-time' });
+    expect(pub.hits()).toBe(0);
+  });
+
+  it('still falls through to the public shelf when the first leg was quick', async () => {
+    // The clamp must not cost the ordinary fallback: a fast team miss leaves the
+    // public leg most of the budget, and it answers in full form as before.
+    const team = await serve(answersOnly(/nothing-matches-this/, TEAM_RESOURCE_ID, TEAM_BODY_MD));
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(injected(run)).toContain(BODY_MD);
+    const rows = await ledger();
+    expect(rows.map((r) => r.shelf)).toEqual(['team', 'public']);
+    expect(rows[1]).toMatchObject({ action: 'injected', form: 'full' });
   });
 
   /**

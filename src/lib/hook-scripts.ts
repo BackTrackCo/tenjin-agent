@@ -675,9 +675,11 @@ function composedUserAgent() {
  * hooks differ only in the question they build, the source they record it under,
  * and whether they may speak. `hookLabel` names the lock's meta holder.
  *
- * `searchTimeoutMs` is the fetch budget. It is a parameter for exactly one
- * caller, the prompt arm, which sits between a human pressing enter and the
- * model starting to answer and so cannot afford the default.
+ * `searchTimeoutMs` is the fetch budget for the LOOKUP, not per request: a
+ * two-shelf lookup divides it between the legs (see `searchDeadline`). It is a
+ * parameter for exactly one caller, the prompt arm, which sits between a human
+ * pressing enter and the model starting to answer and so cannot afford the
+ * default.
  */
 export function marketplaceSource(
   hookLabel: string,
@@ -685,6 +687,33 @@ export function marketplaceSource(
 ): string {
   return `
 const LOCK_PATH = SEARCH_STORE + '.lock';
+const SEARCH_TIMEOUT_MS = ${searchTimeoutMs};
+
+/**
+ * ONE LEG'S FETCH TIMEOUT, BOUNDED BY THE ARM'S OWN WALL CLOCK.
+ *
+ * The watchdogs and the harness \`timeout\` were sized for "a search plus a body
+ * fetch plus slack", and team mode added a SECOND search leg without adding any
+ * time. With a fixed per-request timeout on both legs the worst case became
+ * search + search + body — 1500 + 1500 + 800 against the prompt arm's 2700ms
+ * budget — so a slow team shelf followed by an answering public one lost the
+ * race to the arm's own overrun timer: stdout empty, a \`watchdog\` row in the
+ * ledger, and a hit computed and thrown away.
+ *
+ * So a leg gets the SMALLER of its own timeout and the wall clock actually left
+ * before \`deadline\`, minus what must still happen afterwards (\`reserveMs\`: the
+ * body fetch). The first leg is unaffected — every arm's budget exceeds one
+ * search plus its body — and the second gets whatever the first did not spend,
+ * which is what keeps a two-shelf lookup inside a one-shelf watchdog.
+ */
+function legTimeoutMs(deadline, reserveMs) {
+  const room = deadline - Date.now() - reserveMs;
+  return Math.min(SEARCH_TIMEOUT_MS, Math.max(0, room));
+}
+
+/** Below this there is no point starting a leg: a connect alone will not finish
+ *  in it, and the only thing it can produce is a timeout nobody learns from. */
+const SEARCH_MIN_LEG_MS = 150;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -810,8 +839,10 @@ function usd(atomic) {
 /** Ask a shelf; return only what survived validation. A network error or timeout
  *  throws instead, which \`main().catch(quiet)\` turns into the same silent exit
  *  0. \`shelfBaseUrl\` defaults to \`config.baseUrl\`; the push core passes
- *  \`config.publicShelfUrl\` for the second leg of a team-mode lookup. */
-async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl) {
+ *  \`config.publicShelfUrl\` for the second leg of a team-mode lookup.
+ *  \`timeoutMs\` defaults to the whole budget, which is right for a one-leg
+ *  lookup; a two-leg caller passes what is left of its shared deadline. */
+async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl, timeoutMs) {
   const target =
     typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0 ? shelfBaseUrl : config.baseUrl;
   let url;
@@ -841,7 +872,9 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
       query: question,
       limit,
     }),
-    signal: AbortSignal.timeout(${searchTimeoutMs}),
+    signal: AbortSignal.timeout(
+      typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : SEARCH_TIMEOUT_MS,
+    ),
   });
   if (res.status !== 200) return null;
   const body = await res.json();
