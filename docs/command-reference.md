@@ -32,7 +32,7 @@ Useful flags:
 
 ### Hooks
 
-`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a web search. The dispatch hook (`hooks.dispatchMode`, default `inherit` = follow `hooks.searchMode`) does the same when a subagent is dispatched, sending at most 100 characters of the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session; set it to `remind` or `off` to keep subagent prompts on the machine while the WebSearch hook stays on. Nothing fires on a `WebFetch`. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.webSearch`, default `auto`) checks Tenjin before a web search. The dispatch hook (`hooks.agentDispatch`, default `auto`, disjoint from `hooks.webSearch`) does the same when a subagent is dispatched, sending at most 100 characters of the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session; set it to `remind` or `off` to keep subagent prompts on the machine while the WebSearch hook stays on. No `inherit`: both default `auto` and can be set independently. Old keys `hooks.searchMode`/`hooks.dispatchMode` still work as aliases for one release. Nothing fires on a `WebFetch`. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
 **The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch misses are never raised at all: they are demand data, not questions you asked to be reminded about, and they hold at most 15 of the store's 50 slots so a wide fan-out cannot evict a search you may still want to buy from.
 
@@ -281,22 +281,22 @@ Escape hatch for moving USDC out of the agent wallet. It is deliberately not par
 
 Common keys:
 
-| Key                    | Default                    | Effect                                                                           |
-| ---------------------- | -------------------------- | -------------------------------------------------------------------------------- |
-| `maxAutoSpend`         | `0`                        | Auto-approve a read up to this amount.                                           |
-| `sessionBudget`        | `0`                        | Session auto-spend ceiling; `0` means no ceiling once auto-spend is enabled.     |
-| `confirm`              | `always`                   | When to ask before paying.                                                       |
-| `sendMaxAmount`        | unset                      | Hard per-send cap. Unset means `send` refuses.                                   |
-| `allowlistCreators`    | empty                      | Restrict auto-pay by creator handle.                                             |
-| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL.                                                             |
-| `rpcUrl`               | `https://mainnet.base.org` | Base RPC endpoint.                                                               |
-| `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                        |
-| `publish.mode`         | `review`                   | Publish consent mode.                                                            |
-| `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                                   |
-| `hooks.searchMode`     | `auto`                     | WebSearch hook behavior (and the dispatch hook's, unless split below).           |
-| `hooks.dispatchMode`   | `inherit`                  | Subagent-dispatch hook: `inherit` follows `searchMode`; `auto`, `remind`, `off`. |
-| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.      |
-| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                                  |
+| Key                    | Default                    | Effect                                                                               |
+| ---------------------- | -------------------------- | ------------------------------------------------------------------------------------ |
+| `maxAutoSpend`         | `0`                        | Auto-approve a read up to this amount.                                               |
+| `sessionBudget`        | `0`                        | Session auto-spend ceiling; `0` means no ceiling once auto-spend is enabled.         |
+| `confirm`              | `always`                   | When to ask before paying.                                                           |
+| `sendMaxAmount`        | unset                      | Hard per-send cap. Unset means `send` refuses.                                       |
+| `allowlistCreators`    | empty                      | Restrict auto-pay by creator handle.                                                 |
+| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL.                                                                 |
+| `rpcUrl`               | `https://mainnet.base.org` | Base RPC endpoint.                                                                   |
+| `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                            |
+| `publish.mode`         | `review`                   | Publish consent mode.                                                                |
+| `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                                       |
+| `hooks.webSearch`      | `auto`                     | WebSearch hook behavior: `auto`, `remind`, `off`.                                    |
+| `hooks.agentDispatch`  | `auto`                     | Subagent-dispatch hook (most sensitive payload): `auto`, `remind`, `off` (disjoint). |
+| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.          |
+| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                                      |
 
 ## MCP
 

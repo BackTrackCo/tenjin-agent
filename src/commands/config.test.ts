@@ -88,13 +88,13 @@ describe('runConfigList', () => {
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
     });
-    expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
-    expect(d['hooks.dispatchMode']).toEqual({ value: 'inherit', source: 'default' });
+    expect(d['hooks.webSearch']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['hooks.agentDispatch']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
     // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 4 hooks.*
-    // (incl. dispatchMode, sessionPrimer) + 1 update.mode.
+    // (incl. agentDispatch, sessionPrimer) + 1 update.mode.
     expect(humanLines).toHaveLength(17);
   });
 
@@ -935,8 +935,8 @@ describe('the hooks block is set through config, which stays human-gated', () =>
   it('round-trips every hook key and rejects a value outside the enum', async () => {
     const ctx = makeCtx();
     for (const [key, value] of [
-      ['hooks.searchMode', 'remind'],
-      ['hooks.dispatchMode', 'off'],
+      ['hooks.webSearch', 'remind'],
+      ['hooks.agentDispatch', 'off'],
       ['hooks.stopNag', 'off'],
       ['hooks.sessionPrimer', 'off'],
     ] as const) {
@@ -946,24 +946,31 @@ describe('the hooks block is set through config, which stays human-gated', () =>
         data: { key, value, source: 'file' },
       });
     }
+    // Legacy aliases still work and map to the new keys.
+    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
+      data: { value: 'remind' },
+    });
+    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
     // Every subkey survives the others' writes, so silencing one hook cannot
     // silently reset another.
-    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
+    expect(await runConfigGet({ key: 'hooks.webSearch' }, ctx)).toMatchObject({
       data: { value: 'remind' },
     });
     expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
       data: { value: 'off' },
     });
 
-    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
+    expect(await runConfigGet({ key: 'hooks.agentDispatch' }, ctx)).toMatchObject({
       data: { value: 'off' },
     });
 
     const dispatch = await caught(() =>
-      runConfigSet({ key: 'hooks.dispatchMode', value: 'sometimes' }, ctx),
+      runConfigSet({ key: 'hooks.agentDispatch', value: 'sometimes' }, ctx),
     );
     expect(dispatch.code).toBe('USAGE');
-    expect(dispatch.fix).toContain('"inherit"');
+    expect(dispatch.fix).toContain('"off"');
 
     const primer = await caught(() =>
       runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
