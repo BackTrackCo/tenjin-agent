@@ -131,13 +131,32 @@ const SECRET_RE =
   /(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{16,}|\bgh[oprsu]_[A-Za-z0-9]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bglpat-[A-Za-z0-9_-]{16,}|\bA(?:KIA|SIA)[0-9A-Z]{16}\b|\bxox[baprse]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|\b(?:password|passwd|secret|api[_-]?key|apikey|token)\s*[=:]\s*\S{8,}|:\/\/[^\s:@/]+:[^\s@/]+@)/i;
 
 /**
- * Screaming-snake env names, which the case-insensitive class above misses:
- * `_` is a word character, so `\b(?:secret)` never fires inside
- * `AWS_SECRET_ACCESS_KEY`. Case-sensitive on purpose — lowercase prose
- * ("the secret access key was wrong") is not an assignment.
+ * Compound names, which the class above misses: `_` and `-` sit between the
+ * keyword and the `=`, so `\bsecret\s*[=:]` never fires inside
+ * `AWS_SECRET_ACCESS_KEY=…` or `aws-secret-access-key: …`.
+ *
+ * CASE-INSENSITIVE, unlike the first version of this rule. Screaming snake was
+ * the shape that came to mind, but a config line, a `.env` sample and an agent
+ * quoting its own shell history are all lowercase, and `aws_secret_access_key =
+ * wJalrXUt…` sailed through. The false positive the case rule was guarding
+ * against — lowercase prose like "the secret access key was wrong" — is not
+ * reachable here anyway: the keyword has to be glued to an `=` or `:` by
+ * word characters and followed by eight non-space ones.
+ *
+ * The keyword list mirrors the generated hook's `SECRET_ASSIGN_RE`
+ * (lib/push-scripts.ts); the two scanners guard the same thing.
  */
 const ENV_SECRET_RE =
-  /\b[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY)[A-Z0-9_]*\s*[=:]\s*\S{8,}/;
+  /\b[A-Za-z0-9_-]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|CREDENTIAL)[A-Za-z0-9_-]*\s*[=:]\s*\S{8,}/i;
+
+/**
+ * `Authorization: Bearer <token>`, the shape a pasted curl or a logged request
+ * arrives in. Nothing above sees it: the header name carries none of the
+ * keywords, and an opaque bearer token is not a recognizable vendor prefix
+ * (a JWT is, which is why only the non-JWT case needed this).
+ */
+const BEARER_RE =
+  /\b(?:proxy-)?authorization\s*:\s*\S+\s+\S{8,}|\bbearer\s+[A-Za-z0-9._~+/=-]{16,}/i;
 
 /**
  * The remedy the refusal advises must not re-trip the refusal. `<REDACTED>` is
@@ -149,7 +168,7 @@ const PLACEHOLDER_RE = /<REDACTED>|\[REDACTED\]|\bREDACTED\b|\*{3,}|x{8,}/gi;
 
 function rejectSecrets(text: string): void {
   const scanned = text.replace(PLACEHOLDER_RE, ' ');
-  if (!SECRET_RE.test(scanned) && !ENV_SECRET_RE.test(scanned)) return;
+  if (!SECRET_RE.test(scanned) && !ENV_SECRET_RE.test(scanned) && !BEARER_RE.test(scanned)) return;
   throw new CliError('USAGE', 'That note looks like it contains a credential.', {
     fix: 'A note is committed and pushed to the shared team repo. Remove the secret (or write <REDACTED> in its place) and retry.',
   });

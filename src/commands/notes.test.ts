@@ -90,15 +90,51 @@ describe('runNotesAdd', () => {
     expect(res.humanLines?.[0]).toContain('Saved note');
   });
 
-  /** `_` is a word character, so `\bsecret` never fires inside a screaming-snake name. */
+  /**
+   * `_` and `-` are what hide the keyword: they sit between it and the `=`, so
+   * `\bsecret\s*[=:]` never fires inside `AWS_SECRET_ACCESS_KEY=…`. And the case
+   * does not pick the shape — a `.env` sample, a config line and an agent
+   * quoting its own shell history are all lowercase.
+   */
   it.each([
     ['an aws secret', 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY fixed it'],
+    [
+      'the same one in lowercase',
+      'aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY fixed it',
+    ],
+    ['a hyphenated name', 'aws-secret-access-key: wJalrXUtnFEMI7K7MDENGbPxRfiCYEXAMPLEKEY'],
     ['a prefixed token', 'export CIRCLE_CI_TOKEN=9fj3ksla02mfk3zz and retry'],
+    ['a lowercase prefixed token', 'export circle_ci_token=9fj3ksla02mfk3zz and retry'],
     ['a suffixed api key', 'STRIPE_API_KEY_LIVE: 9fj3ksla02mfk3zz was the wrong one'],
-  ])('refuses %s in a screaming-snake env name', async (_label, body) => {
+  ])('refuses %s in a compound env name', async (_label, body) => {
     await expect(runNotesAdd({ question: 'q', body }, makeCtx(), { env: {} })).rejects.toThrow(
       /credential/,
     );
+  });
+
+  /**
+   * A pasted curl or a logged request. The header name carries none of the
+   * keywords above, and an opaque bearer token has no vendor prefix to
+   * recognize — a JWT does, which is why only this case was missing.
+   */
+  it.each([
+    ['a bearer header', 'the fix was Authorization: Bearer 4f9c2b7a1d6e8035aa19'],
+    ['a lowercase one', 'sent authorization: bearer 4f9c2b7a1d6e8035aa19 and it worked'],
+    ['a bare bearer token', 'pass Bearer 4f9c2b7a1d6e8035aa19bbcc to the proxy'],
+  ])('refuses %s', async (_label, body) => {
+    await expect(runNotesAdd({ question: 'q', body }, makeCtx(), { env: {} })).rejects.toThrow(
+      /credential/,
+    );
+  });
+
+  /** Prose about credentials is not a credential; a refusal has to be worth it. */
+  it.each([
+    ['prose naming the key', 'the secret access key was wrong, which is why the upload failed'],
+    ['prose about a bearer token', 'it needs a bearer token, not basic auth'],
+    ['a named env var with no value', 'read AWS_SECRET_ACCESS_KEY from the environment instead'],
+  ])('accepts %s', async (_label, body) => {
+    const res = await runNotesAdd({ question: 'q', body }, makeCtx(), { env: {} });
+    expect(res.humanLines?.[0]).toContain('Saved note');
   });
 
   it('lets an ordinary note through', async () => {
