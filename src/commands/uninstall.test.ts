@@ -540,7 +540,7 @@ describe('runUninstall — the push experiment’s arms', () => {
     expect(JSON.parse(after)).toEqual({});
   });
 
-  it('removes them even after `tenjin push off`, and keeps the ledger and the notes', async () => {
+  it('removes them even after `tenjin push off`, and keeps the ledger', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
@@ -549,9 +549,6 @@ describe('runUninstall — the push experiment’s arms', () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'off' } }));
     const ledger = join(data, 'push-ledger.jsonl');
     await writeFile(ledger, '{"at":"2026-08-22T00:00:00.000Z"}\n');
-    const note = join(data, 'notes', 'notes', '20260822-aaaaaa.md');
-    await mkdir(join(data, 'notes', 'notes'), { recursive: true });
-    await writeFile(note, '---\nquestion: "q"\n---\nbody\n');
 
     const { report, text } = await run();
 
@@ -559,9 +556,8 @@ describe('runUninstall — the push experiment’s arms', () => {
     expect(report.settings.hooks).toContain('UserPromptSubmit');
     // Under the data dir, so untouched — and said so in the receipt.
     expect(existsSync(ledger)).toBe(true);
-    expect(existsSync(note)).toBe(true);
     expect(existsSync(join(data, 'config.json'))).toBe(true);
-    expect(text).toContain('team notes and the push ledger');
+    expect(text).toContain('the push ledger under ~/.tenjin');
   });
 
   it('leaves a stranger’s entry on a push-only event alone', async () => {

@@ -94,9 +94,14 @@ describe('runConfigList', () => {
     expect(d['hooks.push']).toEqual({ value: 'off', source: 'default' });
     expect(d['hooks.capture']).toEqual({ value: 'off', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 5 hooks.*
-    // (searchMode, stopNag, sessionPrimer, push, capture) + 1 update.mode.
-    expect(humanLines).toHaveLength(18);
+    expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
+    // REDACTED even here, on a fresh dir where the value is empty: the rendered
+    // shape must not depend on whether there is a secret to leak.
+    expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
+    // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
+    // + 2 publish.* + 5 hooks.* (searchMode, stopNag, sessionPrimer, push,
+    // capture) + 1 update.mode.
+    expect(humanLines).toHaveLength(20);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {

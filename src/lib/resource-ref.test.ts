@@ -21,7 +21,7 @@ const BASE = 'https://tenjin.blog';
 describe('resolveResourceRef', () => {
   it('uses a full https URL verbatim', async () => {
     const ref = await resolveResourceRef('https://tenjin.blog/api/read/iris/slug', dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug' });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', shelfBaseUrl: BASE });
   });
 
   it('resolves a uuid to the stored candidate URL', async () => {
@@ -35,7 +35,11 @@ describe('resolveResourceRef', () => {
       ],
     });
     const ref = await resolveResourceRef(RES, dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', resourceId: RES });
+    expect(ref).toEqual({
+      url: 'https://tenjin.blog/api/read/iris/slug',
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
   });
 
   it('fails RESOURCE_NOT_FOUND for an unknown uuid', async () => {
@@ -61,7 +65,7 @@ describe('resolveResourceRef', () => {
 describe('trailing-slash canonicalization', () => {
   it('resolves a trailing-slash URL to the canonical no-slash form', async () => {
     const ref = await resolveResourceRef('https://tenjin.blog/api/read/iris/slug/', dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug' });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', shelfBaseUrl: BASE });
   });
 
   it('canonicalizes a stored candidate URL on the same terms', async () => {
@@ -75,7 +79,11 @@ describe('trailing-slash canonicalization', () => {
       ],
     });
     const ref = await resolveResourceRef(RES, dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', resourceId: RES });
+    expect(ref).toEqual({
+      url: 'https://tenjin.blog/api/read/iris/slug',
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
   });
 
   it('still refuses an off-origin URL that arrives with a trailing slash', async () => {
@@ -88,7 +96,7 @@ describe('trailing-slash canonicalization', () => {
 
   it('leaves a non-read URL on the base origin alone', async () => {
     const ref = await resolveResourceRef('https://tenjin.blog/api/other/', dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/other/' });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/other/', shelfBaseUrl: BASE });
   });
 });
 
@@ -175,7 +183,11 @@ describe('assertOnBaseOrigin across the deployment alias set', () => {
     });
     // The re-assert runs against the CURRENT base, which is still the old origin
     // on an installed client; the URL is passed through unrewritten.
-    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({ url, resourceId: RES });
+    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({
+      url,
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
   });
 
   it('gives a self-hosted base no aliasing at all', () => {
