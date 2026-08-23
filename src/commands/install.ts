@@ -808,8 +808,15 @@ function hooksLine(io: Io, h: HooksResult): string {
   const arms = pushArmed(h)
     ? ` ${paint(io, 'bold', 'Push arms:')} ${h.pushArms}, from tenjin push on (off: tenjin push off).`
     : '';
-  if (wrote > 0) {
+  if (searchWrote > 0) {
     return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${searchWrote} hook event(s) registered in ${h.path}.${arms} Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+  }
+  // Something WAS registered, but none of it was a search event: `hooks.push`
+  // flipped on by `config set` while the search entries were already current.
+  // Branching on the combined count here printed "0 hook event(s) registered"
+  // on exactly the run that wired the experiment.
+  if (wrote > 0) {
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}.${arms} Change: tenjin config set hooks.searchMode <auto|remind|off>`;
   }
   if (h.skipped === undefined) {
     return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}${arms}`;

@@ -1197,6 +1197,43 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).toContain('Push arms: 6');
   });
 
+  /**
+   * The run that wires the experiment and nothing else: `config set hooks.push
+   * on` on a machine whose search entries are already current. Branching the
+   * message on the COMBINED count while printing the search-only one made this
+   * exact run say "0 hook event(s) registered".
+   */
+  it('does not report zero events on a run that registered only the push arms', async () => {
+    const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ hooks: { searchMode: 'auto', push: 'on' } }),
+    );
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive));
+
+    // Drop the four push-only event keys, leaving every search entry current.
+    // The next run registers push arms and nothing else.
+    const settingsPath = join(home, '.claude', 'settings.json');
+    const parsed = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+      hooks: Record<string, unknown>;
+    };
+    for (const event of [
+      'UserPromptSubmit',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'SubagentStart',
+    ]) {
+      delete parsed.hooks[event];
+    }
+    await writeFile(settingsPath, JSON.stringify(parsed, null, 2));
+
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive));
+    const text = human(res);
+    expect(text).not.toContain('0 hook event(s)');
+    expect(text).toContain('already registered');
+    expect(text).toContain('Push arms: 6');
+  });
+
   // The disclosure names the count, the file and the undo. It does NOT recite the
   // nine rules: that block is `doctor`'s, and the machine envelope carries them.
   // The nudge is written by default now, so its existing disclosure block has to

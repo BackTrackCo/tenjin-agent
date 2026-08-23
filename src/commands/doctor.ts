@@ -845,33 +845,8 @@ const POSTURE: Record<DirState, string> = {
 };
 
 /**
- * The delegated session key `tenjin read` presents to recover a piece this wallet
- * already owns (`tenjin session start --scope read` mints it). Never required and
- * never a fail — `read` works without one — so ABSENT is `ok`: the normal
- * posture, not a defect. So are the states that are ordinary decay rather than
- * damage: an older CLI's file, a spent 24h expiry, a scope that does not cover
- * reading. One command re-mints all of them, and a check that yellowed on them
- * would be permanently yellow on any machine that ever minted a key.
- *
- * A genuine fault still warns, and the states are kept apart on purpose. A 0600 file
- * that is now group-readable, or one whose contents no longer parse, is a TAMPER
- * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
- * and collapses them to "no session", which is the right instruction for a caller
- * that can re-mint and exactly the wrong report for the verb an operator runs
- * when something looks wrong. `readSessionFile` keeps them distinguishable and
- * this is the one caller that needs them.
- *
- * An unreadable file (EACCES after a `sudo` run, EIO) warns rather than throwing:
- * doctor is diagnostics, and a session cache nobody asked about must never take
- * down the run that was going to explain the rest of the machine.
- *
- * Reports address / origin / scope / expiry and nothing else. The delegation and
- * the private JWK never reach this output — doctor's payload is the single most
- * likely thing in this CLI to be pasted into an issue.
- */
-/**
  * The push experiment's TWO halves, asked separately, because either one alone
- * reports a healthy sidecar that does nothing: four generated scripts on disk
+ * reports a healthy sidecar that does nothing: the generated scripts on disk
  * with no settings.json entries pointing at them (a `push on` whose settings
  * write refused), or six entries pointing at scripts that are gone (a
  * half-finished uninstall, a moved data dir). Six entries across five events,
@@ -911,6 +886,31 @@ async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCh
   };
 }
 
+/**
+ * The delegated session key `tenjin read` presents to recover a piece this wallet
+ * already owns (`tenjin session start --scope read` mints it). Never required and
+ * never a fail — `read` works without one — so ABSENT is `ok`: the normal
+ * posture, not a defect. So are the states that are ordinary decay rather than
+ * damage: an older CLI's file, a spent 24h expiry, a scope that does not cover
+ * reading. One command re-mints all of them, and a check that yellowed on them
+ * would be permanently yellow on any machine that ever minted a key.
+ *
+ * A genuine fault still warns, and the states are kept apart on purpose. A 0600 file
+ * that is now group-readable, or one whose contents no longer parse, is a TAMPER
+ * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
+ * and collapses them to "no session", which is the right instruction for a caller
+ * that can re-mint and exactly the wrong report for the verb an operator runs
+ * when something looks wrong. `readSessionFile` keeps them distinguishable and
+ * this is the one caller that needs them.
+ *
+ * An unreadable file (EACCES after a `sudo` run, EIO) warns rather than throwing:
+ * doctor is diagnostics, and a session cache nobody asked about must never take
+ * down the run that was going to explain the rest of the machine.
+ *
+ * Reports address / origin / scope / expiry and nothing else. The delegation and
+ * the private JWK never reach this output — doctor's payload is the single most
+ * likely thing in this CLI to be pasted into an issue.
+ */
 async function checkSession(
   dataDir: string,
   now: () => number,
