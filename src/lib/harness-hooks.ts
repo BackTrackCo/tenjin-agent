@@ -559,7 +559,7 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // Nothing to register: no guard is involved, so the scripts are simply brought
   // up to date. This is the path a re-run takes after an upgrade changed a body.
   if (added.length === 0 && updated.length === 0) {
-    const scripts = await writeScripts(plan, scriptsDir);
+    const scripts = await writeScripts(scriptPlan(dataDir), scriptsDir);
     return {
       harness: 'claude',
       path,
@@ -585,7 +585,7 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
 
   // Past the first guard, and still before the entry that points at them, so a
   // harness never reads an entry naming a file that is not on disk yet.
-  const scripts = await writeScripts(plan, scriptsDir);
+  const scripts = await writeScripts(scriptPlan(dataDir), scriptsDir);
 
   // The SECOND compare sits ADJACENT to the commit, because the writes above are
   // two read/write/rename sequences wide and this is a whole-file replacement
@@ -633,8 +633,27 @@ function refuseChanged(
   };
 }
 
+/**
+ * Every script body this CLI generates, for the WRITER — which is not the same
+ * set as the entry plan.
+ *
+ * `tenjin push off` unwires nothing: the six entries stay registered and keep
+ * invoking the four push scripts, which exit on the config key. Planning the
+ * base four for the writer therefore froze those four bodies at whatever version
+ * was on disk when push was last on, and every later upgrade left six registered
+ * entries running pre-upgrade code whose inertness rested entirely on the
+ * run-time gate keeping the shape it had then. A body that is never registered
+ * is inert and costs a few KB; a stale body that IS registered is a liability.
+ *
+ * So: entries follow `opts.push`, bodies never do.
+ */
+function scriptPlan(dataDir: string): HookSpec[] {
+  return specs(dataDir, { push: true });
+}
+
 /** Bring each script up to date, returning the ones this run actually wrote. A
- *  body that already matches is left alone, so a re-run rewrites nothing. */
+ *  body that already matches is left alone, so a re-run rewrites nothing, and a
+ *  script named by two specs is written once for the same reason. */
 async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<string[]> {
   const written: string[] = [];
   for (const spec of plan) {

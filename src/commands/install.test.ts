@@ -3345,12 +3345,19 @@ describe('runInstall: search hooks', () => {
     expect(h.mode).toBe('auto');
     expect(h.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(h.scriptsDir).toBe(join(data, 'hooks'));
-    expect(h.scripts).toHaveLength(4);
+    // All EIGHT bodies, though only three events are registered: `push off`
+    // unwires nothing, so a body that followed the entry plan would go stale
+    // under an entry that is still firing it.
+    expect(h.scripts).toHaveLength(8);
     for (const file of [
       'tenjin-websearch.mjs',
       'tenjin-dispatch.mjs',
       'tenjin-sessionstart.mjs',
       'tenjin-stop.mjs',
+      'tenjin-push-prompt.mjs',
+      'tenjin-push-failure.mjs',
+      'tenjin-push-subagent.mjs',
+      'tenjin-push-context.mjs',
     ]) {
       expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
     }

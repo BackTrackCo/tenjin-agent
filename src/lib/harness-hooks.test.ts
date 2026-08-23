@@ -213,14 +213,34 @@ describe('wireSearchHooks: push experiment entries', () => {
     expect((settings.hooks as Record<string, unknown>).PostToolUse).toBeUndefined();
     expect((settings.hooks as Record<string, unknown>).PostToolUseFailure).toBeUndefined();
     expect((settings.hooks as Record<string, unknown>).SubagentStart).toBeUndefined();
+    // The BODIES are written unconditionally, and only the entries are gated:
+    // `push off` never unwires, so bodies that follow the entry plan freeze at
+    // whatever version was on disk when push was last on. An unregistered body
+    // is inert; a registered stale one is not.
     for (const file of [
       PUSH_PROMPT_HOOK_FILE,
       PUSH_FAILURE_HOOK_FILE,
       PUSH_SUBAGENT_HOOK_FILE,
       PUSH_CONTEXT_HOOK_FILE,
     ]) {
-      expect(existsSync(join(data, 'hooks', file)), file).toBe(false);
+      expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
     }
+  });
+
+  /**
+   * The sequence that used to leave six registered entries running pre-upgrade
+   * code: wire push, turn it off (which unwires nothing), then upgrade.
+   */
+  it('refreshes the push bodies on a push:false run, entries still registered', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    const path = join(data, 'hooks', PUSH_PROMPT_HOOK_FILE);
+    await writeFile(path, '// an older version of this arm\n');
+
+    const result = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    expect(result.scripts).toContain(path);
+    expect(await readFile(path, 'utf8')).not.toContain('an older version');
+    // Still registered, which is exactly why the body had to be brought forward.
+    expect(entriesFor(await readSettings(), 'UserPromptSubmit')).toHaveLength(1);
   });
 
   it('wires all four push scripts across six entries when push is true', async () => {
