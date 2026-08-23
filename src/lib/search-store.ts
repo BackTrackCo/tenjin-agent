@@ -81,6 +81,26 @@ const StoredSearchSchema = z.object({
   /** Absent on entries written before sources existed; see {@link SearchSourceSchema}. */
   source: SearchSourceSchema.optional(),
   /**
+   * WHICH SHELF ANSWERED, as a base URL. A team-mode search asks the team shelf
+   * and falls through to `publicShelfUrl`, and the two shelves have separate
+   * databases: a searchId minted by one means nothing to the other. Without this
+   * field every close — `tenjin outcome`, and the `--search-id` publish sends
+   * with the piece — went to the configured `baseUrl`, so the ordinary team-miss
+   * / public-hit reported the public marketplace's search to the team shelf,
+   * where it inflates `outcomes_dropped_no_parent` or lands permanently on a post
+   * row, while the shelf that actually served the search hears nothing and its
+   * demand loop stays open.
+   *
+   * The push ledger already carries the same fact per row (`shelf` in
+   * lib/push-scripts.ts); this is that fact where the close paths can read it.
+   *
+   * OPTIONAL, and absent means `baseUrl` — which is what every entry written
+   * before this field existed meant, and what a single-shelf public-mode run
+   * still means. Stored as the URL rather than as `team`/`public` so a re-pointed
+   * `baseUrl` cannot silently re-label an old entry's shelf.
+   */
+  shelfBaseUrl: z.string().optional(),
+  /**
    * The harness session this search was run in, when anything could attribute it.
    * This ledger is MACHINE-GLOBAL, so without it the Stop hook nags whichever
    * session happens to stop next about open loops belonging to a sibling session,

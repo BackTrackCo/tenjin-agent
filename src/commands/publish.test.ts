@@ -1544,6 +1544,65 @@ describe('runPublish on a team shelf', () => {
     expect(sent[0]!.body?.price).toBe('0');
   });
 
+  it('does not claim a search the OTHER shelf answered', async () => {
+    await writeShelfConfig();
+    // The ordinary team-miss / public-hit: the marketplace minted this id, and
+    // the team shelf has never seen it. The server format-validates the uuid and
+    // stores it set-once, so sending it would misfile the attribution on a team
+    // post row permanently while the marketplace's demand loop stays open.
+    const FOREIGN = '0197cccc-dddd-7eee-8fff-aaaaaaaaaaaa';
+    await recordSearch(dir, {
+      searchId: FOREIGN,
+      at: new Date().toISOString(),
+      question: 'a question the public shelf answered',
+      decision: 'CANDIDATES',
+      candidates: [],
+      shelfBaseUrl: PUBLIC,
+    });
+    const file = await writeDoc(CLEAN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    const res = await runPublish(
+      baseArgs(file, { searchId: FOREIGN, mode: 'full-auto' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+
+    // Published, to the team shelf, carrying no foreign attribution.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).not.toHaveProperty('searchId');
+    // And the loop stays OPEN, because `tenjin outcome` can still reach the
+    // shelf that answered — a close here would be a receipt for nothing.
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+    const searches = (res.data as { searches: Array<Record<string, unknown>> }).searches;
+    expect(searches).toEqual([{ id: FOREIGN, closed: false, otherShelf: true, prefill: 'none' }]);
+  });
+
+  it('still claims a search this shelf answered', async () => {
+    await writeShelfConfig();
+    const OWN = '0197cccc-dddd-7eee-8fff-bbbbbbbbbbbb';
+    await recordSearch(dir, {
+      searchId: OWN,
+      at: new Date().toISOString(),
+      question: 'a question the team shelf answered',
+      decision: 'MISS',
+      candidates: [],
+      shelfBaseUrl: TEAM,
+    });
+    const file = await writeDoc(CLEAN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    await runPublish(
+      baseArgs(file, { searchId: OWN, mode: 'full-auto' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(sent[0]!.body?.searchId).toBe(OWN);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
   it('still honours an explicit price', async () => {
     await writeShelfConfig();
     const file = await writeDoc(CLEAN);

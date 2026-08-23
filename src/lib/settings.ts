@@ -138,6 +138,61 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
   return publicOrigin === undefined || !isSameDeployment(origin, publicOrigin);
 }
 
+/** Where a close for one stored search has to go, and whether it carries the key. */
+export interface ShelfRoute {
+  baseUrl: string;
+  bypass?: ShelfBypass;
+  /** False when the entry named a shelf other than the configured `baseUrl`. */
+  configured: boolean;
+}
+
+/**
+ * THE SHELF THAT ANSWERED, for anything closing a loop.
+ *
+ * A team-mode search asks the team shelf and falls through to the public
+ * marketplace, and the two have separate databases: the searchId the public leg
+ * minted exists only there. Posting its outcome to the team shelf tells the team
+ * shelf about a search it never ran (where it retries a parent-not-visible window
+ * and then raises `outcomes_dropped_no_parent`, an alarm meant to mean a broken
+ * fleet) and tells the marketplace — whose demand signal is the entire reason the
+ * verb exists — nothing at all.
+ *
+ * `shelfBaseUrl` is absent on an entry written before it existed and on every
+ * single-shelf public-mode run, and absent means the configured base, which is
+ * what those entries meant.
+ *
+ * THE KEY RIDES THE ORIGIN, not the call site: `bypass` comes back only when the
+ * route is the origin the secret was paired with. The transport re-derives the
+ * same rule from the request URL ({@link shelfBypassHeaders}), so this is the
+ * second of two locks rather than the only one — but a call site that reads
+ * `route.bypass` should never be the place a key first goes off-origin.
+ */
+export function shelfRouteFor(
+  stored: { shelfBaseUrl?: string } | null | undefined,
+  settings: Pick<ResolvedSettings, 'baseUrl' | 'bypass'>,
+): ShelfRoute {
+  const recorded = stored?.shelfBaseUrl;
+  const configuredOrigin = tryOrigin(settings.baseUrl);
+  const recordedOrigin = recorded === undefined ? undefined : tryOrigin(recorded);
+  // An unparseable record is not a second shelf, it is a corrupt field: fall back
+  // to the configured base rather than posting a close nowhere.
+  if (recorded === undefined || recordedOrigin === undefined) {
+    return {
+      baseUrl: settings.baseUrl,
+      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
+      configured: true,
+    };
+  }
+  const configured =
+    configuredOrigin !== undefined && isSameDeployment(recordedOrigin, configuredOrigin);
+  const carries = settings.bypass !== undefined && settings.bypass.origin === recordedOrigin;
+  return {
+    baseUrl: recorded,
+    ...(carries ? { bypass: settings.bypass } : {}),
+    configured,
+  };
+}
+
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   const s = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });

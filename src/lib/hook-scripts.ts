@@ -797,7 +797,15 @@ function budgeted(entries) {
  * Best-effort in every direction, and it NEVER throws: a failed record costs one
  * reminder, while a hook that fails costs the tool call.
  */
-async function recordSearch(searchId, question, decision, candidates, sessionId, source) {
+async function recordSearch(
+  searchId,
+  question,
+  decision,
+  candidates,
+  sessionId,
+  source,
+  shelfBaseUrl,
+) {
   if (typeof searchId !== 'string' || searchId.length === 0) return;
   try {
     mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
@@ -809,6 +817,12 @@ async function recordSearch(searchId, question, decision, candidates, sessionId,
       // session that opened it and nowhere else. Omitted rather than written
       // empty when the payload did not name one: absent means "every session",
       // which is the safe direction for a reminder.
+      //
+      // The shelf stamp is what lets \`tenjin outcome --search-id <id>\` — the
+      // command the Stop hook's own nag prints — reach the shelf that MINTED the
+      // id. In team mode a public-leg answer is an id the team shelf has never
+      // seen, and the two shelves have separate databases. Absent means the
+      // configured base, the same rule lib/search-store.ts states.
       const entry = {
         searchId,
         at: new Date().toISOString(),
@@ -817,6 +831,9 @@ async function recordSearch(searchId, question, decision, candidates, sessionId,
         candidates,
         source,
         ...(sessionId !== null ? { sessionId } : {}),
+        ...(typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0
+          ? { shelfBaseUrl }
+          : {}),
       };
       saveSearches(budgeted([entry, ...existing]));
     });
@@ -1160,6 +1177,8 @@ async function main() {
     found.stored,
     sessionIdOf(input),
     'websearch-hook',
+    // This arm asks one shelf, the configured base, whichever mode it is in.
+    config.baseUrl,
   );
   if (found.decision !== 'CANDIDATES') return quiet();
   const lines = hintLines(found.stored);
@@ -1299,6 +1318,9 @@ async function main() {
   // and is skipped when that is nothing.
   const deadline = Date.now() + SEARCH_TIMEOUT_MS;
   let shelf = teamShelfOrigin(config) === null ? 'public' : 'team';
+  // The base the answering leg was asked on, stamped on the store entry so a
+  // close reaches the shelf that minted the id rather than the configured one.
+  let shelfBase = config.baseUrl;
   // A throw and a null are the same outcome to the caller and to the counter: the
   // marketplace did not answer. Only an ANSWER clears it, and a MISS is an answer.
   let found = null;
@@ -1322,6 +1344,7 @@ async function main() {
       if (second !== null) {
         found = second;
         shelf = 'public';
+        shelfBase = config.publicShelfUrl;
       }
     }
   }
@@ -1340,6 +1363,7 @@ async function main() {
     found.stored,
     sessionId,
     'dispatch-hook',
+    shelfBase,
   );
   if (found.decision !== 'CANDIDATES') return quiet();
   // The subagent arm's handoff (docs/command-reference.md#push-experimental, T5). SubagentStart carries the agent

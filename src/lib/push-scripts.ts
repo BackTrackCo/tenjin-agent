@@ -645,7 +645,15 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
     ledgerAppend({ ...base, action: 'skipped', reason: 'no-answer' });
     return { kind: 'miss' };
   }
-  await recordSearch(found.searchId, query, found.decision, found.stored, sessionId, source);
+  await recordSearch(
+    found.searchId,
+    query,
+    found.decision,
+    found.stored,
+    sessionId,
+    source,
+    shelfBaseUrl,
+  );
   const j = judge(query, found);
   const row = {
     ...base,

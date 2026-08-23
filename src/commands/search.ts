@@ -254,6 +254,12 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     // The Stop hook nags on the two differently, so the tag has to be written
     // here rather than inferred later from anything.
     source: 'cli',
+    // THE LEG THAT ANSWERED, not the configured base. In team mode the public
+    // fallthrough mints its searchId in the public marketplace's database, and a
+    // close posted to the team shelf is both a lie to the team shelf and silence
+    // to the marketplace that did the work. `outcome` and publish's search-close
+    // route on this.
+    shelfBaseUrl: q.baseUrl,
     // Usually absent; see readSessionId. An unstamped entry is raised in every
     // session, which is the safe direction for a reminder.
     ...(q.sessionId !== undefined ? { sessionId: q.sessionId } : {}),

@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
-import { latestSearch } from '../lib/search-store';
+import { latestSearch, loadSearches } from '../lib/search-store';
 import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -756,6 +756,33 @@ describe('runSearch across two shelves', () => {
     const { fetch, sent } = shelves({ [TEAM]: teamHit });
     await runSearch({ question: 'q' }, makeCtx({ baseUrl: TEAM }), { fetchImpl: fetch });
     expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('stamps the answering leg on every entry, so a close can find its shelf', async () => {
+    await writeShelfConfig();
+    const { fetch } = shelves({ [PUBLIC]: publicHit });
+    await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    // Two entries, one per leg, each naming the shelf that MINTED its searchId.
+    // Without this the public leg's id — the ordinary team-miss / public-hit —
+    // is closed against the team shelf, which never ran that search.
+    const stored = await loadSearches(dir);
+    const byId = new Map(stored.map((e) => [e.searchId, e.shelfBaseUrl]));
+    expect(byId.get(publicHit.searchId)).toBe(PUBLIC);
+    expect(byId.get(MISS.searchId)).toBe(TEAM);
+  });
+
+  it('stamps the configured base in public mode, where there is one shelf', async () => {
+    // No secret: one leg, and the stamp says so rather than being left absent.
+    const CONFIGURED = 'https://preview.example';
+    const hit = {
+      ...HIT,
+      items: [{ ...(HIT.items[0] as object), url: `${CONFIGURED}/api/read/iris/slug` }],
+    };
+    const { fetch } = shelves({ [CONFIGURED]: hit });
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    const stored = await loadSearches(dir);
+    expect(stored[0]?.shelfBaseUrl).toBe(CONFIGURED);
   });
 
   it('refuses a team-shelf candidate that points at the public shelf', async () => {

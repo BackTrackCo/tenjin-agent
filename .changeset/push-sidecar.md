@@ -28,6 +28,11 @@ block still applies on every shelf**, in every mode, clearable by nothing — a 
 hosted database with logs and a shared door key. The consent cascade is unchanged as well;
 `review` still asks once per note. Clearing `shelfBypassSecret` puts the warn tier back.
 
+**A closed loop reaches the shelf that answered.** Every search entry records the base URL of
+the leg that minted its searchId, so `tenjin outcome` posts there rather than to whatever
+`baseUrl` currently is, and a `--search-id` the other shelf answered is dropped from the publish
+body and left open rather than misfiled on a post row.
+
 **Push puts a finding in front of you without being asked.** With `hooks.push=on`, four hook
 scripts watch for the moments where an answer is worth more than a search — a failing Bash
 command, a submitted prompt, a subagent dispatch, a stuck read/edit loop — and surface a match

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
-import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
+import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
 import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
@@ -118,6 +118,16 @@ export async function runPublish(
 
   const status = resolveStatus(args, frontmatter);
   if (status !== 'draft') warnUnrecorded(ctx, searchIds, stored);
+  // THE OTHER SHELF'S SEARCHES ARE NOT THIS SHELF'S TO CLAIM. A publish lands on
+  // one shelf; a searchId minted by the other names a row in a database this one
+  // has never seen. The server format-validates the uuid and stores it set-once,
+  // so sending it does not fail — it misfiles the attribution permanently, on the
+  // wrong shelf, while the shelf that actually served the search hears nothing.
+  // Dropped from the body and left OPEN locally, so the close is still reachable
+  // by `tenjin outcome`, which routes to the shelf that answered.
+  const foreignIds = searchIds.filter((id) => !shelfRouteFor(stored.get(id), runtime).configured);
+  const claimableIds = searchIds.filter((id) => !foreignIds.includes(id));
+  if (status !== 'draft') warnForeignShelf(ctx, foreignIds, stored);
   const title = resolveTitle(frontmatter, body);
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
@@ -271,7 +281,7 @@ export async function runPublish(
     // demand either. Sending it on a draft put one demand signal on two posts —
     // no command promotes a draft, so reaching a public piece means a second
     // publish carrying the same id — with one of them possibly never shipping.
-    ...(searchIds.length > 0 && status !== 'draft' ? { searchId: searchIds } : {}),
+    ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
   };
 
   const result = await publishPost(input, auth, {
@@ -290,6 +300,10 @@ export async function runPublish(
   // server has every id, so an unrecorded search warns without costing the rest.
   const searches: SearchReceipt[] = [];
   for (const id of searchIds) {
+    if (foreignIds.includes(id)) {
+      searches.push({ id, closed: false, otherShelf: true, prefill: 'none' });
+      continue;
+    }
     searches.push(
       await closeNamedSearch(
         ctx,
@@ -319,6 +333,27 @@ function warnUnrecorded(
   ctx.io.stderr.write(
     `Not in this machine's search store: ${unrecorded.join(', ')}. The server accepts or refuses the named searches as one batch, so if it has no record of one either, this publish is refused after it is signed. Drop that id to publish without it.\n`,
   );
+}
+
+/**
+ * Named searches this machine recorded against the OTHER shelf, said before the
+ * wallet touch like {@link warnUnrecorded}. Not an error: naming the search a
+ * piece answers is right, and in team mode the public marketplace answering a
+ * team miss is the ordinary path. Only the destination is wrong, and `outcome`
+ * is the verb that reaches it.
+ */
+function warnForeignShelf(
+  ctx: CommandContext,
+  foreignIds: string[],
+  stored: Map<string, StoredSearch>,
+): void {
+  if (foreignIds.length === 0) return;
+  for (const id of foreignIds) {
+    const shelf = stored.get(id)?.shelfBaseUrl;
+    ctx.io.stderr.write(
+      `Search ${id} was answered by ${shelf ?? 'another shelf'}, not the shelf this piece is published to, so it is not claimed here and stays open. Close it there with \`tenjin outcome --search-id ${id} --status used\`.\n`,
+    );
+  }
 }
 
 /**
@@ -360,6 +395,12 @@ interface SearchReceipt {
    * `outcome` report.
    */
   alreadyAnswered?: boolean;
+  /**
+   * The named search was answered by the OTHER shelf, so this publish did not
+   * claim it and the loop is still open. The one `closed: false` case that is a
+   * routing fact rather than a failure; see {@link warnForeignShelf}.
+   */
+  otherShelf?: true;
   prefill: PrefillOutcome;
 }
 
