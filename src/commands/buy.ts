@@ -76,7 +76,10 @@ export async function runBuy(
     args.ref,
     ctx.dataDir,
     settings.baseUrl,
-    settings.publicShelfUrl,
+    // The second origin only exists in TEAM mode. In public mode `publicShelfUrl`
+    // is a shelf nothing falls through to, so widening on it would accept a URL
+    // from an origin no search on this machine can even surface.
+    settings.teamMode ? settings.publicShelfUrl : undefined,
   );
 
   // 1. Library idempotence, BEFORE any network or pay: a resource already on disk

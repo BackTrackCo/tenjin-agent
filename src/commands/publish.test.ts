@@ -1416,3 +1416,108 @@ describe('runPublish — a search the store could not close reports closed:false
     }
   }, 15_000);
 });
+
+/**
+ * TEAM MODE. `baseUrl` is the team's own deployment, `shelfBypassSecret` is set,
+ * and everything the public-shaped consent cascade does is skipped — because a
+ * team shelf is not public, and the scan's whole question is "is this safe to
+ * make public".
+ */
+describe('runPublish on a team shelf', () => {
+  const TEAM = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const SECRET = 'shelf-secret-abc123';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+
+  interface Sent {
+    url: string;
+    headers: Record<string, string>;
+    body: Record<string, unknown> | undefined;
+  }
+
+  function shelfServer(): { fetch: typeof fetch; sent: Sent[] } {
+    const sent: Sent[] = [];
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      sent.push({
+        url: String(url),
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify({ ...CREATED, price: '0' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, sent };
+  }
+
+  /** A ctx with no --base-url, so the shelf config below decides the target. */
+  function teamCtx(): CommandContext {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: true, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  async function writeShelfConfig(): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+    );
+  }
+
+  it('publishes content the public scan would block, free, without asking', async () => {
+    await writeShelfConfig();
+    // Both tiers of the public cascade at once: a hard-block secret AND the
+    // review confirm. Neither runs here.
+    const file = await writeDoc(BLOCK);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    const res = await runPublish(
+      baseArgs(file, { mode: 'review' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
+    // To the team shelf, and nowhere near the public one.
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
+    // Free by default: a teammate must not hit a 402 on their own team's finding.
+    expect(sent[0]!.body?.price).toBe('0');
+  });
+
+  it('still honours an explicit price', async () => {
+    await writeShelfConfig();
+    const file = await writeDoc(CLEAN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+    await runPublish(
+      baseArgs(file, { price: '0.25' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(sent[0]!.body?.price).toBe('250000');
+  });
+
+  it('puts the whole cascade back the moment the secret is cleared', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: '' }),
+    );
+    const file = await writeDoc(BLOCK);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(file, { mode: 'full-auto', yes: true }),
+        teamCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
+    expect(sent).toHaveLength(0);
+  });
+});

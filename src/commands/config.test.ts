@@ -1142,3 +1142,52 @@ describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () =>
     ).rejects.toThrow(CliError);
   });
 });
+
+describe('the shelf keys', () => {
+  const SECRET = 'shelf-secret-abc123';
+
+  it('takes publicShelfUrl as a URL and refuses anything else', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'publicShelfUrl', value: 'https://public.example' }, ctx);
+    expect(set.data).toMatchObject({
+      key: 'publicShelfUrl',
+      value: 'https://public.example',
+      source: 'file',
+    });
+    await expect(
+      runConfigSet({ key: 'publicShelfUrl', value: 'not-a-url' }, ctx),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  /**
+   * A door key that gets a request past Deployment Protection. `--json` is what
+   * an agent reads and what a bug report pastes, so the redaction has to be in
+   * `data`, not only in the rendered line — and it has to hold on the SET echo,
+   * which is the one place the value was just typed.
+   */
+  it('never echoes the bypass secret, on set, get, or list', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    expect(set.data).toMatchObject({ key: 'shelfBypassSecret', value: 'set', source: 'file' });
+    expect(JSON.stringify(set)).not.toContain(SECRET);
+
+    const got = await runConfigGet({ key: 'shelfBypassSecret' }, ctx);
+    expect(got.data).toMatchObject({ value: 'set', source: 'file' });
+    expect(JSON.stringify(got)).not.toContain(SECRET);
+
+    const listed = await runConfigList(ctx);
+    expect(JSON.stringify(listed)).not.toContain(SECRET);
+
+    // The operator's own file still holds it: this is redaction of an output,
+    // not encryption of a setting.
+    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe(SECRET);
+  });
+
+  it('clears back to unset with an empty value, which is how team mode is turned off', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    const cleared = await runConfigSet({ key: 'shelfBypassSecret', value: '' }, ctx);
+    expect(cleared.data).toMatchObject({ value: 'unset' });
+    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe('');
+  });
+});

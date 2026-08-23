@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { fetchJson, fetchFailureToCliError, httpRequest } from './http';
+import {
+  fetchJson,
+  fetchFailureToCliError,
+  httpRequest,
+  shelfBypassHeaders,
+  SHELF_BYPASS_HEADER,
+} from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError } from './errors';
 import { CALLER_USER_AGENT_ENV, TENJIN_PRODUCT, TENJIN_USER_AGENT } from './client-meta';
@@ -575,5 +581,79 @@ describe('a caller header the Headers API rejects is a returned failure, not a t
     });
     expect(res).toMatchObject({ ok: false, kind: 'network' });
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * THE ORIGIN TEST, IN THE TRANSPORT. The bypass secret opens a deployment, and
+ * the CLI talks to two shelves in one session — sometimes inside one fire. The
+ * decision therefore lives here, driven by the request URL, so a call site that
+ * passes the key while fetching the wrong host sends nothing rather than the
+ * key.
+ */
+describe('the team shelf bypass header', () => {
+  const SECRET = 'shelf-secret-abc123';
+  const bypass = { origin: 'https://team.example', secret: SECRET };
+
+  function recorder(): { fetchImpl: typeof fetch; seen: Array<Record<string, string>> } {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+      return jsonResponse({ ok: true });
+    };
+    return { fetchImpl, seen };
+  }
+
+  it('is attached on the bypass origin and on no other, through both transports', async () => {
+    for (const send of [
+      (url: string, o: { fetchImpl: typeof fetch }) =>
+        fetchJson(url, { timeoutMs: 1000, bypass, fetchImpl: o.fetchImpl }),
+      (url: string, o: { fetchImpl: typeof fetch }) =>
+        httpRequest(url, { timeoutMs: 1000, bypass, fetchImpl: o.fetchImpl }),
+    ]) {
+      const rec = recorder();
+      await send('https://team.example/api/search', rec);
+      await send('https://public.example/api/search', rec);
+      // Not a sibling host, and not a different port on the same host: an origin
+      // is scheme + host + port, and anything else is somebody else's server.
+      await send('https://evil.team.example/api/search', rec);
+      await send('https://team.example:8443/api/search', rec);
+      expect(rec.seen.map((h) => h[SHELF_BYPASS_HEADER])).toEqual([
+        SECRET,
+        undefined,
+        undefined,
+        undefined,
+      ]);
+    }
+  });
+
+  it('sends nothing for an empty secret or an unparseable URL', () => {
+    expect(
+      shelfBypassHeaders('https://team.example/x', { origin: bypass.origin, secret: '' }),
+    ).toEqual({});
+    expect(shelfBypassHeaders('https://team.example/x', undefined)).toEqual({});
+    expect(shelfBypassHeaders('not-a-url', bypass)).toEqual({});
+  });
+
+  it('wins the slot on its own origin, and contributes nothing off it', async () => {
+    // The bypass is merged OVER the caller's headers, so on-origin the real
+    // secret replaces whatever a call site put in that slot; off-origin the rule
+    // adds nothing at all, and the caller's own header is the caller's business.
+    const rec = recorder();
+    const planted = { [SHELF_BYPASS_HEADER]: 'planted' };
+    await httpRequest('https://team.example/api/search', {
+      timeoutMs: 1000,
+      headers: planted,
+      bypass,
+      fetchImpl: rec.fetchImpl,
+    });
+    await httpRequest('https://public.example/api/search', {
+      timeoutMs: 1000,
+      headers: planted,
+      bypass,
+      fetchImpl: rec.fetchImpl,
+    });
+    expect(rec.seen[0]?.[SHELF_BYPASS_HEADER]).toBe(SECRET);
+    expect(rec.seen[1]?.[SHELF_BYPASS_HEADER]).toBe('planted');
   });
 });

@@ -121,7 +121,7 @@ export async function runSearch(
           ...truncatedHint(primary.response, request.limit),
           publishBackLine(primary.response.searchId),
         ]
-      : legs.flatMap((leg) => shelfLines(leg, legs.length > 1, request.limit));
+      : legs.flatMap((leg) => shelfLines(leg, settings.teamMode, request.limit));
 
   const data =
     decision === 'MISS'
@@ -129,18 +129,17 @@ export async function runSearch(
       : primary.response;
 
   return {
-    data:
-      legs.length > 1
-        ? {
-            ...(data as object),
-            shelves: legs.map((leg) => ({
-              shelf: leg.shelf,
-              baseUrl: leg.baseUrl,
-              searchId: leg.response.searchId,
-              matched: leg.response.items.length,
-            })),
-          }
-        : data,
+    data: settings.teamMode
+      ? {
+          ...(data as object),
+          shelves: legs.map((leg) => ({
+            shelf: leg.shelf,
+            baseUrl: leg.baseUrl,
+            searchId: leg.response.searchId,
+            matched: leg.response.items.length,
+          })),
+        }
+      : data,
     humanLines,
   };
 }
@@ -234,10 +233,11 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
 }
 
 /**
- * One shelf's candidates. `labelled` is false for a lone shelf, which keeps the
- * public-mode rendering exactly what it always was: a machine reading these
- * lines should not have to learn a new header because a second shelf exists on
- * somebody else's machine.
+ * One shelf's candidates. `labelled` follows TEAM MODE, not the number of legs
+ * that ran: a team-mode reader needs to know which shelf answered even when only
+ * one was asked, and a public-mode reader must see exactly the header this
+ * command has always printed — a machine parsing these lines should not learn a
+ * new shape because a second shelf exists on somebody else's machine.
  */
 function shelfLines(leg: ShelfLeg, labelled: boolean, limit: number): string[] {
   const { response } = leg;

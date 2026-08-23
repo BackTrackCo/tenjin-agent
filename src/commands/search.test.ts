@@ -492,3 +492,148 @@ describe('item URL origin ingest boundary', () => {
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
   });
 });
+
+/**
+ * TEAM MODE, WHERE THERE ARE TWO SHELVES AND ONE DOOR KEY.
+ *
+ * Every case here turns on the same three facts: `baseUrl` is asked first, the
+ * public shelf is asked only when the first had nothing, and the bypass header
+ * reaches `baseUrl`'s origin and no other.
+ */
+describe('runSearch across two shelves', () => {
+  const TEAM = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+  const SECRET = 'shelf-secret-abc123';
+
+  interface Sent {
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  /** A fetch that answers per-origin, recording every request it saw. */
+  function shelves(by: Record<string, unknown>): { fetch: typeof fetch; sent: Sent[] } {
+    const sent: Sent[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      const origin = new URL(url).origin;
+      sent.push({
+        url,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      });
+      return new Response(JSON.stringify(by[origin] ?? MISS), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, sent };
+  }
+
+  function teamCtx(): CommandContext {
+    return makeCtx({ baseUrl: undefined });
+  }
+
+  async function writeShelfConfig(extra: Record<string, unknown> = {}): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        baseUrl: TEAM,
+        publicShelfUrl: PUBLIC,
+        shelfBypassSecret: SECRET,
+        ...extra,
+      }),
+    );
+  }
+
+  const teamHit = {
+    ...HIT,
+    searchId: '0197aaaa-bbbb-cccc-dddd-111111111111',
+    items: [{ ...(HIT.items[0] as object), url: `${TEAM}/api/read/iris/slug` }],
+  };
+  const publicHit = {
+    ...HIT,
+    searchId: '0197aaaa-bbbb-cccc-dddd-222222222222',
+    items: [{ ...(HIT.items[0] as object), url: `${PUBLIC}/api/read/iris/slug` }],
+  };
+
+  it('asks the team shelf and stops there when it answers', async () => {
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({ [TEAM]: teamHit });
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+    expect((result.data as { searchId: string }).searchId).toBe(teamHit.searchId);
+    expect(result.humanLines?.[0]).toContain('on the team shelf');
+    // One leg ran, and it is still named: a team-mode reader has two shelves to
+    // tell apart whether or not both were asked.
+    expect((result.data as { shelves: unknown[] }).shelves).toEqual([
+      { shelf: 'team', baseUrl: TEAM, searchId: teamHit.searchId, matched: 1 },
+    ]);
+  });
+
+  it('falls through to the public shelf, and sends it no key', async () => {
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({ [PUBLIC]: publicHit });
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    // Team first, then public: the order the push hooks use, for the same reason.
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM, PUBLIC]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+    expect(sent[1]?.headers[BYPASS_HEADER]).toBeUndefined();
+
+    const data = result.data as { searchId: string; shelves: Array<Record<string, unknown>> };
+    expect(data.searchId).toBe(publicHit.searchId);
+    // Both legs are named, so a caller can tell "the team shelf had nothing"
+    // from "the team shelf was never asked".
+    expect(data.shelves).toEqual([
+      { shelf: 'team', baseUrl: TEAM, searchId: MISS.searchId, matched: 0 },
+      { shelf: 'public', baseUrl: PUBLIC, searchId: publicHit.searchId, matched: 1 },
+    ]);
+    expect(result.humanLines?.[0]).toContain('on the public shelf');
+  });
+
+  it('names both shelves on a total miss and offers the publish-back on the first', async () => {
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({});
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(2);
+    const lines = result.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('MISS, no candidates');
+    expect(lines).toContain('Asked both shelves: team, then public.');
+    // The publish-back names the shelf a publish would actually go to.
+    expect((result.data as { publishBack: { publish: string } }).publishBack.publish).toContain(
+      MISS.searchId,
+    );
+  });
+
+  it('asks one shelf, and sends no key, without a bypass secret', async () => {
+    // publicShelfUrl configured, no secret: public mode, and nothing changes.
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC }),
+    );
+    const { fetch, sent } = shelves({ [TEAM]: teamHit });
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+    // Unlabelled, exactly as a single-shelf run has always rendered.
+    expect(result.humanLines?.[0]).toMatch(/^1 candidate\(s\) \(searchId /);
+    expect(result.data).not.toHaveProperty('shelves');
+  });
+
+  it('refuses a team-shelf candidate that points at the public shelf', async () => {
+    // A shelf may only surface its own candidates. Widening the ref resolver to
+    // two origins must not widen what one shelf is allowed to claim.
+    await writeShelfConfig();
+    const crossed = {
+      ...teamHit,
+      items: [{ ...(HIT.items[0] as object), url: `${PUBLIC}/api/read/iris/slug` }],
+    };
+    const { fetch } = shelves({ [TEAM]: crossed });
+    await expect(
+      runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
+  });
+});

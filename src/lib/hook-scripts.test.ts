@@ -12,10 +12,12 @@ import {
   PRIMER_TEXT,
   REMIND_LINE,
   dispatchHookScript,
+  prelude,
   sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
+import { shelfBypassHeaders } from './http';
 import {
   pushContextHookScript,
   pushFailureHookScript,
@@ -2869,5 +2871,50 @@ describe('dispatch hook: the ceiling binds without a session id', () => {
     await seedUnstamped(9);
     await runScript(dispatchHookScript(dataDir), unstamped('the last unstamped lookup'));
     expect(hits()).toBe(1);
+  });
+});
+
+/**
+ * ⚠ MIRRORED RULE. The generated scripts cannot import lib/http.ts, so the
+ * origin test that decides where the team shelf's bypass secret may go exists
+ * twice: once in `shelfBypassHeaders` and once inside the prelude. The secret
+ * opens a deployment, so a divergence is not cosmetic — it is the key reaching a
+ * host the CLI's own copy would refuse.
+ *
+ * The generated function is lifted out of the prelude and RUN, against the real
+ * one, over the same inputs. Lifting rather than spawning because this is a pure
+ * function of two values: a subprocess per case would buy nothing but seconds.
+ */
+describe('the bypass rule the hook scripts carry', () => {
+  /** The generated `shelfBypassHeaders`, as a callable. */
+  function generated(): (url: string, config: Record<string, string>) => Record<string, string> {
+    const source = prelude('/tmp/pin', 1000);
+    const at = source.indexOf('function shelfBypassHeaders(');
+    expect(at).toBeGreaterThan(0);
+    // To the closing brace of the function, which is the first line that is a
+    // bare `}` at column zero after the declaration.
+    const end = source.indexOf('\n}\n', at);
+    expect(end).toBeGreaterThan(at);
+    const body = source.slice(at, end + 2);
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    return new Function(`${body}; return shelfBypassHeaders;`)() as ReturnType<typeof generated>;
+  }
+
+  const BASE = 'https://team.example';
+  const SECRET = 'shelf-secret-abc123';
+
+  it.each([
+    ['https://team.example/api/search', SECRET, 'the configured origin'],
+    ['https://team.example:443/api/search', SECRET, 'the default port, spelled out'],
+    ['https://public.example/api/search', SECRET, 'the public shelf'],
+    ['https://evil.team.example/api/search', SECRET, 'a subdomain of the shelf'],
+    ['http://team.example/api/search', SECRET, 'the same host over http'],
+    ['https://team.example:8443/api/search', SECRET, 'another port on the same host'],
+    ['not-a-url', SECRET, 'an unparseable url'],
+    ['https://team.example/api/search', '', 'no secret at all'],
+  ])('agrees with lib/http.ts for %s (%s)', (url, secret) => {
+    const mine = shelfBypassHeaders(url, { origin: new URL(BASE).origin, secret });
+    const theirs = generated()(url, { baseUrl: BASE, shelfBypassSecret: secret });
+    expect(theirs).toEqual(mine);
   });
 });
