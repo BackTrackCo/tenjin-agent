@@ -238,14 +238,14 @@ describe('HOOK_SCRIPT_VERSION', () => {
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '8f5300f0889752c4353913239fd2d000',
-      dispatch: 'df4966e3db1c51d5e05c0c955f1587b5',
-      sessionPrimer: '8bf6ac6f3972a1b2ad9975e915004d60',
-      stop: '00ecd4ae170f5209157c1abd15d6caac',
-      pushPrompt: '7c76eebf38a65e9e9d860075dbb2bcfd',
-      pushFailure: '897c8c1f8bca2c8516e5d97176c21e34',
-      pushSubagent: 'f808dc1934d8718c03a14d61f1ce3ae0',
-      pushContext: 'ed55681c26c5da05962cd227d192dd2a',
+      websearch: 'aa6f3043e6ecea9fa185309e97d7c885',
+      dispatch: '907c4095608eb4e6d3d1557c1c61f299',
+      sessionPrimer: '7b6031b2f299952e5e606d13b9082734',
+      stop: '9c3d49e69ac6e29a67a7fc47d5fffa73',
+      pushPrompt: '9c0fde1cdcecf5d8cdf2f23c1a1dccfc',
+      pushFailure: 'a0d671608f4f5d2c26c66f2bcbad59b8',
+      pushSubagent: 'fcc858a2d45089a7a55dc7b3e442fd24',
+      pushContext: '1eb8f8f8556ea42d40032b4f06d91da5',
     });
   });
 
@@ -2423,6 +2423,40 @@ describe('dispatch hook: a subagent dispatch', () => {
     );
     expect(injected(run)).toContain(REMIND_LINE);
     expect(hits()).toBe(0);
+  });
+
+  it('hooks.dispatchMode splits the dispatch hook from the WebSearch hook', async () => {
+    // A fleet keeps searchMode auto and still sends no subagent prompt anywhere.
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto', dispatchMode: 'remind' } });
+    const remind = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(remind)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto', dispatchMode: 'off' } });
+    const off = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(off.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    // And the other direction: searchMode off, dispatch explicitly auto still asks.
+    await writeConfig({ baseUrl, hooks: { searchMode: 'off', dispatchMode: 'auto' } });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
+    );
+    expect(hits()).toBe(1);
+
+    // The WebSearch hook ignores dispatchMode entirely.
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind', dispatchMode: 'auto' } });
+    const web = await runScript(websearchHookScript(dataDir), webSearchInput('a web question'));
+    expect(injected(web)).toContain(REMIND_LINE);
+    expect(hits()).toBe(1);
   });
 
   it('stays silent on every failure path', async () => {

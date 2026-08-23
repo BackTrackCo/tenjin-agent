@@ -89,6 +89,7 @@ describe('runConfigList', () => {
       source: 'default',
     });
     expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['hooks.dispatchMode']).toEqual({ value: 'inherit', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.push']).toEqual({ value: 'off', source: 'default' });
@@ -99,9 +100,9 @@ describe('runConfigList', () => {
     // shape must not depend on whether there is a secret to leak.
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
-    // + 2 publish.* + 5 hooks.* (searchMode, stopNag, sessionPrimer, push,
-    // capture) + 1 update.mode.
-    expect(humanLines).toHaveLength(20);
+    // + 2 publish.* + 6 hooks.* (searchMode, dispatchMode, stopNag,
+    // sessionPrimer, push, capture) + 1 update.mode.
+    expect(humanLines).toHaveLength(21);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -942,6 +943,7 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     const ctx = makeCtx();
     for (const [key, value] of [
       ['hooks.searchMode', 'remind'],
+      ['hooks.dispatchMode', 'off'],
       ['hooks.stopNag', 'off'],
       ['hooks.sessionPrimer', 'off'],
       ['hooks.push', 'on'],
@@ -967,6 +969,16 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
       data: { value: 'block' },
     });
+
+    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
+
+    const dispatch = await caught(() =>
+      runConfigSet({ key: 'hooks.dispatchMode', value: 'sometimes' }, ctx),
+    );
+    expect(dispatch.code).toBe('USAGE');
+    expect(dispatch.fix).toContain('"inherit"');
 
     const primer = await caught(() =>
       runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),

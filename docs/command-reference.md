@@ -32,7 +32,7 @@ Useful flags:
 
 ### Hooks
 
-`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a `WebSearch` (and, with the push experiment on, before a `WebFetch`). The dispatch hook, on the same key, does the same when a subagent is dispatched, sending the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.searchMode`) checks Tenjin before a `WebSearch` (and, with the push experiment on, before a `WebFetch`). The dispatch hook (`hooks.dispatchMode`, default `inherit` = follow `hooks.searchMode`) does the same when a subagent is dispatched, sending at most 100 characters of the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session; set it to `remind` or `off` to keep subagent prompts on the machine while the WebSearch hook stays on. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
 `tenjin push on` registers six more, across four scripts, described in [Push (experimental)](#push-experimental) below; a plain `tenjin install` on a machine that has never run `tenjin push on` adds nothing beyond these four.
 
@@ -299,7 +299,8 @@ Common keys:
 | `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                                                                             |
 | `publish.mode`         | `review`                   | Publish consent mode.                                                                                                                 |
 | `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                                                                                        |
-| `hooks.searchMode`     | `auto`                     | WebSearch and subagent-dispatch hook behavior.                                                                                        |
+| `hooks.searchMode`     | `auto`                     | WebSearch hook behavior (and the dispatch hook's, unless split below).                                                                |
+| `hooks.dispatchMode`   | `inherit`                  | Subagent-dispatch hook: `inherit` follows `searchMode`; `auto`, `remind`, `off`.                                                      |
 | `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.                                                           |
 | `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                                                                                       |
 | `hooks.push`           | `off`                      | Push experiment master switch: `on`, `off`. Set through `tenjin push on/off`, not `config set`, so the wiring step runs alongside it. |

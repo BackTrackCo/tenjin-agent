@@ -46,6 +46,26 @@ export const SearchHookModeSchema = z.enum(['auto', 'remind', 'off']);
 export type SearchHookMode = z.infer<typeof SearchHookModeSchema>;
 
 /**
+ * What the subagent-dispatch hook does, on its own switch. `inherit` (the
+ * default) follows `hooks.searchMode`, so one setting still governs both hooks
+ * unless an operator splits them; the other three values mean exactly what they
+ * mean for the WebSearch hook. The split exists because a dispatch prompt is the
+ * most sensitive payload any hook sees: a fleet can keep `searchMode auto` and
+ * still run dispatch as `remind` (a local nudge, nothing sent) or `off`.
+ */
+export const DispatchHookModeSchema = z.enum(['inherit', 'auto', 'remind', 'off']);
+export type DispatchHookMode = z.infer<typeof DispatchHookModeSchema>;
+
+/** Validate a dispatch-hook mode at a command edge, like the search-hook one. */
+export function parseDispatchHookModeFlag(value: string, flagName: string): DispatchHookMode {
+  const parsed = DispatchHookModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "inherit", "auto", "remind", or "off".',
+  });
+}
+
+/**
  * Validate a search-hook mode at a command edge (`--search-hooks`), the same way
  * publish-mode values are validated: an unrecognized value is USAGE, never a
  * silent fallback to the default.
@@ -140,6 +160,7 @@ export function parseCaptureModeFlag(value: string, flagName: string): CaptureMo
  */
 const HooksConfigSchema = z.object({
   searchMode: SearchHookModeSchema,
+  dispatchMode: DispatchHookModeSchema,
   stopNag: StopNagModeSchema,
   sessionPrimer: SessionPrimerModeSchema,
   push: PushModeSchema,
@@ -330,7 +351,14 @@ export const CONFIG_DEFAULTS: Config = {
   // leaves the installed script inert without touching settings.json. `push` and
   // `capture` default `off`: the push experiment (docs/command-reference.md#push-experimental) is opt-in only,
   // through `tenjin push on`.
-  hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on', push: 'off', capture: 'off' },
+  hooks: {
+    searchMode: 'auto',
+    dispatchMode: 'inherit',
+    stopNag: 'on',
+    sessionPrimer: 'on',
+    push: 'off',
+    capture: 'off',
+  },
   update: { mode: 'nudge' },
 };
 
@@ -354,6 +382,7 @@ export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 /** The dotted keys `config get/set` accept for the nested hooks block. */
 export const HOOKS_CONFIG_KEYS = [
   'hooks.searchMode',
+  'hooks.dispatchMode',
   'hooks.stopNag',
   'hooks.sessionPrimer',
   'hooks.push',
@@ -416,6 +445,7 @@ export async function loadConfig(dir: string): Promise<Config> {
     install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
     hooks: {
       searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
+      dispatchMode: raw.hooks?.dispatchMode ?? CONFIG_DEFAULTS.hooks.dispatchMode,
       stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
       sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
       push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
@@ -467,6 +497,7 @@ export interface EffectiveSettings {
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   hooksSearchMode: ResolvedSetting<SearchHookMode>;
+  hooksDispatchMode: ResolvedSetting<DispatchHookMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
   hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
   hooksPush: ResolvedSetting<PushMode>;
@@ -512,6 +543,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     hooksSearchMode: resolveHooksSearchMode(config),
+    hooksDispatchMode: resolveHooksDispatchMode(config),
     hooksStopNag: resolveHooksStopNag(config),
     hooksSessionPrimer: resolveHooksSessionPrimer(config),
     hooksPush: resolveHooksPush(config),
@@ -526,6 +558,13 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   const fromFile = config.update?.mode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
+}
+
+/** hooks.dispatchMode: file or default, same shape as hooks.searchMode. */
+function resolveHooksDispatchMode(config: PartialConfig): ResolvedSetting<DispatchHookMode> {
+  const fromFile = config.hooks?.dispatchMode;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.dispatchMode, source: 'default' };
 }
 
 /** hooks.sessionPrimer: file or default, same shape as hooks.searchMode. */
