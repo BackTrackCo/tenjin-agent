@@ -233,19 +233,19 @@ describe('HOOK_SCRIPT_VERSION', () => {
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
   it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(35);
+    expect(HOOK_SCRIPT_VERSION).toBe(36);
     const digests = Object.fromEntries(
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '0feec7a7d7f0aa00f35680b5f35f3942',
-      dispatch: 'bc54b251d74820eff81b775c7cf64fe9',
-      sessionPrimer: '4d28bb5a32b333fd7958dc62eb249b6e',
-      stop: '9c45fe059273887b02801ff829481dc6',
-      pushPrompt: '04cac1352b7cd12459c4ba72059cf971',
-      pushFailure: 'a1f631e01c21d158d65ab51ca9a9b91c',
-      pushSubagent: 'fc10428cd00e8dd735f5ac3cffecb698',
-      pushContext: '5c714d4321aa321f8db523dbb59a0bd9',
+      websearch: 'c6115c2a52ad3eaecbb47fe81d4afafc',
+      dispatch: '111cf5220e55cc68752d02db400f9672',
+      sessionPrimer: '0cf4ec6c1249f5e754b9ecc127e80ad8',
+      stop: '705ef8faa7d4d7e8853ab0655baed6fc',
+      pushPrompt: 'edebaefe30241f027403624a5efef0a4',
+      pushFailure: '27a4b9fe969f2e0311ea6036d0f4014a',
+      pushSubagent: '93d748962f4ce48c27da84746807063a',
+      pushContext: '8676b89915d9ec82319dc66866f9bf09',
     });
   });
 
@@ -2896,7 +2896,6 @@ describe('the bypass rule the hook scripts carry', () => {
     const end = source.indexOf('\n}\n', at);
     expect(end).toBeGreaterThan(at);
     const body = source.slice(at, end + 2);
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
     return new Function(`${body}; return shelfBypassHeaders;`)() as ReturnType<typeof generated>;
   }
 

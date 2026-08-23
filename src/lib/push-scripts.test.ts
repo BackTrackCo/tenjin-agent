@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -789,7 +789,7 @@ const answersOnly =
   (word: RegExp, resourceId: string, bodyMd: string) =>
   (req: StubRequest): { status: number; json: unknown } => {
     if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd } };
-    let query = '';
+    let query: string;
     try {
       query = String((JSON.parse(req.body) as { query?: unknown }).query ?? '');
     } catch {
