@@ -1223,6 +1223,27 @@ describe('the shelf keys', () => {
     expect(based.data).not.toHaveProperty('warning');
   });
 
+  /**
+   * The third key of the same triple. `isTeamShelfOrigin` returns false when
+   * baseUrl matches publicShelfUrl too, so pointing the public shelf at the team
+   * deployment drops the machine out of team mode exactly as unsetting the secret
+   * would — silently, on a key the other two warnings never looked at.
+   */
+  it('warns when publicShelfUrl is pointed at the team shelf itself', async () => {
+    const ctx = makeCtx();
+    const TEAM = 'https://backtrack.tenjin.sh';
+    await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    const based = await runConfigSet({ key: 'baseUrl', value: TEAM }, ctx);
+    expect(based.data).not.toHaveProperty('warning');
+
+    const collided = await runConfigSet({ key: 'publicShelfUrl', value: TEAM }, ctx);
+    const warning = (collided.data as { warning?: string }).warning ?? '';
+    expect(warning).toContain('PUBLIC mode');
+    // The fix names the key that broke the pair, not the other half of it.
+    expect(warning).toContain('tenjin config set publicShelfUrl');
+    expect(warning).not.toContain('config set baseUrl');
+  });
+
   it('says nothing about team mode when no secret is set', async () => {
     const ctx = makeCtx();
     const based = await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx);

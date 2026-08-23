@@ -44,10 +44,11 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
 import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
+import { PUSH_STATE_RETENTION_MS } from './paths';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 37;
+export const HOOK_SCRIPT_VERSION = 38;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -1516,6 +1517,41 @@ function markerExists(name, sessionId) {
 }
 
 /**
+ * Sweep this hook's own leavings: one capture marker per session, forever, on a
+ * machine that never turns push on.
+ *
+ * \`hooks.capture\` is an independent key, and the push core's pruner — the only
+ * other thing that reads this directory — runs from its state save and returns
+ * early on every arm when \`hooks.push\` is not \`on\`. So a capture-only machine
+ * had no pruner at all. Inodes rather than bytes (each marker is a timestamp),
+ * but that directory is also what the push pruner readdirs the day push IS
+ * turned on.
+ *
+ * Same retention as that pruner, from the same constant, and the same posture:
+ * bounded, best-effort, and never the turn end's problem. Only \`capture-\`
+ * markers, because the rest of the directory belongs to the push core and is its
+ * to age out.
+ */
+function pruneCaptureMarkers() {
+  try {
+    const now = Date.now();
+    for (const name of readdirSync(PUSH_DIR)) {
+      if (!name.startsWith('capture-')) continue;
+      const path = join(PUSH_DIR, name);
+      try {
+        if (now - statSync(path).mtimeMs > ${PUSH_STATE_RETENTION_MS}) {
+          rmSync(path, { force: true });
+        }
+      } catch {
+        // Skipped: a marker that cannot be stat'd is not one to delete.
+      }
+    }
+  } catch {
+    // No push directory on this machine yet, which is the common case.
+  }
+}
+
+/**
  * Did this session do any research at all? Two signals, either of which is
  * enough: a search the SESSION asked for (the CLI's own \`tenjin search\`, the
  * WebSearch hook, the dispatch hook), or a push-ledger row showing a finding was
@@ -1762,6 +1798,9 @@ async function main() {
   // that will still be there next time. \`nudge\` says the same words as context
   // and rides along with whatever else this turn had to say.
   const ask = captureAsk(config, sessionId, searches);
+  // AFTER the ask, so a session older than the retention window is not asked a
+  // second time by its own prune. Once per turn end, one bounded readdir.
+  pruneCaptureMarkers();
   const reason = captureReason(config, publishMode);
   if (ask === 'block') emitBlock(reason);
   const nudge = ask === 'nudge' ? reason : null;
@@ -1772,6 +1811,13 @@ async function main() {
   // exact command. Letting the per-search lines run beside it stacks three
   // publish prompts on one turn end, which is how a product reads as harness
   // debug output (tenjin-agent #162). \`hooks.capture off\` restores them.
+  //
+  // AN EXPLICIT DECISION, not an inherited one: the trade is one ask per
+  // SESSION in place of a reminder every turn, so a miss left open early goes
+  // unmentioned for the rest of that session, and the suppression holds whether
+  // or not \`captureAsk\` actually returned anything this turn. Taken knowingly —
+  // three publish prompts on one turn end is the failure that cost more than a
+  // forgotten loop does, and \`hooks.capture off\` is the way back.
   if (config.stopNag === 'off' || config.capture !== 'off') {
     if (nudge !== null) emit('Stop', nudge);
     return quiet();

@@ -691,8 +691,12 @@ function refuse(
   return skip(reason, { harness: 'claude', path, scriptsDir, mode, warning, fix: fixFor(reason) });
 }
 
-/** The four generated push arms, by filename: what `push on` writes and what
- *  `uninstall` removes. */
+/** The four generated push arms, by filename. Written by EVERY install, not only
+ *  by `push on` — the bodies are cheap and inert until an entry points at them,
+ *  and what `push on` adds is the six settings entries. This is also what
+ *  `uninstall` removes. Doctor's `checkPushHooks` reads both halves for that
+ *  reason: `pushScriptsPresent` is true after any install, so only its
+ *  entry-count half distinguishes a wired sidecar from an unwired one. */
 export const PUSH_SCRIPT_FILES = [
   PUSH_PROMPT_HOOK_FILE,
   PUSH_FAILURE_HOOK_FILE,

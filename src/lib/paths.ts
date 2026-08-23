@@ -73,6 +73,17 @@ export function hooksDir(dir: string = dataDir()): string {
 export const PUSH_LEDGER_FILE = 'push-ledger.jsonl';
 export const PUSH_DIR_NAME = 'push';
 
+/**
+ * How long anything under the push dir survives: per-session working state, the
+ * candidate cache, and the Stop hook's capture markers. ONE definition because
+ * two writers prune that directory — the push core on every state save, and the
+ * Stop hook on its own pass, which is the only pruner a machine running
+ * `hooks.capture` with `hooks.push` off ever gets. A day is long enough that no
+ * live session's marker is swept and short enough that the inodes do not build
+ * up on a machine that never turns push on.
+ */
+export const PUSH_STATE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 /** The push experiment's decision ledger (docs/command-reference.md#push-experimental):
  *  one JSON line per push arm's decision, append-only. */
 export function pushLedgerPath(dir: string = dataDir()): string {

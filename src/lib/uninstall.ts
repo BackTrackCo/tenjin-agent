@@ -26,9 +26,11 @@ import {
  * uninstall claims and removes: ownership is by filename in both directions.
  *
  * THE PUSH ARMS ARE IN THIS LIST UNCONDITIONALLY, whatever `hooks.push` says.
- * They are written only when push is on, but uninstall is the command an
- * operator reaches for to get their machine back, and `hooks.push` is a KEPT
- * value under the data dir — reading it here would mean an operator who ran
+ * Every install writes all four bodies (`scriptPlan` is `specs(dataDir, { push:
+ * true })`, and `wireSearchHooks` writes that plan on both paths), so they are on
+ * disk on machines that never ran `tenjin push on` — inert, because nothing
+ * points at them. Uninstall is the command an operator reaches for to get their
+ * machine back, and `hooks.push` is a KEPT value under the data dir — reading it here would mean an operator who ran
  * `tenjin push off` before `tenjin uninstall` kept four generated scripts and
  * six settings.json entries pointing at files that no longer exist. Removal
  * stays ownership-gated either way: a filename we never wrote is not found, and

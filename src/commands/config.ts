@@ -13,7 +13,7 @@ import {
 import { modeGatedPointer } from '../lib/permissions';
 import { stopHookIsCurrent } from '../lib/harness-hooks';
 import { resolveHermesHomeLenient } from '../lib/hermes';
-import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
@@ -278,23 +278,46 @@ export async function runConfigSet(
  * under the public gates. Warn, do not refuse — the pair is legitimately
  * half-set between two commands, and refusing would make the documented order
  * the only order.
+ *
+ * THREE KEYS, not two. `isTeamShelfOrigin` also returns false when `baseUrl`
+ * matches `publicShelfUrl`, so pointing `publicShelfUrl` at the team deployment
+ * drops the machine out of team mode just as surely as unsetting the secret
+ * would. It fails safe and doctor catches it later; this is the warning at the
+ * moment it happens, on the third key of the same triple.
  */
 async function halfWiredTeamShelf(
   configKey: ScalarConfigKey,
   dataDir: string,
 ): Promise<string | undefined> {
-  if (configKey !== 'shelfBypassSecret' && configKey !== 'baseUrl') return undefined;
+  if (
+    configKey !== 'shelfBypassSecret' &&
+    configKey !== 'baseUrl' &&
+    configKey !== 'publicShelfUrl'
+  ) {
+    return undefined;
+  }
   const config = await loadRawConfig(dataDir).catch(() => undefined);
   if (config === undefined) return undefined;
   const s = resolveSettings({ config, flags: {}, env: {} });
   if (s.shelfBypassSecret.value.length === 0) return undefined;
   const baseUrl = s.baseUrl.value;
   if (isTeamShelfOrigin(new URL(baseUrl).origin, s.publicShelfUrl.value)) return undefined;
+  // WHICH KEY BROKE THE PAIR decides which fix to name. A baseUrl that now
+  // matches publicShelfUrl is not "the marketplace" in any recognizable sense —
+  // it is the operator's own two keys pointed at one place — and telling them to
+  // re-point baseUrl would be advice for the other half of the same collision.
+  const isProduction = isSameDeployment(new URL(baseUrl).origin, PRODUCTION_ORIGIN);
+  const cause = isProduction
+    ? `baseUrl is the public marketplace (${baseUrl})`
+    : `baseUrl and publicShelfUrl are the same shelf (${baseUrl})`;
+  const fix = isProduction
+    ? 'Point baseUrl at the team deployment to finish team mode: `tenjin config set baseUrl <team shelf url>`.'
+    : `A team shelf must differ from the shelf it falls through to: \`tenjin config set publicShelfUrl ${PRODUCTION_ORIGIN}\`.`;
   return (
-    `Warning: shelfBypassSecret is set, but baseUrl is the public marketplace (${baseUrl}), ` +
-    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the client ' +
-    'scan and the confirm cascade on. Point baseUrl at the team deployment to finish team ' +
-    'mode: `tenjin config set baseUrl <team shelf url>`.'
+    `Warning: shelfBypassSecret is set, but ${cause}, ` +
+    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the scan’s ' +
+    'warn tier and the confirm cascade on. ' +
+    fix
   );
 }
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1858,6 +1858,37 @@ describe('the capture ask (Stop)', () => {
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(run.stdout).not.toContain('"decision"');
     expect(injected(run)).toBe(publicAsk);
+  });
+
+  /**
+   * hooks.capture is an independent key, and the push core's pruner runs from its
+   * state save, which every arm returns before when hooks.push is not on. So on a
+   * capture-only machine this hook is the ONLY pruner its own markers ever get.
+   */
+  it('prunes its own stale markers, and leaves the push core state alone', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const pushDirPath = join(dataDir, 'push');
+    await mkdir(pushDirPath, { recursive: true });
+
+    const stale = join(pushDirPath, 'capture-asked-old-session');
+    const fresh = join(pushDirPath, 'capture-asked-recent-session');
+    const foreign = join(pushDirPath, `state-${SESSION}.json`);
+    for (const path of [stale, fresh, foreign]) await writeFile(path, '{}');
+    // Two days back, past the 24h retention the push core uses.
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await utimes(stale, old, old);
+    await utimes(foreign, old, old);
+
+    await runScript(stopHookScript(dataDir), stopInput);
+
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    // This session's own marker survives its own prune: it was just written.
+    expect(existsSync(join(pushDirPath, `capture-asked-${SESSION}`))).toBe(true);
+    // Not this hook's to age out, however old: the push core owns the rest of
+    // that directory and prunes it on its own schedule.
+    expect(existsSync(foreign)).toBe(true);
   });
 
   it('asks nothing of a session that did no research, or with capture off', async () => {

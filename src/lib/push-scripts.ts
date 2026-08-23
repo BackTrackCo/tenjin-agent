@@ -32,7 +32,7 @@ export const PUSH_CONTEXT_HOOK_FILE = 'tenjin-push-context.mjs';
  * themselves, and a second copy here is a rename away from a sidecar that reads
  * an empty ledger, silently.
  */
-import { PUSH_LEDGER_FILE, PUSH_DIR_NAME } from './paths';
+import { PUSH_LEDGER_FILE, PUSH_DIR_NAME, PUSH_STATE_RETENTION_MS } from './paths';
 export { PUSH_LEDGER_FILE, PUSH_DIR_NAME };
 
 /** Injections a session may receive at full form; past it the short form only. */
@@ -741,7 +741,7 @@ function saveState(sessionId, state) {
   }
 }
 
-const STATE_RETENTION_MS = 24 * 60 * 60 * 1000;
+const STATE_RETENTION_MS = ${PUSH_STATE_RETENTION_MS};
 function pruneState() {
   try {
     const now = Date.now();
