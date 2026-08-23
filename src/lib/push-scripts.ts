@@ -1,5 +1,5 @@
 /**
- * The push experiment's hook scripts (docs/push.md): Tenjin stops being a tool
+ * The push experiment's hook scripts (docs/command-reference.md#push-experimental): Tenjin stops being a tool
  * the agent calls and becomes a process beside it, which puts a published
  * finding in front of the agent at the moment it is about to need one.
  *

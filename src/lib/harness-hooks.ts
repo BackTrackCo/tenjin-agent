@@ -44,7 +44,7 @@ import type { SearchHookMode } from './config';
  *    entry but one emits `additionalContext` and never `permissionDecision`, so
  *    the tool always proceeds; the Stop and SessionStart hooks only ever add a
  *    line. The one exception is the push experiment's abort-and-answer arm
- *    (docs/push.md): on a strong, free hit it may `permissionDecision: 'deny'`
+ *    (docs/command-reference.md#push-experimental): on a strong, free hit it may `permissionDecision: 'deny'`
  *    the WebSearch/WebFetch call it fired on and hand the model the finding in
  *    its place, and only that arm ever does.
  *
@@ -66,7 +66,7 @@ import type { SearchHookMode } from './config';
 /**
  * The hook events this module writes, in the order they are reported. The last
  * four (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart) exist
- * only for the push experiment's arms (docs/push.md) and carry no entry at all
+ * only for the push experiment's arms (docs/command-reference.md#push-experimental) and carry no entry at all
  * unless `push: true` is passed to {@link wireSearchHooks}.
  */
 export const HOOK_EVENTS = [
@@ -113,7 +113,7 @@ export const DISPATCH_MATCHER = 'Agent|Task';
  *  the original SessionStart printed is already in context. */
 export const SESSION_START_MATCHER = 'startup|clear|compact';
 
-/** The push failure arm (docs/push.md, T3) fires on a Bash tool only, on both the
+/** The push failure arm (docs/command-reference.md#push-experimental, T3) fires on a Bash tool only, on both the
  *  ordinary post-use event and the failure-specific one some harness versions
  *  raise instead. */
 export const PUSH_FAILURE_MATCHER = 'Bash';
@@ -318,7 +318,7 @@ interface HookSpec {
 
 /**
  * The base four search-hook entries, always planned. `opts.push` adds the six
- * push-experiment entries (docs/push.md) on top, across FOUR scripts: the prompt
+ * push-experiment entries (docs/command-reference.md#push-experimental) on top, across FOUR scripts: the prompt
  * and subagent arms carry one entry each, and the failure and context arms carry
  * two apiece because each fires on two different events (a Bash failure surfaces
  * as either PostToolUse or PostToolUseFailure depending on harness version; the
@@ -456,7 +456,7 @@ export interface WireHooksOptions {
   mode: SearchHookMode;
   /** Shell-quoting target; injected so both branches are testable on one machine. */
   platform?: string;
-  /** Also plan the six push-experiment entries (docs/push.md). Defaults to
+  /** Also plan the six push-experiment entries (docs/command-reference.md#push-experimental). Defaults to
    *  false: `tenjin install` on a normal machine registers nothing new, and only
    *  `tenjin push on` (or a later install with `hooks.push` already `on`) passes
    *  true. */

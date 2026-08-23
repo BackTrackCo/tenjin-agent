@@ -366,7 +366,7 @@ function readConfig() {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
     sessionPrimer: primer === 'off' ? 'off' : 'on',
-    // The push experiment (docs/push.md). OFF unless the operator ran
+    // The push experiment (docs/command-reference.md#push-experimental). OFF unless the operator ran
     // \`tenjin push on\`: every push arm checks this before it spends a request.
     push: push === 'on' ? 'on' : 'off',
     // The Stop hook's capture ask. OFF unless the operator chose one of the two
@@ -1161,7 +1161,7 @@ async function main() {
     'dispatch-hook',
   );
   if (found.decision !== 'CANDIDATES') return quiet();
-  // The subagent arm's handoff (docs/push.md T5). SubagentStart carries the agent
+  // The subagent arm's handoff (docs/command-reference.md#push-experimental, T5). SubagentStart carries the agent
   // type and nothing else, so what the subagent is being sent to find out is
   // knowable ONLY here, seconds earlier, in the dispatch that spawned it. The
   // judged candidate is parked in this session's push state and the first

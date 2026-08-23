@@ -711,7 +711,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
 
   // ---- push (sidecar) ----
-  // `tenjin push on|off|status` (docs/push.md): the runtime toggle for the push
+  // `tenjin push on|off|status` (docs/command-reference.md#push-experimental): the runtime toggle for the push
   // experiment, which surfaces a Tenjin finding beside a failing command, a
   // stuck edit loop, or a subagent dispatch, without being asked. See
   // commands/push.ts for the mechanism; this block only wires the three verbs.

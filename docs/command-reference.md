@@ -50,7 +50,7 @@ The push arms count as hook scripts here: `uninstall` removes `tenjin-push-promp
 
 ### `tenjin doctor`
 
-Checks the local environment, API reachability, API contracts, skill wiring, session state, wallet state, and balance. Human output includes `fix:` lines where useful; `--json` includes the permission recommendation under `permissions`.
+Checks the local environment, API reachability, API contracts, skill wiring, session state, wallet state, and balance. With `hooks.push` on it also checks both halves of the push sidecar's wiring — the four scripts on disk and the six settings entries registered — as a warn-only check that can never fail the run. Human output includes `fix:` lines where useful; `--json` includes the permission recommendation under `permissions`.
 
 ### `tenjin update`
 
@@ -305,11 +305,11 @@ Common keys:
 
 ## Push (experimental)
 
-The push experiment (`docs/push.md` in the plan of record) flips Tenjin from a tool the agent calls into a sidecar that watches beside it: a published finding surfaces next to a failing command, a stuck edit loop, or a subagent's first turn, without anyone asking for it. It is off by default and costs nothing until turned on.
+The push experiment flips Tenjin from a tool the agent calls into a sidecar that watches beside it: a published finding surfaces next to a failing command, a stuck edit loop, or a subagent's first turn, without anyone asking for it. It is off by default and costs nothing until turned on.
 
 ### `tenjin push on`
 
-Sets `hooks.push` to `on` and immediately wires the four push hook scripts (six settings entries) into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe):
+Sets `hooks.push` to `on` and immediately wires the four push hook scripts (six settings entries, across five events) into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe). Two runs do not get that far: with `hooks.searchMode off` the command refuses and leaves `hooks.push` as it was (that key is the wiring switch for every hook this CLI writes), and on a machine whose recorded install harness is set and does not include Claude Code it persists `hooks.push: on` but wires nothing, since these arms are Claude Code hooks — `tenjin install --harness claude` then `tenjin push on` wires them.
 
 | Script                     | Event(s)                                   | Matcher                           | What it does                                                                                     |
 | -------------------------- | ------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -322,13 +322,15 @@ A hit is `strong` only when the marketplace returned a rank 2 to beat it (scored
 
 ### `tenjin push off`
 
-Sets `hooks.push` to `off` and returns immediately. Nothing is unwired: every push script reads this key at the top of its own run and exits in milliseconds when it is not `on`, so the change takes effect on the very next hook invocation with no re-install.
+Sets `hooks.push` to `off` and returns immediately. Nothing is unwired: every push script reads this key at the top of its own run and exits in milliseconds when it is not `on`, so the change takes effect on the very next hook invocation with no re-install. One registration outlives it until the next `tenjin install`: `push on` widens the WebSearch hook's matcher to `WebSearch|WebFetch`, and while that stays, a `WebFetch` spawns a hook that reads the key and exits without a word. The next `tenjin install` narrows it back on its own.
 
 To take the scripts and their settings entries away entirely, run `tenjin uninstall`.
 
 ### `tenjin push status [--json]`
 
-Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), whether the four scripts are actually present on disk, and a tally of the last 7 days of ledger rows: total rows, broken down by trigger x action, by shelf (`public` vs. a team's private notes), how many denied a tool call outright, and the total tokens injected. The ledger is read from its last 256 KB (nothing rotates it); on a file larger than that the tally says `retained tail only` and its counts are floors.
+Reports the push mode, the capture mode (`hooks.capture` — see the notes half of the push experiment for what it prompts), and BOTH halves of "wired": whether the four scripts are present on disk, and how many of the six settings entries are actually registered (`present/planned`, with the settings file named). Either half alone reports a healthy sidecar that does nothing — scripts with no entries never run, entries with no scripts fail silently — so `push: on` is flagged as not fully wired unless both agree.
+
+Then a tally of the last 7 days of ledger rows: total rows, how many distinct findings they touched, how many denied a tool call outright, the total tokens injected, and the breakdowns by trigger x action, by shelf (`public` vs. a team's private notes), and by `reason` (why a fire said nothing: `miss`, `weak`, `already-injected`, `lookup-cap`, `quiet`, `no-answer`, `inject-cap-pointer`), sorted by count. The ledger is read from its last 256 KB (nothing rotates it); on a file larger than that the tally says `retained tail only` and its counts are floors.
 
 ```bash
 tenjin push on
@@ -359,11 +361,11 @@ visibility: team
 
 ### `tenjin team init <git-url>`
 
-Clones `<git-url>` into the sidecar. Refuses (without touching anything) if the directory already holds a repo or other content — remove or empty it first, or use `tenjin team sync` if it is already your team's repo.
+Clones `<git-url>` into the sidecar. Refuses (without touching anything) if the directory already holds a repo or other content — remove or empty it first, or use `tenjin team sync` if it is already your team's repo. The URL must name an authenticated transport: `https://`, `ssh://`, `file://`, a `git@host:org/repo.git` address, or an absolute local path. `git://` and `http://` are refused (neither authenticates the server, and every note body the shelf serves is read into a teammate's context), and so is anything git would read as an option or as a command to run.
 
 ### `tenjin team sync`
 
-`git pull --rebase`, then `git push`. Unlike `notes add`/`notes rm` below, a failure here is the whole point of the command and is reported as a real error, not a warning.
+`git pull --rebase`, then `git push`. Unlike `notes add`/`notes rm` below, a failure here is the whole point of the command and is reported as a real error, not a warning. A conflicting rebase is aborted before the error is raised, so the clone is left on your own commits and the fix it prints (rebase by hand, resolve, `git rebase --continue`, retry) is one you can actually run. A rebase that was already in progress before the command started is reported untouched — that one is yours to finish.
 
 ### `tenjin notes add [file]`
 
@@ -377,9 +379,9 @@ Saves a new note. The body comes from `file` or from `--body`, never both.
 | `--body <text>`       | The note body, instead of a file argument.                    |
 | `--source <s>`        | Where this came from, e.g. `session:<id>` or `search:<uuid>`. |
 
-Every field except the body is one line: a newline in `--question`, `--scope`, `--source` or an `--applies-to` entry is refused rather than written, since front matter is line-oriented and a second line is a second field. `add` also refuses a note whose text carries something credential-shaped (a private key block, a vendor token, a `password=`/`api_key:` assignment, a connection string with a password in it) — a note is pushed to the shared team repo and read into every teammate's model context, so the fix is to remove or redact the secret, not to publish it.
+Every field except the body is one line: a newline in `--question`, `--scope`, `--source` or an `--applies-to` entry is refused rather than written, since front matter is line-oriented and a second line is a second field. `add` also refuses a note whose text carries something credential-shaped (a private key block, a vendor token, an assignment whose name says secret — `password=`, `api_key:`, `AWS_SECRET_ACCESS_KEY=` and their lowercase and hyphenated forms — an `Authorization: Bearer` header, or a connection string with a password in it) — a note is pushed to the shared team repo and read into every teammate's model context, so the fix is to remove or redact the secret, not to publish it. It is a best-effort scan of the shapes that actually leak in write-ups, not a proof of absence.
 
-If the sidecar is a git repo, `add` commits and pushes the change (`git add -A && git commit -m "note: <id>" && git push`), best-effort with a 10s timeout per git call: a failure here never fails the command, only prints one warning line, since the note is already saved locally either way. `add` never runs on a machine that has not run `tenjin team init` — the git step is a silent no-op there.
+If the sidecar is a git repo, `add` commits, rebases onto the team's latest, and pushes (`git add -A && git commit -m "note: <id>" && git pull --rebase && git push`), best-effort with a 10s timeout per git call: a failure here never fails the command, only prints one warning line, since the note is already saved locally either way. The pull is what keeps one teammate's push from making every later `notes add` on every other machine non-fast-forward. If it conflicts, the rebase is aborted rather than left half-applied, so the note stays committed on your own branch and the next `notes add` still works; the warning names `tenjin team sync`. If a rebase is already in progress in the sidecar when `notes add` runs, it refuses the git step entirely and says so rather than committing into it. The git step as a whole is a silent no-op on a machine that has not run `tenjin team init`; the note itself is still written.
 
 ### `tenjin notes list [--json]`
 

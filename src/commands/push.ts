@@ -10,7 +10,7 @@ import { pushLedgerPath } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin push on|off|status` (docs/push.md): the runtime toggle for the push
+ * `tenjin push on|off|status` (docs/command-reference.md#push-experimental): the runtime toggle for the push
  * experiment, the sidecar half of the marketplace that surfaces a finding beside
  * a failing command, a stuck edit loop, or a subagent dispatch, without being
  * asked for it first.

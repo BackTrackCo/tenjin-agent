@@ -1521,7 +1521,7 @@ async function resolveHooks(args: {
   const dataDir = ctx.dataDir;
   const hooksRaw = (await loadRawConfig(dataDir)).hooks;
   const stored = hooksRaw?.searchMode;
-  // Whether a past `tenjin push on` armed the push experiment (docs/push.md): a
+  // Whether a past `tenjin push on` armed the push experiment (docs/command-reference.md#push-experimental): a
   // durable config key, read here rather than passed in, so this run's hooks
   // stay in step with it with no separate flag to remember.
   const pushOn = hooksRaw?.push === 'on';

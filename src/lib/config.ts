@@ -94,7 +94,7 @@ export function parseSessionPrimerFlag(value: string, flagName: string): Session
 }
 
 /**
- * Whether the push experiment's hook scripts are wired and speaking (docs/push.md).
+ * Whether the push experiment's hook scripts are wired and speaking (docs/command-reference.md#push-experimental).
  * `on` is what `tenjin push on` writes: `tenjin install` then wires the extra hook
  * entries (prompt, failure, subagent, context) alongside the search hooks it always
  * wires. `off` (the default) leaves any already-wired push scripts on disk but
@@ -113,7 +113,7 @@ export function parsePushModeFlag(value: string, flagName: string): PushMode {
 }
 
 /**
- * What the Stop hook does with an end-of-session capture prompt (docs/push.md's
+ * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
  * notes half): `block` raises a blocking reason, once per session, when the
  * session carried a research signal (a recorded search, or a push-ledger row) and
  * nothing has captured it yet; `nudge` says the same thing as additionalContext
@@ -300,7 +300,7 @@ export const CONFIG_DEFAULTS: Config = {
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json. `push` and
-  // `capture` default `off`: the push experiment (docs/push.md) is opt-in only,
+  // `capture` default `off`: the push experiment (docs/command-reference.md#push-experimental) is opt-in only,
   // through `tenjin push on`.
   hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on', push: 'off', capture: 'off' },
   update: { mode: 'nudge' },

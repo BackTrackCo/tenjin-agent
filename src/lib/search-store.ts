@@ -50,7 +50,7 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * was going to run anyway, which is a much weaker signal, because nobody judged
  * the question suitable for the marketplace before it was sent.
  *
- * `push-hook` is the push experiment's arms (docs/push.md): lookups made on an
+ * `push-hook` is the push experiment's arms (docs/command-reference.md#push-experimental): lookups made on an
  * error or a file the agent touched, never chosen by the agent, so they share
  * the demand budget below and the Stop hook never raises them.
  * `dispatch-hook` is weaker still: DEMAND DATA about what an agent was about to

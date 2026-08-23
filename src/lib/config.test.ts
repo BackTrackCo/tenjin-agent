@@ -146,7 +146,7 @@ describe('publish block', () => {
   });
 });
 
-describe('hooks block: push and capture (docs/push.md)', () => {
+describe('hooks block: push and capture (docs/command-reference.md#push-experimental)', () => {
   it('default off for both, read at run time by the installed scripts', async () => {
     expect(CONFIG_DEFAULTS.hooks.push).toBe('off');
     expect(CONFIG_DEFAULTS.hooks.capture).toBe('off');
