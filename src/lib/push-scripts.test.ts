@@ -1411,6 +1411,44 @@ describe('the context arm (log-only)', () => {
   });
 
   /**
+   * A basename is operator-chosen text that leaves the machine, so it goes
+   * through the same filter as the prompt and the error line. Log-only is not a
+   * containment: `pushDecide` spends the request before it decides not to speak,
+   * so an unscrubbed name is on the wire either way.
+   */
+  it('scrubs a credential out of the churned file name before it leaves', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const secret = 'pk_live_4eC39HqLyjWDarjtT1zdp7dc';
+    const file = join(scriptDir, `${secret}-checkout-session.ts`);
+    await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
+
+    const edit = JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: file },
+    });
+    for (let i = 0; i < 4; i += 1) {
+      const run = await runScript(pushContextHookScript(dataDir), edit);
+      expect(run.stdout).toBe('');
+    }
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ trigger: 'churn', action: 'logged' });
+    // The topic survived; the key did not — neither on the wire nor in the row.
+    // Asserted on the key MATERIAL, not on its `pk_live_` prefix: squashing the
+    // separators to spaces already broke the prefix up, which is exactly what
+    // hid this. The 24 characters after it are under the entropy rule's floor,
+    // so nothing downstream would have caught them.
+    expect(rows[0]!.query).toContain('checkout');
+    expect(rows[0]!.query).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
+    expect(queries().join('\n')).toContain('checkout');
+    expect(queries().join('\n')).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
+  });
+
+  /**
    * Two packages in one file used to cost two round trips of blocking hook time
    * IN FRONT OF the agent's next step, for telemetry the model never sees. They
    * are one round trip now, and the deadline here is what says so: sequential

@@ -1399,9 +1399,14 @@ async function main() {
     if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete state.edits[k];
     saveState(sessionId, state);
     if (n !== CHURN_EDITS) return quiet();
-    const name = filePath.split('/').pop() || '';
+    // SCRUBBED, like every other arm's query. A basename is operator-chosen text
+    // going on the wire, and \`clean()\` is not the secret filter — it bounds the
+    // length and drops control bytes, nothing more. Scrub runs BEFORE the
+    // separators are squashed to spaces, because \`sk_live_...\` in a filename
+    // stops looking like a token the moment its underscores are gone.
+    const name = scrub(filePath.split('/').pop() || '').replace(/\.[^.]+$/, '');
     const packages = packagesInSource(fileHead(filePath)).slice(0, 3);
-    const query = clean((packages.join(' ') + ' ' + name.replace(/\.[^.]+$/, '').replace(/[-_.]/g, ' ')).trim(), 300);
+    const query = clean((packages.join(' ') + ' ' + name.replace(/[-_.]/g, ' ')).trim(), 300);
     if (tokens(query).size < 2) return quiet();
     await pushDecide({
       trigger: 'churn',
