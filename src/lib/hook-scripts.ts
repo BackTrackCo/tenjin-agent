@@ -1279,13 +1279,45 @@ async function main() {
   const health = readHealth();
   if (stopped(health, nowMs)) return quiet();
 
+  // TEAM FIRST, THEN PUBLIC — the same order every other trigger uses, and the
+  // order the plan states for EVERY fire. This arm asked \`baseUrl\` and stopped:
+  // in team mode that is the team shelf and nothing else, so a dispatch prompt
+  // only the public marketplace covers (prose research questions are exactly
+  // what it does cover) produced a team miss, no cache, and nothing for the
+  // SubagentStart arm to inject — while filing every row it did write as
+  // \`team\` by construction, so the per-trigger public/team split the dogfood
+  // reads could not be computed for it at all.
+  //
+  // ONE DEADLINE FOR BOTH LEGS, as in the push core: this hook's watchdog has
+  // room for one search, so the second shelf gets what the first did not spend
+  // and is skipped when that is nothing.
+  const deadline = Date.now() + SEARCH_TIMEOUT_MS;
+  let shelf = teamShelfOrigin(config) === null ? 'public' : 'team';
   // A throw and a null are the same outcome to the caller and to the counter: the
   // marketplace did not answer. Only an ANSWER clears it, and a MISS is an answer.
   let found = null;
   try {
-    found = await askTenjin(question, config);
+    found = await askTenjin(question, config, undefined, undefined, legTimeoutMs(deadline, 0));
   } catch {
     found = null;
+  }
+  if (shelf === 'team' && (found === null || found.decision !== 'CANDIDATES')) {
+    const leg = legTimeoutMs(deadline, 0);
+    if (leg >= SEARCH_MIN_LEG_MS) {
+      let second = null;
+      try {
+        second = await askTenjin(question, config, undefined, config.publicShelfUrl, leg);
+      } catch {
+        second = null;
+      }
+      // The public leg only replaces an answer that was not useful, so a team
+      // MISS is not preferred over a public one — and a public leg that failed
+      // leaves the team's own answer, and the team label, exactly as they were.
+      if (second !== null) {
+        found = second;
+        shelf = 'public';
+      }
+    }
   }
   if (found === null) {
     // Restarted rather than incremented once the window has passed, so an outage
@@ -1321,10 +1353,11 @@ async function main() {
         at: new Date().toISOString(),
         query: question,
         // WHICH SHELF ANSWERED, carried so the subagent arm's ledger row says the
-        // truth. This hook asks \`baseUrl\`, which in team mode IS the team shelf;
-        // a hard-coded 'public' there would file every team hit under the wrong
-        // shelf in the one tally the dogfood reads.
-        shelf: teamShelfOrigin(config) === null ? 'public' : 'team',
+        // truth. Read off the leg that actually produced \`found\`, not off the
+        // mode: deriving it from the mode filed every subagent row as \`team\`
+        // whatever answered, and the dogfood's per-trigger split is exactly that
+        // number.
+        shelf,
         searchId: found.searchId,
         top: judged.top,
         score: judged.score,

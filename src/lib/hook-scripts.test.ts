@@ -2956,3 +2956,141 @@ describe('the bypass rule the hook scripts carry', () => {
     ).toEqual({});
   });
 });
+
+/**
+ * THE DISPATCH ARM ASKS BOTH SHELVES.
+ *
+ * It asked `baseUrl` and stopped, which in team mode is the team shelf and
+ * nothing else — so a dispatch prompt only the public marketplace covers (prose
+ * research questions are exactly what it does cover) produced a team miss, no
+ * cache, and nothing for the SubagentStart arm to inject. Every row it did
+ * write was filed as `team` by construction, which is the one number the
+ * dogfood's per-trigger public/team split is computed from.
+ */
+describe('dispatch hook: two shelves in team mode', () => {
+  const SECRET = 'shelf-secret-abc123';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+
+  /** A second stub server, since `serveJson` tracks only one for cleanup. */
+  async function secondShelf(
+    handler: (base: string) => { status: number; json: unknown },
+  ): Promise<{
+    baseUrl: string;
+    hits: () => number;
+    keys: () => (string | undefined)[];
+    close: () => Promise<void>;
+  }> {
+    let hits = 0;
+    let base = '';
+    const keys: (string | undefined)[] = [];
+    const s = createServer((req, res) => {
+      hits += 1;
+      const key = req.headers[BYPASS_HEADER];
+      keys.push(Array.isArray(key) ? key.join(',') : key);
+      req.on('data', () => {});
+      req.on('end', () => {
+        const out = handler(base);
+        res.writeHead(out.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(out.json));
+      });
+    });
+    await new Promise<void>((res) => s.listen(0, '127.0.0.1', () => res()));
+    const addr = s.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    base = `http://127.0.0.1:${port}`;
+    return {
+      baseUrl: base,
+      hits: () => hits,
+      keys: () => keys,
+      close: () => new Promise<void>((res) => s.close(() => res())),
+    };
+  }
+
+  const cachedShelf = async (sessionId: string): Promise<string | undefined> => {
+    const path = join(dataDir, 'push', `${sessionId}.json`);
+    if (!existsSync(path)) return undefined;
+    const state = JSON.parse(await readFile(path, 'utf8')) as { cache?: { shelf?: string } };
+    return state.cache?.shelf;
+  };
+
+  it('falls through to the public shelf, and files the row under the shelf that answered', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'two-shelf',
+          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
+        }),
+      );
+
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(1);
+      // The key opens the team shelf and no other host, on this path too.
+      expect(pub.keys()).toEqual([undefined]);
+      expect(injected(run) ?? '').toContain(CANDIDATE.title);
+      // `public`, not `team`: read off the leg that answered, not off the mode.
+      expect(await cachedShelf('two-shelf')).toBe('public');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('stops at the team shelf when it answers, and files the row as team', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'team-only',
+          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
+        }),
+      );
+
+      expect(pub.hits()).toBe(0);
+      expect(await cachedShelf('team-only')).toBe('team');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('asks one shelf in public mode, exactly as before', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+      // publicShelfUrl configured, no secret: one shelf, and no second leg.
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        hooks: { push: 'on' },
+      });
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'public-only',
+          prompt: longPrompt('a durable third-party question'),
+        }),
+      );
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(0);
+    } finally {
+      await pub.close();
+    }
+  });
+});
