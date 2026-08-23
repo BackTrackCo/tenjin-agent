@@ -35,7 +35,7 @@ import type {
 } from '../lib/skill-wiring';
 import { fetchJson, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { loadProjectConfig } from '../lib/settings';
+import { loadProjectConfig, resolveShelfBypass } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -184,11 +184,11 @@ export async function collectDoctorChecks(
     project: project?.layer,
   });
   const baseUrl = settings.baseUrl.value;
-  // Paired with baseUrl's origin exactly as resolveContextSettings does it; the
-  // transport refuses to send it anywhere else.
-  const secret = settings.shelfBypassSecret.value;
-  const bypass: ShelfBypass | undefined =
-    secret.length > 0 ? { origin: new URL(baseUrl).origin, secret } : undefined;
+  // The SAME resolver resolveContextSettings uses, not a second copy of the
+  // rule: the key is paired with the origin the operator configured, so
+  // `tenjin doctor --base-url <anywhere>` runs its three probes unauthenticated
+  // instead of sending the team shelf's key to that host three times.
+  const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];

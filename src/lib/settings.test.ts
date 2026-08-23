@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { loadProjectConfig, resolvePublishSettings } from './settings';
+import { loadProjectConfig, resolvePublishSettings, resolveShelfBypass } from './settings';
+import { resolveSettings } from './config';
 import { CliError } from './errors';
 
 const run = promisify(execFile);
@@ -242,5 +243,46 @@ describe('loadProjectConfig — real git check-ignore seam', () => {
     await writeFile(join(projectDir, '.gitignore'), '.tenjin.json\n');
     const ignoredLoad = await loadProjectConfig(projectDir);
     expect(ignoredLoad?.layer.gitignored).toBe(true);
+  });
+});
+
+/**
+ * WHO THE KEY IS PAIRED WITH. `shelfBypassSecret` is file-only, but `baseUrl` is
+ * not: `--base-url` and `TENJIN_BASE_URL` outrank the file. Pairing the secret
+ * with the resolved base URL therefore made one command enough to send the
+ * team's door key anywhere — and the transport's origin test agreed, because the
+ * pair it compares against had been built from the named host. The pair is now
+ * built from the CONFIGURED origin, so a re-pointed run gets no key at all.
+ */
+describe('resolveShelfBypass — the key follows the configured shelf, not the flag', () => {
+  const TEAM = 'https://backtrack.tenjin.sh';
+  const SECRET = 'shelf-secret-abc123';
+  const config = { baseUrl: TEAM, shelfBypassSecret: SECRET };
+
+  const pairFor = (flags: { baseUrl?: string }, env: NodeJS.ProcessEnv = {}) =>
+    resolveShelfBypass(config, resolveSettings({ config, flags, env }));
+
+  it('issues the key when the run is still pointed at the configured shelf', () => {
+    expect(pairFor({})).toEqual({ origin: TEAM, secret: SECRET });
+    // An explicit flag naming the SAME origin is the same run, path and all.
+    expect(pairFor({ baseUrl: `${TEAM}/` })).toEqual({ origin: TEAM, secret: SECRET });
+  });
+
+  it('issues nothing when --base-url re-points the run', () => {
+    expect(pairFor({ baseUrl: 'https://attacker.example' })).toBeUndefined();
+    // Including at the public marketplace: consulting it deliberately must not
+    // put the team deployment's key in a request to it.
+    expect(pairFor({ baseUrl: 'https://tenjin.blog' })).toBeUndefined();
+  });
+
+  it('issues nothing when TENJIN_BASE_URL re-points the run', () => {
+    expect(pairFor({}, { TENJIN_BASE_URL: 'https://attacker.example' })).toBeUndefined();
+  });
+
+  it('issues nothing without a secret, whatever the base URL', () => {
+    const noSecret = { baseUrl: TEAM };
+    expect(
+      resolveShelfBypass(noSecret, resolveSettings({ config: noSecret, flags: {}, env: {} })),
+    ).toBeUndefined();
   });
 });

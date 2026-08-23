@@ -623,6 +623,33 @@ describe('runSearch across two shelves', () => {
     expect(result.data).not.toHaveProperty('shelves');
   });
 
+  it('sends no key, and runs public-mode, when --base-url re-points the run', async () => {
+    // ONE COMMAND WAS ENOUGH TO POST THE KEY ANYWHERE. `--base-url` outranks the
+    // config file, and the pair the transport compares against used to be built
+    // from the resolved value, so the origin test agreed with the attacker. The
+    // pair now comes from the CONFIGURED origin, so a re-pointed run carries no
+    // key — the obvious `--base-url <public shelf>` included.
+    await writeShelfConfig();
+    const ELSEWHERE = 'https://attacker.example';
+    for (const target of [ELSEWHERE, PUBLIC]) {
+      const { fetch, sent } = shelves({
+        [ELSEWHERE]: { ...HIT, items: [] },
+        [PUBLIC]: { ...HIT, items: [] },
+      });
+      await runSearch({ question: 'q' }, makeCtx({ baseUrl: target }), { fetchImpl: fetch });
+      expect(sent.map((s) => new URL(s.url).origin)).toEqual([target]);
+      expect(sent[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+    }
+  });
+
+  it('sends the key when a flag names the configured shelf itself', async () => {
+    // The refusal is about being re-pointed, not about the flag existing.
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({ [TEAM]: teamHit });
+    await runSearch({ question: 'q' }, makeCtx({ baseUrl: TEAM }), { fetchImpl: fetch });
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
   it('refuses a team-shelf candidate that points at the public shelf', async () => {
     // A shelf may only surface its own candidates. Widening the ref resolver to
     // two origins must not widen what one shelf is allowed to claim.
