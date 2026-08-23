@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
 import { latestSearch } from '../lib/search-store';
+import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -621,6 +622,93 @@ describe('runSearch across two shelves', () => {
     // Unlabelled, exactly as a single-shelf run has always rendered.
     expect(result.humanLines?.[0]).toMatch(/^1 candidate\(s\) \(searchId /);
     expect(result.data).not.toHaveProperty('shelves');
+  });
+
+  /**
+   * A BROKEN TEAM SHELF IS A MISS, NOT A STOP. Deployment Protection answers a
+   * rotated or mistyped bypass secret with a 401 page, and `postSearch` turns
+   * any non-2xx into a thrown CliError — so an unguarded first leg meant a typo
+   * took down every `tenjin search` on the machine while tenjin.blog sat there
+   * healthy. The hook path already does the opposite on purpose; this is the CLI
+   * verb catching up.
+   */
+  describe('when the team shelf errors instead of missing', () => {
+    /** The team origin answers `status`; the public origin answers normally. */
+    function brokenTeam(status: number, body: unknown = '<html>Authentication Required</html>') {
+      const sent: string[] = [];
+      const fetchFn = (async (url: string) => {
+        sent.push(new URL(url).origin);
+        if (new URL(url).origin === TEAM) {
+          return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+        }
+        return new Response(JSON.stringify(publicHit), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof fetch;
+      return { fetch: fetchFn, sent };
+    }
+
+    it('falls through to the public shelf and still answers', async () => {
+      await writeShelfConfig();
+      const { fetch, sent } = brokenTeam(401);
+      const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+      expect(sent).toEqual([TEAM, PUBLIC]);
+      expect((result.data as { searchId: string }).searchId).toBe(publicHit.searchId);
+      // The operator hears that the shelf is broken; they just do not lose the search.
+      const lines = result.humanLines?.join('\n') ?? '';
+      expect(lines).toContain('The team shelf');
+      expect(lines).toContain('did not answer');
+      expect(lines).toContain('on the public shelf');
+    });
+
+    it('records the failed leg in `shelves`, with an error rather than a searchId', async () => {
+      await writeShelfConfig();
+      const { fetch } = brokenTeam(500);
+      const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+      const shelves = (result.data as { shelves: Array<Record<string, unknown>> }).shelves;
+      // "Asked and broken" must not read as "asked and empty", nor as "never asked".
+      expect(shelves[0]).toMatchObject({ shelf: 'team', baseUrl: TEAM });
+      expect(typeof shelves[0]?.error).toBe('string');
+      expect(shelves[0]).not.toHaveProperty('searchId');
+      expect(shelves[1]).toMatchObject({ shelf: 'public', matched: 1 });
+    });
+
+    it('still throws when the public shelf fails too', async () => {
+      await writeShelfConfig();
+      const bothDown = (async () =>
+        new Response('nope', { status: 503 })) as unknown as typeof fetch;
+      await expect(
+        runSearch({ question: 'q' }, teamCtx(), { fetchImpl: bothDown }),
+      ).rejects.toBeInstanceOf(CliError);
+    });
+
+    it('still fails closed on a contract mismatch, which is not an outage', async () => {
+      // An off-origin candidate is what a later `buy` would pay, so it stays a
+      // whole-response refusal; degrading it into a quiet fallback would turn a
+      // trust-boundary violation into a shelf that "had nothing".
+      await writeShelfConfig();
+      const crossed = {
+        ...teamHit,
+        items: [{ ...(HIT.items[0] as object), url: `${PUBLIC}/api/read/iris/slug` }],
+      };
+      const { fetch, sent } = shelves({ [TEAM]: crossed });
+      await expect(
+        runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+      expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM]);
+    });
+
+    it('still throws in public mode, where there is nothing to fall through to', async () => {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl: TEAM }));
+      const { fetch, sent } = brokenTeam(401);
+      await expect(
+        runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch }),
+      ).rejects.toBeInstanceOf(CliError);
+      expect(sent).toEqual([TEAM]);
+    });
   });
 
   it('is public mode, one leg and no key, when baseUrl is not a shelf of its own', async () => {

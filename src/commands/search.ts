@@ -73,24 +73,49 @@ export async function runSearch(
   // SHELF ONE IS ALWAYS `baseUrl`, and the label follows the mode: in team mode
   // that origin IS the team shelf, in public mode it is the marketplace.
   const legs: ShelfLeg[] = [];
-  legs.push(
-    await queryShelf({
-      shelf: settings.teamMode ? 'team' : 'public',
-      baseUrl: settings.baseUrl,
-      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
-      request,
-      ctx,
-      settings,
-      sessionId,
-      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    }),
-  );
-  // SHELF TWO, TEAM MODE ONLY, AND ONLY ON A MISS. Same order the push hooks
-  // use, for the same reason: the team's own shelf covers the working day and
-  // the public marketplace is the fallback, so a team hit is never buried under
-  // a page of marketplace results. No bypass here — the transport would drop it
-  // anyway, since this is a different origin.
-  if (settings.teamMode && legs[0]!.response.items.length === 0) {
+  /**
+   * A TEAM SHELF THAT ERRORS IS A MISS, NOT A STOP — the rule the push hooks
+   * already state in so many words (lib/push-scripts.ts shelfDecide: "silencing
+   * the public shelf ... would turn one misconfigured secret into a sidecar that
+   * never speaks again"). `postSearch` throws on any non-200, and Deployment
+   * Protection answers a rotated or mistyped bypass secret with a 401 HTML page,
+   * so an unguarded first leg meant that a typo, a redeploy, or ten minutes of
+   * 500s took down every `tenjin search` on the machine while tenjin.blog sat
+   * there healthy. The failure is reported, not swallowed; it just does not cost
+   * the fallback.
+   *
+   * Two throws are NOT outages and keep propagating. In public mode there is one
+   * shelf and nothing to fall through to. And a CONTRACT_MISMATCH is an ingest
+   * trust-boundary refusal, not a shelf that is down — a response whose candidate
+   * points off the shelf that served it is exactly what `buy` would later pay, so
+   * it fails the command closed rather than degrading into a quiet fallback.
+   */
+  let teamError: string | undefined;
+  try {
+    legs.push(
+      await queryShelf({
+        shelf: settings.teamMode ? 'team' : 'public',
+        baseUrl: settings.baseUrl,
+        ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
+        request,
+        ctx,
+        settings,
+        sessionId,
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      }),
+    );
+  } catch (err) {
+    if (!settings.teamMode) throw err;
+    if (err instanceof CliError && err.code === 'CONTRACT_MISMATCH') throw err;
+    teamError = sanitizeForTerminal(err instanceof Error ? err.message : String(err));
+  }
+  // SHELF TWO, TEAM MODE ONLY, AND ONLY WHEN THE FIRST HAD NOTHING TO GIVE —
+  // no candidates, or no answer at all. Same order the push hooks use, for the
+  // same reason: the team's own shelf covers the working day and the public
+  // marketplace is the fallback, so a team hit is never buried under a page of
+  // marketplace results. No bypass here — the transport would drop it anyway,
+  // since this is a different origin.
+  if (settings.teamMode && (legs[0] === undefined || legs[0].response.items.length === 0)) {
     legs.push(
       await queryShelf({
         shelf: 'public',
@@ -112,8 +137,17 @@ export async function runSearch(
   const primary = legs.find((leg) => leg.response.items.length > 0) ?? legs[0]!;
   const decision = primary.response.items.length > 0 ? 'CANDIDATES' : 'MISS';
 
-  const humanLines: string[] =
-    decision === 'MISS'
+  // Named on its own line, first, whichever way the search then went: a shelf
+  // that is broken is something the operator has to hear about, and the search
+  // succeeding on the fallback is exactly when nothing else would say so.
+  const teamErrorLines =
+    teamError === undefined
+      ? []
+      : [`The team shelf (${settings.baseUrl}) did not answer:`, `  ${teamError}`];
+
+  const humanLines: string[] = [
+    ...teamErrorLines,
+    ...(decision === 'MISS'
       ? [
           `MISS, no candidates (searchId ${primary.response.searchId})`,
           ...missedShelfLines(legs),
@@ -121,7 +155,8 @@ export async function runSearch(
           ...truncatedHint(primary.response, request.limit),
           publishBackLine(primary.response.searchId),
         ]
-      : legs.flatMap((leg) => shelfLines(leg, settings.teamMode, request.limit));
+      : legs.flatMap((leg) => shelfLines(leg, settings.teamMode, request.limit))),
+  ];
 
   const data =
     decision === 'MISS'
@@ -132,12 +167,21 @@ export async function runSearch(
     data: settings.teamMode
       ? {
           ...(data as object),
-          shelves: legs.map((leg) => ({
-            shelf: leg.shelf,
-            baseUrl: leg.baseUrl,
-            searchId: leg.response.searchId,
-            matched: leg.response.items.length,
-          })),
+          shelves: [
+            // The shelf that failed is still a leg that ran, and `shelves` is
+            // where a machine reader learns what each one did. It carries
+            // `error` instead of a searchId, so "asked and broken" is not read
+            // as "asked and empty" — or, worse, as "never asked".
+            ...(teamError !== undefined
+              ? [{ shelf: 'team' as const, baseUrl: settings.baseUrl, error: teamError }]
+              : []),
+            ...legs.map((leg) => ({
+              shelf: leg.shelf,
+              baseUrl: leg.baseUrl,
+              searchId: leg.response.searchId,
+              matched: leg.response.items.length,
+            })),
+          ],
         }
       : data,
     humanLines,
