@@ -26,13 +26,14 @@ export const PUSH_FAILURE_HOOK_FILE = 'tenjin-push-failure.mjs';
 export const PUSH_SUBAGENT_HOOK_FILE = 'tenjin-push-subagent.mjs';
 export const PUSH_CONTEXT_HOOK_FILE = 'tenjin-push-context.mjs';
 
-/** The ledger: one row per push decision, append-only JSON lines. */
-export const PUSH_LEDGER_FILE = 'push-ledger.jsonl';
-/** Per-session working state and the candidate cache the subagent arm reads. */
-export const PUSH_DIR_NAME = 'push';
-/** The team shelf's clone, under the data dir. Mirrors \`notesDir\` in
- *  lib/paths.ts; the generated scripts resolve it themselves. */
-export const NOTES_DIR_NAME = 'notes';
+/**
+ * The ledger file, the per-session state directory, and the team shelf's clone.
+ * Re-exported from lib/paths.ts rather than restated: the generated scripts
+ * resolve these themselves, and a second copy here is a rename away from a
+ * sidecar that reads an empty ledger and finds no notes, silently.
+ */
+import { PUSH_LEDGER_FILE, PUSH_DIR_NAME, NOTES_DIR_NAME } from './paths';
+export { PUSH_LEDGER_FILE, PUSH_DIR_NAME, NOTES_DIR_NAME };
 
 /** Injections a session may receive at full form; past it the short form only. */
 export const PUSH_INJECT_MAX_PER_SESSION = 5;

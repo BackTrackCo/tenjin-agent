@@ -43,7 +43,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // scoring). lib/push-scripts.ts imports the prelude from this file in turn, so
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
-import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
+import { NOTES_DIR_NAME, PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
@@ -1209,7 +1209,7 @@ main().catch(quiet);
  */
 export function sessionPrimerHookScript(dataDir: string): string {
   return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}
-const NOTES_DIR = join(DATA_DIR, 'notes');
+const NOTES_DIR = join(DATA_DIR, ${JSON.stringify(NOTES_DIR_NAME)});
 
 function pullTeamShelf() {
   try {

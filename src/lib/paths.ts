@@ -60,22 +60,31 @@ export function hooksDir(dir: string = dataDir()): string {
 }
 
 /**
- * The push experiment's decision ledger (docs/push.md): one JSON line per push
- * arm's decision, append-only. Mirrors `PUSH_LEDGER_FILE` in lib/push-scripts.ts —
- * kept as a literal here rather than an import, so this foundational module never
- * pulls in the (generator-heavy) push-scripts/hook-scripts chain.
+ * THE ONE PLACE each of these three names is written.
+ *
+ * They used to be literals here AND in lib/push-scripts.ts AND, for the notes
+ * dir, a third time inside the SessionStart script lib/hook-scripts.ts emits —
+ * the split justified by keeping this foundational module clear of the
+ * generator-heavy push-scripts/hook-scripts chain. The dependency only ever
+ * needed to point the other way: this module imports nothing but `node:os` and
+ * `node:path`, so the generators can import IT. Every reader of these paths
+ * fails closed to empty on a rename, which is a sidecar that has quietly stopped
+ * seeing anything rather than an error anybody notices.
  */
+export const PUSH_LEDGER_FILE = 'push-ledger.jsonl';
+export const PUSH_DIR_NAME = 'push';
+export const NOTES_DIR_NAME = 'notes';
+
+/** The push experiment's decision ledger (docs/command-reference.md#push-experimental):
+ *  one JSON line per push arm's decision, append-only. */
 export function pushLedgerPath(dir: string = dataDir()): string {
-  return join(dir, 'push-ledger.jsonl');
+  return join(dir, PUSH_LEDGER_FILE);
 }
 
-/**
- * The push experiment's per-session working state and candidate cache (docs/push.md):
- * edits seen, packages seen, error signatures seen. Mirrors `PUSH_DIR_NAME` in
- * lib/push-scripts.ts, same reason as {@link pushLedgerPath}.
- */
+/** The push experiment's per-session working state and candidate cache: edits
+ *  seen, packages seen, error signatures seen. */
 export function pushDir(dir: string = dataDir()): string {
-  return join(dir, 'push');
+  return join(dir, PUSH_DIR_NAME);
 }
 
 /**
@@ -145,5 +154,5 @@ export function archivedWalletPath(account: string, dir: string = dataDir()): st
  * so a note's filename can never collide with something the repo root carries.
  */
 export function notesDir(dir: string = dataDir()): string {
-  return join(dir, 'notes');
+  return join(dir, NOTES_DIR_NAME);
 }
