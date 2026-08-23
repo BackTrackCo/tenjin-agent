@@ -40,6 +40,8 @@ Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, a
 
 Publishing and editing put content on a public marketplace under your identity. The local scan blocks obvious secrets and private-key material in every mode. Other sensitive context can only be warned about, so the agent still has to use judgment before publishing.
 
+On a [team shelf](./command-reference.md#team-shelf) the destination is the team's own deployment rather than the marketplace, so the warn tier — which asks "is this safe to make public" — is skipped. The block on secrets and private-key material is not: that deployment is still a hosted database with logs and a door key the whole team holds.
+
 When in doubt, publish less context and more reproducible evidence.
 
 ## Permission boundaries

@@ -20,11 +20,13 @@ carries the answering shelf's response plus a `shelves` array naming both legs. 
 the shelf the URL is actually on. In public mode there is one shelf and none of this is
 visible.
 
-**Publishing to a team shelf is free and ungated.** It goes to `baseUrl` only, never to the
-public shelf, and skips the client-side scan, the `needs_confirmation` ack and the publish-mode
-coaching, with the price defaulting to `0`. The scan asks "is this safe to make public", and a
-team shelf is not public — every one of its warnings fires on exactly the findings the shelf
-exists to hold. Clearing `shelfBypassSecret` puts the whole cascade back, byte for byte.
+**Publishing to a team shelf is free, and loses the warn tier only.** It goes to `baseUrl`
+only, never to the public shelf, with the price defaulting to `0`. The scan's WARN tier is
+skipped: those warnings ask "is this safe to make public", and a team shelf is not public, so
+every one of them fires on exactly the findings the shelf exists to hold. **The hard secret
+block still applies on every shelf**, in every mode, clearable by nothing — a team shelf is a
+hosted database with logs and a shared door key. The consent cascade is unchanged as well;
+`review` still asks once per note. Clearing `shelfBypassSecret` puts the warn tier back.
 
 **Push puts a finding in front of you without being asked.** With `hooks.push=on`, four hook
 scripts watch for the moments where an answer is worth more than a search — a failing Bash

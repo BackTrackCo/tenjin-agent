@@ -49,6 +49,12 @@ warning, which `review` surfaces and `--yes` or `full-auto` clear. A secret that
 is not a recognizable shape is a prompt to look, not a stop, and rights and
 employer-internal content have no detector at all.
 
+**On a team shelf** (the user's own second Tenjin deployment — `baseUrl` is not
+tenjin.blog and `shelfBypassSecret` is set) the WARN tier is skipped, because a
+repo slug or an internal hostname is the point of a team note rather than a leak.
+The BLOCKING tier is not: a live credential exits 3 there exactly as it does on
+the marketplace, and no `--yes` and no mode clears it.
+
 It matches patterns, so warnings split in two and only the second is worth the
 user's attention:
 

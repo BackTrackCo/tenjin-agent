@@ -1418,10 +1418,12 @@ describe('runPublish — a search the store could not close reports closed:false
 });
 
 /**
- * TEAM MODE. `baseUrl` is the team's own deployment, `shelfBypassSecret` is set,
- * and everything the public-shaped consent cascade does is skipped — because a
- * team shelf is not public, and the scan's whole question is "is this safe to
- * make public".
+ * TEAM MODE. `baseUrl` is the team's own deployment and `shelfBypassSecret` is
+ * set. Exactly ONE gate changes: the scan's WARN tier is skipped, because those
+ * warnings ask "is this safe to make public" and a team shelf is not public. The
+ * hard secret block and the consent cascade are the same on both shelves — a
+ * team shelf is a hosted database with logs and a shared door key, and `review`
+ * means the same thing wherever the write lands.
  */
 describe('runPublish on a team shelf', () => {
   const TEAM = 'https://team.example';
@@ -1468,16 +1470,39 @@ describe('runPublish on a team shelf', () => {
     );
   }
 
-  it('publishes content the public scan would block, free, without asking', async () => {
+  it('BLOCKS a live secret on the team shelf too, in the most permissive mode', async () => {
     await writeShelfConfig();
-    // Both tiers of the public cascade at once: a hard-block secret AND the
-    // review confirm. Neither runs here.
+    // The tier that does NOT change with the shelf. A team shelf is a hosted
+    // database with logs and a shared door key, so a leaked credential there is
+    // leaked, and eight surfaces promise this block can never be turned off.
     const file = await writeDoc(BLOCK);
+    const { fetch, sent } = shelfServer();
+    const { provider, signCount } = spyProvider();
+
+    await expect(
+      runPublish(
+        baseArgs(file, { mode: 'full-auto', yes: true }),
+        teamCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
+    // Nothing written and no wallet touched, exactly as in public mode.
+    expect(sent).toHaveLength(0);
+    expect(signCount()).toBe(0);
+  });
+
+  it('skips the WARN tier, so auto publishes a note the public scan would stop', async () => {
+    await writeShelfConfig();
+    // WARN is a wallet address here; on a team shelf the real ones are a repo
+    // slug or an internal hostname — the findings the shelf exists to hold. In
+    // public mode this exact input is NEEDS_CONFIRMATION under `auto` (see the
+    // consent matrix above); here it publishes with no --yes.
+    const file = await writeDoc(WARN);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
 
     const res = await runPublish(
-      baseArgs(file, { mode: 'review' }),
+      baseArgs(file, { mode: 'auto' }),
       teamCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );
@@ -1490,13 +1515,42 @@ describe('runPublish on a team shelf', () => {
     expect(sent[0]!.body?.price).toBe('0');
   });
 
+  it('keeps the review confirm: team mode is not a consent bypass', async () => {
+    await writeShelfConfig();
+    // `review` is the user's standing "ask me each time", and it means the same
+    // thing on either shelf. A team that does not want the ask sets
+    // publish.mode auto or full-auto, as the dogfood protocol does.
+    const file = await writeDoc(CLEAN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    await expect(
+      runPublish(
+        baseArgs(file, { mode: 'review' }),
+        teamCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(sent).toHaveLength(0);
+
+    // ...and --yes clears it, publishing free to the team shelf.
+    const res = await runPublish(
+      baseArgs(file, { mode: 'review', yes: true }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body?.price).toBe('0');
+  });
+
   it('still honours an explicit price', async () => {
     await writeShelfConfig();
     const file = await writeDoc(CLEAN);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
     await runPublish(
-      baseArgs(file, { price: '0.25' }),
+      baseArgs(file, { price: '0.25', mode: 'full-auto' }),
       teamCtx(),
       hermetic({ fetchImpl: fetch, provider }),
     );

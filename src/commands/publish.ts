@@ -158,18 +158,16 @@ export async function runPublish(
     env,
   });
   // The resolver's downgrade warnings, a mistyped env mode, and the one-line
-  // explainer for an unconfigured mode: all stderr, all invisible to --json.
-  // Silent in team mode, where the consent cascade below does not run and
-  // coaching the operator toward `auto` would be advice about a gate that is
-  // already not in the way.
-  if (!runtime.teamMode) {
-    writeModeNotices(
-      ctx.io.stderr,
-      settings,
-      env,
-      'each publish asks you once. Set auto to publish clean scans automatically',
-    );
-  }
+  // explainer for an unconfigured mode: all stderr, all invisible to --json. On
+  // every shelf, because the cascade below runs on every shelf: in team mode
+  // `review` still asks once per note, so the line pointing at `auto` is the
+  // right advice rather than advice about a gate that is not in the way.
+  writeModeNotices(
+    ctx.io.stderr,
+    settings,
+    env,
+    'each publish asks you once. Set auto to publish clean scans automatically',
+  );
   // FREE BY DEFAULT ON THE TEAM SHELF. The default price exists to stop a public
   // piece being given away by accident; a team shelf has no buyers, and a
   // teammate hitting a 402 on their own team's finding is the loop not working.
@@ -181,21 +179,24 @@ export async function runPublish(
     runtime.teamMode ? '0' : settings.defaultPriceAtomic,
   );
 
-  // The scan runs in EVERY publish mode (D38): it gates the gate, it does not
-  // replace it. What it covers and why is on `scanDraft` below.
+  // The scan runs in EVERY publish mode (D38) and on EVERY shelf: it gates the
+  // gate, it does not replace it. What it covers and why is on `scanDraft` below.
   //
-  // BUT NOT IN TEAM MODE, and this is the one place the two modes really diverge.
-  // The scan asks "is this safe to make public": it blocks on a secret and warns
-  // on a private-looking reference — a repo slug, an internal hostname, an
-  // employer's name. A team shelf is a second deployment only this team can
-  // reach, so every one of those warnings is a false positive on exactly the
-  // findings the loop exists to capture ("a quirk of THIS codebase"), and each
-  // one costs a --yes round trip the agent has to be taught to do. The block on
-  // credentials is dropped with it, deliberately: this is a private deployment,
-  // the operator configured it themselves, and a gate that fires on every note
-  // is a gate nobody reads. `tenjin config set shelfBypassSecret ""` puts the
-  // whole cascade back.
-  const findings = runtime.teamMode ? [] : await scanDraft(args, cwd, raw, card);
+  // TEAM MODE DROPS THE WARN TIER AND NOTHING ELSE. The scan asks two different
+  // questions under one name. "Is this safe to make PUBLIC" is the warn tier — a
+  // repo slug, an internal hostname, an employer's name — and on a second
+  // deployment only this team can reach, every one of those is a false positive
+  // on exactly the findings the loop exists to capture ("a quirk of THIS
+  // codebase"), each costing a --yes round trip the agent has to be taught to do.
+  // "Is this a live credential" is the block tier, and that question has the same
+  // answer on every shelf: a team shelf is a hosted Postgres with logs and a
+  // static shared door key, and a leaked key there is leaked. It is also silent
+  // on a clean note, so keeping it costs the capture loop nothing. The block tier
+  // is therefore NEVER skipped and never clearable by --yes, here or anywhere:
+  // that invariant is stated to operators (lib/permissions.ts) and to models
+  // (mcp/server.ts) and it holds in team mode too.
+  const scanned = await scanDraft(args, cwd, raw, card);
+  const findings = runtime.teamMode ? scanned.filter((f) => f.severity === 'block') : scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 
@@ -215,10 +216,14 @@ export async function runPublish(
     });
   }
 
-  // --yes clears the soft findings and the review confirm alike. In team mode
-  // there is nothing to confirm: no scan ran, and `review` asking once per note
-  // is the ask that made in-session capture fail in the first place.
-  if (!runtime.teamMode && needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
+  // --yes clears the soft findings and the review confirm alike, on every shelf.
+  // TEAM MODE CHANGES NOTHING HERE EITHER: `review` still asks once per note, and
+  // a team that finds that ask is the thing making in-session capture fail turns
+  // it off the way everyone else does, with `publish.mode auto` (the dogfood
+  // protocol sets `full-auto`). What team mode does change is the input: `warns`
+  // is empty above, so `auto` and `full-auto` are promptless on every team note
+  // rather than only on the clean ones.
+  if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
     throw new CliError('NEEDS_CONFIRMATION', confirmMessage(warns.length, price.usd), {
       fix: 'Review the findings, then re-run with --yes (or resolve the source and re-run).',
       details: {
