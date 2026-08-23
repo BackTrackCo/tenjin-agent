@@ -73,6 +73,10 @@ describe('runTeamInit', () => {
     ['a leading-dash option', '--upload-pack=touch /tmp/pwned'],
     ['a short-flag option', '-uecho'],
     ['the ext transport', "ext::sh -c 'touch /tmp/pwned'"],
+    // No server authentication and no integrity, and every body the shelf serves
+    // is inlined into a teammate's context. Refused like the `http://` beside it.
+    ['the git transport', 'git://github.com/org/repo.git'],
+    ['plain http', 'http://github.com/org/repo.git'],
     ['an unknown scheme', 'javascript:alert(1)'],
     ['a relative path', '../../etc'],
     ['a bare word', 'origin'],
@@ -93,7 +97,6 @@ describe('runTeamInit', () => {
   it.each([
     ['https', 'https://github.com/org/repo.git'],
     ['ssh', 'ssh://git@github.com/org/repo.git'],
-    ['git', 'git://github.com/org/repo.git'],
     ['file', 'file:///srv/notes.git'],
     ['scp-like', 'git@github.com:org/repo.git'],
   ])('accepts a %s URL', async (_label, gitUrl) => {

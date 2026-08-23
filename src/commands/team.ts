@@ -30,11 +30,18 @@ export interface TeamInitDeps {
  */
 const CLONE_TIMEOUT_MS = 120_000;
 
-/** Transports a clone URL may name. Deliberately short, and \`ext\` is the one
- *  that matters by its absence: \`ext::sh -c '<anything>'\` is a documented git
- *  transport that RUNS A SHELL COMMAND during clone, so a URL is not merely an
- *  address — it is potentially a program. */
-const CLONE_SCHEMES = new Set(['ssh', 'https', 'git', 'file']);
+/** Transports a clone URL may name. Deliberately short, and two absences carry
+ *  the weight.
+ *
+ *  \`ext\`: \`ext::sh -c '<anything>'\` is a documented git transport that RUNS A
+ *  SHELL COMMAND during clone, so a URL is not merely an address — it is
+ *  potentially a program.
+ *
+ *  \`git\`: the git:// protocol authenticates no server and integrity-checks
+ *  nothing, so whatever answers on port 9418 becomes the shelf. Every note body
+ *  it serves is inlined into a teammate's context by the push hook, which is a
+ *  worse outcome than the \`http://\` this list already refuses. */
+const CLONE_SCHEMES = new Set(['ssh', 'https', 'file']);
 /** \`git@github.com:org/repo.git\`, the form everyone actually pastes. The
  *  negative lookahead keeps it from swallowing a \`scheme://\` that got here by
  *  another route. */
@@ -55,7 +62,7 @@ const LOCAL_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])/;
 function assertCloneUrl(gitUrl: string): void {
   const refuse = (why: string): never => {
     throw new CliError('USAGE', `${why}`, {
-      fix: 'Pass an https://, ssh://, git://, file:// URL, a git@host:org/repo.git address, or an absolute local path.',
+      fix: 'Pass an https://, ssh:// or file:// URL, a git@host:org/repo.git address, or an absolute local path.',
     });
   };
   if (gitUrl.trim() === '') refuse('`tenjin team init` needs a git URL.');
