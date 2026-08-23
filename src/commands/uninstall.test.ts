@@ -217,6 +217,15 @@ describe('runUninstall — a fully installed machine', () => {
      * to be told, and the receipt is where they are looking.
      */
     expect(text).toContain('publish.mode included');
+    /**
+     * And the one kept value that is not the operator's own: the team shelf's
+     * door key is shared with everyone else behind that deployment, so an
+     * uninstall that reads as "handing this machine on" has to name it and say
+     * how to clear it. Clearing it FOR them is not on: the key is not ours to
+     * revoke, and a teammate's shelf must not go dark over an uninstall.
+     */
+    expect(text).toContain('shelfBypassSecret');
+    expect(text).toContain('tenjin config set shelfBypassSecret ""');
     for (const item of report.kept) {
       expect(item, item).not.toMatch(/everything under/i);
     }

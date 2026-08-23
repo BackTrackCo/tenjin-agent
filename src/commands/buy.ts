@@ -4,6 +4,7 @@ import { resolveContextSettings } from '../lib/settings';
 import { resolveResourceRef } from '../lib/resource-ref';
 import { findSearchForResource } from '../lib/search-store';
 import { fetchRead, type Preview } from '../lib/read-client';
+import type { ShelfBypass } from '../lib/http';
 import { buildSiwxHeader } from '../lib/siwx';
 import { buildExactPayment } from '../lib/x402-pay';
 import { gateSpend } from '../lib/spend-gate';
@@ -273,7 +274,18 @@ async function siwxRedeliver(
   url: string,
   baseUrl: string,
   signer: TenjinSigner,
-  fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch; searchId?: string },
+  // THE REAL SHAPE, `bypass` included. It compiles either way — the caller
+  // passes a variable, so excess-property checking does not apply, and the
+  // `{ ...fetchOpts }` below forwards the key at run time. But a refactor that
+  // destructures the named fields instead of spreading would drop the team
+  // shelf's door key silently, and only this redelivery leg would show it, as a
+  // Deployment Protection 401 HTML page rather than as a missing header.
+  fetchOpts: {
+    timeoutMs: number;
+    fetchImpl?: typeof fetch;
+    searchId?: string;
+    bypass?: ShelfBypass;
+  },
   presentOpts: PresentOpts,
   network: string,
 ): Promise<CommandResult> {

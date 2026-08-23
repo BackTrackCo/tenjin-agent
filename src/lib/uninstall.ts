@@ -128,9 +128,19 @@ export type SettingsSkipReason =
  * remembered mode. That is the intended model (installing is the consent, each
  * time), and docs/agent-permissions.md carries the full paragraph, but an operator
  * uninstalling to revoke should not have to find it there.
+ *
+ * `shelfBypassSecret` gets its own item for a different reason: every other kept
+ * value is the operator's own state, and that one is a SHARED TEAM CREDENTIAL —
+ * the door key to a deployment their teammates are also behind. An uninstall is
+ * often "I am handing this machine on", and a kept-items list that says only
+ * "config" leaves the key readable for whoever gets it next. Named, with the one
+ * command that clears it, because the alternative is clearing it for them: the
+ * key is not ours to revoke, and a teammate's shelf must not go dark because
+ * somebody uninstalled the CLI.
  */
 export const KEPT_ITEMS: readonly string[] = [
   'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
+  'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
   'the push ledger under ~/.tenjin (it is the experiment’s only record)',
   'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
 ];
