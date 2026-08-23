@@ -1190,4 +1190,30 @@ describe('the shelf keys', () => {
     expect(cleared.data).toMatchObject({ value: 'unset' });
     expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe('');
   });
+
+  /**
+   * Team mode takes two settings, set by two independent commands, and the CLI
+   * fails the half-wired state safe to PUBLIC mode. Safe, but silent is what
+   * made it survivable: an operator who believes they are on a private shelf
+   * would keep writing internal notes at a command that publishes to
+   * tenjin.blog. So the half is named at the moment it is created.
+   */
+  it('warns when the secret is set while baseUrl is still the public marketplace', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    const warning = (set.data as { warning?: string }).warning ?? '';
+    expect(warning).toContain('PUBLIC mode');
+    expect(set.humanLines?.join('\n')).toContain('PUBLIC mode');
+    expect(JSON.stringify(set)).not.toContain(SECRET);
+
+    // Finishing the setup clears it, from either side of the pair.
+    const based = await runConfigSet({ key: 'baseUrl', value: 'https://backtrack.tenjin.sh' }, ctx);
+    expect(based.data).not.toHaveProperty('warning');
+  });
+
+  it('says nothing about team mode when no secret is set', async () => {
+    const ctx = makeCtx();
+    const based = await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx);
+    expect(based.data).not.toHaveProperty('warning');
+  });
 });

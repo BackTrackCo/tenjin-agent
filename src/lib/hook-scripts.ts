@@ -402,9 +402,45 @@ function readConfig() {
 }
 
 /**
+ * The team shelf's origin, or null when this machine is in public mode.
+ *
+ * ⚠ MIRRORED, MUST UPDATE TOGETHER with src/lib/settings.ts
+ * (\`resolveShelfBypass\` / \`isTeamShelfOrigin\`). TEAM MODE IS NOT "A SECRET IS
+ * SET": it is "a secret is set AND \`baseUrl\` is a shelf of the team's own".
+ * Both \`baseUrl\` and \`publicShelfUrl\` default to the marketplace, so a machine
+ * that got the secret but not the base URL — the day-0 setup is two independent
+ * commands — would otherwise call the PUBLIC MARKETPLACE its team shelf: it
+ * would post the team's key there, search that one origin twice per fire, and
+ * file marketplace hits in the ledger as team hits, which is the exact tally the
+ * dogfood reads. A secret with no private shelf behind it is an unfinished
+ * setup, and it fails safe to public mode.
+ */
+function teamShelfOrigin(config) {
+  if (typeof config.shelfBypassSecret !== 'string' || config.shelfBypassSecret === '') return null;
+  let base;
+  try {
+    base = new URL(config.baseUrl).origin;
+  } catch {
+    return null;
+  }
+  if (sameDeployment(base, ${JSON.stringify(PRODUCTION_ORIGIN)})) return null;
+  try {
+    if (sameDeployment(base, new URL(config.publicShelfUrl).origin)) return null;
+  } catch {
+    /* an unparseable public shelf cannot make \`base\` public */
+  }
+  return base;
+}
+
+/** Two origins that reach the same deployment; mirrors isSameDeployment. */
+function sameDeployment(a, b) {
+  return a === b || (KNOWN_ORIGINS.includes(a) && KNOWN_ORIGINS.includes(b));
+}
+
+/**
  * The team shelf's Vercel "Protection Bypass for Automation" header, for a
- * request to \`url\` — and ONLY when \`url\` is on the SAME ORIGIN as the
- * configured \`baseUrl\`.
+ * request to \`url\` — and ONLY when \`url\` is on the SAME ORIGIN as the team
+ * shelf.
  *
  * THE ORIGIN TEST IS THE WHOLE POINT, and it is here rather than at each call
  * site so it cannot be forgotten at one of them. This secret opens a
@@ -415,9 +451,10 @@ function readConfig() {
  * URL, not from the caller's intent.
  */
 function shelfBypassHeaders(url, config) {
-  if (typeof config.shelfBypassSecret !== 'string' || config.shelfBypassSecret === '') return {};
+  const team = teamShelfOrigin(config);
+  if (team === null) return {};
   try {
-    if (new URL(url).origin !== new URL(config.baseUrl).origin) return {};
+    if (new URL(url).origin !== team) return {};
   } catch {
     return {};
   }
@@ -1254,7 +1291,7 @@ async function main() {
         // truth. This hook asks \`baseUrl\`, which in team mode IS the team shelf;
         // a hard-coded 'public' there would file every team hit under the wrong
         // shelf in the one tally the dogfood reads.
-        shelf: config.shelfBypassSecret === '' ? 'public' : 'team',
+        shelf: teamShelfOrigin(config) === null ? 'public' : 'team',
         searchId: found.searchId,
         top: judged.top,
         score: judged.score,
@@ -1361,7 +1398,10 @@ const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
  *  The mode is in the ask itself rather than on a line above it because it is
  *  what decides whether the agent may run the command it was just handed. */
 function captureReason(config, publishMode) {
-  const text = config.shelfBypassSecret === '' ? CAPTURE_REASON : CAPTURE_REASON_TEAM;
+  // The TEAM criteria ("anything a teammate would want to know") only apply when
+  // there is a private shelf to hold it. A secret with baseUrl still on the
+  // marketplace is public mode, and the ask is the public bar.
+  const text = teamShelfOrigin(config) === null ? CAPTURE_REASON : CAPTURE_REASON_TEAM;
   return text.replace('<mode>', publishMode);
 }
 

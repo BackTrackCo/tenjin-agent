@@ -466,6 +466,9 @@ describe('runDoctor — passing outcomes', () => {
     const TEAM = 'https://backtrack.tenjin.sh';
     const SECRET = 'shelf-secret-abc123';
 
+    const checkNamed = (res: { data: unknown }, name: string): CheckResult | undefined =>
+      (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === name);
+
     async function probe(flags: { baseUrl?: string }, env: NodeJS.ProcessEnv = {}) {
       await writeFile(
         join(dir, 'config.json'),
@@ -502,6 +505,52 @@ describe('runDoctor — passing outcomes', () => {
       const seen = await probe({ baseUrl: undefined });
       expect(seen.length).toBeGreaterThanOrEqual(3);
       for (const headers of seen) expect(headers[BYPASS_HEADER]).toBe(SECRET);
+    });
+
+    it('reports the half-wired setup as a warn, and the finished one as ok', async () => {
+      // The CLI fails a secret-with-no-shelf safe to public mode. Doctor is
+      // where that silence is broken, because the operator's mental model
+      // ("I am on the team shelf") is otherwise never contradicted.
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: 'https://tenjin.blog' }),
+      );
+      const half = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const halfCheck = checkNamed(half, 'team shelf');
+      expect(halfCheck?.status).toBe('warn');
+      // Never fails the command: public mode is a working machine.
+      expect(halfCheck?.required).toBe(false);
+      expect(halfCheck?.detail).toContain('PUBLIC mode');
+
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: TEAM }),
+      );
+      const done = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      expect(checkNamed(done, 'team shelf')?.status).toBe('ok');
+    });
+
+    it('says nothing about a team shelf on a machine with no secret', async () => {
+      const plain = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      expect(checkNamed(plain, 'team shelf')).toBeUndefined();
     });
 
     it('carries it on no probe when --base-url or TENJIN_BASE_URL re-points the run', async () => {

@@ -286,3 +286,42 @@ describe('resolveShelfBypass — the key follows the configured shelf, not the f
     ).toBeUndefined();
   });
 });
+
+/**
+ * TEAM MODE NEEDS A SHELF, NOT JUST A SECRET. Both `baseUrl` and
+ * `publicShelfUrl` default to the marketplace, and the day-0 setup is two
+ * independent commands, so the reachable wrong state is a secret with no
+ * private deployment behind it. Team mode is the mode that skips the publish
+ * scan, skips the confirm cascade and prices at 0, so calling that state "team
+ * mode" would auto-publish internal notes to tenjin.blog under full-auto. It
+ * fails safe to public mode instead.
+ */
+describe('resolveShelfBypass — a secret with no private shelf is public mode', () => {
+  const SECRET = 'shelf-secret-abc123';
+  const pairFor = (config: Record<string, unknown>) =>
+    resolveShelfBypass(config, resolveSettings({ config, flags: {}, env: {} }));
+
+  it('issues nothing when baseUrl was never pointed off the marketplace', () => {
+    expect(pairFor({ shelfBypassSecret: SECRET })).toBeUndefined();
+    expect(pairFor({ baseUrl: 'https://tenjin.blog', shelfBypassSecret: SECRET })).toBeUndefined();
+    // An alias of the same production deployment is not a loophole.
+    expect(pairFor({ baseUrl: 'https://tenjin.sh', shelfBypassSecret: SECRET })).toBeUndefined();
+  });
+
+  it('issues nothing when baseUrl and publicShelfUrl are the same origin', () => {
+    expect(
+      pairFor({
+        baseUrl: 'https://shelf.example',
+        publicShelfUrl: 'https://shelf.example',
+        shelfBypassSecret: SECRET,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("issues the key for a deployment of the team's own", () => {
+    expect(pairFor({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET })).toEqual({
+      origin: 'https://backtrack.tenjin.sh',
+      secret: SECRET,
+    });
+  });
+});

@@ -363,6 +363,8 @@ tenjin config set shelfBypassSecret <secret>
 
 `config get shelfBypassSecret` and `config` print `set` or `unset`, never the value, in both the human lines and `--json`. The value itself is in `~/.tenjin/config.json`.
 
+**Both settings are required.** Team mode is "a secret **and** a `baseUrl` that is a shelf of the team's own", not a non-empty secret. The two commands above are independent, so a machine can end up with the secret while `baseUrl` is still the marketplace — running them in the other order, or the secret line alone on a second machine. That state stays in **public mode**, with the client scan and the confirm cascade on, rather than treating tenjin.blog as a private shelf. `config set` says so when it happens, and `tenjin doctor` carries a `team shelf` check.
+
 ### What changes in team mode
 
 - **The bypass header.** Every request to the **configured** `baseUrl`'s origin carries `x-vercel-protection-bypass`. Nothing else ever does, in three separate ways: the header is attached from the request URL, not from the call site's intent, so a request to `publicShelfUrl` cannot carry it however it is issued; the key is paired with the origin in `config.json`, so a run re-pointed with `--base-url` or `TENJIN_BASE_URL` carries no key at all and runs as an ordinary public-mode run; and a request carrying the key refuses to follow a redirect, so a 3xx on the shelf origin cannot hand it to another host. The generated hook scripts apply the same rules to their own fetches (they have no flag or env layer to be re-pointed through).

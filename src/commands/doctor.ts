@@ -35,7 +35,7 @@ import type {
 } from '../lib/skill-wiring';
 import { fetchJson, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { loadProjectConfig, resolveShelfBypass } from '../lib/settings';
+import { isTeamShelfOrigin, loadProjectConfig, resolveShelfBypass } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -45,7 +45,7 @@ import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
 import { PUSH_SCRIPT_FILES, countPushHookEntries, pushScriptsPresent } from '../lib/harness-hooks';
-import type { PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
+import type { EffectiveSettings, PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -226,6 +226,10 @@ export async function collectDoctorChecks(
   if (config.hooks?.push === 'on') {
     built.push(await checkPushHooks(home, ctx.dataDir));
   }
+
+  // Same rule: only when a secret is set is there a team shelf to be wrong about.
+  const teamShelf = checkTeamShelf(settings);
+  if (teamShelf !== null) built.push(teamShelf);
 
   const hermes = await checkHermes({
     home,
@@ -874,6 +878,42 @@ const POSTURE: Record<DirState, string> = {
  * Never required and never a fail: an experiment that is off-by-default cannot
  * take down the verb an operator runs when something else is broken.
  */
+/**
+ * Is team mode actually on, and does the operator know which answer they got?
+ *
+ * Team mode needs TWO settings, and the setup is two independent commands, so
+ * the reachable wrong state is a machine with the bypass secret and `baseUrl`
+ * still on the public marketplace. The CLI fails that safe to public mode —
+ * publishes keep the client scan and the confirm cascade — but silently, and an
+ * operator who believes they are on the team shelf would keep writing internal
+ * notes at a command that sends them to tenjin.blog. Warn, never fail: public
+ * mode is a working machine, just not the one they meant to configure.
+ */
+function checkTeamShelf(settings: EffectiveSettings): BuiltCheck | null {
+  if (settings.shelfBypassSecret.value.length === 0) return null;
+  const baseUrl = settings.baseUrl.value;
+  const origin = tryOriginOf(baseUrl);
+  if (origin !== null && isTeamShelfOrigin(origin, settings.publicShelfUrl.value)) {
+    return {
+      result: {
+        name: 'team shelf',
+        status: 'ok',
+        required: false,
+        detail: `team mode: baseUrl is ${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'team shelf',
+      status: 'warn',
+      required: false,
+      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
+      fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
+    },
+  };
+}
+
 async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
   const scripts = await pushScriptsPresent(dataDir);
   const entries = await countPushHookEntries(homeDir, dataDir);

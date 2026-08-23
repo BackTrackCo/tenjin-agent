@@ -533,8 +533,11 @@ async function pushDecide(args) {
   const budget = pushBudget(sessionId);
 
   // Shelf 1 is always \`baseUrl\`. In team mode that IS the team shelf; in public
-  // mode baseUrl is the marketplace and there is no second leg to run.
-  const teamMode = config.shelfBypassSecret !== '';
+  // mode baseUrl is the marketplace and there is no second leg to run. Team mode
+  // needs a shelf of the team's OWN (teamShelfOrigin): with the secret set but
+  // baseUrl still on the marketplace there is no second shelf to fall through
+  // to, only the same origin asked twice and filed as a team hit.
+  const teamMode = teamShelfOrigin(config) !== null;
   const first = await shelfDecide(args, base, budget, teamMode ? 'team' : 'public', config.baseUrl);
   if (first.kind !== 'miss') return first.decided ?? null;
   if (!teamMode) return null;

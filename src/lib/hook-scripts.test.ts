@@ -2886,20 +2886,35 @@ describe('dispatch hook: the ceiling binds without a session id', () => {
  * function of two values: a subprocess per case would buy nothing but seconds.
  */
 describe('the bypass rule the hook scripts carry', () => {
-  /** The generated `shelfBypassHeaders`, as a callable. */
-  function generated(): (url: string, config: Record<string, string>) => Record<string, string> {
-    const source = prelude('/tmp/pin', 1000);
-    const at = source.indexOf('function shelfBypassHeaders(');
-    expect(at).toBeGreaterThan(0);
+  /** One named function declaration lifted out of the prelude, verbatim. */
+  function lift(source: string, name: string): string {
+    const at = source.indexOf(`function ${name}(`);
+    expect(at, name).toBeGreaterThan(0);
     // To the closing brace of the function, which is the first line that is a
     // bare `}` at column zero after the declaration.
     const end = source.indexOf('\n}\n', at);
-    expect(end).toBeGreaterThan(at);
-    const body = source.slice(at, end + 2);
+    expect(end, name).toBeGreaterThan(at);
+    return source.slice(at, end + 2);
+  }
+
+  /** The generated `shelfBypassHeaders`, as a callable, with the two helpers it
+   *  now leans on (`teamShelfOrigin` and `sameDeployment`) and their constant. */
+  function generated(): (url: string, config: Record<string, string>) => Record<string, string> {
+    const source = prelude('/tmp/pin', 1000);
+    const knownAt = source.indexOf('const KNOWN_ORIGINS =');
+    expect(knownAt).toBeGreaterThan(0);
+    const known = source.slice(knownAt, source.indexOf('\n', knownAt) + 1);
+    const body = [
+      known,
+      lift(source, 'sameDeployment'),
+      lift(source, 'teamShelfOrigin'),
+      lift(source, 'shelfBypassHeaders'),
+    ].join('\n');
     return new Function(`${body}; return shelfBypassHeaders;`)() as ReturnType<typeof generated>;
   }
 
   const BASE = 'https://team.example';
+  const PUBLIC = 'https://public.example';
   const SECRET = 'shelf-secret-abc123';
 
   it.each([
@@ -2913,7 +2928,31 @@ describe('the bypass rule the hook scripts carry', () => {
     ['https://team.example/api/search', '', 'no secret at all'],
   ])('agrees with lib/http.ts for %s (%s)', (url, secret) => {
     const mine = shelfBypassHeaders(url, { origin: new URL(BASE).origin, secret });
-    const theirs = generated()(url, { baseUrl: BASE, shelfBypassSecret: secret });
+    const theirs = generated()(url, {
+      baseUrl: BASE,
+      publicShelfUrl: PUBLIC,
+      shelfBypassSecret: secret,
+    });
     expect(theirs).toEqual(mine);
+  });
+
+  /**
+   * The OTHER half of the mirrored rule: team mode is "a secret AND a shelf of
+   * the team's own". A machine whose baseUrl is still the marketplace is in
+   * public mode, and the generated copy must reach that answer too — otherwise
+   * the hooks post the key to tenjin.blog while the CLI does not.
+   */
+  it.each([
+    [PRODUCTION_ORIGIN, 'the production marketplace'],
+    ['https://tenjin.sh', 'an alias of the production deployment'],
+    [PUBLIC, 'whatever publicShelfUrl names'],
+  ])('sends nothing when baseUrl is %s (%s)', (baseUrl) => {
+    expect(
+      generated()(`${baseUrl}/api/search`, {
+        baseUrl,
+        publicShelfUrl: PUBLIC,
+        shelfBypassSecret: SECRET,
+      }),
+    ).toEqual({});
   });
 });

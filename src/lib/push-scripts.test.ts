@@ -952,6 +952,31 @@ describe('the two shelves', () => {
     expect(rows[1]).toMatchObject({ shelf: 'public', action: 'injected' });
   });
 
+  it('is public mode, one leg and no key, when baseUrl is not a shelf of its own', async () => {
+    // THE HALF-WIRED SETUP: the secret is set, but baseUrl was never pointed at
+    // a team deployment, so it is still the public shelf. Team mode keyed on the
+    // secret alone would ask that ONE origin twice per fire — spending two of
+    // the session's lookups — send it the team's key, and file the answer as a
+    // `team` hit, which is the exact tally the dogfood's go/no-go reads.
+    const pub = await serve(echo());
+    await writeConfig({
+      baseUrl: pub.baseUrl,
+      publicShelfUrl: pub.baseUrl,
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on' },
+    });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('the zod resolver throws on an optional chain during parse'),
+    );
+    expect(denied(run)).toContain(BODY_MD);
+    // One search, plus the free-body GET; not a second search leg.
+    expect(pub.queries()).toHaveLength(1);
+    for (const h of pub.headers()) expect(h[BYPASS_HEADER]).toBeUndefined();
+    expect((await ledger()).map((r) => r.shelf)).toEqual(['public']);
+  });
+
   it('refuses a redirect off the team shelf rather than handing the key to it', async () => {
     // WHAT A ROTATED BYPASS SECRET ACTUALLY LOOKS LIKE: Vercel Authentication
     // answers /api/search with a 307 to its SSO host. `fetch` re-sends request
@@ -1609,8 +1634,12 @@ describe('the capture ask (Stop)', () => {
     expect(second.stdout).toBe('');
   });
 
-  it('uses the team criteria, and names the team shelf, when a bypass secret is set', async () => {
-    await writeConfig({ shelfBypassSecret: SECRET, hooks: { capture: 'block' } });
+  it('uses the team criteria, and names the team shelf, when a team shelf is configured', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { capture: 'block' },
+    });
     await writeSearchSignal();
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
@@ -1619,6 +1648,20 @@ describe('the capture ask (Stop)', () => {
     expect(reason).toContain('publish it to the team shelf');
     // The public bar is not applied to a shelf that is not public.
     expect(reason).not.toContain('rights-clean');
+  });
+
+  it('keeps the PUBLIC ask when the secret is set but baseUrl is the marketplace', async () => {
+    // THE HALF-WIRED SETUP. Team mode takes two settings and the day-0 protocol
+    // is two independent commands, so a machine can carry the secret with
+    // baseUrl still on tenjin.blog. The team ask invites the agent to write down
+    // "a quirk of this codebase" — and under publish.mode full-auto it would
+    // then publish that, unscanned, to the public marketplace. The bar follows
+    // the shelf that is actually configured, not the secret.
+    await writeConfig({ shelfBypassSecret: SECRET, hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: publicAsk });
+    expect((JSON.parse(run.stdout) as { reason: string }).reason).toContain('rights-clean');
   });
 
   it('names the resolved publish mode in the ask', async () => {

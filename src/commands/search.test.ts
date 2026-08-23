@@ -623,6 +623,26 @@ describe('runSearch across two shelves', () => {
     expect(result.data).not.toHaveProperty('shelves');
   });
 
+  it('is public mode, one leg and no key, when baseUrl is not a shelf of its own', async () => {
+    // The day-0 setup is two independent commands, and both baseUrl and
+    // publicShelfUrl default to tenjin.blog, so the reachable wrong state is a
+    // secret with no private shelf behind it. Team mode keyed on the secret
+    // alone would POST the same origin twice on a miss, send it the team's key,
+    // and label the first leg `team` — a marketplace hit counted as proof the
+    // team shelf works.
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: PUBLIC, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+    );
+    const { fetch, sent } = shelves({});
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([PUBLIC]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+    // Unlabelled, and no `shelves` array: this is a one-shelf run.
+    expect(result.data).not.toHaveProperty('shelves');
+  });
+
   it('sends no key, and runs public-mode, when --base-url re-points the run', async () => {
     // ONE COMMAND WAS ENOUGH TO POST THE KEY ANYWHERE. `--base-url` outranks the
     // config file, and the pair the transport compares against used to be built

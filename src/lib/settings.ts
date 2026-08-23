@@ -22,6 +22,7 @@ import type {
 } from './config';
 import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
+import { PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
 
@@ -90,8 +91,23 @@ function tryOrigin(url: string): string | undefined {
  * base URL runs as an ordinary public-mode run, with the client scan and the
  * confirm cascade back on, rather than as a team-mode run against a stranger.
  *
- * The generated hooks need no equivalent: they read `baseUrl` straight out of
- * config.json and have no flag or env layer to be re-pointed through.
+ * The generated hooks need no equivalent for the flag rule: they read `baseUrl`
+ * straight out of config.json and have no flag or env layer to be re-pointed
+ * through. They DO carry the second rule below (`teamShelfOrigin`).
+ *
+ * SECOND RULE: THE TEAM SHELF MUST BE A SHELF OF ITS OWN. Team mode was keyed on
+ * a non-empty secret alone, and both `baseUrl` and `publicShelfUrl` default to
+ * tenjin.blog, so the two-command day-0 setup run in the other order — or the
+ * secret line alone on a second machine — put a machine in "team mode" pointed
+ * at the PUBLIC MARKETPLACE. Team mode is precisely the mode that skips the
+ * publish scan, skips the confirm cascade and prices at 0, so under
+ * `publish.mode full-auto` that misconfiguration auto-publishes internal
+ * codebase notes to tenjin.blog, unscanned and unacknowledged; it also posts the
+ * team's key to the public marketplace and searches one origin twice per fire.
+ * A secret with no private shelf behind it is a setup that is not finished, so
+ * it fails safe to public mode rather than half-on. `tenjin doctor` and
+ * `config set shelfBypassSecret` say so out loud, because silence here is what
+ * made the misconfiguration survivable.
  */
 export function resolveShelfBypass(
   config: PartialConfig,
@@ -104,7 +120,22 @@ export function resolveShelfBypass(
   if (configured === undefined || effective === undefined || configured !== effective) {
     return undefined;
   }
+  if (!isTeamShelfOrigin(configured, s.publicShelfUrl.value)) return undefined;
   return { origin: configured, secret };
+}
+
+/**
+ * Is `origin` a shelf of the team's own, as opposed to the public marketplace?
+ *
+ * The compare `resource-ref` already makes to no-op its second-origin allowance,
+ * plus the production origin itself: a `publicShelfUrl` pointed somewhere else
+ * must not make tenjin.blog read as private. `isSameDeployment` rather than `===`
+ * so an alias of production (tenjin.sh) is not a loophole.
+ */
+export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boolean {
+  if (isSameDeployment(origin, PRODUCTION_ORIGIN)) return false;
+  const publicOrigin = tryOrigin(publicShelfUrl);
+  return publicOrigin === undefined || !isSameDeployment(origin, publicOrigin);
 }
 
 export async function resolveContextSettings(ctx: CommandContext): Promise<ResolvedSettings> {

@@ -53,7 +53,7 @@ import {
   onPath,
   type HarnessTarget,
 } from '../lib/skill-wiring';
-import { loadProjectConfig } from '../lib/settings';
+import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -255,7 +255,43 @@ export async function runConfigSet(
     }
   }
   const entry = renderSetting(configKey, stored, 'file');
-  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
+  const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
+  return {
+    data: { key: configKey, ...entry, ...(warning !== undefined ? { warning } : {}) },
+    humanLines: [formatLine(configKey, entry), ...(warning !== undefined ? [warning] : [])],
+  };
+}
+
+/**
+ * The half-wired team shelf, said out loud at the moment it is created.
+ *
+ * Team mode takes TWO settings — a private deployment in `baseUrl` and its
+ * bypass secret — and the setup is two independent commands, so a machine can
+ * easily end up with the secret and no shelf (run in the other order, or the
+ * secret line alone on a second machine). The CLI fails that state safe to
+ * public mode, which means an operator who thinks they are on the team shelf
+ * would otherwise get no signal at all: publishes would go to the marketplace
+ * under the public gates. Warn, do not refuse — the pair is legitimately
+ * half-set between two commands, and refusing would make the documented order
+ * the only order.
+ */
+async function halfWiredTeamShelf(
+  configKey: ScalarConfigKey,
+  dataDir: string,
+): Promise<string | undefined> {
+  if (configKey !== 'shelfBypassSecret' && configKey !== 'baseUrl') return undefined;
+  const config = await loadRawConfig(dataDir).catch(() => undefined);
+  if (config === undefined) return undefined;
+  const s = resolveSettings({ config, flags: {}, env: {} });
+  if (s.shelfBypassSecret.value.length === 0) return undefined;
+  const baseUrl = s.baseUrl.value;
+  if (isTeamShelfOrigin(new URL(baseUrl).origin, s.publicShelfUrl.value)) return undefined;
+  return (
+    `Warning: shelfBypassSecret is set, but baseUrl is the public marketplace (${baseUrl}), ` +
+    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the client ' +
+    'scan and the confirm cascade on. Point baseUrl at the team deployment to finish team ' +
+    'mode: `tenjin config set baseUrl <team shelf url>`.'
+  );
 }
 
 /**
