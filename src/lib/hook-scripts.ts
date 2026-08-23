@@ -41,7 +41,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 20;
+export const HOOK_SCRIPT_VERSION = 21;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -313,6 +313,7 @@ function readConfig() {
   const hooks = isRecord(cfg.hooks) ? cfg.hooks : {};
   const publish = isRecord(cfg.publish) ? cfg.publish : {};
   const mode = hooks.searchMode;
+  const dispatch = hooks.dispatchMode;
   const nag = hooks.stopNag;
   const primer = hooks.sessionPrimer;
   // env over file, matching lib/config.ts's resolvePublishMode; an unrecognized
@@ -324,6 +325,10 @@ function readConfig() {
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '${PRODUCTION_ORIGIN}';
   return {
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
+    // The dispatch hook's own switch; anything but an explicit auto/remind/off
+    // (including the default \`inherit\`) follows searchMode.
+    dispatchMode:
+      dispatch === 'off' || dispatch === 'remind' || dispatch === 'auto' ? dispatch : 'inherit',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
     sessionPrimer: primer === 'off' ? 'off' : 'on',
     publishMode: isPublishMode(publishMode) ? publishMode : 'review',
@@ -913,8 +918,9 @@ async function main() {
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   const config = readConfig();
-  if (config.mode === 'off') return quiet();
-  if (config.mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
+  const mode = config.dispatchMode === 'inherit' ? config.mode : config.dispatchMode;
+  if (mode === 'off') return quiet();
+  if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const sessionId = sessionIdOf(input);
   if (alreadyAsked(question, sessionId)) return quiet();

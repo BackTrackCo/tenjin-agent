@@ -23,6 +23,7 @@ import {
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
+  parseDispatchHookModeFlag,
   parseSearchHookModeFlag,
   parseSessionPrimerFlag,
   parseStopNagFlag,
@@ -122,6 +123,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'publish.defaultPrice': 'price used when none is given',
   'hooks.searchMode':
     'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.dispatchMode':
+    'harness subagent-dispatch hook: inherit=follow hooks.searchMode, auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.stopNag':
     'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'hooks.sessionPrimer':
@@ -445,15 +448,19 @@ async function setHooksKey(
   const subkey =
     key === 'hooks.searchMode'
       ? 'searchMode'
-      : key === 'hooks.stopNag'
-        ? 'stopNag'
-        : 'sessionPrimer';
+      : key === 'hooks.dispatchMode'
+        ? 'dispatchMode'
+        : key === 'hooks.stopNag'
+          ? 'stopNag'
+          : 'sessionPrimer';
   const parsed =
     key === 'hooks.searchMode'
       ? parseSearchHookModeFlag(value, key)
-      : key === 'hooks.stopNag'
-        ? parseStopNagFlag(value, key)
-        : parseSessionPrimerFlag(value, key);
+      : key === 'hooks.dispatchMode'
+        ? parseDispatchHookModeFlag(value, key)
+        : key === 'hooks.stopNag'
+          ? parseStopNagFlag(value, key)
+          : parseSessionPrimerFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
@@ -595,9 +602,11 @@ function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): R
   const resolved =
     key === 'hooks.searchMode'
       ? settings.hooksSearchMode
-      : key === 'hooks.stopNag'
-        ? settings.hooksStopNag
-        : settings.hooksSessionPrimer;
+      : key === 'hooks.dispatchMode'
+        ? settings.hooksDispatchMode
+        : key === 'hooks.stopNag'
+          ? settings.hooksStopNag
+          : settings.hooksSessionPrimer;
   return { value: resolved.value, source: resolved.source };
 }
 

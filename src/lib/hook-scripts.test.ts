@@ -218,15 +218,15 @@ describe('HOOK_SCRIPT_VERSION', () => {
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
   it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(20);
+    expect(HOOK_SCRIPT_VERSION).toBe(21);
     const digests = Object.fromEntries(
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '4dc7f96bf7a3f2c455e2d6d638768b9d',
-      dispatch: '8dad784f12a07f073764d2a96b1031d0',
-      sessionPrimer: '6bf9d532feaf02eb00ec3baa9dd24ebb',
-      stop: '8c4f580c55459ff6959778e72e366903',
+      websearch: '8b108626403e634b7b4208dcbc2dfd44',
+      dispatch: '1fd5166919ca4772ba2679d00afa598b',
+      sessionPrimer: '4d3906046859124908ce7f9f31f95618',
+      stop: 'ffcaf858c448bac7d16b587715e1e289',
     });
   });
 
@@ -2404,6 +2404,40 @@ describe('dispatch hook: a subagent dispatch', () => {
     );
     expect(injected(run)).toContain(REMIND_LINE);
     expect(hits()).toBe(0);
+  });
+
+  it('hooks.dispatchMode splits the dispatch hook from the WebSearch hook', async () => {
+    // A fleet keeps searchMode auto and still sends no subagent prompt anywhere.
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto', dispatchMode: 'remind' } });
+    const remind = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(remind)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto', dispatchMode: 'off' } });
+    const off = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(off.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    // And the other direction: searchMode off, dispatch explicitly auto still asks.
+    await writeConfig({ baseUrl, hooks: { searchMode: 'off', dispatchMode: 'auto' } });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
+    );
+    expect(hits()).toBe(1);
+
+    // The WebSearch hook ignores dispatchMode entirely.
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind', dispatchMode: 'auto' } });
+    const web = await runScript(websearchHookScript(dataDir), webSearchInput('a web question'));
+    expect(injected(web)).toContain(REMIND_LINE);
+    expect(hits()).toBe(1);
   });
 
   it('stays silent on every failure path', async () => {
