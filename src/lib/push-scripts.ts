@@ -580,20 +580,36 @@ function shortForm(candidate) {
   return lines.join('\n');
 }
 
-/** The team-shelf header. Where a marketplace line carries a price, this carries
- *  the author: on our own shelf that is what says how far to trust the note. */
+/** The team-shelf header. Deliberately WITHOUT the author: see \`authorLine\`. */
 function teamHeaderLine(top) {
   const title = clean(top.question, 200).replace(/"/g, "'");
-  const author = clean(top.author, 60);
   const applies = top.appliesTo
     .slice(0, 4)
     .map((a) => clean(a, 60))
     .join(', ');
   return (
-    '"' + title + '" · team note · by ' + (author === '' ? 'unknown' : author) +
+    '"' + title + '" · team note' +
     (applies === '' ? '' : ' · applies to ' + applies) +
     (clean(top.asOf, 40) === '' ? '' : ' · as of ' + clean(top.asOf, 40))
   );
+}
+
+/**
+ * NOTHING AUTHENTICATES \`author\`. It is \`$USER\` on whichever machine wrote
+ * the note, stored as plain front matter in a git repo every teammate can push
+ * to and any of them can hand-edit — so "by vraspar" is a claim the note makes
+ * about itself, exactly like its body.
+ *
+ * Spoken outside the fence it read as OURS: a by-line in the hook's own voice is
+ * what a model uses to decide how far to trust what follows, and a one-word edit
+ * to a file would have bought that trust. So it goes inside the fence, prefixed
+ * as a claim, where it is quoted rather than asserted. The pointer form has no
+ * fence at all and therefore does not carry it: 'tenjin notes show <id>' shows
+ * the field for anyone who wants it.
+ */
+function authorLine(top) {
+  const author = clean(top.author, 60);
+  return 'This note says it was written by: ' + (author === '' ? 'unknown' : author);
 }
 
 const PUBLIC_OPENER =
@@ -652,13 +668,18 @@ function closingLine(deny) {
     : 'If this settles it, proceed without re-verifying. If it does not apply, ignore it.';
 }
 
-function fullForm(opener, header, body, deny) {
+/** \`claim\`, when given, is text the SOURCE asserts about itself (a note's
+ *  author). It goes inside the fence with the body, never beside the header:
+ *  outside it, it would be us vouching for it. */
+function fullForm(opener, header, body, deny, claim) {
   const fence = '--- tenjin-body ' + Math.random().toString(36).slice(2, 10) + ' ---';
+  const inside =
+    typeof claim === 'string' && claim !== '' ? claim + '\n\n' + String(body) : String(body);
   return [
     opener,
     header,
     fence,
-    fenceSafeBody(body),
+    fenceSafeBody(inside),
     fence,
     closingLine(deny),
   ].join('\n');
@@ -734,7 +755,7 @@ async function pushDecide(args) {
     }
     const text =
       form === 'full'
-        ? fullForm(TEAM_OPENER, teamHeaderLine(team.top), team.body)
+        ? fullForm(TEAM_OPENER, teamHeaderLine(team.top), team.body, false, authorLine(team.top))
         : teamShortForm(team.top);
     ledgerAppend({
       ...row,

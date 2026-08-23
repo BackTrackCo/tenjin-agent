@@ -794,7 +794,7 @@ describe('the team shelf', () => {
     );
     expect(run.code).toBe(0);
     const text = injected(run);
-    expect(text).toContain('team note · by vraspar');
+    expect(text).toContain('team note');
     expect(text).toContain('applies to tenjin, drizzle');
     expect(text).toContain('The beacon needs a real session row');
     // A note is ours: it is never worth denying a tool call over, and it never
@@ -837,8 +837,10 @@ describe('the team shelf', () => {
     const run = await runScript(websearchHookScript(dataDir), webSearch('pgvector collation zulu'));
     expect(run.code).toBe(0);
     const text = injected(run) ?? '';
-    // The note is named, and nothing it says is inline.
-    expect(text).toContain('team note · by vraspar');
+    // The note is named, and nothing it says is inline — including the author it
+    // claims, which has no fence here to be quoted inside.
+    expect(text).toContain('team note');
+    expect(text).not.toContain('vraspar');
     expect(text).toContain('tenjin notes show 20260822-k3x9q2');
     expect(text).not.toContain(secret);
     expect(denied(run)).toBeNull();
@@ -902,6 +904,39 @@ describe('the team shelf', () => {
     // it was not there at all.
     expect(hits()).toBeGreaterThan(0);
     expect((await ledger())[0]).toMatchObject({ shelf: 'public', reason: 'miss' });
+  });
+
+  /**
+   * `author` is `$USER` on whoever's machine wrote the note, in plain front
+   * matter, in a repo every teammate can push to and hand-edit. Rendered as a
+   * by-line above the fence it was the hook vouching for it, which is a trust
+   * signal a one-word edit could buy. It belongs with the body: quoted, not
+   * asserted.
+   */
+  it('quotes the note author inside the fence, never as a by-line of its own', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await writeNote(
+      '20260822-k3x9q2',
+      'Does the read beacon fire for hand-seeded posts?',
+      'It does not. The beacon needs a real session row, so hand-seeded posts read as zero.',
+    );
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('read beacon hand-seeded posts tenjin'),
+    );
+    const lines = (injected(run) ?? '').split('\n');
+    const fences = lines
+      .map((l, i) => (l.startsWith('--- tenjin-body ') ? i : -1))
+      .filter((i) => i >= 0);
+    expect(fences).toHaveLength(2);
+    const authorAt = lines.findIndex((l) => l.includes('vraspar'));
+    expect(authorAt).toBeGreaterThan(fences[0]!);
+    expect(authorAt).toBeLessThan(fences[1]!);
+    // Nothing in our own voice says who wrote it.
+    expect(lines.slice(0, fences[0]!).join('\n')).not.toContain('vraspar');
+    expect(injected(run)).not.toContain('· by ');
   });
 
   it('falls through to the marketplace when no note is close enough', async () => {
