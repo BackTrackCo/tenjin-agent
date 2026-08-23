@@ -355,14 +355,17 @@ async function fetchFreeBody(candidate, config) {
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
   try {
+    // Same origin rule as the search: a body on the team shelf needs the
+    // bypass, a body on the public shelf must never see it — and a request that
+    // carries it refuses redirects rather than handing it to a 3xx target.
+    const bypass = shelfBypassHeaders(url.href, config);
     const res = await fetch(url, {
       headers: {
         accept: 'application/json',
         'user-agent': composedUserAgent(),
-        // Same origin rule as the search: a body on the team shelf needs the
-        // bypass, a body on the public shelf must never see it.
-        ...shelfBypassHeaders(url.href, config),
+        ...bypass,
       },
+      ...bypassRedirect(bypass),
       signal: AbortSignal.timeout(PUSH_BODY_TIMEOUT),
     });
     if (res.status !== 200) return null;

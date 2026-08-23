@@ -33,9 +33,12 @@ export interface FetchJsonOptions {
  *
  * A door key for a protected preview deployment, not a credential of anyone's:
  * it gets a request past Deployment Protection and authenticates nobody. It is
- * NOT in {@link CREDENTIAL_HEADERS} for that reason — it signs nothing, so a
- * redirect carrying it cannot be replayed into a signature — but it is still a
- * secret, so where it may go is decided here and nowhere else.
+ * NOT in {@link CREDENTIAL_HEADERS}, whose members are wallet-signed material a
+ * redirect target could REPLAY — this one cannot be replayed into a signature.
+ * It is still a secret, and DISCLOSING it is the whole harm: whoever holds it
+ * walks into the team shelf. So it pins redirects exactly as a signed header
+ * does (see {@link carriesBypassKey}), and where it may go is decided here and
+ * nowhere else.
  */
 export const SHELF_BYPASS_HEADER = 'x-vercel-protection-bypass';
 
@@ -71,6 +74,26 @@ export function shelfBypassHeaders(
   }
   if (origin !== bypass.origin) return {};
   return { [SHELF_BYPASS_HEADER]: bypass.secret };
+}
+
+/**
+ * Whether the request being assembled actually carries the door key.
+ *
+ * A request that carries it MUST NOT follow a redirect. `fetch`'s default
+ * `redirect: 'follow'` re-sends request headers verbatim to the new host (Node
+ * strips only `Authorization`), so a single 3xx anywhere on the shelf origin —
+ * the Vercel Authentication interstitial a rotated bypass secret gets, a domain
+ * alias, a CDN rule — would hand the team shelf's key to whatever `Location`
+ * names. Nothing else is needed to walk in afterwards, so the key never leaves
+ * the origin it was paired with, not even one hop.
+ *
+ * Read off the BUILT headers rather than off `opts.bypass`, for the same reason
+ * {@link CREDENTIAL_HEADERS} is matched by name: attaching the secret is what
+ * arms the protection, so an off-origin request (which gets no header) keeps
+ * ordinary transport and a call site cannot forget to ask for the pin.
+ */
+function carriesBypassKey(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some((name) => name.toLowerCase() === SHELF_BYPASS_HEADER);
 }
 
 /**
@@ -175,13 +198,23 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
 
   try {
     let res: Response;
+    // `new Headers` throws on a malformed caller header, so building them stays
+    // inside the catch that turns any pre-flight refusal into the same
+    // discriminated network failure a dead socket gets.
+    let pinned = false;
     try {
+      const headers = withUserAgent(
+        { ...opts.headers, ...shelfBypassHeaders(url, opts.bypass) },
+        opts.callerUserAgent,
+      );
+      // fetchJson sends no signed material — doctor's probes and the contract
+      // checks are anonymous — so the door key is the one thing here worth
+      // pinning, and it pins the same way it does in httpRequest.
+      pinned = carriesBypassKey(headers);
       res = await doFetch(url, {
         signal: controller.signal,
-        headers: withUserAgent(
-          { ...opts.headers, ...shelfBypassHeaders(url, opts.bypass) },
-          opts.callerUserAgent,
-        ),
+        headers,
+        ...(pinned ? { redirect: 'manual' as const } : {}),
       });
     } catch (err) {
       // A timeout is a network failure the AbortController induced; distinguish it
@@ -193,6 +226,20 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
     }
 
     const requestId = res.headers.get('x-request-id') ?? undefined;
+
+    // Fail CLOSED, ahead of the ordinary non-2xx branch, so an unfollowed 3xx is
+    // never reported as a plain HTTP status a caller might retry by hand.
+    if (pinned && res.status >= 300 && res.status < 400) {
+      return {
+        ok: false,
+        kind: 'blocked-redirect',
+        status: res.status,
+        ...(requestId !== undefined ? { requestId } : {}),
+        message:
+          `Request to ${url} was redirected (${res.status}) while carrying the team shelf's ` +
+          'bypass key; refusing to follow it, because the key opens only the configured origin.',
+      };
+    }
 
     if (!res.ok) {
       return {
@@ -299,6 +346,7 @@ interface PreparedRequest {
   headers: Record<string, string>;
   body: string | undefined;
   signed: boolean;
+  bypassed: boolean;
   pinned: boolean;
 }
 
@@ -329,10 +377,20 @@ function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest 
     const headers = Object.fromEntries(applyUserAgent(merged, opts.callerUserAgent).entries());
 
     // Signed requests opt out of redirect following entirely; see CREDENTIAL_HEADERS.
-    // A caller can also pin an unsigned request (blockRedirects) when the
-    // response it gets back becomes a durable local record.
+    // So does a request carrying the team shelf's bypass key: it cannot be
+    // replayed, but a 3xx would DISCLOSE it, and that is the whole harm (see
+    // carriesBypassKey). A caller can also pin an unsigned, keyless request
+    // (blockRedirects) when the response it gets back becomes a durable local record.
     const signed = carriesSignedMaterial(headers);
-    return { ok: true, headers, body, signed, pinned: signed || opts.blockRedirects === true };
+    const bypassed = carriesBypassKey(headers);
+    return {
+      ok: true,
+      headers,
+      body,
+      signed,
+      bypassed,
+      pinned: signed || bypassed || opts.blockRedirects === true,
+    };
   } catch (err) {
     return {
       ok: false,
@@ -354,7 +412,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
   try {
     const prepared = prepareRequest(url, opts);
     if (!prepared.ok) return prepared;
-    const { headers, body, signed, pinned } = prepared;
+    const { headers, body, signed, bypassed, pinned } = prepared;
 
     let res: Response;
     try {
@@ -385,8 +443,11 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
         message: signed
           ? `Request to ${url} was redirected (${res.status}) while carrying a signed header; ` +
             'refusing to follow it, because the signature is bound to the configured origin.'
-          : `Request to ${url} was redirected (${res.status}); ` +
-            'refusing to follow it, because the response must come from the configured origin.',
+          : bypassed
+            ? `Request to ${url} was redirected (${res.status}) while carrying the team shelf's ` +
+              'bypass key; refusing to follow it, because the key opens only the configured origin.'
+            : `Request to ${url} was redirected (${res.status}); ` +
+              'refusing to follow it, because the response must come from the configured origin.',
       };
     }
     // Read the raw text once; parse best-effort. A non-JSON body (empty 202, an

@@ -90,7 +90,10 @@ interface StubRequest {
 
 /** The marketplace, and the free-body endpoint a candidate url points at. */
 async function serve(
-  handler: (req: StubRequest) => { status: number; json: unknown; delayMs?: number } | 'hang',
+  handler: (
+    req: StubRequest,
+  ) =>
+    { status: number; json: unknown; delayMs?: number; headers?: Record<string, string> } | 'hang',
 ): Promise<Stub> {
   let hits = 0;
   let base = '';
@@ -120,7 +123,7 @@ async function serve(
       const out = handler({ url, body, base });
       if (out === 'hang') return;
       const answer = (): void => {
-        res.writeHead(out.status, { 'content-type': 'application/json' });
+        res.writeHead(out.status, { 'content-type': 'application/json', ...out.headers });
         res.end(JSON.stringify(out.json));
       };
       if (out.delayMs === undefined) answer();
@@ -947,6 +950,77 @@ describe('the two shelves', () => {
     const rows = await ledger();
     expect(rows[0]).toMatchObject({ shelf: 'team', action: 'skipped', reason: 'no-answer' });
     expect(rows[1]).toMatchObject({ shelf: 'public', action: 'injected' });
+  });
+
+  it('refuses a redirect off the team shelf rather than handing the key to it', async () => {
+    // WHAT A ROTATED BYPASS SECRET ACTUALLY LOOKS LIKE: Vercel Authentication
+    // answers /api/search with a 307 to its SSO host. `fetch` re-sends request
+    // headers verbatim across a redirect, so following it would post the team's
+    // door key to whatever `Location` names — and the key is all anyone needs to
+    // walk into the shelf. The collector here stands in for that host.
+    const collector = await serve(echo());
+    const team = await serve(() => ({
+      status: 307,
+      json: {},
+      headers: { location: `${collector.baseUrl}/api/search` },
+    }));
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('the zod resolver throws on an optional chain during parse'),
+    );
+
+    // Not one request reached the redirect target, so not one copy of the key did.
+    expect(collector.hits()).toBe(0);
+    // And refusing costs one hint, not the session: the leg reads as no answer
+    // and the public shelf still runs.
+    expect(denied(run)).toContain(BODY_MD);
+    const rows = await ledger();
+    expect(rows[0]).toMatchObject({ shelf: 'team', action: 'skipped', reason: 'no-answer' });
+    expect(rows[1]).toMatchObject({ shelf: 'public', action: 'injected' });
+  });
+
+  it('refuses a redirect on the team shelf free-body GET too', async () => {
+    // The body fetch is a SECOND request that carries the key, on a path the
+    // search response chose. It pins the same way.
+    const collector = await serve(echo());
+    const team = await serve((req: StubRequest) => {
+      if (req.url.startsWith('/api/search')) {
+        return {
+          status: 200,
+          json: {
+            schemaVersion: 3,
+            searchId: SEARCH_ID,
+            items: [
+              {
+                resourceId: TEAM_RESOURCE_ID,
+                title: 'The read beacon and hand-seeded posts',
+                price: '0',
+                url: `${req.base}/api/read/team/beacon`,
+                sellerHandle: 'team',
+              },
+            ],
+          },
+        };
+      }
+      return { status: 307, json: {}, headers: { location: `${collector.baseUrl}/api/read/x` } };
+    });
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    await runScript(
+      websearchHookScript(dataDir),
+      webSearch('read beacon hand-seeded posts tenjin'),
+    );
+
+    expect(collector.hits()).toBe(0);
+    // A body it could not fetch degrades the form; it never claims full text it
+    // does not hold.
+    const rows = await ledger();
+    expect(rows[0]).toMatchObject({ shelf: 'team' });
+    expect(rows[0]?.form).not.toBe('full');
   });
 });
 

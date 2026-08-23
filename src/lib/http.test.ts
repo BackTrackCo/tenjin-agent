@@ -635,6 +635,82 @@ describe('the team shelf bypass header', () => {
     expect(shelfBypassHeaders('not-a-url', bypass)).toEqual({});
   });
 
+  /**
+   * A 3xx MUST NOT CARRY THE DOOR KEY ONWARD. `fetch` re-sends request headers
+   * verbatim to a redirect target (only `Authorization` is stripped), so a
+   * Vercel Authentication interstitial on the shelf origin — what a rotated
+   * bypass secret actually gets — would hand the key to `vercel.com` or to
+   * whatever else `Location` names, and the key is all anyone needs to walk in.
+   * The bypass is not replayable like a signature, so it is not in
+   * CREDENTIAL_HEADERS; it pins anyway, because disclosure is the harm here.
+   */
+  describe('pins redirects the way a signed header does', () => {
+    function recordingFetch(response: () => Response): {
+      fetchImpl: typeof fetch;
+      calls: { url: string; redirect: RequestInit['redirect'] }[];
+    } {
+      const calls: { url: string; redirect: RequestInit['redirect'] }[] = [];
+      const fetchImpl: typeof fetch = async (input, init) => {
+        calls.push({ url: String(input), redirect: init?.redirect });
+        return response();
+      };
+      return { fetchImpl, calls };
+    }
+
+    const ssoRedirect = (): Response =>
+      new Response('', {
+        status: 307,
+        headers: { location: 'https://vercel.com/sso-api?url=team.example' },
+      });
+
+    it('refuses a 3xx on the bypass origin, through httpRequest', async () => {
+      const { fetchImpl, calls } = recordingFetch(ssoRedirect);
+      const res = await httpRequest('https://team.example/api/search', {
+        method: 'POST',
+        timeoutMs: 1000,
+        bypass,
+        jsonBody: { query: 'q' },
+        fetchImpl,
+      });
+
+      expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 307 });
+      expect((res as { message: string }).message).toContain('bypass key');
+      // One request, to the configured origin, and the key was never re-sent.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.redirect).toBe('manual');
+    });
+
+    it('refuses a 3xx on the bypass origin, through fetchJson (doctor probes)', async () => {
+      const { fetchImpl, calls } = recordingFetch(ssoRedirect);
+      const res = await fetchJson('https://team.example/api/search', {
+        timeoutMs: 1000,
+        bypass,
+        fetchImpl,
+      });
+
+      // NOT reported as a plain http status: an unfollowed redirect must not be
+      // mistaken for a server answer and retried by hand.
+      expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 307 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.redirect).toBe('manual');
+    });
+
+    it('leaves an off-origin request on ordinary transport', async () => {
+      // The public shelf gets no key, so it has nothing to disclose and keeps
+      // normal redirect following: the pin is armed by the header, not by intent.
+      for (const send of [
+        (fetchImpl: typeof fetch) =>
+          httpRequest('https://public.example/api/search', { timeoutMs: 1000, bypass, fetchImpl }),
+        (fetchImpl: typeof fetch) =>
+          fetchJson('https://public.example/api/search', { timeoutMs: 1000, bypass, fetchImpl }),
+      ]) {
+        const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ ok: true }));
+        await send(fetchImpl);
+        expect(calls[0]?.redirect).toBeUndefined();
+      }
+    });
+  });
+
   it('wins the slot on its own origin, and contributes nothing off it', async () => {
     // The bypass is merged OVER the caller's headers, so on-origin the real
     // secret replaces whatever a call site put in that slot; off-origin the rule

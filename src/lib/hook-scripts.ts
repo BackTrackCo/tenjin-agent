@@ -424,6 +424,25 @@ function shelfBypassHeaders(url, config) {
   return { 'x-vercel-protection-bypass': config.shelfBypassSecret };
 }
 
+/**
+ * The fetch init a request carrying the door key needs: it MAY NOT follow a
+ * redirect.
+ *
+ * ⚠ MIRRORED, MUST UPDATE TOGETHER with src/lib/http.ts (\`carriesBypassKey\`).
+ * \`fetch\` re-sends request headers verbatim to a redirect target (only
+ * \`Authorization\` is stripped), so one 3xx on the shelf origin — the Vercel
+ * Authentication interstitial a rotated secret gets, a domain alias, a hijacked
+ * record — would hand the key to whatever \`Location\` names, and the key is all
+ * anyone needs to walk into the team shelf. \`redirect: 'error'\` makes the fetch
+ * throw instead, which every caller here already turns into a silent miss: the
+ * cost of refusing is one hint.
+ */
+function bypassRedirect(bypassHeaders) {
+  return bypassHeaders['x-vercel-protection-bypass'] === undefined
+    ? {}
+    : { redirect: 'error' };
+}
+
 const SEARCH_STORE = join(DATA_DIR, 'searches.json');
 
 /** The searches the CLI has recorded, or [] for anything unreadable. */
@@ -770,13 +789,15 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
   // \`query\` spelling, \`view\` named rather than defaulted, and no narrowings at
   // all (this hook rides along with a web search, it does not price-gate). The
   // \`/api/agent/search\` alias this replaced answers 410 after one release.
+  const bypass = shelfBypassHeaders(url.href, config);
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       'user-agent': composedUserAgent(),
-      ...shelfBypassHeaders(url.href, config),
+      ...bypass,
     },
+    ...bypassRedirect(bypass),
     body: JSON.stringify({
       schemaVersion: 3,
       view: 'decision',
