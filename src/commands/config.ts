@@ -479,17 +479,25 @@ async function setHooksKey(
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   // ONE honest line, not a nag loop: the value is stored either way, and the
   // operator is told the running script predates it rather than left believing a
-  // setting took that did not. Only `hooks.stopNag` has a value an older script
-  // misreads (`deliberate-only`); the other keys' scripts read every value they
-  // could ever be set to.
-  const current =
-    key === 'hooks.stopNag'
-      ? await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir)
-      : true;
-  const stale =
-    key === 'hooks.stopNag' && parsed === 'deliberate-only' && !current
+  // setting took that did not. Two keys the installed Stop hook can be too old
+  // to honour: `hooks.stopNag`, whose `deliberate-only` an older script maps back
+  // to `on`, and `hooks.capture`, which scripts written before it existed do not
+  // read AT ALL — so `block` on one of those asks for nothing while `config get`
+  // reports it effective. The remaining keys' scripts read every value they could
+  // ever be set to.
+  const staleable = key === 'hooks.stopNag' || key === 'hooks.capture';
+  const current = staleable
+    ? await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir)
+    : true;
+  const stale = current
+    ? undefined
+    : key === 'hooks.stopNag' && parsed === 'deliberate-only'
       ? `The installed Stop hook predates ${JSON.stringify(parsed)} and will keep treating it as "on". Run \`tenjin install\` to update it.`
-      : undefined;
+      : // `off` is what an unaware script already does, so only a value that asks
+        // for something is worth a warning.
+        key === 'hooks.capture' && parsed !== 'off'
+        ? `The installed Stop hook predates \`hooks.capture\` and will not ask for a note. Run \`tenjin install\` to update it.`
+        : undefined;
   return {
     data: { key, ...entry, ...(stale !== undefined ? { hookScriptStale: true } : {}) },
     humanLines: [formatLine(key, entry), ...(stale !== undefined ? [stale] : [])],

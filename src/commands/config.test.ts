@@ -991,22 +991,53 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(badCapture.fix).toContain('"nudge"');
   });
 
-  // hooks.push and hooks.capture are runtime toggles like their siblings: no
-  // stopHookIsCurrent check applies to them (that staleness only exists for
-  // hooks.stopNag's `deliberate-only`, a value an older Stop hook misreads).
-  it('never reports hookScriptStale for push or capture', async () => {
+  // hooks.push is read by the push arms, which ship in the same build as the key
+  // itself, so there is no version of them that ignores it.
+  it('never reports hookScriptStale for push', async () => {
     const ctx = makeCtx();
     const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx, {
       stopHookIsCurrent: async () => false,
     });
     expect(push.data).not.toHaveProperty('hookScriptStale');
     expect(push.humanLines).toHaveLength(1);
+  });
 
-    const capture = await runConfigSet({ key: 'hooks.capture', value: 'block' }, ctx, {
+  /**
+   * Worse than `deliberate-only`'s misread: a Stop hook written before
+   * `hooks.capture` existed does not read the key at all. Setting `block` on one
+   * of those asks for nothing, while `config get` reports `value=block
+   * source=file` — the operator watches sessions end silently and has no way to
+   * tell the setting from the script.
+   */
+  it('says so when the installed Stop hook predates hooks.capture', async () => {
+    const ctx = makeCtx();
+    for (const value of ['block', 'nudge']) {
+      const set = await runConfigSet({ key: 'hooks.capture', value }, ctx, {
+        stopHookIsCurrent: async () => false,
+      });
+      expect(set.data).toMatchObject({ value, hookScriptStale: true });
+      expect(set.humanLines?.join('\n')).toContain('tenjin install');
+    }
+    // Stored regardless: the line reports the script, it does not refuse the set.
+    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
+      data: { value: 'nudge', source: 'file' },
+    });
+  });
+
+  it('stays quiet about capture on a current script, and about `off` on any', async () => {
+    const ctx = makeCtx();
+    const current = await runConfigSet({ key: 'hooks.capture', value: 'block' }, ctx, {
+      stopHookIsCurrent: async () => true,
+    });
+    expect(current.data).not.toHaveProperty('hookScriptStale');
+    expect(current.humanLines).toHaveLength(1);
+
+    // `off` is exactly what a script that never heard of the key already does.
+    const off = await runConfigSet({ key: 'hooks.capture', value: 'off' }, ctx, {
       stopHookIsCurrent: async () => false,
     });
-    expect(capture.data).not.toHaveProperty('hookScriptStale');
-    expect(capture.humanLines).toHaveLength(1);
+    expect(off.data).not.toHaveProperty('hookScriptStale');
+    expect(off.humanLines).toHaveLength(1);
   });
 
   // The arm-level toggle (#162): silencing the batched web-search reminders
