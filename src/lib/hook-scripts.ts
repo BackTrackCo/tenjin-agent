@@ -47,7 +47,7 @@ import { NOTES_DIR_NAME, PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './p
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 34;
+export const HOOK_SCRIPT_VERSION = 35;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
