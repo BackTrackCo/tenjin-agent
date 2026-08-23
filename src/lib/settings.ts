@@ -22,7 +22,7 @@ import type {
 } from './config';
 import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
-import { PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
+import { PRODUCTION_HOST, PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
 
@@ -136,6 +136,34 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
   if (isSameDeployment(origin, PRODUCTION_ORIGIN)) return false;
   const publicOrigin = tryOrigin(publicShelfUrl);
   return publicOrigin === undefined || !isSameDeployment(origin, publicOrigin);
+}
+
+/**
+ * The host the generated hooks actually ask, for the install-time disclosure and
+ * the consent prompt.
+ *
+ * NOT the `tenjin.blog` literal. `askTenjin` resolves its target to
+ * `config.baseUrl` with no flag or env layer, so on a machine with a configured
+ * shelf the base WebSearch arm asks THAT host — with the door key attached — and
+ * the marketplace is not asked at all. The dispatch arm asks it first too, and
+ * only falls through to the public shelf on a team miss. A disclosure naming the
+ * wrong recipient is the one part of an install an operator cannot check later
+ * without reading the scripts.
+ *
+ * Reads the raw config rather than resolved settings, because that is what the
+ * scripts read: a `--base-url` on the install run reaches neither.
+ */
+export function hookRecipientHost(config: PartialConfig): string {
+  const baseUrl = config.baseUrl ?? CONFIG_DEFAULTS.baseUrl;
+  const origin = tryOrigin(baseUrl);
+  if (origin === undefined) return PRODUCTION_HOST;
+  const publicShelfUrl = config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl;
+  if (!isTeamShelfOrigin(origin, publicShelfUrl)) return PRODUCTION_HOST;
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return PRODUCTION_HOST;
+  }
 }
 
 /** Where a close for one stored search has to go, and whether it carries the key. */

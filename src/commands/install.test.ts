@@ -1168,6 +1168,43 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).not.toContain('Push arms:');
   });
 
+  // The recipient is read off `config.baseUrl`, which is what the generated
+  // scripts read. Naming tenjin.blog on a machine with a configured shelf
+  // discloses a host that, on the base WebSearch arm, is never asked at all.
+  it('names the configured shelf as the recipient, not the tenjin.blog literal', async () => {
+    const SHELF = 'https://team-shelf.example';
+    await writeFile(join(data, 'config.json'), JSON.stringify({ baseUrl: SHELF }));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain('the hooks ask team-shelf.example the same question');
+    expect(text).not.toContain(`the hooks ask ${PRODUCTION_HOST}`);
+    // The dispatch arm's fallthrough is the one thing the marketplace still sees,
+    // and it is named rather than left implied.
+    expect(text).toContain(
+      `A subagent dispatch team-shelf.example has nothing for is then asked of ${PRODUCTION_HOST} as well.`,
+    );
+  });
+
+  it('keeps naming the marketplace when the base URL is the marketplace', async () => {
+    // Including its alias: an alias of production is not somebody's team shelf.
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: `https://${PRODUCTION_HOST}` }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain(`the hooks ask ${PRODUCTION_HOST} the same question`);
+    expect(text).not.toContain('is then asked of');
+  });
+
   /**
    * With the experiment armed the disclosure has to stop promising the hooks are
    * advisory: the research arm can deny a WebSearch or WebFetch outright and

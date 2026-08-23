@@ -11,6 +11,7 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
+import { hookRecipientHost } from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -33,7 +34,7 @@ import {
   parsePublishModeFlag,
   parseSearchHookModeFlag,
 } from '../lib/config';
-import type { PublishMode, SearchHookMode } from '../lib/config';
+import type { PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
 import {
   persistBazaarPay,
   persistInstallHarness,
@@ -589,6 +590,7 @@ async function installBody(
     hooks,
     wallet,
     doctor,
+    shelfHost: hookRecipientHost(rawConfig),
   });
   return { data, humanLines };
 }
@@ -636,6 +638,8 @@ interface WalkthroughState {
   hooks: HooksResult;
   wallet: WalletOutcome;
   doctor: DoctorChecks;
+  /** The host the generated hooks will ask; see {@link hookRecipientHost}. */
+  shelfHost: string;
 }
 
 /**
@@ -715,7 +719,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
   }
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
-    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks)));
+    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks, s.shelfHost)));
     lines.push(
       paint(
         io,
@@ -781,16 +785,27 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
  * Read off the result rather than a flag, so what is disclosed is what was
  * actually wired.
  */
-export function hooksDisclosure(h: HooksResult): string {
+export function hooksDisclosure(h: HooksResult, shelfHost: string = PRODUCTION_HOST): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries run beside these: they look a question up on your configured shelf first and then, in team mode, on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries run beside these: they look a question up on ${shelfHost} first and then, in team mode, on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}${push}`;
   }
-  return `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine.${pushArmed(h) ? '' : ' They can never block or change the tool call.'} ${shared}${push}`;
+  // WHO IS ACTUALLY ASKED, which on a machine with a configured shelf is that
+  // shelf and not the marketplace: the scripts resolve their target from
+  // `config.baseUrl` and attach the team's bypass key to it. Naming
+  // tenjin.blog here would disclose a recipient that, in team mode, is never
+  // asked on this arm at all. The dispatch arm asks the shelf first too, and
+  // reaches the marketplace only on a team miss, so that fallthrough is named
+  // rather than implied.
+  const fallthrough =
+    shelfHost === PRODUCTION_HOST
+      ? ''
+      : ` A subagent dispatch ${shelfHost} has nothing for is then asked of ${PRODUCTION_HOST} as well.`;
+  return `Before a web search or a subagent dispatch, the hooks ask ${shelfHost} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine.${fallthrough}${pushArmed(h) ? '' : ' They can never block or change the tool call.'} ${shared}${push}`;
 }
 
 /** Whether the push experiment's arms are registered in the outcome disclosed. */
@@ -1492,19 +1507,28 @@ async function resolvePermissions(args: {
  */
 export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web searches?';
 
-export const SEARCH_HOOKS_CHOICES = [
-  {
-    value: 'auto',
-    label: 'Yes, check Tenjin first (recommended)',
-    hint: `before a WebSearch or a subagent dispatch, ask ${PRODUCTION_HOST} the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine`,
-  },
-  {
-    value: 'remind',
-    label: 'Just remind me',
-    hint: 'a one-line reminder, nothing sent off-machine',
-  },
-  { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
-] as const satisfies readonly { value: SearchHookMode; label: string; hint?: string }[];
+export function searchHooksChoices(
+  shelfHost: string = PRODUCTION_HOST,
+): readonly { value: SearchHookMode; label: string; hint?: string }[] {
+  return [
+    {
+      value: 'auto',
+      label: 'Yes, check Tenjin first (recommended)',
+      // The host the scripts will actually ask; see {@link hooksDisclosure}. A
+      // consent prompt naming the wrong recipient is consent to something else.
+      hint: `before a WebSearch or a subagent dispatch, ask ${shelfHost} the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine`,
+    },
+    {
+      value: 'remind',
+      label: 'Just remind me',
+      hint: 'a one-line reminder, nothing sent off-machine',
+    },
+    { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
+  ];
+}
+
+/** The default-recipient spelling of {@link searchHooksChoices}. */
+export const SEARCH_HOOKS_CHOICES = searchHooksChoices();
 
 /**
  * Settle the harness hooks. Same shape as the allowlist decision and the same
@@ -1527,7 +1551,8 @@ async function resolveHooks(args: {
 }): Promise<HooksResult> {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
-  const hooksRaw = (await loadRawConfig(dataDir)).hooks;
+  const rawConfig = await loadRawConfig(dataDir);
+  const hooksRaw = rawConfig.hooks;
   const stored = hooksRaw?.searchMode;
   // Whether a past `tenjin push on` armed the push experiment (docs/command-reference.md#push-experimental): a
   // durable config key, read here rather than passed in, so this run's hooks
@@ -1559,7 +1584,7 @@ async function resolveHooks(args: {
     );
   }
 
-  const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt);
+  const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt, rawConfig);
   // Cancelling the select is a decision NOT to decide, so it behaves exactly like
   // `--no-hooks`: nothing registered, nothing written. Every other decision in
   // this walkthrough already treats Escape that way, and this one used to be the
@@ -1620,10 +1645,15 @@ async function chooseHookMode(
   deps: InstallDeps,
   dryRun: boolean,
   canPrompt: boolean,
+  config: PartialConfig,
 ): Promise<SearchHookMode | null> {
   if (flag !== undefined) return flag;
   if (dryRun || !canPrompt) return stored ?? DEFAULT_HOOK_MODE;
-  const answer = await (deps.promptSearchHooks ?? defaultPromptSearchHooks)();
+  const shelfHost = hookRecipientHost(config);
+  const answer = await (
+    deps.promptSearchHooks ??
+    ((): Promise<SearchHookMode | null> => defaultPromptSearchHooks(shelfHost))
+  )();
   if (answer === null) return null;
   // The seam is injectable, so an answer is validated rather than trusted; an
   // unrecognized one is a cancel, not a write of something unknown.
@@ -1631,10 +1661,12 @@ async function chooseHookMode(
   return parsed.success ? parsed.data : null;
 }
 
-function defaultPromptSearchHooks(): Promise<SearchHookMode | null> {
+function defaultPromptSearchHooks(shelfHost: string): Promise<SearchHookMode | null> {
   return selectOne<SearchHookMode>({
     message: SEARCH_HOOKS_QUESTION,
-    choices: SEARCH_HOOKS_CHOICES.map((c) => ({ ...c })),
+    // The recipient the hint names is the one the scripts will ask, not the
+    // marketplace literal; see {@link hookRecipientHost}.
+    choices: searchHooksChoices(shelfHost).map((c) => ({ ...c })),
     initialValue: 'auto',
   });
 }
