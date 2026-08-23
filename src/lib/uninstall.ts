@@ -30,7 +30,7 @@ import {
  * operator reaches for to get their machine back, and `hooks.push` is a KEPT
  * value under the data dir — reading it here would mean an operator who ran
  * `tenjin push off` before `tenjin uninstall` kept four generated scripts and
- * seven settings.json entries pointing at files that no longer exist. Removal
+ * six settings.json entries pointing at files that no longer exist. Removal
  * stays ownership-gated either way: a filename we never wrote is not found, and
  * a hook entry naming somebody else's script is left alone.
  */

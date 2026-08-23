@@ -45,6 +45,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  HOOK_EVENTS,
   quoteForShell,
   wireSearchHooks,
   hooksSkipped,
@@ -274,6 +275,25 @@ describe('wireSearchHooks: push experiment entries', () => {
     // three PreToolUse entries into one.
     expect(pushFiles).toHaveLength(4);
     expect(result.pushArms).toBe(6);
+    // FIVE events, which is the number the prose kept getting wrong: the four
+    // push-only ones plus PreToolUse, which the churn half shares with the base
+    // bundle. PostToolUse carries two of the six on its own.
+    expect(
+      new Set([
+        'UserPromptSubmit',
+        'PostToolUse',
+        'PostToolUseFailure',
+        'SubagentStart',
+        'PreToolUse',
+      ]).size,
+    ).toBe(5);
+    const settingsNow = await readSettings();
+    const pushEntryEvents = HOOK_EVENTS.filter((event) =>
+      entriesFor(settingsNow, event).some((e) =>
+        pushFiles.some((f) => e.hooks[0]!.command.includes(f)),
+      ),
+    );
+    expect(pushEntryEvents).toHaveLength(5);
     // The base bundle's own events, uncounted by the push half.
     expect(result.searchWrote).toBe(3);
 

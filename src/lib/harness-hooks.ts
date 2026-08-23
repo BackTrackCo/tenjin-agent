@@ -323,7 +323,10 @@ interface HookSpec {
  * two apiece because each fires on two different events (a Bash failure surfaces
  * as either PostToolUse or PostToolUseFailure depending on harness version; the
  * context arm's read and churn halves are different events entirely) — so push,
- * when on, plans six entries across four scripts. Callers that only ever write
+ * when on, plans six entries across four scripts and FIVE events
+ * (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart, PreToolUse;
+ * PostToolUse carries two of them, and PreToolUse is shared with the base
+ * bundle). Callers that only ever write
  * the base bundle (`writeSharedHookScripts`, the Hermes adapter,
  * `stopHookIsCurrent`) pass no opts and get `push: false`.
  */
@@ -701,7 +704,8 @@ export async function pushScriptsPresent(dataDir: string): Promise<boolean> {
 
 /** What {@link countPushHookEntries} found in settings.json. */
 export interface PushHookEntryCount {
-  /** Entries a `push on` would plan: six, across four events. */
+  /** Entries a `push on` would plan: six, across five events. Derived from
+   *  {@link specs}, never a literal — the two must not be able to disagree. */
   planned: number;
   /** How many of them are registered right now, matched by the SAME ownership
    *  predicate the writer uses, so "present" here and "already up to date"
