@@ -6,10 +6,8 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { stopHookScript, websearchHookScript } from './lib/hook-scripts';
+import { CAPTURE_REASON_TEAM, stopHookScript, websearchHookScript } from './lib/hook-scripts';
 import { PUSH_LEDGER_FILE, pushFailureHookScript, pushPromptHookScript } from './lib/push-scripts';
-import { addNote } from './lib/notes';
-import { runNotesNone } from './commands/notes';
 import { readLedgerTallies, runPushStatus } from './commands/push';
 import type { PushLedgerTallies } from './commands/push';
 import type { CommandContext } from './context';
@@ -19,30 +17,33 @@ import type { CommandContext } from './context';
  *
  * The unit suites each prove one arm against a stub. This one proves the thing
  * none of them can: that the arms SHARE STATE CORRECTLY across a session — the
- * note written by the command layer is the note the generated hook finds, the
- * ledger every arm appends to is the ledger `push status` tallies, and the
- * capture nag the Stop hook raises is the nag `tenjin notes none` clears.
- * Every one of those is a filename or a field name agreed between TypeScript
- * that ships through the bundler and plain JS that is written to disk as a
- * string, which is exactly the kind of contract that breaks silently.
+ * shelf order every arm applies is the order the ledger records, the ledger
+ * every arm appends to is the ledger `push status` tallies, and the ask the
+ * Stop hook raises fires once and then lets the session end. Every one of those
+ * is a filename or a field name agreed between TypeScript that ships through
+ * the bundler and plain JS that is written to disk as a string, which is exactly
+ * the kind of contract that breaks silently.
  *
- * Nothing here touches the network. The marketplace is a local socket, and the
- * first case asserts that socket saw ZERO requests: the team shelf answering
- * for free is the whole economic argument for the sidecar, and it is only true
- * if the query never leaves the machine.
+ * Nothing here touches the real network. BOTH shelves are local sockets, and the
+ * first case asserts the public one saw ZERO requests: team-first is the whole
+ * order, and it is only real if a team hit costs the public shelf nothing.
  */
 
 const SESSION = 'e2e-session-1';
 const SEARCH_ID = '44444444-4444-4444-8444-444444444444';
 const RESOURCE_ID = '55555555-5555-4555-8555-555555555555';
 const SECOND_RESOURCE_ID = '66666666-6666-4666-8666-666666666666';
+const TEAM_RESOURCE_ID = '77777777-7777-4777-8777-777777777777';
+
+/** The Vercel protection-bypass secret the team shelf's deployment is behind. */
+const BYPASS_HEADER = 'x-vercel-protection-bypass';
+const SECRET = 'e2e-shelf-secret';
 
 /** The body of the marketplace piece the research arm is expected to surface. */
 const PIECE_BODY = 'Pin the zod resolver to 4.1 and the optional-chain parse stops throwing.';
 
-/** A note whose card covers every content word of the failure below. */
-const NOTE_QUESTION = 'Does pgvector testcontainer image swap flip collation';
-const NOTE_BODY = [
+/** The team shelf's own piece, on the failure below. */
+const TEAM_BODY = [
   'The pgvector testcontainer image swap is what flips it: a new image tag ships a',
   'different default collation, so the collation mismatch surfaces as an ordering',
   'difference under vitest, never at startup. Pin the tag, re-create the volume.',
@@ -50,7 +51,7 @@ const NOTE_BODY = [
 
 let dataDir: string;
 let scriptDir: string;
-let server: Server | null = null;
+let servers: Server[] = [];
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-e2e-data-'));
@@ -58,8 +59,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
-  server = null;
+  for (const s of servers) await new Promise<void>((res) => s.close(() => res()));
+  servers = [];
   await rm(dataDir, { recursive: true, force: true });
   await rm(scriptDir, { recursive: true, force: true });
 });
@@ -95,21 +96,37 @@ interface Stub {
   /** Every request that reached the socket, search and body fetch alike. */
   hits: () => number;
   queries: () => string[];
+  /** Every request's headers, in arrival order. */
+  headers: () => Array<Record<string, string>>;
 }
 
 /**
- * The marketplace, on loopback. It answers a search about the zod resolver with
- * two ranked items (rank 2 has to exist for rank 1 to be `strong`: the margin
- * gate has nothing to measure against otherwise) and answers everything else
- * with a miss, so the "matches nothing" case really does match nothing. A GET
- * to the candidate's url is the free-body endpoint.
+ * One shelf, on loopback. It answers a search matching `answers` with two ranked
+ * items (rank 2 has to exist for rank 1 to be `strong`: the margin gate has
+ * nothing to measure against otherwise) and answers everything else with a miss,
+ * so the "matches nothing" case really does match nothing. A GET to the
+ * candidate's url is the free-body endpoint.
  */
-async function serveJson(): Promise<Stub> {
+async function serveShelf(
+  answers: RegExp,
+  resourceId: string,
+  bodyMd: string,
+  handle: string,
+): Promise<Stub> {
   let hits = 0;
   let base = '';
   const queries: string[] = [];
+  const headers: Array<Record<string, string>> = [];
   const s = createServer((req: IncomingMessage, res) => {
     hits += 1;
+    headers.push(
+      Object.fromEntries(
+        Object.entries(req.headers).map(([k, v]) => [
+          k,
+          Array.isArray(v) ? v.join(',') : (v ?? ''),
+        ]),
+      ),
+    );
     let body = '';
     req.on('data', (c) => (body += String(c)));
     req.on('end', () => {
@@ -126,21 +143,20 @@ async function serveJson(): Promise<Stub> {
           query = '';
         }
         queries.push(query);
-        const hit = /zod|resolver/i.test(query);
         send({
           schemaVersion: 3,
           searchId: SEARCH_ID,
-          items: hit
+          items: answers.test(query)
             ? [
                 {
-                  resourceId: RESOURCE_ID,
-                  url: `${base}/@vraspar/zod-resolver`,
+                  resourceId,
+                  url: `${base}/@${handle}/piece`,
                   // Echoing the query back makes the overlap score 1.0 without
                   // hand-tuning words, the same trick the unit suite uses.
                   title: query.slice(0, 190),
                   price: '0',
                   excerpt: 'the excerpt',
-                  creator: { handle: 'vraspar' },
+                  creator: { handle },
                 },
                 {
                   resourceId: SECOND_RESOURCE_ID,
@@ -156,15 +172,15 @@ async function serveJson(): Promise<Stub> {
         return;
       }
       // The free-body GET the candidate url points at.
-      send({ bodyMd: PIECE_BODY });
+      send({ bodyMd });
     });
   });
-  server = s;
+  servers.push(s);
   await new Promise<void>((res) => s.listen(0, '127.0.0.1', () => res()));
   const addr = s.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   base = `http://127.0.0.1:${port}`;
-  return { baseUrl: base, hits: () => hits, queries: () => queries };
+  return { baseUrl: base, hits: () => hits, queries: () => queries, headers: () => headers };
 }
 
 async function writeConfig(config: Record<string, unknown>): Promise<void> {
@@ -225,16 +241,16 @@ const stopInput = JSON.stringify({
 });
 
 describe('the sidecar, end to end over one session', () => {
-  it('answers from the team shelf, from the marketplace, stays quiet, then asks for notes', async () => {
-    const stub = await serveJson();
-    await writeConfig({ baseUrl: stub.baseUrl, hooks: { push: 'on', capture: 'block' } });
-
-    // The team shelf, written by the command layer the operator actually types.
-    const note = await addNote(dataDir, {
-      question: NOTE_QUESTION,
-      appliesTo: ['pgvector'],
-      body: NOTE_BODY,
-      author: 'vraspar',
+  it('answers from the team shelf, then the public one, stays quiet, then asks to publish', async () => {
+    // Two deployments, two sockets. The team shelf answers the pgvector failure;
+    // the public marketplace answers the zod research question.
+    const team = await serveShelf(/pgvector|collation/i, TEAM_RESOURCE_ID, TEAM_BODY, 'backtrack');
+    const pub = await serveShelf(/zod|resolver/i, RESOURCE_ID, PIECE_BODY, 'vraspar');
+    await writeConfig({
+      baseUrl: team.baseUrl,
+      publicShelfUrl: pub.baseUrl,
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
     });
 
     // ---- (a) a Bash failure the team shelf already answers ------------------
@@ -249,8 +265,8 @@ describe('the sidecar, end to end over one session', () => {
       }),
     );
     expect(failure.code).toBe(0);
-    expect(injected(failure)).toContain(NOTE_BODY.split('\n')[0]);
-    expect(injected(failure)).toContain(NOTE_BODY);
+    expect(injected(failure)).toContain(TEAM_BODY);
+    expect(injected(failure)).toContain('your team shelf');
 
     const afterFailure = await ledger();
     expect(afterFailure).toHaveLength(1);
@@ -260,14 +276,17 @@ describe('the sidecar, end to end over one session', () => {
       event: 'PostToolUseFailure',
       shelf: 'team',
       action: 'injected',
-      candidate: { id: note.id },
+      candidate: { resourceId: TEAM_RESOURCE_ID },
       deny: false,
     });
-    // THE POINT OF THE TEAM SHELF: the question never left the machine.
-    expect(stub.hits()).toBe(0);
-    expect(stub.queries()).toEqual([]);
+    // TEAM FIRST IS THE WHOLE ORDER: a team hit costs the public shelf nothing.
+    expect(pub.hits()).toBe(0);
+    expect(pub.queries()).toEqual([]);
+    // And the door key went to the team shelf, on every request it made.
+    expect(team.headers().length).toBeGreaterThan(0);
+    for (const h of team.headers()) expect(h[BYPASS_HEADER]).toBe(SECRET);
 
-    // ---- (b) a WebSearch the marketplace answers for free -------------------
+    // ---- (b) a WebSearch only the public shelf answers ----------------------
     const search = await runScript(
       websearchHookScript(dataDir),
       JSON.stringify({
@@ -280,11 +299,22 @@ describe('the sidecar, end to end over one session', () => {
     expect(search.code).toBe(0);
     const reason = denied(search);
     expect(reason).toContain(PIECE_BODY);
-    expect(stub.hits()).toBeGreaterThan(0);
+    expect(reason).toContain('Third-party text');
+    expect(pub.hits()).toBeGreaterThan(0);
+    // THE KEY NEVER LEAVES ITS OWN ORIGIN, body fetch included.
+    for (const h of pub.headers()) expect(h[BYPASS_HEADER]).toBeUndefined();
 
     const afterSearch = await ledger();
-    expect(afterSearch).toHaveLength(2);
+    // The team leg missed and is on the record; the public leg answered.
+    expect(afterSearch).toHaveLength(3);
     expect(afterSearch[1]).toMatchObject({
+      session: SESSION,
+      trigger: 'research',
+      shelf: 'team',
+      action: 'skipped',
+      reason: 'miss',
+    });
+    expect(afterSearch[2]).toMatchObject({
       session: SESSION,
       trigger: 'research',
       shelf: 'public',
@@ -308,55 +338,49 @@ describe('the sidecar, end to end over one session', () => {
     expect(prompt.stdout).toBe('');
 
     const afterPrompt = await ledger();
-    expect(afterPrompt).toHaveLength(3);
-    expect(afterPrompt[2]).toMatchObject({
-      session: SESSION,
-      trigger: 'prompt',
-      shelf: 'public',
-      action: 'skipped',
-    });
+    expect(afterPrompt).toHaveLength(5);
+    expect(afterPrompt.slice(3).map((r) => r.shelf)).toEqual(['team', 'public']);
+    for (const row of afterPrompt.slice(3)) {
+      expect(row).toMatchObject({ session: SESSION, trigger: 'prompt', action: 'skipped' });
+    }
 
-    // ---- (d) the capture ask, and the command that clears it ----------------
+    // ---- (d) the capture ask, once, in the team shelf's words ---------------
     const stop = await runScript(stopHookScript(dataDir), stopInput);
     expect(stop.code).toBe(0);
     const blocked = JSON.parse(stop.stdout) as { decision?: string; reason?: string };
     expect(blocked.decision).toBe('block');
-    expect(blocked.reason).toContain('tenjin notes none');
-    expect(await readFile(join(dataDir, 'push', 'capture-pending'), 'utf8')).toBe(SESSION);
+    expect(blocked.reason).toBe(CAPTURE_REASON_TEAM.replace('<mode>', 'review'));
+    expect(existsSync(join(dataDir, 'push', `capture-asked-${SESSION}`))).toBe(true);
 
-    // `tenjin notes none` with NO session in the environment: it has to learn
-    // the session from the `capture-pending` file the Stop hook just wrote.
-    await runNotesNone(makeCtx(), { env: {} });
-    expect(existsSync(join(dataDir, 'push', `capture-done-${SESSION}`))).toBe(true);
-    expect(existsSync(join(dataDir, 'push', 'capture-pending'))).toBe(false);
-
+    // Once per session, whether or not anything was published: the second stop
+    // is silent, which is what lets the operator end the session.
     const stopAgain = await runScript(stopHookScript(dataDir), stopInput);
     expect(stopAgain.stdout).toBe('');
 
     // ---- (e) what `tenjin push status` reports about all of it --------------
     const tallies: PushLedgerTallies = await readLedgerTallies(dataDir, Date.now());
-    expect(tallies.rows).toBe(3);
-    expect(tallies.byShelf).toEqual({ team: 1, public: 2 });
+    expect(tallies.rows).toBe(5);
+    expect(tallies.byShelf).toEqual({ team: 3, public: 2 });
     expect(tallies.byTriggerAction).toMatchObject({
       failure: { injected: 1 },
-      research: { injected: 1 },
-      prompt: { skipped: 1 },
+      research: { injected: 1, skipped: 1 },
+      prompt: { skipped: 2 },
     });
     expect(tallies.denies).toBe(1);
-    // One note and one piece: two distinct findings across two candidate shapes.
+    // Two distinct findings across the two shelves.
     expect(tallies.candidates).toBe(2);
     expect(Object.values(tallies.byReason).reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(1);
 
     const status = await runPushStatus(makeCtx());
     expect(status.data).toMatchObject({ mode: 'on', captureMode: 'block' });
     const human = status.humanLines?.join('\n') ?? '';
-    expect(human).toContain('3 row(s)');
+    expect(human).toContain('5 row(s)');
     expect(human).toContain('2 finding(s)');
-    expect(human).toContain('shelf: team=1, public=2');
+    expect(human).toContain('shelf: team=3, public=2');
     expect(human).toContain('reasons:');
     // The whole walk runs in well under a second alone. The explicit budget is
-    // for the full suite, where five spawned node processes and a loopback
-    // socket share a machine with everything else: the global 5s testTimeout is
-    // a per-TEST budget, and this test is five hook invocations long.
+    // for the full suite, where six spawned node processes and two loopback
+    // sockets share a machine with everything else: the global 5s testTimeout is
+    // a per-TEST budget, and this test is six hook invocations long.
   }, 20_000);
 });
