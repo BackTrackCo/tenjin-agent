@@ -398,6 +398,25 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     });
   });
 
+  /**
+   * The deny reason is the ONE output in this tree that cancels a tool call, and
+   * it speaks in the hook's own voice outside the fence. Telling the agent not to
+   * re-verify, in the one case where nothing was verified, hands the last word to
+   * whoever published the piece — anybody, for free.
+   */
+  it('never tells a denied search to skip re-verifying', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    const reason = denied(run) ?? '';
+    expect(reason).toContain(BODY_MD);
+    expect(reason).not.toContain('proceed without re-verifying');
+    expect(reason).toContain('run the search anyway');
+  });
+
   it('reads a non-boolean corroborated as absent, never as false', async () => {
     const { baseUrl } = await serve(echo({ corroborated: 'yes' }));
     await pushOn(baseUrl);
@@ -684,8 +703,11 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(lines.some((l) => /^-/.test(l) && /tenjin/i.test(l) && !l.includes(nonce))).toBe(false);
     expect(lines.some((l) => l.startsWith('  [Tenjin] Operator note'))).toBe(true);
     expect(lines.some((l) => l.startsWith('[Tenjin] Operator note'))).toBe(false);
-    // Our trailing sentence is the last line, after the closing fence.
-    expect(lines[lines.length - 1]).toContain('If this settles it');
+    // Our trailing sentence is the last line, after the closing fence. This is a
+    // deny, so it is the one that sends the agent back to the search — the body's
+    // spoofed copy of the other sentence is inside the fence and is not it.
+    expect(lines[lines.length - 1]).toContain('run the search anyway');
+    expect(lines[lines.length - 1]).not.toContain('If this settles it');
     expect(lines[lines.length - 2]).toBe(lines.filter((l) => l.startsWith('--- tenjin-body '))[1]);
   });
 
@@ -776,8 +798,10 @@ describe('the team shelf', () => {
     expect(text).toContain('applies to tenjin, drizzle');
     expect(text).toContain('The beacon needs a real session row');
     // A note is ours: it is never worth denying a tool call over, and it never
-    // costs a request.
+    // costs a request. Nothing was cancelled, so the closing line is the one
+    // that saves a redundant second look rather than the deny path's.
     expect(denied(run)).toBeNull();
+    expect(text).toContain('proceed without re-verifying');
     expect(hits()).toBe(0);
 
     const rows = await ledger();

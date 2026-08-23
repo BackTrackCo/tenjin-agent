@@ -608,13 +608,12 @@ const TEAM_OPENER =
  * The body, capped, between markers the body cannot forge.
  *
  * THE FENCE IS THE WHOLE SECURITY BOUNDARY OF THIS FILE. Everything outside it
- * is ours and reads as the hook's own voice — including the trailing "proceed
- * without re-verifying", which on the research arm is delivered as a DENY
- * reason, the one output in the tree that changes what the harness does. The
- * body inside it is a stranger's: anyone may publish a free marketplace piece,
- * and any teammate may write a note. A body containing a bare \`---\` line would
- * otherwise close the fence early and speak in our voice for the rest of the
- * injection.
+ * is ours and reads as the hook's own voice, and on the research arm the whole
+ * thing is delivered as a DENY reason — the one output in the tree that changes
+ * what the harness does. The body inside it is a stranger's: anyone may publish
+ * a free marketplace piece, and any teammate may write a note. A body containing
+ * a bare \`---\` line would otherwise close the fence early and speak in our
+ * voice for the rest of the injection.
  *
  * Two locks, because one is cheap: the fence carries a per-injection nonce the
  * body cannot know, and any body line that looks like a fence or opens with our
@@ -637,7 +636,23 @@ function fenceSafeBody(body) {
     .join('\n');
 }
 
-function fullForm(opener, header, body) {
+/**
+ * NEVER TELL A DENIED CALL NOT TO RE-VERIFY. On every other arm the tool call
+ * has already run and the injection sits beside its result, so "proceed without
+ * re-verifying" only saves a redundant second look. On the research arm it is
+ * the reason text of a DENY: the WebSearch or WebFetch the agent asked for did
+ * not happen, and the thing standing in its place is a body anyone could have
+ * published. Telling the agent not to check, in our own voice, in the one place
+ * where nothing was checked, is how a published piece becomes the last word. So
+ * the deny path says the opposite: run it anyway if this is not the answer.
+ */
+function closingLine(deny) {
+  return deny === true
+    ? 'If it does not answer the question, run the search anyway.'
+    : 'If this settles it, proceed without re-verifying. If it does not apply, ignore it.';
+}
+
+function fullForm(opener, header, body, deny) {
   const fence = '--- tenjin-body ' + Math.random().toString(36).slice(2, 10) + ' ---';
   return [
     opener,
@@ -645,7 +660,7 @@ function fullForm(opener, header, body) {
     fence,
     fenceSafeBody(body),
     fence,
-    'If this settles it, proceed without re-verifying. If it does not apply, ignore it.',
+    closingLine(deny),
   ].join('\n');
 }
 
@@ -798,11 +813,13 @@ async function pushDecide(args) {
     const body = await fetchFreeBody(j.top, config);
     if (body !== null) {
       form = 'full';
-      text = fullForm(PUBLIC_OPENER, headerLine(j.top), body);
       // Only where the caller can actually deny: everywhere else the tool call
       // has already run, and a row claiming otherwise would misreport the one
-      // thing in this file that changes what the harness does.
+      // thing in this file that changes what the harness does. The closing line
+      // is chosen from the same fact, so the text can never tell an agent whose
+      // search was cancelled that it need not look.
       deny = args.allowDeny === true;
+      text = fullForm(PUBLIC_OPENER, headerLine(j.top), body, deny);
     }
   }
   ledgerAppend({ ...row, action: 'injected', form, deny, tokens: Math.ceil(text.length / 4) });
