@@ -365,14 +365,14 @@ describe('runPushStatus', () => {
         trigger: 'prompt',
         shelf: 'public',
         action: 'skipped',
-        reason: 'inject-cap',
+        reason: 'lookup-cap',
       }),
       JSON.stringify({
         at: recent,
         trigger: 'read',
         shelf: 'public',
         action: 'skipped',
-        reason: 'inject-cap',
+        reason: 'lookup-cap',
       }),
       JSON.stringify({
         at: recent,
@@ -392,7 +392,7 @@ describe('runPushStatus', () => {
     expect(result.data).toMatchObject({
       ledger: {
         rows: 6,
-        byReason: { 'inject-cap': 2, miss: 1 },
+        byReason: { 'lookup-cap': 2, miss: 1 },
         candidates: 2,
         injectedTokens: 100,
       },
@@ -400,7 +400,7 @@ describe('runPushStatus', () => {
     const human = result.humanLines?.join('\n') ?? '';
     expect(human).toContain('2 finding(s)');
     // Sorted by count, so the dominant brake reads first.
-    expect(human).toContain('reasons: inject-cap=2, miss=1');
+    expect(human).toContain('reasons: lookup-cap=2, miss=1');
     // Read whole, so nothing is a floor and the line does not say otherwise.
     expect((result.data as { ledger: { tail: boolean } }).ledger.tail).toBe(false);
     expect(human).not.toContain('retained tail');

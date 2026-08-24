@@ -179,10 +179,12 @@ export interface PushLedgerTallies {
   rows: number;
   byTriggerAction: Record<string, Record<string, number>>;
   byShelf: Record<string, number>;
-  /** Why a row did not inject: `weak`, `miss`, `already-injected`, `inject-cap`,
-   *  `lookup-cap`, `no-answer`, and whatever a later build adds — the values are
-   *  taken from the rows, never from a list here, so a new reason shows up in
-   *  `status` the day the script starts writing it. */
+  /** Why a row did not inject. The eight the shipped core writes are
+   *  `lookup-cap`, `quiet`, `no-time`, `no-answer`, `miss`, `weak`,
+   *  `already-injected` and `watchdog` (docs/command-reference.md#push-experimental),
+   *  but the values are taken from the rows, never from a list here, so a new
+   *  reason shows up in `status` the day the script starts writing it — and a
+   *  retired one keeps counting out of the append-only rows that still hold it. */
   byReason: Record<string, number>;
   /** Distinct findings surfaced in the window, counted across both candidate
    *  shapes (current `{resourceId}` and the retired `{id}`) — see
@@ -396,8 +398,8 @@ function renderStatusLines(data: {
     lines.push(`  shelf: ${shelfEntries.map(([shelf, n]) => `${shelf}=${n}`).join(', ')}`);
   }
   // Sorted by count: an operator reading this wants to know what is holding the
-  // sidecar back most often, and `inject-cap` climbing that list means the cap
-  // itself is the throttle rather than the matcher.
+  // sidecar back most often, and `lookup-cap` climbing that list means the
+  // per-session lookup budget is the throttle rather than the matcher.
   const reasonEntries = Object.entries(ledger.byReason).sort((a, b) => b[1] - a[1]);
   if (reasonEntries.length > 0) {
     lines.push(`  reasons: ${reasonEntries.map(([reason, n]) => `${reason}=${n}`).join(', ')}`);
