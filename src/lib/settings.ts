@@ -181,9 +181,35 @@ export function hookRecipientHost(config: PartialConfig): string {
  * Protection.
  *
  * Reads the raw config for the same reason its two siblings do: a `--base-url` on
- * the install run reaches neither the scripts nor this.
+ * the install run reaches neither the scripts nor this. That IS team mode, so this
+ * is a named alias for {@link isTeamModeConfig} rather than a second copy of the
+ * rule — the disclosure and the installed skill text have to agree about which
+ * mode the machine is in.
  */
 export function hookFallthroughAsked(config: PartialConfig): boolean {
+  return isTeamModeConfig(config);
+}
+
+/**
+ * Is this MACHINE in team mode — a shelf of the team's own plus the door key that
+ * opens it? The same two-part rule `resolveContextSettings` applies
+ * (`ResolvedSettings.teamMode`), read off the raw config instead of resolved
+ * settings, and the difference is deliberate: a `--base-url` or `TENJIN_BASE_URL`
+ * on one invocation must not answer this question.
+ *
+ * Two callers need the raw-config form, for the same reason. The generated hook
+ * scripts read `config.baseUrl` with no flag layer, so the install-time disclosure
+ * of what they ask has to gate on what they will read
+ * ({@link hookFallthroughAsked}). And the installed skill text
+ * (lib/skill-materialize) outlives the command that wrote it and is read by every
+ * later session on this machine, so shaping it by a one-off flag would leave a
+ * team machine reading public guidance until the next install.
+ *
+ * A secret with `baseUrl` still on the marketplace is NOT team mode, per
+ * docs/command-reference.md#team-shelf: that half-set state runs as ordinary
+ * public mode rather than treating tenjin.blog as a private shelf.
+ */
+export function isTeamModeConfig(config: PartialConfig): boolean {
   const secret = config.shelfBypassSecret ?? CONFIG_DEFAULTS.shelfBypassSecret;
   if (typeof secret !== 'string' || secret === '') return false;
   const origin = tryOrigin(config.baseUrl ?? CONFIG_DEFAULTS.baseUrl);

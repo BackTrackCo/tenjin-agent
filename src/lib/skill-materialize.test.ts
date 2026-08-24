@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { SkillContentFlags } from './skill-materialize';
 import {
   SKILL_CONTENT_FLAG_NAMES,
   markerFlagsIn,
@@ -140,7 +141,8 @@ describe('materializeSkillMarkdown: the else arm', () => {
   });
 
   it('renders exactly one arm for every flag value, never both and never neither', () => {
-    for (const flags of [{ teamMode: true }, { teamMode: false }, {}]) {
+    const cases: SkillContentFlags[] = [{ teamMode: true }, { teamMode: false }, {}];
+    for (const flags of cases) {
       const out = materializeSkillMarkdown(PAIR, flags);
       expect(
         [out.includes('team arm'), out.includes('public arm')].filter(Boolean),

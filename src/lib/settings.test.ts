@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { loadProjectConfig, resolvePublishSettings, resolveShelfBypass } from './settings';
+import {
+  hookFallthroughAsked,
+  isTeamModeConfig,
+  loadProjectConfig,
+  resolvePublishSettings,
+  resolveShelfBypass,
+} from './settings';
 import { resolveSettings } from './config';
 import { CliError } from './errors';
 
@@ -323,5 +329,91 @@ describe('resolveShelfBypass — a secret with no private shelf is public mode',
       origin: 'https://backtrack.tenjin.sh',
       secret: SECRET,
     });
+  });
+});
+
+/**
+ * The machine-level team-mode predicate, which is what shapes the installed skill
+ * text and the install-time hook disclosure. It has to answer the same question
+ * `resolveShelfBypass` does — both halves, not just a non-empty secret — off the
+ * RAW config, because the two things it feeds outlive the invocation: a written
+ * SKILL.md is read by every later session, and the generated hook scripts read
+ * `config.baseUrl` with no flag layer at all.
+ */
+describe('isTeamModeConfig — the machine mode, not the invocation', () => {
+  const SECRET = 'shelf-secret-abc123';
+  const TEAM = 'https://backtrack.tenjin.sh';
+
+  it("is true only with both halves: a shelf of the team's own and the key", () => {
+    expect(isTeamModeConfig({ baseUrl: TEAM, shelfBypassSecret: SECRET })).toBe(true);
+  });
+
+  it('is false for either half alone', () => {
+    expect(isTeamModeConfig({ baseUrl: TEAM })).toBe(false);
+    expect(isTeamModeConfig({ shelfBypassSecret: SECRET })).toBe(false);
+    expect(isTeamModeConfig({})).toBe(false);
+  });
+
+  it('is false for an empty secret, which is how `config set` clears it', () => {
+    expect(isTeamModeConfig({ baseUrl: TEAM, shelfBypassSecret: '' })).toBe(false);
+  });
+
+  // The half-set state docs/command-reference.md#team-shelf documents: a secret
+  // landed before the baseUrl did. Team mode there would render team guidance on a
+  // machine still publishing to the public marketplace.
+  it('is false for a secret with baseUrl still on the marketplace, alias included', () => {
+    expect(isTeamModeConfig({ baseUrl: 'https://tenjin.blog', shelfBypassSecret: SECRET })).toBe(
+      false,
+    );
+    expect(isTeamModeConfig({ baseUrl: 'https://tenjin.sh', shelfBypassSecret: SECRET })).toBe(
+      false,
+    );
+  });
+
+  it('is false when baseUrl and publicShelfUrl name the same origin', () => {
+    expect(
+      isTeamModeConfig({
+        baseUrl: 'https://shelf.example',
+        publicShelfUrl: 'https://shelf.example',
+        shelfBypassSecret: SECRET,
+      }),
+    ).toBe(false);
+  });
+
+  it('is false on an unparseable baseUrl rather than throwing', () => {
+    expect(isTeamModeConfig({ baseUrl: 'not a url', shelfBypassSecret: SECRET })).toBe(false);
+  });
+
+  /**
+   * One rule, two names. The disclosure of what the hooks ask and the guidance the
+   * skills render must never disagree about which mode the machine is in, so this
+   * pins them to the same function rather than to two copies that drift.
+   */
+  it('agrees with hookFallthroughAsked on every shape above', () => {
+    const shapes: Record<string, unknown>[] = [
+      { baseUrl: TEAM, shelfBypassSecret: SECRET },
+      { baseUrl: TEAM },
+      { shelfBypassSecret: SECRET },
+      {},
+      { baseUrl: TEAM, shelfBypassSecret: '' },
+      { baseUrl: 'https://tenjin.blog', shelfBypassSecret: SECRET },
+      { baseUrl: 'not a url', shelfBypassSecret: SECRET },
+    ];
+    for (const config of shapes) {
+      expect(hookFallthroughAsked(config), JSON.stringify(config)).toBe(isTeamModeConfig(config));
+    }
+  });
+
+  /**
+   * `resolveShelfBypass` is the INVOCATION's answer and this is the MACHINE's, so
+   * they agree on a plain run and diverge on exactly one thing: a `--base-url` that
+   * re-points this run does not change what mode the machine is configured in, and
+   * so must not change the skill text on disk.
+   */
+  it('ignores a --base-url that re-points the run, unlike resolveShelfBypass', () => {
+    const config = { baseUrl: TEAM, shelfBypassSecret: SECRET };
+    const flags = { baseUrl: 'https://tenjin.blog' };
+    expect(resolveShelfBypass(config, resolveSettings({ config, flags, env: {} }))).toBeUndefined();
+    expect(isTeamModeConfig(config)).toBe(true);
   });
 });
