@@ -192,7 +192,7 @@ export async function runPublish(
   // The scan runs in EVERY publish mode (D38) and on EVERY shelf: it gates the
   // gate, it does not replace it. What it covers and why is on `scanDraft` below.
   //
-  // TEAM MODE DROPS THE WARN TIER AND NOTHING ELSE. The scan asks two different
+  // TEAM MODE DROPS THE WARN TIER, MINUS ONE CHECK. The scan asks two different
   // questions under one name. "Is this safe to make PUBLIC" is the warn tier — a
   // repo slug, an internal hostname, an employer's name — and on a second
   // deployment only this team can reach, every one of those is a false positive
@@ -205,8 +205,20 @@ export async function runPublish(
   // is therefore NEVER skipped and never clearable by --yes, here or anywhere:
   // that invariant is stated to operators (lib/permissions.ts) and to models
   // (mcp/server.ts) and it holds in team mode too.
+  //
+  // ONE WARN SURVIVES THE DROP: `secret-assignment`. It asks the credential
+  // question rather than the public-safety one — DEPLOY_API_KEY="pk_live_…" is a
+  // live key whose shape no block detector matches — so "a leaked key there is
+  // leaked" applies to it verbatim. It is kept by name rather than promoted to
+  // block, so the consent cascade still governs it: `review` and `auto` confirm,
+  // and `full-auto` clears it unseen on a team shelf exactly as it already does on
+  // the marketplace (the price scan.ts concedes at the detector). Every other warn
+  // is dropped. The two other surfaces that characterise this drop say the same:
+  // docs/command-reference.md and skills/tenjin-publish/SKILL.md.
   const scanned = await scanDraft(args, cwd, raw, card);
-  const findings = runtime.teamMode ? scanned.filter((f) => f.severity === 'block') : scanned;
+  const findings = runtime.teamMode
+    ? scanned.filter((f) => f.severity === 'block' || f.check === 'secret-assignment')
+    : scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 
@@ -231,8 +243,9 @@ export async function runPublish(
   // a team that finds that ask is the thing making in-session capture fail turns
   // it off the way everyone else does, with `publish.mode auto` (the dogfood
   // protocol sets `full-auto`). What team mode does change is the input: `warns`
-  // is empty above, so `auto` and `full-auto` are promptless on every team note
-  // rather than only on the clean ones.
+  // above holds `secret-assignment` findings and nothing else, so `auto` is
+  // promptless on every team note that carries no secret-named assignment, rather
+  // than only on the fully clean ones, and still confirms on one that does.
   if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
     throw new CliError('NEEDS_CONFIRMATION', confirmMessage(warns.length, price.usd), {
       fix: 'Review the findings, then re-run with --yes (or resolve the source and re-run).',

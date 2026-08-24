@@ -147,6 +147,11 @@ const WARN = '# The Answer\n\nSend to 0x' + 'b'.repeat(40) + ' today.\n';
 // A bare, uncontextualized 0x-64-hex raw private key: a hard block in every mode,
 // and it stays a block through B3.1's secret-assignment→warn demotion.
 const BLOCK = '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
+// A secret-named assignment: WARN tier, but the credential question rather than
+// the public-safety one, so it is the one warn a team shelf keeps. `pk_live_` is
+// deliberately not a shape any BLOCK detector matches (the stripe pattern is
+// `[sr]k_`), so nothing else rescues this body.
+const SECRET_ASSIGN = '# The Answer\n\nSet DEPLOY_API_KEY="pk_live_zzzz9988aabb" to deploy.\n';
 
 function baseArgs(file: string | undefined, over: Partial<PublishArgs> = {}): PublishArgs {
   return { ...(file !== undefined ? { file } : {}), ...over };
@@ -1419,11 +1424,13 @@ describe('runPublish — a search the store could not close reports closed:false
 
 /**
  * TEAM MODE. `baseUrl` is the team's own deployment and `shelfBypassSecret` is
- * set. Exactly ONE gate changes: the scan's WARN tier is skipped, because those
- * warnings ask "is this safe to make public" and a team shelf is not public. The
- * hard secret block and the consent cascade are the same on both shelves — a
- * team shelf is a hosted database with logs and a shared door key, and `review`
- * means the same thing wherever the write lands.
+ * set. Exactly ONE gate changes: the scan's WARN tier is skipped APART FROM
+ * `secret-assignment`, because those warnings ask "is this safe to make public"
+ * and a team shelf is not public, while that one asks "is this a live
+ * credential" and gets the same answer on either shelf. The hard secret block
+ * and the consent cascade are the same on both shelves — a team shelf is a
+ * hosted database with logs and a shared door key, and `review` means the same
+ * thing wherever the write lands.
  */
 describe('runPublish on a team shelf', () => {
   const TEAM = 'https://team.example';
@@ -1513,6 +1520,47 @@ describe('runPublish on a team shelf', () => {
     expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
     // Free by default: a teammate must not hit a 402 on their own team's finding.
     expect(sent[0]!.body?.price).toBe('0');
+  });
+
+  it('keeps secret-assignment: auto confirms on a live-looking key, on a team shelf too', async () => {
+    await writeShelfConfig();
+    // The one warn that survives the team drop. It asks "is this a live
+    // credential", not "is this safe to make public", so the block tier's own
+    // argument applies verbatim: a team shelf is a hosted Postgres with logs and
+    // a shared door key, and a leaked key there is leaked. Unlike WARN above,
+    // this body is NOT waved through under `auto`.
+    const file = await writeDoc(SECRET_ASSIGN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    await expect(
+      runPublish(
+        baseArgs(file, { mode: 'auto' }),
+        teamCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('hedges secret-assignment under full-auto, the same price the marketplace pays', async () => {
+    await writeShelfConfig();
+    // Kept as a warn rather than promoted to block, so the consent cascade still
+    // governs it: `full-auto` clears it unseen here exactly as it already does in
+    // public mode (scan.ts concedes that price at the detector). Promoting it
+    // would have made a team shelf STRICTER than the marketplace on this check.
+    const file = await writeDoc(SECRET_ASSIGN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    const res = await runPublish(
+      baseArgs(file, { mode: 'full-auto' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
   });
 
   it('keeps the review confirm: team mode is not a consent bypass', async () => {
