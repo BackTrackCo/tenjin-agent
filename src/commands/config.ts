@@ -859,8 +859,11 @@ async function persist(
       const existing = await loadRawConfig(dir);
       const merged = merge(existing);
       const validated = RawConfigSchema.parse(merged);
+      // 0600, matching lib/config.ts's `writeConfig`: this file holds
+      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
+      // there. See that function for why dirMode alone is not enough.
       await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o644,
+        mode: 0o600,
         dirMode: 0o700,
       });
     });

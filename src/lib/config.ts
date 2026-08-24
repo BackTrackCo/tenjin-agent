@@ -674,11 +674,24 @@ export function resolvePublishDefaultPrice(input: {
   return result;
 }
 
-/** Persist a full, validated config via the atomic writer (0700 dir, 0644 file). */
+/**
+ * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
+ *
+ * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
+ * team shelf's shared door key, and every other secret in this tree is 0600
+ * (the wallet, the passphrase, the session key, the spend ledger, the generated
+ * hook scripts) — wallet/local.ts even warns when it finds one that is not.
+ * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
+ * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
+ * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
+ * the key world-readable. `config --json` already redacts it, which is the same
+ * care applied one layer up. Keep this in step with `persist` in commands/config.ts,
+ * the other writer of this file.
+ */
 export async function writeConfig(dir: string, config: Config): Promise<void> {
   const validated = ConfigSchema.parse(config);
   await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-    mode: 0o644,
+    mode: 0o600,
     dirMode: 0o700,
   });
 }

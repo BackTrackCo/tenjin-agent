@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -1194,6 +1194,15 @@ describe('the shelf keys', () => {
     // not encryption of a setting.
     expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe(SECRET);
   });
+
+  /** And the file it lands in is a secret file, like every other one in the tree. */
+  it.skipIf(process.platform === 'win32')(
+    'leaves config.json at 0600 once it holds the door key',
+    async () => {
+      await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, makeCtx());
+      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('clears back to unset with an empty value, which is how team mode is turned off', async () => {
     const ctx = makeCtx();

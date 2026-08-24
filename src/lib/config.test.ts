@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -121,6 +121,29 @@ describe('writeConfig', () => {
     await writeConfig(dir, next);
     expect(await loadConfig(dir)).toEqual(next);
   });
+
+  /**
+   * config.json holds `shelfBypassSecret`, the team shelf's shared door key, so
+   * it is a secret file and gets the 0600 every other secret in this tree gets.
+   * dirMode 0o700 is not the backstop it looks like: node's recursive mkdir does
+   * not chmod a directory that already exists, so a data dir a devcontainer
+   * volume or a restored backup created at 0755 leaves a 0644 config readable
+   * by anyone on the box.
+   */
+  it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
+    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'still lands at 0600 inside a data dir that already exists at 0755',
+    async () => {
+      await mkdir(dir, { recursive: true });
+      await chmod(dir, 0o755);
+      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+    },
+  );
 });
 
 describe('publish block', () => {
