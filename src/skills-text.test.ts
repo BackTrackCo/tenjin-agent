@@ -1005,7 +1005,7 @@ describe('neither render carries the other mode s criteria', () => {
       skill: 'tenjin-publish',
       what: 'the scan s tier',
       publicOnly: 'warnings split in two and only the second is worth',
-      teamOnly: 'here it asks about CREDENTIALS ONLY',
+      teamOnly: 'is this a live CREDENTIAL, and would this text STEER the agent that reads it',
     },
     {
       skill: 'tenjin-publish',
