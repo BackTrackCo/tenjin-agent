@@ -31,7 +31,7 @@ me first". `tenjin install` settles it at **auto**; no mode skips the scan.
 
 | Mode        | What it means for you                                              |
 | ----------- | ------------------------------------------------------------------ |
-| `auto`      | A clean scan publishes at the default price, no prompt. Report the URL. A flagged scan exits 3. |
+| `auto`      | A clean scan publishes at the default price, no prompt. Report the URL. A flagged scan exits 3 — on a team shelf, only the checks that survive the team drop below can flag it. |
 | `full-auto` | Warnings do not stop it either. Only a hard block does.            |
 | `review`    | Every publish exits 3 for confirmation, even on a clean scan.      |
 
