@@ -1891,6 +1891,31 @@ describe('the capture ask (Stop)', () => {
     expect(existsSync(foreign)).toBe(true);
   });
 
+  /**
+   * The prune must not age out the marker of the session it is running in. The
+   * marker is written once, at first ask, and the existence check only stats it,
+   * so its mtime never moves: a long-lived session would otherwise cross the 24h
+   * retention line and be asked a SECOND time — under `block`, a second turn end
+   * it cannot get past. command-reference.md promises "once per session and no
+   * more", with no 24h qualifier.
+   */
+  it('never prunes the LIVE session marker, so a day-old session is not asked twice', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const pushDirPath = join(dataDir, 'push');
+    await mkdir(pushDirPath, { recursive: true });
+
+    // This session already asked — two days ago, and it is still running.
+    const mine = join(pushDirPath, `capture-asked-${SESSION}`);
+    await writeFile(mine, new Date().toISOString());
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await utimes(mine, old, old);
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
+    expect(existsSync(mine)).toBe(true);
+  });
+
   it('asks nothing of a session that did no research, or with capture off', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     const quiet = await runScript(stopHookScript(dataDir), stopInput);

@@ -1531,13 +1531,27 @@ function markerExists(name, sessionId) {
  * bounded, best-effort, and never the turn end's problem. Only \`capture-\`
  * markers, because the rest of the directory belongs to the push core and is its
  * to age out.
+ *
+ * THE LIVE SESSION'S OWN MARKER IS NEVER SWEPT, whatever its age. The marker is
+ * written once, at first ask, and \`markerExists\` only stats it, so its mtime
+ * stays pinned at that moment: a session still running 24h later would have its
+ * own marker aged out from under it and be asked a SECOND time, which under
+ * \`hooks.capture block\` means a second blocked turn end. "Once per session and
+ * no more" is what command-reference.md promises and what this exclusion makes
+ * true; the session id is in hand at the call site for exactly this. Every other
+ * session's marker still ages out, and this one ages out on the next session's
+ * sweep.
  */
-function pruneCaptureMarkers() {
+function pruneCaptureMarkers(liveSessionId) {
   try {
     const now = Date.now();
+    // Compared as a full path built by the same \`markerPath\`, so the sanitizing
+    // it does to a session id cannot make the two spellings disagree.
+    const keep = liveSessionId === null ? null : markerPath('capture-asked', liveSessionId);
     for (const name of readdirSync(PUSH_DIR)) {
       if (!name.startsWith('capture-')) continue;
       const path = join(PUSH_DIR, name);
+      if (path === keep) continue;
       try {
         if (now - statSync(path).mtimeMs > ${PUSH_STATE_RETENTION_MS}) {
           rmSync(path, { force: true });
@@ -1799,8 +1813,11 @@ async function main() {
   // and rides along with whatever else this turn had to say.
   const ask = captureAsk(config, sessionId, searches);
   // AFTER the ask, so a session older than the retention window is not asked a
-  // second time by its own prune. Once per turn end, one bounded readdir.
-  pruneCaptureMarkers();
+  // second time by its own prune within this turn — and passed this session's id
+  // so it is not asked a second time on a LATER turn either, once the marker it
+  // wrote at first ask is older than the retention window. Once per turn end,
+  // one bounded readdir.
+  pruneCaptureMarkers(sessionId);
   const reason = captureReason(config, publishMode);
   if (ask === 'block') emitBlock(reason);
   const nudge = ask === 'nudge' ? reason : null;
