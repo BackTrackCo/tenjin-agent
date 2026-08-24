@@ -110,7 +110,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     if (command !== 'install') {
       try {
         const { healWiredSkills } = await import('./lib/skill-heal');
-        await healWiredSkills({ io });
+        // The data dir, because the skill text it writes is shaped by the machine's
+        // configured mode (lib/skill-materialize). Resolved the same way the update
+        // nudge above resolves it, and for the same reason: a failed buildContext
+        // leaves no ctx to read one from.
+        await healWiredSkills({ io, dataDir: dataDir(process.env) });
       } catch {
         // Nothing here is the command's business.
       }

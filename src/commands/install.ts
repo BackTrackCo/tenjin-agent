@@ -9,9 +9,15 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
+import { skillMaterialize } from '../lib/skill-materialize';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
-import { hookFallthroughAsked, hookFallthroughHost, hookRecipientHost } from '../lib/settings';
+import {
+  hookFallthroughAsked,
+  hookFallthroughHost,
+  hookRecipientHost,
+  isTeamModeConfig,
+} from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -421,9 +427,13 @@ async function installBody(
   // self-heal is the other writer, and it writes these same bytes to these same
   // paths through the same writer.
   const rawConfig = await loadRawConfig(ctx.dataDir);
+  // The machine's configured mode, which is what the skill text is shaped by. Read
+  // off the raw config on purpose: a `--base-url` on THIS run must not decide what
+  // every later session on this machine reads. See lib/skill-materialize.
+  const teamMode = isTeamModeConfig(rawConfig);
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun));
+    harnesses.push(await applyPlan(plan, skillsSource, dryRun, teamMode));
   }
   await assertSkillsLanded(plans, dryRun);
   if (!dryRun) markPhase('wired');
@@ -526,6 +536,7 @@ async function installBody(
           plan.skillsDir,
           skillsSource,
           bazaarPay.enabled,
+          teamMode,
         );
       } catch {
         // The skills check in the embedded doctor run reports what remains.
@@ -1808,15 +1819,18 @@ async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
   dryRun: boolean,
+  teamMode: boolean,
 ): Promise<HarnessResult> {
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
+  const materialize = skillMaterialize({ teamMode });
   for (const name of SKILL_NAMES) {
     const { status, warning, preexisting } = await installSkill(
       join(skillsSource, name),
       join(plan.skillsDir, name),
       dryRun,
       name,
+      { materialize },
     );
     skills.push({
       name,

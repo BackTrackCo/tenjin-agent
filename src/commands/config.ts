@@ -253,7 +253,10 @@ export async function runConfigSet(
   if (configKey === 'bazaarPay') {
     try {
       const { syncBazaarSkill } = await import('../lib/skill-placement');
-      await syncBazaarSkill(stored === true, deps.placeSkill ?? { io: ctx.io });
+      await syncBazaarSkill(
+        stored === true,
+        deps.placeSkill ?? { io: ctx.io, dataDir: ctx.dataDir },
+      );
     } catch {
       // `tenjin doctor` reports a presence that does not match the toggle.
     }

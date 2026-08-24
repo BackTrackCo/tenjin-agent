@@ -27,6 +27,7 @@ import {
   shadowedCliSkills,
 } from '../lib/skill-wiring';
 import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
+import { skillMaterialize } from '../lib/skill-materialize';
 import type {
   DirState,
   HarnessTarget,
@@ -35,7 +36,12 @@ import type {
 } from '../lib/skill-wiring';
 import { fetchJson, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { isTeamShelfOrigin, loadProjectConfig, resolveShelfBypass } from '../lib/settings';
+import {
+  isTeamModeConfig,
+  isTeamShelfOrigin,
+  loadProjectConfig,
+  resolveShelfBypass,
+} from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -217,6 +223,10 @@ export async function collectDoctorChecks(
       settings.bazaarPay.value,
       deps.skillsSourceDir,
       hermesHome,
+      // The raw config, not resolved settings: the staleness compare has to shape
+      // the packaged copies the way the WRITERS shaped them, and they read the
+      // machine's configured mode with no flag layer (lib/skill-materialize).
+      isTeamModeConfig(config),
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
@@ -516,6 +526,7 @@ async function checkSkills(
   bazaarPay: boolean,
   skillsSourceDir: string | undefined,
   hermesHome: string,
+  teamMode: boolean,
 ): Promise<BuiltCheck> {
   const resolvedHermesHome = hermesHome;
   const present = detectHarnesses(home, which, resolvedHermesHome);
@@ -611,6 +622,7 @@ async function checkSkills(
   // set than it writes would leave a stale directory nothing ever names.
   const { stale, verifiable } = await compareWiredSkills(
     wiring.map((w) => w.dir),
+    teamMode,
     skillsSourceDir,
   );
   if (!verifiable) {
@@ -721,6 +733,11 @@ async function checkHermes(args: {
 /**
  * How the wired CLI adapter skills compare to the packaged ones.
  *
+ * The packaged side is MATERIALIZED for this machine's mode before the compare, so
+ * "current" means "matches what a writer on this machine would write now" — which
+ * also makes a mode change legible as drift until the heal converges it, rather
+ * than either invisible or permanent.
+ *
  * `verifiable` is false when this build cannot read its own packaged copies, which
  * is a broken package rather than evidence of no drift; reporting that as current
  * would make the check quietly green on exactly the install doctor should describe.
@@ -738,6 +755,7 @@ async function checkHermes(args: {
  */
 async function compareWiredSkills(
   dirs: readonly string[],
+  teamMode: boolean,
   sourceDir?: string,
 ): Promise<{ stale: string[]; verifiable: boolean }> {
   let source: string;
@@ -751,9 +769,13 @@ async function compareWiredSkills(
   // adapters decide `verifiable`: a package missing an optional copy is odd,
   // not a reason to call every adapter unverifiable.
   const packaged = new Map<string, Buffer>();
+  const materialize = skillMaterialize({ teamMode });
   for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
     const read = await readSkillFile(join(source, name, 'SKILL.md'));
-    if (read.kind === 'ok') packaged.set(name, read.bytes);
+    // SHAPED before the compare, exactly as the writers shape it. Comparing raw
+    // packaged bytes here would call every skill on a marker-carrying build stale
+    // in both modes, forever, with a fix that cannot clear it.
+    if (read.kind === 'ok') packaged.set(name, materialize('SKILL.md', read.bytes));
   }
   if (CLI_SKILL_NAMES.some((name) => !packaged.has(name))) {
     return { stale: [], verifiable: false };

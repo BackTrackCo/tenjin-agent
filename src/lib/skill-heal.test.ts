@@ -39,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { healWiredSkills } from './skill-heal';
+import { renderSkillMarkdown } from './skill-materialize';
 import { resolveSkillsSource, SHIPPED_SKILL_FILES, type SkillName } from './skills-source';
 import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, skillsDirsFor } from './skill-wiring';
 import type { Io } from './output';
@@ -48,11 +49,14 @@ import type { Io } from './output';
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let home: string;
+let dataDirs: string[];
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'tenjin-heal-home-'));
+  dataDirs = [];
 });
 afterEach(async () => {
   await rm(home, { recursive: true, force: true });
+  for (const dir of dataDirs) await rm(dir, { recursive: true, force: true });
 });
 
 function captureIo(isTTY = true) {
@@ -69,9 +73,32 @@ function captureIo(isTTY = true) {
   return { io, stderr: () => err.join('').replace(/\x1b\[[0-9;]*m/g, '') };
 }
 
-function heal(io: Io, env: NodeJS.ProcessEnv = {}): Promise<void> {
-  return healWiredSkills({ io, env, homeDir: home, skillsSourceDir: SKILLS_SRC });
+function heal(io: Io, env: NodeJS.ProcessEnv = {}, dataDir?: string): Promise<void> {
+  return healWiredSkills({
+    io,
+    env,
+    homeDir: home,
+    skillsSourceDir: SKILLS_SRC,
+    ...(dataDir !== undefined ? { dataDir } : {}),
+  });
 }
+
+/**
+ * A data dir holding one `config.json`. The heal shapes what it writes by the
+ * MACHINE's mode, so a team-mode heal needs both halves of the rule
+ * (settings.isTeamModeConfig): a shelf of the team's own and its door key.
+ */
+async function dataDirWith(config: Record<string, unknown>): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'tenjin-heal-data-'));
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  dataDirs.push(dir);
+  return dir;
+}
+
+const TEAM_CONFIG = {
+  baseUrl: 'https://backtrack.tenjin.sh',
+  shelfBypassSecret: 'shelf-secret-abc123',
+};
 
 const claudeDir = (): string => skillsDirsFor(home, join(home, '.hermes'))[0]!;
 const sharedDir = (): string => skillsDirsFor(home, join(home, '.hermes'))[1]!;
@@ -87,8 +114,17 @@ async function seedSkill(dir: string, name: string, text = stale(name)): Promise
   return path;
 }
 
-async function packaged(name: string): Promise<string> {
-  return readFile(join(SKILLS_SRC, name, 'SKILL.md'), 'utf8');
+/**
+ * What the heal SHOULD have written: the packaged copy rendered for a mode, not the
+ * raw file. Every comparison here goes through this, because a raw comparison is
+ * exactly the disagreement lib/skill-materialize warns about — it would pass today
+ * and start failing the moment a shipped skill carries its first marker, on a heal
+ * that did the right thing.
+ */
+async function packaged(name: string, teamMode = false): Promise<string> {
+  return renderSkillMarkdown(await readFile(join(SKILLS_SRC, name, 'SKILL.md'), 'utf8'), {
+    teamMode,
+  });
 }
 
 /**
@@ -96,11 +132,16 @@ async function packaged(name: string): Promise<string> {
  * carries a `references/` subdirectory, and `installSkill` compares the whole
  * tree: a directory holding only a current SKILL.md is NOT current.
  */
-async function seedWholeSkill(dir: string, name: SkillName): Promise<string> {
+async function seedWholeSkill(dir: string, name: SkillName, teamMode = false): Promise<string> {
   for (const rel of SHIPPED_SKILL_FILES[name]) {
     const path = join(dir, name, rel);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, await readFile(join(SKILLS_SRC, name, rel)));
+    // RENDERED, so "current" here means what a writer on this machine would write.
+    // Seeding raw bytes would make a marker-carrying skill permanently stale.
+    await writeFile(
+      path,
+      renderSkillMarkdown(await readFile(join(SKILLS_SRC, name, rel), 'utf8'), { teamMode }),
+    );
   }
   return join(dir, name, 'SKILL.md');
 }
@@ -410,6 +451,114 @@ describe('healWiredSkills', () => {
         skillsSourceDir: join(home, 'not-a-skills-dir'),
       }),
     ).resolves.toBeUndefined();
+    expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
+    expect(stderr()).toBe('');
+  });
+});
+
+/**
+ * The heal writes SHAPED bytes, through the same resolver `install` uses. That is
+ * what makes a mode change converge on its own from the next command, and what
+ * keeps an upgrade on a team machine from quietly swapping team guidance for
+ * public guidance under a notice claiming it matched this CLI.
+ *
+ * A marked source rather than the real skills, so these cases keep testing the
+ * mechanism whichever sections the shipped skills happen to condition today.
+ */
+describe('healWiredSkills shapes what it writes by the machine mode', () => {
+  const MARKED = [
+    '---',
+    'name: tenjin-search',
+    '---',
+    '',
+    '<!-- tenjin:when teamMode -->',
+    'TEAM GUIDANCE',
+    '<!-- tenjin:else -->',
+    'PUBLIC GUIDANCE',
+    '<!-- /tenjin:when -->',
+    '',
+  ].join('\n');
+
+  let source: string;
+  beforeEach(async () => {
+    source = await mkdtemp(join(tmpdir(), 'tenjin-heal-src-'));
+    dataDirs.push(source);
+    await mkdir(join(source, 'tenjin-search'), { recursive: true });
+    await writeFile(join(source, 'tenjin-search', 'SKILL.md'), MARKED);
+  });
+
+  const healFrom = (io: Io, dataDir?: string): Promise<void> =>
+    healWiredSkills({
+      io,
+      env: {},
+      homeDir: home,
+      skillsSourceDir: source,
+      ...(dataDir !== undefined ? { dataDir } : {}),
+    });
+
+  it('writes the team arm on a team-mode machine, and no marker', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const { io } = captureIo();
+    await healFrom(io, await dataDirWith(TEAM_CONFIG));
+    const written = await readFile(path, 'utf8');
+    expect(written).toContain('TEAM GUIDANCE');
+    expect(written).not.toContain('PUBLIC GUIDANCE');
+    expect(written).not.toContain('tenjin:when');
+  });
+
+  it('writes the public arm with no config at all', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const { io } = captureIo();
+    await healFrom(io, await dataDirWith({}));
+    expect(await readFile(path, 'utf8')).toContain('PUBLIC GUIDANCE');
+  });
+
+  // The half-set state: the key landed before the shelf did. Team mode there would
+  // render team guidance on a machine still publishing to the marketplace.
+  it('writes the public arm for a key with baseUrl still on the marketplace', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const { io } = captureIo();
+    await healFrom(io, await dataDirWith({ shelfBypassSecret: 'shelf-secret-abc123' }));
+    expect(await readFile(path, 'utf8')).toContain('PUBLIC GUIDANCE');
+  });
+
+  /**
+   * The convergence property, and the reason doctor reports a mode change as
+   * staleness: flipping the mode makes the same source differ again, so the next
+   * ordinary command rewrites the skill with no re-install.
+   */
+  it('rewrites on a mode flip, and is a no-op on a second run in the same mode', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const team = await dataDirWith(TEAM_CONFIG);
+    const pub = await dataDirWith({});
+
+    const first = captureIo();
+    await healFrom(first.io, pub);
+    expect(first.stderr()).toContain(path);
+
+    const again = captureIo();
+    await healFrom(again.io, pub);
+    expect(again.stderr()).toBe('');
+
+    const flipped = captureIo();
+    await healFrom(flipped.io, team);
+    expect(flipped.stderr()).toContain(path);
+    expect(await readFile(path, 'utf8')).toContain('TEAM GUIDANCE');
+  });
+
+  /**
+   * A config that cannot be PARSED must heal nothing. Guessing public on a machine
+   * that is really in team mode would rewrite every wired skill to the other mode's
+   * guidance — the one outcome worse than leaving a stale file alone — and the
+   * operator would see a notice saying it now matches this CLI.
+   */
+  it('heals nothing when the config cannot be parsed, rather than guessing public', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const broken = await mkdtemp(join(tmpdir(), 'tenjin-heal-data-'));
+    dataDirs.push(broken);
+    await writeFile(join(broken, 'config.json'), '{ not json');
+    const { io, stderr } = captureIo();
+    await healFrom(io, broken);
     expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
     expect(stderr()).toBe('');
   });
