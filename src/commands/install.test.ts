@@ -333,7 +333,7 @@ describe('runInstall: harness override', () => {
     await expect(readFile(join(data, 'hooks', 'tenjin-websearch.mjs'), 'utf8')).rejects.toThrow();
   });
 
-  it('a stored searchMode of off withholds the plugin and names the real blocker', async () => {
+  it('a stored webSearch of off withholds the plugin and names the real blocker', async () => {
     const { data: d } = await runInstall(
       { harness: ['hermes'], noWallet: true, searchHooks: 'off' },
       makeCtx(),
@@ -342,7 +342,7 @@ describe('runInstall: harness override', () => {
     const h = asData(d).harnesses[0]!;
     expect(h.hermes?.plugin.status).toBe('skipped');
     // Not "re-run `tenjin install --harness hermes`", which loops forever.
-    expect(h.warnings.join(' ')).toContain('hooks.searchMode auto');
+    expect(h.warnings.join(' ')).toContain('hooks.webSearch auto');
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {
@@ -1161,7 +1161,7 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).toContain(
       'the query text, or at most 400 characters of the subagent prompt, leaves the machine',
     );
-    expect(text).toContain('tenjin config set hooks.searchMode off');
+    expect(text).toContain('tenjin config set hooks.webSearch off');
     expect(text).toContain(join(data, 'hooks'));
   });
 
@@ -3300,7 +3300,16 @@ describe('runInstall: search hooks', () => {
   async function persistedMode(): Promise<string | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    return (JSON.parse(raw) as { hooks?: { searchMode?: string } }).hooks?.searchMode;
+    const hooks = (JSON.parse(raw) as { hooks?: { webSearch?: string; searchMode?: string } })
+      .hooks;
+    return hooks?.webSearch ?? hooks?.searchMode;
+  }
+  async function persistedAgentMode(): Promise<string | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    const hooks = (JSON.parse(raw) as { hooks?: { agentDispatch?: string; dispatchMode?: string } })
+      .hooks;
+    return hooks?.agentDispatch ?? hooks?.dispatchMode;
   }
 
   // A bare headless install is the one that most needs the hooks, and it is the
@@ -3364,7 +3373,8 @@ describe('runInstall: search hooks', () => {
     expect(hooksOf(res.data)).toMatchObject({ skipped: 'mode-off', mode: 'off', added: [] });
     expect((await settings()).hooks).toBeUndefined();
     expect(await persistedMode()).toBe('off');
-    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.searchMode auto');
+    expect(await persistedAgentMode()).toBe('off');
+    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.webSearch auto');
   });
 
   it('--search-hooks remind wires the hooks in remind mode', async () => {

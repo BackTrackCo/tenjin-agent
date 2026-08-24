@@ -12,9 +12,10 @@
  *  - They do not depend on `tenjin` being on PATH, on a global install location,
  *    or on a dist layout that an upgrade could move underneath them. The only
  *    thing baked in is the data directory; everything else is read at run time.
- *  - `hooks.searchMode` and `baseUrl` are read from config.json on every run, so
- *    `tenjin config set hooks.searchMode off` takes effect immediately and no
- *    re-install is needed to change behavior or to disarm the hook.
+ *  - `hooks.webSearch`, `hooks.agentDispatch` and `baseUrl` are read from
+ *    config.json on every run, so `tenjin config set hooks.webSearch off` (or
+ *    `hooks.agentDispatch off`) takes effect immediately and no re-install is
+ *    needed to change behavior or to disarm the hook.
  *
  * FAIL-OPEN IS THE CONTRACT. Neither script may block a tool call, delay one past
  * its budget, or write to stderr: a non-zero exit or stderr text would surface in
@@ -41,7 +42,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 21;
+export const HOOK_SCRIPT_VERSION = 23;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -297,10 +298,12 @@ function projectPublishMode(start) {
 /**
  * The config the CLI would resolve from the global file. Read on EVERY run, which
  * is what makes every hooks key a runtime toggle: \`tenjin config set
- * hooks.searchMode off\`, \`hooks.stopNag off\` or \`hooks.sessionPrimer off\`
- * silences a hook immediately, with no re-install and nothing to unwire. An
- * unreadable or unrecognized value falls back to the shipped default rather than
- * failing.
+ * hooks.webSearch off\`, \`hooks.agentDispatch off\`, \`hooks.stopNag off\` or
+ * \`hooks.sessionPrimer off\` silences a hook immediately, with no re-install and
+ * nothing to unwire. An unreadable or unrecognized value falls back to the
+ * shipped default rather than failing. Legacy \`hooks.searchMode\` and
+ * \`hooks.dispatchMode\` (including \`inherit\`) still read for one release so
+ * an old config.json keeps working.
  *
  * \`publishMode\` reads the global file and TENJIN_PUBLISH_MODE. \`envPinned\` says
  * whether the env var decided it, because lib/config.ts resolves
@@ -312,8 +315,20 @@ function readConfig() {
   const cfg = isRecord(raw) ? raw : {};
   const hooks = isRecord(cfg.hooks) ? cfg.hooks : {};
   const publish = isRecord(cfg.publish) ? cfg.publish : {};
-  const mode = hooks.searchMode;
-  const dispatch = hooks.dispatchMode;
+  // New keys, with one-release fallback to the old names. Dispatch no longer has
+  // \`inherit\`: it is its own disjoint switch, both default \`auto\`. For old
+  // configs that only had \`searchMode\` (dispatch inherited), copy the search
+  // value so a user who turned search \`off\` doesn't get dispatch \`auto\` after
+  // upgrade (see A1igator review on #205).
+  const rawWebSearch = hooks.webSearch ?? hooks.searchMode;
+  const rawDispatch =
+    hooks.agentDispatch ??
+    (hooks.dispatchMode === 'inherit' ||
+    (hooks.dispatchMode === undefined && hooks.searchMode !== undefined)
+      ? rawWebSearch
+      : hooks.dispatchMode);
+  const mode = rawWebSearch;
+  const dispatch = rawDispatch;
   const nag = hooks.stopNag;
   const primer = hooks.sessionPrimer;
   // env over file, matching lib/config.ts's resolvePublishMode; an unrecognized
@@ -324,11 +339,11 @@ function readConfig() {
   const publishMode = envPinned ? fromEnv : publish.mode;
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '${PRODUCTION_ORIGIN}';
   return {
+    webSearch: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
+    agentDispatch: dispatch === 'off' || dispatch === 'remind' || dispatch === 'auto' ? dispatch : 'auto',
+    // Deprecated aliases kept for callers that still read \`mode\`/\`dispatchMode\` (same values).
     mode: mode === 'off' || mode === 'remind' || mode === 'auto' ? mode : 'auto',
-    // The dispatch hook's own switch; anything but an explicit auto/remind/off
-    // (including the default \`inherit\`) follows searchMode.
-    dispatchMode:
-      dispatch === 'off' || dispatch === 'remind' || dispatch === 'auto' ? dispatch : 'inherit',
+    dispatchMode: dispatch === 'off' || dispatch === 'remind' || dispatch === 'auto' ? dispatch : 'auto',
     stopNag: nag === 'off' || nag === 'deliberate-only' ? nag : 'on',
     sessionPrimer: primer === 'off' ? 'off' : 'on',
     publishMode: isPublishMode(publishMode) ? publishMode : 'review',
@@ -770,7 +785,7 @@ function hintLines(stored) {
  *
  * It NEVER decides permission: no `permissionDecision` is emitted, so the
  * WebSearch always proceeds and the hint rides alongside the result. A MISS, a
- * timeout, a dead network, a malformed payload, and a `searchMode: off` config
+ * timeout, a dead network, a malformed payload, and a `webSearch: off` config
  * are all the same outcome here: exit 0 with nothing on stdout.
  */
 export function websearchHookScript(dataDir: string): string {
@@ -791,8 +806,8 @@ async function main() {
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   const config = readConfig();
-  if (config.mode === 'off') return quiet();
-  if (config.mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
+  if (config.webSearch === 'off') return quiet();
+  if (config.webSearch === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const found = await askTenjin(question, config);
   if (found === null) return quiet();
@@ -918,7 +933,7 @@ async function main() {
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   const config = readConfig();
-  const mode = config.dispatchMode === 'inherit' ? config.mode : config.dispatchMode;
+  const mode = config.agentDispatch;
   if (mode === 'off') return quiet();
   if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 

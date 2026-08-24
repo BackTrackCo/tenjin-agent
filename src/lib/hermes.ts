@@ -10,7 +10,7 @@ import {
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
 } from './hook-scripts';
-import type { SearchHookMode } from './config';
+import type { WebSearchMode } from './config';
 
 export const HERMES_MCP_MARKER = 'tenjin-cli:hermes-mcp';
 export const HERMES_PLUGIN_NAME = 'tenjin';
@@ -224,7 +224,7 @@ export async function wireHermesIntegration(opts: {
   nodeCommand: string;
   dryRun: boolean;
   explicit: boolean;
-  hooks: { enabled: boolean; fix?: string; mode: SearchHookMode };
+  hooks: { enabled: boolean; fix?: string; mode: WebSearchMode };
 }): Promise<HermesIntegrationResult> {
   const { hermesHome, dataDir, tenjinCommand, nodeCommand, dryRun, explicit, hooks } = opts;
   const mcp = await wireHermesMcp(hermesHome, dryRun, tenjinCommand);
@@ -281,18 +281,19 @@ export async function wireHermesIntegration(opts: {
  *
  * Withholding the write is not an uninstall, so the warning has to say what is
  * still on the machine or an agent reads `skipped` as "off". Whether it still
- * RUNS is a separate question: the generated scripts read `hooks.searchMode` on
- * every invocation, so an enabled plugin is inert while the stored mode is `off`.
- * Inert is the strongest thing on offer: no command in this CLI deletes the plugin
- * directory or the `plugins.enabled` entry, so the note must not promise removal.
+ * RUNS is a separate question: the generated scripts read `hooks.webSearch` (and
+ * `hooks.agentDispatch`) on every invocation, so an enabled plugin is inert while
+ * the stored mode is `off`. Inert is the strongest thing on offer: no command in
+ * this CLI deletes the plugin directory or the `plugins.enabled` entry, so the
+ * note must not promise removal.
  */
-async function survivingPluginNote(hermesHome: string, mode: SearchHookMode): Promise<string> {
+async function survivingPluginNote(hermesHome: string, mode: WebSearchMode): Promise<string> {
   const existing = await readHermesIntegrationStatus(hermesHome);
   if (existing.plugin !== 'installed' || existing.activation !== 'enabled') return '';
   const where = `An enabled plugin from an earlier run is still in ${hermesPluginDir(hermesHome)}`;
   return mode === 'off'
-    ? ` ${where}; it stays inert while \`hooks.searchMode\` is off.`
-    : ` ${where} and keeps running; this run opted out of writing, not out of the plugin. Make it inert with \`tenjin config set hooks.searchMode off\`.`;
+    ? ` ${where}; it stays inert while \`hooks.webSearch\` is off.`
+    : ` ${where} and keeps running; this run opted out of writing, not out of the plugin. Make it inert with \`tenjin config set hooks.webSearch off\`.`;
 }
 
 export async function wireHermesMcp(

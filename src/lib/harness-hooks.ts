@@ -13,7 +13,7 @@ import {
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
-import type { SearchHookMode } from './config';
+import type { WebSearchMode } from './config';
 
 /**
  * The second place the CLI writes into a harness's own settings file, and it
@@ -86,8 +86,8 @@ export interface HooksResult {
   path?: string;
   /** Where the hook scripts live (or would). */
   scriptsDir: string;
-  /** The behavior the installed scripts will follow (config `hooks.searchMode`). */
-  mode: SearchHookMode;
+  /** The behavior the installed scripts will follow (config `hooks.webSearch`; `hooks.agentDispatch` is disjoint, same enum). */
+  mode: WebSearchMode;
   /** Events whose entry this run appended. */
   added: HookEvent[];
   /** Events whose entry was already there, byte-identical. */
@@ -105,7 +105,7 @@ export interface HooksResult {
 
 /** The undo, stated the same way everywhere it is shown. */
 export function hooksUndo(settingsPath: string, scriptsDir: string): string {
-  return `Undo anytime: \`tenjin config set hooks.searchMode off\` disarms them, or delete the tenjin hook entries from ${settingsPath} and the scripts in ${scriptsDir}.`;
+  return `Undo anytime: \`tenjin config set hooks.webSearch off\` (or \`hooks.agentDispatch off\`) disarms them, or delete the tenjin hook entries from ${settingsPath} and the scripts in ${scriptsDir}.`;
 }
 
 function skip(
@@ -114,7 +114,7 @@ function skip(
     harness: string;
     path?: string;
     scriptsDir: string;
-    mode: SearchHookMode;
+    mode: WebSearchMode;
     warning?: string;
     fix?: string;
   },
@@ -139,7 +139,7 @@ export function hooksSkipped(
   harness: string,
   homeDir: string,
   dataDir: string,
-  mode: SearchHookMode,
+  mode: WebSearchMode,
   reason: HooksSkipReason,
 ): HooksResult {
   return skip(reason, {
@@ -161,9 +161,9 @@ function fixFor(reason: HooksSkipReason): string {
     case 'harness-not-claude':
       return 'Hooks are wired for Claude Code only. Re-run `tenjin install --harness claude` on a machine with Claude Code.';
     case 'native-harness':
-      return "Hermes uses Tenjin's native plugin adapter; change behavior with `tenjin config set hooks.searchMode <auto|remind|off>`.";
+      return "Hermes uses Tenjin's native plugin adapter; change behavior with `tenjin config set hooks.webSearch <auto|remind|off>` (or `hooks.agentDispatch`).";
     case 'mode-off':
-      return 'Enable them with `tenjin config set hooks.searchMode auto`, then re-run `tenjin install`.';
+      return 'Enable them with `tenjin config set hooks.webSearch auto` (and `hooks.agentDispatch auto`), then re-run `tenjin install`.';
     case 'declined':
     case 'dry-run':
       return 'Wire them with `tenjin install --search-hooks auto`.';
@@ -291,7 +291,7 @@ export async function stopHookIsCurrent(dataDir: string): Promise<boolean> {
 export interface WireHooksOptions {
   homeDir: string;
   dataDir: string;
-  mode: SearchHookMode;
+  mode: WebSearchMode;
   /** Shell-quoting target; injected so both branches are testable on one machine. */
   platform?: string;
 }
@@ -300,10 +300,10 @@ export interface WireHooksOptions {
  * Write the hook scripts and merge their entries into ~/.claude/settings.json.
  *
  * The SCRIPTS are written whatever the mode, including `off`: the mode is read by
- * the script at run time, so an operator who later flips `hooks.searchMode` back
- * to `auto` gets working hooks without re-installing. Only `mode: 'off'` is
- * refused at the caller (see `hooksSkipped`), which leaves settings.json alone
- * entirely.
+ * the script at run time, so an operator who later flips `hooks.webSearch` back
+ * to `auto` (or `hooks.agentDispatch`) gets working hooks without re-installing.
+ * Only `mode: 'off'` is refused at the caller (see `hooksSkipped`), which leaves
+ * settings.json alone entirely.
  *
  * Idempotent: a second run rewrites no script whose bytes match, appends no entry
  * that is already there, and does not touch settings.json at all when nothing
@@ -408,7 +408,7 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
 function refuseChanged(
   path: string,
   scriptsDir: string,
-  mode: SearchHookMode,
+  mode: WebSearchMode,
   scripts: string[],
 ): HooksResult {
   return {
@@ -440,7 +440,7 @@ async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<strin
 function refuse(
   path: string,
   scriptsDir: string,
-  mode: SearchHookMode,
+  mode: WebSearchMode,
   reason: HooksSkipReason,
   warning: string,
 ): HooksResult {
@@ -464,7 +464,7 @@ interface SettingsInspection {
 async function inspectSettings(
   homeDir: string,
   scriptsDir: string,
-  mode: SearchHookMode,
+  mode: WebSearchMode,
 ): Promise<SettingsInspection | { result: HooksResult }> {
   const declaredPath = claudeSettingsPath(homeDir);
   const entry = await lstat(declaredPath).catch(() => null);

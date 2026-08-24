@@ -365,7 +365,7 @@ describe('wireHermesIntegration', () => {
       hooks: {
         enabled: false,
         mode: 'auto',
-        fix: 'Enable them with `tenjin config set hooks.searchMode auto`.',
+        fix: 'Enable them with `tenjin config set hooks.webSearch auto`.',
       },
     });
     // `skipped` is about THIS RUN. `disabled` is a claim about the target, and on a
@@ -374,7 +374,7 @@ describe('wireHermesIntegration', () => {
     expect(result.plugin.scriptPaths).toEqual([]);
     expect(result.activation.status).toBe('skipped');
     // The warning names the blocker that has to move, not the command just run.
-    expect(result.plugin.warning).toContain('hooks.searchMode auto');
+    expect(result.plugin.warning).toContain('hooks.webSearch auto');
     await expect(
       readFile(join(hermesPluginDir(home), '__init__.py'), 'utf8'),
     ).rejects.toMatchObject({ code: 'ENOENT' });

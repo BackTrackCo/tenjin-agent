@@ -17,29 +17,32 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
+  LEGACY_HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
-  parseDispatchHookModeFlag,
-  parseSearchHookModeFlag,
+  parseAgentDispatchHookModeFlag,
   parseSessionPrimerFlag,
   parseStopNagFlag,
   parseUpdateModeFlag,
+  parseWebSearchHookModeFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
+  AgentDispatchMode,
   EffectiveSettings,
   HooksConfigKey,
+  LegacyHooksConfigKey,
   PartialConfig,
   Provenance,
   PublishConfigKey,
   PublishMode,
   ScalarConfigKey,
-  SearchHookMode,
   UpdateConfigKey,
+  WebSearchMode,
 } from '../lib/config';
 import {
   detectHarnesses,
@@ -121,10 +124,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
-  'hooks.searchMode':
-    'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
-  'hooks.dispatchMode':
-    'harness subagent-dispatch hook: inherit=follow hooks.searchMode, auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.webSearch':
+    'harness WebSearch hook (before WebSearch): auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.agentDispatch':
+    'harness subagent-dispatch hook (before Agent/Task — most sensitive payload): auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.stopNag':
     'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'hooks.sessionPrimer':
@@ -139,6 +142,17 @@ function isPublishKey(key: string): key is PublishConfigKey {
 
 function isHooksKey(key: string): key is HooksConfigKey {
   return (HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isLegacyHooksKey(key: string): key is LegacyHooksConfigKey {
+  return (LEGACY_HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function normalizeHooksKey(key: string): HooksConfigKey | null {
+  if ((HOOKS_CONFIG_KEYS as readonly string[]).includes(key)) return key as HooksConfigKey;
+  if (key === 'hooks.searchMode') return 'hooks.webSearch';
+  if (key === 'hooks.dispatchMode') return 'hooks.agentDispatch';
+  return null;
 }
 
 function isUpdateKey(key: string): key is UpdateConfigKey {
@@ -194,8 +208,10 @@ export async function runConfigGet(
       humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
     };
   }
-  if (isHooksKey(key)) {
-    const entry = renderHooksSetting(key, await resolveFromContext(ctx));
+  const normalized = normalizeHooksKey(key);
+  if (normalized !== null) {
+    const entry = renderHooksSetting(normalized, await resolveFromContext(ctx));
+    // Echo the key the caller asked for (legacy or new) but value is from the normalized new key.
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   if (isUpdateKey(key)) {
@@ -225,7 +241,10 @@ export async function runConfigSet(
   deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
   if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
-  if (isHooksKey(key)) return setHooksKey(key, value, ctx, deps);
+  if (isHooksKey(key) || isLegacyHooksKey(key)) {
+    const normalized = normalizeHooksKey(key)!;
+    return setHooksKey(normalized, value, ctx, deps);
+  }
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
@@ -432,12 +451,13 @@ function allowlistLines(sync: AllowlistSync): string[] {
 }
 
 /**
- * `config set hooks.searchMode`. Merged into the nested hooks block through the
- * same locked read-modify-write every other set uses, so a subkey a newer CLI
- * wrote survives. The installed script reads this file on every run, so a value
- * that script UNDERSTANDS takes effect immediately with no re-install — which is
- * every value it shipped knowing about, and not `deliberate-only` on a script
- * written before that existed. That one case is reported, once, below.
+ * `config set hooks.webSearch` / `hooks.agentDispatch`. Merged into the nested hooks
+ * block through the same locked read-modify-write every other set uses, so a subkey a
+ * newer CLI wrote survives. The installed script reads this file on every run, so a
+ * value that script UNDERSTANDS takes effect immediately with no re-install — which
+ * is every value it shipped knowing about, and not `deliberate-only` on a script
+ * written before that existed. That one case is reported, once, below. Legacy
+ * `hooks.searchMode`/`hooks.dispatchMode` still work as aliases (mapped via normalizeHooksKey).
  */
 async function setHooksKey(
   key: HooksConfigKey,
@@ -446,18 +466,18 @@ async function setHooksKey(
   deps: ConfigSetDeps,
 ): Promise<CommandResult> {
   const subkey =
-    key === 'hooks.searchMode'
-      ? 'searchMode'
-      : key === 'hooks.dispatchMode'
-        ? 'dispatchMode'
+    key === 'hooks.webSearch'
+      ? 'webSearch'
+      : key === 'hooks.agentDispatch'
+        ? 'agentDispatch'
         : key === 'hooks.stopNag'
           ? 'stopNag'
           : 'sessionPrimer';
   const parsed =
-    key === 'hooks.searchMode'
-      ? parseSearchHookModeFlag(value, key)
-      : key === 'hooks.dispatchMode'
-        ? parseDispatchHookModeFlag(value, key)
+    key === 'hooks.webSearch'
+      ? parseWebSearchHookModeFlag(value, key)
+      : key === 'hooks.agentDispatch'
+        ? parseAgentDispatchHookModeFlag(value, key)
         : key === 'hooks.stopNag'
           ? parseStopNagFlag(value, key)
           : parseSessionPrimerFlag(value, key);
@@ -520,21 +540,34 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   }));
 }
 
-/**
- * Persist `hooks.searchMode` through the same locked merge-write, for `install`'s
- * hook decision. The mode is already a validated SearchHookMode.
- */
 /** install's Bazaar-lane decision writer; the same locked read-modify-write every
  *  `config set` uses, so a concurrent set never loses a sibling key. */
 export async function persistBazaarPay(dir: string, enabled: boolean): Promise<void> {
   await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
 }
 
-export async function persistSearchHookMode(dir: string, mode: SearchHookMode): Promise<void> {
+export async function persistWebSearchHookMode(dir: string, mode: WebSearchMode): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,
-    hooks: { ...existing.hooks, searchMode: mode },
+    hooks: { ...existing.hooks, webSearch: mode },
   }));
+}
+
+export async function persistAgentDispatchHookMode(
+  dir: string,
+  mode: AgentDispatchMode,
+): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, agentDispatch: mode },
+  }));
+}
+
+/**
+ * @deprecated use persistWebSearchHookMode — kept for backward compat
+ */
+export async function persistSearchHookMode(dir: string, mode: WebSearchMode): Promise<void> {
+  return persistWebSearchHookMode(dir, mode);
 }
 
 /**
@@ -600,10 +633,10 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
 /** The list/get shape for a hooks key: a plain enum string whichever it is. */
 function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
   const resolved =
-    key === 'hooks.searchMode'
-      ? settings.hooksSearchMode
-      : key === 'hooks.dispatchMode'
-        ? settings.hooksDispatchMode
+    key === 'hooks.webSearch'
+      ? settings.hooksWebSearch
+      : key === 'hooks.agentDispatch'
+        ? settings.hooksAgentDispatch
         : key === 'hooks.stopNag'
           ? settings.hooksStopNag
           : settings.hooksSessionPrimer;
