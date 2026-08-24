@@ -48,7 +48,7 @@ import { PUSH_STATE_RETENTION_MS } from './paths';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 40;
+export const HOOK_SCRIPT_VERSION = 41;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -139,14 +139,14 @@ export const PRIMER_TEXT =
  * a command to write.
  */
 export const CAPTURE_REASON =
-  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: write it to a file and run `tenjin publish <file> --title "..."` (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
+  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
 
 /**
  * The team-mode capture ask. `<mode>` is substituted with the resolved
  * publish.mode at run time, exactly as in the public wording above.
  */
 export const CAPTURE_REASON_TEAM =
-  'Before ending: if this session settled anything a teammate on this project would want to know (a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why), publish it to the team shelf now: write it to a file and run `tenjin publish <file> --title "..."` (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
+  'Before ending: if this session settled anything a teammate on this project would want to know (a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why), publish it to the team shelf now: write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
 
 /**
  * The dispatch hook's bounds. The slice is a PRIVACY bound, not a display one: a
