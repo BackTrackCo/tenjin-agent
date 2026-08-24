@@ -96,6 +96,7 @@ import {
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
+import { renderSkillMarkdown } from '../lib/skill-materialize';
 import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -103,6 +104,17 @@ import type { CommandContext, GlobalFlags } from '../context';
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+
+/**
+ * A packaged skill file as install would WRITE it on this machine. install shapes
+ * every source file before it compares and writes (lib/skill-materialize), so a
+ * raw read is not what lands: these cases run with no shelf configured, which is
+ * public mode. Comparing raw bytes here would pass until the first shipped marker
+ * and then fail on an install that did exactly the right thing.
+ */
+async function packagedText(name: string, rel = 'SKILL.md', teamMode = false): Promise<string> {
+  return renderSkillMarkdown(await readFile(join(SKILLS_SRC, name, rel), 'utf8'), { teamMode });
+}
 
 const MARKER = 'tenjin-cli:skills';
 /** The full marker as it appears in the undo line the walkthrough prints. */
@@ -2816,7 +2828,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
     // Every file the skill ships, already identical — including the one that
     // lives in the same subdirectory as the operator's own notes.
     for (const rel of SHIPPED_SKILL_FILES['tenjin-search']) {
-      await writeFile(join(dir, rel), await readFile(join(SKILLS_SRC, 'tenjin-search', rel)));
+      await writeFile(join(dir, rel), await packagedText('tenjin-search', rel));
     }
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
@@ -2835,17 +2847,14 @@ describe('runInstall: hosted skill already present (#35)', () => {
   it('writes a shipped reference file into an existing skill directory', async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(dir, 'references'), { recursive: true });
-    await writeFile(
-      join(dir, 'SKILL.md'),
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
-    );
+    await writeFile(join(dir, 'SKILL.md'), await packagedText('tenjin-search'));
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
     expect(skill.status).toBe('updated');
     expect(await readFile(join(dir, 'references', 'permissions.md'), 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'references', 'permissions.md'), 'utf8'),
+      await packagedText('tenjin-search', 'references/permissions.md'),
     );
     expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2963,7 +2972,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      await packagedText('tenjin-search'),
     );
   });
 
@@ -3037,7 +3046,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(join(real, 'SKILL.md'), 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      await packagedText('tenjin-search'),
     );
     expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -3074,9 +3083,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
-    expect(await readFile(managed, 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
-    );
+    expect(await readFile(managed, 'utf8')).toBe(await packagedText('tenjin-search'));
   });
 
   // Treating every read failure as "absent" classified an unreadable skill as a

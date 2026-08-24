@@ -20,6 +20,7 @@ vi.mock('./lib/skills-source', async (importOriginal) => {
   };
 });
 import { main } from './cli';
+import { renderSkillMarkdown } from './lib/skill-materialize';
 import { resolveSkillsSource } from './lib/skills-source';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import type { Io } from './lib/output';
@@ -473,8 +474,14 @@ describe('skills self-heal', () => {
     expect(await main(['config', '--json'], cap.io)).toBe(0);
     const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
     expect(parsed.ok).toBe(true);
+    // RENDERED for this machine's mode, not the raw packaged bytes: the heal
+    // materializes what it writes (lib/skill-materialize), and this run has no
+    // team shelf configured, so the public arm is what should have landed.
     expect(await readFile(wiredPath(), 'utf8')).toBe(
-      await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      renderSkillMarkdown(
+        await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+        { teamMode: false },
+      ),
     );
     expect(cap.stderr()).toContain('Updated');
   });
