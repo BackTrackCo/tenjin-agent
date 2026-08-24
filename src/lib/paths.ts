@@ -76,11 +76,14 @@ export const PUSH_DIR_NAME = 'push';
 /**
  * How long anything under the push dir survives: per-session working state, the
  * candidate cache, and the Stop hook's capture markers. ONE definition because
- * two writers prune that directory — the push core on every state save, and the
- * Stop hook on its own pass, which is the only pruner a machine running
- * `hooks.capture` with `hooks.push` off ever gets. A day is long enough that no
- * live session's marker is swept and short enough that the inodes do not build
- * up on a machine that never turns push on.
+ * two writers prune that directory, and they split it by prefix — the push core
+ * on every state save, which skips `capture-` entirely, and the Stop hook on its
+ * own pass, which touches nothing else and is the only pruner a machine running
+ * `hooks.capture` with `hooks.push` off ever gets. A day is short enough that the
+ * inodes do not build up on a machine that never turns push on. It is NOT long
+ * enough to guarantee a live session outlives it: a marker's mtime is pinned at
+ * first ask, so the Stop pruner spares the running session's marker by id rather
+ * than by age, and the push core stays off the prefix because it has no id.
  */
 export const PUSH_STATE_RETENTION_MS = 24 * 60 * 60 * 1000;
 

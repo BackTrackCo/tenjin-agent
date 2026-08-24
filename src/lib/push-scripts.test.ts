@@ -1308,6 +1308,41 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(await ledger()).toHaveLength(1);
   });
 
+  /**
+   * The mirror of the Stop pruner's live-marker test, from the other writer. Both
+   * prune the ONE push directory, and only the Stop hook has a session id in hand
+   * to spare the live marker with — so the push core stays off the `capture-`
+   * prefix entirely. Without that guard a single ordinary Bash failure, in a
+   * session that asked to capture more than 24h ago, sweeps that session's own
+   * marker and the next turn end asks a SECOND time: under `hooks.capture block`,
+   * a second blocked turn end, recurring per 24h of session age.
+   */
+  it('leaves capture markers alone, including a day-old live one, on its own prune', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl, { capture: 'block' });
+    const pushDirPath = join(dataDir, PUSH_DIR_NAME);
+    await mkdir(pushDirPath, { recursive: true });
+
+    // This session asked two days ago and is still running; the marker's mtime is
+    // pinned at that first ask, because nothing ever rewrites it.
+    const mine = join(pushDirPath, `capture-asked-${SESSION}`);
+    const other = join(pushDirPath, 'capture-asked-some-other-session');
+    const stale = join(pushDirPath, 'state-a-finished-session.json');
+    for (const path of [mine, other, stale]) await writeFile(path, '{}');
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    for (const path of [mine, other, stale]) await utimes(path, old, old);
+
+    const run = await runScript(pushFailureHookScript(dataDir), failure());
+    expect(run.code).toBe(0);
+
+    expect(existsSync(mine)).toBe(true);
+    // Not this pruner's prefix however old: aging these out is the Stop hook's
+    // pass, which knows which one to keep.
+    expect(existsSync(other)).toBe(true);
+    // Its own prefix still ages out, so the guard is a split and not a stand-down.
+    expect(existsSync(stale)).toBe(false);
+  });
+
   it('reads the top-level error string of a PostToolUseFailure', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);

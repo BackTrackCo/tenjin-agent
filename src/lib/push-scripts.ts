@@ -746,6 +746,14 @@ function pruneState() {
   try {
     const now = Date.now();
     for (const name of readdirSync(PUSH_DIR)) {
+      // \`capture-\` markers share this directory but are the Stop hook's to age
+      // out, and only its pruner knows to spare the LIVE session's marker: that
+      // marker's mtime is pinned at first ask (it is only ever stat'd), so a
+      // session still running past the retention window would have its own marker
+      // swept here and be asked to capture a SECOND time — under
+      // \`hooks.capture block\`, a second blocked turn end. This pruner has no
+      // session id in hand, so it stays out of the prefix entirely.
+      if (name.startsWith('capture-')) continue;
       const path = join(PUSH_DIR, name);
       try {
         if (now - statSync(path).mtimeMs > STATE_RETENTION_MS) rmSync(path, { force: true });
