@@ -362,9 +362,15 @@ function warnForeignShelf(
 ): void {
   if (foreignIds.length === 0) return;
   for (const id of foreignIds) {
-    const shelf = stored.get(id)?.shelfBaseUrl;
+    // Sanitized like every other store- or server-derived string this tree
+    // writes to a terminal (outcome's echoed question, buy's creator label,
+    // search's shelf error text). Today the field only ever holds a validated
+    // config URL, so this is consistency rather than a live escape-sequence
+    // risk — but the rule that store text is sanitized on the way out is worth
+    // more than the one call site that could argue its way out of it.
+    const shelf = sanitizeForTerminal(stored.get(id)?.shelfBaseUrl ?? 'another shelf');
     ctx.io.stderr.write(
-      `Search ${id} was answered by ${shelf ?? 'another shelf'}, not the shelf this piece is published to, so it is not claimed here and stays open. Close it there with \`tenjin outcome --search-id ${id} --status used\`.\n`,
+      `Search ${id} was answered by ${shelf}, not the shelf this piece is published to, so it is not claimed here and stays open. Close it there with \`tenjin outcome --search-id ${id} --status used\`.\n`,
     );
   }
 }
