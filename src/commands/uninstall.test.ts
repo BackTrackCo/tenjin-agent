@@ -181,7 +181,9 @@ describe('runUninstall — a fully installed machine', () => {
     await seedHookScripts();
     const keep = {
       'wallet.json': '{"wallet":true}',
-      'config.json': '{"baseUrl":"https://tenjin.blog"}',
+      // With a door key, because the receipt line asserted below is conditional
+      // on this machine actually holding one.
+      'config.json': '{"baseUrl":"https://shelf.example","shelfBypassSecret":"door-key"}',
       'searches.json': '{"schemaVersion":1,"searches":[]}',
     };
     for (const [file, body] of Object.entries(keep)) await writeFile(join(data, file), body);
@@ -229,6 +231,35 @@ describe('runUninstall — a fully installed machine', () => {
     for (const item of report.kept) {
       expect(item, item).not.toMatch(/everything under/i);
     }
+  });
+
+  /**
+   * And NOT on the machines that have no such key, which is most of them:
+   * `shelfBypassSecret` defaults to `''`. An imperative to clear a credential
+   * that is not there is a receipt line an operator can check and find false, and
+   * a receipt whose only job is to be read cannot afford one.
+   */
+  it('does not name the shelf key on a public-mode machine', async () => {
+    await seedSettings();
+    await writeFile(join(data, 'config.json'), '{"baseUrl":"https://tenjin.blog"}');
+
+    const { report, text } = await run();
+
+    expect(text).not.toContain('shelfBypassSecret');
+    expect(report.kept.some((item) => item.includes('shelfBypassSecret'))).toBe(false);
+    // Everything else it keeps is still named, so this is a conditional line and
+    // not a quieter receipt.
+    expect(text).toContain('publish.mode included');
+    expect(text).toContain('~/.tenjin/candidates');
+  });
+
+  /** An empty string is the default, and defaults are not credentials. */
+  it('does not name the shelf key when the config holds an empty one', async () => {
+    await seedSettings();
+    await writeFile(join(data, 'config.json'), '{"shelfBypassSecret":""}');
+
+    const { text } = await run();
+    expect(text).not.toContain('shelfBypassSecret');
   });
 });
 

@@ -139,17 +139,29 @@ export type SettingsSkipReason =
  * command that clears it, because the alternative is clearing it for them: the
  * key is not ours to revoke, and a teammate's shelf must not go dark because
  * somebody uninstalled the CLI.
+ *
+ * That item is CONDITIONAL, which is why this is a function and not a constant.
+ * `shelfBypassSecret` defaults to `''`, so on a public-mode machine — most of
+ * them — a static entry printed an imperative to clear a credential that is not
+ * there. A receipt whose items an operator can check and find false is a receipt
+ * they stop reading, and this one's whole job is to be read.
  */
-export const KEPT_ITEMS: readonly string[] = [
-  'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
-  'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
-  'the push ledger under ~/.tenjin (it is the experiment’s only record)',
-  'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
-];
+export function keptItems(hasShelfSecret: boolean): string[] {
+  return [
+    'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
+    ...(hasShelfSecret
+      ? [
+          'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
+        ]
+      : []),
+    'the push ledger under ~/.tenjin (it is the experiment’s only record)',
+    'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
+  ];
+}
 
 /**
  * The one thing under the data dir this command DOES remove, named beside
- * {@link KEPT_ITEMS} so the boundary reads as a boundary.
+ * {@link keptItems} so the boundary reads as a boundary.
  */
 export const REMOVED_FROM_DATA_DIR =
   'the generated hook scripts in ~/.tenjin/hooks (install writes them back)';

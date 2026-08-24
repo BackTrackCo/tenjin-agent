@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import {
-  KEPT_ITEMS,
+  keptItems,
   REMOVED_FROM_DATA_DIR,
   removeFromSettings,
   removeHookScripts,
@@ -9,6 +9,7 @@ import {
   type UninstallReport,
 } from '../lib/uninstall';
 import { sanitizeForTerminal } from '../lib/output';
+import { loadRawConfig } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -22,8 +23,9 @@ import type { CommandContext, CommandResult } from '../context';
  * entries, whatever `hooks.push` currently says: `tenjin push off` leaves the
  * files on disk on purpose, so uninstall is the only thing that takes them away.
  * It does NOT remove the wallet, the config (the team shelf's shared
- * `shelfBypassSecret` included, which the receipt names on its own line with the
- * command that clears it), the library, the push ledger, the search ledger, or
+ * `shelfBypassSecret` included, which the receipt names on its own line, with the
+ * command that clears it, on the machines that actually hold one), the library,
+ * the push ledger, the search ledger, or
  * parked candidates: `install` did not create those, a wallet holds funds, and
  * the ledger is the experiment's only record. The hook scripts are
  * the one thing under `~/.tenjin` it does remove, because `install` generated
@@ -65,10 +67,25 @@ export async function runUninstall(
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
     markers,
-    kept: [...KEPT_ITEMS],
+    // Read rather than assumed: the shelf-key item is an imperative to clear a
+    // shared credential, and on the machines that do not have one it is a false
+    // line in a receipt whose only job is to be checked.
+    kept: keptItems(await hasShelfSecret(ctx.dataDir)),
   };
 
   return { data: report, humanLines: humanLines(report) };
+}
+
+/** Does this machine's config actually hold a team door key? `''` is the default. */
+async function hasShelfSecret(dataDir: string): Promise<boolean> {
+  try {
+    const raw = await loadRawConfig(dataDir);
+    return typeof raw.shelfBypassSecret === 'string' && raw.shelfBypassSecret !== '';
+  } catch {
+    // An unreadable config is not a reason to fail an uninstall, and the quiet
+    // side is the safe one here: the key, if there is one, stays as it was.
+    return false;
+  }
 }
 
 function humanLines(report: UninstallReport): string[] {
