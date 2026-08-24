@@ -570,9 +570,30 @@ async function setHooksKey(
         key === 'hooks.capture' && parsed !== 'off'
         ? `The installed Stop hook predates \`hooks.capture\` and will not ask for a note. Run \`tenjin install\` to update it.`
         : undefined;
+  // `hooks.push` IS NOT THE WHOLE SWITCH. Every other key here is read by a
+  // script that is already wired; this one also needs six settings entries
+  // across four scripts, and only `tenjin push on` writes them. Setting the key
+  // alone persists and echoes as effective while no arm fires, which
+  // command-reference.md already warns about and the CLI used to accept in
+  // silence. Not a stale-script warning — the scripts are current, the wiring is
+  // absent — so it rides its own field. Only on a value that asks for something:
+  // `off` is what an unwired machine already does.
+  const unwired =
+    key === 'hooks.push' && parsed !== 'off'
+      ? 'Set this through `tenjin push on` / `tenjin push off`: `config set` stores the value but does not wire the hook entries the arms need, so on a machine that never ran `tenjin push on` nothing fires. `tenjin push on` reports what it wired; `tenjin doctor` and `tenjin push status` report a half-wired one.'
+      : undefined;
+  const notes = [
+    ...(stale !== undefined ? [stale] : []),
+    ...(unwired !== undefined ? [unwired] : []),
+  ];
   return {
-    data: { key, ...entry, ...(stale !== undefined ? { hookScriptStale: true } : {}) },
-    humanLines: [formatLine(key, entry), ...(stale !== undefined ? [stale] : [])],
+    data: {
+      key,
+      ...entry,
+      ...(stale !== undefined ? { hookScriptStale: true } : {}),
+      ...(unwired !== undefined ? { hookEntriesNotWired: true } : {}),
+    },
+    humanLines: [formatLine(key, entry), ...notes],
   };
 }
 

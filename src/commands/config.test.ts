@@ -1016,6 +1016,29 @@ describe('the hooks block is set through config, which stays human-gated', () =>
       stopHookIsCurrent: async () => false,
     });
     expect(push.data).not.toHaveProperty('hookScriptStale');
+  });
+
+  /**
+   * `hooks.push` is the one hooks key whose value is not the whole switch: the
+   * six settings entries are written by `tenjin push on`, and `config set` only
+   * persists the key — so it echoed as effective while no arm fired.
+   * command-reference.md already gave the guidance; the CLI accepted it silently.
+   */
+  it('points hooks.push at `tenjin push on`, because config set wires nothing', async () => {
+    const ctx = makeCtx();
+    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx);
+    expect(push.data).toMatchObject({ hookEntriesNotWired: true });
+    expect((push.humanLines ?? []).join('\n')).toContain('tenjin push on');
+    // The value is still stored: this is an honest line, not a refusal.
+    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
+      data: { value: 'on', source: 'file' },
+    });
+  });
+
+  it('says nothing for `off`, which is what an unwired machine already does', async () => {
+    const ctx = makeCtx();
+    const push = await runConfigSet({ key: 'hooks.push', value: 'off' }, ctx);
+    expect(push.data).not.toHaveProperty('hookEntriesNotWired');
     expect(push.humanLines).toHaveLength(1);
   });
 
