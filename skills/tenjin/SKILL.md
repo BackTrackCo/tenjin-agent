@@ -135,7 +135,13 @@ secrets; generalize the NAMES, keep the technical specifics).
   `limit` (1-10, default 5) lean items: id, payable `url`, slug, title, artifactType,
   `excerpt`, `temporalMode`, price, asOf, validUntil, matchReasons, estimatedTokens, creator
   handle (slug + creator handle feed any handle/slug call directly, so you never parse the
-  url). At most 3 come from any one
+  url), plus optional `confidence` (`high` | `medium` | `low`) and `corroborated`
+  (boolean), both only when `calibration` is `hybrid-v1`: `confidence` buckets the
+  DENSE leg's own match strength, `corroborated` says whether the lexical leg ALSO
+  matched — neither is a verdict, and a `high` uncorroborated match and a `medium`
+  corroborated one are different evidence, not ranked. Only `corroborated` rests on
+  caller-visible text; `confidence` is paywall-blind, so gate spending on `corroborated`.
+  Coarse, meaningful only within this one response. At most 3 come from any one
   creator while other qualifying creators can fill the page. `matched: 0` means nothing
   matched, and `hint` points at GET /api/articles for browsing; a small early catalog
   makes that the honest answer often. Generalize the question before you send it.
@@ -361,6 +367,7 @@ Add the hosted server at `https://tenjin.blog/api/mcp` when your client supports
 
 1. Ask ~3 questions — their handle, default price in USDC, and what to write about.
 2. Draft the piece AND its `resource` card together: `questionsAnswered` (5-10), `scope`, `exclusions`, plus `asOf` when the piece is a
-   snapshot. A piece published without a card is browseable but never a candidate.
+   snapshot. A piece published without a card ranks below every carded piece in agent
+   search (its `matchReasons` say `no answer card`), and the publish response warns.
 3. Confirm both with the user, then `POST /api/posts` carrying `title`, `bodyMd`,
    `price`, and `resource`. Pass `handle` once to claim it.
