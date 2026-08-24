@@ -148,10 +148,16 @@ const WARN = '# The Answer\n\nSend to 0x' + 'b'.repeat(40) + ' today.\n';
 // and it stays a block through B3.1's secret-assignment→warn demotion.
 const BLOCK = '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
 // A secret-named assignment: WARN tier, but the credential question rather than
-// the public-safety one, so it is the one warn a team shelf keeps. `pk_live_` is
-// deliberately not a shape any BLOCK detector matches (the stripe pattern is
-// `[sr]k_`), so nothing else rescues this body.
+// the public-safety one, so it is one of the two warns a team shelf keeps.
+// `pk_live_` is deliberately not a shape any BLOCK detector matches (the stripe
+// pattern is `[sr]k_`), so nothing else rescues this body.
 const SECRET_ASSIGN = '# The Answer\n\nSet DEPLOY_API_KEY="pk_live_zzzz9988aabb" to deploy.\n';
+// The SAME 0x-64-hex detector as BLOCK, demoted to the warn `hex32-value` because
+// a hash label precedes it (`hash` then `[\s/:=]*` — note `is 0x…` would NOT
+// demote, the intervening word defeats the anchor). Warn there is the
+// surfaced-for-review tier, not the safe tier, so it is the second warn a team
+// shelf keeps.
+const HEX32 = '# The Answer\n\nThe key hash: 0x' + 'c'.repeat(64) + '\n';
 
 function baseArgs(file: string | undefined, over: Partial<PublishArgs> = {}): PublishArgs {
   return { ...(file !== undefined ? { file } : {}), ...over };
@@ -1530,6 +1536,29 @@ describe('runPublish on a team shelf', () => {
     // a shared door key, and a leaked key there is leaked. Unlike WARN above,
     // this body is NOT waved through under `auto`.
     const file = await writeDoc(SECRET_ASSIGN);
+    const { fetch, sent } = shelfServer();
+    const { provider } = spyProvider();
+
+    await expect(
+      runPublish(
+        baseArgs(file, { mode: 'auto' }),
+        teamCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('keeps hex32-value: auto confirms on a hash-labelled 64-hex, on a team shelf too', async () => {
+    await writeShelfConfig();
+    // The second warn that survives the team drop, and the one the predicate used
+    // to miss. `hex32-value` comes off the SAME detector as BLOCK above: a
+    // 0x-64-hex is demoted to warn only because a block is permanently
+    // non-bypassable and a receipt or basescan tx hash must not be unpublishable
+    // forever — warn is the surfaced-for-review tier there, not the safe one. So
+    // the credential question is still open on a team shelf, and `auto` asks it.
+    // Before survivesTeamDrop this body published promptless under `auto`.
+    const file = await writeDoc(HEX32);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
 

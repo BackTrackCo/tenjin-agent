@@ -5,7 +5,7 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
-import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
+import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';
@@ -206,19 +206,21 @@ export async function runPublish(
   // that invariant is stated to operators (lib/permissions.ts) and to models
   // (mcp/server.ts) and it holds in team mode too.
   //
-  // ONE WARN SURVIVES THE DROP: `secret-assignment`. It asks the credential
-  // question rather than the public-safety one — DEPLOY_API_KEY="pk_live_…" is a
-  // live key whose shape no block detector matches — so "a leaked key there is
-  // leaked" applies to it verbatim. It is kept by name rather than promoted to
-  // block, so the consent cascade still governs it: `review` and `auto` confirm,
-  // and `full-auto` clears it unseen on a team shelf exactly as it already does on
+  // TWO WARNS SURVIVE THE DROP: `secret-assignment` and `hex32-value`. Both ask
+  // the credential question rather than the public-safety one — DEPLOY_API_KEY=
+  // "pk_live_…" is a live key whose shape no block detector matches, and a
+  // 0x+64-hex is the raw-private-key detector demoted to warn only because a block
+  // finding is permanently non-bypassable — so "a leaked key there is leaked"
+  // applies to both verbatim. They are kept by name rather than promoted to block,
+  // so the consent cascade still governs them: `review` and `auto` confirm, and
+  // `full-auto` clears them unseen on a team shelf exactly as it already does on
   // the marketplace (the price scan.ts concedes at the detector). Every other warn
-  // is dropped. The two other surfaces that characterise this drop say the same:
+  // is dropped. The rule itself lives beside the tier assignment as
+  // `survivesTeamDrop` (lib/scan.ts) so this filter and edit.ts cannot drift; they
+  // did once. The two other surfaces that characterise this drop say the same:
   // docs/command-reference.md and skills/tenjin-publish/SKILL.md.
   const scanned = await scanDraft(args, cwd, raw, card);
-  const findings = runtime.teamMode
-    ? scanned.filter((f) => f.severity === 'block' || f.check === 'secret-assignment')
-    : scanned;
+  const findings = runtime.teamMode ? scanned.filter(survivesTeamDrop) : scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 

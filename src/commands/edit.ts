@@ -5,7 +5,7 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
 import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
-import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
+import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { sanitizeForTerminal } from '../lib/output';
 import {
@@ -222,15 +222,14 @@ export async function runEdit(
   // THE SAME TEAM-MODE NARROWING PUBLISH DOES, and for the same reason: the warn
   // tier asks "is this safe to make PUBLIC", and a team shelf is not public, so a
   // repo slug is the point of a team note rather than a leak. `secret-assignment`
-  // survives with the block tier because it asks the credential question instead.
-  // Without this, an author publishes a team note carrying its own repo slug
-  // silently under `auto` and then gets NEEDS_CONFIRMATION on that same string
-  // when fixing a typo in it — the --yes round trip the drop exists to remove,
-  // moved to the second command. Keep the two filters identical: publish.ts is
-  // where the full reasoning lives.
-  const findings = runtime.teamMode
-    ? scanned.filter((f) => f.severity === 'block' || f.check === 'secret-assignment')
-    : scanned;
+  // and `hex32-value` survive with the block tier because they ask the credential
+  // question instead. Without this, an author publishes a team note carrying its
+  // own repo slug silently under `auto` and then gets NEEDS_CONFIRMATION on that
+  // same string when fixing a typo in it — the --yes round trip the drop exists to
+  // remove, moved to the second command. The two filters are the one
+  // `survivesTeamDrop` predicate (lib/scan.ts) so they cannot disagree; publish.ts
+  // is where the full reasoning lives.
+  const findings = runtime.teamMode ? scanned.filter(survivesTeamDrop) : scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
   if (blocking.length > 0) {

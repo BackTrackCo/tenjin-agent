@@ -52,13 +52,16 @@ employer-internal content have no detector at all.
 **On a team shelf** (the user's own second Tenjin deployment — `baseUrl` is not
 tenjin.blog and `shelfBypassSecret` is set) most of the WARN tier is skipped,
 because a repo slug or an internal hostname is the point of a team note rather
-than a leak. Two things are not skipped, and both are about credentials rather
-than about publicness. The BLOCKING tier: a live credential exits 3 there exactly
-as it does on the marketplace, and no `--yes` and no mode clears it. And the one
-warn check `secret-assignment`: a secret-named assignment such as
-`DEPLOY_API_KEY="pk_live_…"` still warns on a team shelf, so `review` and `auto`
-exit 3 on it (`full-auto` and `--yes` clear it, there as on the marketplace).
-Every other warn check is dropped on a team shelf.
+than a leak. Three things are not skipped, and all three are about credentials
+rather than about publicness. The BLOCKING tier: a live credential exits 3 there
+exactly as it does on the marketplace, and no `--yes` and no mode clears it. And
+two warn checks, `secret-assignment` and `hex32-value`: a secret-named assignment
+such as `DEPLOY_API_KEY="pk_live_…"`, and a `0x` + 64-hex value that reads as a
+hash (the same detector as the blocking raw private key, warned rather than
+blocked only so that a receipt or tx hash is not permanently unpublishable). Both
+still warn on a team shelf, so `review` and `auto` exit 3 on them (`full-auto` and
+`--yes` clear them, there as on the marketplace). Every other warn check is
+dropped on a team shelf.
 
 It matches patterns, so warnings split in two and only the second is worth the
 user's attention:
