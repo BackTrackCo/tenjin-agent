@@ -152,13 +152,23 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
  *
  * Reads the raw config rather than resolved settings, because that is what the
  * scripts read: a `--base-url` on the install run reaches neither.
+ *
+ * Derived from what the scripts ASK, deliberately not from {@link isTeamShelfOrigin}
+ * (review r6 nit 1). That predicate answers "is this a shelf of the team's own",
+ * which is a different question and returns false whenever `baseUrl` and
+ * `publicShelfUrl` are the same custom origin — a real config, since `publicShelfUrl`
+ * is operator-settable and nothing writes it. Reusing it there disclosed
+ * `tenjin.blog` on a machine whose hooks ask `shelf.internal.example` and never
+ * touch the marketplace at all, which is the exact claim this function exists to
+ * stop making. Only two things send the disclosure back to the production literal:
+ * a `baseUrl` that does not parse, and a `baseUrl` that IS production (its aliases
+ * included, so an alias is not a way to make the marketplace read as private).
  */
 export function hookRecipientHost(config: PartialConfig): string {
   const baseUrl = config.baseUrl ?? CONFIG_DEFAULTS.baseUrl;
   const origin = tryOrigin(baseUrl);
   if (origin === undefined) return PRODUCTION_HOST;
-  const publicShelfUrl = config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl;
-  if (!isTeamShelfOrigin(origin, publicShelfUrl)) return PRODUCTION_HOST;
+  if (isSameDeployment(origin, PRODUCTION_ORIGIN)) return PRODUCTION_HOST;
   try {
     return new URL(baseUrl).host;
   } catch {

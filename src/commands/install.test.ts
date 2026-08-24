@@ -1263,6 +1263,33 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).not.toContain('is then asked of');
   });
 
+  /**
+   * `baseUrl` and `publicShelfUrl` set to the SAME custom origin (review r6 nit 1).
+   * The disclosure used to derive from `isTeamShelfOrigin`, which answers "is this
+   * a shelf of the team's own" and returns false when the two match — so it named
+   * `tenjin.blog` on a machine whose hooks ask this host and never touch the
+   * marketplace at all. No secret here, which is the silent variant: with one,
+   * `doctor` and the half-wired check catch the collision loudly, and nothing
+   * writes `publicShelfUrl` in the first place, so this state ships unannounced.
+   */
+  it('names the shelf when baseUrl and publicShelfUrl are the same custom origin', async () => {
+    const SHELF = 'https://shelf.internal.example';
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, publicShelfUrl: SHELF }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain('the hooks ask shelf.internal.example the same question');
+    expect(text).not.toContain(`the hooks ask ${PRODUCTION_HOST}`);
+    // No secret, so no team mode and no second leg to disclose.
+    expect(text).not.toContain('is then asked of');
+  });
+
   it('keeps naming the marketplace when the base URL is the marketplace', async () => {
     // Including its alias: an alias of production is not somebody's team shelf.
     await writeFile(
