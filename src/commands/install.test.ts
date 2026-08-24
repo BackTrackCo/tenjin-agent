@@ -3244,6 +3244,100 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(isDisabled(text)).toBe(false);
   });
 
+  /**
+   * install SHAPES what it writes by the machine's configured mode, through the same
+   * resolver the self-heal and doctor use (lib/skill-materialize). These cases sit
+   * here rather than in skill-writer.test.ts because what they pin is the WIRING —
+   * that install reads the raw config, that a `--base-url` cannot reach it, and that
+   * a mode change is reported as an update rather than as up-to-date.
+   */
+  describe('shapes the installed skills by the configured mode', () => {
+    const TEAM = {
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    };
+    const searchAt = () => join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+
+    async function configure(config: Record<string, unknown>): Promise<void> {
+      await writeFile(join(data, 'config.json'), JSON.stringify(config));
+    }
+
+    it('writes the team arm on a team-mode machine, and no marker', async () => {
+      await configure(TEAM);
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      const written = await readFile(searchAt(), 'utf8');
+      expect(written).toBe(await packagedText('tenjin-search', 'SKILL.md', true));
+      expect(written).not.toContain('tenjin:when');
+      expect(written).toContain('teammate-useful');
+      expect(written).not.toContain('Public + durable + costly to reproduce');
+    });
+
+    it('writes the public arm with no config, and with the key alone', async () => {
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(await readFile(searchAt(), 'utf8')).toBe(await packagedText('tenjin-search'));
+
+      // The half-set state: the key landed before the shelf did. Team mode there
+      // would render team guidance on a machine still publishing to the marketplace.
+      await configure({ shelfBypassSecret: TEAM.shelfBypassSecret });
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(await readFile(searchAt(), 'utf8')).toBe(await packagedText('tenjin-search'));
+    });
+
+    /**
+     * A `--base-url` re-points THIS run; it does not change what mode the machine is
+     * configured in. The file being written outlives the command, so shaping it by a
+     * one-off flag would leave a team machine reading public guidance until the next
+     * install — and would let any single command silently rewrite every wired skill.
+     */
+    it('ignores --base-url when deciding which arm to write', async () => {
+      await configure(TEAM);
+      await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ baseUrl: 'https://tenjin.blog' }),
+        deps(),
+      );
+      expect(await readFile(searchAt(), 'utf8')).toBe(
+        await packagedText('tenjin-search', 'SKILL.md', true),
+      );
+    });
+
+    /**
+     * The compare happens on the SHAPED source, so a mode flip is a real update. If
+     * install compared raw packaged bytes it would report `up-to-date` and leave the
+     * previous mode's guidance in place, which is the whole failure the seam exists
+     * to prevent.
+     */
+    it('reports a mode flip as an update, not up-to-date', async () => {
+      const first = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(
+        asData(first.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('installed');
+
+      const same = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(
+        asData(same.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('up-to-date');
+
+      await configure(TEAM);
+      const flipped = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(
+        asData(flipped.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('updated');
+      expect(await readFile(searchAt(), 'utf8')).toContain('teammate-useful');
+    });
+
+    // A dry run must resolve the same bytes the real run would, or `would-update`
+    // means nothing on a machine whose mode decides the content.
+    it('a dry run judges against the shaped content too', async () => {
+      await configure(TEAM);
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      const dry = await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps());
+      expect(
+        asData(dry.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('up-to-date');
+    });
+  });
+
   it('the packaged CLI skills are model-invocable (guards the frontmatter)', async () => {
     for (const name of ['tenjin-search', 'tenjin-publish']) {
       const text = await readFile(join(SKILLS_SRC, name, 'SKILL.md'), 'utf8');
