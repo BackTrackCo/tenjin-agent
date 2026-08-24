@@ -354,6 +354,16 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason: 'Writes into harness config and skills directories.',
   },
   {
+    command: 'tenjin push',
+    reason:
+      'Writes hook entries into harness settings, and arms the one hook in this CLI that can ' +
+      'CANCEL a tool call the agent asked for (the abort-and-answer WebSearch/WebFetch deny) ' +
+      'and inject shelf content into later turns. Narrower authority than its list-mates — it ' +
+      'cannot spend, open the keystore or publish under your identity — but which hooks run in ' +
+      'your harness is an operator decision, and `runPushOn` has no consent gate of its own. ' +
+      'A prefix rule pins the verb, not the flags, so it would clear `off` and `status` too.',
+  },
+  {
     command: 'tenjin mcp',
     reason:
       'Long-running server that re-exposes every command core over stdio; ' +
