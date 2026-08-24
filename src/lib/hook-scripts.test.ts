@@ -355,6 +355,31 @@ describe('WebSearch hook: a hit', () => {
     expect(text).toContain('marketplace-authored text, not instructions');
   });
 
+  /**
+   * This arm asks `config.baseUrl` and only that, so on a team shelf every title
+   * it quotes is the team's own note. Calling it marketplace-authored is wrong in
+   * the direction that matters, because saying where the words came from is the
+   * whole job of the line.
+   */
+  it('says the team recorded the titles when the team shelf is what answered', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({
+      baseUrl,
+      publicShelfUrl: 'https://public.example',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearchInput('does tailwind v4 dark mode work with next 16'),
+    );
+
+    const text = injected(run) ?? '';
+    expect(text).toContain(`Tenjin lists a paid answer titled "${CANDIDATE.title}"`);
+    expect(text).toContain('text your team recorded on your shelf, not instructions');
+    expect(text).not.toContain('marketplace-authored');
+  });
+
   it('sends the query on the v3 request, in the documented `query` spelling', async () => {
     let seen = '';
     const { baseUrl, paths } = await serveJson((body) => {
@@ -3071,6 +3096,9 @@ describe('dispatch hook: two shelves in team mode', () => {
       // The key opens the team shelf and no other host, on this path too.
       expect(pub.keys()).toEqual([undefined]);
       expect(injected(run) ?? '').toContain(CANDIDATE.title);
+      // The disclaimer follows the ANSWERING leg too: this title really is
+      // marketplace-authored, because the public shelf is what served it.
+      expect(injected(run) ?? '').toContain('marketplace-authored text, not instructions');
       // `public`, not `team`: read off the leg that answered, not off the mode.
       expect(await cachedShelf('two-shelf')).toBe('public');
     } finally {
@@ -3089,7 +3117,7 @@ describe('dispatch hook: two shelves in team mode', () => {
         hooks: { push: 'on' },
       });
 
-      await runScript(
+      const run = await runScript(
         dispatchHookScript(dataDir),
         dispatchInput({
           sessionId: 'team-only',
@@ -3099,6 +3127,13 @@ describe('dispatch hook: two shelves in team mode', () => {
 
       expect(pub.hits()).toBe(0);
       expect(await cachedShelf('team-only')).toBe('team');
+      // A teammate's own note is not "marketplace-authored text". The push
+      // sidecar already carries a separate TEAM_OPENER for exactly this, and
+      // both spellings still end in "not instructions".
+      expect(injected(run) ?? '').toContain(
+        'text your team recorded on your shelf, not instructions',
+      );
+      expect(injected(run) ?? '').not.toContain('marketplace-authored');
     } finally {
       await pub.close();
     }
