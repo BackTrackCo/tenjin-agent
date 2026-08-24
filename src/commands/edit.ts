@@ -340,12 +340,12 @@ function cardLines(card: OwnPostCard | undefined): string[] {
 }
 
 function eligibilityLine(card: OwnPostCard | undefined): string {
-  if (card === undefined) return 'No answer card (browse-only document).';
+  if (card === undefined) return 'No answer card: ranks below every carded piece in agent search.';
   const missing = missingSentences(card.cacheEligibleMissing).map(sanitizeForTerminal);
   if (card.cacheEligible) return 'Answer card is search-eligible.';
   return missing.length > 0
-    ? `Answer card not search-eligible yet: ${missing.join(' ')}`
-    : 'Answer card is not search-eligible.';
+    ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
+    : 'Answer card incomplete, ranks below every complete card in agent search.';
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ function eligibilityLine(card: OwnPostCard | undefined): string {
  * Pruning is not cosmetic. A card key that rides along unchanged still counts as a
  * card write server-side, which re-runs the embedding for a card nobody edited;
  * and on a post with NO card, a lone `scope: null` mints an all-default card row,
- * turning a browse-only document into a card-bearing one. Comparing first and
+ * turning a card-less post into a card-bearing one. Comparing first and
  * sending only the difference is what keeps `edit` idempotent.
  */
 function diffUpdate(
@@ -783,7 +783,7 @@ function cardFlagsFrom(args: EditArgs): CardFlags {
  * spread of the GET, so a server-owned key (cacheEligible, cacheEligibleMissing,
  * schemaVersion) cannot reach a strictObject body that would reject it.
  *
- * What actually protects the server's D14 invariant (no card row on a browse-only
+ * What actually protects the server's D14 invariant (no card row on a card-less
  * post) is diffCard: it defaults an absent stored value to already-cleared, so a
  * clear on a post with no card compares equal and prunes away. Dropping the clears
  * here as well is a deliberate redundant backstop, one step earlier and local to

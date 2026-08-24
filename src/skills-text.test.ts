@@ -336,12 +336,17 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     }
   });
 
-  it('states the stake once, and states it as absence rather than ranking', () => {
+  it('states the stake once, and states it as a bottom tier rather than absence', () => {
+    // Until tenjin#691 an ineligible card kept the piece out of decision search
+    // entirely; it now ranks in a bottom tier below every eligible candidate and
+    // is labelled in matchReasons. The skill must not promise the older claim.
     expect(text).toMatch(/Leave any one empty and the card is ineligible/i);
-    expect(text).toMatch(/out of agent decision search entirely/i);
-    expect(text).toMatch(/not ranked lower,\s*absent/i);
+    expect(text).toMatch(/bottom tier below every eligible candidate/i);
+    expect(text).toMatch(/`incomplete answer card`/);
+    expect(text).not.toMatch(/out of agent decision search/i);
+    expect(text).not.toMatch(/not ranked lower/i);
     // Said once: the earlier shape repeated the stake in the exclusions bullet.
-    expect(text.match(/out of agent decision search/gi)).toHaveLength(1);
+    expect(text.match(/bottom tier/gi)).toHaveLength(1);
   });
 
   /**
