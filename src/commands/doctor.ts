@@ -867,18 +867,6 @@ const POSTURE: Record<DirState, string> = {
 };
 
 /**
- * The push experiment's TWO halves, asked separately, because either one alone
- * reports a healthy sidecar that does nothing: the generated scripts on disk
- * with no settings.json entries pointing at them (a `push on` whose settings
- * write refused), or six entries pointing at scripts that are gone (a
- * half-finished uninstall, a moved data dir). Six entries across five events,
- * so "half-wired" is a state with several ways in. Both counts are read from
- * the writer's own plan rather than stated here.
- *
- * Never required and never a fail: an experiment that is off-by-default cannot
- * take down the verb an operator runs when something else is broken.
- */
-/**
  * Is team mode actually on, and does the operator know which answer they got?
  *
  * Team mode needs TWO settings, and the setup is two independent commands, so
@@ -945,6 +933,18 @@ function checkTeamShelf(
   };
 }
 
+/**
+ * The push experiment's TWO halves, asked separately, because either one alone
+ * reports a healthy sidecar that does nothing: the generated scripts on disk
+ * with no settings.json entries pointing at them (a `push on` whose settings
+ * write refused), or six entries pointing at scripts that are gone (a
+ * half-finished uninstall, a moved data dir). Six entries across five events,
+ * so "half-wired" is a state with several ways in. Both counts are read from
+ * the writer's own plan rather than stated here.
+ *
+ * Never required and never a fail: an experiment that is off-by-default cannot
+ * take down the verb an operator runs when something else is broken.
+ */
 async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
   const scripts = await pushScriptsPresent(dataDir);
   const entries = await countPushHookEntries(homeDir, dataDir);
