@@ -272,13 +272,19 @@ team_fail() {
   exit 1
 }
 
+# The shelf URL is an UNROUTABLE LOOPBACK on purpose, twice over: this leg makes no
+# request (the heal is filesystem-only, and team mode is decided from stored config
+# alone), and scripts/ is swept for host literals other than the production one
+# (src/lib/production-origin.test.ts), so a plausible-looking shelf domain here
+# fails that sweep.
+#
 # HOME and CI are BOTH pinned on the setup commands, and neither is optional. The
 # post-command heal writes into HOME, so a `config set` that leaves the real one in
 # place heals the DEVELOPER'S OWN skills — and here it would heal them to the wrong
 # arm, since the second set completes team mode. `CI` set is the heal's own off
 # switch, so these two runs cannot write skills anywhere; only the run below, which
 # is the one under test, clears it.
-for KV in "baseUrl https://packsmoke-shelf.tenjin.sh" "shelfBypassSecret pack-smoke-secret"; do
+for KV in "baseUrl http://127.0.0.1:9" "shelfBypassSecret pack-smoke-secret"; do
   # shellcheck disable=SC2086 # deliberate word split: key and value are separate argv.
   HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI=1 "$BIN" config set $KV --json >/dev/null 2>&1 ||
     team_fail "'tenjin config set ${KV%% *}' failed"
