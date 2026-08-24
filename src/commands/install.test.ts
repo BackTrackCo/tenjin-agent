@@ -1173,7 +1173,12 @@ describe('runInstall: interactive walkthrough', () => {
   // discloses a host that, on the base WebSearch arm, is never asked at all.
   it('names the configured shelf as the recipient, not the tenjin.blog literal', async () => {
     const SHELF = 'https://team-shelf.example';
-    await writeFile(join(data, 'config.json'), JSON.stringify({ baseUrl: SHELF }));
+    // WITH the secret, because the fallthrough sentence below is gated on team
+    // mode and team mode is "a secret is set AND baseUrl is the team's own shelf".
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, shelfBypassSecret: 'door-key' }),
+    );
     const res = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
@@ -1200,7 +1205,12 @@ describe('runInstall: interactive walkthrough', () => {
     const MIRROR = 'https://mirror.example';
     await writeFile(
       join(data, 'config.json'),
-      JSON.stringify({ baseUrl: SHELF, publicShelfUrl: MIRROR, hooks: { push: 'on' } }),
+      JSON.stringify({
+        baseUrl: SHELF,
+        publicShelfUrl: MIRROR,
+        shelfBypassSecret: 'door-key',
+        hooks: { push: 'on' },
+      }),
     );
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1214,6 +1224,31 @@ describe('runInstall: interactive walkthrough', () => {
     // The push sentence's team-mode second leg names it too.
     expect(text).toContain('and then, in team mode, on mirror.example,');
     expect(text).not.toContain(PRODUCTION_HOST);
+  });
+
+  /**
+   * The half-set state: a custom `baseUrl` and no `shelfBypassSecret`. The two
+   * setup commands are independent, so this is both the documented sequence's
+   * intermediate step and the terminal state for a shelf with no Deployment
+   * Protection. The scripts gate the second leg on team mode, and `teamShelfOrigin`
+   * is null on an empty secret, so nobody is asked a second time — the sentence
+   * must not claim otherwise. Over-disclosure sends nothing extra, but it is false
+   * in the one text an operator cannot check later without reading the scripts.
+   */
+  it('promises no fallthrough on a custom shelf with no bypass secret', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://shelf.example' }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    // The FIRST leg is still named off baseUrl: that one is asked in either mode.
+    expect(text).toContain('the hooks ask shelf.example the same question');
+    expect(text).not.toContain('is then asked of');
   });
 
   it('keeps naming the marketplace when the base URL is the marketplace', async () => {

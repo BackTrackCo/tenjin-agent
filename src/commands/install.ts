@@ -11,7 +11,7 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
-import { hookFallthroughHost, hookRecipientHost } from '../lib/settings';
+import { hookFallthroughAsked, hookFallthroughHost, hookRecipientHost } from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -592,6 +592,7 @@ async function installBody(
     doctor,
     shelfHost: hookRecipientHost(rawConfig),
     fallthroughHost: hookFallthroughHost(rawConfig),
+    fallthroughAsked: hookFallthroughAsked(rawConfig),
   });
   return { data, humanLines };
 }
@@ -643,6 +644,8 @@ interface WalkthroughState {
   shelfHost: string;
   /** The host they fall through to; see {@link hookFallthroughHost}. */
   fallthroughHost: string;
+  /** Whether that fallthrough leg actually fires; see {@link hookFallthroughAsked}. */
+  fallthroughAsked: boolean;
 }
 
 /**
@@ -722,7 +725,13 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
   }
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
-    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks, s.shelfHost, s.fallthroughHost)));
+    lines.push(
+      paint(
+        io,
+        'dim',
+        hooksDisclosure(s.hooks, s.shelfHost, s.fallthroughHost, s.fallthroughAsked),
+      ),
+    );
     lines.push(
       paint(
         io,
@@ -792,6 +801,7 @@ export function hooksDisclosure(
   h: HooksResult,
   shelfHost: string = PRODUCTION_HOST,
   fallthroughHost: string = PRODUCTION_HOST,
+  fallthroughAsked: boolean = false,
 ): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
@@ -825,10 +835,19 @@ export function hooksDisclosure(
   // asked on this arm at all. The dispatch arm asks the shelf first too, and
   // reaches the marketplace only on a team miss, so that fallthrough is named
   // rather than implied.
-  const fallthrough =
-    shelfHost === PRODUCTION_HOST
-      ? ''
-      : ` A subagent dispatch ${shelfHost} has nothing for is then asked of ${fallthroughHost} as well.`;
+  //
+  // GATED ON TEAM MODE, NOT ON HOST DIFFERENCE. The scripts gate that second leg
+  // on `shelf === 'team'`, and their `teamShelfOrigin` is null on an empty
+  // `shelfBypassSecret` — so a custom `baseUrl` with no secret runs as ordinary
+  // public mode and asks nobody a second time. That half-set state is both the
+  // documented two-command setup's intermediate step and the terminal state for a
+  // shelf with no Deployment Protection, and this sentence used to promise it a
+  // recipient it never has. Over-disclosure sends nothing extra, but it is a
+  // false statement in the one text an operator cannot check later without
+  // reading the generated scripts. See {@link hookFallthroughAsked}.
+  const fallthrough = fallthroughAsked
+    ? ` A subagent dispatch ${shelfHost} has nothing for is then asked of ${fallthroughHost} as well.`
+    : '';
   return `Before a web search or a subagent dispatch, the hooks ask ${shelfHost} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine.${fallthrough}${pushArmed(h) ? '' : ' They can never block or change the tool call.'} ${shared}${push}`;
 }
 

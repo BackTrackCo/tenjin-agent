@@ -167,6 +167,31 @@ export function hookRecipientHost(config: PartialConfig): string {
 }
 
 /**
+ * Do the generated hooks actually MAKE the fallthrough ask — the second, public
+ * leg of the dispatch arm — on this machine?
+ *
+ * Not the same question as "is {@link hookFallthroughHost} different from
+ * {@link hookRecipientHost}". The scripts gate that leg on team mode, and their
+ * `teamShelfOrigin` returns null on an empty `shelfBypassSecret` (hook-scripts.ts),
+ * so a custom `baseUrl` with no secret runs as ordinary public mode and never
+ * falls through to anything. Gating the disclosure sentence on host difference
+ * instead promised a recipient that is never asked, in the half-set state that
+ * docs/command-reference.md documents as both the two-command setup's
+ * intermediate step AND the terminal state for a shelf with no Deployment
+ * Protection.
+ *
+ * Reads the raw config for the same reason its two siblings do: a `--base-url` on
+ * the install run reaches neither the scripts nor this.
+ */
+export function hookFallthroughAsked(config: PartialConfig): boolean {
+  const secret = config.shelfBypassSecret ?? CONFIG_DEFAULTS.shelfBypassSecret;
+  if (typeof secret !== 'string' || secret === '') return false;
+  const origin = tryOrigin(config.baseUrl ?? CONFIG_DEFAULTS.baseUrl);
+  if (origin === undefined) return false;
+  return isTeamShelfOrigin(origin, config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl);
+}
+
+/**
  * The host the generated hooks fall through TO, for the same disclosure.
  *
  * Also not the `tenjin.blog` literal. `publicShelfUrl` is operator-settable
