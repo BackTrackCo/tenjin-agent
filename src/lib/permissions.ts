@@ -346,7 +346,8 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason:
       'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy — ' +
       'and, through shelfBypassSecret + baseUrl, put the machine in team mode, where a publish ' +
-      'skips the scan’s warn tier and prices at 0.',
+      'skips the scan’s warn tier (except the credential checks secret-assignment and ' +
+      'hex32-value and the injection check embedded-instruction) and prices at 0.',
   },
   {
     command: 'tenjin install',
