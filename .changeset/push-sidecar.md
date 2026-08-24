@@ -44,8 +44,10 @@ One of those arms can cancel a tool call. On a strong hit on a FREE piece, the h
 `WebSearch`/`WebFetch` may deny that call and hand the finding back in its place
 (abort-and-answer) instead of letting the search run — the only hook this CLI writes that ever
 changes what the harness does. Every other arm only adds context beside a call that has already
-run. `tenjin install` and `tenjin push on` both say so before wiring anything, and every deny
-is in the ledger with the query and the piece.
+run. `tenjin install` and `tenjin push on` both say so in the receipt they print
+after wiring it — the human walkthrough and the `push on` lines, above the undo command; a
+`--json` install emits the hook counts rather than that paragraph. `tenjin push off` makes the
+arms inert again, and every deny is in the ledger with the query and the piece.
 
 **Capture closes the loop.** With `hooks.capture=block|nudge`, a session that actually did
 research is asked once, at Stop, to publish anything durable it settled, with the resolved
