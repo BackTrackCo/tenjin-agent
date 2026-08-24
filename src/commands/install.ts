@@ -1552,25 +1552,17 @@ async function resolveHooks(args: {
   // and must never clobber a diverged agentDispatch (e.g. webSearch auto + agentDispatch off
   // -> flagless reinstall would otherwise silently re-enable dispatch). See A1igator R2 review.
   const isExplicitChoice = flag !== undefined || (canPrompt && !dryRun);
-  let needsSync = false;
-  if (isExplicitChoice) {
-    needsSync =
-      rawHooks?.webSearch === undefined ||
+  const hasAnyHookKey =
+    rawHooks?.webSearch !== undefined ||
+    rawHooks?.agentDispatch !== undefined ||
+    rawHooks?.searchMode !== undefined ||
+    rawHooks?.dispatchMode !== undefined;
+  const needsSync = isExplicitChoice
+    ? rawHooks?.webSearch === undefined ||
       rawHooks?.agentDispatch === undefined ||
       mode !== storedWebSearchEff ||
-      mode !== storedAgentDispatchEff;
-  } else {
-    // Flagless headless: never clobber an explicit divergence. Only persist on first
-    // install when no hook key exists at all (so defaults become visible in file);
-    // otherwise the hook script's own legacy read (searchMode -> webSearch) keeps
-    // old files working until an explicit install migrates them.
-    const hasAnyHookKey =
-      rawHooks?.webSearch !== undefined ||
-      rawHooks?.agentDispatch !== undefined ||
-      rawHooks?.searchMode !== undefined ||
-      rawHooks?.dispatchMode !== undefined;
-    needsSync = !hasAnyHookKey;
-  }
+      mode !== storedAgentDispatchEff
+    : !hasAnyHookKey;
   if (needsSync) {
     await persistWebSearchHookMode(dataDir, mode);
     await persistAgentDispatchHookMode(dataDir, mode);
