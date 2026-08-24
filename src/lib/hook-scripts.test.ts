@@ -233,19 +233,19 @@ describe('HOOK_SCRIPT_VERSION', () => {
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
   it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(39);
+    expect(HOOK_SCRIPT_VERSION).toBe(40);
     const digests = Object.fromEntries(
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '7119dddcf8b372da49459b23a6e9d678',
-      dispatch: 'dd9cebffb8999245c61a816d38584905',
-      sessionPrimer: '99617121c2130db1c3f65faeb4955d23',
-      stop: 'e59d292320466e1fe908c218eee38d86',
-      pushPrompt: 'cde67966093ffaff823210251683cd27',
-      pushFailure: '1cde23110ed0db87d2d7e365fc632399',
-      pushSubagent: 'b49a4e0a72b0a9c7c223131d59187add',
-      pushContext: '433b43c6085c49b682a64b902ac8d697',
+      websearch: 'cc0250b0fa6a86258548b05f7a1454e3',
+      dispatch: 'd69e43c1f2fae259ead367b8dee7dba7',
+      sessionPrimer: 'efd93a6e1ee3f29634b89d29da8130a0',
+      stop: 'd180d76a3dba6977bf14e5d71f706e2b',
+      pushPrompt: 'a7e9489068b60f078a3d7c2ca41a82d7',
+      pushFailure: 'c2ba27ce75652704bfd073e43353354d',
+      pushSubagent: '163c0b87ef8a1c38b49f0b02bbbf751f',
+      pushContext: '23301224d94e6efd0f51ccf1480a6f61',
     });
   });
 
