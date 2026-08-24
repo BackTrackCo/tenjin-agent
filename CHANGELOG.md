@@ -1,5 +1,284 @@
 # tenjin-cli
 
+## 0.1.0-alpha.15
+
+### Minor Changes
+
+- 18385e4: Add a working native Hermes Agent integration. `tenjin install --harness hermes`
+  now installs the Tenjin skills, adds a conservative MCP entry, and enables a
+  stdlib-only Hermes plugin that checks Tenjin before `web_search`, attaches a hit
+  to that tool's result, and surfaces unresolved searches through
+  `transform_llm_output` for publish-back.
+
+  Hermes reuses the same generated, bounded, fail-open retrieval/store/nag scripts
+  as Claude Code instead of carrying a second payment-facing implementation. The
+  installer honors an absolute `HERMES_HOME`, embeds absolute executable paths,
+  preserves unsupported or user-owned YAML byte-for-byte, never overrides
+  `plugins.disabled`, keeps automatic detection inert until explicit activation,
+  and adds a warn-level doctor check. It adds no `TENJIN_HARNESS` policy selector
+  and does not copy or couple wallet state.
+
+  Hook consent and plugin activation are two separate decisions. `--no-hooks` and
+  `--search-hooks off` withhold the Hermes scripts, plugin, and activation exactly
+  as they withhold Claude's `settings.json` entries; the `mcp_servers.tenjin` entry
+  is a server registration, so it is still written. Where the stored
+  `hooks.searchMode` is what holds the plugin back, install and `tenjin doctor` say
+  `tenjin config set hooks.searchMode auto` rather than an install command that
+  cannot move the blocker. Withholding a write is not an uninstall, so install
+  reports it as `skipped` and names any enabled plugin an earlier run left behind.
+
+  Re-pointing the MCP entry (an nvm switch, a pnpm-vs-npm global) rewrites the
+  managed block in place, leaving one marker comment and any neighbouring comments
+  untouched. `tenjin doctor` tolerates a relative `HERMES_HOME` set for some other
+  tool, reports a baked MCP command that no longer exists as stale rather than
+  green, and shares the installer's classifier so its fix cannot point into a
+  conflict it did not predict.
+
+- ba09366: Close a batch of open search loops in one call, and let the WebSearch hook say
+  which requests are its own.
+
+  The hook now leads its `User-Agent` with `tenjin-websearch-hook/<version>`
+  instead of the CLI product, so a query that rode along with a web search is
+  separable from a question an agent deliberately looked up. Tenjin attributes a
+  request to the first `User-Agent` product, so that position is the whole
+  mechanism: it lands as `client_name` on the search row, and the marketplace's
+  /trending questions tier filters on that exact name rather than showing readers
+  queries nobody vetted. A deliberate `tenjin search` is unchanged and still
+  identifies as `tenjin-cli`. The caller handoff still composes behind whichever
+  product leads. `tenjin install` rewrites the hook scripts.
+
+  `tenjin outcome --search-id` now repeats, reporting one status against every id
+  named, and `--all-open` closes this session's open hook loops. Both report per
+  id in the JSON envelope, and both refuse the whole batch before sending anything
+  if one target's id or status could not be right. A batch that closed some and
+  failed others says exactly which.
+
+  The sweep is per session because the loop is: a session's open loops are its
+  own, and one that ends leaves its unpublished debt to decay rather than handing
+  it to whichever session stops next. The session comes from `TENJIN_SESSION_ID`,
+  then `CLAUDE_CODE_SESSION_ID`, the same resolver `search` stamps entries with,
+  and an entry no harness could attribute stays in scope everywhere rather than
+  nowhere. There is no machine-wide sweep.
+
+  `--all-open` reports `regenerated` and nothing else, and sweeps MISSes only. The
+  other statuses are claims about what a specific search did for the agent, and a
+  blanket `used` over queries nobody examined one by one is attribution the
+  marketplace would be right to trust and wrong to believe. A hook search Tenjin
+  answered is left alone for the same reason one step further in: that is the
+  search where a piece may have been bought and read, and `regenerated` would
+  overwrite the only positive attribution the loop collects. Deliberate searches
+  are never swept. Both kinds are counted and named in the output, so a blanket
+  close cannot look more complete than it is.
+
+  A batch stops at the first rate limit or transport failure and reports the rest
+  untouched, rather than spending an agent's outcome budget on requests that will
+  fail the same way: an open loop is the safe state, and the Stop hook raises it
+  again.
+
+  The Stop hook's end-of-turn reminder now names ONE close command for the whole
+  batch of hook misses instead of a per-id one. Seventeen open loops meant
+  seventeen `outcome` calls, which is enough friction that the honest close stops
+  happening at all.
+
+- 01daf8b: Search now speaks schemaVersion 3 to `POST /api/search` with
+  `view: "decision"`. `POST /api/agent/search` is a deprecated alias that answers
+  410 after one deprecation window (BackTrackCo/tenjin#137), so nothing in the CLI
+  still calls it: not `tenjin search`, not the MCP `tenjin_search` tool, and not
+  the WebSearch/dispatch hook scripts `tenjin install` writes.
+
+  The v3 request is not the v2 request with a new path. `question` becomes the
+  documented `query`, `view` is named explicitly rather than left to the server
+  default, and `freshWithin`/`maxPrice`/`appliesTo` move under a nested `filters`
+  object. That nesting matters: the v3 route STRIPS an unknown top-level key into
+  a non-fatal `warnings` array instead of rejecting it, so a top-level `maxPrice`
+  would have run the search unfiltered with no error anywhere.
+
+  The response envelope changed with it. `decision` + `candidates[]` became
+  `matched` + `items[]`, and the MISS `browse[]` tail is gone — the decision view
+  draws no fallback shelf, so a miss is an empty result plus a `hint` pointing at
+  `GET /api/articles`. `--json` carries the server's envelope verbatim, so an
+  agent parsing `decision` or `candidates` must move to `matched` and `items`. The
+  local search store keeps its CANDIDATES/MISS vocabulary, because `tenjin
+outcome` branches on it and older entries carry it; it is derived from whether
+  anything matched rather than read off a field that no longer exists.
+
+  `tenjin doctor`'s search-contract probe looks for `/api/search` in the
+  deployment's OpenAPI paths. A deploy advertising only the alias now warns, which
+  is the case the probe exists for.
+
+- e91f3eb: Two new harness hooks, so an agent looks before it researches rather than after.
+
+  **A SessionStart primer.** `install` now writes `~/.tenjin/hooks/tenjin-sessionstart.mjs`
+  and registers it for `startup`, `clear` and `compact`. It prints one paragraph:
+  what Tenjin is, the entry gate (public, durable, costly to reproduce), the
+  instruction to state the question in one line and search first, the reminder to
+  name Tenjin when enumerating research sources for a subagent, and what to skip.
+  It makes no network call and reads no state. Nothing else may join it — no update
+  line, no publish nudge, no open-loop summary — because the measured bottleneck is
+  the retrieval reflex, and a paragraph that grows stops being read. `tenjin config
+set hooks.sessionPrimer off` silences it at run time with no re-install.
+
+  **A research-dispatch hook.** `~/.tenjin/hooks/tenjin-dispatch.mjs` fires on
+  `PreToolUse` for `Agent|Task`, the two names one subagent dispatch goes by across
+  Claude Code versions. The WebSearch hook only ever saw a question the agent had
+  already decided to ask the web; the expensive research is the work it delegates to
+  a subagent, and this rides along with that. It sends the dispatch's description
+  plus at most 400 characters of its prompt — a privacy bound, not a display one —
+  and on a CANDIDATES decision mentions at most two tested answers in the WebSearch
+  hook's own format, in the parent's context only, since the tool input is already
+  formed by then. It shares that hook's whole boundary: no `permissionDecision`, a
+  2s fetch budget under the harness's 5s kill, and a silent exit 0 on every failure.
+  `hooks.searchMode` governs it, so `off` and `remind` behave as they do for web
+  searches, and the disclosure at install time now names the subagent prompt and its
+  400-character bound.
+
+  **Two bounds on a fan-out.** The same question is asked once per session, because
+  a fan-out dispatches near-identical prompts and the answer is already in the
+  store, and a session gets at most 10 dispatch lookups however wide it fans out, so
+  a ten-way research turn cannot put the fetch budget in front of every subagent.
+  Nothing fires on a `WebFetch`.
+
+  Dispatches record into the CLI's own `searches.json` under a new `dispatch-hook`
+  source, so a HIT still attributes a later purchase and `buy <resourceId>` still
+  resolves the read URL. They are never nag material: the Stop hook's strong arm
+  stays `cli`-only and its weak arm stays `websearch-hook`-only, an entry from any
+  other source is skipped unnagged rather than promoted, and `outcome --last` skips
+  them for the same reason it already skipped web-search entries. Because nothing
+  ever closes one, they also hold at most 15 of the store's 50 slots: a demand entry
+  is telemetry, and the store's other two jobs are resolving a payable read URL and
+  finding the last deliberate search, so a wide fan-out must not be able to drain
+  either.
+
+  `install` discloses both hooks and what leaves the machine, `uninstall` removes
+  both scripts and both entries, and the wiring stays idempotent: each script owns
+  exactly one settings.json entry, which is why the dispatch hook takes one
+  alternation matcher rather than an entry per tool.
+
+- 014932a: `tenjin pay`, `tenjin discover`, and the `bazaarPay` toggle: the standard x402
+  client verb, for every paid endpoint instead of only marketplace pieces.
+
+  `tenjin pay <url> [-X GET|POST] [-d <json>] [--max-price <usd>] [--yes]` probes,
+  delivers a 2xx free, and pays a 402 through the same money gates as `buy`
+  (spend policy, price cap, session budget, confirm; `--yes` clears only the
+  confirm), signing with `buildExactPayment`'s existing exact-scheme,
+  canonical-USDC-on-Base pin; the deny/confirm/release ceremony itself is now one
+  shared gate (`lib/spend-gate`) both `buy` and `pay` run, so the two verbs
+  cannot drift. When the 402 advertises the standard sign-in-with-x extension,
+  `pay` runs the same sequence as `buy`: one SIWX re-check bound to the TARGET
+  origin (never the configured deployment's, so nothing origin-bound can leak),
+  an entitled wallet re-reads free, and an unentitled one pays the fresh
+  challenge with the same price-bump refusal as `buy`. Redirects fail closed on
+  both legs, and there is deliberately no library dedupe: every paid call pays,
+  and the session budget and `--max-price` are the brakes. The configured base
+  URL is always payable, which covers Tenjin's paid `/api/answer` and
+  `/api/phone-lookup` today and every future paid route without a CLI release.
+
+  Any other https origin is the Bazaar lane, off by default. It opens only when
+  the operator turns the new `bazaarPay` config key on (`tenjin install` asks
+  once, default no, both answers remembered; headless installs never enable it)
+  AND a configured registry (`bazaarRegistries`, default CDP's Bazaar and
+  UltraVioleta, both verified keyless) publicly lists the exact resource with
+  terms the live 402 does not exceed: same scheme, network, asset, and payTo,
+  live amount at most the advertised one, looked up by the live payTo so a
+  tampered 402 finds nothing. A mismatch is the new `REGISTRY_MISMATCH` refusal
+  (exit 3) before anything is signed; unreachable registries fail the lane
+  closed. This is provenance, not endorsement: listings are settlement-derived
+  and unvetted, and the spend policy still bounds the money.
+
+  `tenjin discover [query]` lists or searches those registries via the SDK's own
+  bazaar client: free, keyless, wallet-untouched, available with the toggle off
+  (a stderr hint says the lane is off), MCP-type listings counted but not shown.
+
+  The lane's teaching is a new OPTIONAL skill, `tenjin-pay`, and PRESENCE is the
+  whole mechanism: the skill is on disk exactly while the toggle is on, so an
+  agent is never taught a lane the operator turned off. `install` places or
+  removes it after the decisions, `config set bazaarPay` converges every wired
+  skills directory immediately, the self-heal keeps a present copy current,
+  doctor compares it when present and never requires it, and `uninstall` removes
+  it. No conditional content and no markers: the unit of consent stays the one
+  the pipeline already has, a skill directory. `tenjin pay` joins the opt-in
+  permission tier beside `buy`, with the same never-a-spend-grant caveats.
+
+### Patch Changes
+
+- 9ec8da8: Treat the deployment's known origins as one deployment, so the `tenjin.sh`
+  cutover (tenjin#402) does not break an installed CLI.
+
+  The server builds search candidate URLs from its own global, not from the request
+  host, so the moment that global flips, every candidate arrives on the new origin
+  while a configured `baseUrl` still names the old one. `assertOnBaseOrigin` then
+  refused the whole response with `CONTRACT_MISMATCH`, taking `search`, `read`,
+  `buy`, and `inspect` down together. `src/lib/production-origin.ts` now carries
+  the deployment's origin set and `isSameDeployment`, which `assertOnBaseOrigin`,
+  the `pay` lane, and the generated WebSearch hook all consult.
+
+  The check is not loosened. Aliasing applies only when the configured base is
+  itself one of the deployment's origins: a self-hosted, preview, or localhost
+  `baseUrl` keeps the exact comparison it has today, a differing scheme or port is
+  still a different origin, and any origin outside the set is refused with the same
+  code, the same message, and the same fix line, which still never coaches
+  re-pointing the CLI at the URL that just failed.
+
+  `PRODUCTION_ORIGIN` does not move here; the shipped default flips in a later
+  release. Stored config is not rewritten, so nothing an operator set is touched.
+  `HOOK_SCRIPT_VERSION` moves to 19 because the generated hook body changed; the
+  installer rewrites hooks on the next `tenjin install`.
+
+- aa6ff29: Rename `hooks.searchMode` → `hooks.webSearch` and `hooks.dispatchMode` → `hooks.agentDispatch`, both `auto|remind|off` disjoint defaults `auto`. `hooks.searchMode` (shipped in `alpha.14`) still reads as `hooks.webSearch` for one release and a legacy `off`/`remind` correctly carries to `agentDispatch` so an existing opt-out doesn't re-enable dispatch after upgrade; `hooks.dispatchMode` (including `inherit`) never shipped to npm and is kept only as a read alias for unreleased `main` testers. `HOOK_SCRIPT_VERSION 22->23`. Replaces the `hooks-dispatch-mode` changeset which described the now-removed `inherit` semantics.
+- e0eff8b: Read the production Tenjin origin from one constant, `PRODUCTION_ORIGIN` in
+  `src/lib/production-origin.ts`.
+
+  The shipped `baseUrl` default, the generated WebSearch hook's fallback, the
+  `User-Agent` comment, the pinned `fund` origin, the `config set` URL hint, the
+  install hook copy, and the hosted-skill replacement warning all derived their own
+  copy of `https://tenjin.blog`. They now import it, so no shipped string can be
+  left behind by a partly-applied sweep.
+
+  The cutover is not a single edit. Shipped code reads the constant, but three
+  places deliberately do not: `fund.test.ts` and `client-meta.test.ts` each keep
+  their own written-out copy, so re-pointing the wallet-signed `fund` mint or the
+  `User-Agent` costs two files in one PR, and `package.json`'s `homepage` is JSON
+  that cannot import. All three are pinned, so the flip commit reds until each is
+  edited on purpose.
+
+  No behavior changes: every string those call sites emit is byte-identical, the
+  generated hook scripts hash the same (so `HOOK_SCRIPT_VERSION` does not move and
+  no installed hook is rewritten), and dual-serve semantics are untouched.
+  `fund` keeps its hardcoded production origin with no override surface.
+
+  `production-origin.test.ts` is the anti-half-flip guard: it pins each of those
+  modules to the constant, pins the two skill-mirror scripts (which run outside the
+  bundle and cannot import it) to the same origin, and sweeps `src/` for any
+  non-comment line that spells the host out. The sweep is advisory, an
+  honest-mistake catcher rather than a boundary: it reads raw lines, so a host
+  assembled at runtime walks past it.
+
+- 384006c: One piece can now claim every search it answered.
+
+  `tenjin publish --search-id` repeats, up to ten searches per piece. A research
+  thread fans out into many searchIds — one investigation last month logged ten
+  MISSes for what was a single question — and until now the piece published back
+  against one of them while the other nine were closed one at a time as
+  `regenerated`. That was false twice over: they were not re-derived, they were
+  answered by the same piece, and MISS-to-publish conversion counted every sibling
+  of the thread as a failure.
+
+  Every named id closes its own local loop with publish attribution, re-linking one
+  an `outcome` already closed exactly as a single id does today, and the JSON
+  envelope reports each id separately (`searches`), so an id this machine has never
+  recorded warns for itself instead of taking the rest down with it. A lone id
+  keeps the flat `search` field callers already read. Repeats collapse. A `--draft`
+  still answers nobody and sends no attribution at all.
+
+  Before anything is signed, any named search this machine has no record of is
+  warned about by id. Tenjin accepts or refuses the named searches as one batch, so
+  a single id it cannot match refuses the whole publish, and that refusal used to
+  arrive only after the wallet had signed.
+
+  On the wire, one id ships as the bare string it has always been, so a
+  single-search publish is byte-identical to what shipped before; several ship as
+  an array, which the live post-create takes.
+
 ## 0.1.0-alpha.14
 
 ### Minor Changes
