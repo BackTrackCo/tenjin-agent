@@ -344,8 +344,8 @@ function eligibilityLine(card: OwnPostCard | undefined): string {
   const missing = missingSentences(card.cacheEligibleMissing).map(sanitizeForTerminal);
   if (card.cacheEligible) return 'Answer card is search-eligible.';
   return missing.length > 0
-    ? `Answer card not search-eligible yet: ${missing.join(' ')}`
-    : 'Answer card is not search-eligible.';
+    ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
+    : 'Answer card incomplete, ranks below every complete card in agent search.';
 }
 
 // ---------------------------------------------------------------------------

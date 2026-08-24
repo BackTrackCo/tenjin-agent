@@ -512,7 +512,7 @@ describe('runEdit — show mode (no change flags)', () => {
     expect(human).toContain('questionsAnswered (1): What is it?');
     expect(human).toContain('scope: "L2 fees only"');
     expect(human).toContain(
-      'Answer card not search-eligible yet: State the exclusions (what this piece does not cover).',
+      'Answer card incomplete, ranks below every complete card in agent search. To fix: State the exclusions (what this piece does not cover).',
     );
   });
 
@@ -840,7 +840,7 @@ describe('runEdit — the update receipt', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'Answer card not search-eligible yet: State the exclusions',
+      'Answer card incomplete, ranks below every complete card in agent search. To fix: State the exclusions',
     );
   });
 });

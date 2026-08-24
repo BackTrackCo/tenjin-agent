@@ -439,7 +439,7 @@ function receipt(
     cacheEligible
       ? 'Answer card is search-eligible.'
       : missing.length > 0
-        ? `Answer card not search-eligible yet: ${missing.join(' ')}`
+        ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
         : 'Published without an answer card: ranks below every carded piece in agent search.',
     ...searches.filter((s) => s.closed).map(closeLine),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
