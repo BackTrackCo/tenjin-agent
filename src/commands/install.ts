@@ -788,11 +788,28 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
 export function hooksDisclosure(h: HooksResult, shelfHost: string = PRODUCTION_HOST): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
+  // `pushArms` counts entries wired with `arm: 'push'`. The WebSearch entry is
+  // NOT one of them: it keeps `arm: 'search'` and is instead WIDENED in place to
+  // WebSearch|WebFetch when push is planned (harness-hooks.ts, WEBSEARCH_PUSH_MATCHER),
+  // and it is the entry that carries the deny. So it is one of the arms, not
+  // something they run beside, and the count excludes it.
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries run beside these: they look a question up on ${shelfHost} first and then, in team mode, on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
-    return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}${push}`;
+    // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same
+    // correction the `auto` branch got. In the generated WebSearch script the
+    // push lookup runs BEFORE the reminder line is reached (hook-scripts.ts:
+    // return on `off`, then pushDecide, which reads no mode at all, then the
+    // remind line). Driven against a stub, `remind` with push on makes the same
+    // one request `auto` does. "They send nothing off-machine" would therefore
+    // be false on exactly the arm that can cancel a tool call, and it is the
+    // string `tenjin push on` prints too, to an operator who answered a prompt
+    // reading "a one-line reminder, nothing sent off-machine".
+    const remindBase = pushArmed(h)
+      ? `The WebSearch and dispatch hooks only print a one-line reminder that Tenjin may have an answer, rather than looking one up for you — but the armed push arm shares the WebSearch and WebFetch entry and runs ahead of that reminder, so on a web search the query text does leave the machine for ${shelfHost}, and that call may be denied and answered from the shelf instead.`
+      : 'The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine.';
+    return `${remindBase} ${shared}${push}`;
   }
   // WHO IS ACTUALLY ASKED, which on a machine with a configured shelf is that
   // shelf and not the marketplace: the scripts resolve their target from

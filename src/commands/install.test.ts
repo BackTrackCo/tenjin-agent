@@ -1224,7 +1224,12 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).toContain(
       'the WebSearch and WebFetch hook may deny that call and hand the finding back',
     );
-    expect(text).toContain('The push experiment is on, so 6 more hook entries run beside these');
+    expect(text).toContain(
+      'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
+    );
+    // ...and not the old "beside these", which put the entry that carries the
+    // deny outside the set of arms it belongs to.
+    expect(text).not.toContain('more hook entries run beside these');
     expect(text).toContain('Turn it off: tenjin push off');
     // Three search EVENTS wired (PreToolUse carries two of the four base
     // entries), and the six push entries reported as their own count rather than
@@ -1232,6 +1237,37 @@ describe('runInstall: interactive walkthrough', () => {
     // Without the split this line reads 'auto mode, 7 hook event(s)'.
     expect(text).toContain('auto mode, 3 hook event(s) registered');
     expect(text).toContain('Push arms: 6');
+  });
+
+  /**
+   * THE `remind` BRANCH, which the round-5 `auto` fix did not reach. In the
+   * generated WebSearch script the push lookup runs before the reminder line, so
+   * with push armed `remind` makes the same one request `auto` does. The flat
+   * "they send nothing off-machine" was therefore false on exactly the arm that
+   * can cancel a tool call — and it is the string `tenjin push on` prints too.
+   */
+  it('drops the nothing-leaves-the-machine claim on the remind branch once push is on', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
+    );
+    const text = human(res);
+    expect(text).not.toContain('they send nothing off-machine');
+    expect(text).toContain('the query text does leave the machine');
+    expect(text).toContain('that call may be denied and answered from the shelf instead');
+  });
+
+  it('keeps the remind branch flat when push is NOT armed', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
+    );
+    const text = human(res);
+    expect(text).toContain('they send nothing off-machine');
+    expect(text).not.toContain('the query text does leave the machine');
   });
 
   /**

@@ -143,7 +143,9 @@ describe('runPushOn', () => {
     const result = await runPushOn(makeCtx(), { homeDir: home });
     const lines = result.humanLines ?? [];
     const text = lines.join('\n');
-    expect(text).toContain('The push experiment is on, so 6 more hook entries run beside these');
+    expect(text).toContain(
+      'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
+    );
     expect(text).toContain(
       'the WebSearch and WebFetch hook may deny that call and hand the finding back',
     );
