@@ -15,9 +15,11 @@ import { withFileLock } from './lock';
 /**
  * The store's bounds, EXPORTED because lib/hook-scripts.ts bakes them into the
  * scripts it generates, which cannot import this module: one definition, no
- * drift. `DEMAND_MAX_ENTRIES` is the share `dispatch-hook` entries may hold —
- * nothing ever closes one, so without a budget a wide fan-out drains the slots
- * `buy` and `outcome --last` depend on.
+ * drift. `DEMAND_MAX_ENTRIES` is the share the two DEMAND sources may hold
+ * BETWEEN THEM — `dispatch-hook` and `push-hook`, one shared budget rather than
+ * one each. Nothing ever closes an entry from either, so without the budget a
+ * wide fan-out or a busy push session drains the slots `buy` and
+ * `outcome --last` depend on.
  */
 export const MAX_ENTRIES = 50;
 export const DEMAND_MAX_ENTRIES = 15;
