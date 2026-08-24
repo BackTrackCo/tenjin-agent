@@ -218,15 +218,15 @@ describe('HOOK_SCRIPT_VERSION', () => {
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
   it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(22);
+    expect(HOOK_SCRIPT_VERSION).toBe(23);
     const digests = Object.fromEntries(
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '2d81bda687e1e54bddc84338129686f7',
-      dispatch: '278ce41171431038e5c5c1551fd3ff5b',
-      sessionPrimer: 'cd3906663e8e3b02479209d1e53bbd1f',
-      stop: 'f1a11dda8d28916ab8084ee8c3af7313',
+      websearch: 'b42da7df23b205ffe6aeb0a8c242353b',
+      dispatch: 'aef50fd59101a0f496bac9c6b5bc121b',
+      sessionPrimer: '54209984e918d6aaee15a4e3ee45a0b7',
+      stop: 'f05e78ff0cd39e3e89c011430e26780b',
     });
   });
 
@@ -2437,6 +2437,41 @@ describe('dispatch hook: a subagent dispatch', () => {
     await writeConfig({ baseUrl, hooks: { webSearch: 'remind', agentDispatch: 'auto' } });
     const web = await runScript(websearchHookScript(dataDir), webSearchInput('a web question'));
     expect(injected(web)).toContain(REMIND_LINE);
+    expect(hits()).toBe(1);
+  });
+
+  it('legacy searchMode without dispatch key still governs dispatch for one release', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    const off = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that should not leave the machine') }),
+    );
+    expect(off.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    const remind = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(remind)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
+    );
     expect(hits()).toBe(1);
   });
 

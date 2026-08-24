@@ -42,7 +42,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
-export const HOOK_SCRIPT_VERSION = 22;
+export const HOOK_SCRIPT_VERSION = 23;
 
 export const WEBSEARCH_HOOK_FILE = 'tenjin-websearch.mjs';
 export const STOP_HOOK_FILE = 'tenjin-stop.mjs';
@@ -316,9 +316,17 @@ function readConfig() {
   const hooks = isRecord(cfg.hooks) ? cfg.hooks : {};
   const publish = isRecord(cfg.publish) ? cfg.publish : {};
   // New keys, with one-release fallback to the old names. Dispatch no longer has
-  // \`inherit\`: it is its own disjoint switch, both default \`auto\`.
+  // \`inherit\`: it is its own disjoint switch, both default \`auto\`. For old
+  // configs that only had \`searchMode\` (dispatch inherited), copy the search
+  // value so a user who turned search \`off\` doesn't get dispatch \`auto\` after
+  // upgrade (see A1igator review on #205).
   const rawWebSearch = hooks.webSearch ?? hooks.searchMode;
-  const rawDispatch = hooks.agentDispatch ?? (hooks.dispatchMode === 'inherit' ? rawWebSearch : hooks.dispatchMode);
+  const rawDispatch =
+    hooks.agentDispatch ??
+    (hooks.dispatchMode === 'inherit' ||
+    (hooks.dispatchMode === undefined && hooks.searchMode !== undefined)
+      ? rawWebSearch
+      : hooks.dispatchMode);
   const mode = rawWebSearch;
   const dispatch = rawDispatch;
   const nag = hooks.stopNag;

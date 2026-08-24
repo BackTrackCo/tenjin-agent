@@ -1487,8 +1487,24 @@ async function resolveHooks(args: {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
   const rawHooks = (await loadRawConfig(dataDir)).hooks as
-    { webSearch?: WebSearchMode; searchMode?: WebSearchMode } | undefined;
+    | {
+        webSearch?: WebSearchMode;
+        searchMode?: WebSearchMode;
+        agentDispatch?: WebSearchMode;
+        dispatchMode?: string;
+      }
+    | undefined;
   const stored = rawHooks?.webSearch ?? rawHooks?.searchMode;
+  const storedWebSearch = rawHooks?.webSearch ?? rawHooks?.searchMode;
+  const storedAgentDispatchRaw =
+    rawHooks?.agentDispatch ??
+    (rawHooks?.dispatchMode === 'inherit'
+      ? storedWebSearch
+      : (rawHooks?.dispatchMode as WebSearchMode | undefined));
+  const storedAgentDispatch =
+    storedAgentDispatchRaw ?? (rawHooks?.searchMode !== undefined ? storedWebSearch : undefined);
+  const storedWebSearchEff = storedWebSearch ?? DEFAULT_HOOK_MODE;
+  const storedAgentDispatchEff = storedAgentDispatch ?? storedWebSearch ?? DEFAULT_HOOK_MODE;
   const hasClaude = plans.some((p) => p.harness === 'claude');
   const hasHermes = plans.some((p) => p.harness === 'hermes');
 
@@ -1531,7 +1547,12 @@ async function resolveHooks(args: {
   }
   const resultHarness = hasHermes && !hasClaude ? 'hermes' : 'claude';
   if (dryRun) return hooksSkipped(resultHarness, home, dataDir, mode, 'dry-run');
-  if (mode !== (stored ?? DEFAULT_HOOK_MODE) || stored === undefined) {
+  const needsSync =
+    rawHooks?.webSearch === undefined ||
+    rawHooks?.agentDispatch === undefined ||
+    mode !== storedWebSearchEff ||
+    mode !== storedAgentDispatchEff;
+  if (needsSync) {
     await persistWebSearchHookMode(dataDir, mode);
     await persistAgentDispatchHookMode(dataDir, mode);
   }
