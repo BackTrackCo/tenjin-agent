@@ -166,6 +166,27 @@ export function hookRecipientHost(config: PartialConfig): string {
   }
 }
 
+/**
+ * The host the generated hooks fall through TO, for the same disclosure.
+ *
+ * Also not the `tenjin.blog` literal. `publicShelfUrl` is operator-settable
+ * (`config set publicShelfUrl <url>` is accepted, warned only on a `baseUrl`
+ * collision), and it is what the scripts actually read for the second leg. On a
+ * machine that has repointed it, naming the production host in the disclosure
+ * omits the one recipient that receives the query text on that leg — the same
+ * shape {@link hookRecipientHost} closed on the first leg.
+ *
+ * Reads the raw config for the same reason: a `--base-url` reaches neither.
+ */
+export function hookFallthroughHost(config: PartialConfig): string {
+  const url = config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl;
+  try {
+    return new URL(url).host;
+  } catch {
+    return PRODUCTION_HOST;
+  }
+}
+
 /** Where a close for one stored search has to go, and whether it carries the key. */
 export interface ShelfRoute {
   baseUrl: string;

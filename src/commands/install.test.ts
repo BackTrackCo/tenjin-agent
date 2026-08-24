@@ -1189,6 +1189,33 @@ describe('runInstall: interactive walkthrough', () => {
     );
   });
 
+  /**
+   * `publicShelfUrl` is operator-settable, and it is what the scripts read for
+   * the second leg. Naming the production host here omits the recipient that
+   * actually receives the query text on that leg — the same shape the shelf-host
+   * fix closed on the first leg.
+   */
+  it('names the configured publicShelfUrl as the fallthrough, not the tenjin.blog literal', async () => {
+    const SHELF = 'https://team-shelf.example';
+    const MIRROR = 'https://mirror.example';
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, publicShelfUrl: MIRROR, hooks: { push: 'on' } }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain(
+      'A subagent dispatch team-shelf.example has nothing for is then asked of mirror.example as well.',
+    );
+    // The push sentence's team-mode second leg names it too.
+    expect(text).toContain('and then, in team mode, on mirror.example,');
+    expect(text).not.toContain(PRODUCTION_HOST);
+  });
+
   it('keeps naming the marketplace when the base URL is the marketplace', async () => {
     // Including its alias: an alias of production is not somebody's team shelf.
     await writeFile(

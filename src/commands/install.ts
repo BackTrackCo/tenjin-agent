@@ -11,7 +11,7 @@ import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
-import { hookRecipientHost } from '../lib/settings';
+import { hookFallthroughHost, hookRecipientHost } from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -591,6 +591,7 @@ async function installBody(
     wallet,
     doctor,
     shelfHost: hookRecipientHost(rawConfig),
+    fallthroughHost: hookFallthroughHost(rawConfig),
   });
   return { data, humanLines };
 }
@@ -640,6 +641,8 @@ interface WalkthroughState {
   doctor: DoctorChecks;
   /** The host the generated hooks will ask; see {@link hookRecipientHost}. */
   shelfHost: string;
+  /** The host they fall through to; see {@link hookFallthroughHost}. */
+  fallthroughHost: string;
 }
 
 /**
@@ -719,7 +722,7 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
   }
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
-    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks, s.shelfHost)));
+    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks, s.shelfHost, s.fallthroughHost)));
     lines.push(
       paint(
         io,
@@ -785,7 +788,11 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
  * Read off the result rather than a flag, so what is disclosed is what was
  * actually wired.
  */
-export function hooksDisclosure(h: HooksResult, shelfHost: string = PRODUCTION_HOST): string {
+export function hooksDisclosure(
+  h: HooksResult,
+  shelfHost: string = PRODUCTION_HOST,
+  fallthroughHost: string = PRODUCTION_HOST,
+): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
   // `pushArms` counts entries wired with `arm: 'push'`. The WebSearch entry is
@@ -794,7 +801,7 @@ export function hooksDisclosure(h: HooksResult, shelfHost: string = PRODUCTION_H
   // and it is the entry that carries the deny. So it is one of the arms, not
   // something they run beside, and the count excludes it.
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${PRODUCTION_HOST}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same
@@ -821,7 +828,7 @@ export function hooksDisclosure(h: HooksResult, shelfHost: string = PRODUCTION_H
   const fallthrough =
     shelfHost === PRODUCTION_HOST
       ? ''
-      : ` A subagent dispatch ${shelfHost} has nothing for is then asked of ${PRODUCTION_HOST} as well.`;
+      : ` A subagent dispatch ${shelfHost} has nothing for is then asked of ${fallthroughHost} as well.`;
   return `Before a web search or a subagent dispatch, the hooks ask ${shelfHost} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine.${fallthrough}${pushArmed(h) ? '' : ' They can never block or change the tool call.'} ${shared}${push}`;
 }
 

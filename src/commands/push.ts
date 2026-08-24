@@ -3,7 +3,7 @@ import { open, readFile, stat } from 'node:fs/promises';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { persistPushMode } from './config';
 import { hooksDisclosure } from './install';
-import { hookRecipientHost } from '../lib/settings';
+import { hookFallthroughHost, hookRecipientHost } from '../lib/settings';
 import { CliError } from '../lib/errors';
 import { countPushHookEntries, pushScriptsPresent, wireSearchHooks } from '../lib/harness-hooks';
 import type { HooksResult, PushHookEntryCount } from '../lib/harness-hooks';
@@ -116,7 +116,7 @@ export async function runPushOn(
   });
   return {
     data: { mode: 'on', hooks: result },
-    humanLines: renderWireLines(result, hookRecipientHost(raw)),
+    humanLines: renderWireLines(result, hookRecipientHost(raw), hookFallthroughHost(raw)),
   };
 }
 
@@ -404,7 +404,11 @@ function renderStatusLines(data: {
  *  undo. Not {@link hooksUndo} from lib/harness-hooks.ts — that line names
  *  `hooks.searchMode off`, the search hooks' own off switch, and would tell an
  *  operator to flip the wrong key. */
-function renderWireLines(result: HooksResult, shelfHost: string): string[] {
+function renderWireLines(
+  result: HooksResult,
+  shelfHost: string,
+  fallthroughHost: string,
+): string[] {
   if (result.skipped !== undefined) {
     return [
       `hooks.push is on, but nothing was wired (${result.skipped}): ${result.warning ?? 'no harness to wire it into'}`,
@@ -420,7 +424,7 @@ function renderWireLines(result: HooksResult, shelfHost: string): string[] {
     // the same entries into the same file, and an operator who reached it by a
     // different verb is owed the same disclosure — above the undo, because the
     // undo is only meaningful once you know what there is to undo.
-    hooksDisclosure(result, shelfHost),
+    hooksDisclosure(result, shelfHost, fallthroughHost),
     'Undo anytime: `tenjin push off` (the scripts stay, but go inert on their next run).',
   ];
 }
