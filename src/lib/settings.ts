@@ -170,7 +170,11 @@ export function hookRecipientHost(config: PartialConfig): string {
 export interface ShelfRoute {
   baseUrl: string;
   bypass?: ShelfBypass;
-  /** False when the entry named a shelf other than the configured `baseUrl`. */
+  /**
+   * False when the ENTRY named a shelf other than the configured `baseUrl` —
+   * including an unrecognised origin, which `baseUrl` above nonetheless routes
+   * back to the configured shelf.
+   */
   configured: boolean;
 }
 
@@ -189,6 +193,18 @@ export interface ShelfRoute {
  * single-shelf public-mode run, and absent means the configured base, which is
  * what those entries meant.
  *
+ * ONLY THE TWO CONFIGURED SHELVES ARE ROUTABLE. `shelfBaseUrl` is a plain
+ * optional string in the store schema with no URL validation, and the only
+ * writers are this CLI's own two configured values — so any OTHER origin in that
+ * field is a corrupt or planted entry, not a third shelf, and one hand-edited
+ * `searches.json` row would otherwise make `tenjin outcome --search-id` POST to
+ * a host the operator never configured. An unrecognised origin therefore routes
+ * to the configured base exactly as a missing or unparseable one does: fail open
+ * to the configured shelf, never out to a foreign one. This is the same
+ * re-assertion `resolveResourceRef` already makes against this store's
+ * `candidate.url` before any send. `configured` still reports false for such an
+ * entry, so `publish` keeps dropping its searchId rather than misfiling it.
+ *
  * THE KEY RIDES THE ORIGIN, not the call site: `bypass` comes back only when the
  * route is the origin the secret was paired with. The transport re-derives the
  * same rule from the request URL ({@link shelfBypassHeaders}), so this is the
@@ -197,7 +213,7 @@ export interface ShelfRoute {
  */
 export function shelfRouteFor(
   stored: { shelfBaseUrl?: string } | null | undefined,
-  settings: Pick<ResolvedSettings, 'baseUrl' | 'bypass'>,
+  settings: Pick<ResolvedSettings, 'baseUrl' | 'publicShelfUrl' | 'bypass'>,
 ): ShelfRoute {
   const recorded = stored?.shelfBaseUrl;
   const configuredOrigin = tryOrigin(settings.baseUrl);
@@ -213,6 +229,18 @@ export function shelfRouteFor(
   }
   const configured =
     configuredOrigin !== undefined && isSameDeployment(recordedOrigin, configuredOrigin);
+  // The allow-list: the configured base, or the public shelf it falls through to.
+  // Nothing else is a shelf this machine ever searched.
+  const publicOrigin = tryOrigin(settings.publicShelfUrl);
+  const routable =
+    configured || (publicOrigin !== undefined && isSameDeployment(recordedOrigin, publicOrigin));
+  if (!routable) {
+    return {
+      baseUrl: settings.baseUrl,
+      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
+      configured: false,
+    };
+  }
   const carries = settings.bypass !== undefined && settings.bypass.origin === recordedOrigin;
   return {
     baseUrl: recorded,

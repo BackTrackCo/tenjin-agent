@@ -948,4 +948,22 @@ describe('runOutcome routes to the shelf that answered', () => {
     expect(new URL(sent[0]!.url).origin).toBe(TEAM);
     expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
   });
+
+  it('refuses a foreign origin the config never named, and routes to the base instead', async () => {
+    // `shelfBaseUrl` is an unvalidated optional string in the store schema and
+    // the only writers are this CLI's own two configured values, so a third
+    // origin is a planted or hand-edited row rather than a third shelf. Without
+    // the allow-list one such row makes `outcome --search-id` POST the searchId
+    // and status to a host the operator never configured. Fail open to the
+    // configured shelf, never out to a foreign one.
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: 'https://attacker.example' });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).not.toBe('https://attacker.example');
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+  });
 });
