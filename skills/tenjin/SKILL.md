@@ -361,6 +361,7 @@ Add the hosted server at `https://tenjin.blog/api/mcp` when your client supports
 
 1. Ask ~3 questions — their handle, default price in USDC, and what to write about.
 2. Draft the piece AND its `resource` card together: `questionsAnswered` (5-10), `scope`, `exclusions`, plus `asOf` when the piece is a
-   snapshot. A piece published without a card is browseable but never a candidate.
+   snapshot. A piece published without a card ranks below every carded piece in agent
+   search (its `matchReasons` say `no answer card`), and the publish response warns.
 3. Confirm both with the user, then `POST /api/posts` carrying `title`, `bodyMd`,
    `price`, and `resource`. Pass `handle` once to claim it.
