@@ -1570,9 +1570,6 @@ export function searchHooksChoices(
   ];
 }
 
-/** The default-recipient spelling of {@link searchHooksChoices}. */
-export const SEARCH_HOOKS_CHOICES = searchHooksChoices();
-
 /**
  * Settle the harness hooks. Same shape as the allowlist decision and the same
  * default posture: a flag settles it, an interactive run asks, and a

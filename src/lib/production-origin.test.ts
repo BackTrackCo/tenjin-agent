@@ -12,7 +12,8 @@ import {
 import { CONFIG_DEFAULTS } from './config';
 import { TENJIN_USER_AGENT } from './client-meta';
 import { websearchHookScript } from './hook-scripts';
-import { SEARCH_HOOKS_CHOICES } from '../commands/install';
+import { searchHooksChoices } from '../commands/install';
+import { hookRecipientHost } from './settings';
 
 /**
  * The guard that makes the origin cutover (tenjin#402) a one-line edit: every
@@ -47,7 +48,10 @@ describe('PRODUCTION_ORIGIN', () => {
   });
 
   it('is the host named in the install hook copy', () => {
-    const auto = SEARCH_HOOKS_CHOICES.find((c) => c.value === 'auto');
+    // Built the way the shipped prompt builds it: the recipient is resolved from
+    // the raw config, and an empty config is the default-host case. A pre-built
+    // constant would have pinned a spelling no production path reads.
+    const auto = searchHooksChoices(hookRecipientHost({})).find((c) => c.value === 'auto');
     expect(auto?.hint).toContain(PRODUCTION_HOST);
   });
 
