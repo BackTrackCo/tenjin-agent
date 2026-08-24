@@ -45,9 +45,10 @@ import type { CommandContext, CommandResult } from '../context';
  * convenience that reads first and sends the merged array).
  *
  * The gates are publish's, deliberately: the same deterministic scan over the new
- * body + card text (a live secret hard-blocks in every mode) and the same
- * publish.mode consent cascade, because an edit ships content to the same public
- * page a publish does.
+ * body + card text (a live secret hard-blocks in every mode), the same team-mode
+ * narrowing of that scan, and the same publish.mode consent cascade, because an
+ * edit ships content to the same page a publish does — the public marketplace,
+ * or on a team shelf the team page a publish just wrote.
  *
  * Unlike publish, the wallet is touched BEFORE consent, and that is a real
  * tradeoff, not a technicality: the before→after summary the user approves can
@@ -214,10 +215,22 @@ export async function runEdit(
   // secret already public in the stored scope, restated verbatim, would refuse an
   // unrelated title change while the same flags alone exit 0. A secret in a
   // surviving value still blocks in every mode, never cleared by --yes.
-  const findings = dedupeFindings([
+  const scanned = dedupeFindings([
     ...(input.bodyMd !== undefined ? scan(bodyFile?.raw ?? '', scanContext) : []),
     ...scan(shippedTypedText(args, input), scanContext),
   ]);
+  // THE SAME TEAM-MODE NARROWING PUBLISH DOES, and for the same reason: the warn
+  // tier asks "is this safe to make PUBLIC", and a team shelf is not public, so a
+  // repo slug is the point of a team note rather than a leak. `secret-assignment`
+  // survives with the block tier because it asks the credential question instead.
+  // Without this, an author publishes a team note carrying its own repo slug
+  // silently under `auto` and then gets NEEDS_CONFIRMATION on that same string
+  // when fixing a typo in it — the --yes round trip the drop exists to remove,
+  // moved to the second command. Keep the two filters identical: publish.ts is
+  // where the full reasoning lives.
+  const findings = runtime.teamMode
+    ? scanned.filter((f) => f.severity === 'block' || f.check === 'secret-assignment')
+    : scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
   if (blocking.length > 0) {
