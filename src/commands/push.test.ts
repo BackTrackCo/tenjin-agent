@@ -71,32 +71,32 @@ describe('runPushOn', () => {
     expect(await readFile(claudeSettingsPath(home), 'utf8')).toBe(first);
   });
 
-  it('keeps the currently configured hooks.searchMode rather than forcing auto', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { searchMode: 'remind' } }));
+  it('keeps the currently configured hooks.webSearch rather than forcing auto', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'remind' } }));
     await runPushOn(makeCtx(), { homeDir: home });
     const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as Record<
       string,
       unknown
     >;
     expect((settings.hooks as Record<string, unknown>).UserPromptSubmit).toBeDefined();
-    // searchMode itself is read at run time by the generated scripts, not baked
+    // webSearch itself is read at run time by the generated scripts, not baked
     // into settings.json, so this asserts the CALL succeeded under a non-default
     // mode rather than asserting anything is literally 'remind' in the file.
-    expect((await loadRawConfig(dir)).hooks?.searchMode).toBe('remind');
+    expect((await loadRawConfig(dir)).hooks?.webSearch).toBe('remind');
   });
 
   /**
-   * `install` refuses to write a single hook entry when `hooks.searchMode` is
+   * `install` refuses to write a single hook entry when `hooks.webSearch` is
    * `off` — that is what the kill switch means. This command called
    * `wireSearchHooks` directly and so wired six entries straight past it, which
    * made `off` mean two different things depending on which verb you typed.
    */
-  it('refuses when hooks.searchMode is off, and leaves the key as it was', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { searchMode: 'off' } }));
+  it('refuses when hooks.webSearch is off, and leaves the key as it was', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'off' } }));
     await expect(runPushOn(makeCtx(), { homeDir: home })).rejects.toMatchObject({
       code: 'USAGE',
       exitCode: 2,
-      fix: 'tenjin config set hooks.searchMode auto, then tenjin push on',
+      fix: 'tenjin config set hooks.webSearch auto, then tenjin push on',
     });
     // Nothing written: not the mode, not a script, not settings.json.
     expect((await loadRawConfig(dir)).hooks?.push).toBeUndefined();

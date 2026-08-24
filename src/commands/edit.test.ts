@@ -512,18 +512,20 @@ describe('runEdit — show mode (no change flags)', () => {
     expect(human).toContain('questionsAnswered (1): What is it?');
     expect(human).toContain('scope: "L2 fees only"');
     expect(human).toContain(
-      'Answer card not search-eligible yet: State the exclusions (what this piece does not cover).',
+      'Answer card incomplete, ranks below every complete card in agent search. To fix: State the exclusions (what this piece does not cover).',
     );
   });
 
-  it('a card-less post shows as a browse-only document', async () => {
+  it('a card-less post says it ranks below every carded piece', async () => {
     const stub = stubServer({ get: { ...STORED, resource: undefined } });
     const res = await runEdit(
       args(),
       makeCtx(),
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
-    expect((res.humanLines ?? []).join('\n')).toContain('No answer card (browse-only document).');
+    expect((res.humanLines ?? []).join('\n')).toContain(
+      'No answer card: ranks below every carded piece in agent search.',
+    );
   });
 
   it('--yes alone is still the read (no change flags means nothing to confirm)', async () => {
@@ -838,7 +840,7 @@ describe('runEdit — the update receipt', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'Answer card not search-eligible yet: State the exclusions',
+      'Answer card incomplete, ranks below every complete card in agent search. To fix: State the exclusions',
     );
   });
 });
@@ -1136,7 +1138,7 @@ describe('runEdit — a post with no answer card', () => {
 
   it('omits resource entirely when a real post change rides alongside a clear', async () => {
     // Any resource key at all mints an all-default card row server-side, turning a
-    // browse-only document into a card-bearing one. The title must travel alone.
+    // card-less post into a card-bearing one. The title must travel alone.
     const stub = stubServer({ get: CARDLESS });
     await runEdit(
       args({ yes: true, clear: ['scope'], title: 'A Better Answer' }),

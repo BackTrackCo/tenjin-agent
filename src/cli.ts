@@ -188,7 +188,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option(
       '--search-hooks <mode>',
-      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.searchMode',
+      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.webSearch and hooks.agentDispatch (both auto by default, disjoint)',
     )
     .option('--no-hooks', 'register no harness hooks this run (writes no config)')
     .action(async function (this: Command) {

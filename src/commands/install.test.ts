@@ -345,7 +345,7 @@ describe('runInstall: harness override', () => {
     await expect(readFile(join(data, 'hooks', 'tenjin-websearch.mjs'), 'utf8')).rejects.toThrow();
   });
 
-  it('a stored searchMode of off withholds the plugin and names the real blocker', async () => {
+  it('a stored webSearch of off withholds the plugin and names the real blocker', async () => {
     const { data: d } = await runInstall(
       { harness: ['hermes'], noWallet: true, searchHooks: 'off' },
       makeCtx(),
@@ -354,7 +354,7 @@ describe('runInstall: harness override', () => {
     const h = asData(d).harnesses[0]!;
     expect(h.hermes?.plugin.status).toBe('skipped');
     // Not "re-run `tenjin install --harness hermes`", which loops forever.
-    expect(h.warnings.join(' ')).toContain('hooks.searchMode auto');
+    expect(h.warnings.join(' ')).toContain('hooks.webSearch auto');
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {
@@ -1173,7 +1173,7 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).toContain(
       'the query text, or at most 400 characters of the subagent prompt, leaves the machine',
     );
-    expect(text).toContain('tenjin config set hooks.searchMode off');
+    expect(text).toContain('tenjin config set hooks.webSearch off');
     expect(text).toContain(join(data, 'hooks'));
     // The promise only the UNPUSHED bundle can make. See the push case below.
     expect(text).toContain('They can never block or change the tool call.');
@@ -1373,21 +1373,23 @@ describe('runInstall: interactive walkthrough', () => {
 
   /**
    * The undo line prints directly under a disclosure that includes the push
-   * arms, and `hooks.searchMode` does not reach them: every arm reads
-   * `hooks.push` and nothing in the generated push core reads `mode` at all.
+   * arms, and `hooks.webSearch` does not reach them: every arm reads
+   * `hooks.push` and nothing in the generated push core reads `webSearch` at all.
    * Naming one key for both was the CLI telling an operator to flip the wrong
    * switch.
    */
   it('names both switches in the undo line, but only once the arms are armed', async () => {
     const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
     const base = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
-    expect(base).toContain('`tenjin config set hooks.searchMode off` silences them');
+    expect(base).toContain(
+      '`tenjin config set hooks.webSearch off` (or `hooks.agentDispatch off`) silences them',
+    );
     expect(base).not.toContain('tenjin push off` silences');
 
     await rm(join(home, '.claude', 'settings.json'), { force: true });
     await writeFile(
       join(data, 'config.json'),
-      JSON.stringify({ hooks: { searchMode: 'auto', push: 'on' } }),
+      JSON.stringify({ hooks: { webSearch: 'auto', push: 'on' } }),
     );
     const armed = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
     expect(armed).toContain('`tenjin push off` silences the push arms');
@@ -1404,7 +1406,7 @@ describe('runInstall: interactive walkthrough', () => {
     const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
     await writeFile(
       join(data, 'config.json'),
-      JSON.stringify({ hooks: { searchMode: 'auto', push: 'on' } }),
+      JSON.stringify({ hooks: { webSearch: 'auto', push: 'on' } }),
     );
     await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive));
 
@@ -3655,7 +3657,16 @@ describe('runInstall: search hooks', () => {
   async function persistedMode(): Promise<string | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    return (JSON.parse(raw) as { hooks?: { searchMode?: string } }).hooks?.searchMode;
+    const hooks = (JSON.parse(raw) as { hooks?: { webSearch?: string; searchMode?: string } })
+      .hooks;
+    return hooks?.webSearch ?? hooks?.searchMode;
+  }
+  async function persistedAgentMode(): Promise<string | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    const hooks = (JSON.parse(raw) as { hooks?: { agentDispatch?: string; dispatchMode?: string } })
+      .hooks;
+    return hooks?.agentDispatch ?? hooks?.dispatchMode;
   }
 
   // A bare headless install is the one that most needs the hooks, and it is the
@@ -3727,7 +3738,8 @@ describe('runInstall: search hooks', () => {
     expect(hooksOf(res.data)).toMatchObject({ skipped: 'mode-off', mode: 'off', added: [] });
     expect((await settings()).hooks).toBeUndefined();
     expect(await persistedMode()).toBe('off');
-    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.searchMode auto');
+    expect(await persistedAgentMode()).toBe('off');
+    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.webSearch auto');
   });
 
   it('--search-hooks remind wires the hooks in remind mode', async () => {

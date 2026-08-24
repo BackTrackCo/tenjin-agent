@@ -36,16 +36,17 @@ import {
   CONFIG_DEFAULTS,
   loadRawConfig,
   PublishModeSchema,
-  SearchHookModeSchema,
+  WebSearchModeSchema,
   parsePublishModeFlag,
-  parseSearchHookModeFlag,
+  parseWebSearchHookModeFlag,
 } from '../lib/config';
-import type { PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
+import type { PartialConfig, PublishMode, WebSearchMode } from '../lib/config';
 import {
+  persistAgentDispatchHookMode,
   persistBazaarPay,
   persistInstallHarness,
   persistPublishMode,
-  persistSearchHookMode,
+  persistWebSearchHookMode,
 } from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks, isNoWalletCheck } from './doctor';
@@ -108,7 +109,8 @@ const InstallInputSchema = z.object({
   /**
    * `--no-hooks`: register no hooks THIS RUN, changing nothing persistent. It is
    * deliberately not the same as `--search-hooks off`, which is a durable
-   * statement about behavior and writes `hooks.searchMode: off` to config.
+   * statement about behavior and writes `hooks.webSearch: off` (and
+   * `hooks.agentDispatch: off`) to config.
    */
   noHooks: z.boolean().optional(),
 });
@@ -245,7 +247,7 @@ export interface InstallDeps {
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
   /** Decision 3: the search-hook mode select; defaults to the clack list. */
-  promptSearchHooks?: () => Promise<SearchHookMode | null>;
+  promptSearchHooks?: () => Promise<WebSearchMode | null>;
   /** Decision 5: the Bazaar pay lane opt-in; defaults to the clack confirm (default no). */
   confirmBazaarPay?: (question: string) => Promise<boolean>;
   /** Decision 4: "Create a wallet now?"; defaults to the clack confirm (default yes). */
@@ -376,7 +378,7 @@ async function installBody(
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
   const searchHooksFlag =
     parsed.data.searchHooks !== undefined
-      ? parseSearchHookModeFlag(parsed.data.searchHooks, '--search-hooks')
+      ? parseWebSearchHookModeFlag(parsed.data.searchHooks, '--search-hooks')
       : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
@@ -886,14 +888,14 @@ function hooksLine(io: Io, h: HooksResult): string {
     ? ` ${paint(io, 'bold', 'Push arms:')} ${h.pushArms}, from tenjin push on (off: tenjin push off).`
     : '';
   if (searchWrote > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${searchWrote} hook event(s) registered in ${h.path}.${arms} Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${searchWrote} hook event(s) registered in ${h.path}.${arms} Change: tenjin config set hooks.webSearch <auto|remind|off> (or hooks.agentDispatch)`;
   }
   // Something WAS registered, but none of it was a search event: `hooks.push`
   // flipped on by `config set` while the search entries were already current.
   // Branching on the combined count here printed "0 hook event(s) registered"
   // on exactly the run that wired the experiment.
   if (wrote > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}.${arms} Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}.${arms} Change: tenjin config set hooks.webSearch <auto|remind|off> (or hooks.agentDispatch)`;
   }
   if (h.skipped === undefined) {
     return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}${arms}`;
@@ -902,13 +904,13 @@ function hooksLine(io: Io, h: HooksResult): string {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only).`;
   }
   if (h.skipped === 'native-harness') {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode through the native Hermes plugin. Change: tenjin config set hooks.searchMode <auto|remind|off>`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode through the native Hermes plugin. Change: tenjin config set hooks.webSearch <auto|remind|off> (or hooks.agentDispatch)`;
   }
   if (h.skipped === 'dry-run') {
     return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
   }
   if (h.skipped === 'mode-off') {
-    return `${paint(io, 'dim', '-')} ${label} off (hooks.searchMode). Turn them on: tenjin config set hooks.searchMode auto, then tenjin install`;
+    return `${paint(io, 'dim', '-')} ${label} off (hooks.webSearch). Turn them on: tenjin config set hooks.webSearch auto, then tenjin install`;
   }
   if (h.skipped === 'declined') {
     return `${paint(io, 'dim', '-')} ${label} not registered this run; nothing was configured. Register them: tenjin install`;
@@ -1563,7 +1565,7 @@ export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web search
 
 export function searchHooksChoices(
   shelfHost: string = PRODUCTION_HOST,
-): readonly { value: SearchHookMode; label: string; hint?: string }[] {
+): readonly { value: WebSearchMode; label: string; hint?: string }[] {
   return [
     {
       value: 'auto',
@@ -1586,16 +1588,18 @@ export function searchHooksChoices(
  * default posture: a flag settles it, an interactive run asks, and a
  * non-interactive run wires `auto` with the disclosure and undo in its output.
  *
- * The chosen mode is PERSISTED to config, so it is the script's behavior from
- * then on and `tenjin config set hooks.searchMode` is enough to change it later
- * without re-installing. A `--dry-run` persists nothing, like the publish mode.
+ * The chosen mode is PERSISTED to config as BOTH `hooks.webSearch` and
+ * `hooks.agentDispatch` (disjoint, both `auto` by default). One flag sets both
+ * for the one-step install; `tenjin config set hooks.webSearch` or
+ * `hooks.agentDispatch` can split them later without re-installing. A `--dry-run`
+ * persists nothing, like the publish mode.
  */
 async function resolveHooks(args: {
   plans: HarnessPlan[];
   home: string;
   ctx: CommandContext;
   deps: InstallDeps;
-  flag: SearchHookMode | undefined;
+  flag: WebSearchMode | undefined;
   noHooks: boolean;
   dryRun: boolean;
   canPrompt: boolean;
@@ -1603,12 +1607,29 @@ async function resolveHooks(args: {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
   const rawConfig = await loadRawConfig(dataDir);
-  const hooksRaw = rawConfig.hooks;
-  const stored = hooksRaw?.searchMode;
+  const rawHooks = rawConfig.hooks as
+    | {
+        webSearch?: WebSearchMode;
+        searchMode?: WebSearchMode;
+        agentDispatch?: WebSearchMode;
+        dispatchMode?: string;
+      }
+    | undefined;
+  const stored = rawHooks?.webSearch ?? rawHooks?.searchMode;
+  const storedWebSearch = rawHooks?.webSearch ?? rawHooks?.searchMode;
+  const storedAgentDispatchRaw =
+    rawHooks?.agentDispatch ??
+    (rawHooks?.dispatchMode === 'inherit'
+      ? storedWebSearch
+      : (rawHooks?.dispatchMode as WebSearchMode | undefined));
+  const storedAgentDispatch =
+    storedAgentDispatchRaw ?? (rawHooks?.searchMode !== undefined ? storedWebSearch : undefined);
+  const storedWebSearchEff = storedWebSearch ?? DEFAULT_HOOK_MODE;
+  const storedAgentDispatchEff = storedAgentDispatch ?? storedWebSearch ?? DEFAULT_HOOK_MODE;
   // Whether a past `tenjin push on` armed the push experiment (docs/command-reference.md#push-experimental): a
   // durable config key, read here rather than passed in, so this run's hooks
   // stay in step with it with no separate flag to remember.
-  const pushOn = hooksRaw?.push === 'on';
+  const pushOn = rawConfig.hooks?.push === 'on';
   const hasClaude = plans.some((p) => p.harness === 'claude');
   const hasHermes = plans.some((p) => p.harness === 'hermes');
 
@@ -1651,8 +1672,25 @@ async function resolveHooks(args: {
   }
   const resultHarness = hasHermes && !hasClaude ? 'hermes' : 'claude';
   if (dryRun) return hooksSkipped(resultHarness, home, dataDir, mode, 'dry-run');
-  if (mode !== (stored ?? DEFAULT_HOOK_MODE) || stored === undefined) {
-    await persistSearchHookMode(dataDir, mode);
+  // Only sync agentDispatch on an explicit choice this run (flag or interactive
+  // prompt). A flagless, non-interactive reinstall is just `mode = stored ?? DEFAULT`
+  // and must never clobber a diverged agentDispatch (e.g. webSearch auto + agentDispatch off
+  // -> flagless reinstall would otherwise silently re-enable dispatch). See A1igator R2 review.
+  const isExplicitChoice = flag !== undefined || (canPrompt && !dryRun);
+  const hasAnyHookKey =
+    rawHooks?.webSearch !== undefined ||
+    rawHooks?.agentDispatch !== undefined ||
+    rawHooks?.searchMode !== undefined ||
+    rawHooks?.dispatchMode !== undefined;
+  const needsSync = isExplicitChoice
+    ? rawHooks?.webSearch === undefined ||
+      rawHooks?.agentDispatch === undefined ||
+      mode !== storedWebSearchEff ||
+      mode !== storedAgentDispatchEff
+    : !hasAnyHookKey;
+  if (needsSync) {
+    await persistWebSearchHookMode(dataDir, mode);
+    await persistAgentDispatchHookMode(dataDir, mode);
   }
   // `off` is a decision not to register anything, so settings.json is not touched
   // at all. It is NOT the same as an inert script: an operator who later sets the
@@ -1679,7 +1717,7 @@ function hermesHooksEnabled(hooks: HooksResult): boolean {
 }
 
 /** The stored default for a run that was never asked. */
-const DEFAULT_HOOK_MODE: SearchHookMode = CONFIG_DEFAULTS.hooks.searchMode;
+const DEFAULT_HOOK_MODE: WebSearchMode = CONFIG_DEFAULTS.hooks.webSearch;
 
 /**
  * Precedence for the hook mode: `--search-hooks` > the interactive select > an
@@ -1691,29 +1729,29 @@ const DEFAULT_HOOK_MODE: SearchHookMode = CONFIG_DEFAULTS.hooks.searchMode;
  * no config, which is what every other cancel in this walkthrough does.
  */
 async function chooseHookMode(
-  flag: SearchHookMode | undefined,
-  stored: SearchHookMode | undefined,
+  flag: WebSearchMode | undefined,
+  stored: WebSearchMode | undefined,
   deps: InstallDeps,
   dryRun: boolean,
   canPrompt: boolean,
   config: PartialConfig,
-): Promise<SearchHookMode | null> {
+): Promise<WebSearchMode | null> {
   if (flag !== undefined) return flag;
   if (dryRun || !canPrompt) return stored ?? DEFAULT_HOOK_MODE;
   const shelfHost = hookRecipientHost(config);
   const answer = await (
     deps.promptSearchHooks ??
-    ((): Promise<SearchHookMode | null> => defaultPromptSearchHooks(shelfHost))
+    ((): Promise<WebSearchMode | null> => defaultPromptSearchHooks(shelfHost))
   )();
   if (answer === null) return null;
   // The seam is injectable, so an answer is validated rather than trusted; an
   // unrecognized one is a cancel, not a write of something unknown.
-  const parsed = SearchHookModeSchema.safeParse(answer);
+  const parsed = WebSearchModeSchema.safeParse(answer);
   return parsed.success ? parsed.data : null;
 }
 
-function defaultPromptSearchHooks(shelfHost: string): Promise<SearchHookMode | null> {
-  return selectOne<SearchHookMode>({
+function defaultPromptSearchHooks(shelfHost: string): Promise<WebSearchMode | null> {
+  return selectOne<WebSearchMode>({
     message: SEARCH_HOOKS_QUESTION,
     // The recipient the hint names is the one the scripts will ask, not the
     // marketplace literal; see {@link hookRecipientHost}.

@@ -51,7 +51,7 @@ import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
 import { PUSH_SCRIPT_FILES, countPushHookEntries, pushScriptsPresent } from '../lib/harness-hooks';
-import type { EffectiveSettings, PartialConfig, PublishMode, SearchHookMode } from '../lib/config';
+import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -246,7 +246,9 @@ export async function collectDoctorChecks(
     hermesHome,
     which,
     requested,
-    searchMode: config.hooks?.searchMode,
+    webSearch:
+      (config.hooks as { webSearch?: string; searchMode?: string })?.webSearch ??
+      (config.hooks as { searchMode?: string })?.searchMode,
     homeWarning: hermesTarget.warning,
   });
   if (hermes !== null) built.push(hermes);
@@ -677,10 +679,10 @@ async function checkHermes(args: {
   hermesHome: string;
   which: (bin: string) => boolean;
   requested: readonly HarnessTarget[];
-  searchMode?: SearchHookMode;
+  webSearch?: string;
   homeWarning?: string;
 }): Promise<BuiltCheck | null> {
-  const { home, hermesHome, which, requested, searchMode, homeWarning } = args;
+  const { home, hermesHome, which, requested, webSearch: searchMode, homeWarning } = args;
   const inPlay =
     requested.includes('hermes') || harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0;
   if (!inPlay) return null;
@@ -723,7 +725,7 @@ async function checkHermes(args: {
       // warning forever. Name the blocker that actually has to move first.
       fix:
         searchMode === 'off'
-          ? 'tenjin config set hooks.searchMode auto && tenjin install --harness hermes'
+          ? 'tenjin config set hooks.webSearch auto && tenjin install --harness hermes'
           : 'tenjin install --harness hermes',
       data: status,
     },

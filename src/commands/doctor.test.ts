@@ -204,10 +204,10 @@ describe('runDoctor — passing outcomes', () => {
   // it re-runs, withholds the hook code by design, and prints the same warning
   // forever. The `native-harness` fix string in this same PR already names the
   // config command; doctor has to as well.
-  it('names the config command when the stored searchMode is what blocks the plugin', async () => {
+  it('names the config command when the stored webSearch is what blocks the plugin', async () => {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { searchMode: 'off' } }),
+      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { webSearch: 'off' } }),
     );
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -219,7 +219,7 @@ describe('runDoctor — passing outcomes', () => {
     });
     const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
     expect(hermes.status).toBe('warn');
-    expect(hermes.fix).toContain('tenjin config set hooks.searchMode auto');
+    expect(hermes.fix).toContain('tenjin config set hooks.webSearch auto');
   });
 
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {

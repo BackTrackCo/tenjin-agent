@@ -233,19 +233,19 @@ describe('HOOK_SCRIPT_VERSION', () => {
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
   it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(41);
+    expect(HOOK_SCRIPT_VERSION).toBe(42);
     const digests = Object.fromEntries(
       Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
     );
     expect(digests).toEqual({
-      websearch: '9b1a2fa6c7cbaaf31a3fc87cb6211d87',
-      dispatch: '7d6e1ee429cccfd77855830ff8609301',
-      sessionPrimer: '739c19dc7e9cf503900c1bf4065f39a1',
-      stop: '914d6fdba210fbbc34dbfb1bd4d864f3',
-      pushPrompt: '15fdb10eb48d48be4529ee540264bc88',
-      pushFailure: '6fa9e373ec10a91d3455e22bab5c8526',
-      pushSubagent: '7d89e1327487ff786fb6490ee3b22aa5',
-      pushContext: '2dcddcce06f228db595cc441c2a7a28f',
+      websearch: 'f845fbd1367574cf9091ff0ad5e7ecb9',
+      dispatch: '2b7b7b09d0c10c7d8b700d71959ce20a',
+      sessionPrimer: 'cf12fbfd7b57ebe1c5741fbbd24dca44',
+      stop: 'e412c6f9d62a1d9947638906490af645',
+      pushPrompt: 'a8db5240d39f16c156e09c51bc58fa24',
+      pushFailure: '879c185f63fec286b5d81b452f9df067',
+      pushSubagent: '615a5e84d580030a7263172fee98199f',
+      pushContext: '94bd23f09b7ff064a34fe7e16386ebda',
     });
   });
 
@@ -714,7 +714,7 @@ function callerComposingTo(length: number): string {
 
 describe('WebSearch hook: modes', () => {
   it('uses Hermes web_search input and emits its native context envelope', async () => {
-    await writeConfig({ hooks: { searchMode: 'remind' } });
+    await writeConfig({ hooks: { webSearch: 'remind' } });
     const run = await runScript(
       websearchHookScript(dataDir),
       JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
@@ -730,7 +730,7 @@ describe('WebSearch hook: modes', () => {
       status: 200,
       json: hit(base),
     }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'remind' } });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect(injected(run)).toBe(REMIND_LINE);
     expect(hits()).toBe(0);
@@ -741,7 +741,7 @@ describe('WebSearch hook: modes', () => {
       status: 200,
       json: hit(base),
     }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'off' } });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect(run.stdout).toBe('');
     expect(hits()).toBe(0);
@@ -752,7 +752,7 @@ describe('WebSearch hook: modes', () => {
       status: 200,
       json: hit(base),
     }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'wat' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'wat' } });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect(hits()).toBe(1);
     expect(injected(run)).toContain('Tenjin lists a paid answer titled');
@@ -1021,11 +1021,11 @@ describe('WebSearch hook: recording into the one store', () => {
   });
 
   it('records nothing in remind or off mode, which send nothing', async () => {
-    for (const searchMode of ['remind', 'off']) {
+    for (const webSearch of ['remind', 'off']) {
       const { baseUrl } = await serveJson(() => ({ status: 200, json: MISS_BODY }));
-      await writeConfig({ baseUrl, hooks: { searchMode } });
+      await writeConfig({ baseUrl, hooks: { webSearch } });
       await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
-      expect(await storedSearches(), searchMode).toEqual([]);
+      expect(await storedSearches(), webSearch).toEqual([]);
     }
   });
 
@@ -2429,7 +2429,7 @@ describe('dispatch hook: a subagent dispatch', () => {
 
   it('is silent and records nothing in off mode', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } });
+    await writeConfig({ baseUrl, hooks: { agentDispatch: 'off' } });
     const run = await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question nobody will hear') }),
@@ -2441,7 +2441,7 @@ describe('dispatch hook: a subagent dispatch', () => {
 
   it('emits the static line and sends nothing in remind mode', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
+    await writeConfig({ baseUrl, hooks: { agentDispatch: 'remind' } });
     const run = await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
@@ -2450,10 +2450,10 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(hits()).toBe(0);
   });
 
-  it('hooks.dispatchMode splits the dispatch hook from the WebSearch hook', async () => {
-    // A fleet keeps searchMode auto and still sends no subagent prompt anywhere.
+  it('hooks.agentDispatch splits the dispatch hook from the WebSearch hook', async () => {
+    // A fleet keeps webSearch auto and still sends no subagent prompt anywhere.
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'auto', dispatchMode: 'remind' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'auto', agentDispatch: 'remind' } });
     const remind = await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
@@ -2461,7 +2461,7 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(injected(remind)).toContain(REMIND_LINE);
     expect(hits()).toBe(0);
 
-    await writeConfig({ baseUrl, hooks: { searchMode: 'auto', dispatchMode: 'off' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'auto', agentDispatch: 'off' } });
     const off = await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
@@ -2469,18 +2469,53 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(off.stdout).toBe('');
     expect(hits()).toBe(0);
 
-    // And the other direction: searchMode off, dispatch explicitly auto still asks.
-    await writeConfig({ baseUrl, hooks: { searchMode: 'off', dispatchMode: 'auto' } });
+    // And the other direction: webSearch off, dispatch explicitly auto still asks.
+    await writeConfig({ baseUrl, hooks: { webSearch: 'off', agentDispatch: 'auto' } });
     await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
     );
     expect(hits()).toBe(1);
 
-    // The WebSearch hook ignores dispatchMode entirely.
-    await writeConfig({ baseUrl, hooks: { searchMode: 'remind', dispatchMode: 'auto' } });
+    // The WebSearch hook ignores agentDispatch entirely.
+    await writeConfig({ baseUrl, hooks: { webSearch: 'remind', agentDispatch: 'auto' } });
     const web = await runScript(websearchHookScript(dataDir), webSearchInput('a web question'));
     expect(injected(web)).toContain(REMIND_LINE);
+    expect(hits()).toBe(1);
+  });
+
+  it('legacy searchMode without dispatch key still governs dispatch for one release', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    const off = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that should not leave the machine') }),
+    );
+    expect(off.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    const remind = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(remind)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
+    );
     expect(hits()).toBe(1);
   });
 

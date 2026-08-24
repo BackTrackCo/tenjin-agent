@@ -47,13 +47,13 @@ export interface PushOnDeps {
  * hook scripts (prompt, failure, subagent, context) alongside whatever search
  * hooks are already configured. Typing `tenjin push on` IS the operator's
  * consent to wire Claude Code hooks, the only harness the push arms target
- * today, the same way `tenjin config set hooks.searchMode auto` is consent
+ * today, the same way `tenjin config set hooks.webSearch auto` is consent
  * enough for the search hooks it governs.
  *
  * IT IS NOT CONSENT TO OVERRIDE THE TWO GATES `install` APPLIES, and this
  * command used to call `wireSearchHooks` straight past both of them:
  *
- *  - `hooks.searchMode: off` is the kill switch for this whole bundle, and
+ *  - `hooks.webSearch: off` is the kill switch for this whole bundle, and
  *    `install` on that setting writes NOTHING into settings.json. Wiring six
  *    more entries there because a different verb was typed would make `off` mean
  *    something different depending on which command you reached for, so this
@@ -79,16 +79,16 @@ export async function runPushOn(
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
   });
-  if (settings.hooksSearchMode.value === 'off') {
+  if (settings.hooksWebSearch.value === 'off') {
     throw new CliError(
       'USAGE',
       // NOT "the kill switch for every hook this CLI writes", which this used to
       // say and which is false about push arms that are already wired: those read
-      // `hooks.push` at run time and nothing else. What `searchMode off` is, is
+      // `hooks.push` at run time and nothing else. What `webSearch off` is, is
       // the decision not to REGISTER anything — which is why there is no wiring
       // path for these arms to join.
-      'hooks.searchMode is off, which is the decision not to register any hook entries at all, so the push arms were not wired and hooks.push was left as it was. (Once wired, the push arms are switched by `tenjin push off`; this key does not reach them.)',
-      { fix: 'tenjin config set hooks.searchMode auto, then tenjin push on' },
+      'hooks.webSearch is off, which is the decision not to register any hook entries at all, so the push arms were not wired and hooks.push was left as it was. (Once wired, the push arms are switched by `tenjin push off`; this key does not reach them.)',
+      { fix: 'tenjin config set hooks.webSearch auto, then tenjin push on' },
     );
   }
   // The set a past `--harness` install recorded; empty means nothing was ever
@@ -111,7 +111,7 @@ export async function runPushOn(
   const result = await (deps.wire ?? wireSearchHooks)({
     homeDir: deps.homeDir ?? homedir(),
     dataDir: ctx.dataDir,
-    mode: settings.hooksSearchMode.value,
+    mode: settings.hooksWebSearch.value,
     push: true,
   });
   return {
@@ -409,7 +409,7 @@ function renderStatusLines(data: {
 
 /** What `runPushOn` prints: what {@link wireSearchHooks} actually did, plus the
  *  undo. Not {@link hooksUndo} from lib/harness-hooks.ts — that line names
- *  `hooks.searchMode off`, the search hooks' own off switch, and would tell an
+ *  `hooks.webSearch off`, the search hooks' own off switch, and would tell an
  *  operator to flip the wrong key. */
 function renderWireLines(
   result: HooksResult,

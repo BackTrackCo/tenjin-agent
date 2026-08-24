@@ -358,12 +358,17 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     }
   });
 
-  it('states the stake once, and states it as absence rather than ranking', () => {
+  it('states the stake once, and states it as a bottom tier rather than absence', () => {
+    // Until tenjin#691 an ineligible card kept the piece out of decision search
+    // entirely; it now ranks in a bottom tier below every eligible candidate and
+    // is labelled in matchReasons. The skill must not promise the older claim.
     expect(text).toMatch(/Leave any one empty and the card is ineligible/i);
-    expect(text).toMatch(/out of agent decision search entirely/i);
-    expect(text).toMatch(/not ranked lower,\s*absent/i);
+    expect(text).toMatch(/bottom tier below every eligible candidate/i);
+    expect(text).toMatch(/`incomplete answer card`/);
+    expect(text).not.toMatch(/out of agent decision search/i);
+    expect(text).not.toMatch(/not ranked lower/i);
     // Said once: the earlier shape repeated the stake in the exclusions bullet.
-    expect(text.match(/out of agent decision search/gi)).toHaveLength(1);
+    expect(text.match(/bottom tier/gi)).toHaveLength(1);
   });
 
   /**
@@ -928,10 +933,15 @@ describe('the public render did not move', () => {
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
+  // Re-pinned when #203's skill resync landed on main: it changed the PUBLIC
+  // guidance on purpose (an incomplete card "just ranks below every complete one
+  // in agent search" rather than the older browse-only wording), so the else arm
+  // carries main's sentence and the public render is byte-for-byte main's
+  // unshaped SKILL.md again. The team arm keeps its own browse-only line.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': 'a3d2ff8e259851b2ed8733921286cbea',
-      'tenjin-publish': 'b88037467bba4ecd2fb2d5ec8bebf9f2',
+      'tenjin-publish': 'cb678b98cbb919c1af60e576d232b0b9',
     });
   });
 

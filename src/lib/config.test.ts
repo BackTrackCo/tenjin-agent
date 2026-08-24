@@ -182,7 +182,7 @@ describe('hooks block: push and capture (docs/command-reference.md#push-experime
     const cfg = await loadConfig(dir);
     expect(cfg.hooks.push).toBe('on');
     expect(cfg.hooks.capture).toBe('off');
-    expect(cfg.hooks.searchMode).toBe(CONFIG_DEFAULTS.hooks.searchMode);
+    expect(cfg.hooks.webSearch).toBe(CONFIG_DEFAULTS.hooks.webSearch);
   });
 
   it('resolveSettings exposes hooksPush and hooksCapture, file over default', async () => {

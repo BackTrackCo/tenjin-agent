@@ -1720,7 +1720,7 @@
       "get": {
         "operationId": "listArticles",
         "summary": "Article directory: browse, filter, paginate",
-        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (leak-safe full-text search over title + excerpt + tags plus the body text that is already public — a free piece's whole body, a paid piece's pre-paywall preview only, never text below a paywall; the content match ANDs your plain words, so extra terms narrow the set: `q` is a filter for SHORT terms and a whole question belongs on POST /api/search, which matches meaning as well as wording), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned. A first-page request with a non-blank `q` is limited to 30/minute/IP because it writes catalog-demand telemetry; a 429 includes `Retry-After`. Those responses are not shared-cached, so every request reaches the budget and telemetry boundary. Unfiltered directory reads and cursor pages do not use that bucket.",
+        "description": "The public article feed: every published article from every non-deleted publisher, newest-first, cursor-paginated. Compose the optional filters (AND): `q` (full-text search over title + excerpt + tags + the whole body of every piece, a paid body included — a match on gated prose only decides WHICH public row is listed: no snippet, match offset, or score is ever returned, and every item stays preview-only; the content match ORs your plain words, so extra terms widen the set and relevance orders it: `q` is still a filter for SHORT terms and a whole question belongs on POST /api/search, which matches meaning as well as wording), `tag` (a tag slug), `creator` (a word-handle or 0x address), `maxPrice`/`minPrice` (an atomic-USDC band; `maxPrice=0` = free only, `minPrice=1` = paid only), `updatedSince` (an ISO 8601 UTC instant — incremental sync: re-fetch only pieces updated since your last crawl), and `publishedSince` (keep only pieces published at or after an instant). `sort` picks the browse order — newest (default), oldest, most-read, least-read, cheapest, dearest; it composes with `q` (the query filters, the sort orders the matches), and `q` with no `sort` is relevance-ranked. Each item carries `reads` + `wordCount`. Preview-only — no paid body or below-paywall image is ever returned. A first-page request with a non-blank `q` is limited to 30/minute/IP because it writes catalog-demand telemetry; a 429 includes `Retry-After`. Those responses are not shared-cached, so every request reaches the budget and telemetry boundary. Unfiltered directory reads and cursor pages do not use that bucket.",
         "security": [],
         "parameters": [
           {
@@ -1731,7 +1731,7 @@
               "type": "string",
               "maxLength": 256
             },
-            "description": "Full-text search over title + excerpt + tags plus the body text that is already public — a free piece's whole body, a paid piece's pre-paywall preview only, never text below a paywall — OR a creator handle substring, which matches outside the word match. The content match ANDs your plain words (`or` and `-` are operators; stopwords drop), so extra terms narrow the set: this is a filter for SHORT terms (a topic word, a name, a handle), and a whole question belongs on POST /api/search. Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
+            "description": "Full-text search over title + excerpt + tags + the whole body of every piece, a paid body included — OR a creator handle substring, which matches outside the word match. A match on gated prose only decides WHICH public row is listed: no snippet, match offset, or score is ever returned, and every item stays preview-only. The content match ORs your plain words (`or` and `-` are operators; stopwords drop), so extra terms widen the set and relevance orders it: this is still a filter for SHORT terms (a topic word, a name, a handle), and a whole question belongs on POST /api/search. Relevance-ranked (ts_rank) on its own; add `sort` to re-order the matches. Blank ⇒ unfiltered directory."
           },
           {
             "name": "tag",
@@ -4772,7 +4772,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Server-built labels for WHICH signal matched (title/excerpt hit, `semantic match`), not a rank tier and not a confidence score. The answer card is not a ranking input, so it is never named here."
+            "description": "Server-built labels for WHICH signal matched (title/excerpt hit, `semantic match`), not a rank tier and not a confidence score. The answer card is not a ranking input, so it is never named as a match; `no answer card` / `incomplete answer card` appear only as a NEGATIVE label on a bottom-tier candidate."
           },
           "estimatedTokens": {
             "type": "integer",
@@ -4928,7 +4928,7 @@
             "items": {
               "$ref": "#/components/schemas/SearchCandidate"
             },
-            "description": "Present only on CANDIDATES, rank-ordered, up to the requested `limit`. Every candidate carries an eligible answer card (a bare post is never a candidate); fetch a candidate `url` unpaid to read that card in full for free. At most 3 candidates come from any one creator while other qualifying creators are available to fill the page."
+            "description": "Present only on CANDIDATES, rank-ordered, up to the requested `limit`. Candidates with an eligible answer card come first; one whose card is missing or incomplete only fills a slot they left empty, and names that in `matchReasons`. Fetch a candidate `url` unpaid to read whatever card it has in full for free. At most 3 candidates come from any one creator while other qualifying creators are available to fill the page."
           },
           "inspect": {
             "$ref": "#/components/schemas/SearchInspect",
