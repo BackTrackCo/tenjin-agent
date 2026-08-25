@@ -1591,44 +1591,108 @@ describe('the lookup budget (rolling window, per trigger)', () => {
 });
 
 describe('the subagent arm (SubagentStart)', () => {
+  const DISPATCH_PROMPT =
+    'Find out whether the zod resolver throws on an optional chain during parse, and what pinning changes';
+
+  const dispatch = (): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_input: { prompt: DISPATCH_PROMPT },
+    });
+
+  const start = JSON.stringify({
+    session_id: SESSION,
+    hook_event_name: 'SubagentStart',
+    agent_id: 'a1',
+    agent_type: 'general-purpose',
+  });
+
+  /**
+   * `echo` with the filler rank 2 removed. A lone candidate is at most
+   * 'moderate' however well it matches, so the dispatch hook stays SILENT on it
+   * (tenjin-agent#211) and the cache is the only channel this piece has.
+   */
+  const soloEcho = (req: StubRequest): { status: number; json: unknown } => {
+    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+    let query: string;
+    try {
+      query = String((JSON.parse(req.body) as { query?: unknown }).query);
+    } catch {
+      query = '';
+    }
+    return {
+      status: 200,
+      json: {
+        schemaVersion: 3,
+        searchId: SEARCH_ID,
+        items: [
+          {
+            resourceId: RESOURCE_ID,
+            url: `${req.base}/@a/p`,
+            title: query.slice(0, 190),
+            price: '0',
+            excerpt: 'the excerpt',
+            creator: { handle: 'vraspar' },
+          },
+        ],
+      },
+    };
+  };
+
   it('hands the subagent what the dispatch found, once', async () => {
-    const { baseUrl } = await serve(echo());
+    const { baseUrl } = await serve(soloEcho);
     await pushOn(baseUrl);
 
-    const dispatched = await runScript(
-      dispatchHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Task',
-        tool_input: {
-          prompt:
-            'Find out whether the zod resolver throws on an optional chain during parse, and what pinning changes',
-        },
-      }),
-    );
-    // The lead still gets its pointer lines; the cache is the extra.
-    expect(injected(dispatched)).toContain('Tenjin lists');
+    const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
+    // Moderate, so the lead is told nothing; the cache is the whole handoff.
+    expect(dispatched.stdout).toBe('');
 
-    const start = JSON.stringify({
-      session_id: SESSION,
-      hook_event_name: 'SubagentStart',
-      agent_id: 'a1',
-      agent_type: 'general-purpose',
-    });
     const first = await runScript(pushSubagentHookScript(dataDir), start);
-    expect(injected(first)).toContain(BODY_MD);
-    expect((await ledger())[0]).toMatchObject({
-      trigger: 'subagent',
+    expect(injected(first)).toContain('Read it free: tenjin read');
+    expect(injected(first)).toContain(RESOURCE_ID);
+    const rows = await ledger();
+    expect(rows.find((r) => r.trigger === 'subagent')).toMatchObject({
       event: 'SubagentStart',
       agentType: 'general-purpose',
       action: 'injected',
+      form: 'short',
       deny: false,
     });
 
     // Consumed: a second subagent from the same dispatch gets nothing.
     const second = await runScript(pushSubagentHookScript(dataDir), start);
     expect(second.stdout).toBe('');
+  });
+
+  /**
+   * ⚠ THE ONE PLACE #211 ITEM 2 CHANGED SOMETHING BEYOND NOISE, pinned here so
+   * it is visible rather than silent. The dispatch hook now writes its own
+   * ledger row, and an `injected` row puts its candidate in the session's
+   * `seen` set — the "same finding twice in one session" guard that every arm
+   * reads out of `pushBudget`. So on a STRONG hit the parent gets the pointer
+   * and the subagent handoff (T5) is then skipped as `already-injected`, which
+   * is the opposite of the trade the handoff exists to make: the subagent is a
+   * fresh context that never saw the parent's line.
+   *
+   * Not fixable from lib/hook-scripts.ts — `seen` is populated in
+   * lib/push-scripts.ts's `pushBudget`, so the call is whether a `dispatch` row
+   * should feed it at all.
+   */
+  it('a strong dispatch hit takes the parent pointer INSTEAD of the subagent handoff', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(injected(dispatched)).toContain('Tenjin lists');
+
+    const run = await runScript(pushSubagentHookScript(dataDir), start);
+    expect(run.stdout).toBe('');
+    expect((await ledger()).find((r) => r.trigger === 'subagent')).toMatchObject({
+      action: 'skipped',
+      reason: 'already-injected',
+    });
   });
 
   /**
@@ -2077,6 +2141,200 @@ describe('the capture ask (Stop)', () => {
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(run.stdout).toBe('');
     expect(existsSync(mine)).toBe(true);
+  });
+
+  /**
+   * THE TURN IS NOT OVER WHEN THE MODEL STOPS TALKING. A background Agent/Task
+   * keeps working past the parent's turn end, and Claude Code fires Stop at that
+   * pause. Observed 2026-08-25: the ask blocked a turn that was only waiting on
+   * three running subagents — before the session had learned the thing it was
+   * being asked to write down, and (because the marker is written at first ask)
+   * with no second chance at the real end.
+   */
+  describe('waits for background subagents', () => {
+    /** A Stop payload naming a transcript, as Claude Code writes it. */
+    const stopWith = (transcriptPath: string | undefined): string =>
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'Stop',
+        cwd: '/tmp',
+        ...(transcriptPath === undefined ? {} : { transcript_path: transcriptPath }),
+      });
+
+    /** An assistant message launching a subagent. */
+    const launch = (id: string): string =>
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id,
+              name: 'Agent',
+              input: { description: 'probe', prompt: 'go and find out' },
+            },
+          ],
+        },
+        uuid: `u-${id}`,
+        sessionId: SESSION,
+      });
+
+    /** The user message carrying that launch's tool_result. */
+    const result = (id: string, text: string): string =>
+      JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text }] }],
+        },
+      });
+
+    /** The completion that arrives later for a background launch. */
+    const notification = (id: string, status = 'completed'): string =>
+      JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: `<task-notification>\n<task-id>a9c5e74</task-id>\n<tool-use-id>${id}</tool-use-id>\n<status>${status}</status>\n<summary>Agent "probe" finished</summary>\n</task-notification>`,
+        },
+      });
+
+    const ASYNC_RESULT =
+      'Async agent launched successfully. (This tool result is internal metadata and not the agent output.)\nagentId: a9c5e74';
+    const SPAWNED_RESULT = 'Spawned successfully.\nagent_id: a9c5e74';
+
+    async function writeTranscript(lines: string[]): Promise<string> {
+      const path = join(dataDir, `transcript-${Math.random().toString(36).slice(2)}.jsonl`);
+      await writeFile(path, `${lines.join('\n')}\n`);
+      return path;
+    }
+
+    /** Capture armed, research signal present: everything but the transcript
+     *  says "ask now". */
+    async function armed(): Promise<void> {
+      await writeConfig({ hooks: { capture: 'block' } });
+      await writeSearchSignal();
+    }
+
+    it('says nothing, and writes NO marker, while a background subagent runs', async () => {
+      await armed();
+      const path = await writeTranscript([launch('toolu_01A'), result('toolu_01A', ASYNC_RESULT)]);
+
+      const run = await runScript(stopHookScript(dataDir), stopWith(path));
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+      // The ask has to fire at the REAL end of the turn, so the session must
+      // still be eligible at the next Stop.
+      expect(existsSync(join(dataDir, 'push', `capture-asked-${SESSION}`))).toBe(false);
+    });
+
+    it('blocks as before once the completion notification has arrived', async () => {
+      await armed();
+      const path = await writeTranscript([
+        launch('toolu_01A'),
+        result('toolu_01A', ASYNC_RESULT),
+        notification('toolu_01A'),
+      ]);
+
+      const run = await runScript(stopHookScript(dataDir), stopWith(path));
+      expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: publicAsk });
+    });
+
+    it('reads the other background spelling too', async () => {
+      await armed();
+      const path = await writeTranscript([
+        launch('toolu_01B'),
+        result('toolu_01B', SPAWNED_RESULT),
+        notification('toolu_01B', 'killed'),
+      ]);
+      expect(JSON.parse((await runScript(stopHookScript(dataDir), stopWith(path))).stdout)).toEqual(
+        {
+          decision: 'block',
+          reason: publicAsk,
+        },
+      );
+    });
+
+    // A synchronous agent's tool_result IS its report, so its arrival means that
+    // agent is done and no notification is coming.
+    it('treats a synchronous agent as finished the moment its result lands', async () => {
+      await armed();
+      const path = await writeTranscript([
+        launch('toolu_01C'),
+        result('toolu_01C', 'Found it: the resolver throws only under 4.0. Details follow.'),
+      ]);
+      expect(JSON.parse((await runScript(stopHookScript(dataDir), stopWith(path))).stdout)).toEqual(
+        {
+          decision: 'block',
+          reason: publicAsk,
+        },
+      );
+    });
+
+    it('holds the ask when a launch has no result at all', async () => {
+      await armed();
+      const path = await writeTranscript([launch('toolu_01D')]);
+      const run = await runScript(stopHookScript(dataDir), stopWith(path));
+      expect(run.stdout).toBe('');
+      expect(existsSync(join(dataDir, 'push', `capture-asked-${SESSION}`))).toBe(false);
+    });
+
+    // FAIL TOWARD ASKING: an unreadable transcript is exactly where this check
+    // was before it existed, and a session never asked is worse than one asked
+    // a turn early.
+    it('asks anyway when the transcript is missing, unnamed, or unparseable', async () => {
+      await armed();
+      const gone = await runScript(
+        stopHookScript(dataDir),
+        stopWith(join(dataDir, 'no-such-transcript.jsonl')),
+      );
+      expect(JSON.parse(gone.stdout)).toEqual({ decision: 'block', reason: publicAsk });
+
+      await rm(join(dataDir, 'push'), { recursive: true, force: true });
+      const unnamed = await runScript(stopHookScript(dataDir), stopWith(undefined));
+      expect(JSON.parse(unnamed.stdout)).toEqual({ decision: 'block', reason: publicAsk });
+
+      await rm(join(dataDir, 'push'), { recursive: true, force: true });
+      const torn = await writeTranscript(['{not json at all', launch('toolu_01E').slice(0, 40)]);
+      const broken = await runScript(stopHookScript(dataDir), stopWith(torn));
+      expect(JSON.parse(broken.stdout)).toEqual({ decision: 'block', reason: publicAsk });
+    });
+
+    // The check is gated behind `capture` and the once-per-session marker, so a
+    // machine that never opted in changes in no way at all.
+    it('changes nothing on a capture-off machine', async () => {
+      await writeConfig({});
+      await writeSearchSignal();
+      const path = await writeTranscript([launch('toolu_01F'), result('toolu_01F', ASYNC_RESULT)]);
+      const run = await runScript(stopHookScript(dataDir), stopWith(path));
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+    });
+
+    /**
+     * The Stop hook's whole run is a 1500 ms watchdog, and this added a file
+     * read to it. A tail-bounded read plus a substring prefilter per line is
+     * single-digit milliseconds; this pins that a busy transcript stays nowhere
+     * near the ceiling.
+     */
+    it('reads a large transcript well inside the Stop watchdog', async () => {
+      await armed();
+      const filler = JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(2000) }] },
+      });
+      const path = await writeTranscript([
+        ...Array.from({ length: 2000 }, () => filler),
+        launch('toolu_01G'),
+        result('toolu_01G', ASYNC_RESULT),
+      ]);
+
+      const started = Date.now();
+      const run = await runScript(stopHookScript(dataDir), stopWith(path));
+      expect(run.stdout).toBe('');
+      expect(Date.now() - started).toBeLessThan(1500);
+    });
   });
 
   it('asks nothing of a session that did no research, or with capture off', async () => {
