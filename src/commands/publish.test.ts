@@ -1976,10 +1976,17 @@ describe('runPublish — server ingest gate', () => {
     // `auto` is the mode that reaches the gate on clean local content and stops
     // there. `review` never gets that far without a --yes, and that --yes IS the
     // operator's yes, so review has no separate stop-on-server-warn behaviour.
+    //
+    // A DIFFERENT body than the full-auto half above, which published for real
+    // and so left a same-machine dedup marker on CLEAN's content hash: republish
+    // those exact bytes into this same dataDir and the run short-circuits with
+    // `alreadyPublished` before it ever reaches the gate.
     const held = stubGate('scan_needs_ack', envelope);
     await expect(
       runPublish(
-        baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+        baseArgs(await writeDoc(`${CLEAN}\nA second, differently worded finding.\n`), {
+          mode: 'auto',
+        }),
         makeCtx(),
         hermetic({ fetchImpl: held.fetch, provider: spyProvider().provider }),
       ),
