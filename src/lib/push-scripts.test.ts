@@ -1422,6 +1422,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * it is the common case and not the edge. Nothing credential-shaped may reach
    * the wire, and nothing credential-shaped may reach the ledger either: the
    * ledger row carries the same string the request did.
+   *
+   * Behind `pnpm publish`, whose git preflight is where this wording comes from:
+   * a bare `git push` is no longer a head this arm fires behind at all.
    */
   it('strips the credential out of an auth failure before it leaves the machine', async () => {
     const { baseUrl, queries } = await serve(echo());
@@ -1432,7 +1435,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
         session_id: SESSION,
         hook_event_name: 'PostToolUseFailure',
         tool_name: 'Bash',
-        tool_input: { command: 'git push origin main' },
+        tool_input: { command: 'pnpm publish' },
         error:
           'fatal: Authentication failed for token ghp_16C7e42F292c6912E7710c838347Ae178B4a using account vraspar-ops',
       }),
@@ -1451,6 +1454,10 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * best-known secret shape in the world is standard base64: an AWS secret key
    * carries `/`, which a url-safe-only class treats as a separator, leaving
    * three short runs that all clear the floor and a key that leaves whole.
+   *
+   * Behind `terraform apply` rather than `aws s3 ls`: a bare `aws` is not a
+   * head this arm fires behind, and a provider credential failing mid-apply is
+   * where the sidecar would actually meet this string.
    */
   it('strips a standard-base64 secret, slashes and all', async () => {
     const { baseUrl, queries } = await serve(echo());
@@ -1462,8 +1469,8 @@ describe('the failure arm (PostToolUse Bash)', () => {
         session_id: SESSION,
         hook_event_name: 'PostToolUseFailure',
         tool_name: 'Bash',
-        tool_input: { command: 'aws s3 ls' },
-        error: `fatal: SignatureDoesNotMatch, computed with ${secret} on the presign path`,
+        tool_input: { command: 'terraform apply' },
+        error: `Error: SignatureDoesNotMatch, computed with ${secret} on the presign path`,
       }),
     );
     expect(run.code).toBe(0);
@@ -1474,6 +1481,148 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(sent).not.toContain('wJalrXUtnFEMI');
     expect(sent).not.toContain('bPxRfiCYEXAMPLEKEY');
     expect(String((await ledger())[0]!.query)).not.toContain('wJalrXUtnFEMI');
+  });
+
+  /**
+   * PRECISION, the two halves of it, against the shapes that actually misfired.
+   *
+   * There is no exit code to gate on — Claude Code's Bash tool_response is
+   * {stdout, stderr, interrupted, isImage} — so the arm reads the output for a
+   * marker a real toolchain emits, and it only reads it at all when the command
+   * was a build, test, migration, install or lint step. The head check is the
+   * half the output can never supply: `which`, `grep`, `test`, `diff` and
+   * `git diff --exit-code` all SUCCEED by reporting a non-match, in the exact
+   * words a failure rule has to treat as failure.
+   */
+  const bash = (command: string, response: Record<string, unknown>): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_response: { interrupted: false, isImage: false, ...response },
+    });
+
+  /** Silent, and cheap: nothing asked, nothing recorded, no state written. */
+  async function expectQuiet(stdin: string, hits: () => number): Promise<void> {
+    const run = await runScript(pushFailureHookScript(dataDir), stdin);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
+  }
+
+  /**
+   * The fire that started this: `which codex` says "codex not found" on stderr,
+   * which is the command working, and the old word-bag rule injected an
+   * unrelated 150-token note beside it.
+   */
+  it('says nothing about a `which` that reported a non-match', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await expectQuiet(bash('which codex', { stdout: '', stderr: 'codex not found' }), hits);
+  });
+
+  it('says nothing about a grep that matched nothing, exit code and all', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await expectQuiet(bash('grep -r foo src', { stdout: '', stderr: '', exit_code: 1 }), hits);
+  });
+
+  it('says nothing about `git diff --exit-code` reporting a difference', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await expectQuiet(
+      bash('git diff --exit-code', {
+        stdout: '--- a/src/a.ts\n+++ b/src/a.ts\n-const a = 1;\n+const a = 2;',
+        stderr: '',
+        exit_code: 1,
+      }),
+      hits,
+    );
+  });
+
+  /** An allowlisted head whose subcommand only ever reports a fact. `npm ERR!`
+   *  is a real marker, and `npm ls` exiting 1 still is not a failed build. */
+  it('says nothing about `npm ls`, however loudly it complains', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await expectQuiet(
+      bash('npm ls left-pad', {
+        stdout: '',
+        stderr: 'npm ERR! missing: left-pad@^1.3.0, required by app@1.0.0',
+      }),
+      hits,
+    );
+  });
+
+  /** An allowlisted head, and stderr chatter that is not a failure. */
+  it('says nothing about a build that only printed a deprecation warning', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await expectQuiet(
+      bash('pnpm build', { stdout: '', stderr: 'warning: deprecated subdependency glob@7' }),
+      hits,
+    );
+  });
+
+  /** The word `error` in a log line one page up is not the verdict. Only the
+   *  tail is read, and the tail here is a pass. */
+  it('reads the tail of a passing run, not the log line that says error', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const noisy =
+      'stderr | src/x.test.ts\nthe fixture logged an error while warming up\n' +
+      'ok\n'.repeat(2000) +
+      'Test Files  12 passed (12)\nTests  204 passed (204)\n';
+    await expectQuiet(bash('pnpm vitest run', { stdout: noisy, stderr: '' }), hits);
+  });
+
+  it('fires on a chained head, reading the failure from the second command', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      bash('cd /x && pnpm test', {
+        stdout:
+          'FAIL src/a.test.ts\nAssertionError: expected the drizzle snapshot slot to be free, received a collision',
+        stderr: '',
+      }),
+    );
+    expect(queries()[0] ?? '').toContain('AssertionError');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(injected(run)).toContain(BODY_MD);
+  });
+
+  it('fires on a tsc diagnostic run through `pnpm exec`', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm exec tsc --noEmit', {
+        stdout: "src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'",
+        stderr: '',
+      }),
+    );
+    expect(queries()[0] ?? '').toContain('TS2322');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(injected(run)).toContain(BODY_MD);
+  });
+
+  it('fires on a python traceback and names the module it could not import', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 script.py', {
+        stdout: '',
+        stderr:
+          'Traceback (most recent call last):\n  File "script.py", line 3, in <module>\n    import httpx\nModuleNotFoundError: No module named \'httpx\'',
+      }),
+    );
+    expect(queries()[0] ?? '').toContain('httpx');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(injected(run)).toContain(BODY_MD);
   });
 });
 
@@ -1587,6 +1736,74 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     expect(await ledger()).not.toContainEqual(
       expect.objectContaining({ session: SESSION, reason: 'lookup-cap' }),
     );
+  });
+
+  /**
+   * A capped fire used to cost a 256 KB tail parse and a ledger row every time,
+   * which is most of what a busy arm did all hour. The exhaustion is written
+   * once; the session remembers it and the rest of its fires on that arm return
+   * before they read anything (tenjin-agent#211, item 5).
+   */
+  it('remembers a full bucket, so later capped fires write no row and read nothing', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await seedLookups('prompt', 8, 0);
+
+    const first = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(first.stdout).toBe('');
+    const after = await ledger();
+    expect(after.filter((r) => r.session === SESSION && r.reason === 'lookup-cap')).toHaveLength(1);
+    const state = JSON.parse(await readFile(join(pushDir(dataDir), `${SESSION}.json`), 'utf8')) as {
+      capped: Record<string, number>;
+    };
+    expect(state.capped.prompt).toBeGreaterThan(Date.now());
+
+    const second = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(second.stdout).toBe('');
+    expect(hits()).toBe(0);
+    // One row per bucket per window, not one per fire.
+    expect((await ledger()).length).toBe(after.length);
+  });
+
+  it('is per session: another session still discovers the cap for itself', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await seedLookups('prompt', 8, 0);
+    await runScript(pushPromptHookScript(dataDir), promptInput);
+
+    const other = await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'sess-2',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: QUESTION,
+      }),
+    );
+    expect(other.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await ledger()).toContainEqual(
+      expect.objectContaining({ session: 'sess-2', reason: 'lookup-cap' }),
+    );
+  });
+
+  it('forgets the cap once its reset time has passed', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await mkdir(pushDir(dataDir), { recursive: true });
+    await writeFile(
+      join(pushDir(dataDir), `${SESSION}.json`),
+      JSON.stringify({
+        edits: {},
+        packages: [],
+        signatures: [],
+        cache: null,
+        capped: { prompt: Date.now() - 1000 },
+      }),
+    );
+
+    const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBeGreaterThan(0);
   });
 });
 
