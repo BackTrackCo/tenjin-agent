@@ -15,9 +15,11 @@ import { withFileLock } from './lock';
 /**
  * The store's bounds, EXPORTED because lib/hook-scripts.ts bakes them into the
  * scripts it generates, which cannot import this module: one definition, no
- * drift. `DEMAND_MAX_ENTRIES` is the share `dispatch-hook` entries may hold —
- * nothing ever closes one, so without a budget a wide fan-out drains the slots
- * `buy` and `outcome --last` depend on.
+ * drift. `DEMAND_MAX_ENTRIES` is the share the two DEMAND sources may hold
+ * BETWEEN THEM — `dispatch-hook` and `push-hook`, one shared budget rather than
+ * one each. Nothing ever closes an entry from either, so without the budget a
+ * wide fan-out or a busy push session drains the slots `buy` and
+ * `outcome --last` depend on.
  */
 export const MAX_ENTRIES = 50;
 export const DEMAND_MAX_ENTRIES = 15;
@@ -50,6 +52,9 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * was going to run anyway, which is a much weaker signal, because nobody judged
  * the question suitable for the marketplace before it was sent.
  *
+ * `push-hook` is the push experiment's arms (docs/command-reference.md#push-experimental): lookups made on an
+ * error or a file the agent touched, never chosen by the agent, so they share
+ * the demand budget below and the Stop hook never raises them.
  * `dispatch-hook` is weaker still: DEMAND DATA about what an agent was about to
  * research, which the Stop hook never raises and which holds a bounded share of
  * the store, because nothing ever closes one.
@@ -64,7 +69,7 @@ export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
  * OPTIONAL, and absent means `cli`: a store written by an earlier version has no
  * source field, and those entries were all explicit searches.
  */
-export const SearchSourceSchema = z.enum(['cli', 'websearch-hook', 'dispatch-hook']);
+export const SearchSourceSchema = z.enum(['cli', 'websearch-hook', 'dispatch-hook', 'push-hook']);
 export type SearchSource = z.infer<typeof SearchSourceSchema>;
 
 const StoredSearchSchema = z.object({
@@ -77,6 +82,26 @@ const StoredSearchSchema = z.object({
   resolved: z.object({ by: SearchResolutionSchema, at: z.string() }).optional(),
   /** Absent on entries written before sources existed; see {@link SearchSourceSchema}. */
   source: SearchSourceSchema.optional(),
+  /**
+   * WHICH SHELF ANSWERED, as a base URL. A team-mode search asks the team shelf
+   * and falls through to `publicShelfUrl`, and the two shelves have separate
+   * databases: a searchId minted by one means nothing to the other. Without this
+   * field every close — `tenjin outcome`, and the `--search-id` publish sends
+   * with the piece — went to the configured `baseUrl`, so the ordinary team-miss
+   * / public-hit reported the public marketplace's search to the team shelf,
+   * where it inflates `outcomes_dropped_no_parent` or lands permanently on a post
+   * row, while the shelf that actually served the search hears nothing and its
+   * demand loop stays open.
+   *
+   * The push ledger already carries the same fact per row (`shelf` in
+   * lib/push-scripts.ts); this is that fact where the close paths can read it.
+   *
+   * OPTIONAL, and absent means `baseUrl` — which is what every entry written
+   * before this field existed meant, and what a single-shelf public-mode run
+   * still means. Stored as the URL rather than as `team`/`public` so a re-pointed
+   * `baseUrl` cannot silently re-label an old entry's shelf.
+   */
+  shelfBaseUrl: z.string().optional(),
   /**
    * The harness session this search was run in, when anything could attribute it.
    * This ledger is MACHINE-GLOBAL, so without it the Stop hook nags whichever
@@ -159,7 +184,7 @@ function budgeted(entries: StoredSearch[]): StoredSearch[] {
   const kept: StoredSearch[] = [];
   let demand = 0;
   for (const entry of entries) {
-    if (entry.source === 'dispatch-hook') {
+    if (entry.source === 'dispatch-hook' || entry.source === 'push-hook') {
       if (demand >= DEMAND_MAX_ENTRIES) continue;
       demand += 1;
     }

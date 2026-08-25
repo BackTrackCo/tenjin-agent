@@ -1366,7 +1366,7 @@
         },
         "responses": {
           "200": {
-            "description": "The search result: ranked items in query mode, catalog pointers in browse mode.",
+            "description": "The search result: ranked items, projected by the requested view (decision, display or suggest).",
             "content": {
               "application/json": {
                 "schema": {

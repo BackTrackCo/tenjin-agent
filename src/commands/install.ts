@@ -9,8 +9,15 @@ import { Stream } from 'node:stream';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
+import { skillMaterialize } from '../lib/skill-materialize';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
+import {
+  hookFallthroughAsked,
+  hookFallthroughHost,
+  hookRecipientHost,
+  isTeamModeConfig,
+} from '../lib/settings';
 import type { SkillInstallStatus } from '../lib/skill-writer';
 import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/skills-source';
 import { placeOptionalSkill } from '../lib/skill-placement';
@@ -33,7 +40,7 @@ import {
   parsePublishModeFlag,
   parseWebSearchHookModeFlag,
 } from '../lib/config';
-import type { PublishMode, WebSearchMode } from '../lib/config';
+import type { PartialConfig, PublishMode, WebSearchMode } from '../lib/config';
 import {
   persistAgentDispatchHookMode,
   persistBazaarPay,
@@ -422,9 +429,13 @@ async function installBody(
   // self-heal is the other writer, and it writes these same bytes to these same
   // paths through the same writer.
   const rawConfig = await loadRawConfig(ctx.dataDir);
+  // The machine's configured mode, which is what the skill text is shaped by. Read
+  // off the raw config on purpose: a `--base-url` on THIS run must not decide what
+  // every later session on this machine reads. See lib/skill-materialize.
+  const teamMode = isTeamModeConfig(rawConfig);
   if (!dryRun) markPhase('writing-skills');
   for (const plan of plans) {
-    harnesses.push(await applyPlan(plan, skillsSource, dryRun));
+    harnesses.push(await applyPlan(plan, skillsSource, dryRun, teamMode));
   }
   await assertSkillsLanded(plans, dryRun);
   if (!dryRun) markPhase('wired');
@@ -527,6 +538,7 @@ async function installBody(
           plan.skillsDir,
           skillsSource,
           bazaarPay.enabled,
+          teamMode,
         );
       } catch {
         // The skills check in the embedded doctor run reports what remains.
@@ -591,6 +603,9 @@ async function installBody(
     hooks,
     wallet,
     doctor,
+    shelfHost: hookRecipientHost(rawConfig),
+    fallthroughHost: hookFallthroughHost(rawConfig),
+    fallthroughAsked: hookFallthroughAsked(rawConfig),
   });
   return { data, humanLines };
 }
@@ -638,6 +653,12 @@ interface WalkthroughState {
   hooks: HooksResult;
   wallet: WalletOutcome;
   doctor: DoctorChecks;
+  /** The host the generated hooks will ask; see {@link hookRecipientHost}. */
+  shelfHost: string;
+  /** The host they fall through to; see {@link hookFallthroughHost}. */
+  fallthroughHost: string;
+  /** Whether that fallthrough leg actually fires; see {@link hookFallthroughAsked}. */
+  fallthroughAsked: boolean;
 }
 
 /**
@@ -717,9 +738,23 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
     lines.push(paint(io, 'dim', `Undo anytime: remove those lines from ${s.permissions.path}.`));
   }
   if (s.hooks.added.length > 0 || s.hooks.updated.length > 0) {
-    lines.push(paint(io, 'dim', hooksDisclosure(s.hooks)));
     lines.push(
-      paint(io, 'dim', hooksUndo(s.hooks.path ?? '~/.claude/settings.json', s.hooks.scriptsDir)),
+      paint(
+        io,
+        'dim',
+        hooksDisclosure(s.hooks, s.shelfHost, s.fallthroughHost, s.fallthroughAsked),
+      ),
+    );
+    lines.push(
+      paint(
+        io,
+        'dim',
+        hooksUndo(
+          s.hooks.path ?? '~/.claude/settings.json',
+          s.hooks.scriptsDir,
+          pushArmed(s.hooks),
+        ),
+      ),
     );
     // NOT dim, unlike the disclosure above it: settings.json hooks are read once
     // at session start, so an operator who does not restart gets no hook activity
@@ -762,14 +797,76 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
   ];
 }
 
-/** What the hooks do, in one line each, at the moment they are written. */
-function hooksDisclosure(h: HooksResult): string {
+/**
+ * What the hooks do, in one line each, at the moment they are written.
+ *
+ * THE PUSH SENTENCE IS THE WHOLE POINT OF THE SPLIT. Without the experiment the
+ * hooks are advisory and the disclosure says so: they can never block or change
+ * the tool call. With it on, the research arm CAN deny a WebSearch or WebFetch
+ * and answer it from the marketplace instead, which is the one thing here that
+ * changes what the harness does — so a disclosure that still promised otherwise
+ * would be false exactly where it matters most.
+ *
+ * Read off the result rather than a flag, so what is disclosed is what was
+ * actually wired.
+ */
+export function hooksDisclosure(
+  h: HooksResult,
+  shelfHost: string = PRODUCTION_HOST,
+  fallthroughHost: string = PRODUCTION_HOST,
+  fallthroughAsked: boolean = false,
+): string {
   const shared =
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
+  // `pushArms` counts entries wired with `arm: 'push'`. The WebSearch entry is
+  // NOT one of them: it keeps `arm: 'search'` and is instead WIDENED in place to
+  // WebSearch|WebFetch when push is planned (harness-hooks.ts, WEBSEARCH_PUSH_MATCHER),
+  // and it is the entry that carries the deny. So it is one of the arms, not
+  // something they run beside, and the count excludes it.
+  const push = pushArmed(h)
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    : '';
   if (h.mode === 'remind') {
-    return `The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine. ${shared}`;
+    // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same
+    // correction the `auto` branch got. In the generated WebSearch script the
+    // push lookup runs BEFORE the reminder line is reached (hook-scripts.ts:
+    // return on `off`, then pushDecide, which reads no mode at all, then the
+    // remind line). Driven against a stub, `remind` with push on makes the same
+    // one request `auto` does. "They send nothing off-machine" would therefore
+    // be false on exactly the arm that can cancel a tool call, and it is the
+    // string `tenjin push on` prints too, to an operator who answered a prompt
+    // reading "a one-line reminder, nothing sent off-machine".
+    const remindBase = pushArmed(h)
+      ? `The WebSearch and dispatch hooks only print a one-line reminder that Tenjin may have an answer, rather than looking one up for you — but the armed push arm shares the WebSearch and WebFetch entry and runs ahead of that reminder, so on a web search the query text does leave the machine for ${shelfHost}, and that call may be denied and answered from the shelf instead.`
+      : 'The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine.';
+    return `${remindBase} ${shared}${push}`;
   }
-  return `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine. They can never block or change the tool call. ${shared}`;
+  // WHO IS ACTUALLY ASKED, which on a machine with a configured shelf is that
+  // shelf and not the marketplace: the scripts resolve their target from
+  // `config.baseUrl` and attach the team's bypass key to it. Naming
+  // tenjin.blog here would disclose a recipient that, in team mode, is never
+  // asked on this arm at all. The dispatch arm asks the shelf first too, and
+  // reaches the marketplace only on a team miss, so that fallthrough is named
+  // rather than implied.
+  //
+  // GATED ON TEAM MODE, NOT ON HOST DIFFERENCE. The scripts gate that second leg
+  // on `shelf === 'team'`, and their `teamShelfOrigin` is null on an empty
+  // `shelfBypassSecret` — so a custom `baseUrl` with no secret runs as ordinary
+  // public mode and asks nobody a second time. That half-set state is both the
+  // documented two-command setup's intermediate step and the terminal state for a
+  // shelf with no Deployment Protection, and this sentence used to promise it a
+  // recipient it never has. Over-disclosure sends nothing extra, but it is a
+  // false statement in the one text an operator cannot check later without
+  // reading the generated scripts. See {@link hookFallthroughAsked}.
+  const fallthrough = fallthroughAsked
+    ? ` A subagent dispatch ${shelfHost} has nothing for is then asked of ${fallthroughHost} as well.`
+    : '';
+  return `Before a web search or a subagent dispatch, the hooks ask ${shelfHost} the same question (free and anonymous, ~2s budget, 5s harness kill) and mention a tested answer if one exists; the query text, or at most 400 characters of the subagent prompt, leaves the machine.${fallthrough}${pushArmed(h) ? '' : ' They can never block or change the tool call.'} ${shared}${push}`;
+}
+
+/** Whether the push experiment's arms are registered in the outcome disclosed. */
+function pushArmed(h: HooksResult): boolean {
+  return (h.pushArms ?? 0) > 0;
 }
 
 /**
@@ -780,11 +877,28 @@ function hooksDisclosure(h: HooksResult): string {
 function hooksLine(io: Io, h: HooksResult): string {
   const label = paint(io, 'bold', 'Search hooks:');
   const wrote = h.added.length + h.updated.length;
+  // SEARCH EVENTS ONLY where the split is known. `added` and `updated` are
+  // per-event and the push bundle shares PreToolUse with the search bundle, so
+  // the combined count reports push arms as search hooks — which is the one
+  // number an operator would use to decide the experiment did nothing.
+  const searchWrote = h.searchWrote ?? wrote;
+  // Its own clause, never folded into the count above: the push arms are the
+  // half that can deny a tool call.
+  const arms = pushArmed(h)
+    ? ` ${paint(io, 'bold', 'Push arms:')} ${h.pushArms}, from tenjin push on (off: tenjin push off).`
+    : '';
+  if (searchWrote > 0) {
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${searchWrote} hook event(s) registered in ${h.path}.${arms} Change: tenjin config set hooks.webSearch <auto|remind|off> (or hooks.agentDispatch)`;
+  }
+  // Something WAS registered, but none of it was a search event: `hooks.push`
+  // flipped on by `config set` while the search entries were already current.
+  // Branching on the combined count here printed "0 hook event(s) registered"
+  // on exactly the run that wired the experiment.
   if (wrote > 0) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, ${wrote} hook event(s) registered in ${h.path}. Change: tenjin config set hooks.webSearch <auto|remind|off> (or hooks.agentDispatch)`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}.${arms} Change: tenjin config set hooks.webSearch <auto|remind|off> (or hooks.agentDispatch)`;
   }
   if (h.skipped === undefined) {
-    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}`;
+    return `${paint(io, 'green', '✓')} ${label} ${h.mode} mode, already registered in ${h.path}${arms}`;
   }
   if (h.skipped === 'harness-not-claude') {
     return `${paint(io, 'dim', '-')} ${label} not wired (Claude Code only).`;
@@ -1449,19 +1563,25 @@ async function resolvePermissions(args: {
  */
 export const SEARCH_HOOKS_QUESTION = 'Let Tenjin ride along with your web searches?';
 
-export const SEARCH_HOOKS_CHOICES = [
-  {
-    value: 'auto',
-    label: 'Yes, check Tenjin first (recommended)',
-    hint: `before a WebSearch or a subagent dispatch, ask ${PRODUCTION_HOST} the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine`,
-  },
-  {
-    value: 'remind',
-    label: 'Just remind me',
-    hint: 'a one-line reminder, nothing sent off-machine',
-  },
-  { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
-] as const satisfies readonly { value: WebSearchMode; label: string; hint?: string }[];
+export function searchHooksChoices(
+  shelfHost: string = PRODUCTION_HOST,
+): readonly { value: WebSearchMode; label: string; hint?: string }[] {
+  return [
+    {
+      value: 'auto',
+      label: 'Yes, check Tenjin first (recommended)',
+      // The host the scripts will actually ask; see {@link hooksDisclosure}. A
+      // consent prompt naming the wrong recipient is consent to something else.
+      hint: `before a WebSearch or a subagent dispatch, ask ${shelfHost} the same question (free, anonymous, 2s budget) and mention a tested answer; the query or the first 400 chars of the prompt leaves the machine`,
+    },
+    {
+      value: 'remind',
+      label: 'Just remind me',
+      hint: 'a one-line reminder, nothing sent off-machine',
+    },
+    { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
+  ];
+}
 
 /**
  * Settle the harness hooks. Same shape as the allowlist decision and the same
@@ -1486,7 +1606,8 @@ async function resolveHooks(args: {
 }): Promise<HooksResult> {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
-  const rawHooks = (await loadRawConfig(dataDir)).hooks as
+  const rawConfig = await loadRawConfig(dataDir);
+  const rawHooks = rawConfig.hooks as
     | {
         webSearch?: WebSearchMode;
         searchMode?: WebSearchMode;
@@ -1505,6 +1626,10 @@ async function resolveHooks(args: {
     storedAgentDispatchRaw ?? (rawHooks?.searchMode !== undefined ? storedWebSearch : undefined);
   const storedWebSearchEff = storedWebSearch ?? DEFAULT_HOOK_MODE;
   const storedAgentDispatchEff = storedAgentDispatch ?? storedWebSearch ?? DEFAULT_HOOK_MODE;
+  // Whether a past `tenjin push on` armed the push experiment (docs/command-reference.md#push-experimental): a
+  // durable config key, read here rather than passed in, so this run's hooks
+  // stay in step with it with no separate flag to remember.
+  const pushOn = rawConfig.hooks?.push === 'on';
   const hasClaude = plans.some((p) => p.harness === 'claude');
   const hasHermes = plans.some((p) => p.harness === 'hermes');
 
@@ -1531,7 +1656,7 @@ async function resolveHooks(args: {
     );
   }
 
-  const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt);
+  const mode = await chooseHookMode(flag, stored, deps, dryRun, canPrompt, rawConfig);
   // Cancelling the select is a decision NOT to decide, so it behaves exactly like
   // `--no-hooks`: nothing registered, nothing written. Every other decision in
   // this walkthrough already treats Escape that way, and this one used to be the
@@ -1572,7 +1697,7 @@ async function resolveHooks(args: {
   // mode back to `auto` re-runs install, which is what the fix string says.
   if (mode === 'off') return hooksSkipped(resultHarness, home, dataDir, mode, 'mode-off');
   if (!hasClaude) return hooksSkipped('hermes', home, dataDir, mode, 'native-harness');
-  return wireSearchHooks({ homeDir: home, dataDir, mode });
+  return wireSearchHooks({ homeDir: home, dataDir, mode, push: pushOn });
 }
 
 /**
@@ -1609,10 +1734,15 @@ async function chooseHookMode(
   deps: InstallDeps,
   dryRun: boolean,
   canPrompt: boolean,
+  config: PartialConfig,
 ): Promise<WebSearchMode | null> {
   if (flag !== undefined) return flag;
   if (dryRun || !canPrompt) return stored ?? DEFAULT_HOOK_MODE;
-  const answer = await (deps.promptSearchHooks ?? defaultPromptSearchHooks)();
+  const shelfHost = hookRecipientHost(config);
+  const answer = await (
+    deps.promptSearchHooks ??
+    ((): Promise<WebSearchMode | null> => defaultPromptSearchHooks(shelfHost))
+  )();
   if (answer === null) return null;
   // The seam is injectable, so an answer is validated rather than trusted; an
   // unrecognized one is a cancel, not a write of something unknown.
@@ -1620,10 +1750,12 @@ async function chooseHookMode(
   return parsed.success ? parsed.data : null;
 }
 
-function defaultPromptSearchHooks(): Promise<WebSearchMode | null> {
+function defaultPromptSearchHooks(shelfHost: string): Promise<WebSearchMode | null> {
   return selectOne<WebSearchMode>({
     message: SEARCH_HOOKS_QUESTION,
-    choices: SEARCH_HOOKS_CHOICES.map((c) => ({ ...c })),
+    // The recipient the hint names is the one the scripts will ask, not the
+    // marketplace literal; see {@link hookRecipientHost}.
+    choices: searchHooksChoices(shelfHost).map((c) => ({ ...c })),
     initialValue: 'auto',
   });
 }
@@ -1725,15 +1857,18 @@ async function applyPlan(
   plan: HarnessPlan,
   skillsSource: string,
   dryRun: boolean,
+  teamMode: boolean,
 ): Promise<HarnessResult> {
   const skills: SkillResult[] = [];
   const warnings: string[] = [];
+  const materialize = skillMaterialize({ teamMode });
   for (const name of SKILL_NAMES) {
     const { status, warning, preexisting } = await installSkill(
       join(skillsSource, name),
       join(plan.skillsDir, name),
       dryRun,
       name,
+      { materialize },
     );
     skills.push({
       name,

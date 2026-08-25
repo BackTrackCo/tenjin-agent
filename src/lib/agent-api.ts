@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CliError } from './errors';
-import { httpRequest, type HttpResult } from './http';
+import { httpRequest, type HttpResult, type ShelfBypass } from './http';
 import { ATOMIC_RE, UUID_RE } from './ids';
 import { trimSlash } from './url';
 
@@ -213,6 +213,10 @@ export interface AgentApiOptions {
   fetchImpl?: typeof fetch;
   /** Spec 09 §3 evaluation-cohort opt-in: sends X-Tenjin-Eval-Cohort: 1. */
   evalCohort?: boolean;
+  /** The team shelf's bypass secret and its origin. The transport attaches the
+   *  header only when the request URL is on that origin, so passing it while
+   *  searching the public shelf sends nothing. */
+  bypass?: ShelfBypass;
 }
 
 /** Turn a non-2xx / transport HttpResult into the CLI error contract. */
@@ -265,6 +269,7 @@ export async function postSearch(
     method: 'POST',
     timeoutMs: opts.timeoutMs,
     headers: opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {},
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
   });
@@ -470,6 +475,7 @@ export async function postOutcomes(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     jsonBody: items.length === 1 ? items[0] : items,
     fetchImpl: opts.fetchImpl,
   });

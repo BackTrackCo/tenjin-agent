@@ -8,8 +8,10 @@
 #
 # Self-contained and runnable locally (`pnpm --filter tenjin-cli run pack-smoke`)
 # as well as in CI. Paths are derived from this script's location, so the working
-# directory does not matter. Every CLI invocation points TENJIN_DATA_DIR at a
-# fresh temp dir — never the runner's real ~/.tenjin.
+# directory does not matter. Every CLI invocation points TENJIN_DATA_DIR inside a
+# fresh temp dir — never the runner's real ~/.tenjin. The heal legs point it at
+# their sandbox HOME's OWN default (`$HOME/.tenjin`) rather than at a separate
+# temp dir, because the heal stands down on a redirected data dir.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,8 +168,13 @@ echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 # wherever it points, under a notice naming a path the write never reached), and a
 # same-named skill that is somebody else's by its frontmatter.
 HEAL_HOME="$(mktemp -d)"
-HEAL_DATA="$(mktemp -d)"
-PACKED_SKILL="./node_modules/tenjin-cli/skills/tenjin-search/SKILL.md"
+# The sandbox HOME's OWN default data dir, and it must stay that way: the heal
+# stands down when TENJIN_DATA_DIR points away from the machine default (its
+# write targets are machine-wide, so a redirected profile must not re-render
+# every other profile's skills). A second temp dir here would skip the heal and
+# pass every assertion below for the wrong reason. HOME is what keeps this off
+# the runner's real skills; this only names where the default lands under it.
+HEAL_DATA="$HEAL_HOME/.tenjin"
 mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/tenjin" \
   "$HEAL_HOME/.claude/skills/tenjin-publish" "$HEAL_HOME/.agents/skills/tenjin-search"
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
@@ -214,8 +221,36 @@ printf '%s' "$HEAL_OUT" | node -e '
   });
 ' || heal_fail "the heal disturbed the one-JSON-object contract on stdout"
 
-cmp -s "$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md" "$PACKED_SKILL" ||
+# The healed file is the packaged one MATERIALIZED for this machine's mode, not a
+# copy of it: the skills carry `tenjin:when teamMode` markers whose two arms carry
+# different guidance, and every writer resolves them (src/lib/skill-materialize).
+# So this cannot be a `cmp` against the packed source any more. It is the one
+# comparer that cannot be taught to materialize — bash has no access to the
+# resolver, and re-implementing the grammar here is exactly the disagreement the
+# module's docblock warns about. It asserts the rendered PROPERTIES instead, which
+# is what actually matters about the published artifact: the machinery never
+# reaches a reader, and no reader gets the other mode's guidance. Exact bytes stay
+# pinned in vitest (src/skills-text.test.ts digests the public render).
+HEALED="$HEAL_HOME/.claude/skills/tenjin-search/SKILL.md"
+[ "$(cat "$HEALED")" != "$(printf -- '---\nname: tenjin-search\n---\n\nstale')" ] ||
   heal_fail "a stale wired skill was not healed by an ordinary command"
+grep -q 'tenjin:when\|tenjin:else' "$HEALED" &&
+  heal_fail "the heal wrote marker machinery into an installed skill"
+# This data dir has no config, so it is PUBLIC mode: the public arm's gate must be
+# there and the team arm's must not. A marker-free file carrying both arms would
+# pass every check above and is the failure this pair catches.
+grep -q 'Public + durable + costly to reproduce' "$HEALED" ||
+  heal_fail "the public render lost its own gate"
+grep -q 'teammate-useful' "$HEALED" &&
+  heal_fail "the team arm leaked into a public-mode install"
+# Convergence: a second ordinary command must not rewrite what the first wrote.
+# A writer whose shaped output is not stable churns the operator's home on every
+# command and prints the "Updated ..." notice forever.
+cp "$HEALED" "$HEAL_HOME/first-render.md"
+HOME="$HEAL_HOME" TENJIN_DATA_DIR="$HEAL_DATA" CI= "$BIN" config --json >/dev/null 2>&1 ||
+  heal_fail "the second heal run failed"
+cmp -s "$HEALED" "$HEAL_HOME/first-render.md" ||
+  heal_fail "a second heal rewrote the skill it had just written"
 [ "$(cat "$HEAL_HOME/.claude/skills/tenjin/SKILL.md")" = "a newer fetch" ] ||
   heal_fail "the heal overwrote the hosted tenjin mirror"
 STALE_PUBLISH="$(printf -- '---\nname: tenjin-publish\n---\n\nstale')"
@@ -228,12 +263,62 @@ grep -q 'acme-search' "$HEAL_HOME/.agents/skills/tenjin-search/SKILL.md" ||
 rm -rf "$HEAL_HOME" "$HEAL_DATA"
 echo "pack-smoke: stale adapter healed; mirror, both symlinks and third-party skill untouched (ok)"
 
+# 4b) The OTHER arm, from the same packed skills. Team mode needs both halves — a
+# shelf of the team's own and its door key — so a run with only the key would stay
+# in public mode and this leg would silently re-test 4a. `config set` is the
+# operator's own door, and `--json` keeps stdout parseable if this ever grows an
+# assertion on it.
+TEAM_HOME="$(mktemp -d)"
+# The sandbox HOME's own default, for the reason given at HEAL_DATA above.
+TEAM_DATA="$TEAM_HOME/.tenjin"
+mkdir -p "$TEAM_HOME/.claude/skills/tenjin-search"
+printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
+  > "$TEAM_HOME/.claude/skills/tenjin-search/SKILL.md"
+
+team_fail() {
+  echo "pack-smoke: FAIL — $1" >&2
+  rm -rf "$TEAM_HOME" "$TEAM_DATA"
+  exit 1
+}
+
+# The shelf URL is an UNROUTABLE LOOPBACK on purpose, twice over: this leg makes no
+# request (the heal is filesystem-only, and team mode is decided from stored config
+# alone), and scripts/ is swept for host literals other than the production one
+# (src/lib/production-origin.test.ts), so a plausible-looking shelf domain here
+# fails that sweep.
+#
+# HOME and CI are BOTH pinned on the setup commands, and neither is optional. The
+# post-command heal writes into HOME, so a `config set` that leaves the real one in
+# place heals the DEVELOPER'S OWN skills — and here it would heal them to the wrong
+# arm, since the second set completes team mode. `CI` set is the heal's own off
+# switch, so these two runs cannot write skills anywhere; only the run below, which
+# is the one under test, clears it.
+for KV in "baseUrl http://127.0.0.1:9" "shelfBypassSecret pack-smoke-secret"; do
+  # shellcheck disable=SC2086 # deliberate word split: key and value are separate argv.
+  HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI=1 "$BIN" config set $KV --json >/dev/null 2>&1 ||
+    team_fail "'tenjin config set ${KV%% *}' failed"
+done
+
+HOME="$TEAM_HOME" TENJIN_DATA_DIR="$TEAM_DATA" CI= "$BIN" config --json >/dev/null 2>&1 ||
+  team_fail "'tenjin config --json' failed with a team shelf configured"
+
+TEAM_HEALED="$TEAM_HOME/.claude/skills/tenjin-search/SKILL.md"
+grep -q 'tenjin:when\|tenjin:else' "$TEAM_HEALED" &&
+  team_fail "the team-mode heal wrote marker machinery into an installed skill"
+grep -q 'teammate-useful' "$TEAM_HEALED" ||
+  team_fail "a team-mode install did not get the team arm's gate"
+grep -q 'Public + durable + costly to reproduce' "$TEAM_HEALED" &&
+  team_fail "the public arm leaked into a team-mode install"
+rm -rf "$TEAM_HOME" "$TEAM_DATA"
+echo "pack-smoke: team-mode install renders the team arm only, marker-free (ok)"
+
 # 5) The heal's chunk is lazily imported, so a half-unpacked or corrupt install can
 # make that import fail. It must stay invisible: the command has already emitted
 # its envelope by then, and a rejection there would add a second one and a nonzero
 # exit to a command that succeeded.
 CHUNK_HOME="$(mktemp -d)"
-CHUNK_DATA="$(mktemp -d)"
+# The sandbox HOME's own default, for the reason given at HEAL_DATA above.
+CHUNK_DATA="$CHUNK_HOME/.tenjin"
 CHUNK_BACKUP="$(mktemp -d)"
 mkdir -p "$CHUNK_HOME/.claude/skills/tenjin-search"
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \

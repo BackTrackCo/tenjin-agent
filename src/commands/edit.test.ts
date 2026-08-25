@@ -1498,3 +1498,92 @@ describe('runEdit — the project-marker scan context (parity with publish)', ()
     }
   });
 });
+
+/**
+ * TEAM MODE, and the point is PARITY WITH PUBLISH. Without it an author
+ * publishes a team note carrying its own repo slug silently under `auto` and
+ * then hits NEEDS_CONFIRMATION on that same string when fixing a typo in it —
+ * the --yes round trip the warn-tier drop exists to remove, moved to the second
+ * command. The two filters are meant to be character-identical.
+ */
+describe('runEdit — a team shelf narrows the scan exactly as publish does', () => {
+  const TEAM = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const SECRET = 'shelf-secret-abc123';
+
+  /** No --base-url flag: an override yields no bypass pair and so no team mode. */
+  function teamCtx(): CommandContext {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: true, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  async function writeShelfConfig(): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+    );
+  }
+
+  const WARN_BODY = '# New\n\nSend to 0x' + 'b'.repeat(40) + ' today.\n';
+  const SECRET_ASSIGN_BODY = '# New\n\nSet DEPLOY_API_KEY="pk_live_zzzz9988aabb" to deploy.\n';
+  const BLOCK_BODY = '# New\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
+
+  it('drops the warn tier, so auto applies an edit the public gate would stop', async () => {
+    await writeShelfConfig();
+    const file = await writeDoc(WARN_BODY);
+    const stub = stubServer();
+    await runEdit(
+      args({ body: file }),
+      teamCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(new URL(stub.puts()[0]!.url).origin).toBe(TEAM);
+  });
+
+  it('keeps that same warn on the marketplace, so the drop is the shelf and not the body', async () => {
+    // Same body, no shelf config: the public gate still asks.
+    const file = await writeDoc(WARN_BODY);
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ body: file }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('keeps secret-assignment, the one warn that asks the credential question', async () => {
+    await writeShelfConfig();
+    const file = await writeDoc(SECRET_ASSIGN_BODY);
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ body: file }),
+        teamCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  it('still hard-blocks a live secret on a team shelf, with --yes on', async () => {
+    await writeShelfConfig();
+    const file = await writeDoc(BLOCK_BODY);
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ body: file, yes: true }),
+        teamCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+});

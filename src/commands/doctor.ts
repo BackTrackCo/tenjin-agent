@@ -27,15 +27,21 @@ import {
   shadowedCliSkills,
 } from '../lib/skill-wiring';
 import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
+import { skillMaterialize } from '../lib/skill-materialize';
 import type {
   DirState,
   HarnessTarget,
   HarnessWiring,
   NotInvocableReason,
 } from '../lib/skill-wiring';
-import { fetchJson } from '../lib/http';
+import { fetchJson, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { loadProjectConfig } from '../lib/settings';
+import {
+  isTeamModeConfig,
+  isTeamShelfOrigin,
+  loadProjectConfig,
+  resolveShelfBypass,
+} from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -44,7 +50,8 @@ import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/se
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
-import type { PartialConfig, PublishMode } from '../lib/config';
+import { PUSH_SCRIPT_FILES, countPushHookEntries, pushScriptsPresent } from '../lib/harness-hooks';
+import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -183,6 +190,11 @@ export async function collectDoctorChecks(
     project: project?.layer,
   });
   const baseUrl = settings.baseUrl.value;
+  // The SAME resolver resolveContextSettings uses, not a second copy of the
+  // rule: the key is paired with the origin the operator configured, so
+  // `tenjin doctor --base-url <anywhere>` runs its three probes unauthenticated
+  // instead of sending the team shelf's key to that host three times.
+  const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
@@ -198,9 +210,12 @@ export async function collectDoctorChecks(
   const built: BuiltCheck[] = [
     checkNode(),
     configCheck,
-    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    // The three baseUrl probes carry the team shelf's bypass. Without it every
+    // one of them reports a protected team deployment as unreachable, which is
+    // the check saying "your CLI is broken" about the one setting that is right.
+    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
     await checkSkills(
       home,
       which,
@@ -208,9 +223,23 @@ export async function collectDoctorChecks(
       settings.bazaarPay.value,
       deps.skillsSourceDir,
       hermesHome,
+      // The raw config, not resolved settings: the staleness compare has to shape
+      // the packaged copies the way the WRITERS shaped them, and they read the
+      // machine's configured mode with no flag layer (lib/skill-materialize).
+      isTeamModeConfig(config),
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
+
+  // Only when the experiment is on. Off, there is nothing to be half-wired and
+  // a permanently-present check about a feature nobody enabled is noise.
+  if (config.hooks?.push === 'on') {
+    built.push(await checkPushHooks(home, ctx.dataDir));
+  }
+
+  // Same rule: only when a secret is set is there a team shelf to be wrong about.
+  const teamShelf = checkTeamShelf(settings, bypass);
+  if (teamShelf !== null) built.push(teamShelf);
 
   const hermes = await checkHermes({
     home,
@@ -359,9 +388,14 @@ async function checkApiContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -415,9 +449,14 @@ async function checkSearchContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     return {
       result: {
@@ -489,6 +528,7 @@ async function checkSkills(
   bazaarPay: boolean,
   skillsSourceDir: string | undefined,
   hermesHome: string,
+  teamMode: boolean,
 ): Promise<BuiltCheck> {
   const resolvedHermesHome = hermesHome;
   const present = detectHarnesses(home, which, resolvedHermesHome);
@@ -584,6 +624,7 @@ async function checkSkills(
   // set than it writes would leave a stale directory nothing ever names.
   const { stale, verifiable } = await compareWiredSkills(
     wiring.map((w) => w.dir),
+    teamMode,
     skillsSourceDir,
   );
   if (!verifiable) {
@@ -694,6 +735,11 @@ async function checkHermes(args: {
 /**
  * How the wired CLI adapter skills compare to the packaged ones.
  *
+ * The packaged side is MATERIALIZED for this machine's mode before the compare, so
+ * "current" means "matches what a writer on this machine would write now" — which
+ * also makes a mode change legible as drift until the heal converges it, rather
+ * than either invisible or permanent.
+ *
  * `verifiable` is false when this build cannot read its own packaged copies, which
  * is a broken package rather than evidence of no drift; reporting that as current
  * would make the check quietly green on exactly the install doctor should describe.
@@ -711,6 +757,7 @@ async function checkHermes(args: {
  */
 async function compareWiredSkills(
   dirs: readonly string[],
+  teamMode: boolean,
   sourceDir?: string,
 ): Promise<{ stale: string[]; verifiable: boolean }> {
   let source: string;
@@ -724,9 +771,13 @@ async function compareWiredSkills(
   // adapters decide `verifiable`: a package missing an optional copy is odd,
   // not a reason to call every adapter unverifiable.
   const packaged = new Map<string, Buffer>();
+  const materialize = skillMaterialize({ teamMode });
   for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
     const read = await readSkillFile(join(source, name, 'SKILL.md'));
-    if (read.kind === 'ok') packaged.set(name, read.bytes);
+    // SHAPED before the compare, exactly as the writers shape it. Comparing raw
+    // packaged bytes here would call every skill on a marker-carrying build stale
+    // in both modes, forever, with a fix that cannot clear it.
+    if (read.kind === 'ok') packaged.set(name, materialize('SKILL.md', read.bytes));
   }
   if (CLI_SKILL_NAMES.some((name) => !packaged.has(name))) {
     return { stale: [], verifiable: false };
@@ -838,6 +889,115 @@ const POSTURE: Record<DirState, string> = {
   shadowed: 'at least one CLI skill present but not model-invocable',
   wired: 'CLI skills wired, take precedence over the hosted mirror',
 };
+
+/**
+ * Is team mode actually on, and does the operator know which answer they got?
+ *
+ * Team mode needs TWO settings, and the setup is two independent commands, so
+ * the reachable wrong state is a machine with the bypass secret and `baseUrl`
+ * still on the public marketplace. The CLI fails that safe to public mode —
+ * publishes keep the client scan and the confirm cascade — but silently, and an
+ * operator who believes they are on the team shelf would keep writing internal
+ * notes at a command that sends them to tenjin.blog. Warn, never fail: public
+ * mode is a working machine, just not the one they meant to configure.
+ *
+ * Reports what the probes ACTUALLY DID — it is handed the same `bypass` they
+ * were, rather than re-deriving the answer — so a run whose base URL came from
+ * `--base-url` reports the key as withheld instead of claiming a team mode this
+ * run does not have.
+ */
+function checkTeamShelf(
+  settings: EffectiveSettings,
+  bypass: ShelfBypass | undefined,
+): BuiltCheck | null {
+  if (settings.shelfBypassSecret.value.length === 0) return null;
+  const baseUrl = settings.baseUrl.value;
+  if (bypass !== undefined) {
+    return {
+      result: {
+        name: 'team shelf',
+        status: 'ok',
+        required: false,
+        detail: `team mode: baseUrl is ${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
+      },
+    };
+  }
+  // The secret is set and the shelf is a real one, but THIS run was pointed
+  // elsewhere, so the key was withheld. Not a misconfiguration — the config is
+  // fine — which is why it reads differently from the half-wired case below.
+  const origin = tryOriginOf(baseUrl);
+  if (
+    settings.baseUrl.source !== 'file' &&
+    settings.baseUrl.source !== 'default' &&
+    origin !== null &&
+    isTeamShelfOrigin(origin, settings.publicShelfUrl.value)
+  ) {
+    return {
+      result: {
+        name: 'team shelf',
+        status: 'warn',
+        required: false,
+        // NAMING THE FLAG HERE IS ITSELF THE HAZARD (see FIX_POINT_AT_TENJIN_API
+        // and lib/permissions FLAG_CAVEAT): doctor's lines reach an unattended
+        // agent, and an override is what a prompt-injected one would reach for.
+        // So this says an override happened, never how to make one.
+        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}) rather than from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
+        fix: 'Run doctor with no base-URL override to check the configured team shelf.',
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'team shelf',
+      status: 'warn',
+      required: false,
+      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
+      fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
+    },
+  };
+}
+
+/**
+ * The push experiment's TWO halves, asked separately, because either one alone
+ * reports a healthy sidecar that does nothing: the generated scripts on disk
+ * with no settings.json entries pointing at them (a `push on` whose settings
+ * write refused), or six entries pointing at scripts that are gone (a
+ * half-finished uninstall, a moved data dir). Six entries across five events,
+ * so "half-wired" is a state with several ways in. Both counts are read from
+ * the writer's own plan rather than stated here.
+ *
+ * Never required and never a fail: an experiment that is off-by-default cannot
+ * take down the verb an operator runs when something else is broken.
+ */
+async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
+  const scripts = await pushScriptsPresent(dataDir);
+  const entries = await countPushHookEntries(homeDir, dataDir);
+  const where = entries.path === null ? 'no settings.json found' : entries.path;
+  const registered = `${entries.present}/${entries.planned} hook entries registered (${where})`;
+  if (scripts && entries.present === entries.planned) {
+    return {
+      result: {
+        name: 'push hooks',
+        status: 'ok',
+        required: false,
+        detail: `hooks.push is on: all ${PUSH_SCRIPT_FILES.length} push scripts written, ${registered}`,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'push hooks',
+      status: 'warn',
+      required: false,
+      detail: `hooks.push is on, but the sidecar is only half wired: ${
+        scripts
+          ? `all ${PUSH_SCRIPT_FILES.length} push scripts are written`
+          : 'one or more push scripts are missing'
+      }, ${registered}. Nothing runs unless both halves are there`,
+      fix: 'tenjin push on',
+    },
+  };
+}
 
 /**
  * The delegated session key `tenjin read` presents to recover a piece this wallet
@@ -990,13 +1150,18 @@ async function checkReadPath(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     return {
       result: {

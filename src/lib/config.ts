@@ -132,6 +132,43 @@ export function parseSessionPrimerFlag(value: string, flagName: string): Session
 }
 
 /**
+ * Whether the push experiment's hook scripts are wired and speaking (docs/command-reference.md#push-experimental).
+ * `on` is what `tenjin push on` writes: `tenjin install` then wires the extra hook
+ * entries (prompt, failure, subagent, context) alongside the search hooks it always
+ * wires. `off` (the default) leaves any already-wired push scripts on disk but
+ * inert — every push arm reads this at run time before it spends a request, so
+ * turning the experiment off never needs a re-install.
+ */
+export const PushModeSchema = z.enum(['on', 'off']);
+export type PushMode = z.infer<typeof PushModeSchema>;
+
+export function parsePushModeFlag(value: string, flagName: string): PushMode {
+  const parsed = PushModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
+/**
+ * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
+ * notes half): `block` raises a blocking reason, once per session, when the
+ * session carried a research signal (a recorded search, or a push-ledger row) and
+ * nothing has captured it yet; `nudge` says the same thing as additionalContext
+ * with no block; `off` is silent. Default `off`.
+ */
+export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);
+export type CaptureMode = z.infer<typeof CaptureModeSchema>;
+
+export function parseCaptureModeFlag(value: string, flagName: string): CaptureMode {
+  const parsed = CaptureModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "block", "nudge", or "off".',
+  });
+}
+
+/**
  * The harness-hook block. EVERY key is read by the installed scripts at run
  * time, which is what makes them runtime toggles rather than install-time
  * choices: `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
@@ -144,6 +181,8 @@ const HooksConfigSchema = z.object({
   agentDispatch: AgentDispatchModeSchema,
   stopNag: StopNagModeSchema,
   sessionPrimer: SessionPrimerModeSchema,
+  push: PushModeSchema,
+  capture: CaptureModeSchema,
 });
 
 /**
@@ -218,6 +257,31 @@ export const ConfigSchema = z.object({
   sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
+  /**
+   * The PUBLIC marketplace, consume-only, and the second shelf a team-mode
+   * lookup falls through to. Distinct from `baseUrl` because in team mode
+   * `baseUrl` is the team's own deployment: `publish`, `read` and the first leg
+   * of every search go there, and this is the shelf that still gets asked when
+   * the team's own has nothing. In public mode the two are the same origin and
+   * nothing falls through.
+   */
+  publicShelfUrl: z.url(),
+  /**
+   * The team shelf's Vercel "Protection Bypass for Automation" secret, and the
+   * ONE key that decides which mode this CLI is in: empty (the default) is
+   * public mode, byte-for-byte what it always did; non-empty is team mode.
+   *
+   * It is a DOOR KEY, not a credential of the operator's: it gets a request past
+   * Deployment Protection on the team's preview deployment and authenticates
+   * nobody. Stored in plain config.json alongside everything else for exactly
+   * that reason — anything that can read this file can already read the wallet's
+   * keystore path and rewrite `baseUrl`. It is redacted from `config get` and
+   * `config list` all the same, because those outputs are pasted into issues.
+   *
+   * Sent ONLY to `baseUrl`'s origin; see lib/http.ts's `bypass` option, which
+   * derives that from the request URL rather than from the caller's intent.
+   */
+  shelfBypassSecret: z.string(),
   rpcUrl: z.url(),
   /**
    * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
@@ -301,6 +365,9 @@ export const CONFIG_DEFAULTS: Config = {
   sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: PRODUCTION_ORIGIN,
+  publicShelfUrl: PRODUCTION_ORIGIN,
+  // Empty = public mode. Setting it is the whole of "turn on team mode".
+  shelfBypassSecret: '',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   bazaarPay: false,
@@ -310,8 +377,17 @@ export const CONFIG_DEFAULTS: Config = {
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json. Both hooks
-  // are `auto` by default and disjoint — no `inherit`.
-  hooks: { webSearch: 'auto', agentDispatch: 'auto', stopNag: 'on', sessionPrimer: 'on' },
+  // are `auto` by default and disjoint — no `inherit`. `push` and `capture`
+  // default `off`: the push experiment (docs/command-reference.md#push-experimental) is opt-in only,
+  // through `tenjin push on`.
+  hooks: {
+    webSearch: 'auto',
+    agentDispatch: 'auto',
+    stopNag: 'on',
+    sessionPrimer: 'on',
+    push: 'off',
+    capture: 'off',
+  },
   update: { mode: 'nudge' },
 };
 
@@ -338,6 +414,8 @@ export const HOOKS_CONFIG_KEYS = [
   'hooks.agentDispatch',
   'hooks.stopNag',
   'hooks.sessionPrimer',
+  'hooks.push',
+  'hooks.capture',
 ] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
 
@@ -444,6 +522,8 @@ export async function loadConfig(dir: string): Promise<Config> {
       agentDispatch: resolvedAgentDispatch,
       stopNag: rawHooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
       sessionPrimer: rawHooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
+      push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
+      capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
   };
@@ -482,6 +562,8 @@ export interface EffectiveSettings {
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
+  publicShelfUrl: ResolvedSetting<string>;
+  shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
   bazaarPay: ResolvedSetting<boolean>;
@@ -492,6 +574,8 @@ export interface EffectiveSettings {
   hooksAgentDispatch: ResolvedSetting<AgentDispatchMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
   hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
+  hooksPush: ResolvedSetting<PushMode>;
+  hooksCapture: ResolvedSetting<CaptureMode>;
   updateMode: ResolvedSetting<UpdateMode>;
   /** @deprecated use hooksWebSearch — kept for backward compat */
   hooksSearchMode: ResolvedSetting<WebSearchMode>;
@@ -530,6 +614,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
+    publicShelfUrl: fileOrDefault('publicShelfUrl', config),
+    shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
     bazaarPay: fileOrDefault('bazaarPay', config),
@@ -542,6 +628,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     hooksDispatchMode: agentDispatch,
     hooksStopNag: resolveHooksStopNag(config),
     hooksSessionPrimer: resolveHooksSessionPrimer(config),
+    hooksPush: resolveHooksPush(config),
+    hooksCapture: resolveHooksCapture(config),
     updateMode: resolveUpdateMode(config),
   };
 }
@@ -623,6 +711,21 @@ function resolveHooksStopNag(config: PartialConfig): ResolvedSetting<StopNagMode
   return { value: CONFIG_DEFAULTS.hooks.stopNag, source: 'default' };
 }
 
+/** hooks.push: file or default, same shape as hooks.webSearch — read at run time
+ *  by every push arm, so a set takes effect with no re-install. */
+function resolveHooksPush(config: PartialConfig): ResolvedSetting<PushMode> {
+  const fromFile = config.hooks?.push;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.push, source: 'default' };
+}
+
+/** hooks.capture: file or default, same shape as hooks.webSearch. */
+function resolveHooksCapture(config: PartialConfig): ResolvedSetting<CaptureMode> {
+  const fromFile = config.hooks?.capture;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.hooks.capture, source: 'default' };
+}
+
 /**
  * The loosening gate (D38): a committed (not-gitignored) `.tenjin.json` requesting
  * `full-auto` is downgraded to `auto`, never silently honored — cloning a repo
@@ -693,11 +796,24 @@ export function resolvePublishDefaultPrice(input: {
   return result;
 }
 
-/** Persist a full, validated config via the atomic writer (0700 dir, 0644 file). */
+/**
+ * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
+ *
+ * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
+ * team shelf's shared door key, and every other secret in this tree is 0600
+ * (the wallet, the passphrase, the session key, the spend ledger, the generated
+ * hook scripts) — wallet/local.ts even warns when it finds one that is not.
+ * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
+ * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
+ * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
+ * the key world-readable. `config --json` already redacts it, which is the same
+ * care applied one layer up. Keep this in step with `persist` in commands/config.ts,
+ * the other writer of this file.
+ */
 export async function writeConfig(dir: string, config: Config): Promise<void> {
   const validated = ConfigSchema.parse(config);
   await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-    mode: 0o644,
+    mode: 0o600,
     dirMode: 0o700,
   });
 }

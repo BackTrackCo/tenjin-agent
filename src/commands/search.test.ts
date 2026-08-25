@@ -4,7 +4,8 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
-import { latestSearch } from '../lib/search-store';
+import { latestSearch, loadSearches } from '../lib/search-store';
+import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -489,6 +490,312 @@ describe('item URL origin ingest boundary', () => {
     const { fetch } = stub(foreign);
     await expect(
       runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
+  });
+});
+
+/**
+ * TEAM MODE, WHERE THERE ARE TWO SHELVES AND ONE DOOR KEY.
+ *
+ * Every case here turns on the same three facts: `baseUrl` is asked first, the
+ * public shelf is asked only when the first had nothing, and the bypass header
+ * reaches `baseUrl`'s origin and no other.
+ */
+describe('runSearch across two shelves', () => {
+  const TEAM = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+  const SECRET = 'shelf-secret-abc123';
+
+  interface Sent {
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  /** A fetch that answers per-origin, recording every request it saw. */
+  function shelves(by: Record<string, unknown>): { fetch: typeof fetch; sent: Sent[] } {
+    const sent: Sent[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      const origin = new URL(url).origin;
+      sent.push({
+        url,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      });
+      return new Response(JSON.stringify(by[origin] ?? MISS), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, sent };
+  }
+
+  function teamCtx(): CommandContext {
+    return makeCtx({ baseUrl: undefined });
+  }
+
+  async function writeShelfConfig(extra: Record<string, unknown> = {}): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        baseUrl: TEAM,
+        publicShelfUrl: PUBLIC,
+        shelfBypassSecret: SECRET,
+        ...extra,
+      }),
+    );
+  }
+
+  const teamHit = {
+    ...HIT,
+    searchId: '0197aaaa-bbbb-cccc-dddd-111111111111',
+    items: [{ ...(HIT.items[0] as object), url: `${TEAM}/api/read/iris/slug` }],
+  };
+  const publicHit = {
+    ...HIT,
+    searchId: '0197aaaa-bbbb-cccc-dddd-222222222222',
+    items: [{ ...(HIT.items[0] as object), url: `${PUBLIC}/api/read/iris/slug` }],
+  };
+
+  it('asks the team shelf and stops there when it answers', async () => {
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({ [TEAM]: teamHit });
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+    expect((result.data as { searchId: string }).searchId).toBe(teamHit.searchId);
+    expect(result.humanLines?.[0]).toContain('on the team shelf');
+    // One leg ran, and it is still named: a team-mode reader has two shelves to
+    // tell apart whether or not both were asked.
+    expect((result.data as { shelves: unknown[] }).shelves).toEqual([
+      { shelf: 'team', baseUrl: TEAM, searchId: teamHit.searchId, matched: 1 },
+    ]);
+  });
+
+  it('falls through to the public shelf, and sends it no key', async () => {
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({ [PUBLIC]: publicHit });
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    // Team first, then public: the order the push hooks use, for the same reason.
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM, PUBLIC]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+    expect(sent[1]?.headers[BYPASS_HEADER]).toBeUndefined();
+
+    const data = result.data as { searchId: string; shelves: Array<Record<string, unknown>> };
+    expect(data.searchId).toBe(publicHit.searchId);
+    // Both legs are named, so a caller can tell "the team shelf had nothing"
+    // from "the team shelf was never asked".
+    expect(data.shelves).toEqual([
+      { shelf: 'team', baseUrl: TEAM, searchId: MISS.searchId, matched: 0 },
+      { shelf: 'public', baseUrl: PUBLIC, searchId: publicHit.searchId, matched: 1 },
+    ]);
+    expect(result.humanLines?.[0]).toContain('on the public shelf');
+  });
+
+  it('names both shelves on a total miss and offers the publish-back on the first', async () => {
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({});
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(2);
+    const lines = result.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('MISS, no candidates');
+    expect(lines).toContain('Asked both shelves: team, then public.');
+    // The publish-back names the shelf a publish would actually go to.
+    expect((result.data as { publishBack: { publish: string } }).publishBack.publish).toContain(
+      MISS.searchId,
+    );
+  });
+
+  it('asks one shelf, and sends no key, without a bypass secret', async () => {
+    // publicShelfUrl configured, no secret: public mode, and nothing changes.
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC }),
+    );
+    const { fetch, sent } = shelves({ [TEAM]: teamHit });
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+    // Unlabelled, exactly as a single-shelf run has always rendered.
+    expect(result.humanLines?.[0]).toMatch(/^1 candidate\(s\) \(searchId /);
+    expect(result.data).not.toHaveProperty('shelves');
+  });
+
+  /**
+   * A BROKEN TEAM SHELF IS A MISS, NOT A STOP. Deployment Protection answers a
+   * rotated or mistyped bypass secret with a 401 page, and `postSearch` turns
+   * any non-2xx into a thrown CliError — so an unguarded first leg meant a typo
+   * took down every `tenjin search` on the machine while tenjin.blog sat there
+   * healthy. The hook path already does the opposite on purpose; this is the CLI
+   * verb catching up.
+   */
+  describe('when the team shelf errors instead of missing', () => {
+    /** The team origin answers `status`; the public origin answers normally. */
+    function brokenTeam(status: number, body: unknown = '<html>Authentication Required</html>') {
+      const sent: string[] = [];
+      const fetchFn = (async (url: string) => {
+        sent.push(new URL(url).origin);
+        if (new URL(url).origin === TEAM) {
+          return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+        }
+        return new Response(JSON.stringify(publicHit), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof fetch;
+      return { fetch: fetchFn, sent };
+    }
+
+    it('falls through to the public shelf and still answers', async () => {
+      await writeShelfConfig();
+      const { fetch, sent } = brokenTeam(401);
+      const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+      expect(sent).toEqual([TEAM, PUBLIC]);
+      expect((result.data as { searchId: string }).searchId).toBe(publicHit.searchId);
+      // The operator hears that the shelf is broken; they just do not lose the search.
+      const lines = result.humanLines?.join('\n') ?? '';
+      expect(lines).toContain('The team shelf');
+      expect(lines).toContain('did not answer');
+      expect(lines).toContain('on the public shelf');
+    });
+
+    it('records the failed leg in `shelves`, with an error rather than a searchId', async () => {
+      await writeShelfConfig();
+      const { fetch } = brokenTeam(500);
+      const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+      const shelves = (result.data as { shelves: Array<Record<string, unknown>> }).shelves;
+      // "Asked and broken" must not read as "asked and empty", nor as "never asked".
+      expect(shelves[0]).toMatchObject({ shelf: 'team', baseUrl: TEAM });
+      expect(typeof shelves[0]?.error).toBe('string');
+      expect(shelves[0]).not.toHaveProperty('searchId');
+      expect(shelves[1]).toMatchObject({ shelf: 'public', matched: 1 });
+    });
+
+    it('still throws when the public shelf fails too', async () => {
+      await writeShelfConfig();
+      const bothDown = (async () =>
+        new Response('nope', { status: 503 })) as unknown as typeof fetch;
+      await expect(
+        runSearch({ question: 'q' }, teamCtx(), { fetchImpl: bothDown }),
+      ).rejects.toBeInstanceOf(CliError);
+    });
+
+    it('still fails closed on a contract mismatch, which is not an outage', async () => {
+      // An off-origin candidate is what a later `buy` would pay, so it stays a
+      // whole-response refusal; degrading it into a quiet fallback would turn a
+      // trust-boundary violation into a shelf that "had nothing".
+      await writeShelfConfig();
+      const crossed = {
+        ...teamHit,
+        items: [{ ...(HIT.items[0] as object), url: `${PUBLIC}/api/read/iris/slug` }],
+      };
+      const { fetch, sent } = shelves({ [TEAM]: crossed });
+      await expect(
+        runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+      expect(sent.map((s) => new URL(s.url).origin)).toEqual([TEAM]);
+    });
+
+    it('still throws in public mode, where there is nothing to fall through to', async () => {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ baseUrl: TEAM }));
+      const { fetch, sent } = brokenTeam(401);
+      await expect(
+        runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch }),
+      ).rejects.toBeInstanceOf(CliError);
+      expect(sent).toEqual([TEAM]);
+    });
+  });
+
+  it('is public mode, one leg and no key, when baseUrl is not a shelf of its own', async () => {
+    // The day-0 setup is two independent commands, and both baseUrl and
+    // publicShelfUrl default to tenjin.blog, so the reachable wrong state is a
+    // secret with no private shelf behind it. Team mode keyed on the secret
+    // alone would POST the same origin twice on a miss, send it the team's key,
+    // and label the first leg `team` — a marketplace hit counted as proof the
+    // team shelf works.
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: PUBLIC, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+    );
+    const { fetch, sent } = shelves({});
+    const result = await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent.map((s) => new URL(s.url).origin)).toEqual([PUBLIC]);
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+    // Unlabelled, and no `shelves` array: this is a one-shelf run.
+    expect(result.data).not.toHaveProperty('shelves');
+  });
+
+  it('sends no key, and runs public-mode, when --base-url re-points the run', async () => {
+    // ONE COMMAND WAS ENOUGH TO POST THE KEY ANYWHERE. `--base-url` outranks the
+    // config file, and the pair the transport compares against used to be built
+    // from the resolved value, so the origin test agreed with the attacker. The
+    // pair now comes from the CONFIGURED origin, so a re-pointed run carries no
+    // key — the obvious `--base-url <public shelf>` included.
+    await writeShelfConfig();
+    const ELSEWHERE = 'https://attacker.example';
+    for (const target of [ELSEWHERE, PUBLIC]) {
+      const { fetch, sent } = shelves({
+        [ELSEWHERE]: { ...HIT, items: [] },
+        [PUBLIC]: { ...HIT, items: [] },
+      });
+      await runSearch({ question: 'q' }, makeCtx({ baseUrl: target }), { fetchImpl: fetch });
+      expect(sent.map((s) => new URL(s.url).origin)).toEqual([target]);
+      expect(sent[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+    }
+  });
+
+  it('sends the key when a flag names the configured shelf itself', async () => {
+    // The refusal is about being re-pointed, not about the flag existing.
+    await writeShelfConfig();
+    const { fetch, sent } = shelves({ [TEAM]: teamHit });
+    await runSearch({ question: 'q' }, makeCtx({ baseUrl: TEAM }), { fetchImpl: fetch });
+    expect(sent[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('stamps the answering leg on every entry, so a close can find its shelf', async () => {
+    await writeShelfConfig();
+    const { fetch } = shelves({ [PUBLIC]: publicHit });
+    await runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch });
+
+    // Two entries, one per leg, each naming the shelf that MINTED its searchId.
+    // Without this the public leg's id — the ordinary team-miss / public-hit —
+    // is closed against the team shelf, which never ran that search.
+    const stored = await loadSearches(dir);
+    const byId = new Map(stored.map((e) => [e.searchId, e.shelfBaseUrl]));
+    expect(byId.get(publicHit.searchId)).toBe(PUBLIC);
+    expect(byId.get(MISS.searchId)).toBe(TEAM);
+  });
+
+  it('stamps the configured base in public mode, where there is one shelf', async () => {
+    // No secret: one leg, and the stamp says so rather than being left absent.
+    const CONFIGURED = 'https://preview.example';
+    const hit = {
+      ...HIT,
+      items: [{ ...(HIT.items[0] as object), url: `${CONFIGURED}/api/read/iris/slug` }],
+    };
+    const { fetch } = shelves({ [CONFIGURED]: hit });
+    await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
+    const stored = await loadSearches(dir);
+    expect(stored[0]?.shelfBaseUrl).toBe(CONFIGURED);
+  });
+
+  it('refuses a team-shelf candidate that points at the public shelf', async () => {
+    // A shelf may only surface its own candidates. Widening the ref resolver to
+    // two origins must not widen what one shelf is allowed to claim.
+    await writeShelfConfig();
+    const crossed = {
+      ...teamHit,
+      items: [{ ...(HIT.items[0] as object), url: `${PUBLIC}/api/read/iris/slug` }],
+    };
+    const { fetch } = shelves({ [TEAM]: crossed });
+    await expect(
+      runSearch({ question: 'q' }, teamCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH', exitCode: 1 });
   });
 });

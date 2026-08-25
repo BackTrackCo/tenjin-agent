@@ -856,3 +856,114 @@ describe('runOutcome, closing several searches at once', () => {
     expect(urls).toHaveLength(3);
   });
 });
+
+/**
+ * TEAM-MODE ROUTING. A team-mode search asks the team shelf and falls through to
+ * the public marketplace, and the two shelves have separate databases: the
+ * searchId the public leg minted exists only there. A close posted to the
+ * configured base is both a lie to the team shelf (which raises
+ * `outcomes_dropped_no_parent`, its alarm for a broken fleet) and silence to the
+ * marketplace whose demand signal is why the verb exists.
+ */
+describe('runOutcome routes to the shelf that answered', () => {
+  const TEAM = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+  const SECRET = 'shelf-secret-abc123';
+
+  interface Sent {
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  function stubShelves(): { fetch: typeof fetch; sent: Sent[] } {
+    const sent: Sent[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      sent.push({
+        url: String(url),
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      });
+      return new Response(JSON.stringify({ accepted: 1 }), {
+        status: 202,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, sent };
+  }
+
+  /** No --base-url: the shelf config below decides where a close goes. */
+  function teamCtx(): CommandContext {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: false, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  async function writeShelfConfig(): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+    );
+  }
+
+  it('posts a public-answered id to the public shelf, with no key', async () => {
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: PUBLIC });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).toBe(PUBLIC);
+    // The door key is paired with the team origin, so the public shelf is told
+    // nothing about it — the transport derives the header from the request URL,
+    // and the route refuses to hand it over in the first place.
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBeUndefined();
+    // Closed locally either way: the report landed.
+    const stored = await loadSearches(dir);
+    expect(stored[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('posts a team-answered id to the team shelf, with the key', async () => {
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: TEAM });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('falls back to the configured base for an entry written before the stamp', async () => {
+    // Absent means the configured base, which is what those entries meant.
+    await writeShelfConfig();
+    await record();
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('refuses a foreign origin the config never named, and routes to the base instead', async () => {
+    // `shelfBaseUrl` is an unvalidated optional string in the store schema and
+    // the only writers are this CLI's own two configured values, so a third
+    // origin is a planted or hand-edited row rather than a third shelf. Without
+    // the allow-list one such row makes `outcome --search-id` POST the searchId
+    // and status to a host the operator never configured. Fail open to the
+    // configured shelf, never out to a foreign one.
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: 'https://attacker.example' });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).not.toBe('https://attacker.example');
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+  });
+});

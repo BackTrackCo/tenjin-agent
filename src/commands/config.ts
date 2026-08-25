@@ -13,7 +13,7 @@ import {
 import { modeGatedPointer } from '../lib/permissions';
 import { stopHookIsCurrent } from '../lib/harness-hooks';
 import { resolveHermesHomeLenient } from '../lib/hermes';
-import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
@@ -25,6 +25,8 @@ import {
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
   parseAgentDispatchHookModeFlag,
+  parseCaptureModeFlag,
+  parsePushModeFlag,
   parseSessionPrimerFlag,
   parseStopNagFlag,
   parseUpdateModeFlag,
@@ -33,6 +35,7 @@ import {
 } from '../lib/config';
 import type {
   AgentDispatchMode,
+  CaptureMode,
   EffectiveSettings,
   HooksConfigKey,
   LegacyHooksConfigKey,
@@ -40,7 +43,10 @@ import type {
   Provenance,
   PublishConfigKey,
   PublishMode,
+  PushMode,
   ScalarConfigKey,
+  SessionPrimerMode,
+  StopNagMode,
   UpdateConfigKey,
   WebSearchMode,
 } from '../lib/config';
@@ -51,7 +57,7 @@ import {
   onPath,
   type HarnessTarget,
 } from '../lib/skill-wiring';
-import { loadProjectConfig } from '../lib/settings';
+import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -117,7 +123,11 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  baseUrl: 'Tenjin API base URL',
+  baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
+  publicShelfUrl:
+    'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
+  shelfBypassSecret:
+    "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
   bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
@@ -132,6 +142,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'hooks.sessionPrimer':
     'one-paragraph search-first primer at session start: on=print it, off=print nothing',
+  'hooks.push':
+    'the push experiment (docs/command-reference.md, "Push (experimental)"): on=wire the prompt/failure/subagent/context hooks (`tenjin install`), off=any wired scripts stay but are inert',
+  'hooks.capture':
+    'end-of-session publish prompt for durable findings: block=Stop hook blocks once per session, nudge=same text with no block, off=silent',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
@@ -257,13 +271,75 @@ export async function runConfigSet(
   if (configKey === 'bazaarPay') {
     try {
       const { syncBazaarSkill } = await import('../lib/skill-placement');
-      await syncBazaarSkill(stored === true, deps.placeSkill ?? { io: ctx.io });
+      await syncBazaarSkill(
+        stored === true,
+        deps.placeSkill ?? { io: ctx.io, dataDir: ctx.dataDir },
+      );
     } catch {
       // `tenjin doctor` reports a presence that does not match the toggle.
     }
   }
   const entry = renderSetting(configKey, stored, 'file');
-  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
+  const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
+  return {
+    data: { key: configKey, ...entry, ...(warning !== undefined ? { warning } : {}) },
+    humanLines: [formatLine(configKey, entry), ...(warning !== undefined ? [warning] : [])],
+  };
+}
+
+/**
+ * The half-wired team shelf, said out loud at the moment it is created.
+ *
+ * Team mode takes TWO settings — a private deployment in `baseUrl` and its
+ * bypass secret — and the setup is two independent commands, so a machine can
+ * easily end up with the secret and no shelf (run in the other order, or the
+ * secret line alone on a second machine). The CLI fails that state safe to
+ * public mode, which means an operator who thinks they are on the team shelf
+ * would otherwise get no signal at all: publishes would go to the marketplace
+ * under the public gates. Warn, do not refuse — the pair is legitimately
+ * half-set between two commands, and refusing would make the documented order
+ * the only order.
+ *
+ * THREE KEYS, not two. `isTeamShelfOrigin` also returns false when `baseUrl`
+ * matches `publicShelfUrl`, so pointing `publicShelfUrl` at the team deployment
+ * drops the machine out of team mode just as surely as unsetting the secret
+ * would. It fails safe and doctor catches it later; this is the warning at the
+ * moment it happens, on the third key of the same triple.
+ */
+async function halfWiredTeamShelf(
+  configKey: ScalarConfigKey,
+  dataDir: string,
+): Promise<string | undefined> {
+  if (
+    configKey !== 'shelfBypassSecret' &&
+    configKey !== 'baseUrl' &&
+    configKey !== 'publicShelfUrl'
+  ) {
+    return undefined;
+  }
+  const config = await loadRawConfig(dataDir).catch(() => undefined);
+  if (config === undefined) return undefined;
+  const s = resolveSettings({ config, flags: {}, env: {} });
+  if (s.shelfBypassSecret.value.length === 0) return undefined;
+  const baseUrl = s.baseUrl.value;
+  if (isTeamShelfOrigin(new URL(baseUrl).origin, s.publicShelfUrl.value)) return undefined;
+  // WHICH KEY BROKE THE PAIR decides which fix to name. A baseUrl that now
+  // matches publicShelfUrl is not "the marketplace" in any recognizable sense —
+  // it is the operator's own two keys pointed at one place — and telling them to
+  // re-point baseUrl would be advice for the other half of the same collision.
+  const isProduction = isSameDeployment(new URL(baseUrl).origin, PRODUCTION_ORIGIN);
+  const cause = isProduction
+    ? `baseUrl is the public marketplace (${baseUrl})`
+    : `baseUrl and publicShelfUrl are the same shelf (${baseUrl})`;
+  const fix = isProduction
+    ? 'Point baseUrl at the team deployment to finish team mode: `tenjin config set baseUrl <team shelf url>`.'
+    : `A team shelf must differ from the shelf it falls through to: \`tenjin config set publicShelfUrl ${PRODUCTION_ORIGIN}\`.`;
+  return (
+    `Warning: shelfBypassSecret is set, but ${cause}, ` +
+    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the scan’s ' +
+    'warn tier and the confirm cascade on. ' +
+    fix
+  );
 }
 
 /**
@@ -472,15 +548,24 @@ async function setHooksKey(
         ? 'agentDispatch'
         : key === 'hooks.stopNag'
           ? 'stopNag'
-          : 'sessionPrimer';
-  const parsed =
+          : key === 'hooks.sessionPrimer'
+            ? 'sessionPrimer'
+            : key === 'hooks.push'
+              ? 'push'
+              : 'capture';
+  const parsed:
+    WebSearchMode | AgentDispatchMode | StopNagMode | SessionPrimerMode | PushMode | CaptureMode =
     key === 'hooks.webSearch'
       ? parseWebSearchHookModeFlag(value, key)
       : key === 'hooks.agentDispatch'
         ? parseAgentDispatchHookModeFlag(value, key)
         : key === 'hooks.stopNag'
           ? parseStopNagFlag(value, key)
-          : parseSessionPrimerFlag(value, key);
+          : key === 'hooks.sessionPrimer'
+            ? parseSessionPrimerFlag(value, key)
+            : key === 'hooks.push'
+              ? parsePushModeFlag(value, key)
+              : parseCaptureModeFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
@@ -488,15 +573,49 @@ async function setHooksKey(
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   // ONE honest line, not a nag loop: the value is stored either way, and the
   // operator is told the running script predates it rather than left believing a
-  // setting took that did not.
-  const current = await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir);
-  const stale =
-    parsed === 'deliberate-only' && !current
+  // setting took that did not. Two keys the installed Stop hook can be too old
+  // to honour: `hooks.stopNag`, whose `deliberate-only` an older script maps back
+  // to `on`, and `hooks.capture`, which scripts written before it existed do not
+  // read AT ALL — so `block` on one of those asks for nothing while `config get`
+  // reports it effective. The remaining keys' scripts read every value they could
+  // ever be set to.
+  const staleable = key === 'hooks.stopNag' || key === 'hooks.capture';
+  const current = staleable
+    ? await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir)
+    : true;
+  const stale = current
+    ? undefined
+    : key === 'hooks.stopNag' && parsed === 'deliberate-only'
       ? `The installed Stop hook predates ${JSON.stringify(parsed)} and will keep treating it as "on". Run \`tenjin install\` to update it.`
+      : // `off` is what an unaware script already does, so only a value that asks
+        // for something is worth a warning.
+        key === 'hooks.capture' && parsed !== 'off'
+        ? `The installed Stop hook predates \`hooks.capture\` and will not ask for a note. Run \`tenjin install\` to update it.`
+        : undefined;
+  // `hooks.push` IS NOT THE WHOLE SWITCH. Every other key here is read by a
+  // script that is already wired; this one also needs six settings entries
+  // across four scripts, and only `tenjin push on` writes them. Setting the key
+  // alone persists and echoes as effective while no arm fires, which
+  // command-reference.md already warns about and the CLI used to accept in
+  // silence. Not a stale-script warning — the scripts are current, the wiring is
+  // absent — so it rides its own field. Only on a value that asks for something:
+  // `off` is what an unwired machine already does.
+  const unwired =
+    key === 'hooks.push' && parsed !== 'off'
+      ? 'Set this through `tenjin push on` / `tenjin push off`: `config set` stores the value but does not wire the hook entries the arms need, so on a machine that never ran `tenjin push on` nothing fires. `tenjin push on` reports what it wired; `tenjin doctor` and `tenjin push status` report a half-wired one.'
       : undefined;
+  const notes = [
+    ...(stale !== undefined ? [stale] : []),
+    ...(unwired !== undefined ? [unwired] : []),
+  ];
   return {
-    data: { key, ...entry, ...(stale !== undefined ? { hookScriptStale: true } : {}) },
-    humanLines: [formatLine(key, entry), ...(stale !== undefined ? [stale] : [])],
+    data: {
+      key,
+      ...entry,
+      ...(stale !== undefined ? { hookScriptStale: true } : {}),
+      ...(unwired !== undefined ? { hookEntriesNotWired: true } : {}),
+    },
+    humanLines: [formatLine(key, entry), ...notes],
   };
 }
 
@@ -571,6 +690,17 @@ export async function persistSearchHookMode(dir: string, mode: WebSearchMode): P
 }
 
 /**
+ * Persist `hooks.push` through the same locked read-modify-write every `config
+ * set` uses. Used by `tenjin push on|off`, mirroring `persistPublishMode`.
+ */
+export async function persistPushMode(dir: string, mode: PushMode): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, push: mode },
+  }));
+}
+
+/**
  * Record the explicit `--harness` set `install` was given, through the same locked
  * merge-write. It REPLACES the previous record rather than unioning with it: the last
  * explicit request is the current intent, and re-running install with the right flag
@@ -639,11 +769,24 @@ function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): R
         ? settings.hooksAgentDispatch
         : key === 'hooks.stopNag'
           ? settings.hooksStopNag
-          : settings.hooksSessionPrimer;
+          : key === 'hooks.sessionPrimer'
+            ? settings.hooksSessionPrimer
+            : key === 'hooks.push'
+              ? settings.hooksPush
+              : settings.hooksCapture;
   return { value: resolved.value, source: resolved.source };
 }
 
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
+  // REDACTED IN THE MACHINE ENVELOPE TOO, not just in the human line. `config
+  // --json` is what an agent reads and what a bug report pastes, and the whole
+  // point of a door key is that it opens the door for whoever holds it. What a
+  // caller actually needs from this key is whether team mode is on, and
+  // set/unset says exactly that. The value is still readable, by the operator,
+  // in ~/.tenjin/config.json.
+  if (key === 'shelfBypassSecret') {
+    return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
+  }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
@@ -670,8 +813,13 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
+    case 'publicShelfUrl':
     case 'rpcUrl':
       return parseHttpUrl(value);
+    case 'shelfBypassSecret':
+      // A free string: it is whatever Vercel generated. Empty clears it, which
+      // is how team mode is turned back off.
+      return value.trim();
     case 'evalCohort':
     case 'bazaarPay':
       return parseBoolean(value);
@@ -767,8 +915,11 @@ async function persist(
       const existing = await loadRawConfig(dir);
       const merged = merge(existing);
       const validated = RawConfigSchema.parse(merged);
+      // 0600, matching lib/config.ts's `writeConfig`: this file holds
+      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
+      // there. See that function for why dirMode alone is not enough.
       await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o644,
+        mode: 0o600,
         dirMode: 0o700,
       });
     });

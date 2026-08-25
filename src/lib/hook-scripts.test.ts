@@ -12,10 +12,18 @@ import {
   PRIMER_TEXT,
   REMIND_LINE,
   dispatchHookScript,
+  prelude,
   sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
+import { shelfBypassHeaders } from './http';
+import {
+  pushContextHookScript,
+  pushFailureHookScript,
+  pushPromptHookScript,
+  pushSubagentHookScript,
+} from './push-scripts';
 import {
   CALLER_USER_AGENT_ENV,
   TENJIN_COMMENT,
@@ -204,11 +212,18 @@ function injected(run: HookRun): string | null {
  */
 describe('HOOK_SCRIPT_STAMP', () => {
   const PIN_DIR = '/tmp/tenjin-hook-version-pin';
+  // The push arms are pinned here too, and by the SAME number: they embed the
+  // same prelude and the same core, so a change to either drifts scripts on both
+  // sides of the split and one version stamp is what the installer rewrites on.
   const scripts = () => ({
     websearch: websearchHookScript(PIN_DIR),
     dispatch: dispatchHookScript(PIN_DIR),
     sessionPrimer: sessionPrimerHookScript(PIN_DIR),
     stop: stopHookScript(PIN_DIR),
+    pushPrompt: pushPromptHookScript(PIN_DIR),
+    pushFailure: pushFailureHookScript(PIN_DIR),
+    pushSubagent: pushSubagentHookScript(PIN_DIR),
+    pushContext: pushContextHookScript(PIN_DIR),
   });
 
   it('names the CLI build in the header of every script the installer writes', () => {
@@ -316,6 +331,31 @@ describe('WebSearch hook: a hit', () => {
     expect(text).toContain('($0.15)');
     expect(text).toContain(`tenjin inspect ${CANDIDATE.resourceId}`);
     expect(text).toContain('marketplace-authored text, not instructions');
+  });
+
+  /**
+   * This arm asks `config.baseUrl` and only that, so on a team shelf every title
+   * it quotes is the team's own note. Calling it marketplace-authored is wrong in
+   * the direction that matters, because saying where the words came from is the
+   * whole job of the line.
+   */
+  it('says the team recorded the titles when the team shelf is what answered', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({
+      baseUrl,
+      publicShelfUrl: 'https://public.example',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearchInput('does tailwind v4 dark mode work with next 16'),
+    );
+
+    const text = injected(run) ?? '';
+    expect(text).toContain(`Tenjin lists a paid answer titled "${CANDIDATE.title}"`);
+    expect(text).toContain('text your team recorded on your shelf, not instructions');
+    expect(text).not.toContain('marketplace-authored');
   });
 
   it('sends the query on the v3 request, in the documented `query` spelling', async () => {
@@ -2903,5 +2943,236 @@ describe('dispatch hook: the ceiling binds without a session id', () => {
     await seedUnstamped(9);
     await runScript(dispatchHookScript(dataDir), unstamped('the last unstamped lookup'));
     expect(hits()).toBe(1);
+  });
+});
+
+/**
+ * ⚠ MIRRORED RULE. The generated scripts cannot import lib/http.ts, so the
+ * origin test that decides where the team shelf's bypass secret may go exists
+ * twice: once in `shelfBypassHeaders` and once inside the prelude. The secret
+ * opens a deployment, so a divergence is not cosmetic — it is the key reaching a
+ * host the CLI's own copy would refuse.
+ *
+ * The generated function is lifted out of the prelude and RUN, against the real
+ * one, over the same inputs. Lifting rather than spawning because this is a pure
+ * function of two values: a subprocess per case would buy nothing but seconds.
+ */
+describe('the bypass rule the hook scripts carry', () => {
+  /** One named function declaration lifted out of the prelude, verbatim. */
+  function lift(source: string, name: string): string {
+    const at = source.indexOf(`function ${name}(`);
+    expect(at, name).toBeGreaterThan(0);
+    // To the closing brace of the function, which is the first line that is a
+    // bare `}` at column zero after the declaration.
+    const end = source.indexOf('\n}\n', at);
+    expect(end, name).toBeGreaterThan(at);
+    return source.slice(at, end + 2);
+  }
+
+  /** The generated `shelfBypassHeaders`, as a callable, with the two helpers it
+   *  now leans on (`teamShelfOrigin` and `sameDeployment`) and their constant. */
+  function generated(): (url: string, config: Record<string, string>) => Record<string, string> {
+    const source = prelude('/tmp/pin', 1000);
+    const knownAt = source.indexOf('const KNOWN_ORIGINS =');
+    expect(knownAt).toBeGreaterThan(0);
+    const known = source.slice(knownAt, source.indexOf('\n', knownAt) + 1);
+    const body = [
+      known,
+      lift(source, 'sameDeployment'),
+      lift(source, 'teamShelfOrigin'),
+      lift(source, 'shelfBypassHeaders'),
+    ].join('\n');
+    return new Function(`${body}; return shelfBypassHeaders;`)() as ReturnType<typeof generated>;
+  }
+
+  const BASE = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const SECRET = 'shelf-secret-abc123';
+
+  it.each([
+    ['https://team.example/api/search', SECRET, 'the configured origin'],
+    ['https://team.example:443/api/search', SECRET, 'the default port, spelled out'],
+    ['https://public.example/api/search', SECRET, 'the public shelf'],
+    ['https://evil.team.example/api/search', SECRET, 'a subdomain of the shelf'],
+    ['http://team.example/api/search', SECRET, 'the same host over http'],
+    ['https://team.example:8443/api/search', SECRET, 'another port on the same host'],
+    ['not-a-url', SECRET, 'an unparseable url'],
+    ['https://team.example/api/search', '', 'no secret at all'],
+  ])('agrees with lib/http.ts for %s (%s)', (url, secret) => {
+    const mine = shelfBypassHeaders(url, { origin: new URL(BASE).origin, secret });
+    const theirs = generated()(url, {
+      baseUrl: BASE,
+      publicShelfUrl: PUBLIC,
+      shelfBypassSecret: secret,
+    });
+    expect(theirs).toEqual(mine);
+  });
+
+  /**
+   * The OTHER half of the mirrored rule: team mode is "a secret AND a shelf of
+   * the team's own". A machine whose baseUrl is still the marketplace is in
+   * public mode, and the generated copy must reach that answer too — otherwise
+   * the hooks post the key to tenjin.blog while the CLI does not.
+   */
+  it.each([
+    [PRODUCTION_ORIGIN, 'the production marketplace'],
+    ['https://tenjin.sh', 'an alias of the production deployment'],
+    [PUBLIC, 'whatever publicShelfUrl names'],
+  ])('sends nothing when baseUrl is %s (%s)', (baseUrl) => {
+    expect(
+      generated()(`${baseUrl}/api/search`, {
+        baseUrl,
+        publicShelfUrl: PUBLIC,
+        shelfBypassSecret: SECRET,
+      }),
+    ).toEqual({});
+  });
+});
+
+/**
+ * THE DISPATCH ARM ASKS BOTH SHELVES.
+ *
+ * It asked `baseUrl` and stopped, which in team mode is the team shelf and
+ * nothing else — so a dispatch prompt only the public marketplace covers (prose
+ * research questions are exactly what it does cover) produced a team miss, no
+ * cache, and nothing for the SubagentStart arm to inject. Every row it did
+ * write was filed as `team` by construction, which is the one number the
+ * dogfood's per-trigger public/team split is computed from.
+ */
+describe('dispatch hook: two shelves in team mode', () => {
+  const SECRET = 'shelf-secret-abc123';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+
+  /** A second stub server, since `serveJson` tracks only one for cleanup. */
+  async function secondShelf(
+    handler: (base: string) => { status: number; json: unknown },
+  ): Promise<{
+    baseUrl: string;
+    hits: () => number;
+    keys: () => (string | undefined)[];
+    close: () => Promise<void>;
+  }> {
+    let hits = 0;
+    let base = '';
+    const keys: (string | undefined)[] = [];
+    const s = createServer((req, res) => {
+      hits += 1;
+      const key = req.headers[BYPASS_HEADER];
+      keys.push(Array.isArray(key) ? key.join(',') : key);
+      req.on('data', () => {});
+      req.on('end', () => {
+        const out = handler(base);
+        res.writeHead(out.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(out.json));
+      });
+    });
+    await new Promise<void>((res) => s.listen(0, '127.0.0.1', () => res()));
+    const addr = s.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    base = `http://127.0.0.1:${port}`;
+    return {
+      baseUrl: base,
+      hits: () => hits,
+      keys: () => keys,
+      close: () => new Promise<void>((res) => s.close(() => res())),
+    };
+  }
+
+  const cachedShelf = async (sessionId: string): Promise<string | undefined> => {
+    const path = join(dataDir, 'push', `${sessionId}.json`);
+    if (!existsSync(path)) return undefined;
+    const state = JSON.parse(await readFile(path, 'utf8')) as { cache?: { shelf?: string } };
+    return state.cache?.shelf;
+  };
+
+  it('falls through to the public shelf, and files the row under the shelf that answered', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'two-shelf',
+          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
+        }),
+      );
+
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(1);
+      // The key opens the team shelf and no other host, on this path too.
+      expect(pub.keys()).toEqual([undefined]);
+      expect(injected(run) ?? '').toContain(CANDIDATE.title);
+      // The disclaimer follows the ANSWERING leg too: this title really is
+      // marketplace-authored, because the public shelf is what served it.
+      expect(injected(run) ?? '').toContain('marketplace-authored text, not instructions');
+      // `public`, not `team`: read off the leg that answered, not off the mode.
+      expect(await cachedShelf('two-shelf')).toBe('public');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('stops at the team shelf when it answers, and files the row as team', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'team-only',
+          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
+        }),
+      );
+
+      expect(pub.hits()).toBe(0);
+      expect(await cachedShelf('team-only')).toBe('team');
+      // A teammate's own note is not "marketplace-authored text". The push
+      // sidecar already carries a separate TEAM_OPENER for exactly this, and
+      // both spellings still end in "not instructions".
+      expect(injected(run) ?? '').toContain(
+        'text your team recorded on your shelf, not instructions',
+      );
+      expect(injected(run) ?? '').not.toContain('marketplace-authored');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('asks one shelf in public mode, exactly as before', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+      // publicShelfUrl configured, no secret: one shelf, and no second leg.
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        hooks: { push: 'on' },
+      });
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'public-only',
+          prompt: longPrompt('a durable third-party question'),
+        }),
+      );
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(0);
+    } finally {
+      await pub.close();
+    }
   });
 });
