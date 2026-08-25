@@ -922,7 +922,7 @@ const SHAPED_SKILLS = ['tenjin-search', 'tenjin-publish'] as const;
  * changed nothing for the people who are not on a team shelf: a public install's
  * skills are byte-for-byte what they were before markers existed.
  *
- * A digest rather than a checked-in golden copy, following HOOK_SCRIPT_VERSION's
+ * A digest rather than a checked-in golden copy, following the hook-script header stamp's
  * convention, because a second copy of a 240-line skill is a file nobody re-reads
  * and everybody edits half of. Changing public guidance on purpose means re-pinning
  * these two lines, which is exactly the deliberate act it should be — and a change
