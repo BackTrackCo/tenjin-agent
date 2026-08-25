@@ -38,7 +38,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { healWiredSkills } from './skill-heal';
+import { healWiredSkills, type HealOutcome } from './skill-heal';
 import { renderSkillMarkdown } from './skill-materialize';
 import { resolveSkillsSource, SHIPPED_SKILL_FILES, type SkillName } from './skills-source';
 import { CLI_SKILL_NAMES, HOSTED_SKILL_NAME, skillsDirsFor } from './skill-wiring';
@@ -73,7 +73,7 @@ function captureIo(isTTY = true) {
   return { io, stderr: () => err.join('').replace(/\x1b\[[0-9;]*m/g, '') };
 }
 
-function heal(io: Io, env: NodeJS.ProcessEnv = {}, dataDir?: string): Promise<void> {
+function heal(io: Io, env: NodeJS.ProcessEnv = {}, dataDir?: string): Promise<HealOutcome> {
   return healWiredSkills({
     io,
     env,
@@ -154,6 +154,43 @@ describe('healWiredSkills', () => {
     expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
     expect(stderr()).toContain(path);
     expect(stderr().trimEnd().split('\n')).toHaveLength(1);
+  });
+
+  /**
+   * The heal's write targets are machine-wide (~/.claude/skills, ~/.agents/skills,
+   * $HERMES_HOME/skills — no data-dir component anywhere in them) while the mode
+   * that shapes the bytes is read per invocation. One
+   * `TENJIN_DATA_DIR=… tenjin …` run would otherwise re-render every shared skill
+   * file into that profile's text, and every other profile on the machine would
+   * read it until something healed it back. Same shape settings.ts already
+   * forbids for --base-url: a per-invocation override must not answer a
+   * machine-wide question.
+   */
+  it('stands down when TENJIN_DATA_DIR redirects this invocation', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const { io, stderr } = captureIo();
+
+    const out = await heal(io, { TENJIN_DATA_DIR: join(home, 'other-profile') });
+
+    expect(out).toEqual({
+      ran: false,
+      reason: 'TENJIN_DATA_DIR points away from the machine default.',
+    });
+    // The stale file is left exactly as it was, and nothing is said about it.
+    expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
+    expect(stderr()).toBe('');
+  });
+
+  // The other branch of the same gate, so the test above proves a guard rather
+  // than a heal that never runs: an unredirected env still heals.
+  it('heals when the invoking data dir is the machine default', async () => {
+    const path = await seedSkill(claudeDir(), 'tenjin-search');
+    const { io } = captureIo();
+
+    const out = await heal(io, {});
+
+    expect(out).toEqual({ ran: true });
+    expect(await readFile(path, 'utf8')).toBe(await packaged('tenjin-search'));
   });
 
   it('never creates a skill that is not already there', async () => {
@@ -450,7 +487,7 @@ describe('healWiredSkills', () => {
         homeDir: home,
         skillsSourceDir: join(home, 'not-a-skills-dir'),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
     expect(await readFile(path, 'utf8')).toBe(stale('tenjin-search'));
     expect(stderr()).toBe('');
   });
@@ -487,7 +524,7 @@ describe('healWiredSkills shapes what it writes by the machine mode', () => {
     await writeFile(join(source, 'tenjin-search', 'SKILL.md'), MARKED);
   });
 
-  const healFrom = (io: Io, dataDir?: string): Promise<void> =>
+  const healFrom = (io: Io, dataDir?: string): Promise<HealOutcome> =>
     healWiredSkills({
       io,
       env: {},

@@ -8,8 +8,10 @@
 #
 # Self-contained and runnable locally (`pnpm --filter tenjin-cli run pack-smoke`)
 # as well as in CI. Paths are derived from this script's location, so the working
-# directory does not matter. Every CLI invocation points TENJIN_DATA_DIR at a
-# fresh temp dir — never the runner's real ~/.tenjin.
+# directory does not matter. Every CLI invocation points TENJIN_DATA_DIR inside a
+# fresh temp dir — never the runner's real ~/.tenjin. The heal legs point it at
+# their sandbox HOME's OWN default (`$HOME/.tenjin`) rather than at a separate
+# temp dir, because the heal stands down on a redirected data dir.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,7 +168,13 @@ echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
 # wherever it points, under a notice naming a path the write never reached), and a
 # same-named skill that is somebody else's by its frontmatter.
 HEAL_HOME="$(mktemp -d)"
-HEAL_DATA="$(mktemp -d)"
+# The sandbox HOME's OWN default data dir, and it must stay that way: the heal
+# stands down when TENJIN_DATA_DIR points away from the machine default (its
+# write targets are machine-wide, so a redirected profile must not re-render
+# every other profile's skills). A second temp dir here would skip the heal and
+# pass every assertion below for the wrong reason. HOME is what keeps this off
+# the runner's real skills; this only names where the default lands under it.
+HEAL_DATA="$HEAL_HOME/.tenjin"
 mkdir -p "$HEAL_HOME/.claude/skills/tenjin-search" "$HEAL_HOME/.claude/skills/tenjin" \
   "$HEAL_HOME/.claude/skills/tenjin-publish" "$HEAL_HOME/.agents/skills/tenjin-search"
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
@@ -261,7 +269,8 @@ echo "pack-smoke: stale adapter healed; mirror, both symlinks and third-party sk
 # operator's own door, and `--json` keeps stdout parseable if this ever grows an
 # assertion on it.
 TEAM_HOME="$(mktemp -d)"
-TEAM_DATA="$(mktemp -d)"
+# The sandbox HOME's own default, for the reason given at HEAL_DATA above.
+TEAM_DATA="$TEAM_HOME/.tenjin"
 mkdir -p "$TEAM_HOME/.claude/skills/tenjin-search"
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \
   > "$TEAM_HOME/.claude/skills/tenjin-search/SKILL.md"
@@ -308,7 +317,8 @@ echo "pack-smoke: team-mode install renders the team arm only, marker-free (ok)"
 # its envelope by then, and a rejection there would add a second one and a nonzero
 # exit to a command that succeeded.
 CHUNK_HOME="$(mktemp -d)"
-CHUNK_DATA="$(mktemp -d)"
+# The sandbox HOME's own default, for the reason given at HEAL_DATA above.
+CHUNK_DATA="$CHUNK_HOME/.tenjin"
 CHUNK_BACKUP="$(mktemp -d)"
 mkdir -p "$CHUNK_HOME/.claude/skills/tenjin-search"
 printf -- '---\nname: tenjin-search\n---\n\nstale\n' \

@@ -38,7 +38,12 @@ beforeAll(async () => {
   for (const key of ['CI', 'HOME', 'TENJIN_DATA_DIR']) prevEnv[key] = process.env[key];
   process.env.CI = '1';
   process.env.HOME = join(sandbox, 'home');
-  process.env.TENJIN_DATA_DIR = join(sandbox, 'data');
+  // The sandbox's OWN default, not a second location: the skills heal stands
+  // down when TENJIN_DATA_DIR points away from the machine default, so pointing
+  // it somewhere else here would skip the heal and make the cases below pass for
+  // the wrong reason. HOME is what bounds this file to the sandbox; this line
+  // only makes the data dir explicit at the same place the default resolves to.
+  process.env.TENJIN_DATA_DIR = join(sandbox, 'home', '.tenjin');
 });
 afterAll(async () => {
   for (const [key, value] of Object.entries(prevEnv)) {
