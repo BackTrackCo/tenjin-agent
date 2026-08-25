@@ -201,6 +201,11 @@ set hooks.sessionPrimer off` silences it at run time with no re-install.
 
 ### Patch Changes
 
+- Replace the hand-maintained `HOOK_SCRIPT_VERSION` counter and its pinned script
+  digests with a `tenjin-cli/<version>` header stamp. The installer already
+  rewrites a hook whose bytes on disk differ from what the build would write, so
+  the counter guarded nothing, and the digest pin failed on every release PR
+  because the generated scripts embed the package version.
 - 9ec8da8: Treat the deployment's known origins as one deployment, so the `tenjin.sh`
   cutover (tenjin#402) does not break an installed CLI.
 

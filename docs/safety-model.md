@@ -32,9 +32,7 @@ Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, a
 **Operator runbook, removing a member** (an origin sold, expired, or repointed):
 
 1. Delete the line from `KNOWN_DEPLOYMENT_ORIGINS` and update the exact-membership pin in `production-origin.test.ts`, which is written out independently so this cannot be a one-line change.
-2. Bump `HOOK_SCRIPT_VERSION` in `src/lib/hook-scripts.ts`. The set is inlined into every installed hook, and the installer rewrites a script only on a version change.
-3. Update the digest pin in `hook-scripts.test.ts`'s `HOOK_SCRIPT_VERSION` test. The bump changes every script's bytes, so the old digests fail until they're repasted.
-4. Release, then tell operators to update. Until each CLI updates it keeps the old set: a released binary cannot be recalled, so treat the removal as effective only after operators have upgraded, and stop pointing DNS at anyone else's infrastructure in the meantime.
+2. Release, then tell operators to update. Until each CLI updates it keeps the old set: a released binary cannot be recalled, so treat the removal as effective only after operators have upgraded, and stop pointing DNS at anyone else's infrastructure in the meantime.
 
 ## Publishing boundaries
 

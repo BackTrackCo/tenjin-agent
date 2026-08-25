@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import pkg from '../../package.json';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  HOOK_SCRIPT_VERSION,
+  HOOK_SCRIPT_STAMP,
   PRIMER_TEXT,
   REMIND_LINE,
   dispatchHookScript,
@@ -197,16 +197,12 @@ function injected(run: HookRun): string | null {
 }
 
 /**
- * The installer rewrites an installed hook only when HOOK_SCRIPT_VERSION moves,
- * and every script stamps that number in its own header. So a body change with a
- * forgotten bump is doubly quiet: existing installs keep running the old script,
- * and the header on the new one names a version whose bytes it is not. No other
- * test catches it, because every one of them compares a generated script to
- * itself. These digests are the forced pause. Changing a body reds them; the fix
- * is to bump HOOK_SCRIPT_VERSION and paste the new digests in, in one diff.
+ * The installer rewrites a script whose bytes on disk differ from what this build
+ * would write (`writeScripts` in harness-hooks.ts), so drift is caught by
+ * comparison, not by a version counter. The header names the build that wrote
+ * the file so an operator reading `~/.claude/hooks` can tell how old it is.
  */
-describe('HOOK_SCRIPT_VERSION', () => {
-  // Fixed, because DATA_DIR is substituted into every script.
+describe('HOOK_SCRIPT_STAMP', () => {
   const PIN_DIR = '/tmp/tenjin-hook-version-pin';
   const scripts = () => ({
     websearch: websearchHookScript(PIN_DIR),
@@ -214,25 +210,11 @@ describe('HOOK_SCRIPT_VERSION', () => {
     sessionPrimer: sessionPrimerHookScript(PIN_DIR),
     stop: stopHookScript(PIN_DIR),
   });
-  const digest = (source: string): string =>
-    createHash('sha256').update(source).digest('hex').slice(0, 32);
 
-  it('labels these exact bytes, and no others', () => {
-    expect(HOOK_SCRIPT_VERSION).toBe(23);
-    const digests = Object.fromEntries(
-      Object.entries(scripts()).map(([name, source]) => [name, digest(source)]),
-    );
-    expect(digests).toEqual({
-      websearch: 'b42da7df23b205ffe6aeb0a8c242353b',
-      dispatch: 'aef50fd59101a0f496bac9c6b5bc121b',
-      sessionPrimer: '54209984e918d6aaee15a4e3ee45a0b7',
-      stop: 'f05e78ff0cd39e3e89c011430e26780b',
-    });
-  });
-
-  it('is stamped into the header of every script the installer writes', () => {
+  it('names the CLI build in the header of every script the installer writes', () => {
+    expect(HOOK_SCRIPT_STAMP).toBe(`tenjin-cli/${pkg.version}`);
     for (const [name, source] of Object.entries(scripts())) {
-      expect(source, name).toContain(`(v${HOOK_SCRIPT_VERSION}). Safe to delete.`);
+      expect(source, name).toContain(`(${HOOK_SCRIPT_STAMP}). Safe to delete.`);
     }
   });
 });
