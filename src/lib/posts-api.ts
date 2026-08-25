@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CliError } from './errors';
-import { httpRequest, type HttpResponse, type HttpResult } from './http';
+import { httpRequest, type HttpResponse, type HttpResult, type ShelfBypass } from './http';
 import { rateLimitError } from './agent-api';
 import { sanitizeWireText } from './output';
 import { trimSlash } from './url';
@@ -38,11 +38,12 @@ export interface PublishInput {
   status: PublishStatus;
   resource?: ResourceCardInput;
   /**
-   * The search whose MISS motivated this piece, so the marketplace can attribute
-   * supply to the demand that asked for it (tenjin-agent #161). Stored
-   * server-side only and never echoed back, so nothing downstream reads it.
+   * The search(es) whose MISS motivated this piece, so the marketplace can
+   * attribute supply to the demand that asked for it (tenjin-agent #161, #167).
+   * Several because one thread fans out into many searchIds and a piece answers
+   * the thread. Stored server-side only and never echoed back.
    */
-  searchId?: string;
+  searchId?: string | string[];
 }
 
 /** The exact strictObject body sent to POST /api/posts (defined keys only). */
@@ -55,7 +56,7 @@ export interface PostCreateBody {
   handle?: string;
   status?: PublishStatus;
   resource?: ResourceCardInput;
-  searchId?: string;
+  searchId?: string | string[];
 }
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
@@ -71,6 +72,54 @@ const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
  */
 export const SEARCH_ID_WIRE_RE =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+/**
+ * How many searches one create request may name. The server's cap is stricter in
+ * kind, bounding a post's claims across its whole lifetime, so N requests of 10
+ * cannot land 10N; the numbers coincide only because the CLI never sends
+ * `searchId` on the update path, where an `edit` reusing this would be refused.
+ */
+export const SEARCH_ID_MAX = 10;
+
+/**
+ * The searchIds a publish claims: lowercased, deduped, each checked against the
+ * shape the SERVER declares, and capped. Run by the command edge before the
+ * wallet touch, and again by the builder. Case-folded BEFORE the dedupe, because
+ * the wire regex takes mixed-case hex while a Set compares exact strings, so two
+ * spellings of one uuid would otherwise reach the server as two claims on one
+ * search. Postgres stores `uuid` lowercased anyway.
+ */
+export function normalizeSearchIds(
+  searchId: string | string[] | undefined,
+  label: string,
+): string[] {
+  if (searchId === undefined) return [];
+  const given = typeof searchId === 'string' ? [searchId] : searchId;
+  const ids = [...new Set(given.map((id) => id.toLowerCase()))];
+  for (const id of ids) {
+    if (!SEARCH_ID_WIRE_RE.test(id)) {
+      throw new CliError('USAGE', `Invalid ${label}: ${JSON.stringify(id)}`, {
+        fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
+      });
+    }
+  }
+  if (ids.length > SEARCH_ID_MAX) {
+    throw new CliError(
+      'USAGE',
+      `One piece claims at most ${SEARCH_ID_MAX} searches (got ${ids.length}).`,
+      {
+        fix: `Name the ${SEARCH_ID_MAX} this piece actually answers, then close the rest with \`tenjin outcome --search-id <id> --status regenerated\`.`,
+      },
+    );
+  }
+  return ids;
+}
+
+/** A lone id ships as the bare string it has always been; several as an array. */
+function toWireSearchId(ids: string[]): string | string[] | undefined {
+  if (ids.length === 0) return undefined;
+  return ids.length === 1 ? ids[0] : ids;
+}
+
 /**
  * The server's `excerpt` bound (pinned against the OpenAPI fixture in
  * contract.test.ts). Exported so `publish` can refuse an over-long one at its own
@@ -205,11 +254,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     }
   }
 
-  if (input.searchId !== undefined && !SEARCH_ID_WIRE_RE.test(input.searchId)) {
-    throw new CliError('USAGE', `Invalid searchId: ${JSON.stringify(input.searchId)}`, {
-      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
-    });
-  }
+  const searchId = toWireSearchId(normalizeSearchIds(input.searchId, 'searchId'));
 
   return {
     ...(title !== undefined && title.length > 0 ? { title } : {}),
@@ -223,7 +268,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     // Sent whatever the LOCAL loop says, including on a relink and on a draft:
     // the server stores it against this post, and whether some earlier `outcome`
     // already reported on the search is not a fact about who answered it.
-    ...(input.searchId !== undefined ? { searchId: input.searchId } : {}),
+    ...(searchId !== undefined ? { searchId } : {}),
   };
 }
 
@@ -295,6 +340,10 @@ export interface PublishClientOptions {
   baseUrl: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  /** The team shelf's bypass secret and its origin; the transport attaches the
+   *  header only for that origin. Writes only ever go to `baseUrl`, so this is
+   *  what gets a publish past a protected team deployment. */
+  bypass?: ShelfBypass;
 }
 
 /** Bounded 401 recovery: the initial attempt plus at most this many re-signs. */
@@ -326,6 +375,7 @@ export async function publishPost(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -509,6 +559,7 @@ export async function getOwnPost(
       method: 'GET',
       timeoutMs: opts.timeoutMs,
       headers: { accept: 'application/json', ...authHeaders },
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -567,6 +618,7 @@ export async function updatePost(
       timeoutMs: opts.timeoutMs,
       headers: { ...authHeaders },
       jsonBody: body,
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     if (!res.ok) throw writeTransportError(url, res);
@@ -710,14 +762,17 @@ function authError(code: string | undefined, res: HttpResponse): CliError {
 
 /** Any non-recoverable non-2xx after approval is a write failure (exit 4). */
 function publishFailed(res: HttpResponse): CliError {
-  return new CliError(
-    'PUBLISH_FAILED',
-    serverMessage(res.json) ?? `Publish failed (${res.status}).`,
-    {
-      fix: 'Review the server error, then re-run `tenjin publish`.',
-      details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
-    },
-  );
+  const message = serverMessage(res.json);
+  // A 400 naming searchId against a post-create that predates the array is a
+  // rollout mismatch, not a bad id, and it lands after the signature, where
+  // "review the server error" is the least useful thing to read.
+  const rollout = res.status === 400 && message !== undefined && /searchid/i.test(message);
+  return new CliError('PUBLISH_FAILED', message ?? `Publish failed (${res.status}).`, {
+    fix: rollout
+      ? 'Review the server error, then re-run `tenjin publish`. Naming several --search-id values needs a deployment whose post-create accepts an array; against an older one, publish with a single id.'
+      : 'Review the server error, then re-run `tenjin publish`.',
+    details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+  });
 }
 
 /** A transport/timeout failure never reached the write; a network-class error. */

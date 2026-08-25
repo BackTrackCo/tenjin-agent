@@ -91,9 +91,9 @@ const searchInput = {
   maxPrice: z.coerce
     .string()
     .optional()
-    .describe('Only candidates at or below this decimal-USD price, e.g. "0.25"'),
+    .describe('Only items at or below this decimal-USD price, e.g. "0.25"'),
   freshWithin: z.string().optional().describe('Freshness window, e.g. P30D, P2W, P1Y'),
-  limit: z.coerce.string().optional().describe('Maximum candidates (1-10, default 5)'),
+  limit: z.coerce.string().optional().describe('Maximum items (1-10, default 5)'),
   appliesTo: z
     .array(z.string())
     .optional()
@@ -123,19 +123,31 @@ const buyInput = {
 
 const outcomeInput = {
   status: z.string().describe('used | partially_used | rejected | regenerated | purchase_declined'),
-  searchId: z.string().optional().describe('The search to report against'),
+  // A lone string stays valid: agents already send one, and the batch is additive.
+  searchId: z
+    .union([z.string(), z.array(z.string())])
+    .optional()
+    .describe('The search to report against, or several the same status describes'),
   last: z.boolean().optional().describe('Target the most recent local search instead of an id'),
+  allOpen: z
+    .boolean()
+    .optional()
+    .describe(
+      "Close this session's open WebSearch-hook MISSes, or every open one when the " +
+        'harness names no session (regenerated only)',
+    ),
   resource: z.string().optional().describe('The resourceId the outcome concerns'),
   contentHash: z.string().optional().describe('sha256:<64hex> of the exact body read'),
 } satisfies Record<keyof OutcomeArgs, z.ZodTypeAny>;
 
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
+  // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
-    .string()
+    .union([z.string(), z.array(z.string())])
     .optional()
     .describe(
-      'The search this file answers; closes its open loop and prefills its question when the draft names none',
+      'The search this file answers, or every search of one thread it answers (max 10, accepted or refused as one batch); closes each open loop and prefills the first question when the draft names none',
     ),
   draft: z.boolean().optional().describe('Save as a private draft instead of publishing'),
   yes: z
@@ -294,20 +306,20 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Search for payable answers',
       description:
-        'Ask the marketplace for payable candidate pieces that answer a question, or an honest ' +
-        'MISS. Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: strip secrets, ' +
+        'Ask the marketplace for payable pieces that answer a question, or an honest miss. ' +
+        'Free, no wallet, no payment. Send GENERALIZED PUBLIC text only: strip secrets, ' +
         'private identifiers, and company-internal context, then send what is left as one ' +
         'complete natural-language sentence. Retrieval matches wording and meaning, so ' +
         'compressing the question to keywords throws away signal. Returns up to `limit` LEAN ' +
-        'candidates (identity, price, freshness, why it matched) or a MISS; records the searchId ' +
-        'locally so tenjin_buy and tenjin_outcome can refer to it. A candidate does NOT say what ' +
-        'the piece claims, so always call tenjin_inspect (free) before tenjin_buy. A `truncated: ' +
-        'true` flag means candidates were dropped for size; the ceiling grows with the number ' +
-        'returned, so retry with a LARGER limit (up to 10), and only at 10 is narrowing the ' +
-        'question the remedy. A MISS may also carry a `browse` array of at most three pointers ' +
-        '(resourceId, url, title, price, creator.handle) into the broad corpus: unscored ' +
-        '"you might browse this" hints with no match reasons, not answer candidates, and never ' +
-        'resolvable by tenjin_buy/tenjin_outcome via resourceId.',
+        '`items` (identity, price, freshness, why it matched) with `matched` saying how many; ' +
+        'records the searchId locally so tenjin_buy and tenjin_outcome can refer to it. An item ' +
+        'does NOT say what the piece claims, so always call tenjin_inspect (free) before ' +
+        'tenjin_buy. A `truncated: true` flag means items were dropped for size; the ceiling ' +
+        'grows with the number returned, so retry with a LARGER limit (up to 10), and only at ' +
+        '10 is narrowing the question the remedy. `matched: 0` is the whole of a miss: `items` ' +
+        'is empty and `hint` says where the catalog is browsed instead. There is no fallback ' +
+        'shelf of pointers, so a miss is an answer rather than a signal to retry elsewhere, ' +
+        'though a differently phrased question is worth one retry.',
       inputSchema: searchInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -384,7 +396,10 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
       description:
         'Report honestly how a search ended (used, partially_used, rejected, regenerated, ' +
         'purchase_declined), closing the loop the marketplace learns from. No wallet: the searchId ' +
-        'is the capability. Use --last (last:true) to target the most recent local search.',
+        'is the capability. Use --last (last:true) to target the most recent local search, a ' +
+        'searchId array to close several at one status, or allOpen:true to close this ' +
+        "session's unanswered WebSearch-hook loops as regenerated (every open one when " +
+        'the harness names no session).',
       inputSchema: outcomeInput,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
@@ -395,6 +410,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             status: args.status,
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.last !== undefined ? { last: args.last } : {}),
+            ...(args.allOpen !== undefined ? { allOpen: args.allOpen } : {}),
             ...(args.resource !== undefined ? { resource: args.resource } : {}),
             ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
           },
@@ -442,7 +458,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
           },
           ctx,
-          deps.publish,
+          { ...deps.publish, searchIdLabel: 'searchId' },
         ),
       ),
   );

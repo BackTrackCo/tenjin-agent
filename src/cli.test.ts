@@ -20,6 +20,7 @@ vi.mock('./lib/skills-source', async (importOriginal) => {
   };
 });
 import { main } from './cli';
+import { renderSkillMarkdown } from './lib/skill-materialize';
 import { resolveSkillsSource } from './lib/skills-source';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import type { Io } from './lib/output';
@@ -37,7 +38,12 @@ beforeAll(async () => {
   for (const key of ['CI', 'HOME', 'TENJIN_DATA_DIR']) prevEnv[key] = process.env[key];
   process.env.CI = '1';
   process.env.HOME = join(sandbox, 'home');
-  process.env.TENJIN_DATA_DIR = join(sandbox, 'data');
+  // The sandbox's OWN default, not a second location: the skills heal stands
+  // down when TENJIN_DATA_DIR points away from the machine default, so pointing
+  // it somewhere else here would skip the heal and make the cases below pass for
+  // the wrong reason. HOME is what bounds this file to the sandbox; this line
+  // only makes the data dir explicit at the same place the default resolves to.
+  process.env.TENJIN_DATA_DIR = join(sandbox, 'home', '.tenjin');
 });
 afterAll(async () => {
   for (const [key, value] of Object.entries(prevEnv)) {
@@ -331,6 +337,64 @@ describe('edit flag forwarding (the dispatcher mapping)', () => {
   });
 });
 
+// `outcome`'s batch selectors, read back through refusals that resolve before
+// any request: an uncollected `--search-id` would keep the LAST id and drop the
+// rest, and an `--all-open` that never reached the arg would exit 0 doing nothing.
+describe('outcome batch flags (the dispatcher mapping)', () => {
+  const ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  it('--all-open reaches the arg, and is refused at any status but regenerated', async () => {
+    const cap = captureIo();
+    const code = await main(['outcome', '--all-open', '--status', 'used', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('outcome');
+    expect(parsed.error.message).toContain('--all-open');
+  });
+
+  it('--search-id repeats rather than replacing, and refuses to mix with --all-open', async () => {
+    const cap = captureIo();
+    const code = await main(
+      [
+        'outcome',
+        '--search-id',
+        ID,
+        '--search-id',
+        ID,
+        '--all-open',
+        '--status',
+        'regenerated',
+        '--json',
+      ],
+      cap.io,
+    );
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toContain('not several');
+  });
+});
+
+/**
+ * An option that did not collect would keep the LAST id and drop the rest, so it
+ * is read back through the cap, which only eleven surviving ids can trip.
+ */
+describe('publish --search-id collects (the dispatcher mapping)', () => {
+  it('repeats rather than replacing, and the cap counts every id given', async () => {
+    const ids = Array.from(
+      { length: 11 },
+      (_, i) => `0197bbbb-cccc-7ddd-8eee-0000000000${String(i).padStart(2, '0')}`,
+    );
+    const cap = captureIo();
+    const code = await main(
+      ['publish', 'nope.md', ...ids.flatMap((id) => ['--search-id', id]), '--json'],
+      cap.io,
+    );
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('publish');
+    expect(parsed.error.message).toContain('at most 10 searches (got 11)');
+  });
+});
+
 /**
  * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
  * so the cases here are the ones that resolve BEFORE it — the group exists, the
@@ -415,8 +479,14 @@ describe('skills self-heal', () => {
     expect(await main(['config', '--json'], cap.io)).toBe(0);
     const parsed = JSON.parse(cap.stdout()) as { ok: boolean };
     expect(parsed.ok).toBe(true);
+    // RENDERED for this machine's mode, not the raw packaged bytes: the heal
+    // materializes what it writes (lib/skill-materialize), and this run has no
+    // team shelf configured, so the public arm is what should have landed.
     expect(await readFile(wiredPath(), 'utf8')).toBe(
-      await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      renderSkillMarkdown(
+        await readFile(join(skillsSrc.dir, 'tenjin-search', 'SKILL.md'), 'utf8'),
+        { teamMode: false },
+      ),
     );
     expect(cap.stderr()).toContain('Updated');
   });

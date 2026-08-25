@@ -1,14 +1,22 @@
 import { z } from 'zod';
 import { CliError } from './errors';
-import { httpRequest, type HttpResult } from './http';
+import { httpRequest, type HttpResult, type ShelfBypass } from './http';
 import { ATOMIC_RE, UUID_RE } from './ids';
 import { trimSlash } from './url';
 
 /**
- * The search + outcome HTTP contract (A2, tenjin#370). Request building and
- * response validation live here; the wire shape is validated defensively, an
- * unknown `schemaVersion` degrades to a parse refusal rather than a guess, and
- * unrecognized candidate fields are ignored (forward-compatible), per spec 10.
+ * The search + outcome HTTP contract. Request building and response validation
+ * live here; the wire shape is validated defensively, an unknown `schemaVersion`
+ * degrades to a parse refusal rather than a guess, and unrecognized candidate
+ * fields are ignored (forward-compatible), per spec 10.
+ *
+ * Search speaks schemaVersion 3 to POST /api/search with `view: "decision"`
+ * (tenjin#137). The old POST /api/agent/search is a deprecated alias that the
+ * server serves for one release and then answers 410, so nothing here still
+ * calls it. v3 also reshaped the envelope: `decision` + `candidates[]` became
+ * `matched` + `items[]`, the filters moved under a nested `filters` object, and
+ * the MISS `browse[]` tail is gone entirely — a miss is an empty result plus a
+ * `hint` pointing at GET /api/articles, not a different kind of answer.
  *
  * These endpoints are anonymous: no wallet, no SIWX. The shared transport's
  * User-Agent is what attributes a later purchase back to the search flow.
@@ -17,11 +25,15 @@ import { trimSlash } from './url';
 const FRESH_WITHIN_RE = /^P(\d+)[DWMY]$/;
 const CANONICAL_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
-/** The server's `limit` ceiling. Exported because the truncation advice in
- *  `search` has to name it: past search v2 the response budget scales with the
- *  candidates returned, so a truncated page is recovered by asking for MORE, and
- *  this is the value to ask for. One definition, so the cap the CLI enforces and
- *  the number it tells the operator to retry with cannot drift apart. */
+/** The DECISION view's `limit` ceiling. The v3 schema admits `limit` up to 100
+ *  across views and the server clamps per view (tenjin lib/search/understand.ts
+ *  VIEW_LIMITS: decision 10, display 100, suggest 10); the CLI only ever sends
+ *  `view: "decision"`, so 10 is the real bound and asking for more would be
+ *  silently clamped back to it. Exported because the truncation advice in
+ *  `search` has to name it: the response budget scales with the items returned,
+ *  so a truncated page is recovered by asking for MORE, and this is the value
+ *  to ask for. One definition, so the cap the CLI enforces and the number it
+ *  tells the operator to retry with cannot drift apart. */
 export const MAX_LIMIT = 10;
 
 /** Client-side search request (mirrors the server lookupRequestSchema bounds
@@ -34,12 +46,29 @@ export interface SearchInput {
   limit?: number;
 }
 
-export interface SearchRequestBody {
-  schemaVersion: 2;
-  question: string;
+/** The nested v3 filter object. Freshness, price and applicability are no longer
+ *  top-level request fields: v3 groups every narrowing under `filters`, and the
+ *  server's `filters` schema is a strictObject, so a stray top-level spelling is
+ *  stripped into `warnings` and the search runs UNFILTERED. Building it in one
+ *  place is what keeps a `--max-price` from silently going nowhere. */
+export interface SearchFilters {
   freshWithin?: string;
   maxPrice?: string;
   appliesTo?: Record<string, string[]>;
+}
+
+export interface SearchRequestBody {
+  schemaVersion: 3;
+  /** Pinned rather than defaulted. The server defaults `view` to `decision`, but
+   *  a default is the server's to change and this client parses exactly one
+   *  projection, so it names the one it can read. */
+  view: 'decision';
+  /** The DOCUMENTED spelling. `question` and `q` are undocumented compatibility
+   *  aliases the server still resolves (precedence question, query, q), and it
+   *  echoes the losers in `warnings`; a client written today sends the spelling
+   *  the contract publishes. */
+  query: string;
+  filters?: SearchFilters;
   limit: number;
 }
 
@@ -102,19 +131,26 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
       }
     }
   }
-  return {
-    schemaVersion: 2,
-    question,
+  const filters: SearchFilters = {
     ...(input.freshWithin !== undefined ? { freshWithin: input.freshWithin } : {}),
     ...(input.maxPrice !== undefined ? { maxPrice: input.maxPrice } : {}),
     ...(input.appliesTo !== undefined ? { appliesTo: input.appliesTo } : {}),
+  };
+  return {
+    schemaVersion: 3,
+    view: 'decision',
+    query: question,
+    // Omitted entirely when nothing narrows, rather than sent as `{}`: an empty
+    // object is a filter set that filters nothing, and saying so on the wire only
+    // invites a server to read meaning into it.
+    ...(Object.keys(filters).length > 0 ? { filters } : {}),
     limit,
   };
 }
 
 // Response schemas. `.passthrough()` on the candidate keeps unknown future fields
 // instead of stripping them (forward-compatible), while still requiring the
-// contract fields this CLI reads. `decision` is uppercase on the wire.
+// contract fields this CLI reads.
 //
 // A candidate is a LEAN hit (search v2): identity, price, freshness and why it
 // matched, and nothing more. The full answer card is one free unpaid GET of `url`
@@ -137,72 +173,39 @@ export const searchCandidateSchema = z
 
 export type SearchCandidate = z.infer<typeof searchCandidateSchema>;
 
-/** Per-field caps for a browse pointer's free-form strings. `url` gets its own,
- *  looser bound so a legitimate read URL is never mangled while an invented one
- *  still cannot run away. Declared above the schema because the schema enforces
- *  the `url` bound at parse time (see below). */
-const BROWSE_BOUNDS = { title: 200, url: 512, handle: 64 } as const;
-
-// A browse pointer, carried ONLY on a MISS (tenjin#460): a piece from the broad
-// discoverable corpus with deliberately NO matchReasons, NO estimatedTokens and
-// no confidence field. It is a "you might browse this" hint, never a scored
-// answer candidate, so it is kept strictly out of `candidates` and never
-// recorded in the local search store.
-//
-// That store exclusion makes `inspect`/`buy`/`outcome` unreachable BY
-// `resourceId` (resolveResourceRef's uuid arm needs a store hit and fails with
-// RESOURCE_NOT_FOUND), but NOT by url: resolveResourceRef's URL arm is gated on
-// origin alone and never consults the store, so `tenjin buy <browse url>` does
-// pay. That is by design here, since the url is the payable read endpoint and
-// the contract re-emits it verbatim, but it is a real spend path, so the human
-// hint line carries the price and every spend gate still applies. Do not
-// restate the old "never reachable by inspect/buy/outcome" claim: it was false.
-//
-// A malformed pointer fails the WHOLE response into CONTRACT_MISMATCH rather
-// than being dropped. Deliberate: this client is fail-closed on every other
-// contract deviation, and silently swallowing a bad tail would hide server
-// drift that contract.test.ts exists to catch. Pinned in agent-api.test.ts.
-//
-// The `url` bound is enforced HERE rather than by truncation in the projection
-// below, and that asymmetry with `title`/`handle` is deliberate. Those two are
-// display strings: clipping one degrades gracefully and the human still reads
-// something true. `url` is an actionable payable pointer, and a clipped url is
-// not a shorter url, it is a DIFFERENT and broken one that still looks payable
-// in `--json`. Refusing is also the only ordering-independent answer: capping
-// first would hand the origin assertion in `runSearch` a string the server never
-// sent. 512 is far above any real read endpoint, so exceeding it is server drift.
-export const searchBrowseSchema = z
-  .object({
-    resourceId: z.string().regex(UUID_RE, 'resourceId must be a uuid'),
-    url: z.string().max(BROWSE_BOUNDS.url, `url must be at most ${BROWSE_BOUNDS.url} characters`),
-    title: z.string(),
-    price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
-    creator: z.object({ handle: z.string() }).passthrough(),
-  })
-  .passthrough();
-
-export type SearchBrowse = z.infer<typeof searchBrowseSchema>;
-
-export const searchResponseSchema = z.object({
-  schemaVersion: z.literal(2),
+/** The v3 decision-view result envelope (lib/search/project.ts
+ *  SearchResultEnvelope). `items` is the same lean candidate projection v2 put in
+ *  `candidates`; what changed is the frame around it.
+ *
+ *  There is no `decision` field any more, and that is the point of v3: a miss is
+ *  an EMPTY result, not a second kind of answer to branch on. `matched` is 0,
+ *  `items` is empty, and `hint` says where to browse instead. `browse[]` is gone
+ *  with it — the decision view never draws a fallback tail, so this client no
+ *  longer has one to render or to record.
+ *
+ *  Unknown keys are STRIPPED (plain `z.object`), which is why `inspect` and
+ *  `warnings` are absent here: they are real contract fields this CLI does not
+ *  read, and declaring them would put unbounded server text into `--json` and
+ *  into an agent transcript with nothing rendering it. */
+export const searchResultSchema = z.object({
+  schemaVersion: z.literal(3),
   searchId: z.string().regex(UUID_RE, 'searchId must be a uuid'),
-  decision: z.enum(['CANDIDATES', 'MISS']),
   calibration: z.string(),
-  candidates: z.array(searchCandidateSchema).optional(),
-  // Set only when the server's size backstop dropped trailing candidates the
-  // requested limit had room for; omitted entirely otherwise. There is no cursor,
-  // so a retry at a SMALLER limit returns strictly fewer rows; the ceiling scales
-  // with the candidates returned, so a LARGER limit (up to MAX_LIMIT) is what
-  // recovers the tail, and at MAX_LIMIT the tail is unrecoverable and narrowing the
-  // question is the remedy. `runSearch` picks the half that applies.
+  items: z.array(searchCandidateSchema),
+  matched: z.number().int().nonnegative(),
+  // Present only when `matched` is 0. Server-authored display text, so it rides
+  // the same per-field cap as every other free-form string below.
+  hint: z.string().optional(),
+  // Set only when the server's size backstop dropped trailing items the requested
+  // limit had room for; omitted entirely otherwise. There is no cursor, so a retry
+  // at a SMALLER limit returns strictly fewer rows; the ceiling scales with the
+  // items returned, so a LARGER limit (up to MAX_LIMIT) is what recovers the tail,
+  // and at MAX_LIMIT the tail is unrecoverable and narrowing the question is the
+  // remedy. `runSearch` picks the half that applies.
   truncated: z.literal(true).optional(),
-  // Omitted entirely by the server when empty, and only ever present on a MISS.
-  // Not enforced here (a stricter schema would reject an otherwise-usable
-  // response); truncateResponse drops it on a CANDIDATES decision instead.
-  browse: z.array(searchBrowseSchema).optional(),
 });
 
-export type SearchResponse = z.infer<typeof searchResponseSchema>;
+export type SearchResult = z.infer<typeof searchResultSchema>;
 
 export interface AgentApiOptions {
   baseUrl: string;
@@ -210,6 +213,10 @@ export interface AgentApiOptions {
   fetchImpl?: typeof fetch;
   /** Spec 09 §3 evaluation-cohort opt-in: sends X-Tenjin-Eval-Cohort: 1. */
   evalCohort?: boolean;
+  /** The team shelf's bypass secret and its origin. The transport attaches the
+   *  header only when the request URL is on that origin, so passing it while
+   *  searching the public shelf sends nothing. */
+  bypass?: ShelfBypass;
 }
 
 /** Turn a non-2xx / transport HttpResult into the CLI error contract. */
@@ -256,26 +263,44 @@ function serverErrorMessage(json: unknown): string | undefined {
 export async function postSearch(
   body: SearchRequestBody,
   opts: AgentApiOptions,
-): Promise<SearchResponse> {
-  const url = `${trimSlash(opts.baseUrl)}/api/agent/search`;
+): Promise<SearchResult> {
+  const url = `${trimSlash(opts.baseUrl)}/api/search`;
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
     headers: opts.evalCohort === true ? { 'x-tenjin-eval-cohort': '1' } : {},
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
   });
   if (!res.ok) throw apiFailure(url, res);
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
   if (res.status !== 200) {
-    // The REQUEST gate is where a pre-v2 server actually refuses us, and it is
-    // the arm that fires in practice. Old tenjin declares `schemaVersion:
-    // z.literal(1)` inside a strictObject, so a v2 request never reaches the
-    // handler: it comes back 400 "Invalid request body" with the zod flatten in
-    // `error.details`, and the response check further down can never see it.
-    // Without this the operator is told to retry a request that cannot succeed.
+    // A deployment that predates v3 has no route here AT ALL, so it answers 404
+    // from the Next router rather than anything contract-shaped. That is the arm
+    // that fires in practice against a stale server, and without it the operator
+    // is told to "retry" a path that will never exist on that deploy. A 404 is
+    // equally what a wrong base URL path or a gateway that does not route
+    // POST /api/search answers, so the remedy names both causes rather than
+    // asserting the server's age.
+    if (res.status === 404) {
+      throw new CliError(
+        'CONTRACT_MISMATCH',
+        `${url} answered 404: either this server predates search v3, or the configured base URL does not route POST /api/search.`,
+        {
+          fix: 'Check the base URL (`tenjin config get baseUrl`; `tenjin doctor` probes it), then point it at an updated deployment or install an older tenjin-cli.',
+          details: res.json,
+        },
+      );
+    }
+    // The REQUEST gate: a server that HAS the route but pins an older
+    // `schemaVersion` refuses the body before the handler runs. The v2 alias
+    // answers with a zod flatten under `error.details.fieldErrors`; the v3 route
+    // drops `fieldErrors` and states the same thing as sentences in
+    // `error.details.problems`. Both spellings are read, keyed on the FIELD name
+    // rather than on any message text.
     if (res.status === 400 && rejectedSchemaVersion(res.json)) {
-      throw outdatedServerError('The server rejected schemaVersion 2: it predates search v2.', {
+      throw outdatedServerError('The server rejected schemaVersion 3: it predates search v3.', {
         details: res.json,
       });
     }
@@ -288,15 +313,16 @@ export async function postSearch(
       },
     );
   }
-  const parsed = searchResponseSchema.safeParse(res.json);
+  const parsed = searchResultSchema.safeParse(res.json);
   if (!parsed.success) {
-    // The other way a stale server surfaces: it answered 200 with a v1 body.
-    // Unreachable against today's old tenjin (the request gate above refuses
-    // first), but correct for anything that accepts the request and replies v1.
+    // The other way a stale server surfaces: it accepted the request and answered
+    // 200 with an older envelope. The v2 alias does exactly this if a base URL
+    // ever points at it, so the version it served is named rather than reported
+    // as an anonymous shape mismatch.
     const served = serverSchemaVersion(res.json);
-    if (served !== undefined && served !== 2) {
+    if (served !== undefined && served !== 3) {
       throw outdatedServerError(
-        `Search response is schemaVersion ${served}; this CLI requires 2 (search v2).`,
+        `Search response is schemaVersion ${served}; this CLI requires 3 (search v3).`,
         { details: parsed.error.issues },
       );
     }
@@ -308,23 +334,31 @@ export async function postSearch(
   return truncateResponse(parsed.data);
 }
 
-/** One wording for both ways a pre-v2 server refuses this CLI, so the request-gate
- *  arm and the response arm can never drift apart. */
+/** One wording for all three ways a pre-v3 server refuses this CLI (no route, a
+ *  request-gate 400, a v2 envelope in a 200), so the arms can never drift apart. */
 function outdatedServerError(message: string, opts: { details: unknown }): CliError {
   return new CliError('CONTRACT_MISMATCH', message, {
-    fix: 'The server predates search v2. Point the configured base URL (`tenjin config set baseUrl`) at an updated deployment, or install an older tenjin-cli.',
+    fix: 'The server predates search v3. Point the configured base URL (`tenjin config set baseUrl`) at an updated deployment, or install an older tenjin-cli.',
     details: opts.details,
   });
 }
 
-/** True when a 400 body is the old server's request-gate refusal of our
- *  `schemaVersion`: an ApiError envelope whose zod `flatten()` details carry a
- *  `schemaVersion` fieldError. Keyed on the field, never the message text. */
+/** True when a 400 body is an older server's request-gate refusal of our
+ *  `schemaVersion`. Two shapes, because the two surfaces report differently: the
+ *  v2 alias carries a zod `flatten()` under `error.details.fieldErrors`, while
+ *  the v3 route drops that map and lists sentences under `error.details.problems`
+ *  instead. Both are keyed on the FIELD NAME appearing where the server puts its
+ *  per-field complaints, never on message wording. */
 function rejectedSchemaVersion(json: unknown): boolean {
   const record = (v: unknown): Record<string, unknown> | undefined =>
     typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
-  const fieldErrors = record(record(record(json)?.error)?.details)?.fieldErrors;
-  return Array.isArray(record(fieldErrors)?.schemaVersion);
+  const details = record(record(record(json)?.error)?.details);
+  if (Array.isArray(record(details?.fieldErrors)?.schemaVersion)) return true;
+  const problems = details?.problems;
+  return (
+    Array.isArray(problems) &&
+    problems.some((p) => typeof p === 'string' && p.startsWith('schemaVersion'))
+  );
 }
 
 /** The `schemaVersion` an unparsed body claims, when it claims a number at all. */
@@ -351,42 +385,17 @@ const CAND_BOUNDS = {
   matchReasonChars: 80,
 } as const;
 
+/** The miss `hint` is one fixed server sentence today, but it is server-authored
+ *  display text like any other, so it is bounded rather than trusted. */
+const HINT_MAX = 200;
+
 const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
 
-function truncateResponse(res: SearchResponse): SearchResponse {
-  const out: SearchResponse = { ...res };
-  if (res.candidates !== undefined) out.candidates = res.candidates.map(truncateCandidate);
-  // Browse pointers ride the same defensive discipline, and then some. The
-  // schema is `.passthrough()` so a server-invented key would otherwise survive
-  // at unbounded length into `--json` and MCP structuredContent; we rebuild each
-  // pointer explicitly from the five contract fields instead of spreading, which
-  // drops unknown keys and is what makes the contract.test.ts "no score-like
-  // field" pin hold at runtime and not just against the fixture. Count is capped
-  // at the server's BROWSE_MAX, and every free-form string (title, url, handle)
-  // at its own bound.
-  //
-  // `browse` is MISS-only by contract; drop it outright on a CANDIDATES decision
-  // rather than trust the server, since humanLines renders no hint line there and
-  // it would otherwise be an unrendered channel of server text and payable urls.
-  if (res.browse !== undefined && res.decision === 'MISS') {
-    out.browse = res.browse.slice(0, BROWSE_MAX).map((b) => ({
-      resourceId: b.resourceId,
-      // Not capped: the schema already refused anything over BROWSE_BOUNDS.url,
-      // so this is the url the server sent, verbatim and payable.
-      url: b.url,
-      title: cap(b.title, BROWSE_BOUNDS.title),
-      price: b.price,
-      creator: { handle: cap(b.creator.handle, BROWSE_BOUNDS.handle) },
-    }));
-  } else {
-    delete out.browse;
-  }
+function truncateResponse(res: SearchResult): SearchResult {
+  const out: SearchResult = { ...res, items: res.items.map(truncateCandidate) };
+  if (res.hint !== undefined) out.hint = cap(res.hint, HINT_MAX);
   return out;
 }
-
-/** Mirrors the server's BROWSE_MAX (lib/search-browse.ts): a MISS carries at
- *  most three browse pointers. */
-const BROWSE_MAX = 3;
 
 function truncateCandidate(c: SearchCandidate): SearchCandidate {
   return {
@@ -466,6 +475,7 @@ export async function postOutcomes(
   const res = await httpRequest(url, {
     method: 'POST',
     timeoutMs: opts.timeoutMs,
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     jsonBody: items.length === 1 ? items[0] : items,
     fetchImpl: opts.fetchImpl,
   });

@@ -22,6 +22,16 @@ import { runFund } from './fund';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
+/**
+ * Written out here rather than read from PRODUCTION_ORIGIN, on purpose. `fund`
+ * mints wallet-signed CDP session credentials at whatever origin it pins, so
+ * re-pointing that has to cost two files in one PR instead of one line in
+ * `production-origin.ts`: the source derives, the anchor does not. (Distinct
+ * from #146: that was about user-facing overrides, this is defence in depth.)
+ * At the cutover, edit both, deliberately.
+ */
+const EXPECTED_FUND_ORIGIN = 'https://tenjin.blog';
+const EXPECTED_FUND_HOST = 'tenjin.blog';
 
 let tmp: string;
 let dataDir: string;
@@ -121,7 +131,7 @@ describe('runFund', () => {
     const res = await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+    expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/cdp/session`);
     expect(calls[0]!.body).toEqual({ mode: 'onramp', address });
     expect(res.data).toMatchObject({
       address,
@@ -134,7 +144,7 @@ describe('runFund', () => {
     // What the route's withAuth actually checks, not merely that a header exists:
     // a proof bound to another domain, chain, or key would pass a defined-check.
     const proof = parseSIWxHeader(calls[0]!.headers['sign-in-with-x']!) as Record<string, unknown>;
-    expect(proof.domain).toBe('tenjin.blog');
+    expect(proof.domain).toBe(EXPECTED_FUND_HOST);
     expect(proof.chainId).toBe(SESSION_CHAIN_ID);
     expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
   });
@@ -153,7 +163,7 @@ describe('runFund', () => {
     );
     await runFund(ctx, { provider, fetchImpl, wait: false, open: false });
 
-    expect(calls[0]!.url).toBe('https://tenjin.blog/api/cdp/session');
+    expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/cdp/session`);
   });
 
   it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {

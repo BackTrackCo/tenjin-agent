@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './cli';
 import { searchCandidateSchema } from './lib/agent-api';
-import { SHIPPED_SKILL_FILES, SKILL_NAMES } from './lib/skills-source';
+import { PACKAGED_SKILL_NAMES, SHIPPED_SKILL_FILES } from './lib/skills-source';
 import type { Io } from './lib/output';
 
 // The eval fixtures under evals/ are graded by a model, on demand, at real cost
@@ -67,9 +67,9 @@ const FIXTURE_PATHS = walkFixtures();
  * The vendored `skills/tenjin/` mirror is deliberately excluded: it is generated
  * from the tenjin repo and skill-drift CI owns whether it matches its source.
  */
-const SHIPPED_SKILLS: readonly string[] = SKILL_NAMES.filter((n) => n !== 'tenjin').flatMap(
-  (name) => SHIPPED_SKILL_FILES[name].map((rel) => `${name}/${rel}`),
-);
+const SHIPPED_SKILLS: readonly string[] = PACKAGED_SKILL_NAMES.filter(
+  (n) => n !== 'tenjin',
+).flatMap((name) => SHIPPED_SKILL_FILES[name].map((rel) => `${name}/${rel}`));
 
 /**
  * Everything the two verb guards sweep, read once, each carrying the label a
@@ -287,21 +287,23 @@ describe('eval fixtures', () => {
   });
 });
 
-// The candidate field list in the tenjin-search skill, checked against the wire
+// The item field list in the tenjin-search skill, checked against the wire
 // schema it describes. This is the third time in two weeks that skill text has
 // drifted from the wire, and it is the worst place for it: the list is what an
 // agent uses to decide whether it already has enough to buy on, so a stale entry
 // sends it looking for a field the server stopped sending. Cheap to keep honest,
 // so keep it honest per-commit rather than per-review.
-const CANDIDATE_BULLET = /A candidate is a lean hit:([\s\S]*?`)\./;
+//
+// "item" since search v3, which renamed the array from `candidates` to `items`.
+const ITEM_BULLET = /An item is a lean hit:([\s\S]*?`)\./;
 
 describe('skill text follows the wire schema', () => {
-  it('the tenjin-search candidate bullet names exactly the candidate schema keys', () => {
+  it('the tenjin-search item bullet names exactly the candidate schema keys', () => {
     const skill = readFileSync(`${SKILLS_DIR}tenjin-search/SKILL.md`, 'utf8');
-    const bullet = CANDIDATE_BULLET.exec(skill);
+    const bullet = ITEM_BULLET.exec(skill);
     expect(
       bullet?.[1],
-      'tenjin-search/SKILL.md has no "A candidate is a lean hit:" list',
+      'tenjin-search/SKILL.md has no "An item is a lean hit:" list',
     ).toBeDefined();
 
     // The doc names the nested handle as `creator.handle`, which is the useful

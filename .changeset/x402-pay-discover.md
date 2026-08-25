@@ -1,0 +1,48 @@
+---
+'tenjin-cli': minor
+---
+
+`tenjin pay`, `tenjin discover`, and the `bazaarPay` toggle: the standard x402
+client verb, for every paid endpoint instead of only marketplace pieces.
+
+`tenjin pay <url> [-X GET|POST] [-d <json>] [--max-price <usd>] [--yes]` probes,
+delivers a 2xx free, and pays a 402 through the same money gates as `buy`
+(spend policy, price cap, session budget, confirm; `--yes` clears only the
+confirm), signing with `buildExactPayment`'s existing exact-scheme,
+canonical-USDC-on-Base pin; the deny/confirm/release ceremony itself is now one
+shared gate (`lib/spend-gate`) both `buy` and `pay` run, so the two verbs
+cannot drift. When the 402 advertises the standard sign-in-with-x extension,
+`pay` runs the same sequence as `buy`: one SIWX re-check bound to the TARGET
+origin (never the configured deployment's, so nothing origin-bound can leak),
+an entitled wallet re-reads free, and an unentitled one pays the fresh
+challenge with the same price-bump refusal as `buy`. Redirects fail closed on
+both legs, and there is deliberately no library dedupe: every paid call pays,
+and the session budget and `--max-price` are the brakes. The configured base
+URL is always payable, which covers Tenjin's paid `/api/answer` and
+`/api/phone-lookup` today and every future paid route without a CLI release.
+
+Any other https origin is the Bazaar lane, off by default. It opens only when
+the operator turns the new `bazaarPay` config key on (`tenjin install` asks
+once, default no, both answers remembered; headless installs never enable it)
+AND a configured registry (`bazaarRegistries`, default CDP's Bazaar and
+UltraVioleta, both verified keyless) publicly lists the exact resource with
+terms the live 402 does not exceed: same scheme, network, asset, and payTo,
+live amount at most the advertised one, looked up by the live payTo so a
+tampered 402 finds nothing. A mismatch is the new `REGISTRY_MISMATCH` refusal
+(exit 3) before anything is signed; unreachable registries fail the lane
+closed. This is provenance, not endorsement: listings are settlement-derived
+and unvetted, and the spend policy still bounds the money.
+
+`tenjin discover [query]` lists or searches those registries via the SDK's own
+bazaar client: free, keyless, wallet-untouched, available with the toggle off
+(a stderr hint says the lane is off), MCP-type listings counted but not shown.
+
+The lane's teaching is a new OPTIONAL skill, `tenjin-pay`, and PRESENCE is the
+whole mechanism: the skill is on disk exactly while the toggle is on, so an
+agent is never taught a lane the operator turned off. `install` places or
+removes it after the decisions, `config set bazaarPay` converges every wired
+skills directory immediately, the self-heal keeps a present copy current,
+doctor compares it when present and never requires it, and `uninstall` removes
+it. No conditional content and no markers: the unit of consent stays the one
+the pipeline already has, a skill directory. `tenjin pay` joins the opt-in
+permission tier beside `buy`, with the same never-a-spend-grant caveats.

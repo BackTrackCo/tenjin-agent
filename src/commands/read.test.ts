@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runRead } from './read';
@@ -854,5 +854,100 @@ describe('runRead, failures that must stay loud on the signed GET', () => {
     )) as CliError;
     expect(err.code).toBe('REFUSED');
     expect(calls.map((c) => c.phase)).toEqual(['plain']);
+  });
+});
+
+/**
+ * TEAM MODE READS FROM TWO ORIGINS. A team-mode search surfaces candidates from
+ * the team shelf AND from the public marketplace, so `read` has to resolve both
+ * — a `read` that refused every public-shelf hit would make the fallback leg
+ * useless. The bypass key still goes to one origin only.
+ */
+describe('runRead across two shelves', () => {
+  const TEAM = 'https://team.example';
+  const SECRET = 'shelf-secret-abc123';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+  const PUBLIC_URL = 'https://tenjin.blog/api/read/iris/slug';
+  const TEAM_URL = `${TEAM}/api/read/iris/slug`;
+
+  /** Team mode: baseUrl is the team shelf, publicShelfUrl is tenjin.blog. */
+  async function writeShelfConfig(): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        baseUrl: TEAM,
+        publicShelfUrl: TEST_ORIGIN,
+        shelfBypassSecret: SECRET,
+      }),
+    );
+  }
+
+  /** No --base-url, so the config above decides. */
+  function shelfCtx(): CommandContext {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: false, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  it('reads a free piece on the team shelf, with the key', async () => {
+    await writeShelfConfig();
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0' })),
+    });
+    const result = await runRead({ ref: TEAM_URL }, shelfCtx(), { fetchImpl: fetch });
+    expect((result.data as { entitlement: string }).entitlement).toBe('free');
+    expect(calls[0]?.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('reads a free piece on the public shelf, and sends it no key', async () => {
+    await writeShelfConfig();
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0' })),
+    });
+    const result = await runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: fetch });
+    expect((result.data as { entitlement: string }).entitlement).toBe('free');
+    expect(calls[0]?.url).toBe(PUBLIC_URL);
+    expect(calls[0]?.headers[BYPASS_HEADER]).toBeUndefined();
+  });
+
+  it('resolves a stored public-shelf candidate by id', async () => {
+    await writeShelfConfig();
+    const resourceId = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
+      at: new Date().toISOString(),
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [{ resourceId, url: PUBLIC_URL, title: 'A resource', price: '0' }],
+    });
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.entitled(readBody({ price: '0' })),
+    });
+    await runRead({ ref: resourceId }, shelfCtx(), { fetchImpl: fetch });
+    expect(calls[0]?.url).toBe(PUBLIC_URL);
+  });
+
+  it('still refuses an origin that is neither shelf', async () => {
+    await writeShelfConfig();
+    await expect(
+      runRead({ ref: 'https://evil.example/api/read/iris/slug' }, shelfCtx(), {
+        fetchImpl: neverFetch,
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  it('refuses the public shelf in public mode, when it is not the configured base', async () => {
+    // No secret: one shelf, and `publicShelfUrl` widens nothing. A read is
+    // pinned to the configured base exactly as it always was.
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: TEST_ORIGIN }),
+    );
+    await expect(
+      runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: neverFetch }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
   });
 });

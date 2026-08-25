@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   writeConfig,
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
+  DEFAULT_BAZAAR_REGISTRIES,
 } from './config';
 import { CliError } from './errors';
 
@@ -63,6 +64,19 @@ describe('CONFIG_DEFAULTS.sendMaxAmount placeholder', () => {
   });
 });
 
+describe('DEFAULT_BAZAAR_REGISTRIES', () => {
+  it('pins the verified default registries, in order', () => {
+    // Every entry here was verified keyless (GET /discovery/resources answers
+    // the Bazaar envelope with no credential) before joining the money path;
+    // an addition that skips that verification must fail here first.
+    expect(DEFAULT_BAZAAR_REGISTRIES).toEqual([
+      'https://api.cdp.coinbase.com/platform/v2/x402',
+      'https://facilitator.ultravioletadao.xyz',
+      'https://facilitator.payai.network',
+    ]);
+  });
+});
+
 describe('resolveSettings — precedence and provenance', () => {
   it('reports default provenance when nothing is set', async () => {
     const config = await loadRawConfig(dir);
@@ -107,6 +121,29 @@ describe('writeConfig', () => {
     await writeConfig(dir, next);
     expect(await loadConfig(dir)).toEqual(next);
   });
+
+  /**
+   * config.json holds `shelfBypassSecret`, the team shelf's shared door key, so
+   * it is a secret file and gets the 0600 every other secret in this tree gets.
+   * dirMode 0o700 is not the backstop it looks like: node's recursive mkdir does
+   * not chmod a directory that already exists, so a data dir a devcontainer
+   * volume or a restored backup created at 0755 leaves a 0644 config readable
+   * by anyone on the box.
+   */
+  it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
+    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'still lands at 0600 inside a data dir that already exists at 0755',
+    async () => {
+      await mkdir(dir, { recursive: true });
+      await chmod(dir, 0o755);
+      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+    },
+  );
 });
 
 describe('publish block', () => {
@@ -129,6 +166,45 @@ describe('publish block', () => {
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.publishMode).toEqual({ value: 'review', source: 'file' });
     expect(s.publishDefaultPrice).toEqual({ value: '250000', source: 'file' });
+  });
+});
+
+describe('hooks block: push and capture (docs/command-reference.md#push-experimental)', () => {
+  it('default off for both, read at run time by the installed scripts', async () => {
+    expect(CONFIG_DEFAULTS.hooks.push).toBe('off');
+    expect(CONFIG_DEFAULTS.hooks.capture).toBe('off');
+    expect((await loadConfig(dir)).hooks.push).toBe('off');
+    expect((await loadConfig(dir)).hooks.capture).toBe('off');
+  });
+
+  it('merges a partial hooks block per-subkey (keeps the defaults it omits)', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on' } }));
+    const cfg = await loadConfig(dir);
+    expect(cfg.hooks.push).toBe('on');
+    expect(cfg.hooks.capture).toBe('off');
+    expect(cfg.hooks.webSearch).toBe(CONFIG_DEFAULTS.hooks.webSearch);
+  });
+
+  it('resolveSettings exposes hooksPush and hooksCapture, file over default', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on', capture: 'nudge' } }));
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.hooksPush).toEqual({ value: 'on', source: 'file' });
+    expect(s.hooksCapture).toEqual({ value: 'nudge', source: 'file' });
+  });
+
+  it('resolveSettings reports default provenance when unset', async () => {
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.hooksPush).toEqual({ value: 'off', source: 'default' });
+    expect(s.hooksCapture).toEqual({ value: 'off', source: 'default' });
+  });
+
+  it('rejects a value outside either enum', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'sometimes' } }));
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+    await writeFile(configFile(), JSON.stringify({ hooks: { capture: 'sometimes' } }));
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
   });
 });
 

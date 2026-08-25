@@ -12,31 +12,43 @@ import {
 } from '../lib/harness-permissions';
 import { modeGatedPointer } from '../lib/permissions';
 import { stopHookIsCurrent } from '../lib/harness-hooks';
+import { resolveHermesHomeLenient } from '../lib/hermes';
+import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
+  LEGACY_HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
-  parseSearchHookModeFlag,
+  parseAgentDispatchHookModeFlag,
+  parseCaptureModeFlag,
+  parsePushModeFlag,
   parseSessionPrimerFlag,
   parseStopNagFlag,
   parseUpdateModeFlag,
+  parseWebSearchHookModeFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
+  AgentDispatchMode,
+  CaptureMode,
   EffectiveSettings,
   HooksConfigKey,
+  LegacyHooksConfigKey,
   PartialConfig,
   Provenance,
   PublishConfigKey,
   PublishMode,
+  PushMode,
   ScalarConfigKey,
-  SearchHookMode,
+  SessionPrimerMode,
+  StopNagMode,
   UpdateConfigKey,
+  WebSearchMode,
 } from '../lib/config';
 import {
   detectHarnesses,
@@ -45,7 +57,7 @@ import {
   onPath,
   type HarnessTarget,
 } from '../lib/skill-wiring';
-import { loadProjectConfig } from '../lib/settings';
+import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
@@ -111,17 +123,29 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sendMaxAmount:
     'hard cap per tenjin send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
-  baseUrl: 'Tenjin API base URL',
+  baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
+  publicShelfUrl:
+    'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
+  shelfBypassSecret:
+    "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
   rpcUrl: 'Base RPC endpoint for balance reads',
   evalCohort: 'opt in to the search evaluation cohort',
+  bazaarPay: 'let `tenjin pay` spend at registry-listed non-Tenjin endpoints',
+  bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
-  'hooks.searchMode':
-    'harness WebSearch hook: auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.webSearch':
+    'harness WebSearch hook (before WebSearch): auto=ask Tenjin first, remind=static reminder, off=inert',
+  'hooks.agentDispatch':
+    'harness subagent-dispatch hook (before Agent/Task — most sensitive payload): auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.stopNag':
     'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'hooks.sessionPrimer':
     'one-paragraph search-first primer at session start: on=print it, off=print nothing',
+  'hooks.push':
+    'the push experiment (docs/command-reference.md, "Push (experimental)"): on=wire the prompt/failure/subagent/context hooks (`tenjin install`), off=any wired scripts stay but are inert',
+  'hooks.capture':
+    'end-of-session publish prompt for durable findings: block=Stop hook blocks once per session, nudge=same text with no block, off=silent',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };
@@ -132,6 +156,17 @@ function isPublishKey(key: string): key is PublishConfigKey {
 
 function isHooksKey(key: string): key is HooksConfigKey {
   return (HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isLegacyHooksKey(key: string): key is LegacyHooksConfigKey {
+  return (LEGACY_HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function normalizeHooksKey(key: string): HooksConfigKey | null {
+  if ((HOOKS_CONFIG_KEYS as readonly string[]).includes(key)) return key as HooksConfigKey;
+  if (key === 'hooks.searchMode') return 'hooks.webSearch';
+  if (key === 'hooks.dispatchMode') return 'hooks.agentDispatch';
+  return null;
 }
 
 function isUpdateKey(key: string): key is UpdateConfigKey {
@@ -187,8 +222,10 @@ export async function runConfigGet(
       humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
     };
   }
-  if (isHooksKey(key)) {
-    const entry = renderHooksSetting(key, await resolveFromContext(ctx));
+  const normalized = normalizeHooksKey(key);
+  if (normalized !== null) {
+    const entry = renderHooksSetting(normalized, await resolveFromContext(ctx));
+    // Echo the key the caller asked for (legacy or new) but value is from the normalized new key.
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   if (isUpdateKey(key)) {
@@ -207,19 +244,102 @@ export async function runConfigGet(
  * file — never materializing defaults for keys the user did not set, so
  * provenance stays truthful. The written key now reads `file`.
  */
+export interface ConfigSetDeps {
+  /** Seam for the tenjin-pay skill placement (tests inject homeDir/source). */
+  placeSkill?: { io: CommandContext['io']; homeDir?: string; skillsSourceDir?: string };
+}
+
 export async function runConfigSet(
   { key, value }: { key: string; value: string },
   ctx: CommandContext,
   deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
   if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
-  if (isHooksKey(key)) return setHooksKey(key, value, ctx, deps);
+  if (isHooksKey(key) || isLegacyHooksKey(key)) {
+    const normalized = normalizeHooksKey(key)!;
+    return setHooksKey(normalized, value, ctx, deps);
+  }
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
+  // The Bazaar lane's teaching is an OPTIONAL skill whose presence follows
+  // this toggle: flipping it places or removes the tenjin-pay skill in every
+  // wired skills directory, immediately (a config set is an operator act, the
+  // same trust class as install). Best-effort AFTER the persist: the set
+  // itself already succeeded, and skill drift is doctor's to report.
+  if (configKey === 'bazaarPay') {
+    try {
+      const { syncBazaarSkill } = await import('../lib/skill-placement');
+      await syncBazaarSkill(
+        stored === true,
+        deps.placeSkill ?? { io: ctx.io, dataDir: ctx.dataDir },
+      );
+    } catch {
+      // `tenjin doctor` reports a presence that does not match the toggle.
+    }
+  }
   const entry = renderSetting(configKey, stored, 'file');
-  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
+  const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
+  return {
+    data: { key: configKey, ...entry, ...(warning !== undefined ? { warning } : {}) },
+    humanLines: [formatLine(configKey, entry), ...(warning !== undefined ? [warning] : [])],
+  };
+}
+
+/**
+ * The half-wired team shelf, said out loud at the moment it is created.
+ *
+ * Team mode takes TWO settings — a private deployment in `baseUrl` and its
+ * bypass secret — and the setup is two independent commands, so a machine can
+ * easily end up with the secret and no shelf (run in the other order, or the
+ * secret line alone on a second machine). The CLI fails that state safe to
+ * public mode, which means an operator who thinks they are on the team shelf
+ * would otherwise get no signal at all: publishes would go to the marketplace
+ * under the public gates. Warn, do not refuse — the pair is legitimately
+ * half-set between two commands, and refusing would make the documented order
+ * the only order.
+ *
+ * THREE KEYS, not two. `isTeamShelfOrigin` also returns false when `baseUrl`
+ * matches `publicShelfUrl`, so pointing `publicShelfUrl` at the team deployment
+ * drops the machine out of team mode just as surely as unsetting the secret
+ * would. It fails safe and doctor catches it later; this is the warning at the
+ * moment it happens, on the third key of the same triple.
+ */
+async function halfWiredTeamShelf(
+  configKey: ScalarConfigKey,
+  dataDir: string,
+): Promise<string | undefined> {
+  if (
+    configKey !== 'shelfBypassSecret' &&
+    configKey !== 'baseUrl' &&
+    configKey !== 'publicShelfUrl'
+  ) {
+    return undefined;
+  }
+  const config = await loadRawConfig(dataDir).catch(() => undefined);
+  if (config === undefined) return undefined;
+  const s = resolveSettings({ config, flags: {}, env: {} });
+  if (s.shelfBypassSecret.value.length === 0) return undefined;
+  const baseUrl = s.baseUrl.value;
+  if (isTeamShelfOrigin(new URL(baseUrl).origin, s.publicShelfUrl.value)) return undefined;
+  // WHICH KEY BROKE THE PAIR decides which fix to name. A baseUrl that now
+  // matches publicShelfUrl is not "the marketplace" in any recognizable sense —
+  // it is the operator's own two keys pointed at one place — and telling them to
+  // re-point baseUrl would be advice for the other half of the same collision.
+  const isProduction = isSameDeployment(new URL(baseUrl).origin, PRODUCTION_ORIGIN);
+  const cause = isProduction
+    ? `baseUrl is the public marketplace (${baseUrl})`
+    : `baseUrl and publicShelfUrl are the same shelf (${baseUrl})`;
+  const fix = isProduction
+    ? 'Point baseUrl at the team deployment to finish team mode: `tenjin config set baseUrl <team shelf url>`.'
+    : `A team shelf must differ from the shelf it falls through to: \`tenjin config set publicShelfUrl ${PRODUCTION_ORIGIN}\`.`;
+  return (
+    `Warning: shelfBypassSecret is set, but ${cause}, ` +
+    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the scan’s ' +
+    'warn tier and the confirm cascade on. ' +
+    fix
+  );
 }
 
 /**
@@ -383,11 +503,13 @@ async function claudeInPlay(
   const requested = await loadRawConfig(ctx.dataDir)
     .then((c) => c.install?.harness ?? [])
     .catch(() => [] as HarnessTarget[]);
+  const hermesHome = resolveHermesHomeLenient(home, env).home;
   return harnessInPlay(
     home,
-    harnessTargetDir(home, 'claude'),
-    detectHarnesses(home, which),
+    harnessTargetDir(home, 'claude', hermesHome),
+    detectHarnesses(home, which, hermesHome),
     requested,
+    hermesHome,
   );
 }
 
@@ -405,12 +527,13 @@ function allowlistLines(sync: AllowlistSync): string[] {
 }
 
 /**
- * `config set hooks.searchMode`. Merged into the nested hooks block through the
- * same locked read-modify-write every other set uses, so a subkey a newer CLI
- * wrote survives. The installed script reads this file on every run, so a value
- * that script UNDERSTANDS takes effect immediately with no re-install — which is
- * every value it shipped knowing about, and not `deliberate-only` on a script
- * written before that existed. That one case is reported, once, below.
+ * `config set hooks.webSearch` / `hooks.agentDispatch`. Merged into the nested hooks
+ * block through the same locked read-modify-write every other set uses, so a subkey a
+ * newer CLI wrote survives. The installed script reads this file on every run, so a
+ * value that script UNDERSTANDS takes effect immediately with no re-install — which
+ * is every value it shipped knowing about, and not `deliberate-only` on a script
+ * written before that existed. That one case is reported, once, below. Legacy
+ * `hooks.searchMode`/`hooks.dispatchMode` still work as aliases (mapped via normalizeHooksKey).
  */
 async function setHooksKey(
   key: HooksConfigKey,
@@ -419,17 +542,30 @@ async function setHooksKey(
   deps: ConfigSetDeps,
 ): Promise<CommandResult> {
   const subkey =
-    key === 'hooks.searchMode'
-      ? 'searchMode'
-      : key === 'hooks.stopNag'
-        ? 'stopNag'
-        : 'sessionPrimer';
-  const parsed =
-    key === 'hooks.searchMode'
-      ? parseSearchHookModeFlag(value, key)
-      : key === 'hooks.stopNag'
-        ? parseStopNagFlag(value, key)
-        : parseSessionPrimerFlag(value, key);
+    key === 'hooks.webSearch'
+      ? 'webSearch'
+      : key === 'hooks.agentDispatch'
+        ? 'agentDispatch'
+        : key === 'hooks.stopNag'
+          ? 'stopNag'
+          : key === 'hooks.sessionPrimer'
+            ? 'sessionPrimer'
+            : key === 'hooks.push'
+              ? 'push'
+              : 'capture';
+  const parsed:
+    WebSearchMode | AgentDispatchMode | StopNagMode | SessionPrimerMode | PushMode | CaptureMode =
+    key === 'hooks.webSearch'
+      ? parseWebSearchHookModeFlag(value, key)
+      : key === 'hooks.agentDispatch'
+        ? parseAgentDispatchHookModeFlag(value, key)
+        : key === 'hooks.stopNag'
+          ? parseStopNagFlag(value, key)
+          : key === 'hooks.sessionPrimer'
+            ? parseSessionPrimerFlag(value, key)
+            : key === 'hooks.push'
+              ? parsePushModeFlag(value, key)
+              : parseCaptureModeFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
@@ -437,15 +573,49 @@ async function setHooksKey(
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   // ONE honest line, not a nag loop: the value is stored either way, and the
   // operator is told the running script predates it rather than left believing a
-  // setting took that did not.
-  const current = await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir);
-  const stale =
-    parsed === 'deliberate-only' && !current
+  // setting took that did not. Two keys the installed Stop hook can be too old
+  // to honour: `hooks.stopNag`, whose `deliberate-only` an older script maps back
+  // to `on`, and `hooks.capture`, which scripts written before it existed do not
+  // read AT ALL — so `block` on one of those asks for nothing while `config get`
+  // reports it effective. The remaining keys' scripts read every value they could
+  // ever be set to.
+  const staleable = key === 'hooks.stopNag' || key === 'hooks.capture';
+  const current = staleable
+    ? await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir)
+    : true;
+  const stale = current
+    ? undefined
+    : key === 'hooks.stopNag' && parsed === 'deliberate-only'
       ? `The installed Stop hook predates ${JSON.stringify(parsed)} and will keep treating it as "on". Run \`tenjin install\` to update it.`
+      : // `off` is what an unaware script already does, so only a value that asks
+        // for something is worth a warning.
+        key === 'hooks.capture' && parsed !== 'off'
+        ? `The installed Stop hook predates \`hooks.capture\` and will not ask for a note. Run \`tenjin install\` to update it.`
+        : undefined;
+  // `hooks.push` IS NOT THE WHOLE SWITCH. Every other key here is read by a
+  // script that is already wired; this one also needs six settings entries
+  // across four scripts, and only `tenjin push on` writes them. Setting the key
+  // alone persists and echoes as effective while no arm fires, which
+  // command-reference.md already warns about and the CLI used to accept in
+  // silence. Not a stale-script warning — the scripts are current, the wiring is
+  // absent — so it rides its own field. Only on a value that asks for something:
+  // `off` is what an unwired machine already does.
+  const unwired =
+    key === 'hooks.push' && parsed !== 'off'
+      ? 'Set this through `tenjin push on` / `tenjin push off`: `config set` stores the value but does not wire the hook entries the arms need, so on a machine that never ran `tenjin push on` nothing fires. `tenjin push on` reports what it wired; `tenjin doctor` and `tenjin push status` report a half-wired one.'
       : undefined;
+  const notes = [
+    ...(stale !== undefined ? [stale] : []),
+    ...(unwired !== undefined ? [unwired] : []),
+  ];
   return {
-    data: { key, ...entry, ...(stale !== undefined ? { hookScriptStale: true } : {}) },
-    humanLines: [formatLine(key, entry), ...(stale !== undefined ? [stale] : [])],
+    data: {
+      key,
+      ...entry,
+      ...(stale !== undefined ? { hookScriptStale: true } : {}),
+      ...(unwired !== undefined ? { hookEntriesNotWired: true } : {}),
+    },
+    humanLines: [formatLine(key, entry), ...notes],
   };
 }
 
@@ -489,14 +659,44 @@ export async function persistPublishMode(dir: string, mode: PublishMode): Promis
   }));
 }
 
-/**
- * Persist `hooks.searchMode` through the same locked merge-write, for `install`'s
- * hook decision. The mode is already a validated SearchHookMode.
- */
-export async function persistSearchHookMode(dir: string, mode: SearchHookMode): Promise<void> {
+/** install's Bazaar-lane decision writer; the same locked read-modify-write every
+ *  `config set` uses, so a concurrent set never loses a sibling key. */
+export async function persistBazaarPay(dir: string, enabled: boolean): Promise<void> {
+  await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
+}
+
+export async function persistWebSearchHookMode(dir: string, mode: WebSearchMode): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,
-    hooks: { ...existing.hooks, searchMode: mode },
+    hooks: { ...existing.hooks, webSearch: mode },
+  }));
+}
+
+export async function persistAgentDispatchHookMode(
+  dir: string,
+  mode: AgentDispatchMode,
+): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, agentDispatch: mode },
+  }));
+}
+
+/**
+ * @deprecated use persistWebSearchHookMode — kept for backward compat
+ */
+export async function persistSearchHookMode(dir: string, mode: WebSearchMode): Promise<void> {
+  return persistWebSearchHookMode(dir, mode);
+}
+
+/**
+ * Persist `hooks.push` through the same locked read-modify-write every `config
+ * set` uses. Used by `tenjin push on|off`, mirroring `persistPublishMode`.
+ */
+export async function persistPushMode(dir: string, mode: PushMode): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, push: mode },
   }));
 }
 
@@ -563,15 +763,30 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
 /** The list/get shape for a hooks key: a plain enum string whichever it is. */
 function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
   const resolved =
-    key === 'hooks.searchMode'
-      ? settings.hooksSearchMode
-      : key === 'hooks.stopNag'
-        ? settings.hooksStopNag
-        : settings.hooksSessionPrimer;
+    key === 'hooks.webSearch'
+      ? settings.hooksWebSearch
+      : key === 'hooks.agentDispatch'
+        ? settings.hooksAgentDispatch
+        : key === 'hooks.stopNag'
+          ? settings.hooksStopNag
+          : key === 'hooks.sessionPrimer'
+            ? settings.hooksSessionPrimer
+            : key === 'hooks.push'
+              ? settings.hooksPush
+              : settings.hooksCapture;
   return { value: resolved.value, source: resolved.source };
 }
 
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
+  // REDACTED IN THE MACHINE ENVELOPE TOO, not just in the human line. `config
+  // --json` is what an agent reads and what a bug report pastes, and the whole
+  // point of a door key is that it opens the door for whoever holds it. What a
+  // caller actually needs from this key is whether team mode is on, and
+  // set/unset says exactly that. The value is still readable, by the operator,
+  // in ~/.tenjin/config.json.
+  if (key === 'shelfBypassSecret') {
+    return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
+  }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
   if (key === 'sendMaxAmount') {
@@ -598,18 +813,39 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
+    case 'publicShelfUrl':
     case 'rpcUrl':
       return parseHttpUrl(value);
+    case 'shelfBypassSecret':
+      // A free string: it is whatever Vercel generated. Empty clears it, which
+      // is how team mode is turned back off.
+      return value.trim();
     case 'evalCohort':
+    case 'bazaarPay':
       return parseBoolean(value);
+    case 'bazaarRegistries':
+      return parseRegistryList(value);
   }
 }
 
+/** "" clears to []; comma-split, each entry an absolute http(s) URL. */
+function parseRegistryList(value: string): string[] {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => parseHttpUrl(entry));
+}
+
+// on/off ride along with true/false because that is how the CLI's own refusal
+// texts coach these keys (`tenjin config set bazaarPay on`), and the hooks keys
+// already speak on/off; a coached command that exits USAGE teaches an agent the
+// remediation is broken.
 function parseBoolean(value: string): boolean {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
+  if (value === 'true' || value === 'on') return true;
+  if (value === 'false' || value === 'off') return false;
   throw new CliError('USAGE', `Invalid boolean value: ${JSON.stringify(value)}`, {
-    fix: 'Use "true" or "false".',
+    fix: 'Use "on" or "off" (or "true"/"false").',
   });
 }
 
@@ -646,12 +882,12 @@ function parseHttpUrl(value: string): string {
     url = new URL(value);
   } catch {
     throw new CliError('USAGE', `Invalid URL: ${JSON.stringify(value)}`, {
-      fix: 'Pass an absolute http(s) URL like https://tenjin.blog.',
+      fix: `Pass an absolute http(s) URL like ${PRODUCTION_ORIGIN}.`,
     });
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new CliError('USAGE', `URL must be http or https: ${JSON.stringify(value)}`, {
-      fix: 'Pass an absolute http(s) URL like https://tenjin.blog.',
+      fix: `Pass an absolute http(s) URL like ${PRODUCTION_ORIGIN}.`,
     });
   }
   return value;
@@ -679,8 +915,11 @@ async function persist(
       const existing = await loadRawConfig(dir);
       const merged = merge(existing);
       const validated = RawConfigSchema.parse(merged);
+      // 0600, matching lib/config.ts's `writeConfig`: this file holds
+      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
+      // there. See that function for why dirMode alone is not enough.
       await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o644,
+        mode: 0o600,
         dirMode: 0o700,
       });
     });
