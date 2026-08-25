@@ -221,7 +221,7 @@ const EMPTY_TALLIES: PushLedgerTallies = {
  * command.
  *
  * READ FROM THE TAIL, the same 256 KB the hook scripts read (see
- * `sessionRows` in lib/push-scripts.ts). Nothing rotates this file: every arm
+ * `ledgerTailRows` in lib/push-scripts.ts). Nothing rotates this file: every arm
  * of every session appends to it forever, so "one status call is not on a tool
  * call's critical path" was an argument about latency that ignored the size.
  * The tail is also where the 7-day window's rows are, by construction.

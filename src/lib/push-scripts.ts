@@ -37,10 +37,41 @@ export { PUSH_LEDGER_FILE, PUSH_DIR_NAME };
 
 /** Injections a session may receive at full form; past it the short form only. */
 export const PUSH_INJECT_MAX_PER_SESSION = 5;
-/** Lookups one session may spend across every push arm. Each costs a request in
- *  front of (or beside) a tool call, so a runaway loop of failing commands is
- *  bounded here, not by the server. */
-export const PUSH_LOOKUP_MAX_PER_SESSION = 30;
+/**
+ * The lookup budget's window, and each trigger's allowance inside it.
+ *
+ * THE UNIT IS TIME AND TRIGGER, NOT SESSION. A flat per-session cap starved the
+ * case this sidecar exists for: an always-on loop session keeps one session id
+ * for hours, so its opening minutes spend the whole allowance on whatever fires
+ * most often — ordinary prompts — and every later failure or research lookup is
+ * skipped for the rest of the run. A live run measured 62% of fires skipped on
+ * `lookup-cap`, prompts and failures between them accounting for all of it.
+ * Nothing refilled it either: the 24h pruner sweeps PUSH_DIR, and the ledger
+ * lives beside it, so the only thing that ever gave a long session its budget
+ * back was the 256 KB tail scrolling its own early rows out of view — a refill
+ * keyed on write volume rather than on elapsed time.
+ *
+ * So: a rolling window that recovers on its own, and one bucket per trigger so a
+ * prompt flood cannot spend the failure arm's allowance. The buckets ARE the
+ * reserve — there is no shared pool left for a busy arm to drain — and they are
+ * counted MACHINE-WIDE rather than per session, because concurrent sessions on
+ * one laptop are one machine's worth of requests however many session ids they
+ * carry. The per-session `seen` set is untouched: once-per-piece is a property
+ * of the conversation being injected into, not of the machine.
+ */
+export const PUSH_LOOKUP_WINDOW_MS = 60 * 60 * 1000;
+export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
+  prompt: 8,
+  failure: 8,
+  research: 8,
+  subagent: 8,
+  read: 4,
+  churn: 4,
+};
+/** What a trigger not named above may spend. The floor, not the ceiling: an arm
+ *  that reaches this line is one nobody sized a bucket for, and the safe reading
+ *  of an unsized arm is the cheapest one. */
+export const PUSH_LOOKUP_CAP_DEFAULT = 4;
 /** Consecutive unanswered lookups that silence the public leg, and for how long
  *  — the push core's copy of the dispatch hook's self-healing stop
  *  (DISPATCH_FAILURE_STOP / DISPATCH_QUIET_MS in lib/hook-scripts.ts). A dead
@@ -111,7 +142,9 @@ const PUSH_CORE_JS = String.raw`
 const PUSH_DIR = join(DATA_DIR, __PUSH_DIR__);
 const LEDGER_PATH = join(DATA_DIR, __LEDGER_FILE__);
 const PUSH_INJECT_MAX = __INJECT_MAX__;
-const PUSH_LOOKUP_MAX = __LOOKUP_MAX__;
+const PUSH_LOOKUP_WINDOW_MS = __LOOKUP_WINDOW_MS__;
+const PUSH_LOOKUP_CAPS = __LOOKUP_CAPS__;
+const PUSH_LOOKUP_CAP_DEFAULT = __LOOKUP_CAP_DEFAULT__;
 const PUSH_FAILURE_STOP = __FAILURE_STOP__;
 const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
@@ -264,18 +297,15 @@ function ledgerAppend(row) {
 }
 
 /**
- * This session's ledger rows, read from the tail of the file.
+ * Every ledger row in the tail of the file, whatever session wrote it.
  *
- * A NULL SESSION IS A BUCKET, NOT AN EXEMPTION. Returning [] here zeroed every
- * per-session bound at once — the lookup cap, the inject cap, the once-per-piece
- * set and the outage brake all read this — so a payload with no \`session_id\`
- * bought an unbounded one. The rows it writes carry \`session: null\`, so they
- * are their own machine-global bucket and the same caps apply to them. Coarser
- * than a real session (two concurrent session-less harnesses share one budget)
- * and that is the right way round: the bound holds, and the cost of the coarse
- * bucket is a lookup deferred, never a bound skipped.
+ * The lookup budget is machine-wide and windowed, so it needs the rows this
+ * session did NOT write; the per-session bounds below filter this down. ONE READ
+ * SERVES BOTH — the file is parsed in front of a tool call, and parsing it twice
+ * to answer two questions about the same bytes is latency the human waiting
+ * behind the prompt arm can feel.
  */
-function sessionRows(sessionId) {
+function ledgerTailRows() {
   let text;
   try {
     const size = statSync(LEDGER_PATH).size;
@@ -301,8 +331,7 @@ function sessionRows(sessionId) {
     try {
       const r = JSON.parse(line);
       if (!isRecord(r)) continue;
-      const rowSession = typeof r.session === 'string' && r.session.length > 0 ? r.session : null;
-      if (rowSession === sessionId) rows.push(r);
+      rows.push(r);
     } catch {
       // A torn or foreign line is skipped, never fatal.
     }
@@ -310,24 +339,73 @@ function sessionRows(sessionId) {
   return rows;
 }
 
-/**
- * What this session has already spent, already seen, and just failed at.
+/** Whether \`r\` is a lookup that was actually attempted.
  *
- * A LOOKUP IS AN ATTEMPT, NOT AN ANSWER. Counting only rows that carry a
- * searchId made a FAILING lookup free — during an outage every row is
- * 'no-answer' with no searchId, the counter stays at zero, and the cap that
- * exists to bound a runaway session never engages while each attempt burns the
- * full fetch timeout in front of a tool call. That is precisely the case worth
- * bounding, so it is counted, and \`failStreak\` sits under it as the faster
- * brake.
+ *  A LOOKUP IS AN ATTEMPT, NOT AN ANSWER. Counting only rows that carry a
+ *  searchId made a FAILING lookup free — during an outage every row is
+ *  'no-answer' with no searchId, the counter stays at zero, and the cap that
+ *  exists to bound a runaway loop never engages while each attempt burns the
+ *  full fetch timeout in front of a tool call. That is precisely the case worth
+ *  bounding, so it is counted, and \`failStreak\` sits under it as the faster
+ *  brake. */
+function isLookupRow(r) {
+  return typeof r.searchId === 'string' || r.reason === 'no-answer';
+}
+
+/** One bucket key. An unlabelled row and an unlabelled arm must land on the SAME
+ *  key, or the arm counts against a bucket nothing ever fills. */
+function triggerKey(trigger) {
+  return typeof trigger === 'string' && trigger.length > 0 ? trigger : '';
+}
+
+/** This trigger's allowance per window. */
+function lookupCapFor(trigger) {
+  const cap = PUSH_LOOKUP_CAPS[triggerKey(trigger)];
+  return typeof cap === 'number' ? cap : PUSH_LOOKUP_CAP_DEFAULT;
+}
+
+/**
+ * What has been spent, already seen, and just failed at.
+ *
+ * TWO UNITS, DELIBERATELY. \`lookups\` is a machine-wide count per trigger over
+ * the last PUSH_LOOKUP_WINDOW_MS: it bounds requests, and requests are a
+ * property of the machine and of the clock, not of a session id that an
+ * always-on loop holds for a day. Everything else — the inject cap, the
+ * once-per-piece \`seen\` set, the outage brake — stays per session, because each
+ * is a property of the one conversation being injected into.
+ *
+ * A NULL SESSION IS A BUCKET, NOT AN EXEMPTION. Treating a payload with no
+ * \`session_id\` as "no rows" zeroed every per-session bound at once and bought
+ * an unbounded session. Its rows carry \`session: null\`, so they are their own
+ * machine-global bucket and the same caps apply to them. Coarser than a real
+ * session (two concurrent session-less harnesses share one budget) and that is
+ * the right way round: the bound holds, and the cost of the coarse bucket is a
+ * lookup deferred, never a bound skipped.
+ *
+ * The window can only ever be UNDERCOUNTED, never over: the tail is the last
+ * LEDGER_TAIL_BYTES, so a machine that writes more than that inside one window
+ * loses its oldest rows from the count and is treated as having spent less.
+ * That errs toward letting a lookup through, which is the safe direction for a
+ * budget whose failure mode this change exists to fix.
  */
 function pushBudget(sessionId) {
-  const rows = sessionRows(sessionId);
+  const all = ledgerTailRows();
+  const rows = [];
+  const lookups = Object.create(null);
+  const windowStart = Date.now() - PUSH_LOOKUP_WINDOW_MS;
   const seen = new Set();
   let injected = 0;
-  let lookups = 0;
-  for (const r of rows) {
-    if (typeof r.searchId === 'string' || r.reason === 'no-answer') lookups += 1;
+  for (const r of all) {
+    if (isLookupRow(r)) {
+      const at = Date.parse(String(r.at));
+      if (Number.isFinite(at) && at >= windowStart) {
+        const key = triggerKey(r.trigger);
+        lookups[key] = (lookups[key] ?? 0) + 1;
+      }
+    }
+    const rowSession = typeof r.session === 'string' && r.session.length > 0 ? r.session : null;
+    if (rowSession !== sessionId) continue;
+    rows.push(r);
     if (r.action === 'injected') {
       injected += 1;
       // A marketplace piece is keyed by its resourceId and a note by its id;
@@ -353,6 +431,11 @@ function pushBudget(sessionId) {
     failStreak += 1;
   }
   return { injected, lookups, seen, failStreak, lastFailAtMs };
+}
+
+/** Whether \`trigger\` has anything left in the current window. */
+function lookupAllowed(budget, trigger) {
+  return (budget.lookups[triggerKey(trigger)] ?? 0) < lookupCapFor(trigger);
 }
 
 /** The free body of \`candidate\`, capped, or null. GET of the candidate url is
@@ -595,9 +678,10 @@ async function pushDecide(args) {
  *
  *  - \`miss\`   nothing worth saying was found (no answer, no candidate, or a
  *              candidate too weak to offer). The next shelf may be asked.
- *  - \`stop\`   this session has spent its lookup budget, or the marketplace is in
- *              its quiet window. Asking a second shelf would spend the budget the
- *              stop exists to protect, so nothing else is asked.
+ *  - \`stop\`   this trigger has spent its lookup budget for the window, or the
+ *              marketplace is in its quiet window. Asking a second shelf would
+ *              spend the budget the stop exists to protect, so nothing else is
+ *              asked.
  *  - \`done\`   this shelf answered — injected, logged, or deliberately skipped
  *              because the same piece already landed this session. \`decided\` is
  *              what the arm emits (null for a log-only or skipped outcome).
@@ -609,7 +693,11 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
   const shortOpener = shelf === 'team' ? TEAM_SHORT_OPENER : PUBLIC_SHORT_OPENER;
   const base = { ...outerBase, shelf };
 
-  if (budget.lookups >= PUSH_LOOKUP_MAX) {
+  // This arm's OWN bucket for the current window, not a shared pool: a prompt
+  // flood spends the prompt allowance and leaves the failure arm's untouched.
+  // The row already carries \`trigger\`, so \`push status\` shows which bucket
+  // filled up without a new field.
+  if (!lookupAllowed(budget, base.trigger)) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap' });
     return { kind: 'stop' };
   }
@@ -871,7 +959,9 @@ export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string
   const js = PUSH_CORE_JS.replaceAll('__PUSH_DIR__', JSON.stringify(PUSH_DIR_NAME))
     .replaceAll('__LEDGER_FILE__', JSON.stringify(PUSH_LEDGER_FILE))
     .replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
-    .replaceAll('__LOOKUP_MAX__', String(PUSH_LOOKUP_MAX_PER_SESSION))
+    .replaceAll('__LOOKUP_WINDOW_MS__', String(PUSH_LOOKUP_WINDOW_MS))
+    .replaceAll('__LOOKUP_CAPS__', JSON.stringify(PUSH_LOOKUP_CAPS_PER_WINDOW))
+    .replaceAll('__LOOKUP_CAP_DEFAULT__', String(PUSH_LOOKUP_CAP_DEFAULT))
     .replaceAll('__FAILURE_STOP__', String(PUSH_FAILURE_STOP))
     .replaceAll('__QUIET_MS__', String(PUSH_QUIET_MS))
     .replaceAll('__BODY_MAX__', String(PUSH_BODY_MAX_CHARS))
