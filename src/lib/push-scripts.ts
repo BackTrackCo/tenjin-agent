@@ -33,6 +33,7 @@ export const PUSH_CONTEXT_HOOK_FILE = 'tenjin-push-context.mjs';
  * an empty ledger, silently.
  */
 import { PUSH_LEDGER_FILE, PUSH_DIR_NAME, PUSH_STATE_RETENTION_MS } from './paths';
+import { PUBLISHED_MARKER_PREFIX } from './publish-dedup';
 export { PUSH_LEDGER_FILE, PUSH_DIR_NAME };
 
 /** Injections a session may receive at full form; past it the short form only. */
@@ -841,7 +842,13 @@ function pruneState() {
       // swept here and be asked to capture a SECOND time — under
       // \`hooks.capture block\`, a second blocked turn end. This pruner has no
       // session id in hand, so it stays out of the prefix entirely.
-      if (name.startsWith('capture-')) continue;
+      //
+      // \`published-\` markers are the publish command's, and are treated the
+      // same way for the same reason: their mtime is pinned at the publish (they
+      // are only ever read), and sweeping one early is a duplicate post — the
+      // exact thing they exist to prevent. The Stop hook's pass ages them out.
+      if (name.startsWith('capture-') || name.startsWith(${JSON.stringify(PUBLISHED_MARKER_PREFIX)}))
+        continue;
       const path = join(PUSH_DIR, name);
       try {
         if (now - statSync(path).mtimeMs > STATE_RETENTION_MS) rmSync(path, { force: true });

@@ -308,6 +308,11 @@ describe('runPublish — receipt + card echo', () => {
 });
 
 describe('runPublish — session key mint-once', () => {
+  // Two DIFFERENT pieces, because publish dedups on the body's content hash: the
+  // subject here is one wallet across two writes, and byte-identical text would
+  // make the second write not happen at all.
+  const SECOND = '# Another Answer\n\nA second plain body, also nothing sensitive.\n';
+
   it('the first publish mints the session (one wallet sig); the second reuses it (zero)', async () => {
     const { provider, signCount } = spyProvider();
     const { fetch } = stubServer();
@@ -316,7 +321,7 @@ describe('runPublish — session key mint-once', () => {
     await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
     expect(signCount()).toBe(1);
 
-    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
+    await runPublish(baseArgs(await writeDoc(SECOND), { mode: 'auto' }), makeCtx(), deps);
     expect(signCount()).toBe(1); // cached session.json reused, no second popup
   });
 
@@ -326,7 +331,7 @@ describe('runPublish — session key mint-once', () => {
     const deps = hermetic({ fetchImpl: fetch, provider, useSession: false });
 
     await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
-    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
+    await runPublish(baseArgs(await writeDoc(SECOND), { mode: 'auto' }), makeCtx(), deps);
     expect(signCount()).toBe(2); // one SIWX signature per write
   });
 });
@@ -927,11 +932,21 @@ describe('runPublish — a piece that answers a whole thread', () => {
     return (res.data as { searches?: unknown[] }).searches;
   }
 
+  // A DISTINCT BODY PER PUBLISH, because publish now dedups on the body's
+  // content hash: two calls with byte-identical text are one publish by design,
+  // and every case here is about the searchId wire shape rather than about
+  // republishing one piece.
+  let nth = 0;
   async function publishWith(ids: string[], over: Partial<PublishArgs> = {}) {
     const { fetch, body } = bodyServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
+    nth += 1;
     const res = await runPublish(
-      baseArgs(await writeDoc(CLEAN), { searchId: ids, mode: 'auto', ...over }),
+      baseArgs(await writeDoc(`${CLEAN}\nFinding ${nth}.\n`), {
+        searchId: ids,
+        mode: 'auto',
+        ...over,
+      }),
       ctx,
       hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
@@ -1737,5 +1752,99 @@ describe('runPublish on a team shelf', () => {
       ),
     ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
     expect(sent).toHaveLength(0);
+  });
+});
+
+/**
+ * Publishing the same finding twice.
+ *
+ * A live run published five findings twice: the Stop hook's capture ask is
+ * guarded once per session, but the marker guards the ASK and nothing downstream
+ * dedups the publish. Two agents watching related sessions are two session ids
+ * and both are asked; one agent whose turn ends twice around a retry is one id
+ * and asked twice. What every duplicate shares is the body, so that is the key.
+ */
+describe('runPublish — the same body is published once per machine', () => {
+  it('reports the existing url and makes no request at all', async () => {
+    const file = await writeDoc(CLEAN);
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    const deps = hermetic({ fetchImpl: fetch, provider });
+
+    const first = await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps);
+    expect((first.data as { url: string }).url).toBe(CREATED.url);
+    expect(calls).toHaveLength(1);
+    const unlocksAfterFirst = getSignerCount();
+
+    const second = await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps);
+    // Success, not an error: a capture ask that fires twice must not turn a
+    // clean turn end into a failure for a piece that is already up.
+    expect(second.data).toEqual({ alreadyPublished: true, url: CREATED.url });
+    expect(second.humanLines).toEqual([`Already published: ${CREATED.url}`]);
+    // Nothing on the wire, and no keystore unlock either: the check runs before
+    // the scan, the consent gate and the wallet.
+    expect(calls).toHaveLength(1);
+    expect(getSignerCount()).toBe(unlocksAfterFirst);
+  });
+
+  /**
+   * The duplicate is a RE-RENDER of the same finding, not a byte-for-byte copy
+   * of one file: the second agent writes the same prose with CRLF line endings,
+   * a trailing blank line, or a space left at the end of a wrapped line. None of
+   * those is a different finding.
+   */
+  it('sees through trailing whitespace, CRLF and a trailing blank line', async () => {
+    const { fetch, calls } = stubServer();
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
+    const rerendered = `${CLEAN.replace(/\n/g, '\r\n').replace('sensitive.', 'sensitive.   ')}\r\n\r\n`;
+    const again = await runPublish(
+      baseArgs(await writeDoc(rerendered), { mode: 'auto' }),
+      makeCtx(),
+      deps,
+    );
+
+    expect(again.data).toEqual({ alreadyPublished: true, url: CREATED.url });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('is not fooled into swallowing a genuinely different body', async () => {
+    const { fetch, calls } = stubServer();
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+
+    await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
+    const edited = CLEAN.replace('nothing sensitive', 'nothing sensitive at all');
+    const res = await runPublish(
+      baseArgs(await writeDoc(edited), { mode: 'auto' }),
+      makeCtx(),
+      deps,
+    );
+
+    expect(res.data).toHaveProperty('resourceId');
+    expect(calls).toHaveLength(2);
+  });
+
+  /**
+   * A draft is the one case where publishing the same body twice is the point:
+   * nothing promotes a draft, so reaching a public piece MEANS a second publish
+   * of the same text. Deduping that would make the promotion silently do nothing.
+   */
+  it('never dedups a draft, in either direction', async () => {
+    const file = await writeDoc(CLEAN);
+    const { fetch, calls } = stubServer({ ...CREATED, status: 'draft' });
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+
+    await runPublish(baseArgs(file, { mode: 'auto', draft: true }), makeCtx(), deps);
+    // A second draft of the same body still goes to the wire: the first wrote no
+    // marker.
+    const second = await runPublish(baseArgs(file, { mode: 'auto', draft: true }), makeCtx(), deps);
+    expect(second.data).toHaveProperty('resourceId');
+    expect(calls).toHaveLength(2);
+
+    // And the real publish that promotes it is not blocked by either draft.
+    const promoted = await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps);
+    expect(promoted.data).toHaveProperty('resourceId');
+    expect(calls).toHaveLength(3);
   });
 });

@@ -226,6 +226,8 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 
 On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
 
+**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and checks for a `published-<hash>` marker in `~/.tenjin/push/`. On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The marker is written after a successful publish and ages out on the same 24h retention as the capture markers beside it. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: nothing promotes a draft, so publishing the same body again is how a draft ever reaches a public piece. It is a same-machine guard, not a guarantee across machines.
+
 The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
 ### `tenjin edit <post-id>`

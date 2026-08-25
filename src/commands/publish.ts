@@ -36,6 +36,7 @@ import {
   resolveWriteAuth,
   writeModeNotices,
 } from '../lib/consent';
+import { publishedUrlFor, recordPublished } from '../lib/publish-dedup';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -117,6 +118,29 @@ export async function runPublish(
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
+
+  // ALREADY PUBLISHED FROM THIS MACHINE? Keyed on the body's content hash, not on
+  // a session id: the duplicates this catches come from two agents watching
+  // related sessions, or one agent whose turn ended twice, and the only thing the
+  // two publishes share is the text. Checked HERE — before the scan, before the
+  // consent gate, before the wallet — so a capture ask that fires twice cannot
+  // turn a clean turn end into a confirm prompt or a keystore unlock, and so no
+  // request is made at all.
+  //
+  // DRAFTS ARE OUT, both ways: a draft answers nobody and no command promotes
+  // one, so reaching a public piece MEANS publishing the same body a second time.
+  // Deduping that would make the promotion silently do nothing.
+  if (status !== 'draft') {
+    const already = publishedUrlFor(ctx.dataDir, body);
+    if (already !== null) {
+      // Success, deliberately. The caller is a turn end that already did its
+      // work; failing it would report a broken publish for a piece that is up.
+      return {
+        data: { alreadyPublished: true, url: already },
+        humanLines: [`Already published: ${sanitizeForTerminal(already)}`],
+      };
+    }
+  }
   if (status !== 'draft') warnUnrecorded(ctx, searchIds, stored);
   // THE OTHER SHELF'S SEARCHES ARE NOT THIS SHELF'S TO CLAIM. A publish lands on
   // one shelf; a searchId minted by the other names a row in a database this one
@@ -310,6 +334,11 @@ export async function runPublish(
   // loop: the draft is still the pending answer, and the later real publish is
   // what resolves it.
   const parksPrivately = status === 'draft';
+
+  // The post exists: remember it against the body, so the next publish of the
+  // same text this machine attempts hands back this url instead of creating a
+  // second row. Not for a draft, whose whole purpose is to be published later.
+  if (!parksPrivately) recordPublished(ctx.dataDir, body, result.url);
 
   // One close per id, each reporting for itself: the piece is published and the
   // server has every id, so an unrecorded search warns without costing the rest.

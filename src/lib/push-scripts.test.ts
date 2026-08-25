@@ -1328,9 +1328,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
     const mine = join(pushDirPath, `capture-asked-${SESSION}`);
     const other = join(pushDirPath, 'capture-asked-some-other-session');
     const stale = join(pushDirPath, 'state-a-finished-session.json');
-    for (const path of [mine, other, stale]) await writeFile(path, '{}');
+    // Same split, same reason: a `published-` marker's mtime is pinned at the
+    // publish, and sweeping one early is a duplicate post — the exact thing it
+    // exists to prevent. The Stop hook's pass ages these out.
+    const published = join(pushDirPath, `published-${'a'.repeat(64)}`);
+    for (const path of [mine, other, stale, published]) await writeFile(path, '{}');
     const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
-    for (const path of [mine, other, stale]) await utimes(path, old, old);
+    for (const path of [mine, other, stale, published]) await utimes(path, old, old);
 
     const run = await runScript(pushFailureHookScript(dataDir), failure());
     expect(run.code).toBe(0);
@@ -1339,6 +1343,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
     // Not this pruner's prefix however old: aging these out is the Stop hook's
     // pass, which knows which one to keep.
     expect(existsSync(other)).toBe(true);
+    expect(existsSync(published)).toBe(true);
     // Its own prefix still ages out, so the guard is a split and not a stand-down.
     expect(existsSync(stale)).toBe(false);
   });
@@ -2022,16 +2027,26 @@ describe('the capture ask (Stop)', () => {
     const stale = join(pushDirPath, 'capture-asked-old-session');
     const fresh = join(pushDirPath, 'capture-asked-recent-session');
     const foreign = join(pushDirPath, `state-${SESSION}.json`);
-    for (const path of [stale, fresh, foreign]) await writeFile(path, '{}');
+    // `publish`'s content-hash dedup markers share this directory and this
+    // retention, and this pass is the ONLY thing that ages them out: the push
+    // core skips their prefix exactly as it skips `capture-`.
+    const stalePublish = join(pushDirPath, `published-${'a'.repeat(64)}`);
+    const freshPublish = join(pushDirPath, `published-${'b'.repeat(64)}`);
+    for (const path of [stale, fresh, foreign, stalePublish, freshPublish]) {
+      await writeFile(path, '{}');
+    }
     // Two days back, past the 24h retention the push core uses.
     const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
     await utimes(stale, old, old);
     await utimes(foreign, old, old);
+    await utimes(stalePublish, old, old);
 
     await runScript(stopHookScript(dataDir), stopInput);
 
     expect(existsSync(stale)).toBe(false);
     expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(stalePublish)).toBe(false);
+    expect(existsSync(freshPublish)).toBe(true);
     // This session's own marker survives its own prune: it was just written.
     expect(existsSync(join(pushDirPath, `capture-asked-${SESSION}`))).toBe(true);
     // Not this hook's to age out, however old: the push core owns the rest of

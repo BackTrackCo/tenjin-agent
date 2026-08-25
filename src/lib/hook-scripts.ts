@@ -46,6 +46,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // other at module scope, only from inside a generator that runs later.
 import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
 import { PUSH_STATE_RETENTION_MS } from './paths';
+import { PUBLISHED_MARKER_PREFIX } from './publish-dedup';
 import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
 
 /** Bumped when a body changes; the installer rewrites a script whose text drifts. */
@@ -1560,9 +1561,17 @@ function markerExists(name, sessionId) {
  * turned on.
  *
  * Same retention as that pruner, from the same constant, and the same posture:
- * bounded, best-effort, and never the turn end's problem. Only \`capture-\`
- * markers, because the rest of the directory belongs to the push core and is its
- * to age out.
+ * bounded, best-effort, and never the turn end's problem. Only \`capture-\` and
+ * \`published-\` markers, because the rest of the directory belongs to the push
+ * core and is its to age out.
+ *
+ * \`published-\` markers are \`tenjin publish\`'s content-hash dedup, written on
+ * a successful create and never rewritten. The push core skips them for the same
+ * reason it skips \`capture-\` — a pinned mtime it cannot reason about — so this
+ * pass is the only thing that ages them out, exactly as it is for the capture
+ * markers. No live-marker exclusion is needed: nothing holds one open, and a
+ * swept marker costs at worst one duplicate post a day later rather than a
+ * repeated blocked turn end.
  *
  * THE LIVE SESSION'S OWN MARKER IS NEVER SWEPT, whatever its age. The marker is
  * written once, at first ask, and \`markerExists\` only stats it, so its mtime
@@ -1581,7 +1590,8 @@ function pruneCaptureMarkers(liveSessionId) {
     // it does to a session id cannot make the two spellings disagree.
     const keep = liveSessionId === null ? null : markerPath('capture-asked', liveSessionId);
     for (const name of readdirSync(PUSH_DIR)) {
-      if (!name.startsWith('capture-')) continue;
+      if (!name.startsWith('capture-') && !name.startsWith(${JSON.stringify(PUBLISHED_MARKER_PREFIX)}))
+        continue;
       const path = join(PUSH_DIR, name);
       if (path === keep) continue;
       try {
