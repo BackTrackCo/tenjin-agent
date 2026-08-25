@@ -164,6 +164,63 @@ describe('mergeScanFindings', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0]?.source).toBe('local');
   });
+
+  // Server offsets are per-field, so two one-line fields collide on line 1 as a
+  // matter of course. Collapsing them would leave the operator acking a secret
+  // the server flagged and the render never showed.
+  it('keeps two server findings that share an offset in different fields', () => {
+    const merged = mergeScanFindings(
+      [],
+      [
+        {
+          check: 'email',
+          severity: 'warn',
+          line: 1,
+          span: [8, 22],
+          excerpt: 'x@b.co',
+          field: 'title',
+        },
+        {
+          check: 'email',
+          severity: 'warn',
+          line: 1,
+          span: [8, 22],
+          excerpt: 'y@b.co',
+          field: 'excerpt',
+        },
+      ],
+    );
+    expect(merged).toHaveLength(2);
+    expect(merged.map((f) => f.field)).toEqual(['title', 'excerpt']);
+  });
+
+  // The same secret in two fields is still one finding: the value key collapses
+  // it even though nothing else about the two entries matches.
+  it('still collapses one secret repeated across two fields', () => {
+    const merged = mergeScanFindings(
+      [],
+      [
+        {
+          check: 'email',
+          severity: 'warn',
+          line: 1,
+          span: [8, 22],
+          excerpt: 'x@b.co',
+          field: 'title',
+        },
+        {
+          check: 'email',
+          severity: 'warn',
+          line: 9,
+          span: [0, 6],
+          excerpt: 'x@b.co',
+          field: 'body',
+        },
+      ],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ field: 'title', source: 'server' });
+  });
 });
 
 describe('scanReceipt / scanNoteLines', () => {

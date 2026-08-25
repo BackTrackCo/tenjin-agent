@@ -187,6 +187,15 @@ function valueKey(check: string, excerpt: string): string {
  * corpus versions. Erring toward collapsing is safe (the finding is still
  * rendered, once); erring toward splitting shows the operator the same secret
  * twice and teaches them to skim.
+ *
+ * The offset key is a LOCAL-side key only, and that is the whole reason server
+ * findings are keyed by value alone. Offsets are per-field: the server reports
+ * `line`/`span` relative to the submitted field it matched in, so two findings
+ * from DIFFERENT fields sharing a detector, a line and a span are a coordinate
+ * coincidence rather than one finding, and two different secrets in a one-line
+ * `title` and a one-line `excerpt` collide constantly. Collapsing those would
+ * drop material the operator then acks without ever seeing, which is the one
+ * direction this merge must not err in.
  */
 export function mergeScanFindings(
   local: ScanFinding[],
@@ -228,7 +237,6 @@ export function mergeScanFindings(
       source: 'server',
       ...(f.field !== undefined ? { field: f.field } : {}),
     };
-    byOffset.set(oKey, rendered);
     byValue.set(vKey, rendered);
     out.push(rendered);
   }
