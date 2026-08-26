@@ -131,7 +131,7 @@ export async function runPublish(
   // one, so reaching a public piece MEANS publishing the same body a second time.
   // Deduping that would make the promotion silently do nothing.
   if (status !== 'draft') {
-    const already = publishedUrlFor(ctx.dataDir, body);
+    const already = await publishedUrlFor(ctx.dataDir, body);
     if (already !== null) {
       // Success, deliberately. The caller is a turn end that already did its
       // work; failing it would report a broken publish for a piece that is up.
@@ -341,7 +341,7 @@ export async function runPublish(
   // The post exists: remember it against the body, so the next publish of the
   // same text this machine attempts hands back this url instead of creating a
   // second row. Not for a draft, whose whole purpose is to be published later.
-  if (!parksPrivately) recordPublished(ctx.dataDir, body, result.url);
+  if (!parksPrivately) await recordPublished(ctx.dataDir, body, result.url);
 
   // One close per id, each reporting for itself: the piece is published and the
   // server has every id, so an unrecorded search warns without costing the rest.
