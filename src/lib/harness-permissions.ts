@@ -177,7 +177,10 @@ function retiredFor(mode: PublishMode): Set<string> {
  * `Bash(tenjin candidate list:*)` is the first entry: the candidate pen was
  * removed, and machines installed before that still carry its rule.
  */
-export const LEGACY_ALLOWLIST_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
+export const LEGACY_ALLOWLIST_RULES: readonly string[] = [
+  'Bash(tenjin candidate list:*)',
+  'Bash(tenjin fund:*)',
+];
 
 /**
  * Verb fragments that must never appear in {@link FREE_VERB_RULES}. Asserted by

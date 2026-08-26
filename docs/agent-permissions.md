@@ -373,9 +373,9 @@ Both are denied, never wrongly allowed:
 ## Delegating to a subagent
 
 The free tier is the answer to "what may a read-only subagent run", with nothing
-subtracted. All nine are safe to hand over: `search`, `fund`, `inspect`, `read`,
+subtracted. All nine are safe to hand over: `search`, `wallet fund`, `inspect`, `read`,
 `outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`.
-None can spend and none can move your keys; `fund` mints a checkout link only a
+None can spend and none can move your keys; `wallet fund` mints a checkout link only a
 human can pay.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
