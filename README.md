@@ -135,6 +135,8 @@ tenjin buy <url-or-resource-id>
 tenjin outcome --last --status used
 tenjin publish ./finding.md --price 0.10
 tenjin edit <post-id>
+tenjin profile set --handle <handle>
+tenjin stats
 tenjin wallet show
 tenjin wallet balance
 tenjin fund 5

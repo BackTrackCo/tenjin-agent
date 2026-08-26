@@ -244,6 +244,26 @@ It accepts the card flags from `publish`, plus:
 | `--add-task <text>`     | Append one task. Repeatable.           |
 | `--clear <field>`       | Empty one card field. Repeatable.      |
 
+### `tenjin profile`
+
+Prints the publisher profile behind this wallet: handle, display name, bio, default price. `profile: null` (and a pointer at `profile set`) for a wallet that has never published or claimed a handle. Owner-scoped, so it signs with your wallet on first use and mints a read-scoped 24h session.
+
+### `tenjin profile set`
+
+Claims or renames your handle and sets what bylines and the desk show. Omitted flags keep their stored value; an empty value is a usage error, not a clear. No consent gate: this is an operator-invoked account edit, not content. Mints a `read+write` session on first use.
+
+| Flag                    | Effect                                        |
+| ----------------------- | --------------------------------------------- |
+| `--handle <handle>`     | Word-handle, 2–32 chars of `a-z`, `0-9`, `-`. |
+| `--display-name <name>` | Display name (≤100 chars).                    |
+| `--bio <text>`          | Short bio (≤280 chars).                       |
+
+A taken, reserved, or cooling-down handle comes back as the server's own message with exit 4.
+
+### `tenjin stats`
+
+This month's (UTC) earnings, full reads, and glances across your pieces. `--json` carries `earningsThisMonth` in atomic USDC and `earningsThisMonthUsd` formatted. Per-sale detail lives on the desk URL every publish receipt returns.
+
 ## Wallet and funding
 
 ### `tenjin wallet create`
