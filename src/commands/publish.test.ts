@@ -2068,6 +2068,34 @@ describe('runPublish — server ingest gate', () => {
       });
     }
 
+    // A masked excerpt identifies a value no better on the local side than on the
+    // server's: two same-length secrets redact identically. So a local entry
+    // absorbs ONE server site. A second coincident one renders on its own line
+    // and keeps `serverAddedUnseen` true, which is what holds the run: otherwise
+    // an eligible --yes acked a token covering a finding nothing had rendered.
+    it('holds when two server sites coincide with one local warn', async () => {
+      const { fetch, bodies } = stubGate('scan_needs_ack', {
+        findings: [LOCAL_WALLET, { ...LOCAL_WALLET, line: 9, span: [0, 42] }],
+        ackToken: 'v1.tok.mac',
+      });
+      const err = (await runPublish(
+        baseArgs(await writeDoc(`${WARN}\nTwo coincident server sites.\n`), {
+          mode: 'auto',
+          yes: true,
+        }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ).catch((e: unknown) => e)) as { code: string; fix?: string; details: unknown };
+      expect(err.code).toBe('NEEDS_CONFIRMATION');
+      // The token stays unsent: nothing was acked.
+      expect(bodies()).toHaveLength(1);
+      expect(err.fix).toContain('beyond what your --yes answered');
+      const findings = (err.details as { findings: { source: string }[] }).findings;
+      expect(findings).toHaveLength(2);
+      expect(findings[0]).toMatchObject({ check: 'wallet-address', source: 'both' });
+      expect(findings[1]).toMatchObject({ check: 'wallet-address', source: 'server' });
+    });
+
     // `on` is a standing yes, never a manufactured one: with no --yes on the run
     // there is no yes for it to extend, and `auto` on clean local content holds.
     it('the standing yes does not stand in for a --yes nobody gave', async () => {

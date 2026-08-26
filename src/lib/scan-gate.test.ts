@@ -275,9 +275,40 @@ describe('mergeScanFindings', () => {
     expect(mergeScanFindings([], [entry, { ...entry }])).toHaveLength(1);
   });
 
-  // One local finding, two server sites for the same value: the operator can see
-  // that value in their own file, so it renders once, marked as agreed.
-  it('marks a local finding as both however many server sites report it', () => {
+  // A local entry absorbs ONE server finding, not a queue of them. The local
+  // excerpt is masked too (`secret-assignment` renders `KEY=[redacted N chars]`,
+  // `wallet-address` first-6-last-4), so two distinct values of equal length
+  // collide there exactly as they do server-side. Letting the second vanish into
+  // the first cleared `serverAddedUnseen`, and an eligible --yes then acked a
+  // token covering a finding no render had shown.
+  it('lets one local entry absorb one server finding, not several', () => {
+    const site = (over: Partial<ServerScanFinding>): ServerScanFinding => ({
+      check: 'secret-assignment',
+      severity: 'warn',
+      line: 1,
+      excerpt: 'DEPLOY_API_KEY=[redacted 16 chars]',
+      ...over,
+    });
+    const merged = mergeScanFindings(
+      [
+        {
+          check: 'secret-assignment',
+          severity: 'warn',
+          line: 4,
+          excerpt: 'DEPLOY_API_KEY=[redacted 16 chars]',
+        } as ScanFinding,
+      ],
+      [site({ span: [0, 34], field: 'body' }), site({ span: [80, 114], field: 'body' })],
+    );
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toMatchObject({ line: 4, source: 'both' });
+    // The second renders on its own line, so the run holds instead of acking it.
+    expect(merged[1]).toMatchObject({ line: 1, source: 'server' });
+    expect(merged.some((f) => f.source === 'server')).toBe(true);
+  });
+
+  // The ordinary case is untouched: one occurrence, both scans, one line.
+  it('still collapses the ordinary one-for-one agreement', () => {
     const merged = mergeScanFindings(
       [local()],
       [
@@ -285,14 +316,6 @@ describe('mergeScanFindings', () => {
           check: 'email',
           severity: 'warn',
           line: 1,
-          span: [0, 6],
-          excerpt: 'a@b.co',
-          field: 'title',
-        },
-        {
-          check: 'email',
-          severity: 'warn',
-          line: 9,
           span: [0, 6],
           excerpt: 'a@b.co',
           field: 'body',

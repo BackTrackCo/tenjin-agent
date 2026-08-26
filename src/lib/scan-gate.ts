@@ -199,13 +199,19 @@ function serverSiteKey(f: ServerScanFinding): string {
  * line; collapsing costs material acked unseen. So two entries collapse only
  * where collapsing is provably right, and the two sides have different proofs.
  *
- * ACROSS THE SIDES, by value. The local scan reads the whole file (frontmatter
- * included) while the gate scans the extracted body, so one secret lands on
- * different line numbers and offsets cannot match it up; detector + excerpt can,
- * and a local excerpt the operator can see in their own file is what makes that
- * safe. `byOffset` and `byValue` are LOCAL-side keys, never written by the
- * server loop: reading `byOffset` there collapsed a distinct server finding into
- * a local one whose per-field coordinates merely coincided.
+ * ACROSS THE SIDES, by value and AT MOST ONCE PER LOCAL ENTRY. The local scan
+ * reads the whole file (frontmatter included) while the gate scans the extracted
+ * body, so one secret lands on different line numbers and offsets cannot match
+ * it up; detector + excerpt is the only thing that can. It is not proof either,
+ * since a local excerpt is masked too (`KEY=[redacted 16 chars]` for
+ * `secret-assignment`, first-6-last-4 for `wallet-address`), so two values of
+ * equal length collide there exactly as they do server-side. One match is the
+ * ordinary case and stays collapsed; a SECOND server finding on the same local
+ * entry is the server reporting more than the local render stands for, and it
+ * renders separately rather than vanishing. `byOffset` and `byValue` are
+ * LOCAL-side keys, never written by the server loop: reading `byOffset` there
+ * collapsed a distinct server finding into a local one whose per-field
+ * coordinates merely coincided.
  *
  * WITHIN THE SERVER'S OWN SET, by match site (detector, coordinates, field,
  * excerpt) and not by value. A server excerpt is redacted and can be a fixed
@@ -242,16 +248,23 @@ export function mergeScanFindings(
   }
 
   const sites = new Set<string>();
+  const claimed = new Set<RenderedFinding>();
   for (const f of server) {
     const site = serverSiteKey(f);
     if (sites.has(site)) continue;
     sites.add(site);
-    // The cross-side match, and the ONLY read of a local-side key here. A hit
-    // means the operator can see this value in their own file, which is what
-    // makes collapsing it safe; `byValue` is deliberately not written back, so
-    // one server entry never absorbs another.
+    // The cross-side match, and the ONLY read of a local-side key here. ONE
+    // server finding may collapse into a given local entry, and only one: a
+    // local excerpt is masked too (`KEY=[redacted 16 chars]`, `0xabcd…wxyz`),
+    // so it identifies a value no better than a server excerpt does. One match
+    // is the ordinary case, both scans reporting one occurrence. A SECOND
+    // server finding on the same local entry says the server found more than
+    // the local render stands for, and letting it vanish there cleared
+    // `serverAddedUnseen` and let a `--yes` ack it. It renders on its own line
+    // instead, which also holds the run.
     const agreed = byValue.get(valueKey(f.check, f.excerpt));
-    if (agreed !== undefined) {
+    if (agreed !== undefined && !claimed.has(agreed)) {
+      claimed.add(agreed);
       agreed.source = 'both';
       continue;
     }
