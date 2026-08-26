@@ -89,6 +89,17 @@ const STOP_WATCHDOG_MS = 1500;
  * capture ask open.
  */
 const TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
+/**
+ * How long a background launch with no completion notification keeps the
+ * capture ask deferred. THE FLOOR UNDER THE DEFERRAL: a subagent that dies
+ * without writing its \`<task-notification>\` (killed harness, crashed agent)
+ * would otherwise hold the ask open for the rest of the session — and an
+ * always-on loop's session is the whole run. Past this age the launch is read
+ * as finished and the ask arrives late rather than never, the trade every
+ * other branch of that check already makes. Longer than a real subagent
+ * usually runs; a fork that implements a feature takes 15–25 minutes.
+ */
+const SUBAGENT_STALE_MS = 45 * 60 * 1000;
 const PRIMER_WATCHDOG_MS = 1500;
 
 /** How recent an unresolved MISS has to be for the Stop hook to raise it. */
@@ -1354,12 +1365,13 @@ function stopped(health, nowMs) {
   );
 }
 
-/** How good an answer is, as a number the two legs can be compared on: nothing
- *  or a MISS 0, a 'none'/'moderate' candidate 0/1, a 'strong' one 2. */
-function strengthRank(question, found) {
-  if (found === null || found.decision !== 'CANDIDATES') return 0;
-  const s = judge(question, found).strength;
-  return s === 'strong' ? 2 : s === 'moderate' ? 1 : 0;
+/** One leg's verdict, judged ONCE: nothing or a MISS is null; otherwise the
+ *  judge() result, with \`rank\` beside it so the two legs compare on one
+ *  number — 'none' 0, 'moderate' 1, 'strong' 2. */
+function judgeLeg(question, found) {
+  if (found === null || found.decision !== 'CANDIDATES') return null;
+  const j = judge(question, found);
+  return { ...j, rank: j.strength === 'strong' ? 2 : j.strength === 'moderate' ? 1 : 0 };
 }
 
 async function main() {
@@ -1418,7 +1430,8 @@ async function main() {
   // chance. The push core already falls through on a weak team hit; this leg
   // now does the same, and the public answer replaces the team one only when
   // it is STRONGER, so a team 'moderate' still reaches the SubagentStart cache.
-  if (shelf === 'team' && strengthRank(question, found) < 2) {
+  let judged = judgeLeg(question, found);
+  if (shelf === 'team' && (judged === null || judged.rank < 2)) {
     const leg = legTimeoutMs(deadline, 0);
     if (leg >= SEARCH_MIN_LEG_MS) {
       let second = null;
@@ -1430,8 +1443,13 @@ async function main() {
       // The public leg only replaces an answer that was not useful, so a team
       // MISS is not preferred over a public one — and a public leg that failed
       // leaves the team's own answer, and the team label, exactly as they were.
-      if (second !== null && strengthRank(question, second) > strengthRank(question, found)) {
+      const secondJudged = judgeLeg(question, second);
+      if (
+        second !== null &&
+        (secondJudged === null ? 0 : secondJudged.rank) > (judged === null ? 0 : judged.rank)
+      ) {
         found = second;
+        judged = secondJudged;
         shelf = 'public';
         shelfBase = config.publicShelfUrl;
       }
@@ -1466,7 +1484,8 @@ async function main() {
   // says, because the noise this removes is identical with push off and the
   // ledger is the only place the "would this have been worth showing" question
   // can be answered from later; ledgerAppend creates the directory on demand.
-  const judged = judge(question, found);
+  // \`judged\` was computed once per leg above, on the leg that answered.
+  if (judged === null) return quiet();
   // The subagent arm's handoff (docs/command-reference.md#push-experimental, T5). SubagentStart carries the agent
   // type and nothing else, so what the subagent is being sent to find out is
   // knowable ONLY here, seconds earlier, in the dispatch that spawned it. The
@@ -1641,6 +1660,7 @@ const PUSH_DIR = join(DATA_DIR, ${JSON.stringify(PUSH_DIR_NAME)});
 const LEDGER_PATH = join(DATA_DIR, ${JSON.stringify(PUSH_LEDGER_FILE)});
 const LEDGER_TAIL_BYTES = 262144;
 const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
+const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
 const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
 const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
 
@@ -1876,7 +1896,10 @@ function notificationIds(text) {
  * receipt was a background launch and no notification has named it since.
  *
  * FAIL TOWARD ASKING, everywhere: a missing, unreadable, or unparseable
- * transcript, a launch older than the tail, and every torn line answer false.
+ * transcript, a launch older than the tail, a launch whose last evidence is
+ * older than SUBAGENT_STALE_MS (the floor: a subagent that died without a
+ * notification must not hold the ask open for a whole loop session), and
+ * every torn line answer false.
  * The cost of a false "nothing running" is the ask arriving one turn early,
  * which is where it was before this check; the cost of a false "still running"
  * is a session that is never asked at all.
@@ -1904,10 +1927,13 @@ function subagentsRunning(transcriptPath) {
   } catch {
     return false;
   }
-  const launched = new Set();
+  // Launch id → the transcript time of its latest evidence (the launch, then
+  // the receipt). What the staleness floor below is measured from.
+  const launched = new Map();
   const receipted = new Set();
   const background = new Set();
   const notified = new Set();
+  const now = Date.now();
   for (const line of text.split('\\n')) {
     if (line.length === 0) continue;
     // The prefilter, and the reason this is affordable: a transcript is mostly
@@ -1926,6 +1952,7 @@ function subagentsRunning(transcriptPath) {
       continue;
     }
     if (!isRecord(row) || !isRecord(row.message)) continue;
+    const at = Date.parse(String(row.timestamp));
     const content = row.message.content;
     // A completion notification arrives as a plain string message.
     if (typeof content === 'string') {
@@ -1941,19 +1968,27 @@ function subagentsRunning(transcriptPath) {
           typeof block.id === 'string' &&
           block.id.length > 0
         ) {
-          launched.add(block.id);
+          launched.set(block.id, at);
         }
       } else if (block.type === 'tool_result') {
         const id = block.tool_use_id;
         if (typeof id !== 'string' || id.length === 0) continue;
         receipted.add(id);
-        if (isBackgroundLaunch(resultText(block.content))) background.add(id);
+        if (isBackgroundLaunch(resultText(block.content))) {
+          background.add(id);
+          if (launched.has(id)) launched.set(id, at);
+        }
       } else if (block.type === 'text' && typeof block.text === 'string') {
         for (const id of notificationIds(block.text)) notified.add(id);
       }
     }
   }
-  for (const id of launched) {
+  for (const [id, at] of launched) {
+    // STALE IS FINISHED. A launch whose last evidence is older than the floor
+    // is not believed, whether it never got a receipt or got a background one
+    // and no notification since; an unreadable timestamp reads as stale too,
+    // because the only alternative is an unbounded deferral.
+    if (!Number.isFinite(at) || now - at > SUBAGENT_STALE_MS) continue;
     if (!receipted.has(id)) return true;
     if (background.has(id) && !notified.has(id)) return true;
   }

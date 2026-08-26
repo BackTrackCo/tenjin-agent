@@ -643,8 +643,16 @@ async function pushDecide(args) {
   // counted it, and re-deriving the same verdict costs a 256 KB tail parse in
   // front of every later fire on this arm. A null session has no cache and
   // behaves exactly as it did before.
+  //
+  // STILL COUNTED. The row costs one O_APPEND write and no read, and it is what
+  // keeps "how many fires did the cap swallow" derivable from the ledger — the
+  // number (139 of 226) that found the budget starvation in the first place.
+  // \`cached: true\` marks it as a remembered verdict rather than a fresh one.
   const cappedUntil = loadState(sessionId).capped[triggerKey(args.trigger)];
-  if (Number.isFinite(cappedUntil) && cappedUntil > Date.now()) return null;
+  if (Number.isFinite(cappedUntil) && cappedUntil > Date.now()) {
+    ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap', cached: true });
+    return null;
+  }
   const budget = pushBudget(sessionId);
 
   // Shelf 1 is always \`baseUrl\`. In team mode that IS the team shelf; in public
@@ -718,8 +726,8 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
   // filled up without a new field.
   if (!lookupAllowed(budget, base.trigger)) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap' });
-    // ONE ROW PER BUCKET PER WINDOW, not one per fire: the rest of this
-    // session's fires on this arm return before they reach here.
+    // The rest of this session's fires on this arm return before they reach
+    // here, on a remembered verdict and without the ledger parse.
     rememberCap(sessionId, base.trigger, budget);
     return { kind: 'stop' };
   }
@@ -1230,6 +1238,10 @@ const FAILURE_HEADS = new Set([
   'drizzle-kit', 'prisma', 'alembic', 'knex', 'sequelize', 'flyway', 'liquibase',
   // infrastructure
   'docker', 'docker-compose', 'terraform', 'pulumi',
+  // compilers and git, so every marker above is reachable behind a head that
+  // emits it: rustc's \`error[E…]\`, gcc/clang's \`error:\`, git's \`fatal:\`.
+  // \`git diff --exit-code\` stays quiet: it exits 1 with no marker at all.
+  'git', 'rustc', 'gcc', 'clang', 'cc', 'g++', 'clang++', 'zig',
 ]);
 /** Package managers whose SUBCOMMAND decides: \`pnpm build\` can fail a build,
  *  \`npm ls\` reports a fact and exits 1 to mean "no". */
@@ -1258,6 +1270,24 @@ function commandHeads(command) {
     const words = segment.trim().split(/\s+/).filter((w) => w.length > 0);
     let i = 0;
     let head = '';
+    // A WRAPPER-LED SEGMENT IS SEARCHED WHOLE. \`sudo -u builder pnpm test\`,
+    // \`timeout --signal=KILL 30s pytest\`, \`nice -n 10 pnpm test\`: every
+    // wrapper takes options of its own arity, and encoding each is a losing
+    // game. The allowlist is the authority on what counts, so behind a wrapper
+    // any word that IS an allowlisted head is taken as the command, with the
+    // word after it as the subcommand. Only behind a wrapper: an ordinary
+    // segment's arguments must not be able to authorize it.
+    const first = words.length > 0 ? (words[0].split('/').pop() || words[0]) : '';
+    if (HEAD_SKIP.has(first) || first === 'timeout' || HEAD_RUNNERS.has(first)) {
+      for (let k = 1; k < words.length; k += 1) {
+        const name = words[k].split('/').pop() || words[k];
+        if (FAILURE_HEADS.has(name)) {
+          out.push({ head: name, sub: k + 1 < words.length ? words[k + 1] : '' });
+          break;
+        }
+      }
+      continue;
+    }
     while (i < words.length) {
       const word = words[i];
       const name = word.split('/').pop() || word;

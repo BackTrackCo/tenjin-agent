@@ -1529,6 +1529,74 @@ describe('the failure arm (PostToolUse Bash)', () => {
     await expectQuiet(bash('grep -r foo src', { stdout: '', stderr: '', exit_code: 1 }), hits);
   });
 
+  it('reaches the command behind a wrapper with options', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    for (const command of [
+      'sudo -u builder pnpm test',
+      'timeout --signal=KILL 30s pytest -x',
+      'nice -n 10 pnpm test',
+    ]) {
+      await rm(join(dataDir, PUSH_LEDGER_FILE), { force: true });
+      const run = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: `wrap-${command.length}`,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command },
+          tool_response: {
+            stdout:
+              'FAIL src/a.test.ts\nAssertionError: expected the zod resolver to throw on an optional chain',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      expect(run.code).toBe(0);
+      expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    }
+    expect(queries().length).toBe(3);
+  });
+
+  it('does not let an argument authorize an ordinary command', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'grep -rn pnpm src' },
+        tool_response: { stdout: '', stderr: 'Error: nothing', interrupted: false },
+      }),
+    );
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+  });
+
+  it('fires on a rustc diagnostic, which only rustc emits', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'rustc main.rs' },
+        tool_response: {
+          stdout: '',
+          stderr: 'error[E0425]: cannot find value `x` in this scope\n --> main.rs:2:5',
+          interrupted: false,
+        },
+      }),
+    );
+    expect(run.code).toBe(0);
+    expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+  });
+
   it('says nothing about `git diff --exit-code` reporting a difference', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
@@ -1744,7 +1812,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
    * once; the session remembers it and the rest of its fires on that arm return
    * before they read anything (tenjin-agent#211, item 5).
    */
-  it('remembers a full bucket, so later capped fires write no row and read nothing', async () => {
+  it('remembers a full bucket, so later capped fires are counted without a ledger read', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     await seedLookups('prompt', 8, 0);
@@ -1761,8 +1829,17 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     const second = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(second.stdout).toBe('');
     expect(hits()).toBe(0);
-    // One row per bucket per window, not one per fire.
-    expect((await ledger()).length).toBe(after.length);
+    // Still one row per fire — an O_APPEND write, no read — so the count of
+    // swallowed fires stays derivable; \`cached\` says it was a remembered verdict.
+    const rows = await ledger();
+    expect(rows.length).toBe(after.length + 1);
+    expect(rows.at(-1)).toMatchObject({
+      session: SESSION,
+      trigger: 'prompt',
+      action: 'skipped',
+      reason: 'lookup-cap',
+      cached: true,
+    });
   });
 
   it('is per session: another session still discovers the cap for itself', async () => {
@@ -2395,16 +2472,19 @@ describe('the capture ask (Stop)', () => {
         },
         uuid: `u-${id}`,
         sessionId: SESSION,
+        timestamp: new Date().toISOString(),
       });
 
-    /** The user message carrying that launch's tool_result. */
-    const result = (id: string, text: string): string =>
+    /** The user message carrying that launch's tool_result, stamped now unless
+     *  a case needs it to look old. */
+    const result = (id: string, text: string, at: Date = new Date()): string =>
       JSON.stringify({
         type: 'user',
         message: {
           role: 'user',
           content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text }] }],
         },
+        timestamp: at.toISOString(),
       });
 
     /** The completion that arrives later for a background launch. */
@@ -2444,6 +2524,24 @@ describe('the capture ask (Stop)', () => {
       // The ask has to fire at the REAL end of the turn, so the session must
       // still be eligible at the next Stop.
       expect(existsSync(join(dataDir, 'push', `capture-asked-${SESSION}`))).toBe(false);
+    });
+
+    /**
+     * The floor under the deferral. A subagent that dies without writing its
+     * notification (killed harness, crashed agent) would otherwise hold the ask
+     * open for the rest of the session — the whole run, for an always-on loop.
+     * Past SUBAGENT_STALE_MS the launch is read as finished: asked late, never
+     * "never asked".
+     */
+    it('stops believing a background launch that has gone quiet for too long', async () => {
+      await armed();
+      const path = await writeTranscript([
+        launch('toolu_01S'),
+        result('toolu_01S', ASYNC_RESULT, new Date(Date.now() - 46 * 60 * 1000)),
+      ]);
+      expect(JSON.parse((await runScript(stopHookScript(dataDir), stopWith(path))).stdout)).toEqual(
+        { decision: 'block', reason: publicAsk },
+      );
     });
 
     it('blocks as before once the completion notification has arrived', async () => {
