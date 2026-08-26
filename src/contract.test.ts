@@ -532,6 +532,28 @@ const PUBLISH_OPS: PinnedOp[] = [
     deprecated: false,
     migration: '`tenjin edit` writes through this alone',
   },
+  // The account surface (#208): `tenjin profile` / `profile set` / `stats`.
+  {
+    path: '/api/me',
+    method: 'get',
+    operationId: 'getMe',
+    deprecated: false,
+    migration: '`tenjin profile` reads through this alone',
+  },
+  {
+    path: '/api/me',
+    method: 'put',
+    operationId: 'upsertMe',
+    deprecated: false,
+    migration: '`tenjin profile set` writes through this alone',
+  },
+  {
+    path: '/api/me/stats',
+    method: 'get',
+    operationId: 'getMyStats',
+    deprecated: false,
+    migration: '`tenjin stats` reads through this alone',
+  },
 ];
 
 function assertPostPaths(doc: unknown): void {

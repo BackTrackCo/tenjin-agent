@@ -783,3 +783,176 @@ function writeTransportError(url: string, result: Exclude<HttpResult, { ok: true
     fix: 'Check your network and the configured base URL (`tenjin config get baseUrl`), then retry.',
   });
 }
+
+// ---------------------------------------------------------------------------
+// The account surface (tenjin-agent#208): `tenjin profile [set]` and `tenjin
+// stats`. Owner-scoped like getOwnPost, signed through the same WriteAuth, and
+// riding the same bypass plumbing so a team shelf needs nothing extra.
+// ---------------------------------------------------------------------------
+
+/** The creator row `GET /api/me` returns (null until a first publish or `profile set`). */
+export const creatorProfileSchema = z
+  .object({
+    handle: z.string().nullable(),
+    displayName: z.string().nullable(),
+    walletAddress: z.string(),
+    bio: z.string().nullable(),
+    defaultPrice: z.string().nullable(),
+  })
+  .passthrough();
+export type CreatorProfile = z.infer<typeof creatorProfileSchema>;
+
+const meResponseSchema = z
+  .object({
+    address: z.string(),
+    creator: creatorProfileSchema.nullable(),
+    warnings: z.array(z.string()).optional(),
+  })
+  .passthrough();
+export type MeResponse = z.infer<typeof meResponseSchema>;
+
+/** The fields `tenjin profile set` can send; omitted = kept (the server merges). */
+export interface ProfileUpdateInput {
+  handle?: string;
+  displayName?: string;
+  bio?: string;
+}
+
+const statsSchema = z
+  .object({
+    earningsThisMonth: z.string(),
+    readsThisMonth: z.number(),
+    glancesThisMonth: z.number(),
+  })
+  .passthrough();
+export type MyStats = z.infer<typeof statsSchema>;
+
+/** `GET /api/me`: your own profile. A read: no body, no nonce, exit 1 on failure. */
+export async function getMe(auth: WriteAuth, opts: PublishClientOptions): Promise<MeResponse> {
+  const url = `${trimSlash(opts.baseUrl)}/api/me`;
+  const res = await signedRead(url, auth, opts, 'profile');
+  return parseWith(meResponseSchema, res.json, 'profile');
+}
+
+/** `GET /api/me/stats`: this month's earnings, reads, and glances. */
+export async function getMyStats(auth: WriteAuth, opts: PublishClientOptions): Promise<MyStats> {
+  const url = `${trimSlash(opts.baseUrl)}/api/me/stats`;
+  const res = await signedRead(url, auth, opts, 'stats');
+  return parseWith(statsSchema, res.json, 'stats');
+}
+
+/**
+ * `PUT /api/me`: merge-update the profile (handle claim/rename included). Same
+ * signing and 401-recovery discipline as updatePost, since each PUT burns a
+ * single-use nonce. A rejected write is `PUBLISH_FAILED` with the server's field
+ * keys named, so a taken or reserved handle reads as exactly that.
+ */
+export async function updateMe(
+  input: ProfileUpdateInput,
+  auth: WriteAuth,
+  opts: PublishClientOptions,
+): Promise<MeResponse> {
+  const body: Record<string, string> = {};
+  if (input.handle !== undefined) body.handle = input.handle;
+  if (input.displayName !== undefined) body.displayName = input.displayName;
+  if (input.bio !== undefined) body.bio = input.bio;
+  const url = `${trimSlash(opts.baseUrl)}/api/me`;
+  const bodyStr = JSON.stringify(body);
+
+  let recoveries = 0;
+  for (;;) {
+    const authHeaders = await auth.headersFor({ method: 'PUT', url, body: bodyStr });
+    const res = await httpRequest(url, {
+      method: 'PUT',
+      timeoutMs: opts.timeoutMs,
+      headers: { ...authHeaders },
+      jsonBody: body,
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+      ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    });
+    if (!res.ok) throw writeTransportError(url, res);
+
+    if (res.status === 401 && recoveries < MAX_RECOVERIES) {
+      const code = auth401Code(res);
+      if (await auth.recover(code)) {
+        recoveries++;
+        continue;
+      }
+      throw authError(code, res);
+    }
+    if (res.status === 401) throw authError(auth401Code(res), res);
+    if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+    if (res.status !== 200) throw profileUpdateFailed(res);
+    return parseWith(meResponseSchema, res.json, 'profile update');
+  }
+}
+
+/** The shared GET leg of getMe / getMyStats: signed, 401-recovering, read-class errors. */
+async function signedRead(
+  url: string,
+  auth: WriteAuth,
+  opts: PublishClientOptions,
+  what: string,
+): Promise<HttpResponse> {
+  let recoveries = 0;
+  for (;;) {
+    const authHeaders = await auth.headersFor({ method: 'GET', url });
+    const res = await httpRequest(url, {
+      method: 'GET',
+      timeoutMs: opts.timeoutMs,
+      headers: { accept: 'application/json', ...authHeaders },
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+      ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    });
+    if (!res.ok) throw writeTransportError(url, res);
+
+    if (res.status === 401 && recoveries < MAX_RECOVERIES) {
+      const code = auth401Code(res);
+      if (await auth.recover(code)) {
+        recoveries++;
+        continue;
+      }
+      throw readAuthError(code, res);
+    }
+    if (res.status === 401) throw readAuthError(auth401Code(res), res);
+    if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+    if (res.status !== 200) {
+      throw new CliError(
+        'API_UNREACHABLE',
+        serverMessage(res.json) ?? `Could not read your ${what} (${res.status}).`,
+        {
+          fix: 'Review the server error, then retry.',
+          details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+        },
+      );
+    }
+    return res;
+  }
+}
+
+function parseWith<T>(schema: z.ZodType<T>, json: unknown, what: string): T {
+  const parsed = schema.safeParse(json);
+  if (!parsed.success) {
+    throw new CliError('CONTRACT_MISMATCH', `The ${what} response did not match the contract.`, {
+      fix: 'Update tenjin-cli; the server contract may have changed.',
+      details: parsed.error.issues,
+    });
+  }
+  return parsed.data;
+}
+
+function profileUpdateFailed(res: HttpResponse): CliError {
+  const fields = fieldErrorKeys(res.json);
+  const base = serverMessage(res.json) ?? `Profile update failed (${res.status}).`;
+  return new CliError(
+    'PUBLISH_FAILED',
+    fields.length > 0 ? `${base} (${fields.join(', ')})` : base,
+    {
+      fix:
+        res.status === 409
+          ? 'That handle is taken or cooling down; pick another and re-run `tenjin profile set`.'
+          : 'Correct the reported fields, then re-run `tenjin profile set`.',
+      details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+    },
+  );
+}

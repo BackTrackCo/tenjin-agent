@@ -438,6 +438,37 @@ describe('session command group', () => {
  * the heal's own behavior is covered in lib/skill-heal.test.ts, and the packed
  * binary actually healing a stale skill is covered in scripts/pack-smoke.sh.
  */
+/**
+ * The account verbs (#208). Dispatcher-level only: each reaches a wallet, so
+ * the cases are the ones that resolve BEFORE it — the group and leaves exist,
+ * and `profile set` with nothing to set is USAGE.
+ */
+describe('profile and stats', () => {
+  it('registers `profile set` as a subcommand and `stats` as a bare verb', async () => {
+    const cap = captureIo();
+    expect(await main(['profile', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('set [options]');
+    const cap2 = captureIo();
+    expect(await main(['stats', '--help'], cap2.io)).toBe(0);
+  });
+
+  it('`profile set` with no flags is USAGE before any wallet work', async () => {
+    const cap = captureIo();
+    const code = await main(['profile', 'set', '--json'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout()) as { command: string; error: { code: string } };
+    expect(parsed.command).toBe('profile.set');
+    expect(parsed.error.code).toBe('USAGE');
+  });
+
+  it('the leaves take trailing global flags like every other command', async () => {
+    const cap = captureIo();
+    expect(await main(['profile', 'set', '--handle', 'x', '--timeout', 'abc'], cap.io)).toBe(2);
+    const cap2 = captureIo();
+    expect(await main(['stats', '--timeout', 'abc'], cap2.io)).toBe(2);
+  });
+});
+
 describe('skills self-heal', () => {
   const wiredPath = (): string =>
     join(process.env.HOME!, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
