@@ -1167,8 +1167,11 @@ const ERROR_MARKERS = [
   /AssertionError/,
   /\b[1-9]\d* (?:failed|failing|errors?)\b/i,
   // \`Error:\`, \`TypeError:\`, \`ReferenceError:\`, \`ModuleNotFoundError:\` — the
-  // JS and Python convention of naming the class before the colon.
-  /^[ \t]*\w*Error:/m,
+  // JS and Python convention of naming the class before the colon — and the
+  // lowercase \`error:\` that rustc, gcc, clang, esbuild and git open a
+  // diagnostic line with. Line-start only: "an error: occurred" mid-sentence
+  // is prose.
+  /^[ \t]*(?:\w*Error|error):/m,
   /Traceback \(most recent call last\)/,
   /ModuleNotFoundError|ImportError:/,
   /Cannot find module/i,
