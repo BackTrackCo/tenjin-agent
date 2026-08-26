@@ -146,6 +146,24 @@ describe('buildExactPayment, builder-code attribution', () => {
     expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
   });
 
+  // REGRESSION PIN. The SDK merges the enriched payload onto the server's
+  // extensions as the base and copies a client field only where the server left
+  // it unset, so before the strip a seller that declared its own `info.s` kept
+  // it and Tenjin's code vanished with no error. Any 402 can do this, so this is
+  // the foreign-seller lane, not only the hostile one.
+  it('keeps Tenjin as the only client code when the seller declares its own `s`', async () => {
+    const { paymentRequired } = buildPaymentRequired(
+      {},
+      withBuilderCode('bc_seller01', ['bc_attacker']),
+    );
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
+    const info = builderCodeInfo(payload.extensions);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    // `a` is the seller's own field and still rides untouched.
+    expect(info?.a).toBe('bc_seller01');
+  });
+
   it('sends no builder-code extension to a seller that never advertised one', async () => {
     const { paymentRequired } = buildPaymentRequired();
     const built = await buildExactPayment(paymentRequired, testSigner());

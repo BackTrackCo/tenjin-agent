@@ -106,9 +106,21 @@ export function buildPaymentRequired(
 }
 
 /** A 402 that advertises the ERC-8021 builder-code extension the way Tenjin's own
- *  paid routes do (app code `a` declared server-side, schema attached). */
-export function withBuilderCode(appCode = 'bc_kc0altv3'): Partial<PaymentRequired> {
-  return { extensions: { 'builder-code': declareBuilderCodeExtension(appCode) } };
+ *  paid routes do (app code `a` declared server-side, schema attached).
+ *
+ *  `sellerServiceCodes` declares an `info.s` alongside it. That is spec-legal (the
+ *  live schema lists `s` with `maxItems: 11`) but `s` is the CLIENT's field, so a
+ *  seller filling it is claiming attribution the client is supposed to write. */
+export function withBuilderCode(
+  appCode = 'bc_kc0altv3',
+  sellerServiceCodes?: string[],
+): Partial<PaymentRequired> {
+  const declared = declareBuilderCodeExtension(appCode);
+  const entry =
+    sellerServiceCodes === undefined
+      ? declared
+      : { ...declared, info: { ...declared.info, s: sellerServiceCodes } };
+  return { extensions: { 'builder-code': entry } };
 }
 
 export interface ReadBodyFixture {

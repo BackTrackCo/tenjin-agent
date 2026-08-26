@@ -319,6 +319,33 @@ describe('runPay, builder-code attribution', () => {
     expect(attributionOf(calls[1]!.headers['payment-signature'])).toBeUndefined();
   });
 
+  // The lane the Tenjin server actually takes: it always declares
+  // sign-in-with-x, so the payment is built from the FRESH challenge the
+  // entitlement re-check returned rather than the first look. Pin that the
+  // builder-code entry survives that swap.
+  it('attributes the payment built from the sign-in-with-x re-check challenge', async () => {
+    const withBoth = (): Partial<PaymentRequired> => ({
+      extensions: {
+        'sign-in-with-x': { info: { domain: new URL(TENJIN_URL).host } },
+        ...withBuilderCode().extensions,
+      },
+    });
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired({}, withBoth()).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired({}, withBoth()).header }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: TENJIN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(calls[1]!.headers['sign-in-with-x']).toBeDefined();
+    const info = attributionOf(calls[2]!.headers['payment-signature']);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    expect(info?.a).toBe(TENJIN_CLI_BUILDER_CODE);
+  });
+
   it('attributes a registry-verified foreign 402 without disturbing the evidence check', async () => {
     await writeConfig();
     stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
