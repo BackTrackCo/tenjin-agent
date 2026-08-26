@@ -119,9 +119,9 @@ FIRST settled sale (no register call), and by x402scan once CDP-settled payments
 ## Find a paid answer for a task (agent search)
 
 Mid-task, ask a QUESTION instead of browsing: it matches what pieces actually say (body, title
-and excerpt), with freshness/price/applicability as HARD gates. A `browse` result carries pointers whenever
-anything within your `maxPrice` is discoverable (pointers to browse, not necessarily a match
-on your wording), so browse IS the answer here; a differently phrased question is still worth
+and excerpt), with freshness/price/applicability as HARD gates. This endpoint only searches:
+`matched: 0` is an empty result plus a `hint` pointing at GET `/api/articles`, which is
+where the catalog is browsed. A differently phrased question is still worth
 one retry on this same endpoint. Anonymous,
 no wallet. Matching
 runs on wording and meaning, so send the whole question as one natural-language sentence
