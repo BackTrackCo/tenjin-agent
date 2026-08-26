@@ -1,7 +1,15 @@
 import { CliError } from '../lib/errors';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveWriteAuth } from '../lib/consent';
-import { getMe, updateMe, type CreatorProfile, type MeResponse } from '../lib/posts-api';
+import {
+  getMe,
+  PROFILE_BIO_MAX,
+  PROFILE_DISPLAY_NAME_MAX,
+  PROFILE_HANDLE_RE,
+  updateMe,
+  type CreatorProfile,
+  type MeResponse,
+} from '../lib/posts-api';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { atomicToUsd } from '../lib/money';
 import type { CommandContext, CommandResult } from '../context';
@@ -63,6 +71,23 @@ export async function runProfileSet(
       });
     }
   }
+  // The server's own bounds, applied here so a bad value never reaches the
+  // wallet: a PUT burns a single-use nonce even when it comes back 400.
+  if (args.handle !== undefined && !PROFILE_HANDLE_RE.test(args.handle)) {
+    throw new CliError('USAGE', `Invalid handle: ${JSON.stringify(args.handle)}`, {
+      fix: 'A handle is 2-32 characters of a-z, 0-9, or - (lowercase, no spaces).',
+    });
+  }
+  if (args.displayName !== undefined && args.displayName.length > PROFILE_DISPLAY_NAME_MAX) {
+    throw new CliError('USAGE', `--display-name is over ${PROFILE_DISPLAY_NAME_MAX} characters.`, {
+      fix: 'Shorten the display name.',
+    });
+  }
+  if (args.bio !== undefined && args.bio.length > PROFILE_BIO_MAX) {
+    throw new CliError('USAGE', `--bio is over ${PROFILE_BIO_MAX} characters.`, {
+      fix: 'Shorten the bio.',
+    });
+  }
   const { auth, client } = await connect(ctx, deps, 'read+write');
   const me = await updateMe(
     {
@@ -120,22 +145,26 @@ function receipt(me: MeResponse, what: 'show' | 'set'): CommandResult {
     );
   } else {
     humanLines.push(what === 'set' ? 'Profile updated.' : `Profile for ${me.address}`);
-    humanLines.push(`  handle:        ${c.handle ?? '(none — shown as your address)'}`);
-    humanLines.push(`  display name:  ${c.displayName ?? '(none)'}`);
-    humanLines.push(`  bio:           ${c.bio ?? '(none)'}`);
-    if (c.defaultPrice !== null) {
-      humanLines.push(`  default price: $${atomicToUsd(c.defaultPrice)}`);
-    }
+    humanLines.push(`  handle:        ${orNone(c.handle, '(none — shown as your address)')}`);
+    humanLines.push(`  display name:  ${orNone(c.displayName)}`);
+    humanLines.push(`  bio:           ${orNone(c.bio)}`);
+    humanLines.push(`  default price: $${atomicToUsd(c.defaultPrice)}`);
   }
   for (const w of me.warnings ?? []) humanLines.push(`Note: ${w}`);
   return { data, humanLines };
 }
 
+/** The server stores '' for an unset name/bio and null for an unclaimed handle; both read as unset. */
+function orNone(value: string | null | undefined, none = '(none)'): string {
+  return value === undefined || value === null || value === '' ? none : value;
+}
+
 function pick(c: CreatorProfile) {
+  // Omitted and null both mean "not set"; the envelope says null for either.
   return {
-    handle: c.handle,
-    displayName: c.displayName,
-    bio: c.bio,
+    handle: c.handle ?? null,
+    displayName: c.displayName ?? null,
+    bio: c.bio ?? null,
     defaultPrice: c.defaultPrice,
     walletAddress: c.walletAddress,
   };

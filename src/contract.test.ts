@@ -11,6 +11,10 @@ import {
   resourceEchoSchema,
   SEARCH_ID_MAX,
   SEARCH_ID_WIRE_RE,
+  creatorProfileSchema,
+  PROFILE_BIO_MAX,
+  PROFILE_DISPLAY_NAME_MAX,
+  PROFILE_HANDLE_RE,
 } from './lib/posts-api';
 import { deriveCard } from './lib/card';
 import { CliError } from './lib/errors';
@@ -532,7 +536,9 @@ const PUBLISH_OPS: PinnedOp[] = [
     deprecated: false,
     migration: '`tenjin edit` writes through this alone',
   },
-  // The account surface (#208): `tenjin profile` / `profile set` / `stats`.
+];
+
+const ACCOUNT_OPS: PinnedOp[] = [
   {
     path: '/api/me',
     method: 'get',
@@ -890,6 +896,74 @@ describe('contract fixture pins the publish endpoints', () => {
 // TENJIN_CONTRACT_BASE_URL is set: fetch the live openapi.json and re-run the
 // structural pins (assertions 1-4) against the deployment itself.
 const liveBase = process.env.TENJIN_CONTRACT_BASE_URL;
+/**
+ * The account surface (#208). The CLI's zod schemas are hand-written, so each
+ * required list and bound is pinned here against the fixture rather than trusted
+ * to stay in step by itself.
+ */
+function accountSchema(doc: unknown, name: string): unknown {
+  return get(doc, 'components', 'schemas', name);
+}
+
+function assertAccountShapes(doc: unknown): void {
+  for (const op of ACCOUNT_OPS) assertPinnedOp(doc, op);
+
+  // Creator: what the CLI DEMANDS is what the fixture guarantees, and what the
+  // CLI treats as optional-or-null is NOT in the required list.
+  const creatorRequired = get(accountSchema(doc, 'Creator'), 'required') as string[];
+  for (const field of ['walletAddress', 'defaultPrice']) {
+    expect(creatorRequired, `Creator no longer guarantees ${field}`).toContain(field);
+  }
+  for (const field of ['handle', 'displayName', 'bio']) {
+    expect(creatorRequired, `Creator now requires ${field}; loosen the CLI schema`).not.toContain(
+      field,
+    );
+    expect(get(accountSchema(doc, 'Creator'), 'properties', field, 'type')).toContain('null');
+  }
+  expect(get(accountSchema(doc, 'MeResponse'), 'required')).toEqual(['address', 'creator']);
+
+  // Stats: all three scalars required, earnings a string (atomic USDC).
+  expect(get(accountSchema(doc, 'Stats'), 'required')).toEqual([
+    'earningsThisMonth',
+    'readsThisMonth',
+    'glancesThisMonth',
+  ]);
+  expect(get(accountSchema(doc, 'Stats'), 'properties', 'earningsThisMonth', 'type')).toBe(
+    'string',
+  );
+
+  // Profile (the PUT body): every key updateMe can send is declared, the object
+  // is closed, and the bounds the CLI enforces at the edge are the server's.
+  const profile = accountSchema(doc, 'Profile');
+  expect(get(profile, 'additionalProperties')).toBe(false);
+  for (const field of ['handle', 'displayName', 'bio']) {
+    expect(get(profile, 'properties', field), `Profile.${field} missing`).toBeDefined();
+  }
+  expect(get(profile, 'required'), 'Profile fields must all be optional for merge').toBeUndefined();
+  expect(get(profile, 'properties', 'handle', 'pattern')).toBe(PROFILE_HANDLE_RE.source);
+  expect(get(profile, 'properties', 'displayName', 'maxLength')).toBe(PROFILE_DISPLAY_NAME_MAX);
+  expect(get(profile, 'properties', 'bio', 'maxLength')).toBe(PROFILE_BIO_MAX);
+}
+
+describe('contract fixture pins the account endpoints', () => {
+  it('declares GET/PUT /api/me and GET /api/me/stats with the shapes the CLI relies on', () => {
+    assertAccountShapes(fixtureDoc);
+  });
+
+  it('a Creator that omits handle/displayName/bio parses (they are not required)', () => {
+    const parsed = creatorProfileSchema.safeParse({
+      id: 'x',
+      walletAddress: '0xabc',
+      defaultPrice: '0',
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('a Creator without defaultPrice is a contract mismatch, since the fixture requires it', () => {
+    expect(creatorProfileSchema.safeParse({ id: 'x', walletAddress: '0xabc' }).success).toBe(false);
+  });
+});
+
 describe.skipIf(liveBase === undefined || liveBase === '')(
   'live contract at TENJIN_CONTRACT_BASE_URL',
   () => {
@@ -922,6 +996,10 @@ describe.skipIf(liveBase === undefined || liveBase === '')(
       assertPostPaths(liveDoc);
       assertPublishContract(liveDoc);
       assertUpdateContract(liveDoc);
+    });
+
+    it('declares the account endpoints and shapes', () => {
+      assertAccountShapes(liveDoc);
     });
 
     it('the 402 preview declares the optional answer card', () => {

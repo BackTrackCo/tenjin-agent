@@ -790,18 +790,27 @@ function writeTransportError(url: string, result: Exclude<HttpResult, { ok: true
 // riding the same bypass plumbing so a team shelf needs nothing extra.
 // ---------------------------------------------------------------------------
 
-/** The creator row `GET /api/me` returns (null until a first publish or `profile set`). */
+/**
+ * The creator row `GET /api/me` returns (null until a first publish or `profile
+ * set`). Mirrors the fixture's `Creator`: `walletAddress` and `defaultPrice` are
+ * required and non-null; `handle`, `displayName`, `bio` are nullable AND
+ * optional (`nullish`), so a contract-legal response that omits them parses.
+ * contract.test.ts pins both lists against the fixture.
+ */
 export const creatorProfileSchema = z
   .object({
-    handle: z.string().nullable(),
-    displayName: z.string().nullable(),
+    handle: z.string().nullish(),
+    displayName: z.string().nullish(),
     walletAddress: z.string(),
-    bio: z.string().nullable(),
-    defaultPrice: z.string().nullable(),
+    bio: z.string().nullish(),
+    defaultPrice: z.string(),
   })
   .passthrough();
 export type CreatorProfile = z.infer<typeof creatorProfileSchema>;
 
+// `warnings` is what PUT /api/me really returns (the unclaimed-handle nudge,
+// same convention as POST /api/posts) but the published MeResponse schema does
+// not declare it yet; optional here so a spec that catches up changes nothing.
 const meResponseSchema = z
   .object({
     address: z.string(),
@@ -811,7 +820,21 @@ const meResponseSchema = z
   .passthrough();
 export type MeResponse = z.infer<typeof meResponseSchema>;
 
-/** The fields `tenjin profile set` can send; omitted = kept (the server merges). */
+/**
+ * The bounds the server's `Profile` request schema publishes, checked at the
+ * edge so a bad value costs no signature and burns no nonce. Pinned against the
+ * fixture in contract.test.ts.
+ */
+export const PROFILE_HANDLE_RE = /^[a-z0-9-]{2,32}$/;
+export const PROFILE_DISPLAY_NAME_MAX = 100;
+export const PROFILE_BIO_MAX = 280;
+
+/**
+ * The fields `tenjin profile set` can send. Omitted = kept: the server's
+ * upsertProfile spreads only the keys present into a partial UPDATE (verified
+ * against lib/creators.ts on tenjin main, PR #215 review), and an explicit null
+ * is a 400, so there is no clear path and none is offered.
+ */
 export interface ProfileUpdateInput {
   handle?: string;
   displayName?: string;
@@ -948,11 +971,20 @@ function profileUpdateFailed(res: HttpResponse): CliError {
     'PUBLISH_FAILED',
     fields.length > 0 ? `${base} (${fields.join(', ')})` : base,
     {
-      fix:
-        res.status === 409
-          ? 'That handle is taken or cooling down; pick another and re-run `tenjin profile set`.'
-          : 'Correct the reported fields, then re-run `tenjin profile set`.',
+      fix: profileUpdateFix(res),
       details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
     },
   );
+}
+
+/** The 409 codes PUT /api/me documents each want a different next step. */
+function profileUpdateFix(res: HttpResponse): string {
+  const code = bodyErrorCode(res.json);
+  if (code === 'account_deleted') {
+    return 'This wallet\u2019s account was deleted; there is no resurrection flow, so publish from another wallet.';
+  }
+  if (res.status === 409) {
+    return 'That handle is taken or cooling down; pick another and re-run `tenjin profile set`.';
+  }
+  return 'Correct the reported fields, then re-run `tenjin profile set`.';
 }

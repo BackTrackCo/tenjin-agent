@@ -193,6 +193,57 @@ describe('tenjin profile set', () => {
     expect(s.calls).toHaveLength(0);
   });
 
+  it.each([
+    [{ handle: 'Foo Bar' }, 'Invalid handle'],
+    [{ handle: 'a' }, 'Invalid handle'],
+    [{ displayName: 'x'.repeat(101) }, '--display-name is over 100'],
+    [{ bio: 'x'.repeat(281) }, '--bio is over 280'],
+  ])('%j is USAGE at the edge: no signature, no nonce burned', async (flags, message) => {
+    const s = stub(() => json(500, {}));
+    const p = provider();
+    await expect(
+      runProfileSet(flags, makeCtx(), deps(s.fetch, { provider: p.provider })),
+    ).rejects.toMatchObject({ code: 'USAGE', message: expect.stringContaining(message) });
+    expect(s.calls).toHaveLength(0);
+    expect(p.signCount()).toBe(0);
+  });
+
+  it('a Creator that omits the optional fields still renders, as unset', async () => {
+    const s = stub(() =>
+      json(200, {
+        address: ADDRESS,
+        creator: { id: 'x', walletAddress: ADDRESS.toLowerCase(), defaultPrice: '0' },
+      }),
+    );
+    const res = await runProfileShow(makeCtx(), deps(s.fetch));
+    expect((res.data as { profile: { handle: null } }).profile).toEqual({
+      handle: null,
+      displayName: null,
+      bio: null,
+      defaultPrice: '0',
+      walletAddress: ADDRESS.toLowerCase(),
+    });
+    expect(res.humanLines?.join('\n')).toContain('display name:  (none)');
+  });
+
+  it('an empty stored display name reads as unset, like the server stores it', async () => {
+    const s = stub(() => json(200, { address: ADDRESS, creator: { ...CREATOR, displayName: '' } }));
+    const res = await runProfileShow(makeCtx(), deps(s.fetch));
+    expect(res.humanLines?.join('\n')).toContain('display name:  (none)');
+  });
+
+  it('a deleted account (409 account_deleted) does not suggest another handle', async () => {
+    const s = stub(() =>
+      json(409, { error: { code: 'account_deleted', message: 'Account deleted' } }),
+    );
+    await expect(runProfileSet({ handle: 'iris' }, makeCtx(), deps(s.fetch))).rejects.toMatchObject(
+      {
+        code: 'PUBLISH_FAILED',
+        fix: expect.stringContaining('deleted'),
+      },
+    );
+  });
+
   it('surfaces the server warnings (unclaimed-handle nudge) on the receipt', async () => {
     const s = stub(() =>
       json(200, {
@@ -295,7 +346,7 @@ describe('team shelf', () => {
         : json(200, { address: ADDRESS, creator: CREATOR }),
     );
     await runProfileShow(teamCtx(), deps(s.fetch));
-    await runProfileSet({ handle: 'v' }, teamCtx(), deps(s.fetch));
+    await runProfileSet({ handle: 'vraj' }, teamCtx(), deps(s.fetch));
     await runStats(teamCtx(), deps(s.fetch));
     expect(s.calls).toHaveLength(3);
     for (const c of s.calls) {
