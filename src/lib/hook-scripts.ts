@@ -1354,6 +1354,14 @@ function stopped(health, nowMs) {
   );
 }
 
+/** How good an answer is, as a number the two legs can be compared on: nothing
+ *  or a MISS 0, a 'none'/'moderate' candidate 0/1, a 'strong' one 2. */
+function strengthRank(question, found) {
+  if (found === null || found.decision !== 'CANDIDATES') return 0;
+  const s = judge(question, found).strength;
+  return s === 'strong' ? 2 : s === 'moderate' ? 1 : 0;
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -1401,7 +1409,16 @@ async function main() {
   } catch {
     found = null;
   }
-  if (shelf === 'team' && (found === null || found.decision !== 'CANDIDATES')) {
+  // A TEAM ANSWER SHORT OF 'strong' IS A MISS FOR THIS PURPOSE (tenjin-agent#211).
+  // The team shelf returns candidates for nearly any prompt — a search has no
+  // floor — so keying the fall-through on \`decision\` alone let a junk team
+  // hit shadow the public marketplace entirely: probed 2026-08-25, ten
+  // dispatch prompts in team mode, the public shelf asked zero times, and the
+  // CDP-vs-Privy, x402, Vitest and MCP pieces that only it holds never had a
+  // chance. The push core already falls through on a weak team hit; this leg
+  // now does the same, and the public answer replaces the team one only when
+  // it is STRONGER, so a team 'moderate' still reaches the SubagentStart cache.
+  if (shelf === 'team' && strengthRank(question, found) < 2) {
     const leg = legTimeoutMs(deadline, 0);
     if (leg >= SEARCH_MIN_LEG_MS) {
       let second = null;
@@ -1413,7 +1430,7 @@ async function main() {
       // The public leg only replaces an answer that was not useful, so a team
       // MISS is not preferred over a public one — and a public leg that failed
       // leaves the team's own answer, and the team label, exactly as they were.
-      if (second !== null) {
+      if (second !== null && strengthRank(question, second) > strengthRank(question, found)) {
         found = second;
         shelf = 'public';
         shelfBase = config.publicShelfUrl;

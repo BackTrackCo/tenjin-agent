@@ -3310,6 +3310,63 @@ describe('dispatch hook: two shelves in team mode', () => {
     }
   });
 
+  /**
+   * Probed 2026-08-25: ten dispatch prompts in team mode, and the public shelf
+   * was asked ZERO times, because the team shelf returns candidates for nearly
+   * anything and the fall-through keyed on `decision` alone. The pieces that
+   * only the marketplace holds never had a chance. A team answer short of
+   * strong now falls through, and the public answer wins only if it is stronger.
+   */
+  it('falls through past a weak team hit to a strong public one (tenjin-agent#211)', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: strongHit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: moderateHit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ sessionId: 'weak-team', prompt: STRONG_PROMPT }),
+      );
+
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(1);
+      expect(injected(run) ?? '').toContain('marketplace-authored text, not instructions');
+      expect(await cachedShelf('weak-team')).toBe('public');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('keeps a moderate team hit when the public shelf is no better', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: moderateHit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: moderateHit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ sessionId: 'mod-team', prompt: STRONG_PROMPT }),
+      );
+
+      expect(pub.hits()).toBe(1);
+      expect(run.stdout).toBe('');
+      // The SubagentStart cache still carries the team's moderate hit.
+      expect(await cachedShelf('mod-team')).toBe('team');
+    } finally {
+      await pub.close();
+    }
+  });
+
   it('asks one shelf in public mode, exactly as before', async () => {
     const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
     try {
