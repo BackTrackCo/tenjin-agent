@@ -99,10 +99,12 @@ describe('runConfigList', () => {
     // REDACTED even here, on a fresh dir where the value is empty: the rendered
     // shape must not depend on whether there is a secret to leak.
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
+    expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
-    // + 2 publish.* + 6 hooks.* (webSearch, agentDispatch, stopNag,
-    // sessionPrimer, push, capture) + 1 update.mode.
-    expect(humanLines).toHaveLength(21);
+    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 6 hooks.*
+    // (webSearch, agentDispatch, stopNag, sessionPrimer, push, capture)
+    // + 1 update.mode.
+    expect(humanLines).toHaveLength(22);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -468,6 +470,58 @@ describe('publish.defaultPrice key', () => {
     await runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), await hermeticHome());
     await runConfigSet({ key: 'publish.defaultPrice', value: '0.5' }, makeCtx());
     expect(await readRawFile()).toEqual({ publish: { mode: 'review', defaultPrice: '500000' } });
+  });
+});
+
+/**
+ * The consent seam the held payload sends operators to: a scan-gate hold whose
+ * `fix` names `tenjin config set publish.ackServerWarnings on`, so the command it
+ * names has to work and has to refuse a value it does not know.
+ */
+describe('publish.ackServerWarnings key', () => {
+  it.each(['mode', 'on', 'off'] as const)('round-trips %s through the file', async (value) => {
+    const set = await runConfigSet(
+      { key: 'publish.ackServerWarnings', value },
+      makeCtx(),
+      await hermeticHome(),
+    );
+    expect(set.data).toEqual({ key: 'publish.ackServerWarnings', value, source: 'file' });
+    const get = await runConfigGet({ key: 'publish.ackServerWarnings' }, makeCtx());
+    expect(get.data).toEqual({ key: 'publish.ackServerWarnings', value, source: 'file' });
+    expect(await readRawFile()).toEqual({ publish: { ackServerWarnings: value } });
+  });
+
+  // A typo must not land on the looser reading by accident: this key decides
+  // whether one --yes covers the marketplace's own findings.
+  it.each(['yes', 'true', 'ON', 'auto', ''])('rejects %j as USAGE', async (bad) => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.ackServerWarnings', value: bad }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+  });
+
+  it('merges with the sibling publish subkeys rather than replacing them', async () => {
+    await runConfigSet(
+      { key: 'publish.mode', value: 'full-auto' },
+      makeCtx(),
+      await hermeticHome(),
+    );
+    await runConfigSet({ key: 'publish.ackServerWarnings', value: 'off' }, makeCtx());
+    expect(await readRawFile()).toEqual({
+      publish: { mode: 'full-auto', ackServerWarnings: 'off' },
+    });
+  });
+
+  // Setting it is not a mode change, so it must not touch the harness allowlist
+  // the way `config set publish.mode` deliberately does.
+  it('does not sync the harness allowlist the way publish.mode does', async () => {
+    const set = await runConfigSet(
+      { key: 'publish.ackServerWarnings', value: 'on' },
+      makeCtx(),
+      await hermeticHome(),
+    );
+    expect(set.data).not.toHaveProperty('allowlist');
   });
 });
 

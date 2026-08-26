@@ -63,6 +63,33 @@ that already asks for that exact bump, so running it twice is safe.
 Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived, per-run
 token, so there is **no `NPM_TOKEN`** to store or rotate.
 
+## Server-coupled releases
+
+Some releases gate a server-side flag flip in the `tenjin` repo. The flip waits
+for the CLI release to reach operators, so the order is: ship here, confirm
+adoption, then flip there. Never the reverse.
+
+Open couplings:
+
+- **Ingest scan gate, warn tier (`SCAN_WARN_MODE`).** The gate in
+  `BackTrackCo/tenjin` runs the publish scan server-side in the shared write
+  path. Its block tier is live; its warn tier ships in `advisory` mode, where a
+  warn-bearing publish succeeds and the findings ride the success response. The
+  `enforce` value instead rejects with `scan_needs_ack` plus an ack token, which
+  only a CLI carrying the ack flow (`src/lib/scan-gate.ts`, first released here)
+  can answer. Flipping the env to `enforce` before that release has propagated
+  turns every warn-tier publish from an older CLI into an unrecoverable exit-4
+  write failure. `tenjin update` also does not rewrite installed hook scripts
+  (tenjin-agent#171), so adoption lags a release; wait for it.
+
+  **Team shelves stay advisory.** A team deployment runs the same gate, because
+  it sits in the shared write path, and it keeps the block tier on purpose. It
+  sets no `SCAN_WARN_MODE`, so its warn tier reports on the success response and
+  holds nothing, and this coupling does not ask you to flip it there. Under
+  `enforce` a shelf would re-impose exactly the warn findings the team drop
+  (`survivesTeamDrop`, `src/lib/scan.ts`) exists to remove, so flipping it is a
+  deliberate change of what a team note is allowed to carry, not a rollout step.
+
 ## One-time owner setup
 
 Credentials are configured on this repo (`gh variable list` / `gh secret list` to

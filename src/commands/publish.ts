@@ -34,9 +34,11 @@ import {
   needsConfirmation,
   publicFinding,
   resolveWriteAuth,
+  throughScanGate,
   writeModeNotices,
 } from '../lib/consent';
 import { publishedUrlFor, recordPublished } from '../lib/publish-dedup';
+import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -93,6 +95,14 @@ export interface PublishDeps {
    *  by default, `searchId` from the MCP tool. A dep and not an arg because
    *  `publishInput`'s `satisfies` would expose a new PublishArgs key to agents. */
   searchIdLabel?: string;
+  /**
+   * Force the answer to the server gate's warn tier, whatever `publish.mode` and
+   * `publish.ackServerWarnings` say. For an IN-PROCESS caller whose answer is not
+   * the operator's to configure: an unattended lane passes `false` so a server
+   * warn drops its candidate to a draft rather than being acked by a config
+   * value. The operator-facing switch is `publish.ackServerWarnings`, not this.
+   */
+  ackServerWarnings?: boolean;
 }
 
 export async function runPublish(
@@ -326,11 +336,26 @@ export async function runPublish(
     ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
   };
 
-  const result = await publishPost(input, auth, {
+  const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
     ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  };
+  // The server ingest gate runs the same rule corpus in the marketplace's write
+  // path, so its warn tier joins this command's exit-3 flow rather than arriving
+  // as an opaque write failure. Its block tier has no acknowledgement path.
+  const result = await throughScanGate({
+    send: (scanAck) =>
+      publishPost(scanAck === undefined ? input : { ...input, scanAck }, auth, client),
+    localWarns: warns,
+    mode: settings.mode,
+    yes: args.yes === true,
+    ackSetting: settings.ackServerWarnings,
+    ...(deps.ackServerWarnings !== undefined ? { ackOverride: deps.ackServerWarnings } : {}),
+    detail: { mode: settings.mode, price: { atomic: price.atomic, usd: price.usd } },
+    noun: 'Publish',
+    heldSuffix: `, price $${price.usd}`,
   });
 
   // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
@@ -529,12 +554,18 @@ async function closeNamedSearch(
 }
 
 /**
- * The deterministic scan over the draft AND the derived card's text, so a secret
- * reaches the same gates whether it arrives in the body, in frontmatter, or via a
- * card-authoring flag (`--provenance`, `--scope`, …) — the card ships to the
- * PUBLIC card, so a flag secret must block exactly like an in-file one. Deduped
- * by check+excerpt so a frontmatter value (present in both raw and the card) is
- * not double-counted.
+ * The deterministic scan over the draft, the typed `--excerpt`, AND the derived
+ * card's text, so a secret reaches the same gates whether it arrives in the body,
+ * in frontmatter, in the excerpt flag, or via a card-authoring flag
+ * (`--provenance`, `--scope`, …), all of it shipping to the PUBLIC page, so a flag
+ * secret must block exactly like an in-file one. Deduped by check+excerpt so a
+ * frontmatter value (present in both raw and the card) is not double-counted.
+ *
+ * `args.excerpt` is scanned here and not only inside `raw` because it is the one
+ * shipped field that never passes through the file: a frontmatter excerpt is in
+ * `raw` already, a flag excerpt was not covered at all, and that is the gap that
+ * made "a block-tier secret never leaves the machine" untrue. `edit.ts` has
+ * always scanned its own typed excerpt (`shippedTypedText`).
  *
  * The scan context carries the source project's git remote slugs (offline FS
  * read, best-effort): a draft quoting its own project's repo/org warns as a
@@ -550,7 +581,11 @@ async function scanDraft(
 ): Promise<ScanFinding[]> {
   const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
   const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
-  return dedupeFindings([...scan(raw, scanContext), ...scan(cardScanText(card), scanContext)]);
+  return dedupeFindings([
+    ...scan(raw, scanContext),
+    ...scan(args.excerpt ?? '', scanContext),
+    ...scan(cardScanText(card), scanContext),
+  ]);
 }
 
 /** The Markdown to publish. A missing path is USAGE before any wallet touch. */
@@ -584,6 +619,7 @@ function receipt(
         ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
         : 'Published without an answer card: ranks below every carded piece in agent search.',
     ...searches.filter((s) => s.closed).map(closeLine),
+    ...scanNoteLines(result.scan),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -599,6 +635,7 @@ function receipt(
       // batch has no single one to repeat.
       ...(searches.length === 1 ? { search: searches[0] } : {}),
       ...(searches.length > 0 ? { searches } : {}),
+      ...(result.scan !== undefined ? { scan: scanReceipt(result.scan) } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,

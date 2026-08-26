@@ -307,26 +307,27 @@ Escape hatch for moving USDC out of the agent wallet. It is deliberately not par
 
 Common keys:
 
-| Key                    | Default                    | Effect                                                                                                                                |
-| ---------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `maxAutoSpend`         | `0`                        | Auto-approve a read up to this amount.                                                                                                |
-| `sessionBudget`        | `0`                        | Session auto-spend ceiling; `0` means no ceiling once auto-spend is enabled.                                                          |
-| `confirm`              | `always`                   | When to ask before paying.                                                                                                            |
-| `sendMaxAmount`        | unset                      | Hard per-send cap. Unset means `send` refuses.                                                                                        |
-| `allowlistCreators`    | empty                      | Restrict auto-pay by creator handle.                                                                                                  |
-| `baseUrl`              | `https://tenjin.blog`      | Tenjin API base URL: what `publish`/`read`/`search` talk to. See [Team shelf](#team-shelf).                                           |
-| `publicShelfUrl`       | `https://tenjin.blog`      | The public marketplace, consume-only: the second shelf a team-mode search falls through to.                                           |
-| `shelfBypassSecret`    | unset                      | The team shelf's protection-bypass secret; setting it turns team mode on. Printed as `set`/`unset`, never echoed.                     |
-| `rpcUrl`               | `https://mainnet.base.org` | Base RPC endpoint.                                                                                                                    |
-| `evalCohort`           | `false`                    | Opt into 90-day query retention for retrieval evaluation.                                                                             |
-| `publish.mode`         | `review`                   | Publish consent mode.                                                                                                                 |
-| `publish.defaultPrice` | `0.10`                     | Price used when none is given.                                                                                                        |
-| `hooks.webSearch`      | `auto`                     | WebSearch hook behavior: `auto`, `remind`, `off`.                                                                                     |
-| `hooks.agentDispatch`  | `auto`                     | Subagent-dispatch hook (most sensitive payload): `auto`, `remind`, `off` (disjoint).                                                  |
-| `hooks.stopNag`        | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.                                                           |
-| `hooks.sessionPrimer`  | `on`                       | Session-start search-first primer: `on`, `off`.                                                                                       |
-| `hooks.push`           | `off`                      | Push experiment master switch: `on`, `off`. Set through `tenjin push on/off`, not `config set`, so the wiring step runs alongside it. |
-| `hooks.capture`        | `off`                      | End-of-session publish prompt: `block`, `nudge`, `off`. See [Stop-hook capture](#stop-hook-capture).                                  |
+| Key                         | Default                    | Effect                                                                                                                                          |
+| --------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxAutoSpend`              | `0`                        | Auto-approve a read up to this amount.                                                                                                          |
+| `sessionBudget`             | `0`                        | Session auto-spend ceiling; `0` means no ceiling once auto-spend is enabled.                                                                    |
+| `confirm`                   | `always`                   | When to ask before paying.                                                                                                                      |
+| `sendMaxAmount`             | unset                      | Hard per-send cap. Unset means `send` refuses.                                                                                                  |
+| `allowlistCreators`         | empty                      | Restrict auto-pay by creator handle.                                                                                                            |
+| `baseUrl`                   | `https://tenjin.blog`      | Tenjin API base URL: what `publish`/`read`/`search` talk to. See [Team shelf](#team-shelf).                                                     |
+| `publicShelfUrl`            | `https://tenjin.blog`      | The public marketplace, consume-only: the second shelf a team-mode search falls through to.                                                     |
+| `shelfBypassSecret`         | unset                      | The team shelf's protection-bypass secret; setting it turns team mode on. Printed as `set`/`unset`, never echoed.                               |
+| `rpcUrl`                    | `https://mainnet.base.org` | Base RPC endpoint.                                                                                                                              |
+| `evalCohort`                | `false`                    | Opt into 90-day query retention for retrieval evaluation.                                                                                       |
+| `publish.mode`              | `review`                   | Publish consent mode.                                                                                                                           |
+| `publish.defaultPrice`      | `0.10`                     | Price used when none is given.                                                                                                                  |
+| `publish.ackServerWarnings` | `mode`                     | Whether a yes covers the marketplace scan's warn findings: `mode`, `on`, `off`. See [safety-model.md](./safety-model.md#publishing-boundaries). |
+| `hooks.webSearch`           | `auto`                     | WebSearch hook behavior: `auto`, `remind`, `off`.                                                                                               |
+| `hooks.agentDispatch`       | `auto`                     | Subagent-dispatch hook (most sensitive payload): `auto`, `remind`, `off` (disjoint).                                                            |
+| `hooks.stopNag`             | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.                                                                     |
+| `hooks.sessionPrimer`       | `on`                       | Session-start search-first primer: `on`, `off`.                                                                                                 |
+| `hooks.push`                | `off`                      | Push experiment master switch: `on`, `off`. Set through `tenjin push on/off`, not `config set`, so the wiring step runs alongside it.           |
+| `hooks.capture`             | `off`                      | End-of-session publish prompt: `block`, `nudge`, `off`. See [Stop-hook capture](#stop-hook-capture).                                            |
 
 ## Push (experimental)
 

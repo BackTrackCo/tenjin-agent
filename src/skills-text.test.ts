@@ -933,7 +933,7 @@ describe('the public render did not move', () => {
   // unshaped SKILL.md again. The team arm keeps its own browse-only line.
   //
   // Re-pinned again for the scan hardening: the public arm's warn triage now names
-  // the detectors this branch adds (`private-network-endpoint`, `high-entropy-string`,
+  // the detectors that branch added (`private-network-endpoint`, `high-entropy-string`,
   // `collaboration-url`, `cloud-resource-id`, `env-dump-block`) and the block tier
   // gained seed phrases. Only tenjin-publish's else arm moved; tenjin-search is
   // untouched, which is why its digest still holds.
@@ -943,15 +943,21 @@ describe('the public render did not move', () => {
   // families (TOTP provisioning URIs is what the public arm was missing), and the
   // "usually fine" warn bucket got back the qualifiers that make it conditional.
   //
+  // Re-pinned again for the marketplace ingest gate: a `--yes` re-run can now hit
+  // a SECOND exit 3 carrying findings marked `[server]` that the first payload
+  // could not have shown, and an agent told only to re-run with `--yes` would
+  // loop on it. Both arms moved; the team arm also drops the claim that the
+  // survivors are the only findings there are, since the shelf scans at ingest.
+  //
   // Re-pinned merging main into #158: #158's own wallet fund rename touches
   // skills/tenjin-search/SKILL.md's fund line outside any `tenjin:when` arm,
-  // so tenjin-search's digest carries that rename on top of main's unshaped
-  // text. tenjin-publish is untouched by #158, so it keeps whatever main's
-  // own chain above already pinned.
+  // so tenjin-search's digest carries that rename on top of whatever main's
+  // own chain above pins. tenjin-publish is untouched by #158, so it keeps
+  // main's value unchanged.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': 'c59faaebcd6e2030376d426aee9e9a7a',
-      'tenjin-publish': 'b5312fcaf8aefad153ed4433b833dc22',
+      'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
     });
   });
 
