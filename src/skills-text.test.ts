@@ -933,14 +933,14 @@ describe('the public render did not move', () => {
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
-  // Re-pinned when #203's skill resync landed on main: it changed the PUBLIC
-  // guidance on purpose (an incomplete card "just ranks below every complete one
-  // in agent search" rather than the older browse-only wording), so the else arm
-  // carries main's sentence and the public render is byte-for-byte main's
-  // unshaped SKILL.md again. The team arm keeps its own browse-only line.
+  // Re-pinned when #158 moved `tenjin fund` to `tenjin wallet fund`: the
+  // rename touches skills/tenjin-search/SKILL.md's fund line outside any
+  // `tenjin:when` arm, so it is shared text and the public render moved on
+  // purpose along with the team one. tenjin-publish never mentions fund, so
+  // its digest is unchanged.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'a3d2ff8e259851b2ed8733921286cbea',
+      'tenjin-search': 'c59faaebcd6e2030376d426aee9e9a7a',
       'tenjin-publish': 'cb678b98cbb919c1af60e576d232b0b9',
     });
   });
