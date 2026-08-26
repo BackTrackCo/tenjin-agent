@@ -962,6 +962,38 @@ describe('Stop hook: open-loop collection', () => {
     expect(run.stderr).toContain('tenjin: state store unavailable');
   });
 
+  /**
+   * The nag reads a bounded set of the newest MISSes and then discards the
+   * sources it never raises (`push-hook`, `dispatch-hook`) and other sessions'
+   * rows. Doing that filtering AFTER the limit meant a machine with the push
+   * arms on buried the deliberate `tenjin search` MISS the nag exists for under
+   * its own telemetry within the hour — and never surfaced it again, because
+   * fresh telemetry keeps arriving inside the window. The file version was
+   * protected by the demand budget that capped those sources at 15 of 50.
+   */
+  it('surfaces a cli loop buried under a machine-full of hook misses', async () => {
+    const buried: SeedSearch[] = [];
+    for (let i = 0; i < 40; i += 1) {
+      buried.push({
+        searchId: `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, '0')}`,
+        question: `a sidecar lookup ${i}`,
+        decision: 'MISS',
+        minutesAgo: 1,
+        source: i % 2 === 0 ? 'push-hook' : 'dispatch-hook',
+      });
+    }
+    // The one that matters is the OLDEST, so an unfiltered newest-first limit
+    // cannot reach it.
+    await seedSearches([...buried, { ...OPEN_MISS, minutesAgo: 30 }]);
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const text = injected(run) ?? '';
+    expect(text).toContain('Open Tenjin loop');
+    expect(text).toContain(OPEN_MISS.question);
+    // ...and the telemetry it was buried under is still never raised.
+    expect(text).not.toContain('a sidecar lookup');
+  });
+
   it('caps a backlog at two open loops per turn', async () => {
     await seedSearches([
       OPEN_MISS,

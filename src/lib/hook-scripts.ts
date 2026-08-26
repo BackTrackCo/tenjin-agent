@@ -881,7 +881,7 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
   // Sliced after parsing, so this caps PROJECTION AND STORAGE, not the download
   // or the JSON parse: those already happened, bounded by the fetch timeout. What
   // it buys is that a ten-thousand-item response cannot put ten thousand
-  // entries in searches.json or ten thousand lines in the hint.
+  // recorded searches or ten thousand lines in the hint.
   const candidates = body.items.slice(0, limit);
 
   // Store the LEAN projection the CLI stores, so \`buy <resourceId>\` can resolve
@@ -916,7 +916,7 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
       price: c.price,
     });
     // The DISPLAY fields the push arms score against. Kept beside the lean
-    // projection, never inside it: searches.json's shape is the CLI's, and these
+    // projection, never inside it: the stored shape is the CLI's, and these
     // are never actionable, so a bad one is dropped to '' rather than dropping
     // the candidate.
     rich.push({
@@ -1011,12 +1011,11 @@ function hintLines(stored, isTeam, ctx) {
     const kind = BigInt(c.price) === 0n ? 'a free answer' : 'a paid answer';
     const line =
       'Tenjin lists ' + kind + ' titled "' + title + '" ($' + price + '); inspect free: tenjin inspect ' + id;
-    lines.push(line);
     // RECORDED AS AN INJECTION, because that is what it is: a line the agent
     // will read. \`ctx\` carries the judge's verdict as well as the identity, so
     // this row is the WHOLE decision row for the candidate — the caller writes
     // no second one, or every count in \`push status\` would be doubled.
-    recordInjection({
+    const claimed = recordInjection({
       ...ctx,
       session: ctx.sessionId,
       candidate: c,
@@ -1024,6 +1023,19 @@ function hintLines(stored, isTeam, ctx) {
       form: 'short',
       tokens: Math.ceil(line.length / 4),
     });
+    // The unique index is the bound, so a candidate a concurrent fire in this
+    // session already claimed is recorded as a skip and left out of the text.
+    if (claimed === 'duplicate') {
+      recordInjection({
+        ...ctx,
+        session: ctx.sessionId,
+        candidate: c,
+        action: 'skipped',
+        reason: 'already-injected',
+      });
+      continue;
+    }
+    lines.push(line);
   }
   if (lines.length > 0) {
     lines.push(
@@ -1682,10 +1694,16 @@ function markCaptureAsked(sessionId) {
  */
 function didResearch(sessionId) {
   if (storeGet(STORE_SQL.researchedBySession, [storeSession(sessionId)]) !== null) return true;
+  // \`shelf <> 'local'\` for the same reason 'read'/'churn' and the log-only
+  // actions are excluded: a pairing this machine replayed out of its own record
+  // is the sidecar's telemetry, not evidence the session researched anything. A
+  // session that ran the tests, tripped an error this laptop had already paired,
+  // and edited code has contacted no shelf and has nothing to publish — and
+  // under \`hooks.capture block\` the ask it would get is a blocked turn end.
   return (
     storeGet(
       "SELECT 1 FROM injections WHERE session = ? AND hook NOT IN ('read', 'churn')" +
-        " AND action NOT IN ('skipped', 'logged') LIMIT 1",
+        " AND action NOT IN ('skipped', 'logged') AND shelf <> 'local' LIMIT 1",
       [storeSession(sessionId)],
     ) !== null
   );
@@ -2040,7 +2058,15 @@ async function main() {
   // The session is over: stamp \`ended_at\` so the judge's per-session windows
   // and the importance score (#212) have a close as well as an open.
   endSession(sessionId);
-  const searches = openLoops(Date.now() - ${OPEN_LOOP_WINDOW_MS}, ${MAX_STRONG_LOOPS + MAX_WEAK_LOOPS + 20});
+  // SCOPED IN THE QUERY. The loop below discards sources this hook never nags
+  // about and sessions that are not its own, and doing that AFTER a LIMIT let a
+  // push-on machine bury a deliberate \`tenjin search\` MISS under its own
+  // telemetry inside the hour.
+  const searches = openLoops(
+    sessionId,
+    Date.now() - ${OPEN_LOOP_WINDOW_MS},
+    ${MAX_STRONG_LOOPS + MAX_WEAK_LOOPS + 20},
+  );
   // The mode the next publish IN THIS DIRECTORY would actually run under. The
   // Stop hook's cwd IS the session's working directory, so it is the place that
   // publish runs. Precedence follows lib/config.ts: an env var outranks the

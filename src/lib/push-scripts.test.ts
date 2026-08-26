@@ -1288,7 +1288,7 @@ describe('the prompt arm (UserPromptSubmit)', () => {
    * The arm sits between a keypress and the first token, so its watchdog has to
    * be bigger than the work it starts. It was not: search (1500) plus body
    * (1500) overran a 2500ms kill, and a killed run injected nothing AND wrote no
-   * ledger row, while the search it had already paid for sat in searches.json.
+   * decision row, while the search it had already paid for was recorded.
    */
   it('gives up on a slow body rather than being killed holding one', async () => {
     const slow = echo();
@@ -2582,6 +2582,46 @@ describe('the capture ask (Stop)', () => {
       expect(run.stdout).toBe('');
       expect(Date.now() - started).toBeLessThan(1500);
     });
+  });
+
+  /**
+   * A pairing this machine replayed out of its OWN record is the sidecar's
+   * telemetry, not evidence the session researched anything. A session that ran
+   * the tests, tripped an error this laptop had already paired and edited code
+   * has contacted no shelf and has nothing to publish — and under
+   * `hooks.capture block` the ask it was getting is a blocked turn end.
+   */
+  it('does not take a local pairing replay as a research signal', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.insertInjection, [
+      'uid-local',
+      null,
+      Date.now(),
+      SESSION,
+      null,
+      'machine',
+      'failure',
+      'local',
+      'pairing:1',
+      'a pairing this machine recorded itself',
+      null,
+      '0',
+      null,
+      null,
+      null,
+      'moderate',
+      null,
+      null,
+      'injected',
+      null,
+      'short',
+      0,
+      40,
+    ]);
+    store?.close();
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
   });
 
   it('asks nothing of a session that did no research, or with capture off', async () => {
