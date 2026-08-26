@@ -2,10 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
-import { resolveContextSettings, resolvePublishSettings } from '../lib/settings';
+import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
-import { scan, type ScanContext, type ScanFinding } from '../lib/scan';
+import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';
@@ -22,9 +22,9 @@ import {
 } from '../lib/card';
 import {
   publishPost,
+  normalizeSearchIds,
   EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
-  SEARCH_ID_WIRE_RE,
   type PublishInput,
   type PublishStatus,
 } from '../lib/posts-api';
@@ -36,6 +36,7 @@ import {
   resolveWriteAuth,
   writeModeNotices,
 } from '../lib/consent';
+import { publishedUrlFor, recordPublished } from '../lib/publish-dedup';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -55,8 +56,8 @@ import type { CommandContext, CommandResult } from '../context';
 export interface PublishArgs {
   /** The Markdown file to publish. */
   file?: string;
-  /** The search this publish answers; closes its open loop. */
-  searchId?: string;
+  /** The search(es) this publish answers; closes each open loop. */
+  searchId?: string | string[];
   draft?: boolean;
   yes?: boolean;
   /** Raw `--mode` (review|auto|full-auto); validated at the edge (USAGE on a bad value). */
@@ -88,6 +89,10 @@ export interface PublishDeps {
   env?: NodeJS.ProcessEnv;
   /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
   cwd?: string;
+  /** How this surface spells the search-id input, for edge errors: the CLI flag
+   *  by default, `searchId` from the MCP tool. A dep and not an arg because
+   *  `publishInput`'s `satisfies` would expose a new PublishArgs key to agents. */
+  searchIdLabel?: string;
 }
 
 export async function runPublish(
@@ -101,19 +106,52 @@ export async function runPublish(
   // typo like `--mode Review` must never be silently dropped onto a looser mode
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
-  validateSearchId(args);
+  const searchIds = normalizeSearchIds(args.searchId, deps.searchIdLabel ?? '--search-id');
 
+  // Resolved FIRST because team mode changes what the rest of this function
+  // does, not just where the POST goes.
+  const runtime = await resolveContextSettings(ctx);
   const raw = await readSource(args);
-  // Read the named search ONCE, here: it prefills the card's question below, and
-  // whether it was found decides what the post-publish close reports. Local read,
-  // and a missing store reads as no entry rather than failing the publish.
-  const storedSearch =
-    args.searchId !== undefined
-      ? ((await loadSearches(ctx.dataDir)).find((s) => s.searchId === args.searchId) ?? null)
-      : null;
+  // Read the named searches ONCE: one prefills the card, and each id's presence
+  // decides what its close reports and what is warned about below.
+  const stored = await loadNamedSearches(ctx, searchIds);
   const { frontmatter, body } = parseFrontmatter(raw);
 
   const status = resolveStatus(args, frontmatter);
+
+  // ALREADY PUBLISHED FROM THIS MACHINE? Keyed on the body's content hash, not on
+  // a session id: the duplicates this catches come from two agents watching
+  // related sessions, or one agent whose turn ended twice, and the only thing the
+  // two publishes share is the text. Checked HERE — before the scan, before the
+  // consent gate, before the wallet — so a capture ask that fires twice cannot
+  // turn a clean turn end into a confirm prompt or a keystore unlock, and so no
+  // request is made at all.
+  //
+  // DRAFTS ARE OUT, both ways: a draft answers nobody and no command promotes
+  // one, so reaching a public piece MEANS publishing the same body a second time.
+  // Deduping that would make the promotion silently do nothing.
+  if (status !== 'draft') {
+    const already = publishedUrlFor(ctx.dataDir, body);
+    if (already !== null) {
+      // Success, deliberately. The caller is a turn end that already did its
+      // work; failing it would report a broken publish for a piece that is up.
+      return {
+        data: { alreadyPublished: true, url: already },
+        humanLines: [`Already published: ${sanitizeForTerminal(already)}`],
+      };
+    }
+  }
+  if (status !== 'draft') warnUnrecorded(ctx, searchIds, stored);
+  // THE OTHER SHELF'S SEARCHES ARE NOT THIS SHELF'S TO CLAIM. A publish lands on
+  // one shelf; a searchId minted by the other names a row in a database this one
+  // has never seen. The server format-validates the uuid and stores it set-once,
+  // so sending it does not fail — it misfiles the attribution permanently, on the
+  // wrong shelf, while the shelf that actually served the search hears nothing.
+  // Dropped from the body and left OPEN locally, so the close is still reachable
+  // by `tenjin outcome`, which routes to the shelf that answered.
+  const foreignIds = searchIds.filter((id) => !shelfRouteFor(stored.get(id), runtime).configured);
+  const claimableIds = searchIds.filter((id) => !foreignIds.includes(id));
+  if (status !== 'draft') warnForeignShelf(ctx, foreignIds, stored);
   const title = resolveTitle(frontmatter, body);
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
@@ -122,7 +160,9 @@ export async function runPublish(
   // fallback: an explicit --question OR a frontmatter questionsAnswered still
   // wins. That phrasing is what the next searcher will send.
   const cardFlags = cardFlagsFrom(args);
-  const wanted = storedSearch?.question;
+  // One card, one prefill: the first id you typed that this machine holds.
+  const prefillFrom = searchIds.find((id) => stored.get(id)?.question !== undefined);
+  const wanted = prefillFrom === undefined ? undefined : stored.get(prefillFrom)?.question;
   const prefillQuestion = wanted === undefined ? undefined : cardQuestion(wanted);
   const roomForPrefill =
     cardFlags.question === undefined && frontmatter.questionsAnswered === undefined;
@@ -152,33 +192,59 @@ export async function runPublish(
     env,
   });
   // The resolver's downgrade warnings, a mistyped env mode, and the one-line
-  // explainer for an unconfigured mode: all stderr, all invisible to --json.
+  // explainer for an unconfigured mode: all stderr, all invisible to --json. On
+  // every shelf, because the cascade below runs on every shelf: in team mode
+  // `review` still asks once per note, so the line pointing at `auto` is the
+  // right advice rather than advice about a gate that is not in the way.
   writeModeNotices(
     ctx.io.stderr,
     settings,
     env,
     'each publish asks you once. Set auto to publish clean scans automatically',
   );
-  const priceAtomic = resolvePrice(args, frontmatter, settings.defaultPriceAtomic);
+  // FREE BY DEFAULT ON THE TEAM SHELF. The default price exists to stop a public
+  // piece being given away by accident; a team shelf has no buyers, and a
+  // teammate hitting a 402 on their own team's finding is the loop not working.
+  // An explicit --price or a frontmatter price still wins, because that is
+  // somebody saying what they meant.
+  const priceAtomic = resolvePrice(
+    args,
+    frontmatter,
+    runtime.teamMode ? '0' : settings.defaultPriceAtomic,
+  );
 
-  // The scan runs in EVERY mode (D38): it gates the gate, it does not replace it.
-  // Scan the whole file AND the derived card's text, so a secret reaches the same
-  // gates whether it arrives in the body, in frontmatter, or via a card-authoring
-  // flag (--provenance, --scope, …) — the card ships to the PUBLIC card, so a flag
-  // secret must block exactly like an in-file one. Dedupe by check+excerpt so a
-  // frontmatter value (present in both raw and the card) is not double-counted.
-  // The scan context carries the source project's git remote slugs (offline FS
-  // read, best-effort): a draft quoting its own project's repo/org warns as a
-  // private-by-default reference (open-questions publishing-safety check-set).
-  // Markers derive from the DRAFT's project, not the shell's cwd (review r5): a
-  // file publish walks up from the file's own directory, so the process cwd is
-  // unrelated to where the draft actually lives.
-  const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
-  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
-  const findings = dedupeFindings([
-    ...scan(raw, scanContext),
-    ...scan(cardScanText(card), scanContext),
-  ]);
+  // The scan runs in EVERY publish mode (D38) and on EVERY shelf: it gates the
+  // gate, it does not replace it. What it covers and why is on `scanDraft` below.
+  //
+  // TEAM MODE DROPS THE WARN TIER, MINUS ONE CHECK. The scan asks two different
+  // questions under one name. "Is this safe to make PUBLIC" is the warn tier — a
+  // repo slug, an internal hostname, an employer's name — and on a second
+  // deployment only this team can reach, every one of those is a false positive
+  // on exactly the findings the loop exists to capture ("a quirk of THIS
+  // codebase"), each costing a --yes round trip the agent has to be taught to do.
+  // "Is this a live credential" is the block tier, and that question has the same
+  // answer on every shelf: a team shelf is a hosted Postgres with logs and a
+  // static shared door key, and a leaked key there is leaked. It is also silent
+  // on a clean note, so keeping it costs the capture loop nothing. The block tier
+  // is therefore NEVER skipped and never clearable by --yes, here or anywhere:
+  // that invariant is stated to operators (lib/permissions.ts) and to models
+  // (mcp/server.ts) and it holds in team mode too.
+  //
+  // TWO WARNS SURVIVE THE DROP: `secret-assignment` and `hex32-value`. Both ask
+  // the credential question rather than the public-safety one — DEPLOY_API_KEY=
+  // "pk_live_…" is a live key whose shape no block detector matches, and a
+  // 0x+64-hex is the raw-private-key detector demoted to warn only because a block
+  // finding is permanently non-bypassable — so "a leaked key there is leaked"
+  // applies to both verbatim. They are kept by name rather than promoted to block,
+  // so the consent cascade still governs them: `review` and `auto` confirm, and
+  // `full-auto` clears them unseen on a team shelf exactly as it already does on
+  // the marketplace (the price scan.ts concedes at the detector). Every other warn
+  // is dropped. The rule itself lives beside the tier assignment as
+  // `survivesTeamDrop` (lib/scan.ts) so this filter and edit.ts cannot drift; they
+  // did once. The two other surfaces that characterise this drop say the same:
+  // docs/command-reference.md and skills/tenjin-publish/SKILL.md.
+  const scanned = await scanDraft(args, cwd, raw, card);
+  const findings = runtime.teamMode ? scanned.filter(survivesTeamDrop) : scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 
@@ -198,7 +264,14 @@ export async function runPublish(
     });
   }
 
-  // --yes clears the soft findings and the review confirm alike.
+  // --yes clears the soft findings and the review confirm alike, on every shelf.
+  // TEAM MODE CHANGES NOTHING HERE EITHER: `review` still asks once per note, and
+  // a team that finds that ask is the thing making in-session capture fail turns
+  // it off the way everyone else does, with `publish.mode auto` (the dogfood
+  // protocol sets `full-auto`). What team mode does change is the input: `warns`
+  // above holds `secret-assignment` findings and nothing else, so `auto` is
+  // promptless on every team note that carries no secret-named assignment, rather
+  // than only on the fully clean ones, and still confirms on one that does.
   if (needsConfirmation(settings.mode, warns.length) && args.yes !== true) {
     throw new CliError('NEEDS_CONFIRMATION', confirmMessage(warns.length, price.usd), {
       fix: 'Review the findings, then re-run with --yes (or resolve the source and re-run).',
@@ -214,8 +287,9 @@ export async function runPublish(
 
   // Approved (or nothing to confirm): from here a wallet is required. The write
   // base URL is resolved through the shared settings seam and used for BOTH the
-  // SIWX/session header domain and the POST host, so the two never diverge.
-  const runtime = await resolveContextSettings(ctx);
+  // SIWX/session header domain and the POST host, so the two never diverge. In
+  // team mode that is the team shelf and nowhere else — a publish never reaches
+  // `publicShelfUrl`, which is consume-only.
   const provider = resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
@@ -246,12 +320,13 @@ export async function runPublish(
     // demand either. Sending it on a draft put one demand signal on two posts —
     // no command promotes a draft, so reaching a public piece means a second
     // publish carrying the same id — with one of them possibly never shipping.
-    ...(args.searchId !== undefined && status !== 'draft' ? { searchId: args.searchId } : {}),
+    ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
   };
 
   const result = await publishPost(input, auth, {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
+    ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
@@ -260,11 +335,93 @@ export async function runPublish(
   // what resolves it.
   const parksPrivately = status === 'draft';
 
-  let searchInfo: SearchReceipt | undefined;
-  if (args.searchId !== undefined) {
-    searchInfo = await closeNamedSearch(ctx, args.searchId, storedSearch, parksPrivately, prefill);
+  // The post exists: remember it against the body, so the next publish of the
+  // same text this machine attempts hands back this url instead of creating a
+  // second row. Not for a draft, whose whole purpose is to be published later.
+  if (!parksPrivately) recordPublished(ctx.dataDir, body, result.url);
+
+  // One close per id, each reporting for itself: the piece is published and the
+  // server has every id, so an unrecorded search warns without costing the rest.
+  const searches: SearchReceipt[] = [];
+  for (const id of searchIds) {
+    if (foreignIds.includes(id)) {
+      searches.push({ id, closed: false, otherShelf: true, prefill: 'none' });
+      continue;
+    }
+    searches.push(
+      await closeNamedSearch(
+        ctx,
+        id,
+        stored.get(id) ?? null,
+        parksPrivately,
+        id === prefillFrom ? prefill : 'none',
+      ),
+    );
   }
-  return receipt(result, runtime.baseUrl, searchInfo);
+  return receipt(result, runtime.baseUrl, searches);
+}
+
+/**
+ * Which named searches this machine has no record of, said BEFORE the wallet
+ * touch: the server takes the batch as a unit, so one id it cannot match refuses
+ * the whole publish, after the signature. Ordinary, with a 50-entry store against
+ * a 90-day sweep. A warning: an id recorded elsewhere is absent here, valid there.
+ */
+function warnUnrecorded(
+  ctx: CommandContext,
+  searchIds: string[],
+  stored: Map<string, StoredSearch>,
+): void {
+  const unrecorded = searchIds.filter((id) => !stored.has(id));
+  if (unrecorded.length === 0) return;
+  ctx.io.stderr.write(
+    `Not in this machine's search store: ${unrecorded.join(', ')}. The server accepts or refuses the named searches as one batch, so if it has no record of one either, this publish is refused after it is signed. Drop that id to publish without it.\n`,
+  );
+}
+
+/**
+ * Named searches this machine recorded against the OTHER shelf, said before the
+ * wallet touch like {@link warnUnrecorded}. Not an error: naming the search a
+ * piece answers is right, and in team mode the public marketplace answering a
+ * team miss is the ordinary path. Only the destination is wrong, and `outcome`
+ * is the verb that reaches it.
+ */
+function warnForeignShelf(
+  ctx: CommandContext,
+  foreignIds: string[],
+  stored: Map<string, StoredSearch>,
+): void {
+  if (foreignIds.length === 0) return;
+  for (const id of foreignIds) {
+    // Sanitized like every other store- or server-derived string this tree
+    // writes to a terminal (outcome's echoed question, buy's creator label,
+    // search's shelf error text). Today the field only ever holds a validated
+    // config URL, so this is consistency rather than a live escape-sequence
+    // risk — but the rule that store text is sanitized on the way out is worth
+    // more than the one call site that could argue its way out of it.
+    const shelf = sanitizeForTerminal(stored.get(id)?.shelfBaseUrl ?? 'another shelf');
+    ctx.io.stderr.write(
+      `Search ${id} was answered by ${shelf}, not the shelf this piece is published to, so it is not claimed here and stays open. Close it there with \`tenjin outcome --search-id ${id} --status used\`.\n`,
+    );
+  }
+}
+
+/**
+ * The local records for the named searches, keyed case-folded like the ids that
+ * look them up, so an entry recorded in another spelling is still found.
+ */
+async function loadNamedSearches(
+  ctx: CommandContext,
+  searchIds: string[],
+): Promise<Map<string, StoredSearch>> {
+  if (searchIds.length === 0) return new Map();
+  const searches = await loadSearches(ctx.dataDir);
+  const wanted = new Set(searchIds);
+  return new Map(
+    searches
+      .filter((s) => wanted.has(s.searchId.toLowerCase()))
+      .map((s) => [s.searchId.toLowerCase(), s]),
+  );
 }
 
 /**
@@ -288,6 +445,12 @@ interface SearchReceipt {
    * `outcome` report.
    */
   alreadyAnswered?: boolean;
+  /**
+   * The named search was answered by the OTHER shelf, so this publish did not
+   * claim it and the loop is still open. The one `closed: false` case that is a
+   * routing fact rather than a failure; see {@link warnForeignShelf}.
+   */
+  otherShelf?: true;
   prefill: PrefillOutcome;
 }
 
@@ -297,24 +460,6 @@ interface SearchReceipt {
  * nothing was expected; `dropped-too-long` is the one a caller has to be told.
  */
 type PrefillOutcome = 'applied' | 'dropped-too-long' | 'none';
-
-/**
- * `--search-id` at the edge: a uuid, refused before any wallet touch so a typo
- * costs a message rather than a signing prompt.
- *
- * Checked against the shape the SERVER declares, not the looser local UUID_RE,
- * because this value is now sent on the publish body: an id that satisfied only
- * the local shape would be refused by the server as a 400, and that refusal
- * would arrive after the wallet signature rather than here.
- */
-function validateSearchId(args: PublishArgs): void {
-  if (args.searchId === undefined) return;
-  if (!SEARCH_ID_WIRE_RE.test(args.searchId)) {
-    throw new CliError('USAGE', `Invalid --search-id: ${JSON.stringify(args.searchId)}.`, {
-      fix: 'Pass the searchId from a prior `tenjin search` (a uuid).',
-    });
-  }
-}
 
 /**
  * Close the loop a `--search-id` file publish named, and say what happened in
@@ -353,7 +498,8 @@ async function closeNamedSearch(
   if (stored === null) {
     return open(`Published, but search ${searchId} is not in the local store.`);
   }
-  const outcome = await markSearchResolved(ctx.dataDir, searchId, 'publish', undefined, {
+  // The record's OWN spelling: the store matches ids by exact string.
+  const outcome = await markSearchResolved(ctx.dataDir, stored.searchId, 'publish', undefined, {
     relink: true,
   });
   if (outcome === 'failed') {
@@ -379,6 +525,31 @@ async function closeNamedSearch(
   return { id: searchId, closed: true, prefill };
 }
 
+/**
+ * The deterministic scan over the draft AND the derived card's text, so a secret
+ * reaches the same gates whether it arrives in the body, in frontmatter, or via a
+ * card-authoring flag (`--provenance`, `--scope`, …) — the card ships to the
+ * PUBLIC card, so a flag secret must block exactly like an in-file one. Deduped
+ * by check+excerpt so a frontmatter value (present in both raw and the card) is
+ * not double-counted.
+ *
+ * The scan context carries the source project's git remote slugs (offline FS
+ * read, best-effort): a draft quoting its own project's repo/org warns as a
+ * private-by-default reference. Markers derive from the DRAFT's project, not the
+ * shell's cwd (review r5): a file publish walks up from the file's own directory,
+ * so the process cwd is unrelated to where the draft actually lives.
+ */
+async function scanDraft(
+  args: PublishArgs,
+  cwd: string,
+  raw: string,
+  card: ResourceCardInput | undefined,
+): Promise<ScanFinding[]> {
+  const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
+  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
+  return dedupeFindings([...scan(raw, scanContext), ...scan(cardScanText(card), scanContext)]);
+}
+
 /** The Markdown to publish. A missing path is USAGE before any wallet touch. */
 async function readSource(args: PublishArgs): Promise<string> {
   if (args.file === undefined) {
@@ -392,7 +563,7 @@ async function readSource(args: PublishArgs): Promise<string> {
 function receipt(
   result: Awaited<ReturnType<typeof publishPost>>,
   baseUrl: string,
-  searchInfo?: SearchReceipt,
+  searches: SearchReceipt[],
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
@@ -407,17 +578,9 @@ function receipt(
     cacheEligible
       ? 'Answer card is search-eligible.'
       : missing.length > 0
-        ? `Answer card not search-eligible yet: ${missing.join(' ')}`
-        : 'Published as a browse-only document (no answer card).',
-    ...(searchInfo?.closed === true
-      ? [
-          searchInfo.relinked === true
-            ? `Re-linked search ${searchInfo.id} to this piece; it had been closed without one.`
-            : searchInfo.alreadyAnswered === true
-              ? `Search ${searchInfo.id} was already answered by an earlier publish.`
-              : `Closed the loop on search ${searchInfo.id}.`,
-        ]
-      : []),
+        ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
+        : 'Published without an answer card: ranks below every carded piece in agent search.',
+    ...searches.filter((s) => s.closed).map(closeLine),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
   return {
@@ -429,11 +592,24 @@ function receipt(
       cacheEligible,
       missing,
       deskUrl,
-      ...(searchInfo !== undefined ? { search: searchInfo } : {}),
+      // `search` repeats a lone result for callers that already read it; a
+      // batch has no single one to repeat.
+      ...(searches.length === 1 ? { search: searches[0] } : {}),
+      ...(searches.length > 0 ? { searches } : {}),
       ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     },
     humanLines: human,
   };
+}
+
+function closeLine(search: SearchReceipt): string {
+  if (search.relinked === true) {
+    return `Re-linked search ${search.id} to this piece; it had been closed without one.`;
+  }
+  if (search.alreadyAnswered === true) {
+    return `Search ${search.id} was already answered by an earlier publish.`;
+  }
+  return `Closed the loop on search ${search.id}.`;
 }
 
 // ---------------------------------------------------------------------------

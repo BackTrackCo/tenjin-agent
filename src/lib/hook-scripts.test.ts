@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import pkg from '../../package.json';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
@@ -7,21 +8,32 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  HOOK_SCRIPT_STAMP,
   PRIMER_TEXT,
   REMIND_LINE,
   dispatchHookScript,
+  prelude,
   sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
+import { shelfBypassHeaders } from './http';
+import {
+  pushContextHookScript,
+  pushFailureHookScript,
+  pushPromptHookScript,
+  pushSubagentHookScript,
+} from './push-scripts';
 import {
   CALLER_USER_AGENT_ENV,
   TENJIN_COMMENT,
-  TENJIN_PRODUCT,
-  TENJIN_USER_AGENT,
+  TENJIN_PRODUCT_NAME,
   USER_AGENT_MAX_LENGTH,
+  WEBSEARCH_HOOK_PRODUCT,
+  WEBSEARCH_HOOK_USER_AGENT,
   composeUserAgent,
 } from './client-meta';
+import { PRODUCTION_HOST, PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 import { loadSearches, recordSearch, searchStoreLockPath } from './search-store';
 
 /**
@@ -58,19 +70,21 @@ interface HookRun {
 
 /**
  * Write the script and run it exactly as a harness would: stdin in, stdout out.
+ * `args` carries the harness selector the native adapters pass (`--hermes`), and
  * `env` is what the launching harness would have exported: the caller handoff for
  * the User-Agent cases, `TENJIN_PUBLISH_MODE` or `HOME` for the mode cases.
  */
 async function runScript(
   source: string,
   stdin: string,
+  args: string[] = [],
   env: Record<string, string> = {},
 ): Promise<HookRun> {
   const path = join(scriptDir, `hook-${Math.random().toString(36).slice(2)}.mjs`);
   await writeFile(path, source, { mode: 0o755 });
   const started = Date.now();
   return await new Promise<HookRun>((resolve, reject) => {
-    const child = spawn(process.execPath, [path], {
+    const child = spawn(process.execPath, [path, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       // A CLEAN environment plus whatever the case sets, rather than an inherited
       // one. The hook reads `TENJIN_PUBLISH_MODE` and `HOME`, so inheriting would
@@ -91,13 +105,22 @@ async function runScript(
 /** A local server standing in for the marketplace, plus a count of hits. */
 async function serveJson(
   handler: (body: string, baseUrl: string) => { status: number; json: unknown } | 'hang',
-): Promise<{ baseUrl: string; hits: () => number; userAgents: () => (string | undefined)[] }> {
+): Promise<{
+  baseUrl: string;
+  hits: () => number;
+  userAgents: () => (string | undefined)[];
+  /** The request paths the hook actually asked for. The endpoint it POSTs to is
+   *  part of the contract this suite pins, not an implementation detail. */
+  paths: () => (string | undefined)[];
+}> {
   let hits = 0;
   let base = '';
   const seenAgents: (string | undefined)[] = [];
+  const seenPaths: (string | undefined)[] = [];
   const s = createServer((req, res) => {
     hits += 1;
     seenAgents.push(req.headers['user-agent']);
+    seenPaths.push(req.url);
     let body = '';
     req.on('data', (c) => (body += String(c)));
     req.on('end', () => {
@@ -112,7 +135,12 @@ async function serveJson(
   const addr = s.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   base = `http://127.0.0.1:${port}`;
-  return { baseUrl: base, hits: () => hits, userAgents: () => seenAgents };
+  return {
+    baseUrl: base,
+    hits: () => hits,
+    userAgents: () => seenAgents,
+    paths: () => seenPaths,
+  };
 }
 
 async function writeConfig(config: Record<string, unknown>): Promise<void> {
@@ -157,13 +185,14 @@ const at = (baseUrl: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-/** A well-formed CANDIDATES body for `baseUrl`. */
+/** A well-formed v3 result with one match, for `baseUrl`. There is no `decision`
+ *  field: under search v3 a hit is simply a non-empty `items`. */
 const hit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   searchId: SEARCH_ID,
-  decision: 'CANDIDATES',
   calibration: 'ok',
-  candidates: [at(baseUrl, over)],
+  matched: 1,
+  items: [at(baseUrl, over)],
 });
 
 /** The additionalContext a run injected, or null when it stayed silent. */
@@ -174,6 +203,36 @@ function injected(run: HookRun): string | null {
   };
   return parsed.hookSpecificOutput?.additionalContext ?? null;
 }
+
+/**
+ * The installer rewrites a script whose bytes on disk differ from what this build
+ * would write (`writeScripts` in harness-hooks.ts), so drift is caught by
+ * comparison, not by a version counter. The header names the build that wrote
+ * the file so an operator reading `~/.claude/hooks` can tell how old it is.
+ */
+describe('HOOK_SCRIPT_STAMP', () => {
+  const PIN_DIR = '/tmp/tenjin-hook-version-pin';
+  // The push arms are pinned here too, and by the SAME number: they embed the
+  // same prelude and the same core, so a change to either drifts scripts on both
+  // sides of the split and one version stamp is what the installer rewrites on.
+  const scripts = () => ({
+    websearch: websearchHookScript(PIN_DIR),
+    dispatch: dispatchHookScript(PIN_DIR),
+    sessionPrimer: sessionPrimerHookScript(PIN_DIR),
+    stop: stopHookScript(PIN_DIR),
+    pushPrompt: pushPromptHookScript(PIN_DIR),
+    pushFailure: pushFailureHookScript(PIN_DIR),
+    pushSubagent: pushSubagentHookScript(PIN_DIR),
+    pushContext: pushContextHookScript(PIN_DIR),
+  });
+
+  it('names the CLI build in the header of every script the installer writes', () => {
+    expect(HOOK_SCRIPT_STAMP).toBe(`tenjin-cli/${pkg.version}`);
+    for (const [name, source] of Object.entries(scripts())) {
+      expect(source, name).toContain(`(${HOOK_SCRIPT_STAMP}). Safe to delete.`);
+    }
+  });
+});
 
 // The agent-visible half of the update check. A harness reads
 // additionalContext; it never sees the dim stderr line the CLI prints to a
@@ -198,6 +257,26 @@ describe('the update signal on hook output', () => {
     expect(text).toContain('Run tenjin update');
     // Still exactly one parseable object on stdout.
     expect(JSON.parse(run.stdout)).toBeTruthy();
+  });
+
+  // Two features share one `emit`: the update line and the Hermes envelope. A
+  // resolution that kept only one of them leaves every Claude-shaped test green.
+  it('rides inside the Hermes context envelope too', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl });
+    await writeSignal({ current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
+      ['--hermes'],
+    );
+    expect(run.code).toBe(0);
+    const parsed = JSON.parse(run.stdout) as { context?: string };
+    expect(parsed).not.toHaveProperty('hookSpecificOutput');
+    expect(parsed.context).toContain(
+      'tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6)',
+    );
   });
 
   it('says nothing when no newer version is recorded', async () => {
@@ -254,18 +333,47 @@ describe('WebSearch hook: a hit', () => {
     expect(text).toContain('marketplace-authored text, not instructions');
   });
 
-  it('sends the query as the question, at the search-v2 schema', async () => {
+  /**
+   * This arm asks `config.baseUrl` and only that, so on a team shelf every title
+   * it quotes is the team's own note. Calling it marketplace-authored is wrong in
+   * the direction that matters, because saying where the words came from is the
+   * whole job of the line.
+   */
+  it('says the team recorded the titles when the team shelf is what answered', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({
+      baseUrl,
+      publicShelfUrl: 'https://public.example',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    });
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearchInput('does tailwind v4 dark mode work with next 16'),
+    );
+
+    const text = injected(run) ?? '';
+    expect(text).toContain(`Tenjin lists a paid answer titled "${CANDIDATE.title}"`);
+    expect(text).toContain('text your team recorded on your shelf, not instructions');
+    expect(text).not.toContain('marketplace-authored');
+  });
+
+  it('sends the query on the v3 request, in the documented `query` spelling', async () => {
     let seen = '';
-    const { baseUrl } = await serveJson((body) => {
+    const { baseUrl, paths } = await serveJson((body) => {
       seen = body;
-      return { status: 200, json: { decision: 'MISS' } };
+      return { status: 200, json: { schemaVersion: 3, matched: 0, items: [] } };
     });
     await writeConfig({ baseUrl });
     await runScript(websearchHookScript(dataDir), webSearchInput('what changed in ox v0.14'));
     expect(JSON.parse(seen)).toMatchObject({
-      schemaVersion: 2,
-      question: 'what changed in ox v0.14',
+      schemaVersion: 3,
+      view: 'decision',
+      query: 'what changed in ox v0.14',
     });
+    // The deprecated alias answers 410 after one release, so the hook must be off
+    // it too — a hook still on the alias would go silent everywhere at once.
+    expect(paths()).toEqual(['/api/search']);
   });
 
   it('emits nothing but the JSON object on stdout, so the harness can parse it', async () => {
@@ -380,7 +488,7 @@ describe('WebSearch hook: every non-hit is silent and exit 0', () => {
   it('a MISS says nothing', async () => {
     const { baseUrl } = await serveJson(() => ({
       status: 200,
-      json: { schemaVersion: 2, decision: 'MISS', candidates: [] },
+      json: { schemaVersion: 3, searchId: SEARCH_ID, matched: 0, items: [] },
     }));
     await writeConfig({ baseUrl });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
@@ -490,26 +598,34 @@ describe('WebSearch hook: it fires on WebSearch and nothing else', () => {
  * generated bytes against a real socket and read the field the server actually
  * received, which is the only place a missing default is observable.
  */
-describe('WebSearch hook: the CLI identity on the wire', () => {
+describe('WebSearch hook: the hook identity on the wire', () => {
   const identityRun = async (env: Record<string, string> = {}): Promise<string | undefined> => {
     const { baseUrl, userAgents } = await serveJson((_body, base) => ({
       status: 200,
       json: hit(base),
     }));
     await writeConfig({ baseUrl });
-    await runScript(websearchHookScript(dataDir), webSearchInput('a question'), env);
+    await runScript(websearchHookScript(dataDir), webSearchInput('a question'), [], env);
     return userAgents()[0];
   };
 
-  it('sends the tenjin-cli identity, never the Node default', async () => {
+  it('sends the hook identity, never the Node default', async () => {
     const sent = await identityRun();
-    expect(sent).toBe(TENJIN_USER_AGENT);
+    expect(sent).toBe(WEBSEARCH_HOOK_USER_AGENT);
     expect(sent).not.toBe('node');
   });
 
-  it('composes the launching harness handoff behind the CLI product', async () => {
+  // A literal, not the constant: this exact string is what lands in client_name,
+  // and the server attributes on the FIRST product, so both are pinned.
+  it('leads with tenjin-websearch-hook, so a ridealong query is separable', async () => {
+    const sent = (await identityRun()) ?? '';
+    expect(sent.split(' ')[0]).toMatch(/^tenjin-websearch-hook\//);
+    expect(sent).not.toMatch(new RegExp(`^${TENJIN_PRODUCT_NAME}/`));
+  });
+
+  it('composes the launching harness handoff behind the hook product', async () => {
     const sent = await identityRun({ [CALLER_USER_AGENT_ENV]: 'codex/1.2.0 node/24.4.0' });
-    expect(sent).toBe(`${TENJIN_PRODUCT} codex/1.2.0 node/24.4.0 (+https://tenjin.blog)`);
+    expect(sent).toBe(`${WEBSEARCH_HOOK_PRODUCT} codex/1.2.0 node/24.4.0 (+https://tenjin.blog)`);
   });
 
   /**
@@ -524,6 +640,7 @@ describe('WebSearch hook: the CLI identity on the wire', () => {
     ['codex/1.2.0', 'one product'],
     ['codex/1.2.0 node/24.4.0', 'a sequence'],
     ['tenjin-cli/9.9.9 codex/1.2.0 (+https://tenjin.blog)', 'an already-composed field'],
+    ['tenjin-websearch-hook/9.9.9 codex/1.2.0', 'the hook product handed back to us'],
     ['TENJIN-CLI/9.9.9 codex/1.2.0', 'our own product in another casing'],
     ['tenjin-cli-wrapper/1.0', 'a product that only looks like ours'],
     ['codex/1.2.0 (some comment)', 'a comment, which is not a product'],
@@ -536,7 +653,7 @@ describe('WebSearch hook: the CLI identity on the wire', () => {
     ['a/1 '.repeat(200), 'a handoff past the 512-character bound'],
   ])('matches composeUserAgent for %s (%s)', async (caller) => {
     const sent = await identityRun({ [CALLER_USER_AGENT_ENV]: caller });
-    expect(sent).toBe(composeUserAgent({ caller, env: {} }));
+    expect(sent).toBe(composeUserAgent({ caller, env: {}, product: WEBSEARCH_HOOK_PRODUCT }));
   });
 
   /**
@@ -552,9 +669,9 @@ describe('WebSearch hook: the CLI identity on the wire', () => {
     [USER_AGENT_MAX_LENGTH + 1, 'one over'],
   ])('matches composeUserAgent at %i composed characters (%s the bound)', async (length) => {
     const caller = callerComposingTo(length);
-    const expected = composeUserAgent({ caller, env: {} });
+    const expected = composeUserAgent({ caller, env: {}, product: WEBSEARCH_HOOK_PRODUCT });
     expect(expected.length).toBe(
-      length <= USER_AGENT_MAX_LENGTH ? length : TENJIN_USER_AGENT.length,
+      length <= USER_AGENT_MAX_LENGTH ? length : WEBSEARCH_HOOK_USER_AGENT.length,
     );
     const sent = await identityRun({ [CALLER_USER_AGENT_ENV]: caller });
     expect(sent).toBe(expected);
@@ -563,21 +680,35 @@ describe('WebSearch hook: the CLI identity on the wire', () => {
 
 /**
  * A one-token handoff whose composed field is exactly `length` characters.
- * Derived from the exported constants, never a literal: `TENJIN_PRODUCT`'s
+ * Derived from the exported constants, never a literal: the leading product's
  * length moves with the version string on every release.
  */
 function callerComposingTo(length: number): string {
-  const token = `a/${'x'.repeat(length - `${TENJIN_PRODUCT}  ${TENJIN_COMMENT}`.length - 2)}`;
+  const token = `a/${'x'.repeat(
+    length - `${WEBSEARCH_HOOK_PRODUCT}  ${TENJIN_COMMENT}`.length - 2,
+  )}`;
   return token;
 }
 
 describe('WebSearch hook: modes', () => {
+  it('uses Hermes web_search input and emits its native context envelope', async () => {
+    await writeConfig({ hooks: { webSearch: 'remind' } });
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({ tool_name: 'web_search', args: { query: 'a question' } }),
+      ['--hermes'],
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(JSON.parse(run.stdout)).toEqual({ context: REMIND_LINE });
+  });
+
   it('remind emits the static line and sends nothing', async () => {
     const { baseUrl, hits } = await serveJson((_body, base) => ({
       status: 200,
       json: hit(base),
     }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'remind' } });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect(injected(run)).toBe(REMIND_LINE);
     expect(hits()).toBe(0);
@@ -588,7 +719,7 @@ describe('WebSearch hook: modes', () => {
       status: 200,
       json: hit(base),
     }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'off' } });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect(run.stdout).toBe('');
     expect(hits()).toBe(0);
@@ -599,7 +730,7 @@ describe('WebSearch hook: modes', () => {
       status: 200,
       json: hit(base),
     }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'wat' } });
+    await writeConfig({ baseUrl, hooks: { webSearch: 'wat' } });
     const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
     expect(hits()).toBe(1);
     expect(injected(run)).toContain('Tenjin lists a paid answer titled');
@@ -696,6 +827,30 @@ describe('Stop hook: open-loop collection', () => {
     expect(loopLines(run)).toHaveLength(1);
   });
 
+  // The search half has had a `--hermes` test since the envelope landed; this is
+  // the publish-back half, and its body is the one #131 rewrote. The Python plugin
+  // sends a bare `{}` and reads only `context`, so a regression in either the
+  // envelope or the payload tolerance would silently cost Hermes the whole nag
+  // while all 30 Claude-shaped stop tests stayed green.
+  it('emits the Hermes context envelope from the same nag body', async () => {
+    await seedSearches([OPEN_MISS]);
+    const run = await runScript(stopHookScript(dataDir), '{}', ['--hermes']);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    const parsed = JSON.parse(run.stdout) as { context?: string };
+    expect(parsed).not.toHaveProperty('hookSpecificOutput');
+    const text = parsed.context ?? '';
+    // Not a second copy of the text: the same body Claude gets, current wording and
+    // all. The publish.mode line is asserted here too, because it is resolved on the
+    // way into the body: a Hermes envelope that carried the loop line without it
+    // would be a second, quietly weaker rendering of the same nag.
+    expect(text).toContain('publish.mode=review: publishing asks first.');
+    expect(text).toContain(`'${OPEN_MISS.question}' was a MISS`);
+    expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
+    expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
+    expect(text).not.toContain('candidate add');
+  });
+
   it('nags exactly once: the second run is silent', async () => {
     await seedSearches([OPEN_MISS]);
     const first = await runScript(stopHookScript(dataDir), stopInput);
@@ -781,10 +936,11 @@ async function storedSearches(): Promise<StoredEntry[]> {
 
 describe('WebSearch hook: recording into the one store', () => {
   const MISS_BODY = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '66666666-6666-4666-8666-666666666666',
-    decision: 'MISS',
     calibration: 'ok',
+    matched: 0,
+    items: [],
   };
 
   // Without this the hook's misses were invisible to everything downstream: the
@@ -843,11 +999,11 @@ describe('WebSearch hook: recording into the one store', () => {
   });
 
   it('records nothing in remind or off mode, which send nothing', async () => {
-    for (const searchMode of ['remind', 'off']) {
+    for (const webSearch of ['remind', 'off']) {
       const { baseUrl } = await serveJson(() => ({ status: 200, json: MISS_BODY }));
-      await writeConfig({ baseUrl, hooks: { searchMode } });
+      await writeConfig({ baseUrl, hooks: { webSearch } });
       await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
-      expect(await storedSearches(), searchMode).toEqual([]);
+      expect(await storedSearches(), webSearch).toEqual([]);
     }
   });
 
@@ -893,10 +1049,11 @@ describe('WebSearch hook: recording into the one store', () => {
  */
 describe('WebSearch hook: the lock protocol mirrors the CLI', () => {
   const MISS_BODY = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '66666666-6666-4666-8666-666666666666',
-    decision: 'MISS',
     calibration: 'ok',
+    matched: 0,
+    items: [],
   };
 
   /** The lock the CLI would take, from the CLI's own definition of the path. */
@@ -986,10 +1143,11 @@ describe('WebSearch hook: the lock protocol mirrors the CLI', () => {
 
 describe('WebSearch hook: store round-trip', () => {
   const MISS_BODY = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     searchId: '66666666-6666-4666-8666-666666666666',
-    decision: 'MISS',
     calibration: 'ok',
+    matched: 0,
+    items: [],
   };
 
   it('writes an entry the CLI store can still parse', async () => {
@@ -1034,9 +1192,17 @@ describe('Stop hook: the two kinds of open loop', () => {
     expect(text).toContain('a web query 2');
     expect(text).toContain('Durable public finding among them?');
     expect(text).toContain('tenjin publish <file> --search-id <id>');
-    expect(text).toContain('tenjin outcome --search-id <id> --status regenerated');
     expect(text).not.toContain('candidate add');
     expect(text).not.toContain('Open Tenjin loop');
+  });
+
+  // Seventeen listed misses used to mean seventeen `outcome` calls, which is
+  // enough friction that the honest close stops happening.
+  it('names ONE batch close command for the whole weak batch', async () => {
+    await seedSearches([hookMiss(1), hookMiss(2), hookMiss(3)]);
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text).toContain('tenjin outcome --all-open --status regenerated');
+    expect(text.match(/tenjin outcome/g)).toHaveLength(1);
   });
 
   it('caps the weak batch at three', async () => {
@@ -1272,7 +1438,7 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     await writeConfig({ publish: { mode: 'review' } });
     const text =
       injected(
-        await runScript(stopHookScript(dataDir), stopInput, {
+        await runScript(stopHookScript(dataDir), stopInput, [], {
           TENJIN_PUBLISH_MODE: 'full-auto',
         }),
       ) ?? '';
@@ -1317,7 +1483,7 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
       );
       const text =
         injected(
-          await runScript(stopHookScript(dataDir), stopIn(project), {
+          await runScript(stopHookScript(dataDir), stopIn(project), [], {
             TENJIN_PUBLISH_MODE: 'auto',
           }),
         ) ?? '';
@@ -1410,7 +1576,8 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
             JSON.stringify({ publish: { mode: 'auto' } }),
           );
           const text =
-            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), { HOME: home })) ?? '';
+            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), [], { HOME: home })) ??
+            '';
           expect(text.split('\n')[0]).toBe('publish.mode=review: publishing asks first.');
         } finally {
           await rm(base, { recursive: true, force: true });
@@ -1437,7 +1604,8 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
           const cwd = join(home, 'work');
           await mkdir(cwd, { recursive: true });
           const text =
-            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), { HOME: home })) ?? '';
+            injected(await runScript(stopHookScript(dataDir), stopIn(cwd), [], { HOME: home })) ??
+            '';
           expect(text.split('\n')[0]).toBe(
             'publish.mode=auto: a clean publish proceeds without asking.',
           );
@@ -1526,7 +1694,7 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
   it('falls back to the file when the env names no mode', async () => {
     await seedSearches([OPEN_MISS]);
     await writeConfig({ publish: { mode: 'auto' } });
-    const text = injected(await runScript(stopHookScript(dataDir), stopInput, {})) ?? '';
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput, [], {})) ?? '';
     expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
   });
 
@@ -1535,7 +1703,9 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     await writeConfig({ publish: { mode: 'auto' } });
     const text =
       injected(
-        await runScript(stopHookScript(dataDir), stopInput, { TENJIN_PUBLISH_MODE: 'whatever' }),
+        await runScript(stopHookScript(dataDir), stopInput, [], {
+          TENJIN_PUBLISH_MODE: 'whatever',
+        }),
       ) ?? '';
     expect(text.split('\n')[0]).toBe('publish.mode=auto: a clean publish proceeds without asking.');
   });
@@ -1640,6 +1810,55 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     expect(JSON.stringify(await storedSearches())).not.toContain('evil.example');
   });
 
+  /**
+   * The alias rule is two-sided on purpose, and this is the side that matters.
+   * The stub server is an ordinary listener, not a deployment origin, so a
+   * candidate it hands back pointing AT the deployment has to be dropped. A
+   * regression to a one-sided `KNOWN_ORIGINS.includes(candidateOrigin)` would
+   * keep it, letting anything the operator ever pointed `baseUrl` at launder a
+   * payable pointer at the real marketplace into the store, where a later `buy`
+   * signs for it. The real shipped bytes and the real set, no substitution.
+   */
+  it('drops a deployment-origin candidate when the configured base is not a member', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: hit(base, { url: `${PRODUCTION_ORIGIN}/@a/p` }),
+    }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+
+    expect(run.stdout).toBe('');
+    expect((await storedSearches())[0]?.candidates).toEqual([]);
+    expect(JSON.stringify(await storedSearches())).not.toContain(PRODUCTION_HOST);
+  });
+
+  /**
+   * The other side: when the configured base IS a member, a sibling member's url
+   * is the same deployment and survives, which is the whole point of the set
+   * (tenjin#738). Both origins have to be local for the run to stay offline, so
+   * this rewrites the one generated line that inlines the set and asserts the
+   * rewrite landed; everything the rewrite does not touch is the shipped script.
+   */
+  it('keeps a sibling-origin candidate when the configured base is a member', async () => {
+    const sibling = 'http://127.0.0.1:9';
+    const { baseUrl } = await serveJson((_body) => ({
+      status: 200,
+      json: hit(sibling, { url: `${sibling}/@a/p` }),
+    }));
+    await writeConfig({ baseUrl });
+
+    const shipped = `const KNOWN_ORIGINS = ${JSON.stringify(knownDeploymentOrigins())};`;
+    const source = websearchHookScript(dataDir);
+    expect(source, 'the inlined set moved; this rewrite tests nothing').toContain(shipped);
+    const run = await runScript(
+      source.replace(shipped, `const KNOWN_ORIGINS = ${JSON.stringify([baseUrl, sibling])};`),
+      webSearchInput('a question'),
+    );
+
+    expect(run.code).toBe(0);
+    expect((await storedSearches())[0]?.candidates.map((c) => c.url)).toEqual([`${sibling}/@a/p`]);
+  });
+
   it('drops a candidate whose url does not parse', async () => {
     const { baseUrl } = await serveJson((_body, base) => ({
       status: 200,
@@ -1650,21 +1869,45 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     expect((await storedSearches())[0]?.candidates).toEqual([]);
   });
 
-  it('is silent on a decision it does not recognize, and records nothing', async () => {
-    for (const decision of ['MAYBE', '', 'candidates', 7, null]) {
+  // v3 carries no `decision` word, so `items` is the field that says what
+  // happened. A body without a real array is a shape this parser cannot read: it
+  // drops the whole response rather than treating "no items I could find" as the
+  // server having matched nothing, which would write a MISS that never happened.
+  it('is silent when `items` is not an array, and records nothing', async () => {
+    for (const items of ['MAYBE', '', 7, null, {}, undefined]) {
       await rm(join(dataDir, 'searches.json'), { force: true });
-      const { baseUrl } = await serveJson((_body, base) => ({
-        status: 200,
-        json: { ...hit(base), decision },
-      }));
+      const { baseUrl } = await serveJson((_body, base) => {
+        const json: Record<string, unknown> = { ...hit(base) };
+        if (items === undefined) delete json.items;
+        else json.items = items;
+        return { status: 200, json };
+      });
       await writeConfig({ baseUrl });
       const run = await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
-      expect(run.code, String(decision)).toBe(0);
-      expect(run.stdout, String(decision)).toBe('');
-      expect(await storedSearches(), String(decision)).toEqual([]);
+      const label = String(items);
+      expect(run.code, label).toBe(0);
+      expect(run.stdout, label).toBe('');
+      expect(await storedSearches(), label).toEqual([]);
       if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
       server = null;
     }
+  });
+
+  // The inverse, and the reason the count comes off the SERVER's array rather
+  // than off what survived this hook's own validation: a response that matched a
+  // piece whose fields were all malformed stores zero candidates, but it is still
+  // not a MISS, and recording it as one puts a false open loop in front of the
+  // agent at the end of the turn.
+  it('records CANDIDATES when the server matched, even if every item was dropped', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: hit(base, { resourceId: 'not-a-uuid' }),
+    }));
+    await writeConfig({ baseUrl });
+    await runScript(websearchHookScript(dataDir), webSearchInput('a question'));
+    const stored = await storedSearches();
+    expect(stored[0]?.decision).toBe('CANDIDATES');
+    expect(stored[0]?.candidates).toEqual([]);
   });
 
   // This used to pin the OPPOSITE (a malformed price stored as '0' and advertised
@@ -1694,8 +1937,11 @@ describe('WebSearch hook: the response is validated fail-closed', () => {
     }
   });
 
-  it('drops the whole record when schemaVersion is not 2', async () => {
-    for (const schemaVersion of [1, 3, '2', undefined, null]) {
+  it('drops the whole record when schemaVersion is not 3', async () => {
+    // 2 is in the list on purpose: it is the v2 alias envelope, which a
+    // mis-pointed base URL can still serve, and reading it would record a search
+    // whose `candidates` this parser never looked at.
+    for (const schemaVersion of [1, 2, '3', undefined, null]) {
       await rm(join(dataDir, 'searches.json'), { force: true });
       const { baseUrl } = await serveJson((_body, base) => {
         const json: Record<string, unknown> = { ...hit(base) };
@@ -1843,9 +2089,10 @@ describe('session scoping: the ledger is global, the nag is not', () => {
     const { baseUrl } = await serveJson(() => ({
       status: 200,
       json: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         searchId: '66666666-6666-4666-8666-666666666666',
-        decision: 'MISS',
+        matched: 0,
+        items: [],
       },
     }));
     await writeConfig({ baseUrl });
@@ -1857,9 +2104,10 @@ describe('session scoping: the ledger is global, the nag is not', () => {
     const { baseUrl } = await serveJson(() => ({
       status: 200,
       json: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         searchId: '66666666-6666-4666-8666-666666666666',
-        decision: 'MISS',
+        matched: 0,
+        items: [],
       },
     }));
     await writeConfig({ baseUrl });
@@ -1987,9 +2235,10 @@ const dispatchInput = (
     },
   });
 
-/** The `question` the hook put on the wire, from the stub server's body. */
+/** The query text the hook put on the wire, from the stub server's body. v3
+ *  spells it `query`; the `question` spelling is the retired v2 one. */
 function questionSent(bodies: string[]): string {
-  return (JSON.parse(bodies[0] ?? '{}') as { question?: string }).question ?? '';
+  return (JSON.parse(bodies[0] ?? '{}') as { query?: string }).query ?? '';
 }
 
 async function serveCapturing(
@@ -2004,10 +2253,11 @@ async function serveCapturing(
 }
 
 const DISPATCH_MISS = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   searchId: '77777777-7777-4777-8777-777777777777',
-  decision: 'MISS',
   calibration: 'ok',
+  matched: 0,
+  items: [],
 };
 
 describe('dispatch hook: a subagent dispatch', () => {
@@ -2157,7 +2407,7 @@ describe('dispatch hook: a subagent dispatch', () => {
 
   it('is silent and records nothing in off mode', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } });
+    await writeConfig({ baseUrl, hooks: { agentDispatch: 'off' } });
     const run = await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question nobody will hear') }),
@@ -2169,13 +2419,82 @@ describe('dispatch hook: a subagent dispatch', () => {
 
   it('emits the static line and sends nothing in remind mode', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } });
+    await writeConfig({ baseUrl, hooks: { agentDispatch: 'remind' } });
     const run = await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
     );
     expect(injected(run)).toContain(REMIND_LINE);
     expect(hits()).toBe(0);
+  });
+
+  it('hooks.agentDispatch splits the dispatch hook from the WebSearch hook', async () => {
+    // A fleet keeps webSearch auto and still sends no subagent prompt anywhere.
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { webSearch: 'auto', agentDispatch: 'remind' } });
+    const remind = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(remind)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { webSearch: 'auto', agentDispatch: 'off' } });
+    const off = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(off.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    // And the other direction: webSearch off, dispatch explicitly auto still asks.
+    await writeConfig({ baseUrl, hooks: { webSearch: 'off', agentDispatch: 'auto' } });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
+    );
+    expect(hits()).toBe(1);
+
+    // The WebSearch hook ignores agentDispatch entirely.
+    await writeConfig({ baseUrl, hooks: { webSearch: 'remind', agentDispatch: 'auto' } });
+    const web = await runScript(websearchHookScript(dataDir), webSearchInput('a web question'));
+    expect(injected(web)).toContain(REMIND_LINE);
+    expect(hits()).toBe(1);
+  });
+
+  it('legacy searchMode without dispatch key still governs dispatch for one release', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl, hooks: { searchMode: 'off' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    const off = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that should not leave the machine') }),
+    );
+    expect(off.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'remind' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    const remind = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that stays on the machine') }),
+    );
+    expect(injected(remind)).toContain(REMIND_LINE);
+    expect(hits()).toBe(0);
+
+    await writeConfig({ baseUrl, hooks: { searchMode: 'auto' } } as unknown as Record<
+      string,
+      unknown
+    >);
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a question that may leave the machine') }),
+    );
+    expect(hits()).toBe(1);
   });
 
   it('stays silent on every failure path', async () => {
@@ -2624,5 +2943,236 @@ describe('dispatch hook: the ceiling binds without a session id', () => {
     await seedUnstamped(9);
     await runScript(dispatchHookScript(dataDir), unstamped('the last unstamped lookup'));
     expect(hits()).toBe(1);
+  });
+});
+
+/**
+ * ⚠ MIRRORED RULE. The generated scripts cannot import lib/http.ts, so the
+ * origin test that decides where the team shelf's bypass secret may go exists
+ * twice: once in `shelfBypassHeaders` and once inside the prelude. The secret
+ * opens a deployment, so a divergence is not cosmetic — it is the key reaching a
+ * host the CLI's own copy would refuse.
+ *
+ * The generated function is lifted out of the prelude and RUN, against the real
+ * one, over the same inputs. Lifting rather than spawning because this is a pure
+ * function of two values: a subprocess per case would buy nothing but seconds.
+ */
+describe('the bypass rule the hook scripts carry', () => {
+  /** One named function declaration lifted out of the prelude, verbatim. */
+  function lift(source: string, name: string): string {
+    const at = source.indexOf(`function ${name}(`);
+    expect(at, name).toBeGreaterThan(0);
+    // To the closing brace of the function, which is the first line that is a
+    // bare `}` at column zero after the declaration.
+    const end = source.indexOf('\n}\n', at);
+    expect(end, name).toBeGreaterThan(at);
+    return source.slice(at, end + 2);
+  }
+
+  /** The generated `shelfBypassHeaders`, as a callable, with the two helpers it
+   *  now leans on (`teamShelfOrigin` and `sameDeployment`) and their constant. */
+  function generated(): (url: string, config: Record<string, string>) => Record<string, string> {
+    const source = prelude('/tmp/pin', 1000);
+    const knownAt = source.indexOf('const KNOWN_ORIGINS =');
+    expect(knownAt).toBeGreaterThan(0);
+    const known = source.slice(knownAt, source.indexOf('\n', knownAt) + 1);
+    const body = [
+      known,
+      lift(source, 'sameDeployment'),
+      lift(source, 'teamShelfOrigin'),
+      lift(source, 'shelfBypassHeaders'),
+    ].join('\n');
+    return new Function(`${body}; return shelfBypassHeaders;`)() as ReturnType<typeof generated>;
+  }
+
+  const BASE = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const SECRET = 'shelf-secret-abc123';
+
+  it.each([
+    ['https://team.example/api/search', SECRET, 'the configured origin'],
+    ['https://team.example:443/api/search', SECRET, 'the default port, spelled out'],
+    ['https://public.example/api/search', SECRET, 'the public shelf'],
+    ['https://evil.team.example/api/search', SECRET, 'a subdomain of the shelf'],
+    ['http://team.example/api/search', SECRET, 'the same host over http'],
+    ['https://team.example:8443/api/search', SECRET, 'another port on the same host'],
+    ['not-a-url', SECRET, 'an unparseable url'],
+    ['https://team.example/api/search', '', 'no secret at all'],
+  ])('agrees with lib/http.ts for %s (%s)', (url, secret) => {
+    const mine = shelfBypassHeaders(url, { origin: new URL(BASE).origin, secret });
+    const theirs = generated()(url, {
+      baseUrl: BASE,
+      publicShelfUrl: PUBLIC,
+      shelfBypassSecret: secret,
+    });
+    expect(theirs).toEqual(mine);
+  });
+
+  /**
+   * The OTHER half of the mirrored rule: team mode is "a secret AND a shelf of
+   * the team's own". A machine whose baseUrl is still the marketplace is in
+   * public mode, and the generated copy must reach that answer too — otherwise
+   * the hooks post the key to tenjin.blog while the CLI does not.
+   */
+  it.each([
+    [PRODUCTION_ORIGIN, 'the production marketplace'],
+    ['https://tenjin.sh', 'an alias of the production deployment'],
+    [PUBLIC, 'whatever publicShelfUrl names'],
+  ])('sends nothing when baseUrl is %s (%s)', (baseUrl) => {
+    expect(
+      generated()(`${baseUrl}/api/search`, {
+        baseUrl,
+        publicShelfUrl: PUBLIC,
+        shelfBypassSecret: SECRET,
+      }),
+    ).toEqual({});
+  });
+});
+
+/**
+ * THE DISPATCH ARM ASKS BOTH SHELVES.
+ *
+ * It asked `baseUrl` and stopped, which in team mode is the team shelf and
+ * nothing else — so a dispatch prompt only the public marketplace covers (prose
+ * research questions are exactly what it does cover) produced a team miss, no
+ * cache, and nothing for the SubagentStart arm to inject. Every row it did
+ * write was filed as `team` by construction, which is the one number the
+ * dogfood's per-trigger public/team split is computed from.
+ */
+describe('dispatch hook: two shelves in team mode', () => {
+  const SECRET = 'shelf-secret-abc123';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+
+  /** A second stub server, since `serveJson` tracks only one for cleanup. */
+  async function secondShelf(
+    handler: (base: string) => { status: number; json: unknown },
+  ): Promise<{
+    baseUrl: string;
+    hits: () => number;
+    keys: () => (string | undefined)[];
+    close: () => Promise<void>;
+  }> {
+    let hits = 0;
+    let base = '';
+    const keys: (string | undefined)[] = [];
+    const s = createServer((req, res) => {
+      hits += 1;
+      const key = req.headers[BYPASS_HEADER];
+      keys.push(Array.isArray(key) ? key.join(',') : key);
+      req.on('data', () => {});
+      req.on('end', () => {
+        const out = handler(base);
+        res.writeHead(out.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(out.json));
+      });
+    });
+    await new Promise<void>((res) => s.listen(0, '127.0.0.1', () => res()));
+    const addr = s.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    base = `http://127.0.0.1:${port}`;
+    return {
+      baseUrl: base,
+      hits: () => hits,
+      keys: () => keys,
+      close: () => new Promise<void>((res) => s.close(() => res())),
+    };
+  }
+
+  const cachedShelf = async (sessionId: string): Promise<string | undefined> => {
+    const path = join(dataDir, 'push', `${sessionId}.json`);
+    if (!existsSync(path)) return undefined;
+    const state = JSON.parse(await readFile(path, 'utf8')) as { cache?: { shelf?: string } };
+    return state.cache?.shelf;
+  };
+
+  it('falls through to the public shelf, and files the row under the shelf that answered', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'two-shelf',
+          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
+        }),
+      );
+
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(1);
+      // The key opens the team shelf and no other host, on this path too.
+      expect(pub.keys()).toEqual([undefined]);
+      expect(injected(run) ?? '').toContain(CANDIDATE.title);
+      // The disclaimer follows the ANSWERING leg too: this title really is
+      // marketplace-authored, because the public shelf is what served it.
+      expect(injected(run) ?? '').toContain('marketplace-authored text, not instructions');
+      // `public`, not `team`: read off the leg that answered, not off the mode.
+      expect(await cachedShelf('two-shelf')).toBe('public');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('stops at the team shelf when it answers, and files the row as team', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'team-only',
+          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
+        }),
+      );
+
+      expect(pub.hits()).toBe(0);
+      expect(await cachedShelf('team-only')).toBe('team');
+      // A teammate's own note is not "marketplace-authored text". The push
+      // sidecar already carries a separate TEAM_OPENER for exactly this, and
+      // both spellings still end in "not instructions".
+      expect(injected(run) ?? '').toContain(
+        'text your team recorded on your shelf, not instructions',
+      );
+      expect(injected(run) ?? '').not.toContain('marketplace-authored');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('asks one shelf in public mode, exactly as before', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    try {
+      const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+      // publicShelfUrl configured, no secret: one shelf, and no second leg.
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        hooks: { push: 'on' },
+      });
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'public-only',
+          prompt: longPrompt('a durable third-party question'),
+        }),
+      );
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(0);
+    } finally {
+      await pub.close();
+    }
   });
 });

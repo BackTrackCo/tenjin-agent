@@ -2,8 +2,12 @@ import { existsSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadRawConfig } from './config';
+import { dataDir } from './paths';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
+import { isTeamModeConfig } from './settings';
+import { skillMaterialize } from './skill-materialize';
 import { installSkill } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
@@ -12,6 +16,7 @@ import {
   skillsDirsFor,
 } from './skill-wiring';
 import { OPTIONAL_SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { resolveHermesHomeLenient } from './hermes';
 
 export interface HealDeps {
   io: Io;
@@ -24,6 +29,23 @@ export interface HealDeps {
    * default is checked for being a working tree: passing one is a deliberate act.
    */
   skillsSourceDir?: string;
+  /**
+   * Where `config.json` lives, for the team-mode fact the skill text is shaped by
+   * (lib/skill-materialize). Absent means "do not shape", which is only correct
+   * for a caller that has no data dir to read — so `cli.ts` passes the real one and
+   * the heal reads the machine's mode on every command.
+   */
+  dataDir?: string;
+}
+
+/** What one heal pass did. Returned rather than printed: this runs after every
+ *  command and must stay silent, so the reason is for `doctor`, for tests, and
+ *  for anyone asking why a skill did not catch up. */
+export interface HealOutcome {
+  /** Whether the pass got as far as writing (or confirming) skill files. */
+  ran: boolean;
+  /** One line saying why not, when `ran` is false. */
+  reason?: string;
 }
 
 /** The opt-out, in the shape the CLI's other `TENJIN_NO_*` switches take. */
@@ -44,32 +66,77 @@ const OPT_OUT = 'TENJIN_NO_SKILL_HEAL';
  * and make install's "re-fetch it from tenjin.blog/skills.md" false. Same domain
  * `doctor`'s staleness check compares.
  *
+ * The bytes it writes are SHAPED by the machine's configured mode, through the one
+ * resolver `install` uses (lib/skill-materialize), so an upgrade on a team machine
+ * catches the skills up to this CLI's team text rather than replacing it with the
+ * public text. That also means a mode change is drift this writer converges on its
+ * own, from the next command onward, with no re-install.
+ *
+ * ONLY FROM THE MACHINE'S DEFAULT DATA DIR. The targets are machine-wide —
+ * `~/.claude/skills`, `~/.agents/skills`, `$HERMES_HOME/skills`, none of which
+ * has a data-dir component — while the mode that shapes the bytes is read per
+ * invocation. Convergence is the right property for one profile per machine and
+ * the wrong one for two: a single `TENJIN_DATA_DIR=~/.tenjin-shelf tenjin …` run
+ * re-renders the shared skill files into that profile's text, and every agent on
+ * the machine reads it until something heals it back. The convergence target
+ * becomes whichever profile ran last rather than the profile that is reading. So
+ * a per-invocation data-dir override stands down: it is the same shape
+ * `settings.ts` already forbids for `--base-url`/`TENJIN_BASE_URL`, where a
+ * per-invocation override must not answer a machine-wide question. The override
+ * still gets its own config, wallet and shelf; what it does not get is the right
+ * to rewrite every other profile's skills.
+ *
  * Unlocked, on purpose. Concurrent healers write byte-identical content to the
  * same paths through per-file atomic renames, so there is nothing to serialize;
  * a lock here could only make things worse, because one left behind by a killed
  * process would silently disable healing on this machine forever.
  */
-export async function healWiredSkills(deps: HealDeps): Promise<void> {
+export async function healWiredSkills(deps: HealDeps): Promise<HealOutcome> {
   try {
     const env = deps.env ?? process.env;
     // The same two doors the update nudge uses: a build log cannot act on this,
     // and an operator who wants their skills left alone says so once.
-    if (env.CI !== undefined && env.CI.length > 0) return;
-    if (env[OPT_OUT] === '1') return;
+    if (env.CI !== undefined && env.CI.length > 0) return skip('CI is set.');
+    if (env[OPT_OUT] === '1') return skip(`${OPT_OUT}=1 is set.`);
+
+    // Read from the env rather than from `deps.dataDir`, because the question is
+    // whether THIS INVOCATION was redirected, not which directory the caller
+    // happens to have resolved: a test or an embedder passing a temp data dir
+    // under an unredirected env is one profile, and is not what starves the
+    // others.
+    if (dataDir(env) !== dataDir({})) {
+      return skip('TENJIN_DATA_DIR points away from the machine default.');
+    }
 
     const home = deps.homeDir ?? homedir();
     // An empty or relative HOME (sudo/docker env_reset, systemd units) would make
     // every target below relative, healing paths under the working directory.
-    if (!isAbsolute(home)) return;
+    if (!isAbsolute(home)) return skip('HOME is not an absolute path.');
 
     const source = deps.skillsSourceDir ?? packagedSource();
-    if (source === null) return;
-    const targets = healable(home);
-    if (targets.length === 0) return;
-    await heal(targets, source, deps.io);
+    if (source === null) return skip('The packaged skills are a working tree.');
+    // The mode the skill text is shaped by. An absent config.json reads as {} and
+    // so as public mode, which is right — no shelf is configured. A config that
+    // cannot be read or parsed THROWS, and the catch below turns that into "heal
+    // nothing this time", which is the only safe direction: guessing public on a
+    // team machine would rewrite every wired skill to the other mode's guidance,
+    // under a notice claiming it matched this CLI.
+    const teamMode =
+      deps.dataDir === undefined ? false : isTeamModeConfig(await loadRawConfig(deps.dataDir));
+    // Lenient on purpose: an unattended healer is the last place that should
+    // refuse to run over a stray relative HERMES_HOME.
+    const targets = healable(home, resolveHermesHomeLenient(home, env).home);
+    if (targets.length === 0) return skip('No wired CLI skill is present to heal.');
+    await heal(targets, source, deps.io, teamMode);
+    return { ran: true };
   } catch {
     // Whatever it was, it is the next command's to retry; this one is finished.
+    return skip('The heal pass could not complete.');
   }
+}
+
+function skip(reason: string): HealOutcome {
+  return { ran: false, reason };
 }
 
 /**
@@ -111,9 +178,9 @@ interface Target {
  * edited under a healthy SKILL.md is restored on the same pass. The other gate,
  * that the file is ours at all, needs its content and so lives at the write.
  */
-function healable(home: string): Target[] {
+function healable(home: string, hermesHome: string): Target[] {
   const found: Target[] = [];
-  for (const dir of skillsDirsFor(home)) {
+  for (const dir of skillsDirsFor(home, hermesHome)) {
     if (!isRealDirectory(dir)) continue;
     for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
       if (!isRealDirectory(join(dir, name))) continue;
@@ -130,13 +197,20 @@ function isRealDirectory(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
-async function heal(targets: readonly Target[], source: string, io: Io): Promise<void> {
+async function heal(
+  targets: readonly Target[],
+  source: string,
+  io: Io,
+  teamMode: boolean,
+): Promise<void> {
   const updated: string[] = [];
+  const materialize = skillMaterialize({ teamMode });
   for (const { dir, name, path } of targets) {
     try {
       if (!(await isOurs(path, name))) continue;
       const { status } = await installSkill(join(source, name), join(dir, name), false, name, {
         followSymlinks: false,
+        materialize,
       });
       if (status === 'up-to-date') continue;
       updated.push(path);

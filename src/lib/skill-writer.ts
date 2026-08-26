@@ -4,6 +4,7 @@ import { dirname, join, relative } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { hasCode } from './errno';
 import { CliError } from './errors';
+import { PRODUCTION_HOST } from './production-origin';
 import { HOSTED_SKILL_NAME, readSkillFile } from './skill-wiring';
 
 /**
@@ -130,7 +131,7 @@ export async function installSkill(
     // direction: the local file may well be a newer fetch than this package's copy.
     warning:
       name === HOSTED_SKILL_NAME
-        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of tenjin.blog/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from tenjin.blog/skills.md if you need the current one.`
+        ? `${destDir}: the hosted Tenjin skill differed and ${dryRun ? 'would be' : 'was'} replaced by this package's mirror of ${PRODUCTION_HOST}/skills.md, which may be older; it stays as the zero-install fallback. Re-fetch it from ${PRODUCTION_HOST}/skills.md if you need the current one.`
         : `${destDir}: local edits to ${name}'s SKILL.md ${dryRun ? 'would be' : 'were'} overwritten (the packaged copy is canonical).`,
   };
 }

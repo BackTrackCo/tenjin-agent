@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,7 @@ import {
   MODE_GATED_RULES,
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
 
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
@@ -76,7 +77,7 @@ describe('runConfigList', () => {
     expect(d.sessionBudget).toEqual({ value: { atomic: '0', usd: '0' }, source: 'default' });
     expect(d.confirm).toEqual({ value: 'always', source: 'default' });
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
-    expect(d.baseUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
+    expect(d.baseUrl).toEqual({ value: PRODUCTION_ORIGIN, source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     expect(d.evalCohort).toEqual({ value: false, source: 'default' });
     // No numeric or 'none' default: absent resolves to the 'unset' sentinel and
@@ -87,13 +88,21 @@ describe('runConfigList', () => {
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
     });
-    expect(d['hooks.searchMode']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['hooks.webSearch']).toEqual({ value: 'auto', source: 'default' });
+    expect(d['hooks.agentDispatch']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
+    expect(d['hooks.push']).toEqual({ value: 'off', source: 'default' });
+    expect(d['hooks.capture']).toEqual({ value: 'off', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
-    // 10 scalar keys (incl. bazaarPay/bazaarRegistries) + 2 publish.* + 3 hooks.*
-    // (incl. sessionPrimer) + 1 update.mode.
-    expect(humanLines).toHaveLength(16);
+    expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
+    // REDACTED even here, on a fresh dir where the value is empty: the rendered
+    // shape must not depend on whether there is a secret to leak.
+    expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
+    // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
+    // + 2 publish.* + 6 hooks.* (webSearch, agentDispatch, stopNag,
+    // sessionPrimer, push, capture) + 1 update.mode.
+    expect(humanLines).toHaveLength(21);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -933,9 +942,12 @@ describe('the hooks block is set through config, which stays human-gated', () =>
   it('round-trips every hook key and rejects a value outside the enum', async () => {
     const ctx = makeCtx();
     for (const [key, value] of [
-      ['hooks.searchMode', 'remind'],
+      ['hooks.webSearch', 'remind'],
+      ['hooks.agentDispatch', 'off'],
       ['hooks.stopNag', 'off'],
       ['hooks.sessionPrimer', 'off'],
+      ['hooks.push', 'on'],
+      ['hooks.capture', 'block'],
     ] as const) {
       const set = await runConfigSet({ key, value }, ctx);
       expect(set.data).toMatchObject({ key, value, source: 'file' });
@@ -943,14 +955,37 @@ describe('the hooks block is set through config, which stays human-gated', () =>
         data: { key, value, source: 'file' },
       });
     }
+    // Legacy aliases still work and map to the new keys.
+    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
+      data: { value: 'remind' },
+    });
+    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
     // Every subkey survives the others' writes, so silencing one hook cannot
     // silently reset another.
-    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
+    expect(await runConfigGet({ key: 'hooks.webSearch' }, ctx)).toMatchObject({
       data: { value: 'remind' },
     });
     expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
       data: { value: 'off' },
     });
+    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
+      data: { value: 'on' },
+    });
+    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
+      data: { value: 'block' },
+    });
+
+    expect(await runConfigGet({ key: 'hooks.agentDispatch' }, ctx)).toMatchObject({
+      data: { value: 'off' },
+    });
+
+    const dispatch = await caught(() =>
+      runConfigSet({ key: 'hooks.agentDispatch', value: 'sometimes' }, ctx),
+    );
+    expect(dispatch.code).toBe('USAGE');
+    expect(dispatch.fix).toContain('"off"');
 
     const primer = await caught(() =>
       runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
@@ -964,6 +999,92 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     // The middle setting is offered by name, or an operator hunting for it
     // finds only the cliff.
     expect(bad.fix).toContain('"deliberate-only"');
+
+    const badPush = await caught(() =>
+      runConfigSet({ key: 'hooks.push', value: 'sometimes' }, ctx),
+    );
+    expect(badPush.code).toBe('USAGE');
+    expect(badPush.fix).toContain('"on"');
+    expect(badPush.fix).toContain('"off"');
+
+    const badCapture = await caught(() =>
+      runConfigSet({ key: 'hooks.capture', value: 'sometimes' }, ctx),
+    );
+    expect(badCapture.code).toBe('USAGE');
+    expect(badCapture.fix).toContain('"block"');
+    expect(badCapture.fix).toContain('"nudge"');
+  });
+
+  // hooks.push is read by the push arms, which ship in the same build as the key
+  // itself, so there is no version of them that ignores it.
+  it('never reports hookScriptStale for push', async () => {
+    const ctx = makeCtx();
+    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(push.data).not.toHaveProperty('hookScriptStale');
+  });
+
+  /**
+   * `hooks.push` is the one hooks key whose value is not the whole switch: the
+   * six settings entries are written by `tenjin push on`, and `config set` only
+   * persists the key — so it echoed as effective while no arm fired.
+   * command-reference.md already gave the guidance; the CLI accepted it silently.
+   */
+  it('points hooks.push at `tenjin push on`, because config set wires nothing', async () => {
+    const ctx = makeCtx();
+    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx);
+    expect(push.data).toMatchObject({ hookEntriesNotWired: true });
+    expect((push.humanLines ?? []).join('\n')).toContain('tenjin push on');
+    // The value is still stored: this is an honest line, not a refusal.
+    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
+      data: { value: 'on', source: 'file' },
+    });
+  });
+
+  it('says nothing for `off`, which is what an unwired machine already does', async () => {
+    const ctx = makeCtx();
+    const push = await runConfigSet({ key: 'hooks.push', value: 'off' }, ctx);
+    expect(push.data).not.toHaveProperty('hookEntriesNotWired');
+    expect(push.humanLines).toHaveLength(1);
+  });
+
+  /**
+   * Worse than `deliberate-only`'s misread: a Stop hook written before
+   * `hooks.capture` existed does not read the key at all. Setting `block` on one
+   * of those asks for nothing, while `config get` reports `value=block
+   * source=file` — the operator watches sessions end silently and has no way to
+   * tell the setting from the script.
+   */
+  it('says so when the installed Stop hook predates hooks.capture', async () => {
+    const ctx = makeCtx();
+    for (const value of ['block', 'nudge']) {
+      const set = await runConfigSet({ key: 'hooks.capture', value }, ctx, {
+        stopHookIsCurrent: async () => false,
+      });
+      expect(set.data).toMatchObject({ value, hookScriptStale: true });
+      expect(set.humanLines?.join('\n')).toContain('tenjin install');
+    }
+    // Stored regardless: the line reports the script, it does not refuse the set.
+    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
+      data: { value: 'nudge', source: 'file' },
+    });
+  });
+
+  it('stays quiet about capture on a current script, and about `off` on any', async () => {
+    const ctx = makeCtx();
+    const current = await runConfigSet({ key: 'hooks.capture', value: 'block' }, ctx, {
+      stopHookIsCurrent: async () => true,
+    });
+    expect(current.data).not.toHaveProperty('hookScriptStale');
+    expect(current.humanLines).toHaveLength(1);
+
+    // `off` is exactly what a script that never heard of the key already does.
+    const off = await runConfigSet({ key: 'hooks.capture', value: 'off' }, ctx, {
+      stopHookIsCurrent: async () => false,
+    });
+    expect(off.data).not.toHaveProperty('hookScriptStale');
+    expect(off.humanLines).toHaveLength(1);
   });
 
   // The arm-level toggle (#162): silencing the batched web-search reminders
@@ -1061,5 +1182,110 @@ describe('runConfigSet: the bazaarPay toggle places the tenjin-pay skill', () =>
     await expect(
       runConfigSet({ key: 'bazaarRegistries', value: 'not a url' }, ctx),
     ).rejects.toThrow(CliError);
+  });
+});
+
+describe('the shelf keys', () => {
+  const SECRET = 'shelf-secret-abc123';
+
+  it('takes publicShelfUrl as a URL and refuses anything else', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'publicShelfUrl', value: 'https://public.example' }, ctx);
+    expect(set.data).toMatchObject({
+      key: 'publicShelfUrl',
+      value: 'https://public.example',
+      source: 'file',
+    });
+    await expect(
+      runConfigSet({ key: 'publicShelfUrl', value: 'not-a-url' }, ctx),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  /**
+   * A door key that gets a request past Deployment Protection. `--json` is what
+   * an agent reads and what a bug report pastes, so the redaction has to be in
+   * `data`, not only in the rendered line — and it has to hold on the SET echo,
+   * which is the one place the value was just typed.
+   */
+  it('never echoes the bypass secret, on set, get, or list', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    expect(set.data).toMatchObject({ key: 'shelfBypassSecret', value: 'set', source: 'file' });
+    expect(JSON.stringify(set)).not.toContain(SECRET);
+
+    const got = await runConfigGet({ key: 'shelfBypassSecret' }, ctx);
+    expect(got.data).toMatchObject({ value: 'set', source: 'file' });
+    expect(JSON.stringify(got)).not.toContain(SECRET);
+
+    const listed = await runConfigList(ctx);
+    expect(JSON.stringify(listed)).not.toContain(SECRET);
+
+    // The operator's own file still holds it: this is redaction of an output,
+    // not encryption of a setting.
+    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe(SECRET);
+  });
+
+  /** And the file it lands in is a secret file, like every other one in the tree. */
+  it.skipIf(process.platform === 'win32')(
+    'leaves config.json at 0600 once it holds the door key',
+    async () => {
+      await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, makeCtx());
+      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it('clears back to unset with an empty value, which is how team mode is turned off', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    const cleared = await runConfigSet({ key: 'shelfBypassSecret', value: '' }, ctx);
+    expect(cleared.data).toMatchObject({ value: 'unset' });
+    expect(JSON.parse(await readFile(configFile(), 'utf8')).shelfBypassSecret).toBe('');
+  });
+
+  /**
+   * Team mode takes two settings, set by two independent commands, and the CLI
+   * fails the half-wired state safe to PUBLIC mode. Safe, but silent is what
+   * made it survivable: an operator who believes they are on a private shelf
+   * would keep writing internal notes at a command that publishes to
+   * tenjin.blog. So the half is named at the moment it is created.
+   */
+  it('warns when the secret is set while baseUrl is still the public marketplace', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    const warning = (set.data as { warning?: string }).warning ?? '';
+    expect(warning).toContain('PUBLIC mode');
+    expect(set.humanLines?.join('\n')).toContain('PUBLIC mode');
+    expect(JSON.stringify(set)).not.toContain(SECRET);
+
+    // Finishing the setup clears it, from either side of the pair.
+    const based = await runConfigSet({ key: 'baseUrl', value: 'https://backtrack.tenjin.sh' }, ctx);
+    expect(based.data).not.toHaveProperty('warning');
+  });
+
+  /**
+   * The third key of the same triple. `isTeamShelfOrigin` returns false when
+   * baseUrl matches publicShelfUrl too, so pointing the public shelf at the team
+   * deployment drops the machine out of team mode exactly as unsetting the secret
+   * would — silently, on a key the other two warnings never looked at.
+   */
+  it('warns when publicShelfUrl is pointed at the team shelf itself', async () => {
+    const ctx = makeCtx();
+    const TEAM = 'https://backtrack.tenjin.sh';
+    await runConfigSet({ key: 'shelfBypassSecret', value: SECRET }, ctx);
+    const based = await runConfigSet({ key: 'baseUrl', value: TEAM }, ctx);
+    expect(based.data).not.toHaveProperty('warning');
+
+    const collided = await runConfigSet({ key: 'publicShelfUrl', value: TEAM }, ctx);
+    const warning = (collided.data as { warning?: string }).warning ?? '';
+    expect(warning).toContain('PUBLIC mode');
+    // The fix names the key that broke the pair, not the other half of it.
+    expect(warning).toContain('tenjin config set publicShelfUrl');
+    expect(warning).not.toContain('config set baseUrl');
+  });
+
+  it('says nothing about team mode when no secret is set', async () => {
+    const ctx = makeCtx();
+    const based = await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx);
+    expect(based.data).not.toHaveProperty('warning');
   });
 });

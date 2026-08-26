@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
+import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired } from '@x402/core/types';
@@ -149,6 +150,20 @@ describe('runPay, tenjin lane', () => {
     expect(data.status).toBe(200);
     expect(data.body).toEqual({ answer: 42 });
     expect(data.lane).toBe('tenjin');
+    expect(calls).toHaveLength(1);
+  });
+
+  // tenjin#738: at the cutover a Tenjin URL arrives on the deployment other
+  // origin while the config still names the old one. It must stay in this lane.
+  // The Bazaar lane is off here, so a fall-through would refuse outright.
+  it('keeps a URL on the deployment other origin in this lane', async () => {
+    const sibling = knownDeploymentOrigins().find((o) => o !== new URL(TENJIN_URL).origin);
+    expect(sibling).toBeDefined();
+    const { fetch, calls } = scriptedFetch([json(200, { answer: 42 })]);
+    const result = await runPay({ url: `${sibling}/api/answer` }, makeCtx(), { fetchImpl: fetch });
+    const data = result.data as { lane: string; status: number };
+    expect(data.lane).toBe('tenjin');
+    expect(data.status).toBe(200);
     expect(calls).toHaveLength(1);
   });
 

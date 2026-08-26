@@ -1,6 +1,8 @@
 import { CliError } from '../lib/errors';
-import { resolveContextSettings } from '../lib/settings';
+import { resolveContextSettings, shelfRouteFor } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
+import { UUID_RE } from '../lib/ids';
+import { ownedByThisSession, readSessionId } from '../lib/session';
 import {
   latestSearch,
   loadSearches,
@@ -26,11 +28,21 @@ import type { CommandContext, CommandResult } from '../context';
  * the machine data, so a misfire is visible in the same breath as the report; and
  * an outcome that could not describe that search, whether by its status or by
  * naming a resource the search never surfaced, is refused before the request.
+ *
+ * ONE STATUS, MANY SEARCHES. `--search-id` repeats and `--all-open` sweeps this
+ * session's unanswered hook loops, because a session that closed seventeen of
+ * them one call at a time is one where the honest close stops happening. Both
+ * report per id, both refuse before sending if one target's id or status could
+ * not be right, and both stop at an unhealthy server and report the rest
+ * untouched, because an open loop is the state the Stop hook can recover.
  */
 
 export interface OutcomeArgs {
-  searchId?: string;
+  /** One search, or several the same status describes. */
+  searchId?: string | string[];
   last?: boolean;
+  /** Close this session's open websearch-hook MISSes; `regenerated` only. */
+  allOpen?: boolean;
   status: string;
   resource?: string;
   contentHash?: string;
@@ -38,54 +50,185 @@ export interface OutcomeArgs {
 
 export interface OutcomeDeps {
   fetchImpl?: typeof fetch;
+  /** Environment seam (TENJIN_SESSION_ID); defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
+
+/** `error` when the report did not land, `untouched` when it was never tried. */
+interface OutcomeReport {
+  searchId: string;
+  accepted: number;
+  question?: string;
+  error?: { code: string; message: string };
+  untouched?: true;
+}
+
+/** Failures where the next id fails the same way: the budget signal itself (a
+ *  sweep can spend 50 of the 60/min window) and the dead network (50 ids at the
+ *  10s default stalls a turn end). NOT `API_UNREACHABLE` — postOutcomes gives
+ *  that to any non-202, so halting would abandon a batch over a per-id 400. */
+const HALTING_FAILURES = new Set(['RATE_LIMITED', 'NETWORK_ERROR']);
 
 export async function runOutcome(
   args: OutcomeArgs,
   ctx: CommandContext,
   deps: OutcomeDeps = {},
 ): Promise<CommandResult> {
-  const target = await resolveTarget(args, ctx);
-  // Status name first, so an unknown status still fails as an unknown status
-  // rather than as an incoherent one.
+  const { targets, deliberateLeftOpen, answeredLeftOpen } = await resolveTargets(args, ctx, deps);
+  // The status VOCABULARY; `--all-open`'s narrower rule already ran above.
   const item = buildOutcomeItem({
     status: args.status,
     ...(args.resource !== undefined ? { resourceId: args.resource } : {}),
     ...(args.contentHash !== undefined ? { contentHash: args.contentHash } : {}),
   });
-  if (target.stored !== null) assertOutcomeCoherent(item.status, target.stored, item.resourceId);
-  const { searchId } = target;
-  const question = target.stored !== null ? echoQuestion(target.stored.question) : undefined;
+  if (item.resourceId !== undefined && (targets.length > 1 || args.allOpen === true)) {
+    throw new CliError(
+      'USAGE',
+      "A --resource names one search's candidate, so it cannot describe a batch.",
+      { fix: 'Report the resource against its own search with a single --search-id <id>.' },
+    );
+  }
+  // Ids and statuses, before any request: half a batch is worse than none.
+  for (const target of targets) {
+    assertReportableId(target.searchId);
+    if (target.stored !== null) assertOutcomeCoherent(item.status, target.stored, item.resourceId);
+  }
 
   const settings = await resolveContextSettings(ctx);
-  const result = await postOutcomes(searchId, [item], {
-    baseUrl: settings.baseUrl,
-    timeoutMs: ctx.flags.timeout,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-  });
+  const reports: OutcomeReport[] = [];
+  let halted = false;
+  for (const target of targets) {
+    const question = target.stored !== null ? echoQuestion(target.stored.question) : undefined;
+    if (halted) {
+      reports.push({ searchId: target.searchId, accepted: 0, untouched: true });
+      continue;
+    }
+    // TO THE SHELF THAT ANSWERED. In team mode the ordinary team-miss /
+    // public-hit means the id was minted by the public marketplace, and the team
+    // shelf has no such search: posting there raises a dropped-parent alarm on
+    // the team's own deployment and leaves the marketplace's demand loop open.
+    // An entry with no recorded shelf, and every public-mode run, routes to the
+    // configured base exactly as before. The key rides the origin, so a report to
+    // the public shelf carries no bypass header.
+    const route = shelfRouteFor(target.stored, settings);
+    try {
+      const result = await postOutcomes(target.searchId, [item], {
+        baseUrl: route.baseUrl,
+        timeoutMs: ctx.flags.timeout,
+        ...(route.bypass !== undefined ? { bypass: route.bypass } : {}),
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      });
+      // The loop is closed, so the Stop hook has nothing left to raise about it.
+      // AFTER the post, so a refused or failed report leaves the loop open. Local
+      // bookkeeping only, and it never throws: see markSearchResolved.
+      await markSearchResolved(ctx.dataDir, target.searchId, 'outcome');
+      reports.push({
+        searchId: target.searchId,
+        accepted: result.accepted,
+        ...(question !== undefined ? { question } : {}),
+      });
+    } catch (err) {
+      // One id keeps its own error envelope, with the code callers already read.
+      if (targets.length === 1) throw err;
+      const error = describeFailure(err);
+      halted = HALTING_FAILURES.has(error.code);
+      reports.push({
+        searchId: target.searchId,
+        accepted: 0,
+        ...(question !== undefined ? { question } : {}),
+        error,
+      });
+    }
+  }
 
-  // The loop is closed, so the Stop hook has nothing left to raise about it.
-  // AFTER the post, so a refused or failed report leaves the loop open. Local
-  // bookkeeping only, and it never throws: see markSearchResolved.
-  await markSearchResolved(ctx.dataDir, searchId, 'outcome');
-
+  const failed = reports.filter((r) => r.error !== undefined);
+  const untouched = reports.filter((r) => r.untouched === true);
+  const closed = reports.length - failed.length - untouched.length;
   // The question rides both renderings, so the misfire this guards against is
   // visible whether a human is reading the line or an agent is reading the JSON.
   // Sanitized on the human line only: the envelope is machine data and keeps the
   // bytes it was given (see output.ts).
+  const humanLines = reports
+    .filter((r) => r.error === undefined && r.untouched !== true)
+    .map((r) => reportLine(item.status, r));
+  if (targets.length === 0) humanLines.push('No open web-search loops in this session.');
+  humanLines.push(...leftOpenLines(deliberateLeftOpen, answeredLeftOpen));
+
+  if (failed.length > 0) {
+    const remainder = untouched.length > 0 ? `, ${untouched.length} left untouched` : '';
+    throw new CliError(
+      failureCode(failed),
+      `Reported ${item.status} for ${closed} of ${reports.length} searches; ${failed.length} failed${remainder}.`,
+      {
+        // In `fix`, not just `details`: the renderer drops other shapes.
+        fix: `Retry with ${retryFlags(failed.concat(untouched))}`,
+        details: { status: item.status, closed, results: reports },
+      },
+    );
+  }
+
   return {
+    // Flat fields repeat a lone result, so data.searchId still reads.
     data: {
-      searchId,
       status: item.status,
-      accepted: result.accepted,
-      ...(question !== undefined ? { question } : {}),
+      closed,
+      results: reports,
+      ...(deliberateLeftOpen > 0 ? { deliberateLeftOpen } : {}),
+      ...(answeredLeftOpen > 0 ? { answeredLeftOpen } : {}),
+      ...(reports.length === 1 ? flatten(reports[0]!) : {}),
     },
-    humanLines: [
-      `Reported ${item.status} for search ${searchId}${
-        question !== undefined ? ` "${sanitizeForTerminal(question)}"` : ''
-      } (accepted ${result.accepted}).`,
-    ],
+    humanLines,
   };
+}
+
+function leftOpenLines(deliberate: number, answered: number): string[] {
+  const lines: string[] = [];
+  if (deliberate > 0) {
+    lines.push(`${deliberate} deliberate search(es) left open; close each with --search-id <id>.`);
+  }
+  if (answered > 0) {
+    lines.push(
+      `${answered} hook search(es) Tenjin answered left open; report each with --search-id <id>.`,
+    );
+  }
+  return lines;
+}
+
+/** One shared code when every failure agrees, so an all-USAGE batch keeps its
+ *  exit 2 and an all-RATE_LIMITED one stays recoverable; mixed is an outage. */
+function failureCode(failed: OutcomeReport[]): 'USAGE' | 'RATE_LIMITED' | 'API_UNREACHABLE' {
+  const codes = new Set(failed.map((r) => r.error?.code));
+  if (codes.size !== 1) return 'API_UNREACHABLE';
+  const [only] = [...codes];
+  if (only === 'USAGE') return 'USAGE';
+  return only === 'RATE_LIMITED' ? 'RATE_LIMITED' : 'API_UNREACHABLE';
+}
+
+/** The copy-pasteable retry, bounded: a fix line naming fifty ids is not a fix. */
+function retryFlags(pending: OutcomeReport[]): string {
+  const MAX_NAMED = 5;
+  const named = pending.slice(0, MAX_NAMED).map((r) => `--search-id ${r.searchId}`);
+  const rest = pending.length - named.length;
+  return rest > 0 ? `${named.join(' ')} (and ${rest} more, see results)` : named.join(' ');
+}
+
+function flatten(report: OutcomeReport): Record<string, unknown> {
+  return {
+    searchId: report.searchId,
+    accepted: report.accepted,
+    ...(report.question !== undefined ? { question: report.question } : {}),
+  };
+}
+
+function reportLine(status: string, report: OutcomeReport): string {
+  const question =
+    report.question !== undefined ? ` "${sanitizeForTerminal(report.question)}"` : '';
+  return `Reported ${status} for search ${report.searchId}${question} (accepted ${report.accepted}).`;
+}
+
+function describeFailure(err: unknown): { code: string; message: string } {
+  if (err instanceof CliError) return { code: err.code, message: err.message };
+  return { code: 'INTERNAL', message: err instanceof Error ? err.message : String(err) };
 }
 
 /** The search this report will land on, plus the local record of it when there is
@@ -96,17 +239,49 @@ interface OutcomeTarget {
   stored: StoredSearch | null;
 }
 
-async function resolveTarget(args: OutcomeArgs, ctx: CommandContext): Promise<OutcomeTarget> {
-  if (args.searchId !== undefined && args.last === true) {
-    throw new CliError('USAGE', 'Pass either --search-id or --last, not both.', {
-      fix: 'Use --search-id <id> for a specific search, or --last for the most recent.',
+/** The searches to report against, plus what `--all-open` walked past. */
+interface ResolvedTargets {
+  targets: OutcomeTarget[];
+  deliberateLeftOpen: number;
+  answeredLeftOpen: number;
+}
+
+/** The shape `postOutcomes` enforces, hoisted in front of the send loop, where
+ *  it would otherwise run per id after earlier reports already left. UUID_RE and
+ *  not `SEARCH_ID_WIRE_RE`: this path parameter is `format: uuid` with no pattern
+ *  (openapi.fixture.json), so the POST /api/posts regex is stricter than the
+ *  route. */
+function assertReportableId(searchId: string): void {
+  if (UUID_RE.test(searchId)) return;
+  throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
+    fix: 'Pass a searchId from a prior search (or use --last).',
+  });
+}
+
+async function resolveTargets(
+  args: OutcomeArgs,
+  ctx: CommandContext,
+  deps: OutcomeDeps,
+): Promise<ResolvedTargets> {
+  const ids = idsOf(args.searchId);
+  const selectors = [ids.length > 0, args.last === true, args.allOpen === true].filter(
+    Boolean,
+  ).length;
+  if (selectors > 1) {
+    throw new CliError('USAGE', 'Pass one of --search-id, --last or --all-open, not several.', {
+      fix: "Use --search-id <id> (repeatable) for specific searches, --last for the most recent, or --all-open to close this session's open web-search-hook loops.",
     });
   }
-  if (args.searchId !== undefined) {
+  if (args.allOpen === true) return resolveAllOpen(args, ctx, deps);
+  if (ids.length > 0) {
     const searches = await loadSearches(ctx.dataDir);
     return {
-      searchId: args.searchId,
-      stored: searches.find((s) => s.searchId === args.searchId) ?? null,
+      targets: ids.map((searchId) => ({
+        searchId,
+        stored: searches.find((s) => s.searchId === searchId) ?? null,
+      })),
+      deliberateLeftOpen: 0,
+      answeredLeftOpen: 0,
     };
   }
   if (args.last === true) {
@@ -116,11 +291,67 @@ async function resolveTarget(args: OutcomeArgs, ctx: CommandContext): Promise<Ou
         fix: 'Run `tenjin search` first, or pass --search-id <id>.',
       });
     }
-    return { searchId: latest.searchId, stored: latest };
+    return {
+      targets: [{ searchId: latest.searchId, stored: latest }],
+      deliberateLeftOpen: 0,
+      answeredLeftOpen: 0,
+    };
   }
   throw new CliError('USAGE', 'An outcome needs a search to report against.', {
-    fix: 'Pass --search-id <id> or --last.',
+    fix: 'Pass --search-id <id>, --last, or --all-open --status regenerated.',
   });
+}
+
+/**
+ * This session's open loops that the hook recorded and Tenjin could not answer.
+ *
+ * THIS SESSION ONLY, no flag for a wider sweep: the loop is per-session by
+ * design, a session's loops are its own, and one that ends leaves its debt to
+ * decay rather than handing it to whoever stops next. `readSessionId` and the
+ * unstamped rule are shared with the Stop hook, so this covers the same set the
+ * nag is drawn from.
+ *
+ * `regenerated` ONLY, and MISS ONLY: the other statuses claim what a search did
+ * for the agent, and the hook records CANDIDATES under this same source, where a
+ * priced answer was shown and may have been bought — `regenerated` there would
+ * overwrite the one positive attribution this loop collects. Deliberate and
+ * answered searches are counted, never swept.
+ */
+async function resolveAllOpen(
+  args: OutcomeArgs,
+  ctx: CommandContext,
+  deps: OutcomeDeps,
+): Promise<ResolvedTargets> {
+  if (args.status !== 'regenerated') {
+    throw new CliError(
+      'USAGE',
+      `--all-open closes searches nobody examined one by one, so it reports regenerated and nothing else (got ${JSON.stringify(args.status)}).`,
+      {
+        fix: 'Use --all-open --status regenerated, or report other statuses per search with --search-id <id>.',
+      },
+    );
+  }
+  const sessionId = readSessionId(deps.env);
+  const open = (await loadSearches(ctx.dataDir)).filter(
+    (s) =>
+      (s.resolved === undefined || s.resolved === null) &&
+      ownedByThisSession(s.sessionId, sessionId),
+  );
+  // Absent source predates sources, and those entries were all deliberate.
+  const hook = open.filter((s) => s.source === 'websearch-hook');
+  return {
+    targets: hook
+      .filter((s) => s.decision === 'MISS')
+      .map((stored) => ({ searchId: stored.searchId, stored })),
+    deliberateLeftOpen: open.length - hook.length,
+    answeredLeftOpen: hook.filter((s) => s.decision !== 'MISS').length,
+  };
+}
+
+function idsOf(searchId: string | string[] | undefined): string[] {
+  if (searchId === undefined) return [];
+  const ids = typeof searchId === 'string' ? [searchId] : searchId;
+  return [...new Set(ids)];
 }
 
 /** Long enough to tell two searches apart on one line, short enough not to bury
