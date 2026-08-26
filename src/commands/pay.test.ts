@@ -9,7 +9,8 @@ import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired } from '@x402/core/types';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
+import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -289,6 +290,95 @@ describe('runPay, tenjin lane', () => {
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+});
+
+/** The builder-code `info` the CLI put on the wire, or undefined when it sent none. */
+function attributionOf(header: string | undefined): { a?: string; s?: string[] } | undefined {
+  const envelope = JSON.parse(Buffer.from(header ?? '', 'base64').toString('utf8')) as {
+    extensions?: Record<string, { info?: { a?: string; s?: string[] } }>;
+  };
+  return envelope.extensions?.['builder-code']?.info;
+}
+
+describe('runPay, builder-code attribution', () => {
+  it('sends the CLI service code when the 402 advertises builder-code', async () => {
+    const fixture = buildPaymentRequired({}, withBuilderCode());
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: TENJIN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(attributionOf(calls[1]!.headers['payment-signature'])?.s).toEqual([
+      TENJIN_CLI_BUILDER_CODE,
+    ]);
+  });
+
+  // A seller who never declared the extension must not receive it: the SDK's
+  // gating is what keeps this attribution spec-clean rather than a custom header.
+  it('sends no builder-code extension to a seller that did not advertise it', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: TENJIN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(attributionOf(calls[1]!.headers['payment-signature'])).toBeUndefined();
+  });
+
+  // The lane the Tenjin server actually takes: it always declares
+  // sign-in-with-x, so the payment is built from the FRESH challenge the
+  // entitlement re-check returned rather than the first look. Pin that the
+  // builder-code entry survives that swap.
+  it('attributes the payment built from the sign-in-with-x re-check challenge', async () => {
+    const withBoth = (): Partial<PaymentRequired> => ({
+      extensions: {
+        'sign-in-with-x': { info: { domain: new URL(TENJIN_URL).host } },
+        ...withBuilderCode().extensions,
+      },
+    });
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired({}, withBoth()).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired({}, withBoth()).header }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: TENJIN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(calls[1]!.headers['sign-in-with-x']).toBeDefined();
+    const info = attributionOf(calls[2]!.headers['payment-signature']);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    expect(info?.a).toBe(TENJIN_CLI_BUILDER_CODE);
+  });
+
+  it('attributes a registry-verified foreign 402 without disturbing the evidence check', async () => {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const fixture = buildPaymentRequired({}, withBuilderCode('bc_seller01'));
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { enriched: true }),
+    ]);
+    const result = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { lane: string; registry: string }).lane).toBe('bazaar');
+    expect((result.data as { registry: string }).registry).toBe(REGISTRY);
+    const info = attributionOf(calls[1]!.headers['payment-signature']);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    expect(info?.a).toBe('bc_seller01');
   });
 });
 

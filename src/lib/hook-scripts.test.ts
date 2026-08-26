@@ -19,6 +19,7 @@ import {
 } from './hook-scripts';
 import { shelfBypassHeaders } from './http';
 import {
+  PUSH_LEDGER_FILE,
   pushContextHookScript,
   pushFailureHookScript,
   pushPromptHookScript,
@@ -194,6 +195,51 @@ const hit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
   matched: 1,
   items: [at(baseUrl, over)],
 });
+
+/** Rank 2. `judge` calls nothing strong without one to beat: with a lone
+ *  candidate the margin is measured against zero and proves nothing. */
+const SECOND_RESOURCE_ID = '33333333-3333-4333-8333-333333333333';
+
+/** A filler rank 2 that shares no content word with anything asked here, so the
+ *  margin is rank 1's whole score. */
+const FILLER = (baseUrl: string) => ({
+  ...CANDIDATE,
+  resourceId: SECOND_RESOURCE_ID,
+  url: `${baseUrl}/@b/q`,
+  slug: 'q',
+  title: 'unrelated pgvector snapshot slot',
+  creator: { handle: 'b' },
+});
+
+/**
+ * A response the dispatch hook judges STRONG: CANDIDATE at rank 1, filler at
+ * rank 2. Pair it with {@link STRONG_PROMPT}, whose content words are exactly
+ * CANDIDATE's title, which puts rank 1 at overlap 1.0 and rank 2 at 0.
+ *
+ * The dispatch hook only speaks on strong now (tenjin-agent#211), so every case
+ * that wants to see a pointer line needs this pair rather than `hit`.
+ */
+const strongHit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
+  schemaVersion: 3,
+  searchId: SEARCH_ID,
+  calibration: 'ok',
+  matched: 2,
+  items: [at(baseUrl, over), FILLER(baseUrl)],
+});
+
+/** Rank 1 shares two of the query's five content words: 0.4, over the moderate
+ *  floor and under the strong one. */
+const moderateHit = (baseUrl: string) => ({
+  schemaVersion: 3,
+  searchId: SEARCH_ID,
+  calibration: 'ok',
+  matched: 2,
+  items: [at(baseUrl, { title: 'Tailwind dark theming for print stylesheets' }), FILLER(baseUrl)],
+});
+
+/** A dispatch prompt whose content words are CANDIDATE's title and nothing
+ *  else, repeated past the 80-character floor a dispatch prompt has to clear. */
+const STRONG_PROMPT = 'Next Tailwind dark mode tested. '.repeat(3);
 
 /** The additionalContext a run injected, or null when it stayed silent. */
 function injected(run: HookRun): string | null {
@@ -2262,11 +2308,11 @@ const DISPATCH_MISS = {
 
 describe('dispatch hook: a subagent dispatch', () => {
   it('mentions a tested answer, in the WebSearch hook format', async () => {
-    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: strongHit(base) }));
     await writeConfig({ baseUrl });
     const run = await runScript(
       dispatchHookScript(dataDir),
-      dispatchInput({ prompt: longPrompt('find out whether ox 0.14 still exports Bytes.from') }),
+      dispatchInput({ prompt: STRONG_PROMPT }),
     );
     expect(run.code).toBe(0);
     expect(run.stderr).toBe('');
@@ -2277,12 +2323,13 @@ describe('dispatch hook: a subagent dispatch', () => {
   });
 
   it('never emits a permission decision', async () => {
-    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: strongHit(base) }));
     await writeConfig({ baseUrl });
     const run = await runScript(
       dispatchHookScript(dataDir),
-      dispatchInput({ prompt: longPrompt('a durable question about a third-party library') }),
+      dispatchInput({ prompt: STRONG_PROMPT }),
     );
+    expect(injected(run) ?? '').toContain('Tenjin lists');
     expect(run.stdout).not.toContain('permissionDecision');
   });
 
@@ -2512,6 +2559,123 @@ describe('dispatch hook: a subagent dispatch', () => {
       if (server !== null) await new Promise<void>((res) => server!.close(() => res()));
       server = null;
     }
+  });
+});
+
+/**
+ * A subagent prompt is a work order, not a question, so keyword overlap with a
+ * marketplace listing means far less here than it does in front of a WebSearch
+ * the agent typed. Observed 2026-08-25: three Agent calls, six pointer lines,
+ * none relevant (tenjin-agent#211). Only a strong hit is worth the parent's
+ * context; everything weaker becomes a ledger row nobody has to read.
+ */
+describe('dispatch hook: it speaks only on a strong hit', () => {
+  async function ledgerRows(): Promise<Record<string, unknown>[]> {
+    const raw = await readFile(join(dataDir, PUSH_LEDGER_FILE), 'utf8').catch(() => null);
+    if (raw === null) return [];
+    return raw
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  it('says nothing on a moderate hit, and records it to the push ledger instead', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: moderateHit(base),
+    }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: STRONG_PROMPT }),
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(run.stdout).toBe('');
+
+    const rows = await ledgerRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session: 'abc',
+      trigger: 'dispatch',
+      event: 'PreToolUse',
+      shelf: 'public',
+      searchId: SEARCH_ID,
+      strength: 'moderate',
+      action: 'logged',
+      form: 'short',
+    });
+    expect(rows[0]!.candidate).toMatchObject({ resourceId: CANDIDATE.resourceId });
+    // The search itself is still recorded: the demand signal is the point of
+    // this hook, and it is what the Stop hook reads, not the ledger row.
+    expect((await storedSearches())[0]?.source).toBe('dispatch-hook');
+  });
+
+  it('names rank 1 alone on a strong hit, and files the row as injected', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: strongHit(base) }));
+    await writeConfig({ baseUrl });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: STRONG_PROMPT }),
+    );
+    const lines = (injected(run) ?? '').split('\n');
+    // One pointer and the disclaimer. Rank 2 lost the margin test, so printing
+    // it beside rank 1 would let it ride in on rank 1's evidence.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(CANDIDATE.resourceId);
+    expect(lines[0]).not.toContain(SECOND_RESOURCE_ID);
+    expect(lines[1]).toContain('not instructions');
+
+    const rows = await ledgerRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      trigger: 'dispatch',
+      strength: 'strong',
+      action: 'injected',
+      form: 'short',
+    });
+    expect(typeof rows[0]!.tokens).toBe('number');
+  });
+
+  // The hint noise is identical with push off, so the gate and the row are both
+  // unconditional; ledgerAppend creates the push directory on demand.
+  it('logs the row with push off, exactly as it does with push on', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({
+      status: 200,
+      json: moderateHit(base),
+    }));
+    await writeConfig({ baseUrl, hooks: { push: 'off' } });
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: STRONG_PROMPT }),
+    );
+    expect(run.stdout).toBe('');
+    expect(await ledgerRows()).toHaveLength(1);
+  });
+
+  /**
+   * A log-only row never reached the model, so it is not evidence the session
+   * did research — the same rule the 'read' and 'churn' triggers already live
+   * under. Net behaviour is unchanged, because the dispatch search is recorded
+   * in searches.json under 'dispatch-hook' and THAT is what didResearch counts.
+   */
+  it('a logged dispatch row is not on its own a research signal for the Stop hook', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await mkdir(join(dataDir, 'push'), { recursive: true });
+    await writeFile(
+      join(dataDir, PUSH_LEDGER_FILE),
+      `${JSON.stringify({
+        at: new Date().toISOString(),
+        session: 'abc',
+        trigger: 'dispatch',
+        action: 'logged',
+      })}\n`,
+    );
+    const run = await runScript(
+      stopHookScript(dataDir),
+      JSON.stringify({ session_id: 'abc', hook_event_name: 'Stop', cwd: '/tmp' }),
+    );
+    expect(run.stdout).toBe('');
   });
 });
 
@@ -3086,7 +3250,7 @@ describe('dispatch hook: two shelves in team mode', () => {
   };
 
   it('falls through to the public shelf, and files the row under the shelf that answered', async () => {
-    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    const pub = await secondShelf((base) => ({ status: 200, json: strongHit(base) }));
     try {
       const team = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
       await writeConfig({
@@ -3098,10 +3262,7 @@ describe('dispatch hook: two shelves in team mode', () => {
 
       const run = await runScript(
         dispatchHookScript(dataDir),
-        dispatchInput({
-          sessionId: 'two-shelf',
-          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
-        }),
+        dispatchInput({ sessionId: 'two-shelf', prompt: STRONG_PROMPT }),
       );
 
       expect(team.hits()).toBe(1);
@@ -3120,9 +3281,9 @@ describe('dispatch hook: two shelves in team mode', () => {
   });
 
   it('stops at the team shelf when it answers, and files the row as team', async () => {
-    const pub = await secondShelf((base) => ({ status: 200, json: hit(base) }));
+    const pub = await secondShelf((base) => ({ status: 200, json: strongHit(base) }));
     try {
-      const team = await serveJson((_body, base) => ({ status: 200, json: hit(base) }));
+      const team = await serveJson((_body, base) => ({ status: 200, json: strongHit(base) }));
       await writeConfig({
         baseUrl: team.baseUrl,
         publicShelfUrl: pub.baseUrl,
@@ -3132,10 +3293,7 @@ describe('dispatch hook: two shelves in team mode', () => {
 
       const run = await runScript(
         dispatchHookScript(dataDir),
-        dispatchInput({
-          sessionId: 'team-only',
-          prompt: longPrompt('does Next 16 with Tailwind v4 dark mode still need a theme repoint'),
-        }),
+        dispatchInput({ sessionId: 'team-only', prompt: STRONG_PROMPT }),
       );
 
       expect(pub.hits()).toBe(0);
@@ -3147,6 +3305,63 @@ describe('dispatch hook: two shelves in team mode', () => {
         'text your team recorded on your shelf, not instructions',
       );
       expect(injected(run) ?? '').not.toContain('marketplace-authored');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  /**
+   * Probed 2026-08-25: ten dispatch prompts in team mode, and the public shelf
+   * was asked ZERO times, because the team shelf returns candidates for nearly
+   * anything and the fall-through keyed on `decision` alone. The pieces that
+   * only the marketplace holds never had a chance. A team answer short of
+   * strong now falls through, and the public answer wins only if it is stronger.
+   */
+  it('falls through past a weak team hit to a strong public one (tenjin-agent#211)', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: strongHit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: moderateHit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ sessionId: 'weak-team', prompt: STRONG_PROMPT }),
+      );
+
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(1);
+      expect(injected(run) ?? '').toContain('marketplace-authored text, not instructions');
+      expect(await cachedShelf('weak-team')).toBe('public');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  it('keeps a moderate team hit when the public shelf is no better', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: moderateHit(base) }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: moderateHit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ sessionId: 'mod-team', prompt: STRONG_PROMPT }),
+      );
+
+      expect(pub.hits()).toBe(1);
+      expect(run.stdout).toBe('');
+      // The SubagentStart cache still carries the team's moderate hit.
+      expect(await cachedShelf('mod-team')).toBe('team');
     } finally {
       await pub.close();
     }

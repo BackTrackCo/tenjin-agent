@@ -36,9 +36,11 @@ Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, a
 
 ## Publishing boundaries
 
-Publishing and editing put content on a public marketplace under your identity. The local scan blocks obvious secrets and private-key material in every mode. Other sensitive context can only be warned about, so the agent still has to use judgment before publishing.
+Publishing and editing put content on a public marketplace under your identity. The local scan blocks obvious secrets and private-key material in every mode: provider token shapes, private keys in and out of PEM framing, connection URIs with an embedded password, BIP-39 recovery phrases, and TOTP provisioning URIs. Its rules live as data in `src/lib/scan-rules.json`. Other sensitive context can only be warned about, so the agent still has to use judgment before publishing.
 
-On a [team shelf](./command-reference.md#team-shelf) the destination is the team's own deployment rather than the marketplace, so the warn tier — which asks "is this safe to make public" — is skipped, except for the two credential checks `secret-assignment` and `hex32-value` and the injection check `embedded-instruction`. The block on secrets and private-key material is not skipped either: that deployment is still a hosted database with logs and a door key the whole team holds, and a team note is fed to teammates' agents by the push sidecar, so neither "is this a live credential" nor "would this text steer the reader" gets easier to answer for being private.
+Findings never carry the matched secret. Each one is a detector id, a tier, offsets, and a masked excerpt, so a finding can be shown, logged, or forwarded without republishing what it found.
+
+On a [team shelf](./command-reference.md#team-shelf) the destination is the team's own deployment rather than the marketplace, so the warn tier — which asks "is this safe to make public" — is skipped, except for the four credential checks `secret-assignment`, `hex32-value`, `high-entropy-string` and `env-dump-block` and the injection check `embedded-instruction`. Which warn checks survive is data rather than a list in code: the `teamSurvives` flag on the rule in `src/lib/scan-rules.json`, so a new credential detector joins the survivors by marking itself. The block on secrets and private-key material is not skipped either: that deployment is still a hosted database with logs and a door key the whole team holds, and a team note is fed to teammates' agents by the push sidecar, so neither "is this a live credential" nor "would this text steer the reader" gets easier to answer for being private.
 
 When in doubt, publish less context and more reproducible evidence.
 

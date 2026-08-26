@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { verifyTypedData } from 'viem';
-import { buildExactPayment } from './x402-pay';
-import { buildPaymentRequired, testSigner } from './read-test-utils';
+import { buildExactPayment, TENJIN_CLI_BUILDER_CODE } from './x402-pay';
+import { buildPaymentRequired, testSigner, withBuilderCode } from './read-test-utils';
 
 describe('buildExactPayment', () => {
   it('builds a PAYMENT-SIGNATURE header offline and reports the exact amount', async () => {
@@ -121,3 +121,85 @@ describe('buildExactPayment', () => {
     expect(built.headers['PAYMENT-SIGNATURE']).toBeTypeOf('string');
   });
 });
+
+describe('buildExactPayment, builder-code attribution', () => {
+  it('carries the client service code when the 402 advertises builder-code', async () => {
+    // A foreign seller's own code, so the two Schema 2 roles are visibly
+    // distinct: `a` is whoever exposed the endpoint, `s` is who brokered it.
+    const { paymentRequired } = buildPaymentRequired({}, withBuilderCode('bc_seller01'));
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
+    const info = builderCodeInfo(payload.extensions);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    // The seller's own app code survives the merge: `s` adds to `a`, never replaces it.
+    expect(info?.a).toBe('bc_seller01');
+  });
+
+  // Against Tenjin's own 402 the one registered code lands in both roles; the
+  // suffix still says which side each occurrence came from.
+  it('fills both roles with the one code when Tenjin is also the seller', async () => {
+    const { paymentRequired } = buildPaymentRequired({}, withBuilderCode());
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
+    const info = builderCodeInfo(payload.extensions);
+    expect(info?.a).toBe(TENJIN_CLI_BUILDER_CODE);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+  });
+
+  // REGRESSION PIN. The SDK merges the enriched payload onto the server's
+  // extensions as the base and copies a client field only where the server left
+  // it unset, so before the strip a seller that declared its own `info.s` kept
+  // it and Tenjin's code vanished with no error. Any 402 can do this, so this is
+  // the foreign-seller lane, not only the hostile one.
+  it('keeps Tenjin as the only client code when the seller declares its own `s`', async () => {
+    const { paymentRequired } = buildPaymentRequired(
+      {},
+      withBuilderCode('bc_seller01', ['bc_attacker']),
+    );
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
+    const info = builderCodeInfo(payload.extensions);
+    expect(info?.s).toEqual([TENJIN_CLI_BUILDER_CODE]);
+    // `a` is the seller's own field and still rides untouched.
+    expect(info?.a).toBe('bc_seller01');
+  });
+
+  it('sends no builder-code extension to a seller that never advertised one', async () => {
+    const { paymentRequired } = buildPaymentRequired();
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
+    expect(builderCodeInfo(payload.extensions)).toBeUndefined();
+  });
+
+  // Attribution is metadata, not terms: what the wallet authorizes must be
+  // identical whether or not the seller asked for a builder code.
+  it('leaves the authorized terms identical with and without the extension', async () => {
+    const signer = testSigner();
+    const plain = await buildExactPayment(buildPaymentRequired().paymentRequired, signer);
+    const attributed = await buildExactPayment(
+      buildPaymentRequired({}, withBuilderCode()).paymentRequired,
+      signer,
+    );
+    expect(attributed.amountAtomic).toBe(plain.amountAtomic);
+    const a = decodePaymentSignatureHeader(attributed.headers['PAYMENT-SIGNATURE'] as string);
+    const p = decodePaymentSignatureHeader(plain.headers['PAYMENT-SIGNATURE'] as string);
+    expect(a.accepted).toEqual(p.accepted);
+    // nonce and the validity window are fresh per signature by design, so the
+    // comparable terms are who pays whom, how much, and on what.
+    const auth = (x: typeof a): Record<string, unknown> => {
+      const { authorization } = x.payload as { authorization: Record<string, unknown> };
+      return {
+        from: authorization.from,
+        to: authorization.to,
+        value: authorization.value,
+      };
+    };
+    expect(auth(a)).toEqual(auth(p));
+  });
+});
+
+/** The merged `builder-code` extension info as it rides the payload, or undefined. */
+function builderCodeInfo(extensions: unknown): { a?: string; s?: string[] | string } | undefined {
+  const entry = (extensions as Record<string, { info?: unknown }> | undefined)?.['builder-code'];
+  return entry?.info as { a?: string; s?: string[] | string } | undefined;
+}

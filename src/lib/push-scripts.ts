@@ -388,11 +388,19 @@ function lookupCapFor(trigger) {
  * loses its oldest rows from the count and is treated as having spent less.
  * That errs toward letting a lookup through, which is the safe direction for a
  * budget whose failure mode this change exists to fix.
+ *
+ * \`resetAt\` rides along beside \`lookups\`: per trigger, the instant that
+ * bucket next frees a slot, which is the OLDEST in-window row's time plus one
+ * window. It exists so an exhausted arm can be remembered rather than
+ * rediscovered — see {@link rememberCap} — and it inherits the tail's
+ * undercount: a scrolled-off oldest row makes this LATER than the truth by at
+ * most one window, which costs one deferred lookup and never a bound skipped.
  */
 function pushBudget(sessionId) {
   const all = ledgerTailRows();
   const rows = [];
   const lookups = Object.create(null);
+  const oldest = Object.create(null);
   const windowStart = Date.now() - PUSH_LOOKUP_WINDOW_MS;
   const seen = new Set();
   let injected = 0;
@@ -402,6 +410,7 @@ function pushBudget(sessionId) {
       if (Number.isFinite(at) && at >= windowStart) {
         const key = triggerKey(r.trigger);
         lookups[key] = (lookups[key] ?? 0) + 1;
+        if (oldest[key] === undefined || at < oldest[key]) oldest[key] = at;
       }
     }
     const rowSession = typeof r.session === 'string' && r.session.length > 0 ? r.session : null;
@@ -431,7 +440,9 @@ function pushBudget(sessionId) {
     }
     failStreak += 1;
   }
-  return { injected, lookups, seen, failStreak, lastFailAtMs };
+  const resetAt = Object.create(null);
+  for (const key of Object.keys(oldest)) resetAt[key] = oldest[key] + PUSH_LOOKUP_WINDOW_MS;
+  return { injected, lookups, seen, failStreak, lastFailAtMs, resetAt };
 }
 
 /** Whether \`trigger\` has anything left in the current window. */
@@ -627,6 +638,21 @@ async function pushDecide(args) {
     event: args.event,
     query: clean(query, 512),
   };
+  // A bucket this session has ALREADY watched fill up, skipped before anything
+  // is read or written: the exhaustion row is on the ledger, \`push status\`
+  // counted it, and re-deriving the same verdict costs a 256 KB tail parse in
+  // front of every later fire on this arm. A null session has no cache and
+  // behaves exactly as it did before.
+  //
+  // STILL COUNTED. The row costs one O_APPEND write and no read, and it is what
+  // keeps "how many fires did the cap swallow" derivable from the ledger — the
+  // number (139 of 226) that found the budget starvation in the first place.
+  // \`cached: true\` marks it as a remembered verdict rather than a fresh one.
+  const cappedUntil = loadState(sessionId).capped[triggerKey(args.trigger)];
+  if (Number.isFinite(cappedUntil) && cappedUntil > Date.now()) {
+    ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap', cached: true });
+    return null;
+  }
   const budget = pushBudget(sessionId);
 
   // Shelf 1 is always \`baseUrl\`. In team mode that IS the team shelf; in public
@@ -700,6 +726,9 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
   // filled up without a new field.
   if (!lookupAllowed(budget, base.trigger)) {
     ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap' });
+    // The rest of this session's fires on this arm return before they reach
+    // here, on a remembered verdict and without the ledger parse.
+    rememberCap(sessionId, base.trigger, budget);
     return { kind: 'stop' };
   }
   // The shelf is not answering: stop asking it for a while. Self-healing, and
@@ -803,7 +832,9 @@ function statePath(sessionId) {
 }
 
 function loadState(sessionId) {
-  if (sessionId === null) return { edits: {}, packages: [], signatures: [], cache: null };
+  if (sessionId === null) {
+    return { edits: {}, packages: [], signatures: [], cache: null, capped: {} };
+  }
   const raw = readJsonFile(statePath(sessionId));
   const s = isRecord(raw) ? raw : {};
   return {
@@ -811,7 +842,53 @@ function loadState(sessionId) {
     packages: Array.isArray(s.packages) ? s.packages.filter((p) => typeof p === 'string') : [],
     signatures: Array.isArray(s.signatures) ? s.signatures.filter((p) => typeof p === 'string') : [],
     cache: isRecord(s.cache) ? s.cache : null,
+    capped: cappedTimes(s.capped),
   };
+}
+
+/** The \`capped\` map as epoch ms, dropping anything that is not a finite time.
+ *  A number is taken as ms and a string is parsed as a date, so a file written
+ *  by an older build (or by hand) can only ever be ignored, never throw. */
+function cappedTimes(raw) {
+  const out = {};
+  if (!isRecord(raw)) return out;
+  for (const key of Object.keys(raw)) {
+    const v = raw[key];
+    const ms = typeof v === 'number' ? v : (typeof v === 'string' ? Date.parse(v) : NaN);
+    if (Number.isFinite(ms)) out[key] = ms;
+  }
+  return out;
+}
+
+/**
+ * Remember that \`trigger\` is out of budget until its bucket next frees a slot,
+ * so the REST of this session's fires on that arm can skip the ledger parse
+ * entirely. Written next to the \`lookup-cap\` row and never anywhere else: the
+ * row is what \`push status\` counts, and the cache is what stops the next fire
+ * paying 256 KB of tail parsing to rediscover a fact this session just learned.
+ *
+ * PER SESSION ON PURPOSE, though the budget itself is machine-wide. Another
+ * session parses and finds the cap for itself, which keeps a stale or
+ * hand-edited state file from being able to silence a whole machine, and the
+ * entry needs no explicit clear: it expires by being in the past.
+ *
+ * The read-modify-write here is LAST-WRITER-WINS, like every other saveState
+ * call. Two arms can be inside this at once (the context arm looks two packages
+ * up concurrently), so one of them may drop the other's unrelated key. That is
+ * the documented contract of this file — it is a dedupe aid, never a ledger —
+ * and the cost of losing a write is one extra ledger parse.
+ *
+ * INTERIM. The SQLite budget store in #209 replaces the whole arrangement with
+ * a counter that can be read without parsing anything.
+ */
+function rememberCap(sessionId, trigger, budget) {
+  if (sessionId === null) return;
+  const key = triggerKey(trigger);
+  const resetAt = budget.resetAt[key];
+  if (!Number.isFinite(resetAt) || resetAt <= Date.now()) return;
+  const state = loadState(sessionId);
+  state.capped = { ...state.capped, [key]: resetAt };
+  saveState(sessionId, state);
 }
 
 /** Best-effort, last writer wins: this is a dedupe aid, never a ledger. Stale
@@ -1075,9 +1152,204 @@ export function pushPromptHookScript(dataDir: string): string {
  * finding BESIDE the error. It never denies anything; the command already ran.
  */
 const FAILURE_JS = String.raw`
-const ERROR_LINE_RE = /(error|exception|traceback|cannot find|not found|failed|enoent|eaddrinuse|econnrefused|unhandled|typeerror|referenceerror|syntaxerror|panic|fatal|segmentation|killed|timed out|err_)/i;
+/**
+ * WHAT A FAILURE ACTUALLY LOOKS LIKE, as markers rather than as words.
+ *
+ * The old rule was a bag of substrings — \`error\`, \`failed\`, \`not found\`,
+ * \`killed\` — matched case-insensitively against any line. Every one of those is
+ * ordinary English that a healthy command prints: \`which codex\` writing
+ * "codex not found" to stderr fired the arm and injected an unrelated 150-token
+ * note beside a command that did exactly what was asked of it. The cost of a
+ * wrong fire is ~180 tokens in the agent's context AND the operator's trust in
+ * everything else the sidecar says, so the bar is a marker a real toolchain
+ * emits, anchored to the start of its line wherever the format allows.
+ *
+ * Case-sensitive where the case IS the signal: \`FAIL\` is a vitest/jest/pytest
+ * verdict, \`fail\` and \`failed\` are prose. Every pattern carries \`m\` so the
+ * anchored ones work on a whole stdout blob as well as on one trimmed line, and
+ * leading indentation is allowed because runners indent their own output.
+ */
+const ERROR_MARKERS = [
+  // Test-runner verdicts. Uppercase only, and a whole word.
+  /\bFAIL\b/,
+  /AssertionError/,
+  /\b[1-9]\d* (?:failed|failing|errors?)\b/i,
+  // \`Error:\`, \`TypeError:\`, \`ReferenceError:\`, \`ModuleNotFoundError:\` — the
+  // JS and Python convention of naming the class before the colon — and the
+  // lowercase \`error:\` that rustc, gcc, clang, esbuild and git open a
+  // diagnostic line with. Line-start only: "an error: occurred" mid-sentence
+  // is prose.
+  /^[ \t]*(?:\w*Error|error):/m,
+  /Traceback \(most recent call last\)/,
+  /ModuleNotFoundError|ImportError:/,
+  /Cannot find module/i,
+  // A code the shell or a runner states outright. Never zero.
+  /exit code [1-9]\d*/i,
+  // libuv/POSIX codes: unambiguous, and the common real failures.
+  /\b(?:ENOENT|EADDRINUSE|ECONNREFUSED|EACCES|EPERM)\b/,
+  // Toolchain-specific prefixes: npm, pnpm, tsc, cargo, go, git.
+  /^[ \t]*npm ERR!/m,
+  /ERR_PNPM_/,
+  /error TS\d+:/,
+  /^[ \t]*error\[E\d+\]/m,
+  /^[ \t]*panic:/m,
+  /^[ \t]*fatal:/m,
+  /Unhandled(?:PromiseRejection|Rejection)/,
+  /segmentation fault/i,
+];
+
+/** Whether \`text\` carries any marker above. Applied to one trimmed line by
+ *  {@link errorLine} and to a whole stream tail by {@link failureText}. */
+function isErrorMarker(text) {
+  for (const re of ERROR_MARKERS) if (re.test(text)) return true;
+  return false;
+}
 const STACK_FRAME_RE = /^\s*(at\s|File\s+"|\.{3}|\d+\s*\|)/;
 const PKG_MANAGER_RE = /\b(?:npm|pnpm|yarn|bun|npx|pip3?|uv|poetry|cargo|go|gem|bundle|composer)\s+(?:install|add|i|run|exec|test|build|update|get)\b/;
+
+/**
+ * COMMAND HEADS THIS ARM MAY FIRE BEHIND — builds, tests, migrations, installs,
+ * linters. Nothing else.
+ *
+ * The allowlist exists because THERE IS NO EXIT CODE TO GATE ON. Claude Code's
+ * Bash tool_response is {stdout, stderr, interrupted, isImage}, so "did this
+ * command fail" has to be inferred from its output, and a whole class of
+ * ordinary commands SUCCEEDS by reporting a non-match: \`which\` and \`grep\`
+ * and \`test\` and \`diff\` and \`git diff --exit-code\` all return 1 to say
+ * "no", printing exactly the words a marker rule has to treat as failure. There
+ * is no output-shaped way to tell those apart, so they are excluded by what was
+ * run rather than by what it printed.
+ *
+ * The check runs before failureText(), so a \`which codex\` fire costs one
+ * config read and nothing else: no state write, no ledger parse, no request.
+ */
+const FAILURE_HEADS = new Set([
+  // package managers and language toolchains
+  'npm', 'pnpm', 'yarn', 'bun', 'pip', 'pip3', 'uv', 'poetry', 'pipx', 'cargo', 'go', 'gem',
+  'bundle', 'composer', 'node', 'deno', 'python', 'python3',
+  // build systems
+  'make', 'cmake', 'ninja', 'mvn', 'gradle', 'gradlew', 'dotnet', 'swift', 'xcodebuild',
+  // compilers, test runners, linters, type checkers
+  'tsc', 'vitest', 'jest', 'mocha', 'pytest', 'tox', 'nox', 'eslint', 'prettier', 'ruff', 'mypy',
+  'pyright', 'flake8', 'black', 'biome', 'oxlint',
+  // bundlers and app frameworks
+  'next', 'vite', 'turbo', 'nx', 'webpack', 'esbuild', 'rollup',
+  // migrations
+  'drizzle-kit', 'prisma', 'alembic', 'knex', 'sequelize', 'flyway', 'liquibase',
+  // infrastructure
+  'docker', 'docker-compose', 'terraform', 'pulumi',
+  // compilers and git, so every marker above is reachable behind a head that
+  // emits it: rustc's \`error[E…]\`, gcc/clang's \`error:\`, git's \`fatal:\`.
+  // \`git diff --exit-code\` stays quiet: it exits 1 with no marker at all.
+  'git', 'rustc', 'gcc', 'clang', 'cc', 'g++', 'clang++', 'zig',
+]);
+/** Package managers whose SUBCOMMAND decides: \`pnpm build\` can fail a build,
+ *  \`npm ls\` reports a fact and exits 1 to mean "no". */
+const PM_HEADS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+const PM_QUIET_SUBS = new Set([
+  'ls', 'list', 'why', 'view', 'info', 'outdated', 'audit', 'config', '-v', '--version',
+]);
+/**
+ * Wrappers that stand in front of the real command, with the options of each
+ * that TAKE A VALUE, so \`sudo -u builder pnpm test\` is read as \`pnpm test\`
+ * and never as \`-u\` or as \`builder\`. Flags without a value are skipped by
+ * the leading dash alone. THE TABLE IS THE POINT: searching a wrapper-led
+ * segment for any allowlisted word instead let an argument authorize the arm —
+ * \`sudo grep pnpm src\` read as a \`pnpm\` failure — which is precisely the
+ * \`which\`/\`grep\` false positive the allowlist exists to prevent. A wrapper
+ * not in this table is not a wrapper here, and an unknown option shape falls
+ * through to "the next word is the command", which errs toward not firing.
+ */
+const WRAPPER_VALUE_OPTS = {
+  sudo: new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '--user', '--group', '--host', '--prompt', '--close-from', '--chdir', '--chroot', '--command-timeout', '--other-user']),
+  doas: new Set(['-u', '-C']),
+  nice: new Set(['-n', '--adjustment']),
+  timeout: new Set(['-s', '-k', '--signal', '--kill-after']),
+  env: new Set(['-u', '-C', '-S', '--unset', '--chdir', '--split-string']),
+  time: new Set(['-f', '-o', '--format', '--output']),
+  nohup: new Set([]),
+  stdbuf: new Set(['-i', '-o', '-e', '--input', '--output', '--error']),
+  command: new Set([]),
+  exec: new Set([]),
+};
+/** Runners whose next word IS the command: \`npx tsc\` is a tsc invocation. */
+const HEAD_RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'uvx']);
+/** ... and the package-manager subcommands that do the same thing. */
+const PM_RUN_SUBS = new Set(['exec', 'dlx', 'x']);
+
+/**
+ * Step \`i\` past one wrapper and its options: returns the index of the word
+ * the wrapper runs. \`-uBUILDER\` and \`--user=builder\` carry their value in
+ * the same word; \`-u builder\` takes the next one; \`--\` ends the options;
+ * \`timeout\` then also owns one bare duration word (\`30s\`, \`1.5m\`).
+ */
+function skipWrapper(words, i, valueOpts, name) {
+  i += 1;
+  while (i < words.length) {
+    const w = words[i];
+    if (w === '--') return i + 1;
+    if (!w.startsWith('-') || w === '-') break;
+    if (w.startsWith('--')) {
+      i += w.includes('=') || !valueOpts.has(w) ? 1 : 2;
+      continue;
+    }
+    // Short option: a known value option is either \`-u builder\` or \`-ubuilder\`.
+    const opt = w.slice(0, 2);
+    i += valueOpts.has(opt) && w.length === 2 ? 2 : 1;
+  }
+  if (name === 'timeout' && i < words.length && /^\d+(?:\.\d+)?[smhd]?$/.test(words[i])) i += 1;
+  return i;
+}
+
+/**
+ * Every command in \`command\`, as { head, sub }: the program each segment
+ * actually runs and its first argument. Segments split on \`&&\`, \`||\`, \`;\`,
+ * \`|\` and newlines, so \`cd /x && pnpm test\` yields the \`cd\` nobody cares
+ * about AND the \`pnpm test\` that matters. The head is a basename, so
+ * \`/usr/local/bin/pnpm\` and \`./node_modules/.bin/vitest\` land on their
+ * program names; leading \`FOO=bar\` assignments and wrappers are stepped over,
+ * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`).
+ */
+function commandHeads(command) {
+  const out = [];
+  for (const segment of String(command).split(/&&|\|\||[;|\n]/)) {
+    const words = segment.trim().split(/\s+/).filter((w) => w.length > 0);
+    let i = 0;
+    let head = '';
+    let guard = 0;
+    while (i < words.length && guard < 32) {
+      guard += 1;
+      const word = words[i];
+      const name = word.split('/').pop() || word;
+      if (/^[A-Za-z_]\w*=/.test(word)) { i += 1; continue; }
+      if (Object.prototype.hasOwnProperty.call(WRAPPER_VALUE_OPTS, name)) {
+        i = skipWrapper(words, i, WRAPPER_VALUE_OPTS[name], name);
+        continue;
+      }
+      if (HEAD_RUNNERS.has(name)) { i += 1; continue; }
+      if (PM_HEADS.has(name) && i + 1 < words.length && PM_RUN_SUBS.has(words[i + 1])) {
+        i += 2;
+        continue;
+      }
+      head = name;
+      break;
+    }
+    if (head.length === 0) continue;
+    out.push({ head, sub: i + 1 < words.length ? words[i + 1] : '' });
+  }
+  return out;
+}
+
+/** Whether ANY command in the line is one this arm may fire behind. Any, not
+ *  all: in \`cd /x && pnpm test\` the failure belongs to the second half. */
+function failureAllowed(command) {
+  for (const { head, sub } of commandHeads(command)) {
+    if (!FAILURE_HEADS.has(head)) continue;
+    if (PM_HEADS.has(head) && PM_QUIET_SUBS.has(sub)) continue;
+    return true;
+  }
+  return false;
+}
 
 /** The most informative line: the LAST error-shaped, non-frame line, because
  *  test runners print the real cause after pages of summary. */
@@ -1087,7 +1359,7 @@ function errorLine(text) {
   for (let i = lines.length - 1; i >= 0 && i >= lines.length - 400; i -= 1) {
     const line = lines[i].trim();
     if (line.length === 0 || STACK_FRAME_RE.test(line)) continue;
-    if (ERROR_LINE_RE.test(line)) {
+    if (isErrorMarker(line)) {
       best = line;
       break;
     }
@@ -1143,7 +1415,7 @@ function failureText(input) {
   // the failure this arm exists for. Only the tail of stdout is read: a passing
   // run that mentions the word "error" in a log line one page in is not a
   // failure, and the tail is where a runner puts its verdict.
-  if (exit === null && !ERROR_LINE_RE.test(stderr) && !ERROR_LINE_RE.test(stdout.slice(-4000))) {
+  if (exit === null && !isErrorMarker(stderr) && !isErrorMarker(stdout.slice(-4000))) {
     return '';
   }
   return stdout + '\n' + stderr;
@@ -1163,6 +1435,10 @@ async function main() {
   if (input.is_interrupt === true) return quiet();
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
   const command = typeof toolInput.command === 'string' ? toolInput.command : '';
+  // BEFORE anything is read, parsed or written. A command whose head is not a
+  // build, test, migration, install or lint step is not one this arm has an
+  // opinion about, however its output reads.
+  if (!failureAllowed(command)) return quiet();
   const text = failureText(input);
   if (text.length === 0) return quiet();
   const line = errorLine(text.slice(-20000));

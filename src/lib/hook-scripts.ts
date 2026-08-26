@@ -75,6 +75,31 @@ const WATCHDOG_MS = 2500;
 /** The Stop and SessionStart hooks only read local files, so their whole run is
  *  the watchdog. */
 const STOP_WATCHDOG_MS = 1500;
+/**
+ * How much of the session transcript the Stop hook reads to decide whether a
+ * background subagent is still running. The TAIL only, on the same terms and for
+ * the same reason as the push ledger's: a long session's JSONL runs to hundreds
+ * of megabytes, and parsing it whole at every turn end would blow through
+ * {@link STOP_WATCHDOG_MS}. Larger than the ledger's bound because a transcript
+ * line carries whole tool payloads: 4 MB is a few hundred turns, far more than
+ * the seconds-to-minutes a launch and its completion are apart.
+ *
+ * THE BOUND IS A BLIND SPOT, and it fails toward asking: a launch whose tool_use
+ * has scrolled out of the tail is not seen, so its subagent does not hold the
+ * capture ask open.
+ */
+const TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
+/**
+ * How long a background launch with no completion notification keeps the
+ * capture ask deferred. THE FLOOR UNDER THE DEFERRAL: a subagent that dies
+ * without writing its \`<task-notification>\` (killed harness, crashed agent)
+ * would otherwise hold the ask open for the rest of the session — and an
+ * always-on loop's session is the whole run. Past this age the launch is read
+ * as finished and the ask arrives late rather than never, the trade every
+ * other branch of that check already makes. Longer than a real subagent
+ * usually runs; a fork that implements a feature takes 15–25 minutes.
+ */
+const SUBAGENT_STALE_MS = 45 * 60 * 1000;
 const PRIMER_WATCHDOG_MS = 1500;
 
 /** How recent an unresolved MISS has to be for the Stop hook to raise it. */
@@ -272,6 +297,19 @@ function cwdOf(input) {
   if (!isRecord(input)) return null;
   const dir = input.cwd;
   return typeof dir === 'string' && dir.length > 0 && dir.length <= 4096 ? dir : null;
+}
+
+/**
+ * The JSONL transcript of the session this event belongs to, or null when the
+ * payload does not name a usable one. Same bound and posture as \`cwdOf\`: a
+ * string, non-empty, path-length capped. Only the Stop hook reads it, to tell a
+ * turn that is finished from one that is merely waiting on a background
+ * subagent.
+ */
+function transcriptPathOf(input) {
+  if (!isRecord(input)) return null;
+  const path = input.transcript_path;
+  return typeof path === 'string' && path.length > 0 && path.length <= 4096 ? path : null;
 }
 
 /**
@@ -1235,6 +1273,12 @@ main().catch(quiet);
  * expensive one is the research it decides to do ITSELF. Fail-open throughout,
  * like the WebSearch hook, and bounded twice: the same question is asked once per
  * session, and a session gets a fixed number of lookups however wide it fans out.
+ *
+ * IT SPEAKS ONLY ON A STRONG HIT (tenjin-agent#211). A subagent prompt is a work
+ * order rather than a question, so keyword overlap with a listing means much less
+ * here than in front of a WebSearch, and the pointer lines were noise far more
+ * often than they were useful. A moderate or absent match now leaves a push
+ * ledger row and nothing else, whatever `hooks.push` is set to.
  */
 export function dispatchHookScript(dataDir: string): string {
   return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('dispatch')}${pushSource()}
@@ -1321,6 +1365,15 @@ function stopped(health, nowMs) {
   );
 }
 
+/** One leg's verdict, judged ONCE: nothing or a MISS is null; otherwise the
+ *  judge() result, with \`rank\` beside it so the two legs compare on one
+ *  number — 'none' 0, 'moderate' 1, 'strong' 2. */
+function judgeLeg(question, found) {
+  if (found === null || found.decision !== 'CANDIDATES') return null;
+  const j = judge(question, found);
+  return { ...j, rank: j.strength === 'strong' ? 2 : j.strength === 'moderate' ? 1 : 0 };
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -1368,7 +1421,17 @@ async function main() {
   } catch {
     found = null;
   }
-  if (shelf === 'team' && (found === null || found.decision !== 'CANDIDATES')) {
+  // A TEAM ANSWER SHORT OF 'strong' IS A MISS FOR THIS PURPOSE (tenjin-agent#211).
+  // The team shelf returns candidates for nearly any prompt — a search has no
+  // floor — so keying the fall-through on \`decision\` alone let a junk team
+  // hit shadow the public marketplace entirely: probed 2026-08-25, ten
+  // dispatch prompts in team mode, the public shelf asked zero times, and the
+  // CDP-vs-Privy, x402, Vitest and MCP pieces that only it holds never had a
+  // chance. The push core already falls through on a weak team hit; this leg
+  // now does the same, and the public answer replaces the team one only when
+  // it is STRONGER, so a team 'moderate' still reaches the SubagentStart cache.
+  let judged = judgeLeg(question, found);
+  if (shelf === 'team' && (judged === null || judged.rank < 2)) {
     const leg = legTimeoutMs(deadline, 0);
     if (leg >= SEARCH_MIN_LEG_MS) {
       let second = null;
@@ -1380,8 +1443,13 @@ async function main() {
       // The public leg only replaces an answer that was not useful, so a team
       // MISS is not preferred over a public one — and a public leg that failed
       // leaves the team's own answer, and the team label, exactly as they were.
-      if (second !== null) {
+      const secondJudged = judgeLeg(question, second);
+      if (
+        second !== null &&
+        (secondJudged === null ? 0 : secondJudged.rank) > (judged === null ? 0 : judged.rank)
+      ) {
         found = second;
+        judged = secondJudged;
         shelf = 'public';
         shelfBase = config.publicShelfUrl;
       }
@@ -1405,13 +1473,30 @@ async function main() {
     shelfBase,
   );
   if (found.decision !== 'CANDIDATES') return quiet();
+  // JUDGED ONCE, AND THE VERDICT GOVERNS WHETHER THIS HOOK SPEAKS AT ALL
+  // (tenjin-agent#211). A subagent prompt is not a question: it is a work order,
+  // so keyword overlap with a marketplace title means far less here than it does
+  // in front of a WebSearch the agent actually typed. Observed 2026-08-25: three
+  // Agent calls, six pointer lines, none of them relevant. So only a 'strong'
+  // hit — judge()'s five-way test, rank 2 beaten and the answer card confirming
+  // — is worth the parent's context; everything weaker is recorded to the push
+  // ledger and never shown. The ledger row is written WHATEVER \`hooks.push\`
+  // says, because the noise this removes is identical with push off and the
+  // ledger is the only place the "would this have been worth showing" question
+  // can be answered from later; ledgerAppend creates the directory on demand.
+  // \`judged\` was computed once per leg above, on the leg that answered.
+  if (judged === null) return quiet();
   // The subagent arm's handoff (docs/command-reference.md#push-experimental, T5). SubagentStart carries the agent
   // type and nothing else, so what the subagent is being sent to find out is
   // knowable ONLY here, seconds earlier, in the dispatch that spawned it. The
   // judged candidate is parked in this session's push state and the first
   // subagent to start consumes it.
+  //
+  // STILL CACHED ON 'moderate', deliberately, and it is not the same decision as
+  // the injection above: the cache is consumed by the subagent arm, which runs
+  // its own judgement and its own once-per-session bounds before it speaks, and
+  // a handoff it decides against costs nobody a line of context.
   if (config.push === 'on' && sessionId !== null) {
-    const judged = judge(question, found);
     // \`top\` is non-null for ANY candidate the server returned, including one
     // that shares not a word with the question — judge() reports that as
     // strength 'none'. Caching it would hand the next subagent a pointer the
@@ -1436,12 +1521,57 @@ async function main() {
       saveState(sessionId, state);
     }
   }
+  // The row every fire leaves behind, on the shape lib/push-scripts.ts's
+  // shelfDecide writes so \`tenjin push status\` reads dispatch rows with
+  // everything else. \`action\` is the only field that differs between the two
+  // outcomes below.
+  const row = {
+    at: new Date().toISOString(),
+    session: sessionId,
+    trigger: 'dispatch',
+    event: 'PreToolUse',
+    query: clean(question, ${QUESTION_MAX}),
+    shelf,
+    searchId: found.searchId,
+    candidate:
+      judged.top === null
+        ? null
+        : {
+            resourceId: judged.top.resourceId,
+            title: judged.top.title,
+            price: judged.top.price,
+            url: judged.top.url,
+          },
+    score: judged.score,
+    second: judged.second,
+    strength: judged.strength,
+    confidence: judged.confidence ?? null,
+    corroborated: judged.corroborated ?? null,
+  };
+  if (judged.strength !== 'strong') {
+    ledgerAppend({ ...row, action: 'logged', form: 'short' });
+    return quiet();
+  }
+  // RANK 1 ALONE. \`judge\` scored rank 1 against rank 2 and only rank 1 cleared
+  // the bar, so rank 2 rides in on rank 1's evidence if it is printed beside it —
+  // which is exactly the "two plausible pieces, neither asserted" case the margin
+  // test exists to refuse. The fallback covers a projection that lost the judged
+  // candidate at the boundary (rich and stored are validated separately), where
+  // saying the little that survived beats saying nothing on a strong hit.
+  const top = found.stored.filter((c) => c.resourceId === judged.top.resourceId);
   // Two legs here, so it is the leg that ANSWERED that decides the wording.
-  const lines = hintLines(found.stored, shelf === 'team');
-  if (lines.length === 0) return quiet();
+  const lines = hintLines(top.length > 0 ? top : found.stored, shelf === 'team');
+  if (lines.length === 0) {
+    // Nothing renderable (an empty title, an unformattable price): the finding
+    // never reached the model, so the row says \`logged\` and not \`injected\`.
+    ledgerAppend({ ...row, action: 'logged', form: 'short' });
+    return quiet();
+  }
+  const text = lines.join('\\n');
+  ledgerAppend({ ...row, action: 'injected', form: 'short', tokens: Math.ceil(text.length / 4) });
   // The hint lands in the PARENT's context only: tool_input is already formed, so
   // the subagent never sees it and the disclaimer always travels with the titles.
-  emit('PreToolUse', lines.join('\\n'));
+  emit('PreToolUse', text);
 }
 
 main().catch(quiet);
@@ -1495,7 +1625,9 @@ main().catch(quiet);
  * in this file that ends a turn, and it is spent on the one thing the loop cannot
  * recover later. While capture is on it REPLACES the MISS nag below rather than
  * joining it — both say "publish what you learned", and one turn end does not
- * need three of them.
+ * need three of them. It also WAITS for background subagents launched from this
+ * session ({@link TRANSCRIPT_TAIL_BYTES}), because a turn paused on running work
+ * has not learned yet what the ask is asking about.
  *
  * TWO KINDS OF OPEN LOOP, and they are not worth the same attention. A `cli` MISS
  * is a question the agent decided was worth looking up and nobody had answered:
@@ -1527,6 +1659,8 @@ const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
 const PUSH_DIR = join(DATA_DIR, ${JSON.stringify(PUSH_DIR_NAME)});
 const LEDGER_PATH = join(DATA_DIR, ${JSON.stringify(PUSH_LEDGER_FILE)});
 const LEDGER_TAIL_BYTES = 262144;
+const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
+const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
 const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
 const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
 
@@ -1626,7 +1760,18 @@ function pruneCaptureMarkers(liveSessionId) {
  * counting those made \`capture: block\` fire at the end of essentially every
  * push-on session, including one that only read and edited code. So:
  * \`push-hook\` searches do not count, and a ledger row counts only when a real
- * trigger surfaced something (not 'read', not 'churn', not a 'skipped' row).
+ * trigger surfaced something (not 'read', not 'churn', not a 'skipped' row, and
+ * not a 'logged' one).
+ *
+ * 'logged' IS EXCLUDED FOR THE SAME REASON 'skipped' IS: a log-only row records
+ * a finding that was judged and then NOT put in front of the model, so nothing
+ * about it is evidence the session did research. It became reachable outside the
+ * 'read'/'churn' triggers when the dispatch hook started logging its weaker hits
+ * instead of injecting them (tenjin-agent#211). NET BEHAVIOUR IS UNCHANGED there:
+ * a dispatch lookup is also recorded in searches.json under 'dispatch-hook',
+ * which the loop above already counts, so a session that dispatched a subagent
+ * is still a session that researched — this only stops the ledger from
+ * DOUBLE-counting it through a row the agent never saw.
  *
  * The ledger is read from its TAIL, the same bound and reason as the push core's
  * own reader (lib/push-scripts.ts): a file that has grown for months must not be
@@ -1665,13 +1810,187 @@ function didResearch(sessionId, searches) {
         row.session === sessionId &&
         row.trigger !== 'read' &&
         row.trigger !== 'churn' &&
-        row.action !== 'skipped'
+        row.action !== 'skipped' &&
+        row.action !== 'logged'
       ) {
         return true;
       }
     } catch {
       // A torn or foreign line is skipped, never fatal.
     }
+  }
+  return false;
+}
+
+/** The text of a tool_result's \`content\`, which the harness writes either as a
+ *  bare string or as an array of text blocks. Anything else reads as empty. */
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  let out = '';
+  for (const block of content) {
+    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') {
+      out += block.text;
+    }
+  }
+  return out;
+}
+
+/**
+ * Is this tool_result the receipt for a BACKGROUND launch rather than a finished
+ * agent's report? The two spellings the harness uses; a synchronous agent's
+ * result is its final report text, which starts with neither.
+ */
+function isBackgroundLaunch(text) {
+  const head = text.trimStart();
+  return (
+    head.startsWith('Async agent launched successfully.') ||
+    head.startsWith('Spawned successfully.')
+  );
+}
+
+/** The launch ids a \`<task-notification>\` block names as finished. Any
+ *  \`<status>\` counts — completed, killed and failed all mean "not running". */
+const NOTIFICATION_ID_RE = /<tool-use-id>\\s*([^<]*?)\\s*<\\/tool-use-id>/g;
+function notificationIds(text) {
+  const out = [];
+  if (!text.includes('<task-notification>')) return out;
+  NOTIFICATION_ID_RE.lastIndex = 0;
+  for (;;) {
+    const m = NOTIFICATION_ID_RE.exec(text);
+    if (m === null) break;
+    if (typeof m[1] === 'string' && m[1].length > 0) out.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Is a subagent this session launched still running?
+ *
+ * THE TURN IS NOT OVER WHEN THE MODEL STOPS TALKING. A background Agent/Task
+ * keeps working after the parent's turn ends, and Claude Code fires Stop at that
+ * pause. Observed 2026-08-25: the capture ask blocked a turn that was only
+ * waiting on three running subagents, so it arrived before the session had
+ * learned the thing it was being asked to write down — and, because the marker
+ * is written at first ask, it would never be asked again at the real end. So
+ * this holds the ask open, WITHOUT writing the marker, until nothing is running.
+ *
+ * The transcript is the only place that fact is visible: the Stop payload names
+ * \`transcript_path\` and nothing about pending work. Read from the tail
+ * ({@link TRANSCRIPT_TAIL_BYTES}), with a cheap substring prefilter before any
+ * JSON.parse, so the whole pass stays far inside the 1500 ms watchdog: a 4 MB
+ * read plus an indexOf per line is single-digit milliseconds, and only the few
+ * lines that mention a tool call are parsed at all.
+ *
+ * THE RULE, over the three shapes the harness actually writes:
+ *
+ *  - A launch is an assistant \`{type:'tool_use', id:'toolu_…', name:'Agent'|'Task'}\`.
+ *  - Its receipt is a user \`{type:'tool_result', tool_use_id:'toolu_…'}\`. A
+ *    background launch's receipt text opens with "Async agent launched
+ *    successfully." or "Spawned successfully."; a synchronous agent's receipt IS
+ *    its report, and its arrival means that agent is done.
+ *  - A background agent's completion arrives later as a \`<task-notification>\`
+ *    naming the launch in \`<tool-use-id>\`.
+ *
+ * so a subagent is running when its launch has NO receipt at all, or when its
+ * receipt was a background launch and no notification has named it since.
+ *
+ * FAIL TOWARD ASKING, everywhere: a missing, unreadable, or unparseable
+ * transcript, a launch older than the tail, a launch whose last evidence is
+ * older than SUBAGENT_STALE_MS (the floor: a subagent that died without a
+ * notification must not hold the ask open for a whole loop session), and
+ * every torn line answer false.
+ * The cost of a false "nothing running" is the ask arriving one turn early,
+ * which is where it was before this check; the cost of a false "still running"
+ * is a session that is never asked at all.
+ */
+function subagentsRunning(transcriptPath) {
+  if (typeof transcriptPath !== 'string' || transcriptPath.length === 0) return false;
+  let text;
+  try {
+    const size = statSync(transcriptPath).size;
+    if (size <= TRANSCRIPT_TAIL_BYTES) {
+      text = readFileSync(transcriptPath, 'utf8');
+    } else {
+      const fd = openSync(transcriptPath, 'r');
+      try {
+        const buf = Buffer.alloc(TRANSCRIPT_TAIL_BYTES);
+        readSync(fd, buf, 0, TRANSCRIPT_TAIL_BYTES, size - TRANSCRIPT_TAIL_BYTES);
+        text = buf.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+      // The first line of a tail read is a fragment of whatever line the window
+      // opened inside; dropped rather than parsed.
+      text = text.slice(text.indexOf('\\n') + 1);
+    }
+  } catch {
+    return false;
+  }
+  // Launch id → the transcript time of its latest evidence (the launch, then
+  // the receipt). What the staleness floor below is measured from.
+  const launched = new Map();
+  const receipted = new Set();
+  const background = new Set();
+  const notified = new Set();
+  const now = Date.now();
+  for (const line of text.split('\\n')) {
+    if (line.length === 0) continue;
+    // The prefilter, and the reason this is affordable: a transcript is mostly
+    // assistant prose and file reads, and none of it is parsed.
+    if (
+      !line.includes('tool_use') &&
+      !line.includes('tool_result') &&
+      !line.includes('task-notification')
+    ) {
+      continue;
+    }
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(row) || !isRecord(row.message)) continue;
+    const at = Date.parse(String(row.timestamp));
+    const content = row.message.content;
+    // A completion notification arrives as a plain string message.
+    if (typeof content === 'string') {
+      for (const id of notificationIds(content)) notified.add(id);
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!isRecord(block)) continue;
+      if (block.type === 'tool_use') {
+        if (
+          (block.name === 'Agent' || block.name === 'Task') &&
+          typeof block.id === 'string' &&
+          block.id.length > 0
+        ) {
+          launched.set(block.id, at);
+        }
+      } else if (block.type === 'tool_result') {
+        const id = block.tool_use_id;
+        if (typeof id !== 'string' || id.length === 0) continue;
+        receipted.add(id);
+        if (isBackgroundLaunch(resultText(block.content))) {
+          background.add(id);
+          if (launched.has(id)) launched.set(id, at);
+        }
+      } else if (block.type === 'text' && typeof block.text === 'string') {
+        for (const id of notificationIds(block.text)) notified.add(id);
+      }
+    }
+  }
+  for (const [id, at] of launched) {
+    // STALE IS FINISHED. A launch whose last evidence is older than the floor
+    // is not believed, whether it never got a receipt or got a background one
+    // and no notification since; an unreadable timestamp reads as stale too,
+    // because the only alternative is an unbounded deferral.
+    if (!Number.isFinite(at) || now - at > SUBAGENT_STALE_MS) continue;
+    if (!receipted.has(id)) return true;
+    if (background.has(id) && !notified.has(id)) return true;
   }
   return false;
 }
@@ -1690,13 +2009,18 @@ function didResearch(sessionId, searches) {
  * RECORDED BEFORE THE ASK, like the nag record below and for the same reason: an
  * ask we cannot mark is an ask that repeats at every turn end.
  */
-function captureAsk(config, sessionId, searches) {
+function captureAsk(config, sessionId, searches, transcriptPath) {
   if (config.capture === 'off') return null;
   // No session id means no marker to write and no way to clear it: the ask would
   // fire at every turn end forever. The nag arm degrades to machine-global here;
   // this one degrades to silence, because it is the one that can block.
   if (sessionId === null) return null;
   if (markerExists('capture-asked', sessionId)) return null;
+  // AFTER the two cheap gates, so a capture-off machine and an already-asked
+  // session never open the transcript at all, and NO MARKER IS WRITTEN on this
+  // path: the ask has to fire at the REAL end of the turn, so the session stays
+  // eligible at the next Stop.
+  if (subagentsRunning(transcriptPath)) return null;
   if (!didResearch(sessionId, searches)) return null;
   try {
     mkdirSync(PUSH_DIR, { recursive: true, mode: 0o700 });
@@ -1839,10 +2163,12 @@ async function main() {
   // the reminder.
   let sessionId = null;
   let cwd = null;
+  let transcriptPath = null;
   try {
     const input = JSON.parse(await readStdin());
     sessionId = sessionIdOf(input);
     cwd = cwdOf(input);
+    transcriptPath = transcriptPathOf(input);
   } catch {
     // Unparseable stdin: fall back to machine-global behavior.
   }
@@ -1859,7 +2185,7 @@ async function main() {
   // FIRST, because a block ends the turn and everything below it is a reminder
   // that will still be there next time. \`nudge\` says the same words as context
   // and rides along with whatever else this turn had to say.
-  const ask = captureAsk(config, sessionId, searches);
+  const ask = captureAsk(config, sessionId, searches, transcriptPath);
   // AFTER the ask, so a session older than the retention window is not asked a
   // second time by its own prune within this turn — and passed this session's id
   // so it is not asked a second time on a LATER turn either, once the marker it

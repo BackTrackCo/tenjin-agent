@@ -1,0 +1,836 @@
+{
+  "schemaVersion": 1,
+  "note": "Detector corpus for the Tenjin publish scan, kept as data so the tenjin server-side ingest gate can vendor it verbatim (see plans/2026-08-18-session-observer.md, PR 2a). Every entry is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is either a JS regex (pattern + flags) or the name of an algorithmic detector a consumer must implement, `excerpt` is the redaction policy, and `skip` names a suppression predicate. Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "publicHexConstants": [
+    {
+      "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "name": "topic0 ERC-20 / ERC-721 Transfer"
+    },
+    {
+      "value": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+      "name": "topic0 ERC-20 / ERC-721 Approval"
+    },
+    {
+      "value": "0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31",
+      "name": "topic0 ERC-721 / ERC-1155 ApprovalForAll"
+    },
+    {
+      "value": "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62",
+      "name": "topic0 ERC-1155 TransferSingle"
+    },
+    {
+      "value": "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb",
+      "name": "topic0 ERC-1155 TransferBatch"
+    },
+    {
+      "value": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+      "name": "topic0 Ownable OwnershipTransferred"
+    },
+    {
+      "value": "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",
+      "name": "topic0 WETH Deposit"
+    },
+    {
+      "value": "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65",
+      "name": "topic0 WETH Withdrawal"
+    },
+    {
+      "value": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+      "name": "EIP-1967 implementation storage slot"
+    },
+    {
+      "value": "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103",
+      "name": "EIP-1967 admin storage slot"
+    },
+    {
+      "value": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+      "name": "keccak256 of the empty string"
+    },
+    {
+      "value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "name": "the zero hash"
+    }
+  ],
+  "excerptPolicies": {
+    "mask": "Keep the first `keep` characters (a public type marker) and replace the rest with a redaction count.",
+    "verbatim": "Echo the match, truncated to `max` characters when set. Only for non-secret matches.",
+    "abbreviate": "Keep `head` leading and `tail` trailing characters joined by an ellipsis.",
+    "custom": "Consumer-implemented builder named by `handler`."
+  },
+  "rules": [
+    {
+      "id": "aws-access-key",
+      "tier": "block",
+      "description": "AWS access key id (AKIA/ASIA/ABIA/ACCA/A3T prefixes).",
+      "source": "gitleaks:aws-access-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "jwt",
+      "tier": "block",
+      "description": "JSON Web Token: three base64url segments whose header starts eyJ.",
+      "source": "gitleaks:jwt",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\beyJ[A-Za-z0-9_-]{5,}\\.eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 3
+      }
+    },
+    {
+      "id": "github-token",
+      "tier": "block",
+      "description": "GitHub classic PAT/OAuth/app/refresh token or fine-grained PAT (github_pat_).",
+      "source": "gitleaks:github-pat + github-fine-grained-pat",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:gh[posru]_[0-9A-Za-z]{36}|github_pat_[0-9A-Za-z_]{82})\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "slack-token",
+      "tier": "block",
+      "description": "Slack bot/user/app/refresh/legacy token.",
+      "source": "gitleaks:slack-*-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bxox[baprs]-[0-9A-Za-z-]{10,}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 5
+      }
+    },
+    {
+      "id": "stripe-token",
+      "tier": "block",
+      "description": "Stripe live or test secret/restricted key.",
+      "source": "gitleaks:stripe-access-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b[sr]k_(?:live|test)_[0-9A-Za-z]{10,99}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 8
+      }
+    },
+    {
+      "id": "anthropic-key",
+      "tier": "block",
+      "description": "Anthropic API key (sk-ant-).",
+      "source": "gitleaks:anthropic-api-key",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bsk-ant-[0-9A-Za-z_-]{20,}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 7
+      }
+    },
+    {
+      "id": "openai-key",
+      "tier": "block",
+      "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block.",
+      "source": "gitleaks:openai-api-key",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 3
+      }
+    },
+    {
+      "id": "google-key",
+      "tier": "block",
+      "description": "Google API key (AIza) or OAuth client secret (GOCSPX-).",
+      "source": "gitleaks:gcp-api-key + gcp-oauth-client-secret",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:AIza[0-9A-Za-z_-]{35}|GOCSPX-[0-9A-Za-z_-]{20,})\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "googleKey"
+      }
+    },
+    {
+      "id": "npm-token",
+      "tier": "block",
+      "description": "npm access token.",
+      "source": "gitleaks:npm-access-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bnpm_[0-9A-Za-z]{36}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "supabase-token",
+      "tier": "block",
+      "description": "Supabase personal access token (sbp_) or secret/publishable API key (sb_*_).",
+      "source": "gitleaks:supabase-access-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bsbp_[0-9a-f]{40}\\b|\\bsb_(?:secret|publishable)_[0-9A-Za-z_-]{20,}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "twilio-key",
+      "tier": "block",
+      "description": "Twilio API key SID (SK + 32 lowercase hex).",
+      "source": "gitleaks:twilio-api-key",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bSK[0-9a-f]{32}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 2
+      }
+    },
+    {
+      "id": "sendgrid-token",
+      "tier": "block",
+      "description": "SendGrid API key (SG.<id>.<secret>).",
+      "source": "gitleaks:sendgrid-api-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bSG\\.[0-9A-Za-z_-]{16,32}\\.[0-9A-Za-z_-]{16,64}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 3
+      }
+    },
+    {
+      "id": "huggingface-token",
+      "tier": "block",
+      "description": "Hugging Face user access token (hf_).",
+      "source": "gitleaks:huggingface-access-token",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bhf_[0-9A-Za-z]{30,}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 3
+      }
+    },
+    {
+      "id": "vercel-token",
+      "tier": "block",
+      "description": "Vercel Blob read/write store token.",
+      "source": "tenjin (shape from the Vercel Blob docs)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bvercel_blob_[a-z]{2}_[0-9A-Za-z_]{24,}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 12
+      }
+    },
+    {
+      "id": "vercel-token",
+      "tier": "block",
+      "description": "Vercel platform token (vcp_/vci_/vca_/vcr_/vck_ prefixes).",
+      "source": "secretlint:@secretlint/secretlint-rule-vercel",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:vcp|vci|vca|vcr|vck)_[0-9A-Za-z]{20,60}(?![0-9A-Za-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "notion-token",
+      "tier": "block",
+      "description": "Notion integration token (ntn_).",
+      "source": "secretlint:@secretlint/secretlint-rule-notion",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bntn_[0-9]{11}[0-9A-Za-z]{35}(?![0-9A-Za-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "linear-token",
+      "tier": "block",
+      "description": "Linear API key (lin_api_).",
+      "source": "secretlint:@secretlint/secretlint-rule-linear",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\blin_api_[0-9A-Za-z_]{32,128}(?![0-9A-Za-z_])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 8
+      }
+    },
+    {
+      "id": "figma-token",
+      "tier": "block",
+      "description": "Figma personal access token (figd_).",
+      "source": "secretlint:@secretlint/secretlint-rule-figma",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bfigd_[0-9A-Za-z_-]{40,200}(?![0-9A-Za-z_-])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 5
+      }
+    },
+    {
+      "id": "gitlab-token",
+      "tier": "block",
+      "description": "GitLab personal access token (glpat-).",
+      "source": "secretlint:@secretlint/secretlint-rule-gitlab",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bglpat-[0-9A-Za-z_-]{20,128}(?![0-9A-Za-z_-])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 6
+      }
+    },
+    {
+      "id": "docker-token",
+      "tier": "block",
+      "description": "Docker Hub personal access token (dckr_pat_).",
+      "source": "secretlint:@secretlint/secretlint-rule-docker",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bdckr_pat_[0-9A-Za-z_-]{27}(?![0-9A-Za-z_-])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 9
+      }
+    },
+    {
+      "id": "cloudflare-token",
+      "tier": "block",
+      "description": "Cloudflare API key or account/user token (cfk_/cfut_/cfat_).",
+      "source": "secretlint:@secretlint/secretlint-rule-cloudflare",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:cfk|cfut|cfat)_[0-9A-Za-z]{40}[0-9a-f]{8}(?![0-9A-Za-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "databricks-token",
+      "tier": "block",
+      "description": "Databricks personal access token (dapi).",
+      "source": "secretlint:@secretlint/secretlint-rule-databricks",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bdapi[0-9A-Fa-f]{32}(?:-[0-9])?(?![0-9A-Fa-f])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 4
+      }
+    },
+    {
+      "id": "openssh-private-key",
+      "tier": "block",
+      "description": "OpenSSH private key body pasted without its PEM framing (base64 of the openssh-key-v1 magic).",
+      "source": "gitleaks:private-key (framing-free variant)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bb3BlbnNzaC1rZXktdjEA[0-9A-Za-z+/=]{20,}",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 8
+      }
+    },
+    {
+      "id": "totp-uri",
+      "tier": "block",
+      "description": "otpauth:// TOTP/HOTP provisioning URI; its secret= parameter is a live second factor.",
+      "source": "tenjin (RFC-style otpauth key URI)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\botpauth:\\/\\/[ht]otp\\/[^\\s\"'`<>)\\]]+",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 15
+      }
+    },
+    {
+      "id": "db-connection-uri",
+      "tier": "block",
+      "description": "Basic-auth style URI with an embedded password (scheme://user:pass@host), including database connection strings. The scheme run is length-bounded: unbounded, it backtracks quadratically across a transcript-length dotted-token line that never reaches ://.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b([a-z][a-z0-9+.-]{0,31}):\\/\\/([^\\s:@/]+):([^\\s@/]+)@([^\\s/:]+)",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "dbConnectionUri"
+      },
+      "skip": {
+        "handler": "exampleDbPassword"
+      }
+    },
+    {
+      "id": "bearer-token",
+      "tier": "block",
+      "description": "Authorization: Bearer header carrying a live token.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bAuthorization:\\s*Bearer\\s+(\\S{8,})",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "bearerToken"
+      },
+      "skip": {
+        "handler": "placeholderGroup1"
+      }
+    },
+    {
+      "id": "secret-assignment",
+      "tier": "warn",
+      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value.",
+      "source": "tenjin",
+      "teamSurvives": true,
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\\s*[:=]\\s*(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
+    {
+      "id": "wallet-address",
+      "tier": "warn",
+      "description": "EVM account/contract address (0x + 40 hex).",
+      "source": "blockrun-mcp (wallet-key leak scanner)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![0-9a-fx])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "abbreviate",
+        "head": 6,
+        "tail": 4
+      }
+    },
+    {
+      "id": "confidential-marker",
+      "tier": "warn",
+      "description": "Document classification legend (CONFIDENTIAL stamp, INTERNAL USE ONLY, DO NOT DISTRIBUTE). Case-sensitive: marker-shaped, not word-in-phrase.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:STRICTLY|COMPANY|HIGHLY)\\s+CONFIDENTIAL\\b|(?<![A-Z]{2,}[ \\t]+)\\bCONFIDENTIAL\\b|\\bCONFIDENTIAL\\b(?![ \\t]+[A-Z]{2,})|\\bConfidential(?=\\s*(?:[-:.,;–—]|$))|\\b(?:INTERNAL|Internal)(?:\\s+(?:USE|Use))?\\s+(?:ONLY|Only)\\b|\\b(?:DO\\s+NOT\\s+DISTRIBUTE|Do\\s+Not\\s+Distribute)\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "internal-hostname",
+      "tier": "warn",
+      "description": "Hostname on a private-use suffix (.internal, .corp, .local, .lan, .intranet). Label count and label length are bounded: an unbounded (label\\.)+ run is quadratic on a transcript-length line of dotted digits.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:[a-z0-9-]{1,63}\\.){1,6}(?:internal|corp|local|lan|intranet)\\b",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "private-network-endpoint",
+      "tier": "warn",
+      "description": "RFC1918 / link-local IPv4 endpoint (10/8, 172.16/12, 192.168/16, 169.254/16).",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![\\d.])(?:10\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|172\\.(?:1[6-9]|2\\d|3[01])\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|192\\.168\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|169\\.254\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d))(?::\\d{2,5})?(?!\\.?\\d)",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "private-network-endpoint",
+      "tier": "warn",
+      "description": "Loopback / wildcard-bind development endpoint. Scheme or port required so prose about localhost does not warn.",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "https?:\\/\\/(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])(?::\\d{2,5})?(?:\\/[^\\s\"'`<>?&)\\]]*)?|\\b(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0):\\d{2,5}\\b",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim",
+        "max": 80
+      }
+    },
+    {
+      "id": "collaboration-url",
+      "tier": "warn",
+      "description": "Link into a collaboration workspace (Google Docs/Drive, Notion, Figma, Slack archives, Linear, Jira/Confluence): the target is usually access-controlled.",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "https?:\\/\\/(?:docs\\.google\\.com|drive\\.google\\.com|(?:[a-z0-9-]+\\.)?notion\\.(?:so|site)|(?:www\\.)?figma\\.com|(?:[a-z0-9-]+\\.)?slack\\.com\\/archives|linear\\.app|[a-z0-9-]+\\.atlassian\\.net)(?:\\/[^\\s\"'`<>?&)\\]]*)?",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim",
+        "max": 80
+      }
+    },
+    {
+      "id": "cloud-resource-id",
+      "tier": "warn",
+      "description": "AWS ARN: names an account, region, and resource.",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\barn:aws[0-9a-z-]*:[0-9a-z-]+:[0-9a-z-]*:\\d{0,12}:[^\\s\"'`<>,)\\]]+",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim",
+        "max": 80
+      }
+    },
+    {
+      "id": "cloud-resource-id",
+      "tier": "warn",
+      "description": "GCP fully-qualified resource name (projects/<id>/<collection>/<name>).",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bprojects\\/[a-z][a-z0-9-]{4,28}[a-z0-9]\\/(?:locations|topics|subscriptions|secrets|instances|serviceAccounts|datasets|buckets|zones|keyRings|clusters|jobs|models)\\/[^\\s\"'`<>,)\\]]+",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim",
+        "max": 80
+      }
+    },
+    {
+      "id": "cloud-resource-id",
+      "tier": "warn",
+      "description": "Azure resource id: /subscriptions/<guid>/resourceGroups/<name>/...",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\/subscriptions\\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\/resourceGroups\\/[^\\s\"'`<>,)\\]/]+(?:\\/[^\\s\"'`<>,)\\]]*)?",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim",
+        "max": 80
+      }
+    },
+    {
+      "id": "cloud-resource-id",
+      "tier": "warn",
+      "description": "Cloud object-storage location (s3://, gs://, or an S3/Azure Blob/GCS bucket hostname).",
+      "source": "tenjin (closes tenjin-agent#45)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:s3|gs):\\/\\/[a-z0-9][a-z0-9._-]{2,62}(?:\\/[^\\s\"'`<>,?&)\\]]*)?|\\b[a-z0-9][a-z0-9.-]{1,62}\\.(?:s3(?:[.-][a-z0-9-]+)?\\.amazonaws\\.com|blob\\.core\\.windows\\.net|storage\\.googleapis\\.com)\\b",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim",
+        "max": 80
+      }
+    },
+    {
+      "id": "local-path",
+      "tier": "warn",
+      "description": "Home-anchored local filesystem path: leaks the machine username and private project layout.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?:(?<![\\w.-])\\/(?:Users|home)\\/([A-Za-z0-9._-]+)(?:\\/[^\\s\"'`)\\]}>:,;?&/]+)+|\\b[A-Za-z]:\\\\[Uu]sers\\\\([^\\\\\\s\"']+)(?:\\\\[^\\\\\\s\"']+)+)",
+        "flags": "dg"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "localPath"
+      },
+      "skip": {
+        "handler": "placeholderUsername"
+      }
+    },
+    {
+      "id": "customer-identifier",
+      "tier": "warn",
+      "description": "Labeled customer/account/tenant identifier with a literal value.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b((?:customer|client|account|tenant|subscriber)[ _-]?(?:id|number|no))\\b\\s*[:=#]\\s*(\"[^\"]{2,}\"|'[^']{2,}'|[A-Za-z0-9][A-Za-z0-9._-]{2,})",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
+    {
+      "id": "paid-content-marker",
+      "tier": "warn",
+      "description": "Third-party rights legend suggesting copied licensed material. Legend shapes only: bare paywall vocabulary is this marketplace’s own subject matter.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\ball rights reserved\\b|\\b(?:reprinted|reproduced|used) with permission\\b|\\bnot for (?:redistribution|republication)\\b|\\bdo not (?:redistribute|republish)\\b|(?:©|\\(c\\)|copyright)\\s*(?:19|20)\\d{2}\\b",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "embedded-instruction",
+      "tier": "warn",
+      "description": "Injection-shaped imperative captured from a prompt or tool output.",
+      "source": "tenjin",
+      "teamSurvives": true,
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+)?(?:previous|prior|above|earlier|preceding)\\s+(?:instructions?|prompts?|context|messages?)\\b|\\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\\b",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "embedded-instruction",
+      "tier": "warn",
+      "description": "Hidden-prompt document header. Case-sensitive: the all-caps header form is the injection-typed one.",
+      "source": "tenjin",
+      "teamSurvives": true,
+      "match": {
+        "kind": "regex",
+        "pattern": "\\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "email",
+      "tier": "warn",
+      "description": "Email address (PII), subsuming corporate-domain addresses. Lengths follow the RFC limits so the local part and the domain cannot backtrack against each other: unbounded, the pair is quadratic on a transcript-length line.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.){1,8}[A-Za-z]{2,24}\\b",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      },
+      "skip": {
+        "handler": "reservedExampleEmail"
+      }
+    },
+    {
+      "id": "phone",
+      "tier": "warn",
+      "description": "Telephone number (PII).",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<!\\d)(?:\\+?\\d{1,2}[\\s.-]?)?(?:\\(\\d{3}\\)|\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\d)",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "verbatim"
+      }
+    },
+    {
+      "id": "raw-private-key",
+      "tier": "block",
+      "description": "0x + 64 hex with no hash context. Demoted to the warn detector hex32-value when a hash/identifier label precedes it (within two intervening tokens, across markdown and quote punctuation), when it sits inside an http(s) URL, or when it is one of the publicHexConstants below. An unlabeled bare 64-hex stays block: that is the floor.",
+      "source": "blockrun-mcp (wallet-key leak scanner)",
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "hex64"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "hex64"
+      }
+    },
+    {
+      "id": "pem-private-key",
+      "tier": "block",
+      "description": "PEM private-key armor (-----BEGIN ... PRIVATE KEY-----), RSA/EC/OPENSSH/PGP variants.",
+      "source": "gitleaks:private-key",
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "pemBlock"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "pemBlock"
+      }
+    },
+    {
+      "id": "bip39-seed-phrase",
+      "tier": "block",
+      "description": "Twelve or more consecutive BIP-39 English wordlist words separated only by spaces or tabs: a wallet recovery phrase.",
+      "source": "tenjin; wordlist from BIP-0039 (see NOTICE.md)",
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "bip39"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "bip39"
+      }
+    },
+    {
+      "id": "env-dump-block",
+      "tier": "warn",
+      "description": "Three or more consecutive SHOUTY_KEY=value lines carrying at least one substantial literal: a pasted .env file.",
+      "source": "tenjin",
+      "teamSurvives": true,
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "envDump"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "envDump"
+      }
+    },
+    {
+      "id": "high-entropy-string",
+      "tier": "warn",
+      "description": "Catch-all for unknown credential formats: a long mixed-case alphanumeric token whose Shannon entropy and case-run profile match random key material rather than an identifier.",
+      "source": "tenjin (entropy heuristic in the spirit of gitleaks entropy gating)",
+      "teamSurvives": true,
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "entropy"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "entropy"
+      }
+    },
+    {
+      "id": "long-verbatim-quote",
+      "tier": "warn",
+      "description": "Fenced block or blockquote run long enough to read as copied third-party material.",
+      "source": "tenjin",
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "longVerbatim"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "longVerbatim"
+      }
+    },
+    {
+      "id": "private-repo-reference",
+      "tier": "warn",
+      "description": "Mention of a caller-supplied private project marker (git remote slug or path).",
+      "source": "tenjin",
+      "match": {
+        "kind": "algorithm",
+        "algorithm": "projectMarkers"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "projectMarkers"
+      }
+    }
+  ]
+}
