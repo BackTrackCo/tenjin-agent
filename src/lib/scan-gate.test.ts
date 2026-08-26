@@ -8,6 +8,7 @@ import {
   SCAN_BLOCKED,
   SCAN_NEEDS_ACK,
 } from './scan-gate';
+import type { ServerScanFinding } from './scan-gate';
 import type { ScanFinding } from './scan';
 
 function envelope(code: string, scan: unknown): unknown {
@@ -243,18 +244,17 @@ describe('mergeScanFindings', () => {
   // they matched. Keyed by value, the second vanished from the render while the
   // ack token still covered it.
   it('keeps two distinct findings whose redactions are identical', () => {
-    const redacted = (over: Record<string, unknown>) => ({
+    // Same detector, same tier, same fixed excerpt, same field: two findings that
+    // differ only in where the judge matched.
+    const redacted = (span: [number, number]): ServerScanFinding => ({
       check: 'semantic-pii',
       severity: 'warn',
       line: 1,
+      span,
       excerpt: 'reads as private context',
       field: 'body',
-      ...over,
     });
-    const merged = mergeScanFindings(
-      [],
-      [redacted({ span: [0, 40] }), redacted({ span: [90, 130] })],
-    );
+    const merged = mergeScanFindings([], [redacted([0, 40]), redacted([90, 130])]);
     expect(merged).toHaveLength(2);
     expect(merged.every((f) => f.source === 'server')).toBe(true);
   });
@@ -262,7 +262,9 @@ describe('mergeScanFindings', () => {
   // Collapsing is still right for the one case it can prove: the server sent the
   // same finding twice, same detector, same coordinates, same field, same excerpt.
   it('collapses a server finding the server sent twice', () => {
-    const entry = {
+    // Annotated, not inferred: a bare object literal widens `span` to number[],
+    // which the tuple the schema declares does not accept.
+    const entry: ServerScanFinding = {
       check: 'email',
       severity: 'warn',
       line: 3,
