@@ -127,6 +127,55 @@ describe('scan — 0x-64-hex is a key or a hash by context', () => {
     expect(checks(`blockhash = 0x${HEX64}`)).toContain('hex32-value');
   });
 
+  /**
+   * The shapes an advisory replay over 389 published posts found (tenjin#723):
+   * every block-tier hit in the live catalog was a public hex constant the old
+   * demotion window missed. Demotion is to WARN, so a real key mislabeled
+   * `hash` is still surfaced for review rather than silenced.
+   */
+  it('demotes a label separated from the value by up to two tokens', () => {
+    expect(checks(`the committee hash was 0x${HEX64}`)).toContain('hex32-value');
+    expect(checks(`the committee hash was 0x${HEX64}`)).not.toContain('raw-private-key');
+    expect(checks(`source_id = 0x${HEX64}`)).toContain('hex32-value');
+    expect(checks(`source_id = 0x${HEX64}`)).not.toContain('raw-private-key');
+  });
+
+  // The catalog writes hashes as inline code, so the path from label to value
+  // runs through markdown and quote punctuation. Separators are permissive; the
+  // label SET is not.
+  it('demotes across backticks and quotes between the label and the value', () => {
+    expect(checks(`the committee hash was \`0x${HEX64}\``)).toContain('hex32-value');
+    expect(checks(`the committee hash was \`0x${HEX64}\``)).not.toContain('raw-private-key');
+    expect(checks(`"id": "0x${HEX64}"`)).toContain('hex32-value');
+    expect(checks(`the root is “0x${HEX64}”`)).toContain('hex32-value');
+  });
+
+  it('demotes the widened identifier label set', () => {
+    for (const label of ['salt', 'id', 'topic0', 'root', 'digest', 'commitment']) {
+      expect(checks(`${label}: 0x${HEX64}`), label).toContain('hex32-value');
+      expect(checks(`${label}: 0x${HEX64}`), label).not.toContain('raw-private-key');
+    }
+  });
+
+  it('demotes a universal public constant carrying no label at all', () => {
+    const topic0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+    expect(checks(`emitted ${topic0} first`)).toContain('hex32-value');
+    expect(checks(`emitted ${topic0} first`)).not.toContain('raw-private-key');
+  });
+
+  it('keeps the block floor: the window widened, it did not open', () => {
+    // Four tokens between label and value is out of window.
+    expect(checks(`the hash of the private key is 0x${HEX64}`)).toContain('raw-private-key');
+    // Words merely ENDING in a label are not labels.
+    expect(checks(`the grid 0x${HEX64}`)).toContain('raw-private-key');
+    expect(checks(`a valid 0x${HEX64}`)).toContain('raw-private-key');
+    expect(checks(`PRIVATE_KEY=0x${HEX64}`)).toContain('raw-private-key');
+    // Separator tolerance cannot invent a label: inline-code formatting around a
+    // secret-named assignment still blocks.
+    expect(checks(`PRIVATE_KEY=\`0x${HEX64}\``)).toContain('raw-private-key');
+    expect(checks(`the wallet key is "0x${HEX64}"`)).toContain('raw-private-key');
+  });
+
   it('blocks a bare, uncontextualized 64-hex as a raw private key', () => {
     const found = scan(`0x${HEX64}`);
     const f = found.find((x) => x.check === 'raw-private-key');
@@ -488,6 +537,231 @@ describe('scan — secrets are never echoed verbatim', () => {
       expect(masked.length).toBeGreaterThan(0);
       for (const f of masked) expect(f.excerpt).not.toContain(secret);
     }
+  });
+});
+
+describe('scan — wallet-shaped secrets (block)', () => {
+  const SEED =
+    'abandon ability able about above absent absorb abstract absurd abuse access accident';
+
+  it('blocks a 12-word BIP-39 phrase without echoing a single word of it', () => {
+    const f = find(`recovery: ${SEED}`, 'bip39-seed-phrase');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).toBe('[redacted 12-word BIP-39 recovery phrase]');
+    expect(f?.excerpt).not.toContain('abandon');
+  });
+
+  it('counts the whole run, so a 24-word phrase reports as one finding', () => {
+    const long = `${SEED} account accuse achieve acid acoustic acquire across act action actor actress actual`;
+    const found = scan(long).filter((f) => f.check === 'bip39-seed-phrase');
+    expect(found).toHaveLength(1);
+    expect(found[0]!.excerpt).toContain('24-word');
+  });
+
+  it('does not fire on prose built from wordlist words, or on eleven of them', () => {
+    // Punctuation breaks the run: a sentence is not a phrase.
+    expect(
+      checks('We abandon the ability to absorb abstract risk, then access the accident report.'),
+    ).not.toContain('bip39-seed-phrase');
+    expect(checks(SEED.split(' ').slice(0, 11).join(' '))).not.toContain('bip39-seed-phrase');
+  });
+
+  it('blocks an otpauth TOTP URI and masks the shared secret', () => {
+    const uri = 'otpauth://totp/Tenjin:ops?secret=JBSWY3DPEHPK3PXP&issuer=Tenjin';
+    const f = find(uri, 'totp-uri');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).toContain('otpauth://totp/');
+    expect(f?.excerpt).not.toContain('JBSWY3DPEHPK3PXP');
+  });
+});
+
+describe('scan — credential shapes ported from the gitleaks corpus', () => {
+  it('blocks Supabase, Twilio, SendGrid, Hugging Face, and Vercel Blob tokens', () => {
+    expect(checks(`t=sbp_${'a1b2c3d4'.repeat(5)}`)).toContain('supabase-token');
+    expect(checks(`t=SK${'0f1e2d3c'.repeat(4)}`)).toContain('twilio-key');
+    expect(checks(`t=SG.${'A'.repeat(22)}.${'B'.repeat(43)}`)).toContain('sendgrid-token');
+    expect(checks(`t=hf_${'Qw3rTy'.repeat(6)}`)).toContain('huggingface-token');
+    expect(checks(`t=vercel_blob_rw_${'A1b2C3d4'.repeat(4)}`)).toContain('vercel-token');
+  });
+
+  it('blocks the shapes the secretlint preset diff added', () => {
+    expect(checks(`t=vcp_${'A1b2C3d4'.repeat(4)}`)).toContain('vercel-token');
+    expect(checks(`t=ntn_12345678901${'A1b2C'.repeat(7)}`)).toContain('notion-token');
+    expect(checks(`t=lin_api_${'A1b2C3d4'.repeat(5)}`)).toContain('linear-token');
+    expect(checks(`t=figd_${'A1b2C3d4'.repeat(6)}`)).toContain('figma-token');
+    expect(checks(`t=glpat-${'A1b2C3d4'.repeat(4)}`)).toContain('gitlab-token');
+    expect(checks(`t=dckr_pat_${'A1b2C3d4'.repeat(3)}abc`)).toContain('docker-token');
+    expect(checks(`t=cfut_${'A1b2C3d4'.repeat(5)}0f1e2d3c`)).toContain('cloudflare-token');
+    expect(checks(`t=dapi${'0f1e2d3c'.repeat(4)}`)).toContain('databricks-token');
+  });
+
+  it('blocks an OPENSSH private key body pasted without its PEM framing', () => {
+    const body = `b3BlbnNzaC1rZXktdjEA${'AAAABG5vbmUAAAAEbm9uZQ'.repeat(2)}`;
+    const f = find(`someone pasted ${body} in chat`, 'openssh-private-key');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).toContain('[redacted');
+    expect(f?.excerpt).not.toContain('AAAABG5vbmU');
+  });
+
+  it('treats a non-database basic-auth URL as the same block-tier shape', () => {
+    const f = find('curl https://svc:R3alPassw0rd@api.acme-prod.com/v1', 'db-connection-uri');
+    expect(f?.severity).toBe('block');
+    expect(f?.excerpt).not.toContain('R3alPassw0rd');
+  });
+
+  it('warns on a pasted .env block, naming keys but never values', () => {
+    const env = [
+      'NODE_ENV=production',
+      'BUILD_TAG=release-2026-08-18-canary',
+      'FEATURE_FLAGS=observer,digest,ingest-gate',
+    ].join('\n');
+    const f = find(env, 'env-dump-block');
+    expect(f?.severity).toBe('warn');
+    expect(f?.excerpt).toContain('NODE_ENV');
+    expect(f?.excerpt).not.toContain('release-2026-08-18-canary');
+    // Short-valued config is not a dump, and two lines are not a block.
+    expect(checks(['PORT=3000', 'DEBUG=1', 'LOG_LEVEL=info'].join('\n'))).not.toContain(
+      'env-dump-block',
+    );
+  });
+
+  it('warns on an unknown-format high-entropy token, masked', () => {
+    const token = 'R7fQ2mVx9LpZ4nKd8WjT3cYbA6sHuE1gNvXoIrPq';
+    const f = find(`the handle was ${token} yesterday`, 'high-entropy-string');
+    expect(f?.severity).toBe('warn');
+    expect(f?.excerpt).not.toContain(token);
+    expect(f?.excerpt).toContain('[redacted');
+  });
+
+  it('keeps identifiers, git SHAs, and URL paths out of the entropy detector', () => {
+    expect(checks('rename getUserProfileByAccountIdentifier2 before landing')).not.toContain(
+      'high-entropy-string',
+    );
+    expect(checks('reverted at 9f2b1c4d8e7a6053f1b2c3d4e5f6a7b8c9d0e1f2 on Tuesday')).not.toContain(
+      'high-entropy-string',
+    );
+    expect(checks('filed as https://github.com/BackTrackCo/tenjin-agent/issues/45')).not.toContain(
+      'high-entropy-string',
+    );
+  });
+
+  it('reports a known shape once: the entropy catch-all yields to the named detector', () => {
+    const jwt = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.${'aB3dE'.repeat(8)}`;
+    expect(checks(jwt)).toEqual(['jwt']);
+  });
+});
+
+describe('scan — #45 deferred detectors (private network, collaboration, cloud)', () => {
+  it('warns on RFC1918 and loopback endpoints, not on versions or bare localhost', () => {
+    expect(checks('the box answers on 192.168.1.42:8080')).toContain('private-network-endpoint');
+    expect(checks('point the agent at 10.14.203.7 and retry')).toContain(
+      'private-network-endpoint',
+    );
+    expect(checks('open http://localhost:3000/api/posts')).toContain('private-network-endpoint');
+    expect(checks('upgrade the cluster from 1.29.4 to 1.30.2')).not.toContain(
+      'private-network-endpoint',
+    );
+    expect(checks('run it on localhost while you iterate')).not.toContain(
+      'private-network-endpoint',
+    );
+    expect(checks('the edge resolved to 104.18.32.7')).not.toContain('private-network-endpoint');
+  });
+
+  it('warns on collaboration-workspace links, not on public repos or vendor docs', () => {
+    expect(checks('tracked in https://acme.atlassian.net/browse/PLAT-4821')).toContain(
+      'collaboration-url',
+    );
+    expect(checks('spec at https://docs.google.com/document/d/1QbXeR/edit')).toContain(
+      'collaboration-url',
+    );
+    expect(checks('thread https://acme.slack.com/archives/C02AB3CD/p1723640000')).toContain(
+      'collaboration-url',
+    );
+    expect(checks('runbook at https://www.notion.so/acme/Incident-Runbook')).toContain(
+      'collaboration-url',
+    );
+    expect(checks('filed as https://github.com/BackTrackCo/tenjin-agent/issues/45')).not.toContain(
+      'collaboration-url',
+    );
+  });
+
+  it('warns on ARNs and GCP/Azure/bucket resource ids, not on the generic ARN grammar', () => {
+    expect(checks('the role is arn:aws:iam::123456789012:role/tenjin-deploy')).toContain(
+      'cloud-resource-id',
+    );
+    expect(checks('read projects/tenjin-prod-8412/secrets/answer-key at boot')).toContain(
+      'cloud-resource-id',
+    );
+    expect(
+      checks(
+        'scoped to /subscriptions/3f2504e0-4f89-11d3-9a0c-0305e82c3301/resourceGroups/rg-prod/x',
+      ),
+    ).toContain('cloud-resource-id');
+    expect(checks('artifacts land in s3://tenjin-artifacts/releases/alpha.tgz')).toContain(
+      'cloud-resource-id',
+    );
+    expect(checks('an ARN reads arn:partition:service:region:account:resource')).not.toContain(
+      'cloud-resource-id',
+    );
+    expect(checks('the monorepo keeps projects/web and projects/api')).not.toContain(
+      'cloud-resource-id',
+    );
+  });
+});
+
+/**
+ * The block tier is non-bypassable by contract, so the docs-placeholder rule — a
+ * SUBSTRING test over the whole match — is confined to warns. Real passwords
+ * routinely carry `<`, `>`, `{`, `}` or a letter run, and a connection string is
+ * one of the commonest ways a live credential reaches a transcript, so a
+ * substring match was silently converting a block into nothing.
+ */
+describe('scan — the block tier is non-bypassable', () => {
+  it('blocks a live secret whose value merely CONTAINS a placeholder shape', () => {
+    const bypasses = [
+      'postgres://appuser:Str0ng<Pw>Value@prod-db.acme.com:5432/main',
+      'mysql://root:Pa{{ss}}w0rd99@10.2.3.4:3306/app',
+      'postgres://appuser:realpwxxxxxx99@prod-db.acme.com/main',
+      'Authorization: Bearer ghp_realtokenxxxxxx0123456789abcdef',
+      'redis://cache:yourkeyR3al99Value@cache.acme.com:6379',
+      `the docs show ghp_${'x'.repeat(36)} as the shape`,
+    ];
+    for (const text of bypasses) {
+      const blocks = scan(text).filter((f) => f.severity === 'block');
+      expect(blocks.length, text).toBeGreaterThan(0);
+      // A non-bypassable block must not become a leak either.
+      for (const f of blocks) expect(f.excerpt).toContain('[redacted');
+    }
+  });
+
+  it('keeps the value-anchored block suppressions, which are not substring rules', () => {
+    // Here the WHOLE captured password/token is the placeholder, not a fragment
+    // of a live one — the shape a docs snippet actually takes.
+    expect(checks('postgres://user:<password>@host:5432/db')).not.toContain('db-connection-uri');
+    expect(checks('Authorization: Bearer <token>')).not.toContain('bearer-token');
+  });
+});
+
+describe('scan — placeholder suppression', () => {
+  it('drops docs-shaped placeholder matches for warn-tier detectors', () => {
+    expect(checks('API_KEY=<YOUR_KEY>')).not.toContain('secret-assignment');
+    expect(checks('set the header to A1b2C3xxxxxx4D5e6F7g8H9i0J1k2L3m4N5o')).not.toContain(
+      'high-entropy-string',
+    );
+    expect(checks('deploy to api-xxxxxx.acme.internal for the smoke test')).not.toContain(
+      'internal-hostname',
+    );
+  });
+
+  it('drops emails on the RFC 2606 reserved domains, but keeps real ones', () => {
+    expect(checks('sample payloads use user@example.com throughout')).not.toContain('email');
+    expect(checks('escalate to alice@corp.example when paging')).toContain('email');
+  });
+
+  it('does not treat a boring key body as a placeholder (no block bypass)', () => {
+    // A repeated-letter body is still a live key shape.
+    expect(checks(`t=ghp_${'Z'.repeat(36)}`)).toContain('github-token');
+    expect(checks(`0x${HEX64}`)).toContain('raw-private-key');
   });
 });
 

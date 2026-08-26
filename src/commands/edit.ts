@@ -221,9 +221,10 @@ export async function runEdit(
   ]);
   // THE SAME TEAM-MODE NARROWING PUBLISH DOES, and for the same reason: the warn
   // tier asks "is this safe to make PUBLIC", and a team shelf is not public, so a
-  // repo slug is the point of a team note rather than a leak. `secret-assignment`
-  // and `hex32-value` survive with the block tier because they ask the credential
-  // question instead. Without this, an author publishes a team note carrying its
+  // repo slug is the point of a team note rather than a leak. The credential checks
+  // survive with the block tier because they ask a question the audience does not
+  // change; which ones those are is a `teamSurvives` flag on the rule in
+  // scan-rules.json rather than a list in code. Without this, an author publishes a team note carrying its
   // own repo slug silently under `auto` and then gets NEEDS_CONFIRMATION on that
   // same string when fixing a typo in it — the --yes round trip the drop exists to
   // remove, moved to the second command. The two filters are the one
