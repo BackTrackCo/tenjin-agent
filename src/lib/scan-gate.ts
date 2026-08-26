@@ -177,27 +177,45 @@ function valueKey(check: string, excerpt: string): string {
 }
 
 /**
+ * One server finding's MATCH SITE: detector, coordinates, submitted field, and
+ * excerpt. Two server entries collapse only when every one of those agrees, i.e.
+ * when the server sent the same finding twice. Anything less is two match sites,
+ * and an excerpt is redacted, so it cannot tell one value reported at two sites
+ * from two different values that redact to the same string.
+ */
+function serverSiteKey(f: ServerScanFinding): string {
+  return `${offsetKey(f.check, f.line, f.span)}\u0000${f.field ?? '-'}\u0000${f.excerpt}`;
+}
+
+/**
  * Merge the local scan's warn findings with the server's, deduped so the same
  * finding renders ONCE. Local entries come first and win the rendering: their
  * offsets point into the operator's own file, while the server's are relative to
  * the submitted field.
  *
- * Two keys, and a match on EITHER collapses. Offset alone is not enough — the
- * local scan reads the whole file (frontmatter included) while the gate scans
- * the extracted body, so the identical secret lands on different line numbers —
- * and value alone is not enough either, since a redaction can differ across
- * corpus versions. Erring toward collapsing is safe (the finding is still
- * rendered, once); erring toward splitting shows the operator the same secret
- * twice and teaches them to skim.
+ * THE ONE DIRECTION THIS MERGE MUST NOT ERR IN is collapsing two findings into
+ * one rendered line, because the ack token covers the server's whole set while
+ * the operator only ever answers what was rendered. Splitting costs a duplicate
+ * line; collapsing costs material acked unseen. So two entries collapse only
+ * where collapsing is provably right, and the two sides have different proofs.
  *
- * The offset key is a LOCAL-side key only, and that is the whole reason server
- * findings are keyed by value alone. Offsets are per-field: the server reports
- * `line`/`span` relative to the submitted field it matched in, so two findings
- * from DIFFERENT fields sharing a detector, a line and a span are a coordinate
- * coincidence rather than one finding, and two different secrets in a one-line
- * `title` and a one-line `excerpt` collide constantly. Collapsing those would
- * drop material the operator then acks without ever seeing, which is the one
- * direction this merge must not err in.
+ * ACROSS THE SIDES, by value. The local scan reads the whole file (frontmatter
+ * included) while the gate scans the extracted body, so one secret lands on
+ * different line numbers and offsets cannot match it up; detector + excerpt can,
+ * and a local excerpt the operator can see in their own file is what makes that
+ * safe. `byOffset` and `byValue` are LOCAL-side keys, never written by the
+ * server loop: reading `byOffset` there collapsed a distinct server finding into
+ * a local one whose per-field coordinates merely coincided.
+ *
+ * WITHIN THE SERVER'S OWN SET, by match site (detector, coordinates, field,
+ * excerpt) and not by value. A server excerpt is redacted and can be a fixed
+ * string, so two entries sharing one cannot be told apart: one value reported at
+ * two sites and two values that redact alike look identical from here. Value
+ * alone therefore dropped the second of two distinct same-detector secrets, and
+ * a same-length pair or a fixed semantic excerpt is enough to trigger it. The
+ * site key keeps both and collapses only a finding the server sent twice. The
+ * cost is that one secret genuinely occurring in two fields renders twice, on
+ * two different lines, which is what actually happened.
  */
 export function mergeScanFindings(
   local: ScanFinding[],
@@ -223,28 +241,28 @@ export function mergeScanFindings(
     out.push(rendered);
   }
 
+  const sites = new Set<string>();
   for (const f of server) {
-    const vKey = valueKey(f.check, f.excerpt);
-    // BY VALUE ONLY. `byOffset` holds local entries, whose coordinates point into
-    // the operator's file, while a server finding's point into the submitted
-    // field; reading it here collapsed a distinct server finding into a local one
-    // on a coordinate coincidence, and the operator then acked what the render
-    // had dropped.
-    const seen = byValue.get(vKey);
-    if (seen !== undefined) {
-      if (seen.source === 'local') seen.source = 'both';
+    const site = serverSiteKey(f);
+    if (sites.has(site)) continue;
+    sites.add(site);
+    // The cross-side match, and the ONLY read of a local-side key here. A hit
+    // means the operator can see this value in their own file, which is what
+    // makes collapsing it safe; `byValue` is deliberately not written back, so
+    // one server entry never absorbs another.
+    const agreed = byValue.get(valueKey(f.check, f.excerpt));
+    if (agreed !== undefined) {
+      agreed.source = 'both';
       continue;
     }
-    const rendered: RenderedFinding = {
+    out.push({
       check: f.check,
       severity: f.severity,
       line: f.line,
       excerpt: f.excerpt,
       source: 'server',
       ...(f.field !== undefined ? { field: f.field } : {}),
-    };
-    byValue.set(vKey, rendered);
-    out.push(rendered);
+    });
   }
   return out;
 }

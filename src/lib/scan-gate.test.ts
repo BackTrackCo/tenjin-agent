@@ -208,9 +208,11 @@ describe('mergeScanFindings', () => {
     expect(merged.map((f) => f.field)).toEqual(['title', 'excerpt']);
   });
 
-  // The same secret in two fields is still one finding: the value key collapses
-  // it even though nothing else about the two entries matches.
-  it('still collapses one secret repeated across two fields', () => {
+  // Two server entries sharing an excerpt are NOT collapsed, because a redacted
+  // excerpt cannot tell one value at two sites from two values that redact alike.
+  // The cost lands here: one secret genuinely in two fields renders twice, on two
+  // different lines. The alternative dropped the second of two distinct secrets.
+  it('keeps both server entries when one excerpt covers two match sites', () => {
     const merged = mergeScanFindings(
       [],
       [
@@ -232,8 +234,71 @@ describe('mergeScanFindings', () => {
         },
       ],
     );
+    expect(merged).toHaveLength(2);
+    expect(merged.map((f) => f.field)).toEqual(['title', 'body']);
+  });
+
+  // The case that motivates it. A redaction is lossy, and a semantic excerpt is a
+  // fixed string, so two distinct findings arrive byte-identical apart from where
+  // they matched. Keyed by value, the second vanished from the render while the
+  // ack token still covered it.
+  it('keeps two distinct findings whose redactions are identical', () => {
+    const redacted = (over: Record<string, unknown>) => ({
+      check: 'semantic-pii',
+      severity: 'warn',
+      line: 1,
+      excerpt: 'reads as private context',
+      field: 'body',
+      ...over,
+    });
+    const merged = mergeScanFindings(
+      [],
+      [redacted({ span: [0, 40] }), redacted({ span: [90, 130] })],
+    );
+    expect(merged).toHaveLength(2);
+    expect(merged.every((f) => f.source === 'server')).toBe(true);
+  });
+
+  // Collapsing is still right for the one case it can prove: the server sent the
+  // same finding twice, same detector, same coordinates, same field, same excerpt.
+  it('collapses a server finding the server sent twice', () => {
+    const entry = {
+      check: 'email',
+      severity: 'warn',
+      line: 3,
+      span: [8, 22],
+      excerpt: 'x@b.co',
+      field: 'body',
+    };
+    expect(mergeScanFindings([], [entry, { ...entry }])).toHaveLength(1);
+  });
+
+  // One local finding, two server sites for the same value: the operator can see
+  // that value in their own file, so it renders once, marked as agreed.
+  it('marks a local finding as both however many server sites report it', () => {
+    const merged = mergeScanFindings(
+      [local()],
+      [
+        {
+          check: 'email',
+          severity: 'warn',
+          line: 1,
+          span: [0, 6],
+          excerpt: 'a@b.co',
+          field: 'title',
+        },
+        {
+          check: 'email',
+          severity: 'warn',
+          line: 9,
+          span: [0, 6],
+          excerpt: 'a@b.co',
+          field: 'body',
+        },
+      ],
+    );
     expect(merged).toHaveLength(1);
-    expect(merged[0]).toMatchObject({ field: 'title', source: 'server' });
+    expect(merged[0]).toMatchObject({ line: 7, source: 'both' });
   });
 });
 
