@@ -1249,12 +1249,57 @@ const PM_HEADS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
 const PM_QUIET_SUBS = new Set([
   'ls', 'list', 'why', 'view', 'info', 'outdated', 'audit', 'config', '-v', '--version',
 ]);
-/** Words that stand in front of the real command and are not it. */
-const HEAD_SKIP = new Set(['sudo', 'time', 'env', 'nice', 'nohup', 'stdbuf', 'command', 'exec']);
+/**
+ * Wrappers that stand in front of the real command, with the options of each
+ * that TAKE A VALUE, so \`sudo -u builder pnpm test\` is read as \`pnpm test\`
+ * and never as \`-u\` or as \`builder\`. Flags without a value are skipped by
+ * the leading dash alone. THE TABLE IS THE POINT: searching a wrapper-led
+ * segment for any allowlisted word instead let an argument authorize the arm —
+ * \`sudo grep pnpm src\` read as a \`pnpm\` failure — which is precisely the
+ * \`which\`/\`grep\` false positive the allowlist exists to prevent. A wrapper
+ * not in this table is not a wrapper here, and an unknown option shape falls
+ * through to "the next word is the command", which errs toward not firing.
+ */
+const WRAPPER_VALUE_OPTS = {
+  sudo: new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '--user', '--group', '--host', '--prompt', '--close-from', '--chdir', '--chroot', '--command-timeout', '--other-user']),
+  doas: new Set(['-u', '-C']),
+  nice: new Set(['-n', '--adjustment']),
+  timeout: new Set(['-s', '-k', '--signal', '--kill-after']),
+  env: new Set(['-u', '-C', '-S', '--unset', '--chdir', '--split-string']),
+  time: new Set(['-f', '-o', '--format', '--output']),
+  nohup: new Set([]),
+  stdbuf: new Set(['-i', '-o', '-e', '--input', '--output', '--error']),
+  command: new Set([]),
+  exec: new Set([]),
+};
 /** Runners whose next word IS the command: \`npx tsc\` is a tsc invocation. */
 const HEAD_RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'uvx']);
 /** ... and the package-manager subcommands that do the same thing. */
 const PM_RUN_SUBS = new Set(['exec', 'dlx', 'x']);
+
+/**
+ * Step \`i\` past one wrapper and its options: returns the index of the word
+ * the wrapper runs. \`-uBUILDER\` and \`--user=builder\` carry their value in
+ * the same word; \`-u builder\` takes the next one; \`--\` ends the options;
+ * \`timeout\` then also owns one bare duration word (\`30s\`, \`1.5m\`).
+ */
+function skipWrapper(words, i, valueOpts, name) {
+  i += 1;
+  while (i < words.length) {
+    const w = words[i];
+    if (w === '--') return i + 1;
+    if (!w.startsWith('-') || w === '-') break;
+    if (w.startsWith('--')) {
+      i += w.includes('=') || !valueOpts.has(w) ? 1 : 2;
+      continue;
+    }
+    // Short option: a known value option is either \`-u builder\` or \`-ubuilder\`.
+    const opt = w.slice(0, 2);
+    i += valueOpts.has(opt) && w.length === 2 ? 2 : 1;
+  }
+  if (name === 'timeout' && i < words.length && /^\d+(?:\.\d+)?[smhd]?$/.test(words[i])) i += 1;
+  return i;
+}
 
 /**
  * Every command in \`command\`, as { head, sub }: the program each segment
@@ -1262,7 +1307,8 @@ const PM_RUN_SUBS = new Set(['exec', 'dlx', 'x']);
  * \`|\` and newlines, so \`cd /x && pnpm test\` yields the \`cd\` nobody cares
  * about AND the \`pnpm test\` that matters. The head is a basename, so
  * \`/usr/local/bin/pnpm\` and \`./node_modules/.bin/vitest\` land on their
- * program names; leading \`FOO=bar\` assignments and wrappers are stepped over.
+ * program names; leading \`FOO=bar\` assignments and wrappers are stepped over,
+ * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`).
  */
 function commandHeads(command) {
   const out = [];
@@ -1270,33 +1316,14 @@ function commandHeads(command) {
     const words = segment.trim().split(/\s+/).filter((w) => w.length > 0);
     let i = 0;
     let head = '';
-    // A WRAPPER-LED SEGMENT IS SEARCHED WHOLE. \`sudo -u builder pnpm test\`,
-    // \`timeout --signal=KILL 30s pytest\`, \`nice -n 10 pnpm test\`: every
-    // wrapper takes options of its own arity, and encoding each is a losing
-    // game. The allowlist is the authority on what counts, so behind a wrapper
-    // any word that IS an allowlisted head is taken as the command, with the
-    // word after it as the subcommand. Only behind a wrapper: an ordinary
-    // segment's arguments must not be able to authorize it.
-    const first = words.length > 0 ? (words[0].split('/').pop() || words[0]) : '';
-    if (HEAD_SKIP.has(first) || first === 'timeout' || HEAD_RUNNERS.has(first)) {
-      for (let k = 1; k < words.length; k += 1) {
-        const name = words[k].split('/').pop() || words[k];
-        if (FAILURE_HEADS.has(name)) {
-          out.push({ head: name, sub: k + 1 < words.length ? words[k + 1] : '' });
-          break;
-        }
-      }
-      continue;
-    }
-    while (i < words.length) {
+    let guard = 0;
+    while (i < words.length && guard < 32) {
+      guard += 1;
       const word = words[i];
       const name = word.split('/').pop() || word;
-      // FOO=bar prefixes, and the wrappers that take a command as an argument.
       if (/^[A-Za-z_]\w*=/.test(word)) { i += 1; continue; }
-      if (HEAD_SKIP.has(name)) { i += 1; continue; }
-      if (name === 'timeout') {
-        i += 1;
-        if (i < words.length && /^\d+(?:\.\d+)?[smhd]?$/.test(words[i])) i += 1;
+      if (Object.prototype.hasOwnProperty.call(WRAPPER_VALUE_OPTS, name)) {
+        i = skipWrapper(words, i, WRAPPER_VALUE_OPTS[name], name);
         continue;
       }
       if (HEAD_RUNNERS.has(name)) { i += 1; continue; }

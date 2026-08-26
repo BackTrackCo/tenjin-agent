@@ -1534,8 +1534,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
     await pushOn(baseUrl);
     for (const command of [
       'sudo -u builder pnpm test',
+      'sudo -E pnpm test',
+      'sudo --user=builder pnpm test',
       'timeout --signal=KILL 30s pytest -x',
       'nice -n 10 pnpm test',
+      'sudo env CI=1 pnpm test',
     ]) {
       await rm(join(dataDir, PUSH_LEDGER_FILE), { force: true });
       const run = await runScript(
@@ -1556,7 +1559,35 @@ describe('the failure arm (PostToolUse Bash)', () => {
       expect(run.code).toBe(0);
       expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
     }
-    expect(queries().length).toBe(3);
+    expect(queries().length).toBe(6);
+  });
+
+  it('does not let an argument authorize a command behind a wrapper either', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    for (const command of [
+      'sudo grep pnpm src',
+      'sudo which pnpm',
+      'timeout 30s grep -r pytest .',
+    ]) {
+      const run = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: `arg-${command.length}`,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command },
+          tool_response: {
+            stdout: '',
+            stderr: 'Error: Cannot find module pnpm in the resolver',
+            interrupted: false,
+          },
+        }),
+      );
+      expect(run.stdout).toBe('');
+    }
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
   });
 
   it('does not let an argument authorize an ordinary command', async () => {
