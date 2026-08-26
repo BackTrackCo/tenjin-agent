@@ -346,8 +346,12 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason:
       'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy — ' +
       'and, through shelfBypassSecret + baseUrl, put the machine in team mode, where a publish ' +
-      'skips the scan’s warn tier (except the credential checks secret-assignment and ' +
-      'hex32-value and the injection check embedded-instruction) and prices at 0.',
+      'skips the scan’s warn tier (except the credential checks secret-assignment, ' +
+      'hex32-value, high-entropy-string and env-dump-block and the injection check ' +
+      'embedded-instruction) and prices at 0. It also writes ' +
+      'publish.ackServerWarnings on, the most direct consent-loosening write on this verb: ' +
+      'it lets one --yes cover the marketplace’s own scan findings, which no payload had ' +
+      'rendered when that yes was given.',
   },
   {
     command: 'tenjin install',

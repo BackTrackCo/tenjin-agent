@@ -147,14 +147,37 @@ describe('writeConfig', () => {
 });
 
 describe('publish block', () => {
-  it('defaults publish to review / $0.10 atomic', async () => {
-    expect(CONFIG_DEFAULTS.publish).toEqual({ mode: 'review', defaultPrice: '100000' });
-    expect((await loadConfig(dir)).publish).toEqual({ mode: 'review', defaultPrice: '100000' });
+  const PUBLISH_DEFAULTS = {
+    mode: 'review',
+    defaultPrice: '100000',
+    ackServerWarnings: 'mode',
+  } as const;
+
+  it('defaults publish to review / $0.10 atomic / mode-derived server acks', async () => {
+    expect(CONFIG_DEFAULTS.publish).toEqual(PUBLISH_DEFAULTS);
+    expect((await loadConfig(dir)).publish).toEqual(PUBLISH_DEFAULTS);
   });
 
-  it('merges a partial publish block per-subkey (keeps the default it omits)', async () => {
+  it('merges a partial publish block per-subkey (keeps the defaults it omits)', async () => {
     await writeFile(configFile(), JSON.stringify({ publish: { mode: 'review' } }));
-    expect((await loadConfig(dir)).publish).toEqual({ mode: 'review', defaultPrice: '100000' });
+    expect((await loadConfig(dir)).publish).toEqual(PUBLISH_DEFAULTS);
+  });
+
+  // The key only ever LOOSENS what a yes covers, so a `.tenjin.json` a cloned
+  // repo carries must not be able to set it: global config or the default.
+  it('takes publish.ackServerWarnings from the global config only', async () => {
+    expect(resolveSettings({ config: {}, flags: {}, env: {} }).publishAckServerWarnings).toEqual({
+      value: 'mode',
+      source: 'default',
+    });
+    expect(
+      resolveSettings({
+        config: { publish: { ackServerWarnings: 'off' } },
+        flags: {},
+        env: {},
+        project: { publish: { ackServerWarnings: 'on' } } as never,
+      }).publishAckServerWarnings,
+    ).toEqual({ value: 'off', source: 'file' });
   });
 
   it('resolveSettings exposes publishMode and publishDefaultPrice', async () => {

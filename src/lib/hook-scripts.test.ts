@@ -1466,6 +1466,36 @@ describe('Stop hook: the resolved publish mode leads the block', () => {
     );
   });
 
+  /**
+   * `ackServerWarnings off` outranks the mode at the marketplace gate, so a
+   * full-auto machine carrying it does stop on a server warn. Stating the mode's
+   * contract without it told the agent, every turn end, that it would never be
+   * asked, on exactly the dogfood machines the switch exists for.
+   */
+  it('says the marketplace still stops a full-auto publish under ackServerWarnings off', async () => {
+    await seedSearches([OPEN_MISS]);
+    await writeConfig({ publish: { mode: 'full-auto', ackServerWarnings: 'off' } });
+    const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+    expect(text.split('\n')[0]).toBe(
+      'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.' +
+        ' Marketplace scan findings still stop it (publish.ackServerWarnings=off).',
+    );
+  });
+
+  // One `it` per value, not a loop: the Stop hook nags once per session, so a
+  // second run against the same dataDir is suppressed and asserts nothing.
+  it.each(['mode', 'on'] as const)(
+    'says nothing extra when the setting is %s',
+    async (ackServerWarnings) => {
+      await seedSearches([OPEN_MISS]);
+      await writeConfig({ publish: { mode: 'full-auto', ackServerWarnings } });
+      const text = injected(await runScript(stopHookScript(dataDir), stopInput)) ?? '';
+      expect(text.split('\n')[0]).toBe(
+        'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.',
+      );
+    },
+  );
+
   it('falls back to review on a mode the CLI would not accept', async () => {
     await seedSearches([OPEN_MISS]);
     await writeConfig({ publish: { mode: 'whatever' } });

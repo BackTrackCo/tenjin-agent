@@ -3,6 +3,12 @@ import { CliError } from './errors';
 import { httpRequest, type HttpResponse, type HttpResult, type ShelfBypass } from './http';
 import { rateLimitError } from './agent-api';
 import { sanitizeWireText } from './output';
+import {
+  parseScanRejection,
+  parseScanSuccessReport,
+  type ScanGateRejection,
+  type ServerScanReport,
+} from './scan-gate';
 import { trimSlash } from './url';
 import type { ResourceCardInput } from './card';
 import type { WriteAuth } from './session-key';
@@ -44,6 +50,13 @@ export interface PublishInput {
    * the thread. Stored server-side only and never echoed back.
    */
   searchId?: string | string[];
+  /**
+   * The `ackToken` from a prior `scan_needs_ack` rejection, acknowledging the
+   * warn findings that were rendered to the operator. Only ever set on the retry
+   * AFTER a server issued one, so a deployment predating the ingest gate never
+   * sees this key on a body its strictObject schema would reject.
+   */
+  scanAck?: string;
 }
 
 /** The exact strictObject body sent to POST /api/posts (defined keys only). */
@@ -57,6 +70,7 @@ export interface PostCreateBody {
   status?: PublishStatus;
   resource?: ResourceCardInput;
   searchId?: string | string[];
+  scanAck?: string;
 }
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
@@ -269,6 +283,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     // the server stores it against this post, and whether some earlier `outcome`
     // already reported on the search is not a fact about who answered it.
     ...(searchId !== undefined ? { searchId } : {}),
+    ...(input.scanAck !== undefined ? { scanAck: input.scanAck } : {}),
   };
 }
 
@@ -334,6 +349,11 @@ export interface PublishResult {
   cacheEligibleMissing: string[];
   /** Server-dropped external image refs (spec: owned-uploads-only). */
   warnings: string[];
+  /**
+   * The ingest gate's advisory report, when the server sent one. Present only on
+   * a SUCCESS: it never blocked anything, and it is surfaced as information.
+   */
+  scan?: ServerScanReport;
 }
 
 export interface PublishClientOptions {
@@ -390,6 +410,11 @@ export async function publishPost(
     }
     if (res.status === 401) throw authError(auth401Code(res), res);
     if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+    // The ingest gate refuses BEFORE the generic write-failure path: a gate
+    // rejection is a content decision the caller can act on (and, for the warn
+    // tier, acknowledge), not an opaque server failure.
+    const gate = parseScanRejection(res.status, res.json);
+    if (gate !== null) throw new ScanGateError(gate);
     if (res.status !== 201 && res.status !== 200) throw publishFailed(res);
 
     const parsed = ownPostSchema.safeParse(res.json);
@@ -400,6 +425,7 @@ export async function publishPost(
       });
     }
     const post = parsed.data;
+    const scan = parseScanSuccessReport(res.json);
     return {
       resourceId: post.id,
       slug: post.slug,
@@ -410,7 +436,31 @@ export async function publishPost(
       ...(post.resource !== undefined ? { cacheEligible: post.resource.cacheEligible } : {}),
       cacheEligibleMissing: post.resource?.cacheEligibleMissing ?? [],
       warnings: post.warnings ?? [],
+      ...(scan !== null ? { scan } : {}),
     };
+  }
+}
+
+/**
+ * A publish or edit the server's ingest gate refused. Thrown from the request
+ * layer so the COMMAND decides what to do with it: a block is terminal, while a
+ * `needs-ack` is routed into the same exit-3 consent flow local warn findings
+ * already use, and re-run carrying the token on an explicit yes.
+ *
+ * It is a CliError so an unhandled path still exits 3 with the server's own
+ * message rather than an INTERNAL; both kinds are understood-but-refused.
+ */
+export class ScanGateError extends CliError {
+  readonly rejection: ScanGateRejection;
+
+  constructor(rejection: ScanGateRejection) {
+    super(
+      rejection.kind === 'blocked' ? 'PUBLISH_BLOCKED' : 'NEEDS_CONFIRMATION',
+      rejection.message,
+      { details: { findings: rejection.report.findings } },
+    );
+    this.name = 'ScanGateError';
+    this.rejection = rejection;
   }
 }
 
@@ -458,6 +508,8 @@ export interface PostUpdateInput {
   priceAtomic?: string;
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
+  /** See PublishInput.scanAck; the edit path passes through the same gate. */
+  scanAck?: string;
 }
 
 /** The exact strictObject body sent to PUT /api/posts/<id> (defined keys only). */
@@ -469,6 +521,7 @@ export interface PostUpdateBody {
   price?: string;
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
+  scanAck?: string;
 }
 
 /**
@@ -536,7 +589,9 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
       fix: 'Pass at least one field flag, or run `tenjin edit <postId>` with no flags to view the post.',
     });
   }
-  return body;
+  // Added AFTER the emptiness check on purpose: an acknowledgement is not a
+  // change, so a PUT carrying only a token is still nothing to update.
+  return input.scanAck !== undefined ? { ...body, scanAck: input.scanAck } : body;
 }
 
 /**
@@ -634,6 +689,8 @@ export async function updatePost(
     if (res.status === 401) throw authError(auth401Code(res), res);
     if (res.status === 404) throw postNotFound(id);
     if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+    const gate = parseScanRejection(res.status, res.json);
+    if (gate !== null) throw new ScanGateError(gate);
     if (res.status !== 200) throw updateFailed(res);
 
     return parseOwnPost(res.json, 'update');

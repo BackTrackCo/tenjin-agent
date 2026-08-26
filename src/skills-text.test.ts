@@ -933,7 +933,7 @@ describe('the public render did not move', () => {
   // unshaped SKILL.md again. The team arm keeps its own browse-only line.
   //
   // Re-pinned again for the scan hardening: the public arm's warn triage now names
-  // the detectors this branch adds (`private-network-endpoint`, `high-entropy-string`,
+  // the detectors that branch added (`private-network-endpoint`, `high-entropy-string`,
   // `collaboration-url`, `cloud-resource-id`, `env-dump-block`) and the block tier
   // gained seed phrases. Only tenjin-publish's else arm moved; tenjin-search is
   // untouched, which is why its digest still holds.
@@ -942,10 +942,16 @@ describe('the public render did not move', () => {
   // across the two arms and safety-model.md, so all three now name the same five
   // families (TOTP provisioning URIs is what the public arm was missing), and the
   // "usually fine" warn bucket got back the qualifiers that make it conditional.
+  //
+  // Re-pinned again for the marketplace ingest gate: a `--yes` re-run can now hit
+  // a SECOND exit 3 carrying findings marked `[server]` that the first payload
+  // could not have shown, and an agent told only to re-run with `--yes` would
+  // loop on it. Both arms moved; the team arm also drops the claim that the
+  // survivors are the only findings there are, since the shelf scans at ingest.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': 'a3d2ff8e259851b2ed8733921286cbea',
-      'tenjin-publish': 'b5312fcaf8aefad153ed4433b833dc22',
+      'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
     });
   });
 
