@@ -11,6 +11,13 @@ import {
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
 } from '../lib/hook-scripts';
+import {
+  PUSH_CONTEXT_HOOK_FILE,
+  PUSH_FAILURE_HOOK_FILE,
+  PUSH_PROMPT_HOOK_FILE,
+  PUSH_SUBAGENT_HOOK_FILE,
+} from '../lib/push-scripts';
+import { wireSearchHooks } from '../lib/harness-hooks';
 import { hooksDir } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
 import type { CommandContext } from '../context';
@@ -129,6 +136,24 @@ describe('runUninstall — a fully installed machine', () => {
     });
   });
 
+  // `skillsDirsFor` requires a Hermes home precisely so a new caller cannot quietly
+  // leave that directory behind. Both spellings are covered: the default and an
+  // absolute HERMES_HOME, which is the one a defaulted argument would have missed.
+  it('removes the Hermes skills, including under an absolute HERMES_HOME', async () => {
+    await seedSkill('.hermes/skills', 'tenjin-search');
+    const custom = join(home, 'custom-hermes');
+    await seedSkill(join('custom-hermes', 'skills'), 'tenjin-publish');
+
+    const bare = (await runUninstall(makeCtx(), { home, env: {} })).data as UninstallReport;
+    expect(bare.skills).toHaveLength(1);
+    expect(existsSync(join(home, '.hermes', 'skills', 'tenjin-search'))).toBe(false);
+
+    const scoped = (await runUninstall(makeCtx(), { home, env: { HERMES_HOME: custom } }))
+      .data as UninstallReport;
+    expect(scoped.skills).toHaveLength(1);
+    expect(existsSync(join(custom, 'skills', 'tenjin-publish'))).toBe(false);
+  });
+
   // Ownership, not position: a rule or entry we did not write keeps its place even
   // when one of ours is removed from in front of it.
   it('leaves another tool’s hook entry and allow rule exactly where they were', async () => {
@@ -156,7 +181,9 @@ describe('runUninstall — a fully installed machine', () => {
     await seedHookScripts();
     const keep = {
       'wallet.json': '{"wallet":true}',
-      'config.json': '{"baseUrl":"https://tenjin.blog"}',
+      // With a door key, because the receipt line asserted below is conditional
+      // on this machine actually holding one.
+      'config.json': '{"baseUrl":"https://shelf.example","shelfBypassSecret":"door-key"}',
       'searches.json': '{"schemaVersion":1,"searches":[]}',
     };
     for (const [file, body] of Object.entries(keep)) await writeFile(join(data, file), body);
@@ -192,9 +219,47 @@ describe('runUninstall — a fully installed machine', () => {
      * to be told, and the receipt is where they are looking.
      */
     expect(text).toContain('publish.mode included');
+    /**
+     * And the one kept value that is not the operator's own: the team shelf's
+     * door key is shared with everyone else behind that deployment, so an
+     * uninstall that reads as "handing this machine on" has to name it and say
+     * how to clear it. Clearing it FOR them is not on: the key is not ours to
+     * revoke, and a teammate's shelf must not go dark over an uninstall.
+     */
+    expect(text).toContain('shelfBypassSecret');
+    expect(text).toContain('tenjin config set shelfBypassSecret ""');
     for (const item of report.kept) {
       expect(item, item).not.toMatch(/everything under/i);
     }
+  });
+
+  /**
+   * And NOT on the machines that have no such key, which is most of them:
+   * `shelfBypassSecret` defaults to `''`. An imperative to clear a credential
+   * that is not there is a receipt line an operator can check and find false, and
+   * a receipt whose only job is to be read cannot afford one.
+   */
+  it('does not name the shelf key on a public-mode machine', async () => {
+    await seedSettings();
+    await writeFile(join(data, 'config.json'), '{"baseUrl":"https://tenjin.blog"}');
+
+    const { report, text } = await run();
+
+    expect(text).not.toContain('shelfBypassSecret');
+    expect(report.kept.some((item) => item.includes('shelfBypassSecret'))).toBe(false);
+    // Everything else it keeps is still named, so this is a conditional line and
+    // not a quieter receipt.
+    expect(text).toContain('publish.mode included');
+    expect(text).toContain('~/.tenjin/candidates');
+  });
+
+  /** An empty string is the default, and defaults are not credentials. */
+  it('does not name the shelf key when the config holds an empty one', async () => {
+    await seedSettings();
+    await writeFile(join(data, 'config.json'), '{"shelfBypassSecret":""}');
+
+    const { text } = await run();
+    expect(text).not.toContain('shelfBypassSecret');
   });
 });
 
@@ -464,5 +529,94 @@ describe('runUninstall — partial and repeat states', () => {
     expect(report.settings.skipped).toBe('unparsable');
     expect(report.scripts).toHaveLength(4);
     expect(text).toContain('not valid JSON');
+  });
+});
+
+/**
+ * The push experiment's arms, wired by the REAL wiring code rather than by a
+ * hand-written fixture: uninstall's whole claim is that it is the exact reverse
+ * of what install (and `tenjin push on`) wrote, and a fixture I typed here would
+ * go stale the day a seventh entry or a fifth script is added, silently passing
+ * while the real machine keeps a file forever.
+ */
+describe('runUninstall — the push experiment’s arms', () => {
+  it('removes every push script and every push settings.json entry', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeSettingsPath(home), '{}\n');
+    const wired = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    expect(wired.skipped).toBeUndefined();
+
+    // What the wiring actually put on disk, so this asserts against the writer
+    // instead of against a second copy of the plan.
+    const pushFiles = [
+      PUSH_PROMPT_HOOK_FILE,
+      PUSH_FAILURE_HOOK_FILE,
+      PUSH_SUBAGENT_HOOK_FILE,
+      PUSH_CONTEXT_HOOK_FILE,
+    ];
+    for (const f of pushFiles) expect(existsSync(join(hooksDir(data), f))).toBe(true);
+
+    const { report } = await run();
+
+    for (const f of pushFiles) expect(existsSync(join(hooksDir(data), f))).toBe(false);
+    for (const f of pushFiles) {
+      expect(report.scripts.some((p) => p.endsWith(f))).toBe(true);
+    }
+    // Every event the push arms are registered under is reported as cleared.
+    expect(report.settings.hooks.sort()).toEqual(
+      [
+        'PostToolUse',
+        'PostToolUseFailure',
+        'PreToolUse',
+        'SessionStart',
+        'Stop',
+        'SubagentStart',
+        'UserPromptSubmit',
+      ].sort(),
+    );
+    // Nothing of ours is left anywhere in the file.
+    const after = await readFile(claudeSettingsPath(home), 'utf8');
+    for (const f of pushFiles) expect(after).not.toContain(f);
+    expect(JSON.parse(after)).toEqual({});
+  });
+
+  it('removes them even after `tenjin push off`, and keeps the ledger', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeSettingsPath(home), '{}\n');
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    // `push off` writes the config key and nothing else: the scripts and entries
+    // stay on disk on purpose, which is exactly the state uninstall must clear.
+    await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'off' } }));
+    const ledger = join(data, 'push-ledger.jsonl');
+    await writeFile(ledger, '{"at":"2026-08-22T00:00:00.000Z"}\n');
+
+    const { report, text } = await run();
+
+    expect(report.scripts.some((p) => p.endsWith(PUSH_PROMPT_HOOK_FILE))).toBe(true);
+    expect(report.settings.hooks).toContain('UserPromptSubmit');
+    // Under the data dir, so untouched — and said so in the receipt.
+    expect(existsSync(ledger)).toBe(true);
+    expect(existsSync(join(data, 'config.json'))).toBe(true);
+    expect(text).toContain('the push ledger under ~/.tenjin');
+  });
+
+  it('leaves a stranger’s entry on a push-only event alone', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      `${JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] }],
+        },
+      })}\n`,
+    );
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    await run();
+    const after = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
+      hooks: { UserPromptSubmit: unknown[] };
+    };
+    expect(after.hooks.UserPromptSubmit).toEqual([
+      { hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] },
+    ]);
   });
 });

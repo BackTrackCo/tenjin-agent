@@ -13,6 +13,7 @@ import { getUsdcBalance } from '../lib/usdc';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
 import { openInBrowser } from '../lib/open-url';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, CommandResult } from '../context';
 
 /*
@@ -35,7 +36,7 @@ const CHECKOUT_HOST = 'pay.coinbase.com';
  * not the env, not config. Cutting the surface entirely is what lets the verb
  * sit in the free allowlist tier with nothing to caveat.
  */
-const FUND_ORIGIN = 'https://tenjin.blog';
+const FUND_ORIGIN = PRODUCTION_ORIGIN;
 /** Matches the server's presetAmount bound (app/api/cdp/session bodySchema). */
 const MAX_PRESET_USD = 100_000;
 const POLL_INTERVAL_MS = 5_000;

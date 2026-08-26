@@ -518,3 +518,452 @@ describe('runOutcome over a websearch-hook-sourced search', () => {
     expect(urls).toHaveLength(1);
   });
 });
+
+/** ONE STATUS, MANY SEARCHES: the two shapes that replace seventeen sequential
+ *  closes, and the refusals that keep a blanket close from becoming a claim. */
+describe('runOutcome, closing several searches at once', () => {
+  const id = (n: number): string => `0197aaaa-bbbb-cccc-dddd-00000000000${n}`;
+
+  async function seed(n: number, over: Partial<StoredSearch> = {}): Promise<string> {
+    await recordSearch(dir, {
+      searchId: id(n),
+      at: new Date().toISOString(),
+      question: `question ${n}`,
+      decision: 'MISS',
+      candidates: [],
+      paidBrowseCount: 0,
+      source: 'websearch-hook',
+      ...over,
+    });
+    return id(n);
+  }
+
+  it('reports one status against every --search-id, and echoes each', async () => {
+    await seed(1);
+    await seed(2);
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ searchId: [id(1), id(2)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(2);
+    expect(res.data).toMatchObject({ status: 'regenerated', closed: 2 });
+    expect((res.data as { results: unknown[] }).results).toMatchObject([
+      { searchId: id(1), accepted: 1, question: 'question 1' },
+      { searchId: id(2), accepted: 1, question: 'question 2' },
+    ]);
+    const resolved = (await loadSearches(dir)).filter((s) => s.resolved?.by === 'outcome');
+    expect(resolved).toHaveLength(2);
+  });
+
+  it('reports a repeated id once, not twice', async () => {
+    await seed(1);
+    const { fetch, urls } = stub();
+    await runOutcome({ searchId: [id(1), id(1)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(1);
+  });
+
+  it('keeps the single-search envelope every caller read before the batch', async () => {
+    await seed(1);
+    const { fetch } = stub();
+    const res = await runOutcome({ searchId: [id(1)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(res.data).toMatchObject({
+      searchId: id(1),
+      accepted: 1,
+      question: 'question 1',
+      closed: 1,
+    });
+  });
+
+  it("--all-open closes the hook's open loops and leaves deliberate ones alone", async () => {
+    await seed(1);
+    await seed(2, { source: 'cli', question: 'a question I chose to ask' });
+    await seed(3, { resolved: { by: 'publish', at: new Date().toISOString() } });
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain(id(1));
+    expect(res.data).toMatchObject({ closed: 1, deliberateLeftOpen: 1 });
+    expect(res.humanLines?.join('\n')).toContain('1 deliberate search(es) left open');
+  });
+
+  // The hook records CANDIDATES under the same source, and `regenerated` there
+  // would overwrite the only positive attribution the loop collects.
+  it('--all-open leaves a hook search Tenjin answered open, and counts it', async () => {
+    await seed(1);
+    await seed(2, { decision: 'CANDIDATES', candidates: [CANDIDATE] });
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain(id(1));
+    expect(urls.join(' ')).not.toContain(id(2));
+    expect(res.data).toMatchObject({ closed: 1, answeredLeftOpen: 1 });
+    expect(res.humanLines?.join('\n')).toContain('1 hook search(es) Tenjin answered left open');
+    const stored = await loadSearches(dir);
+    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
+  });
+
+  // Per session by design: a session's loops are its own.
+  it("--all-open sweeps this session's loops and never a sibling's", async () => {
+    await seed(1, { sessionId: 'session-A' });
+    await seed(2, { sessionId: 'session-B' });
+    await seed(3);
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { TENJIN_SESSION_ID: 'session-A' },
+    });
+    // This session's stamped entry and the unstamped one, never session-B's.
+    expect(urls).toHaveLength(2);
+    expect(urls.join(' ')).toContain(id(1));
+    expect(urls.join(' ')).toContain(id(3));
+    expect(urls.join(' ')).not.toContain(id(2));
+    expect(res.data).toMatchObject({ closed: 2 });
+    const stored = await loadSearches(dir);
+    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
+  });
+
+  it('reads CLAUDE_CODE_SESSION_ID when no operator override is set', async () => {
+    await seed(1, { sessionId: 'session-A' });
+    await seed(2, { sessionId: 'session-B' });
+    const { fetch, urls } = stub();
+    await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { CLAUDE_CODE_SESSION_ID: 'session-B' },
+    });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain(id(2));
+  });
+
+  // Raised in every session, so closable in every session: nothing strands.
+  it('sweeps every open hook MISS when the harness names no session', async () => {
+    await seed(1, { sessionId: 'session-A' });
+    await seed(2);
+    const { fetch, urls } = stub();
+    await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: {},
+    });
+    expect(urls).toHaveLength(2);
+  });
+
+  // An entry written before sources existed was a deliberate search.
+  it('--all-open leaves a sourceless entry open', async () => {
+    await seed(1, { source: undefined });
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(0);
+    expect(res.data).toMatchObject({ closed: 0, deliberateLeftOpen: 1 });
+  });
+
+  // A blanket `used` over queries nobody examined would be attribution the
+  // marketplace is right to trust and wrong to believe.
+  it.each(['used', 'partially_used', 'rejected', 'purchase_declined'])(
+    '--all-open refuses --status %s before sending anything',
+    async (status) => {
+      await seed(1);
+      const { fetch, urls } = stub();
+      await expect(
+        runOutcome({ allOpen: true, status }, makeCtx(), { fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(urls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['--search-id', { searchId: ['0197aaaa-bbbb-cccc-dddd-000000000001'] }],
+    ['--last', { last: true }],
+  ])('--all-open refuses to combine with %s', async (_label, over) => {
+    await seed(1);
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ allOpen: true, status: 'regenerated', ...over }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  it('--all-open with nothing open is a no-op, not an error', async () => {
+    const { fetch, urls } = stub();
+    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    expect(urls).toHaveLength(0);
+    expect(res.data).toMatchObject({ closed: 0 });
+    expect(res.humanLines?.join('\n')).toContain('No open web-search loops in this session.');
+  });
+
+  it('refuses a --resource that cannot describe a batch', async () => {
+    await seed(1);
+    await seed(2);
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome(
+        { searchId: [id(1), id(2)], status: 'used', resource: CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  // Otherwise a one-entry sweep attaches the resource to whatever it happened to
+  // find, and a zero-entry sweep ignores it in silence.
+  it('refuses --resource under --all-open, however many loops are open', async () => {
+    await seed(1);
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome(
+        { allOpen: true, status: 'regenerated', resource: CANDIDATE.resourceId },
+        makeCtx(),
+        { fetchImpl: fetch },
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  // Inside postOutcomes this check runs per id mid-batch, so a typo used to send
+  // the ids before it and then fail as a network-class error nobody can retry.
+  it('refuses a malformed id before any request, as USAGE', async () => {
+    await seed(1);
+    const { fetch, urls } = stub();
+    const call = runOutcome({ searchId: [id(1), 'not-a-uuid'], status: 'regenerated' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
+    await expect(call).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    await expect(call).rejects.toThrow('not-a-uuid');
+    expect(urls).toHaveLength(0);
+  });
+
+  // Half a report nobody meant to send is worse than none: the whole batch is
+  // checked for coherence before the first request.
+  it("refuses the whole batch when one target's status is incoherent", async () => {
+    await seed(1, { decision: 'CANDIDATES', candidates: [CANDIDATE] });
+    await seed(2);
+    const { fetch, urls } = stub();
+    await expect(
+      runOutcome({ searchId: [id(1), id(2)], status: 'purchase_declined' }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(urls).toHaveLength(0);
+  });
+
+  // Success would claim a close that never landed; failure alone hides the one
+  // that did.
+  it('names what closed and what failed when one id fails', async () => {
+    await seed(1);
+    await seed(2);
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(String(url));
+      return String(url).includes(id(2))
+        ? new Response('nope', { status: 500 })
+        : new Response(JSON.stringify({ accepted: 1 }), {
+            status: 202,
+            headers: { 'content-type': 'application/json' },
+          });
+    }) as unknown as typeof fetch;
+    const call = runOutcome({ searchId: [id(1), id(2)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl,
+    });
+    await expect(call).rejects.toMatchObject({
+      details: {
+        closed: 1,
+        results: [
+          { searchId: id(1), accepted: 1 },
+          { searchId: id(2), accepted: 0 },
+        ],
+      },
+    });
+    expect(urls).toHaveLength(2);
+    const stored = await loadSearches(dir);
+    expect(stored.find((s) => s.searchId === id(1))?.resolved?.by).toBe('outcome');
+    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
+  });
+
+  // The renderer prints `fix` and drops other shapes: ids must ride it.
+  it('names the ids to retry in the fix line, not only in the envelope', async () => {
+    await seed(1);
+    await seed(2);
+    const fetchImpl = (async (url: string) =>
+      String(url).includes(id(2))
+        ? new Response('nope', { status: 500 })
+        : new Response(JSON.stringify({ accepted: 1 }), {
+            status: 202,
+            headers: { 'content-type': 'application/json' },
+          })) as unknown as typeof fetch;
+    const call = runOutcome({ searchId: [id(1), id(2)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl,
+    });
+    await expect(call).rejects.toMatchObject({ fix: `Retry with --search-id ${id(2)}` });
+  });
+
+  // One sweep can spend 50 of the 60/min budget. An open loop is the safe state:
+  // the Stop hook raises it again.
+  it('stops the sweep at the first rate limit and reports the rest untouched', async () => {
+    for (const n of [1, 2, 3]) await seed(n);
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(String(url));
+      return new Response('slow down', { status: 429, headers: { 'retry-after': '30' } });
+    }) as unknown as typeof fetch;
+    const call = runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), { fetchImpl });
+    await expect(call).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      details: { closed: 0 },
+    });
+    // One attempt, not three: the remainder never left the machine.
+    expect(urls).toHaveLength(1);
+    const stored = await loadSearches(dir);
+    expect(stored.filter((s) => s.resolved !== undefined)).toHaveLength(0);
+    const untouched = await call.catch(
+      (e: { details: { results: { untouched?: true }[] } }) =>
+        e.details.results.filter((r) => r.untouched === true).length,
+    );
+    expect(untouched).toBe(2);
+  });
+
+  // A transport failure is the server being unhealthy; a rejected id is not.
+  it('keeps going past a failure that is about one id', async () => {
+    for (const n of [1, 2, 3]) await seed(n);
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(String(url));
+      return String(url).includes(id(2))
+        ? new Response(JSON.stringify({ error: { message: 'no' } }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(JSON.stringify({ accepted: 1 }), {
+            status: 202,
+            headers: { 'content-type': 'application/json' },
+          });
+    }) as unknown as typeof fetch;
+    await expect(
+      runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), { fetchImpl }),
+    ).rejects.toMatchObject({ details: { closed: 2 } });
+    expect(urls).toHaveLength(3);
+  });
+});
+
+/**
+ * TEAM-MODE ROUTING. A team-mode search asks the team shelf and falls through to
+ * the public marketplace, and the two shelves have separate databases: the
+ * searchId the public leg minted exists only there. A close posted to the
+ * configured base is both a lie to the team shelf (which raises
+ * `outcomes_dropped_no_parent`, its alarm for a broken fleet) and silence to the
+ * marketplace whose demand signal is why the verb exists.
+ */
+describe('runOutcome routes to the shelf that answered', () => {
+  const TEAM = 'https://team.example';
+  const PUBLIC = 'https://public.example';
+  const BYPASS_HEADER = 'x-vercel-protection-bypass';
+  const SECRET = 'shelf-secret-abc123';
+
+  interface Sent {
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  function stubShelves(): { fetch: typeof fetch; sent: Sent[] } {
+    const sent: Sent[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      sent.push({
+        url: String(url),
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      });
+      return new Response(JSON.stringify({ accepted: 1 }), {
+        status: 202,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, sent };
+  }
+
+  /** No --base-url: the shelf config below decides where a close goes. */
+  function teamCtx(): CommandContext {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: false, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  async function writeShelfConfig(): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: SECRET }),
+    );
+  }
+
+  it('posts a public-answered id to the public shelf, with no key', async () => {
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: PUBLIC });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).toBe(PUBLIC);
+    // The door key is paired with the team origin, so the public shelf is told
+    // nothing about it — the transport derives the header from the request URL,
+    // and the route refuses to hand it over in the first place.
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBeUndefined();
+    // Closed locally either way: the report landed.
+    const stored = await loadSearches(dir);
+    expect(stored[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('posts a team-answered id to the team shelf, with the key', async () => {
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: TEAM });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('falls back to the configured base for an entry written before the stamp', async () => {
+    // Absent means the configured base, which is what those entries meant.
+    await writeShelfConfig();
+    await record();
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+    expect(sent[0]!.headers[BYPASS_HEADER]).toBe(SECRET);
+  });
+
+  it('refuses a foreign origin the config never named, and routes to the base instead', async () => {
+    // `shelfBaseUrl` is an unvalidated optional string in the store schema and
+    // the only writers are this CLI's own two configured values, so a third
+    // origin is a planted or hand-edited row rather than a third shelf. Without
+    // the allow-list one such row makes `outcome --search-id` POST the searchId
+    // and status to a host the operator never configured. Fail open to the
+    // configured shelf, never out to a foreign one.
+    await writeShelfConfig();
+    await record({ shelfBaseUrl: 'https://attacker.example' });
+    const { fetch, sent } = stubShelves();
+
+    await runOutcome({ searchId: LOOKUP, status: 'used' }, teamCtx(), { fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).not.toBe('https://attacker.example');
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
+  });
+});

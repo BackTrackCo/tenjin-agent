@@ -4,8 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installSkill } from './skill-writer';
-import { materializeTransform } from './skill-materialize';
+import {
+  SKILL_CONTENT_FLAG_NAMES,
+  markerFlagsIn,
+  materializeTransform,
+  renderSkillMarkdown,
+} from './skill-materialize';
 import { SHIPPED_SKILL_FILES, SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { HOSTED_SKILL_NAME } from './skill-wiring';
 
 /**
  * The materialize seam on `installSkill`: the source is shaped BEFORE the compare
@@ -94,31 +100,101 @@ describe('installSkill with a materialize transform', () => {
 });
 
 /**
- * The seam has NO consumer yet: no writer passes `materialize`, so `install`, the
- * self-heal, `doctor` and `scripts/pack-smoke.sh` all still compare packaged bytes
- * directly. That is correct only while no packaged skill carries a marker, and
- * pack-smoke's `cmp` against the raw packaged file is the one comparer that cannot
- * be taught from inside vitest. So this is a tripwire, not a style check: the first
- * marker added to a shipped skill fails here, naming the four comparers that have
- * to learn to materialize through one resolver in that same change. Three of four
- * is how a shaped skill and a raw comparison disagree forever.
+ * The seam HAS consumers now, so the tripwire changes shape rather than going away.
+ *
+ * What #147 pinned was "no shipped skill carries a marker", because a raw byte
+ * comparison is only valid while that holds. Markers now ship, and every comparer
+ * materializes: `install`, the post-command self-heal, the optional-skill placer
+ * and `doctor`'s staleness compare all go through `skillMaterialize`, and
+ * `scripts/pack-smoke.sh` — the one comparer that cannot be taught from inside
+ * vitest — asserts the rendered PROPERTIES of the packed artifact instead of raw
+ * bytes.
+ *
+ * What replaces it is the check the parse deliberately cannot make. An unknown flag
+ * resolves OFF, which for a when/else pair means silently rendering the OTHER
+ * mode's guidance: a `teamMod` typo would ship team text to nobody and public text
+ * to a team machine, with every runtime guard green. So the flag NAMES are pinned
+ * against the closed set here, at build time, which is the only place a misspelling
+ * can fail.
  */
-describe('packaged skills carry no markers yet', () => {
+describe('every marker in a shipped skill names a known flag', () => {
   /**
    * EVERY packaged markdown file, not every `SKILL.md`. `materializeTransform`
    * gates on `rel.toLowerCase().endsWith('.md')`, so a marker in a reference file
-   * is exactly as load-bearing as one in a SKILL.md, and this test is the whole
-   * tripwire: `tenjin:when` appears nowhere else in src/, scripts/ or skills/,
-   * and pack-smoke has no marker assertion. Iterating SKILL_NAMES alone covered
-   * three of the five files the package ships.
+   * is exactly as load-bearing as one in a SKILL.md. Iterating SKILL_NAMES alone
+   * covered three of the five files the package ships.
    */
-  it('every shipped markdown file is marker-free, so raw byte comparison stays valid', async () => {
+  it('uses no flag outside SKILL_CONTENT_FLAG_NAMES', async () => {
+    const source = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    const known = new Set<string>(SKILL_CONTENT_FLAG_NAMES);
+    for (const name of SKILL_NAMES) {
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        const text = await readFile(join(source, name, rel), 'utf8');
+        for (const flag of markerFlagsIn(text)) {
+          expect(
+            known.has(flag),
+            `${name}/${rel} gates on "${flag}", which is not a flag this build resolves; ` +
+              `an unknown flag renders the OTHER arm, so this is a typo, not a no-op`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
+  /**
+   * The marker machinery must never reach a reader. It is instruction-shaped text
+   * inside a file an agent reads whole, and a half-stripped skill would have an
+   * agent reasoning about which arm applies to it.
+   */
+  it('renders no marker text in either mode, for every shipped markdown file', async () => {
     const source = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
     for (const name of SKILL_NAMES) {
       for (const rel of SHIPPED_SKILL_FILES[name]) {
         const text = await readFile(join(source, name, rel), 'utf8');
-        expect(text, `${name}/${rel} ships a tenjin:when marker`).not.toContain('tenjin:when');
+        for (const teamMode of [true, false]) {
+          const rendered = renderSkillMarkdown(text, { teamMode });
+          expect(
+            rendered,
+            `${name}/${rel} leaks a marker in ${String(teamMode)} mode`,
+          ).not.toContain('tenjin:when');
+          expect(rendered).not.toContain('tenjin:else');
+        }
       }
+    }
+  });
+
+  /**
+   * Balance, on the real files. The parse fails closed on every malformed shape, so
+   * this is the case where that guard has to NOT fire: a shipped skill whose markers
+   * do not balance would refuse the install outright rather than degrade.
+   */
+  it('parses every shipped markdown file in both modes without throwing', async () => {
+    const source = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    for (const name of SKILL_NAMES) {
+      for (const rel of SHIPPED_SKILL_FILES[name]) {
+        const text = await readFile(join(source, name, rel), 'utf8');
+        for (const teamMode of [true, false]) {
+          expect(() => renderSkillMarkdown(text, { teamMode }), `${name}/${rel}`).not.toThrow();
+        }
+      }
+    }
+  });
+
+  /**
+   * The hosted `tenjin` skill is a byte-for-byte mirror of tenjin.blog/skills.md
+   * (scripts/sync-skill.mjs, and skill-drift CI diffs it after re-running the sync),
+   * so a marker there would be wiped by the next sync and fail that check. It is
+   * also the CLI-LESS path: a reader of it has no `tenjin` binary and so no config
+   * to have a mode in. It must stay unshaped.
+   */
+  it('the hosted mirror carries no marker at all', async () => {
+    const source = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+    for (const rel of SHIPPED_SKILL_FILES[HOSTED_SKILL_NAME]) {
+      const text = await readFile(join(source, HOSTED_SKILL_NAME, rel), 'utf8');
+      expect(markerFlagsIn(text), `${HOSTED_SKILL_NAME}/${rel} is a hand-edited mirror`).toEqual(
+        [],
+      );
+      expect(text).not.toContain('tenjin:when');
     }
   });
 });

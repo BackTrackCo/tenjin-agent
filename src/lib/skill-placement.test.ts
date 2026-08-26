@@ -29,24 +29,24 @@ const payDir = () => join(claudeSkills(), OPTIONAL_PAY_SKILL);
 describe('placeOptionalSkill', () => {
   it('round-trips presence, and removal leaves operator files behind', async () => {
     await mkdir(claudeSkills(), { recursive: true });
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, true);
+    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, true, false);
     expect(await readFile(join(payDir(), 'SKILL.md'), 'utf8')).toContain('name: tenjin-pay');
 
     await writeFile(join(payDir(), 'notes.md'), 'mine');
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false);
+    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false, false);
     expect(existsSync(join(payDir(), 'SKILL.md'))).toBe(false);
     expect(await readFile(join(payDir(), 'notes.md'), 'utf8')).toBe('mine'); // dir survives
 
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, true);
+    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, true, false);
     await rm(join(payDir(), 'notes.md'));
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false);
+    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false, false);
     expect(existsSync(payDir())).toBe(false); // empty dir goes with our file
   });
 
   it('never deletes a same-named skill that is not ours', async () => {
     await mkdir(payDir(), { recursive: true });
     await writeFile(join(payDir(), 'SKILL.md'), '---\nname: somebody-else\n---\ntheirs\n');
-    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false);
+    await placeOptionalSkill(OPTIONAL_PAY_SKILL, claudeSkills(), SKILLS_SRC, false, false);
     expect(await readFile(join(payDir(), 'SKILL.md'), 'utf8')).toContain('somebody-else');
   });
 });

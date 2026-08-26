@@ -69,7 +69,15 @@ export async function runRead(
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
   const sectionsBudget = parseSectionsBudget(args.sections);
-  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl);
+  const ref = await resolveResourceRef(
+    args.ref,
+    ctx.dataDir,
+    settings.baseUrl,
+    // The second origin only exists in TEAM mode. In public mode `publicShelfUrl`
+    // is a shelf nothing falls through to, so widening on it would accept a URL
+    // from an origin no search on this machine can even surface.
+    settings.teamMode ? settings.publicShelfUrl : undefined,
+  );
   const presentOpts: PresentOpts = { printBody: args.printBody === true, sectionsBudget };
 
   // 1. Library idempotence, BEFORE any network: an owned resource re-delivers
@@ -85,6 +93,7 @@ export async function runRead(
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
+    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 

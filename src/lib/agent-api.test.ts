@@ -4,7 +4,7 @@ import {
   buildOutcomeItem,
   postSearch,
   postOutcomes,
-  type SearchResponse,
+  type SearchResult,
 } from './agent-api';
 import { CliError } from './errors';
 
@@ -30,12 +30,15 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-const CANDIDATES: SearchResponse = {
-  schemaVersion: 2,
+/** A v3 decision-view result with one match. `items` replaces v2's `candidates`
+ *  and `matched` replaces the `decision` word; the per-item projection is
+ *  unchanged, which is why the candidate literal below is verbatim what v2 sent. */
+const RESULT: SearchResult = {
+  schemaVersion: 3,
   searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-  decision: 'CANDIDATES',
   calibration: 'lexical-v1',
-  candidates: [
+  matched: 1,
+  items: [
     {
       resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
       url: 'https://tenjin.blog/api/read/iris/slug',
@@ -52,11 +55,23 @@ const CANDIDATES: SearchResponse = {
   ],
 };
 
+/** A v3 miss: nothing matched, so `items` is empty and `hint` says where to
+ *  browse. There is no second envelope shape to branch on. */
+const MISS: SearchResult = {
+  schemaVersion: 3,
+  searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  calibration: 'hybrid-v1',
+  matched: 0,
+  items: [],
+  hint: 'No matches. Browse the catalog at GET /api/articles.',
+};
+
 describe('buildSearchRequest', () => {
   it('builds a minimal request with the default limit', () => {
     expect(buildSearchRequest({ question: 'hi' })).toEqual({
-      schemaVersion: 2,
-      question: 'hi',
+      schemaVersion: 3,
+      view: 'decision',
+      query: 'hi',
       limit: 5,
     });
   });
@@ -68,12 +83,19 @@ describe('buildSearchRequest', () => {
       appliesTo: { products: ['Vercel'] },
       limit: 3,
     });
+    // The three narrowings ride UNDER `filters` in v3. A top-level spelling is
+    // not a 400 server-side, it is STRIPPED into `warnings` and the search runs
+    // unfiltered, so where they sit is the difference between a price cap and no
+    // price cap at all.
     expect(r).toEqual({
-      schemaVersion: 2,
-      question: 'does it work?',
-      freshWithin: 'P30D',
-      maxPrice: '100000',
-      appliesTo: { products: ['Vercel'] },
+      schemaVersion: 3,
+      view: 'decision',
+      query: 'does it work?',
+      filters: {
+        freshWithin: 'P30D',
+        maxPrice: '100000',
+        appliesTo: { products: ['Vercel'] },
+      },
       limit: 3,
     });
   });
@@ -138,33 +160,83 @@ describe('buildSearchRequest bounds (server strictObject mirror)', () => {
       freshWithin: 'P30D',
       appliesTo: { products: ['Vercel'] },
     });
-    expect(body.freshWithin).toBe('P30D');
-    expect(body.appliesTo).toEqual({ products: ['Vercel'] });
+    expect(body.filters?.freshWithin).toBe('P30D');
+    expect(body.filters?.appliesTo).toEqual({ products: ['Vercel'] });
+  });
+
+  it('omits `filters` entirely when nothing narrows', () => {
+    // `{}` is a filter set that filters nothing; sending it only invites a server
+    // to read meaning into an empty object.
+    expect(buildSearchRequest({ question: 'q' })).not.toHaveProperty('filters');
   });
 });
 
 describe('postSearch', () => {
-  it('POSTs the request with the tenjin-cli User-Agent, never X-Tenjin-Client, and parses CANDIDATES', async () => {
-    const { fetch, calls } = stubFetch(json(200, CANDIDATES));
+  it('POSTs the v3 body to /api/search with the tenjin-cli User-Agent, never X-Tenjin-Client', async () => {
+    const { fetch, calls } = stubFetch(json(200, RESULT));
     const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect(res.decision).toBe('CANDIDATES');
-    expect(calls[0]?.url).toBe('https://preview.example/api/agent/search');
+    expect(res.matched).toBe(1);
+    expect(res.items).toHaveLength(1);
+    // The alias is gone: nothing in this client still calls /api/agent/search.
+    expect(calls[0]?.url).toBe('https://preview.example/api/search');
     expect(calls[0]?.init.method).toBe('POST');
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
     expect(headers['x-tenjin-client']).toBeUndefined();
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
-      schemaVersion: 2,
-      question: 'q',
+      schemaVersion: 3,
+      view: 'decision',
+      query: 'q',
       limit: 5,
     });
   });
+
+  it('names `view` explicitly rather than leaning on the server default', async () => {
+    // The server defaults `view` to `decision`, but a default is the server's to
+    // change and this client parses exactly one projection. Pin that it is sent.
+    const { fetch, calls } = stubFetch(json(200, RESULT));
+    await postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(JSON.parse(String(calls[0]?.init.body)).view).toBe('decision');
+  });
+
+  it('sends the documented `query` spelling, not the compatibility aliases', async () => {
+    // `question` and `q` still resolve server-side, but they are undocumented
+    // compatibility and the loser spellings come back in `warnings`. A client
+    // written today sends what the contract publishes.
+    const { fetch, calls } = stubFetch(json(200, RESULT));
+    await postSearch(buildSearchRequest({ question: 'does it work?' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    const body = JSON.parse(String(calls[0]?.init.body));
+    expect(body.query).toBe('does it work?');
+    expect(body).not.toHaveProperty('question');
+    expect(body).not.toHaveProperty('q');
+  });
+
+  it('nests the narrowings under `filters` on the wire', async () => {
+    const { fetch, calls } = stubFetch(json(200, RESULT));
+    await postSearch(
+      buildSearchRequest({ question: 'q', maxPrice: '100000', freshWithin: 'P30D' }),
+      { baseUrl: 'https://preview.example', timeoutMs: 5000, fetchImpl: fetch },
+    );
+    const body = JSON.parse(String(calls[0]?.init.body));
+    expect(body.filters).toEqual({ freshWithin: 'P30D', maxPrice: '100000' });
+    expect(body).not.toHaveProperty('maxPrice');
+    expect(body).not.toHaveProperty('freshWithin');
+  });
+
   it('omits the eval-cohort header by default and sends it when opted in', async () => {
-    const a = stubFetch(json(200, CANDIDATES));
+    const a = stubFetch(json(200, RESULT));
     await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
@@ -173,7 +245,7 @@ describe('postSearch', () => {
     const aHeaders = a.calls[0]?.init.headers as Record<string, string>;
     expect(aHeaders['x-tenjin-eval-cohort']).toBeUndefined();
 
-    const b = stubFetch(json(200, CANDIDATES));
+    const b = stubFetch(json(200, RESULT));
     await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
@@ -184,13 +256,13 @@ describe('postSearch', () => {
     expect(bHeaders['x-tenjin-eval-cohort']).toBe('1');
   });
 
-  it('re-applies the server bounds to an oversized candidate, but never to the slug', async () => {
+  it('re-applies the server bounds to an oversized item, but never to the slug', async () => {
     const runawaySlug = 's'.repeat(4000);
     const bloated = {
-      ...CANDIDATES,
-      candidates: [
+      ...RESULT,
+      items: [
         {
-          ...(CANDIDATES.candidates?.[0] as object),
+          ...(RESULT.items[0] as object),
           title: 'T'.repeat(1000),
           slug: runawaySlug,
           matchReasons: Array.from({ length: 20 }, () => 'r'.repeat(300)),
@@ -203,7 +275,7 @@ describe('postSearch', () => {
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    const c = res.candidates?.[0];
+    const c = res.items[0];
     expect(c?.title).toHaveLength(200);
     expect(c?.matchReasons).toHaveLength(3);
     expect(c?.matchReasons[0]).toHaveLength(80);
@@ -215,7 +287,7 @@ describe('postSearch', () => {
   });
 
   it('carries the optional truncated flag through, and omits it when unset', async () => {
-    const { fetch } = stubFetch(json(200, { ...CANDIDATES, truncated: true }));
+    const { fetch } = stubFetch(json(200, { ...RESULT, truncated: true }));
     const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
@@ -223,7 +295,7 @@ describe('postSearch', () => {
     });
     expect(res.truncated).toBe(true);
 
-    const clean = stubFetch(json(200, CANDIDATES));
+    const clean = stubFetch(json(200, RESULT));
     const res2 = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
@@ -232,13 +304,44 @@ describe('postSearch', () => {
     expect(res2.truncated).toBeUndefined();
   });
 
-  it('parses a MISS with no candidates', async () => {
+  it('parses a miss as an empty result carrying the browse hint', async () => {
+    const { fetch } = stubFetch(json(200, MISS));
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.matched).toBe(0);
+    expect(res.items).toEqual([]);
+    expect(res.hint).toBe('No matches. Browse the catalog at GET /api/articles.');
+  });
+
+  it('bounds the server-authored hint like every other rendered string', async () => {
+    const { fetch } = stubFetch(json(200, { ...MISS, hint: 'h'.repeat(9000) }));
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(res.hint).toHaveLength(200);
+  });
+
+  it('strips a browse tail a server invents: v3 has none, so nothing renders it', async () => {
+    // The v2 MISS tail is gone from the contract. The envelope schema is a plain
+    // z.object, so a resurrected `browse` array is dropped rather than carried
+    // into --json where an agent could mistake a pointer for a scored candidate.
     const { fetch } = stubFetch(
       json(200, {
-        schemaVersion: 2,
-        searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-        decision: 'MISS',
-        calibration: 'lexical-v1',
+        ...MISS,
+        browse: [
+          {
+            resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
+            url: 'https://preview.example/api/read/alice/a-piece',
+            title: 'A browsable piece',
+            price: '250000',
+            creator: { handle: 'alice' },
+          },
+        ],
       }),
     );
     const res = await postSearch(buildSearchRequest({ question: 'q' }), {
@@ -246,108 +349,23 @@ describe('postSearch', () => {
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect(res.decision).toBe('MISS');
-    expect(res.candidates).toBeUndefined();
+    expect(res).not.toHaveProperty('browse');
   });
 
-  const browsePointer = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
-    url: 'https://preview.example/api/read/alice/a-piece',
-    title: 'A browsable piece',
-    price: '250000',
-    creator: { handle: 'alice' },
-    ...over,
-  });
-  const miss = (browse: unknown[], decision = 'MISS'): unknown => ({
-    schemaVersion: 2,
-    searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-    decision,
-    calibration: 'hybrid-v1',
-    browse,
-  });
-  const postMiss = async (body: unknown): Promise<SearchResponse> => {
-    const { fetch } = stubFetch(json(200, body));
-    return postSearch(buildSearchRequest({ question: 'q' }), {
+  it('strips `inspect` and `warnings`, which are real fields this CLI does not render', async () => {
+    // Both are contract fields; neither has a renderer here, and both carry
+    // unbounded server text. Declaring them would put that text into --json and
+    // into an agent transcript with nothing to display it.
+    const { fetch } = stubFetch(
+      json(200, { ...RESULT, inspect: { resourceId: 'x' }, warnings: ['maxPrise'] }),
+    );
+    const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-  };
-
-  it('re-applies the browse bounds: 4 pointers slice to BROWSE_MAX, a 5000-char title caps at 200', async () => {
-    const res = await postMiss(
-      miss([
-        browsePointer({ title: 'T'.repeat(5000) }),
-        browsePointer(),
-        browsePointer(),
-        browsePointer(),
-      ]),
-    );
-    expect(res.browse).toHaveLength(3);
-    expect(res.browse?.[0]?.title).toHaveLength(200);
-  });
-
-  it('drops unknown browse keys instead of passing them through to --json', async () => {
-    // The schema is .passthrough() so the parse keeps a server-invented key; the
-    // explicit projection in truncateResponse is what must strip it, or a future
-    // `confidence` would reach agents as if it were a score.
-    const res = await postMiss(miss([browsePointer({ confidence: 0.9, note: 'x'.repeat(9000) })]));
-    expect(res.browse?.[0]).toEqual({
-      resourceId: '0197aaaa-bbbb-cccc-dddd-ffffffffffff',
-      url: 'https://preview.example/api/read/alice/a-piece',
-      title: 'A browsable piece',
-      price: '250000',
-      creator: { handle: 'alice' },
-    });
-  });
-
-  it('drops unknown keys inside creator, not just at the top level', async () => {
-    // `creator` is its own .passthrough() object, so the top-level projection
-    // does not cover it: rebuilding it as `{ ...b.creator, handle }` would leak
-    // an invented `creator.score` while every other browse assertion still
-    // passed. Pin the nested rebuild separately from the outer one.
-    const res = await postMiss(
-      miss([browsePointer({ creator: { handle: 'alice', score: 0.9, bio: 'b'.repeat(9000) } })]),
-    );
-    expect(res.browse?.[0]?.creator).toEqual({ handle: 'alice' });
-  });
-
-  it('caps a runaway creator handle but leaves a legitimate url verbatim', async () => {
-    const url = `https://preview.example/api/read/alice/${'u'.repeat(400)}`;
-    const res = await postMiss(
-      miss([browsePointer({ url, creator: { handle: 'h'.repeat(500) } })]),
-    );
-    expect(res.browse?.[0]?.creator.handle).toHaveLength(64);
-    // A url within bounds is never clipped: it has to stay payable.
-    expect(res.browse?.[0]?.url).toBe(url);
-  });
-
-  it('refuses a runaway browse url instead of truncating it into a broken pointer', async () => {
-    // Clipping a url does not shorten it, it changes it: the result still looks
-    // payable in --json but resolves to nothing, and it would reach runSearch's
-    // origin assertion as a string the server never sent. Fail closed instead,
-    // the same way a malformed pointer does.
-    await expect(
-      postMiss(miss([browsePointer({ url: `https://preview.example/${'u'.repeat(2000)}` })])),
-    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
-  });
-
-  it('drops browse entirely on a CANDIDATES decision, where nothing would render it', async () => {
-    const res = await postMiss({ ...(miss([browsePointer()], 'CANDIDATES') as object) });
-    expect(res.decision).toBe('CANDIDATES');
-    expect(res.browse).toBeUndefined();
-  });
-
-  it('fails the whole response when one browse pointer is malformed', async () => {
-    // Deliberate and pinned: the client is fail-closed on every other contract
-    // deviation, so a bad decorative tail surfaces as drift rather than being
-    // silently dropped. Changing this to lenient is a product call, not a bugfix.
-    await expect(
-      postMiss(miss([browsePointer({ resourceId: 'not-a-uuid' })])),
-    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
-    await expect(postMiss(miss([browsePointer({ creator: undefined })]))).rejects.toMatchObject({
-      code: 'CONTRACT_MISMATCH',
-    });
+    expect(res).not.toHaveProperty('inspect');
+    expect(res).not.toHaveProperty('warnings');
   });
 
   it('maps a 400 validation error to API_UNREACHABLE with the server message', async () => {
@@ -360,8 +378,9 @@ describe('postSearch', () => {
       }),
     ).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
   });
+
   it('flags a contract mismatch when the body is not the expected shape', async () => {
-    const { fetch } = stubFetch(json(200, { schemaVersion: 2, decision: 'MAYBE' }));
+    const { fetch } = stubFetch(json(200, { schemaVersion: 3, matched: 'lots' }));
     await expect(
       postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
@@ -371,26 +390,12 @@ describe('postSearch', () => {
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 
-  it('names the outdated server when a pre-v2 deployment refuses the request', async () => {
-    // The REAL failure mode of the v2 break, and the whole reason this arm
-    // exists. Pre-v2 tenjin declares `schemaVersion: z.literal(1)` inside a
-    // strictObject, so our v2 request dies at the REQUEST gate and never reaches
-    // the handler: the body below is verbatim what old main emits (an ApiError
-    // envelope wrapping `parsed.error.flatten()`), reproduced against its actual
-    // schema. Routed as API_UNREACHABLE it would tell the operator to retry a
-    // request that can never succeed.
-    const { fetch } = stubFetch(
-      json(400, {
-        error: {
-          code: 'validation_failed',
-          message: 'Invalid request body',
-          details: {
-            formErrors: [],
-            fieldErrors: { schemaVersion: ['Invalid input: expected 1'] },
-          },
-        },
-      }),
-    );
+  it('names the outdated server when the deployment has no /api/search route at all', async () => {
+    // The arm that fires in practice against a stale deploy: POST /api/search did
+    // not exist before #137, so the Next router answers 404 with nothing
+    // contract-shaped. Routed as API_UNREACHABLE the operator is told to retry a
+    // path that will never exist on that server.
+    const { fetch } = stubFetch(json(404, { error: 'Not Found' }));
     await expect(
       postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
@@ -399,19 +404,75 @@ describe('postSearch', () => {
       }),
     ).rejects.toMatchObject({
       code: 'CONTRACT_MISMATCH',
-      message: expect.stringContaining('predates search v2'),
+      message: expect.stringContaining('predates search v3'),
+    });
+  });
+
+  it('names the outdated server when a pre-v3 deployment refuses the request', async () => {
+    // The REQUEST gate: a server that HAS the route but pins an older
+    // `schemaVersion` dies before the handler runs. Two spellings are read,
+    // because the two surfaces report differently — the v2 alias emits a zod
+    // `flatten()` under `error.details.fieldErrors`, the v3 route lists sentences
+    // under `error.details.problems`. Both are keyed on the FIELD name, never on
+    // message wording.
+    const fieldErrors = stubFetch(
+      json(400, {
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid request body',
+          details: {
+            formErrors: [],
+            fieldErrors: { schemaVersion: ['Invalid input: expected 2'] },
+          },
+        },
+      }),
+    );
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: fieldErrors.fetch,
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: expect.stringContaining('schemaVersion 3'),
+    });
+
+    const problems = stubFetch(
+      json(400, {
+        error: {
+          code: 'validation_failed',
+          message: 'schemaVersion must be 2',
+          details: { problems: ['schemaVersion must be 2'] },
+        },
+      }),
+    );
+    await expect(
+      postSearch(buildSearchRequest({ question: 'q' }), {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: problems.fetch,
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: expect.stringContaining('schemaVersion 3'),
     });
   });
 
   it('leaves an unrelated 400 on the API_UNREACHABLE path', async () => {
-    // The version arm keys on a `schemaVersion` fieldError, so an ordinary
-    // validation failure must not be mistaken for a stale deployment.
+    // The version arm keys on a `schemaVersion` complaint, so an ordinary
+    // validation failure must not be mistaken for a stale deployment — in either
+    // of the two 400 shapes.
     const { fetch } = stubFetch(
       json(400, {
         error: {
           code: 'validation_failed',
           message: 'Invalid request body',
-          details: { formErrors: [], fieldErrors: { question: ['Too big: expected <=512'] } },
+          details: {
+            formErrors: [],
+            fieldErrors: { query: ['Too big: expected <=512'] },
+            problems: ['query must be at most 512 characters'],
+          },
         },
       }),
     );
@@ -424,10 +485,20 @@ describe('postSearch', () => {
     ).rejects.toMatchObject({ code: 'API_UNREACHABLE' });
   });
 
-  it('names the version when a server answers 200 with a v1 body', async () => {
-    // Unreachable against today's old tenjin (the request gate refuses first),
-    // but correct for any server that accepts the request and replies v1.
-    const { fetch } = stubFetch(json(200, { ...CANDIDATES, schemaVersion: 1 }));
+  it('names the version when a server answers 200 with the v2 alias envelope', async () => {
+    // A base URL still pointed at the deprecated alias answers 200 with
+    // `decision` + `candidates` and schemaVersion 2. `items` is required here, so
+    // that is a parse REFUSAL — and the version it served is named rather than
+    // reported as an anonymous shape mismatch.
+    const { fetch } = stubFetch(
+      json(200, {
+        schemaVersion: 2,
+        searchId: RESULT.searchId,
+        decision: 'CANDIDATES',
+        calibration: 'lexical-v1',
+        candidates: RESULT.items,
+      }),
+    );
     await expect(
       postSearch(buildSearchRequest({ question: 'q' }), {
         baseUrl: 'https://preview.example',
@@ -436,19 +507,20 @@ describe('postSearch', () => {
       }),
     ).rejects.toMatchObject({
       code: 'CONTRACT_MISMATCH',
-      message: expect.stringContaining('schemaVersion 1'),
+      message: expect.stringContaining('schemaVersion 2'),
     });
   });
-  it('keeps unknown future candidate fields (forward-compatible)', async () => {
-    const withExtra = structuredClone(CANDIDATES);
-    (withExtra.candidates![0] as Record<string, unknown>).futureField = 'keep me';
+
+  it('keeps unknown future item fields (forward-compatible)', async () => {
+    const withExtra = structuredClone(RESULT);
+    (withExtra.items[0] as Record<string, unknown>).futureField = 'keep me';
     const { fetch } = stubFetch(json(200, withExtra));
     const res = await postSearch(buildSearchRequest({ question: 'q' }), {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect((res.candidates?.[0] as Record<string, unknown>).futureField).toBe('keep me');
+    expect((res.items[0] as Record<string, unknown>).futureField).toBe('keep me');
   });
 });
 

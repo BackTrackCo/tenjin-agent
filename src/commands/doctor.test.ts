@@ -19,6 +19,7 @@ import { saveSessionFile } from '../lib/session-key';
 import { sessionPath } from '../lib/paths';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
+import { wireHermesIntegration } from '../lib/hermes';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -27,9 +28,9 @@ const balanceMock = vi.mocked(getUsdcBalance);
 const OPENAPI_OK = {
   openapi: '3.1.0',
   info: { title: 'Tenjin', version: '0.1.0' },
-  // A healthy deploy advertises the A2 search endpoint, so the search-contract
+  // A healthy deploy advertises the search endpoint, so the search-contract
   // check is ok (no extra fix line): "all required checks green" stays true.
-  paths: { '/api/agent/search': {} },
+  paths: { '/api/search': {} },
 };
 const ARTICLES_OK = { items: [{ id: 'a1' }], nextCursor: null };
 // doctor reads the wallet file's cleartext top-level address without decrypting,
@@ -129,6 +130,98 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
+  it('reports a working native Hermes integration separately from portable skills', async () => {
+    await wireHermesIntegration({
+      // A path that EXISTS: doctor now stats the baked command, because an
+      // `npx`/`dlx` cache path can be pruned out from under a green check.
+      hermesHome: join(skillHome, '.hermes'),
+      dataDir: dir,
+      tenjinCommand: process.execPath,
+      nodeCommand: process.execPath,
+      dryRun: false,
+      explicit: true,
+      hooks: { enabled: true, mode: 'auto' },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(find(checks, 'hermes')).toMatchObject({ status: 'ok', required: false });
+    expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
+  });
+
+  // Doctor is the command you reach for when something is already broken, so the
+  // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
+  // some other tool would return CONFIG_INVALID and run zero checks on a machine
+  // with no Hermes at all.
+  it('a relative HERMES_HOME warns and falls back instead of aborting every check', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: { HERMES_HOME: 'relative/hermes' },
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(checks.length).toBeGreaterThan(1);
+    expect(find(checks, 'node').status).toBe('ok');
+  });
+
+  it('a baked MCP command that no longer exists warns instead of reading green', async () => {
+    const hermesHome = join(skillHome, '.hermes');
+    await wireHermesIntegration({
+      hermesHome,
+      dataDir: dir,
+      tenjinCommand: join(skillHome, 'pruned-npx-cache', 'tenjin'),
+      nodeCommand: process.execPath,
+      dryRun: false,
+      explicit: true,
+      hooks: { enabled: true, mode: 'auto' },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
+    expect(hermes.status).toBe('warn');
+    expect(hermes.detail).toContain('MCP command missing');
+    // One subject per problem: prefixing the activation with `plugin` too reads as
+    // one subject named twice.
+    expect(hermes.detail).not.toContain('plugin plugin');
+  });
+
+  // `tenjin install --harness hermes` alone is a dead end with the mode stored off:
+  // it re-runs, withholds the hook code by design, and prints the same warning
+  // forever. The `native-harness` fix string in this same PR already names the
+  // config command; doctor has to as well.
+  it('names the config command when the stored webSearch is what blocks the plugin', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { webSearch: 'off' } }),
+    );
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
+    expect(hermes.status).toBe('warn');
+    expect(hermes.fix).toContain('tenjin config set hooks.webSearch auto');
+  });
+
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
@@ -154,6 +247,35 @@ describe('runDoctor — passing outcomes', () => {
     expect(res.humanLines?.[checkLines]).toBe('');
     expect(res.humanLines?.[checkLines + 1]).toContain(PERMISSIONS_DOC_URL);
     expect((res.humanLines ?? []).length).toBe(checkLines + 2);
+  });
+
+  // The alias is what a stale deployment advertises: it is deprecated and answers
+  // 410 after one release, so a deploy carrying ONLY it is the case this check has
+  // to warn about. Passing on the alias would send `tenjin search` at a path that
+  // is about to stop answering, which is the entire point of the probe.
+  it('search-contract warns when the deploy advertises only the deprecated alias', async () => {
+    const aliasOnly = routeFetch({
+      '/openapi.json': {
+        body: {
+          openapi: '3.1.0',
+          info: { version: '0.1.0' },
+          paths: { '/api/agent/search': {} },
+        },
+      },
+      '/api/articles': { body: ARTICLES_OK },
+    });
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: aliasOnly,
+    });
+    const data = res.data as { status: string; checks: CheckResult[] };
+    expect(data.status).toBe('pass'); // still passes: search-contract is not required
+    const check = find(data.checks, 'search-contract');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('POST /api/search');
   });
 
   it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
@@ -331,6 +453,148 @@ describe('runDoctor — passing outcomes', () => {
       expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
       expect(headers['x-tenjin-client']).toBeUndefined();
     }
+  });
+
+  /**
+   * Doctor's three probes all carry the team shelf's door key, because without it
+   * a protected deployment reports as unreachable. So doctor is the widest of the
+   * leaks a re-pointed base URL used to open: one `--base-url` sent the key to
+   * the named host three times.
+   */
+  describe('the team shelf bypass key on doctor probes', () => {
+    const BYPASS_HEADER = 'x-vercel-protection-bypass';
+    const TEAM = 'https://backtrack.tenjin.sh';
+    const SECRET = 'shelf-secret-abc123';
+
+    const checkNamed = (res: { data: unknown }, name: string): CheckResult | undefined =>
+      (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === name);
+
+    async function probe(flags: { baseUrl?: string }, env: NodeJS.ProcessEnv = {}) {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ baseUrl: TEAM, shelfBypassSecret: SECRET }),
+      );
+      const headersSeen: Record<string, string>[] = [];
+      const capturing: typeof fetch = (async (
+        input: Parameters<typeof fetch>[0],
+        init?: RequestInit,
+      ) => {
+        const url = String(input);
+        headersSeen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+        return new Response(
+          JSON.stringify(url.includes('/openapi.json') ? OPENAPI_OK : ARTICLES_OK),
+          {
+            status: 200,
+          },
+        );
+      }) as typeof fetch;
+      await runDoctor(
+        { flags: { json: false, timeout: 5000, ...flags }, dataDir: dir, io: captureIo().io },
+        {
+          walletPassphrase: NO_OS_STORE,
+          homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
+          env,
+          fetchImpl: capturing,
+        },
+      );
+      return headersSeen;
+    }
+
+    it('carries the key on the configured shelf', async () => {
+      const seen = await probe({ baseUrl: undefined });
+      expect(seen.length).toBeGreaterThanOrEqual(3);
+      for (const headers of seen) expect(headers[BYPASS_HEADER]).toBe(SECRET);
+    });
+
+    it('reports the half-wired setup as a warn, and the finished one as ok', async () => {
+      // The CLI fails a secret-with-no-shelf safe to public mode. Doctor is
+      // where that silence is broken, because the operator's mental model
+      // ("I am on the team shelf") is otherwise never contradicted.
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: 'https://tenjin.blog' }),
+      );
+      const half = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      const halfCheck = checkNamed(half, 'team shelf');
+      expect(halfCheck?.status).toBe('warn');
+      // Never fails the command: public mode is a working machine.
+      expect(halfCheck?.required).toBe(false);
+      expect(halfCheck?.detail).toContain('PUBLIC mode');
+
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: TEAM }),
+      );
+      const done = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      expect(checkNamed(done, 'team shelf')?.status).toBe('ok');
+    });
+
+    it('says nothing about a team shelf on a machine with no secret', async () => {
+      const plain = await runDoctor(ctxFor(), {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: healthyFetch,
+      });
+      expect(checkNamed(plain, 'team shelf')).toBeUndefined();
+    });
+
+    it('carries it on no probe when --base-url or TENJIN_BASE_URL re-points the run', async () => {
+      for (const seen of [
+        await probe({ baseUrl: 'https://attacker.example' }),
+        await probe({ baseUrl: undefined }, { TENJIN_BASE_URL: 'https://attacker.example' }),
+      ]) {
+        expect(seen.length).toBeGreaterThanOrEqual(3);
+        for (const headers of seen) expect(headers[BYPASS_HEADER]).toBeUndefined();
+      }
+    });
+
+    it('says the key was withheld rather than claiming a team mode this run has not got', async () => {
+      // The check reports what the probes DID. Re-deriving "am I in team mode"
+      // from the config would have it announce a bypass header the run never
+      // sent, which is the failure mode the whole check exists against.
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: TEAM }),
+      );
+      const res = await runDoctor(
+        {
+          flags: { json: false, timeout: 5000, baseUrl: 'https://elsewhere.example' },
+          dataDir: dir,
+          io: captureIo().io,
+        },
+        {
+          walletPassphrase: NO_OS_STORE,
+          homeDir: skillHome,
+          skillsSourceDir: pkgSrc,
+          env: {},
+          fetchImpl: healthyFetch,
+        },
+      );
+      const check = checkNamed(res, 'team shelf');
+      expect(check?.status).toBe('warn');
+      expect(check?.detail).toContain('command-line override');
+      expect(check?.detail).toContain('withheld');
+      // And it never spells the flag: doctor's lines reach an unattended agent,
+      // and coaching the override is the move the skills forbid (FLAG_CAVEAT).
+      expect(`${check?.detail} ${check?.fix}`).not.toContain('--base-url');
+      // Not the half-wired warning: the config is fine, this run is not.
+      expect(check?.detail).not.toContain('PUBLIC mode');
+    });
   });
 });
 
@@ -1261,11 +1525,17 @@ describe('runDoctor — the rule the publish mode carries', () => {
     await rm(home, { recursive: true, force: true });
   });
 
+  // homeDir is threaded through so inspectFreeVerbRules reads the empty temp
+  // home, not the developer's real ~/.claude/settings.json: a machine that
+  // already carries the publish rules would otherwise make these cases pass or
+  // fail by accident of its own config.
   const run = async (): Promise<string> => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
+      homeDir: home,
+      cwd: dir,
     });
     return (res.humanLines ?? []).join('\n');
   };
@@ -1349,6 +1619,8 @@ describe('runDoctor — the rule the publish mode carries', () => {
       walletPassphrase: NO_OS_STORE,
       env: {},
       fetchImpl: healthyFetch,
+      homeDir: home,
+      cwd: dir,
     });
     const data = res.data as { permissions: { modeGated: { rule: string }[] } };
     expect(data.permissions.modeGated.map((e) => e.rule)).toEqual([
@@ -1503,7 +1775,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
         body: {
           openapi: '3.1.0',
           info: { version: forged },
-          paths: { '/api/agent/search': {} },
+          paths: { '/api/search': {} },
         },
       },
       '/api/articles': { body: ARTICLES_OK },

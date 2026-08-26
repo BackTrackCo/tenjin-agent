@@ -3,7 +3,7 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/
 import type { PaymentRequired } from '@x402/core/types';
 import { CliError } from './errors';
 import { rateLimitError } from './agent-api';
-import { httpRequest } from './http';
+import { httpRequest, type ShelfBypass } from './http';
 import { SIWX_HEADER } from './siwx';
 
 /**
@@ -160,6 +160,13 @@ export interface ReadRequestOptions {
   sessionHeaders?: Record<string, string>;
   /** Attribute a following purchase to the search that surfaced it. */
   searchId?: string;
+  /**
+   * The team shelf's bypass secret and its origin. A read on the team shelf
+   * needs it to get past Deployment Protection; a read of a PUBLIC-shelf
+   * candidate, which team mode also resolves (see `resolveResourceRef`), must
+   * not carry it — the transport decides that from the request URL.
+   */
+  bypass?: ShelfBypass;
 }
 
 /**
@@ -184,6 +191,7 @@ export async function fetchRead(url: string, opts: ReadRequestOptions): Promise<
     method: 'GET',
     timeoutMs: opts.timeoutMs,
     headers,
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     fetchImpl: opts.fetchImpl,
     // Pinned even when UNSIGNED (the first probe): a 200 from this route is
     // written to the library by `deliverFresh` as an entitlement record under

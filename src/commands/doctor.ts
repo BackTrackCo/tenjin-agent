@@ -15,6 +15,7 @@ import {
   anyTenjinSkill,
   cliSkillsWired,
   detectHarnesses,
+  harnessDetectedBy,
   harnessFlagFor,
   harnessInPlay,
   harnessReads,
@@ -25,15 +26,22 @@ import {
   readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
+import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
+import { skillMaterialize } from '../lib/skill-materialize';
 import type {
   DirState,
   HarnessTarget,
   HarnessWiring,
   NotInvocableReason,
 } from '../lib/skill-wiring';
-import { fetchJson } from '../lib/http';
+import { fetchJson, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
-import { loadProjectConfig } from '../lib/settings';
+import {
+  isTeamModeConfig,
+  isTeamShelfOrigin,
+  loadProjectConfig,
+  resolveShelfBypass,
+} from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
 import { configPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
@@ -42,7 +50,8 @@ import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/se
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
-import type { PartialConfig, PublishMode } from '../lib/config';
+import { PUSH_SCRIPT_FILES, countPushHookEntries, pushScriptsPresent } from '../lib/harness-hooks';
+import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
 import type {
@@ -126,6 +135,8 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
+  /** Hermes home override; defaults through HERMES_HOME using the same resolver as install. */
+  hermesHome?: string;
   /**
    * Passphrase seams for the wallet verification (#70), which reads the OS
    * credential store. Tests inject a platform with no store, or a stubbed exec,
@@ -179,22 +190,68 @@ export async function collectDoctorChecks(
     project: project?.layer,
   });
   const baseUrl = settings.baseUrl.value;
+  // The SAME resolver resolveContextSettings uses, not a second copy of the
+  // rule: the key is paired with the origin the operator configured, so
+  // `tenjin doctor --base-url <anywhere>` runs its three probes unauthenticated
+  // instead of sending the team shelf's key to that host three times.
+  const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
+  const home = deps.homeDir ?? homedir();
+  const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const requested = config.install?.harness ?? [];
+  // NEVER the strict resolver here. Doctor is the command you reach for when
+  // something is already broken, so a stray relative HERMES_HOME must not abort it
+  // before a single check runs: it warns on the Hermes check and falls back.
+  const hermesTarget =
+    deps.hermesHome === undefined
+      ? resolveHermesHomeLenient(home, env)
+      : { home: deps.hermesHome, warning: undefined };
+  const hermesHome = hermesTarget.home;
 
   const built: BuiltCheck[] = [
     checkNode(),
     configCheck,
-    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl),
-    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl),
+    // The three baseUrl probes carry the team shelf's bypass. Without it every
+    // one of them reports a protected team deployment as unreachable, which is
+    // the check saying "your CLI is broken" about the one setting that is right.
+    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
     await checkSkills(
-      deps.homeDir ?? homedir(),
-      deps.which ?? ((bin) => onPath(bin, env)),
-      config.install?.harness ?? [],
+      home,
+      which,
+      requested,
       settings.bazaarPay.value,
       deps.skillsSourceDir,
+      hermesHome,
+      // The raw config, not resolved settings: the staleness compare has to shape
+      // the packaged copies the way the WRITERS shaped them, and they read the
+      // machine's configured mode with no flag layer (lib/skill-materialize).
+      isTeamModeConfig(config),
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   ];
+
+  // Only when the experiment is on. Off, there is nothing to be half-wired and
+  // a permanently-present check about a feature nobody enabled is noise.
+  if (config.hooks?.push === 'on') {
+    built.push(await checkPushHooks(home, ctx.dataDir));
+  }
+
+  // Same rule: only when a secret is set is there a team shelf to be wrong about.
+  const teamShelf = checkTeamShelf(settings, bypass);
+  if (teamShelf !== null) built.push(teamShelf);
+
+  const hermes = await checkHermes({
+    home,
+    hermesHome,
+    which,
+    requested,
+    webSearch:
+      (config.hooks as { webSearch?: string; searchMode?: string })?.webSearch ??
+      (config.hooks as { searchMode?: string })?.searchMode,
+    homeWarning: hermesTarget.warning,
+  });
+  if (hermes !== null) built.push(hermes);
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
   // describe() and diagnostics(), so doctor never runs its own fs/env probe.
@@ -331,9 +388,14 @@ async function checkApiContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
     return {
@@ -373,18 +435,28 @@ async function checkApiContract(
 }
 
 /**
- * WARN-level (never fails doctor): is the A2 search endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates A2 (the buy/search path will
- * not work against it yet). Warn-only because doctor's job is a working READ path,
- * and search is additive.
+ * WARN-level (never fails doctor): is the search endpoint advertised in the
+ * OpenAPI doc? Absent means the deployment predates search v3 (tenjin#137), so
+ * `tenjin search` and the buy path that starts there will not work against it.
+ * Warn-only because doctor's job is a working READ path, and search is additive.
+ *
+ * It probes `/api/search`, the path the client actually calls. The
+ * `/api/agent/search` alias it replaced is deprecated and answers 410 after one
+ * release, so a deployment advertising ONLY the alias is exactly the case this
+ * check has to warn about rather than pass.
  */
 async function checkSearchContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     return {
       result: {
@@ -409,8 +481,8 @@ async function checkSearchContract(
           name: 'search-contract',
           status: 'warn',
           required: false,
-          detail: 'This deployment does not advertise POST /api/agent/search (A2 not deployed)',
-          fix: 'search/buy need A2 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
+          detail: 'This deployment does not advertise POST /api/search (it predates search v3)',
+          fix: 'search/buy need search v3 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
         },
   };
 }
@@ -418,7 +490,7 @@ async function checkSearchContract(
 function hasSearchPath(json: unknown): boolean {
   if (!isRecord(json)) return false;
   const paths = json.paths;
-  return isRecord(paths) && '/api/agent/search' in paths;
+  return isRecord(paths) && '/api/search' in paths;
 }
 
 /**
@@ -454,15 +526,18 @@ async function checkSkills(
   which: (bin: string) => boolean,
   requested: readonly HarnessTarget[],
   bazaarPay: boolean,
-  skillsSourceDir?: string,
+  skillsSourceDir: string | undefined,
+  hermesHome: string,
+  teamMode: boolean,
 ): Promise<BuiltCheck> {
-  const present = detectHarnesses(home, which);
-  const wiring = await readAllWiring(home);
+  const resolvedHermesHome = hermesHome;
+  const present = detectHarnesses(home, which, resolvedHermesHome);
+  const wiring = await readAllWiring(home, resolvedHermesHome);
   const data = {
     directories: wiring.map((w) => ({
       ...w,
-      harnessPresent: harnessReads(home, w.dir, present),
-      requested: harnessRequested(home, w.dir, requested),
+      harnessPresent: harnessReads(home, w.dir, present, resolvedHermesHome),
+      requested: harnessRequested(home, w.dir, requested, resolvedHermesHome),
     })),
   };
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
@@ -477,15 +552,15 @@ async function checkSkills(
     // nobody asked to see named.
     const targeted =
       requested.length > 0
-        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested))
+        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome))
         : [];
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
-        fix: targeted.length > 0 ? fixFor(home, targeted) : 'tenjin install',
+        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills, .agents/skills, and Hermes skills)`,
+        fix: targeted.length > 0 ? fixFor(home, targeted, resolvedHermesHome) : 'tenjin install',
         data,
       },
     };
@@ -495,7 +570,7 @@ async function checkSkills(
   // is the defect, whether it is shadowed, half-installed, hosted-only or absent; a
   // directory neither detected nor asked for is described but never warned about.
   const broken = wiring.filter(
-    (w) => harnessInPlay(home, w.dir, present, requested) && !cliSkillsWired(w),
+    (w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome) && !cliSkillsWired(w),
   );
   if (broken.length > 0) {
     return {
@@ -504,7 +579,7 @@ async function checkSkills(
         status: 'warn',
         required: false,
         detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
-        fix: fixFor(home, broken),
+        fix: fixFor(home, broken, resolvedHermesHome),
         data,
       },
     };
@@ -518,7 +593,7 @@ async function checkSkills(
   // keeps the lane itself safe either way, which is why this is warn, not fail.
   const payDrift: string[] = [];
   for (const w of inPlay) {
-    if (!harnessInPlay(home, w.dir, present, requested)) continue;
+    if (!harnessInPlay(home, w.dir, present, requested, resolvedHermesHome)) continue;
     const onDisk = await readSkillFile(join(w.dir, OPTIONAL_PAY_SKILL, 'SKILL.md'));
     if ((onDisk.kind === 'ok') !== bazaarPay) payDrift.push(w.dir);
   }
@@ -549,6 +624,7 @@ async function checkSkills(
   // set than it writes would leave a stale directory nothing ever names.
   const { stale, verifiable } = await compareWiredSkills(
     wiring.map((w) => w.dir),
+    teamMode,
     skillsSourceDir,
   );
   if (!verifiable) {
@@ -579,6 +655,7 @@ async function checkSkills(
         fix: fixFor(
           home,
           wiring.filter((w) => stale.includes(w.dir)),
+          resolvedHermesHome,
         ),
         data,
       },
@@ -596,8 +673,72 @@ async function checkSkills(
   };
 }
 
+/** Native Hermes wiring is a separate warn-level check from portable skills. */
+async function checkHermes(args: {
+  home: string;
+  hermesHome: string;
+  which: (bin: string) => boolean;
+  requested: readonly HarnessTarget[];
+  webSearch?: string;
+  homeWarning?: string;
+}): Promise<BuiltCheck | null> {
+  const { home, hermesHome, which, requested, webSearch: searchMode, homeWarning } = args;
+  const inPlay =
+    requested.includes('hermes') || harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0;
+  if (!inPlay) return null;
+  const status = {
+    ...(await readHermesIntegrationStatus(hermesHome)),
+    ...(homeWarning !== undefined ? { homeWarning } : {}),
+  };
+  const ok =
+    status.mcp === 'configured' && status.plugin === 'installed' && status.activation === 'enabled';
+  if (ok && homeWarning === undefined) {
+    return {
+      result: {
+        name: 'hermes',
+        status: 'ok',
+        required: false,
+        detail: `Native Tenjin retrieval and publish-back plugin enabled in ${hermesHome}`,
+        data: status,
+      },
+    };
+  }
+  const problems: string[] = [];
+  if (status.mcp === 'stale') {
+    problems.push(`MCP command missing (${status.mcpCommand ?? 'unknown'})`);
+  } else if (status.mcp !== 'configured') problems.push(`MCP ${status.mcp}`);
+  if (status.plugin !== 'installed') problems.push(`plugin ${status.plugin}`);
+  // Named `activation`, not a second `plugin`: "plugin missing, plugin not-enabled"
+  // read as one subject twice.
+  if (status.activation !== 'enabled') problems.push(`activation ${status.activation}`);
+  if (homeWarning !== undefined) problems.push('HERMES_HOME ignored');
+  return {
+    result: {
+      name: 'hermes',
+      status: 'warn',
+      required: false,
+      detail: `Hermes Tenjin integration incomplete in ${hermesHome}: ${problems.join(', ')}${
+        homeWarning === undefined ? '' : `. ${homeWarning}`
+      }`,
+      // `tenjin install --harness hermes` alone is a dead end when the stored mode
+      // is `off`: it re-runs, withholds the hook code by design, and prints the same
+      // warning forever. Name the blocker that actually has to move first.
+      fix:
+        searchMode === 'off'
+          ? 'tenjin config set hooks.webSearch auto && tenjin install --harness hermes'
+          : 'tenjin install --harness hermes',
+      data: status,
+    },
+  };
+}
+
 /**
  * How the wired CLI adapter skills compare to the packaged ones.
+ *
+ * The packaged side is MATERIALIZED for this machine's mode before the compare, so
+ * "current" means "matches what a writer on this machine would write now" — which
+ * also makes a mode change legible as drift until the heal converges it, rather
+ * than either invisible or permanent.
  *
  * `verifiable` is false when this build cannot read its own packaged copies, which
  * is a broken package rather than evidence of no drift; reporting that as current
@@ -616,6 +757,7 @@ async function checkSkills(
  */
 async function compareWiredSkills(
   dirs: readonly string[],
+  teamMode: boolean,
   sourceDir?: string,
 ): Promise<{ stale: string[]; verifiable: boolean }> {
   let source: string;
@@ -629,9 +771,13 @@ async function compareWiredSkills(
   // adapters decide `verifiable`: a package missing an optional copy is odd,
   // not a reason to call every adapter unverifiable.
   const packaged = new Map<string, Buffer>();
+  const materialize = skillMaterialize({ teamMode });
   for (const name of [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES]) {
     const read = await readSkillFile(join(source, name, 'SKILL.md'));
-    if (read.kind === 'ok') packaged.set(name, read.bytes);
+    // SHAPED before the compare, exactly as the writers shape it. Comparing raw
+    // packaged bytes here would call every skill on a marker-carrying build stale
+    // in both modes, forever, with a fix that cannot clear it.
+    if (read.kind === 'ok') packaged.set(name, materialize('SKILL.md', read.bytes));
   }
   if (CLI_SKILL_NAMES.some((name) => !packaged.has(name))) {
     return { stale: [], verifiable: false };
@@ -702,8 +848,8 @@ function hostedHere(w: HarnessWiring): boolean {
  * the directories detection picks, so a problem in ~/.agents/skills on a
  * Claude-only machine needs `--harness shared` spelled out.
  */
-function fixFor(home: string, dirs: HarnessWiring[]): string {
-  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
+function fixFor(home: string, dirs: HarnessWiring[], hermesHome: string): string {
+  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir, hermesHome)))];
   return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
 }
 
@@ -743,6 +889,115 @@ const POSTURE: Record<DirState, string> = {
   shadowed: 'at least one CLI skill present but not model-invocable',
   wired: 'CLI skills wired, take precedence over the hosted mirror',
 };
+
+/**
+ * Is team mode actually on, and does the operator know which answer they got?
+ *
+ * Team mode needs TWO settings, and the setup is two independent commands, so
+ * the reachable wrong state is a machine with the bypass secret and `baseUrl`
+ * still on the public marketplace. The CLI fails that safe to public mode —
+ * publishes keep the client scan and the confirm cascade — but silently, and an
+ * operator who believes they are on the team shelf would keep writing internal
+ * notes at a command that sends them to tenjin.blog. Warn, never fail: public
+ * mode is a working machine, just not the one they meant to configure.
+ *
+ * Reports what the probes ACTUALLY DID — it is handed the same `bypass` they
+ * were, rather than re-deriving the answer — so a run whose base URL came from
+ * `--base-url` reports the key as withheld instead of claiming a team mode this
+ * run does not have.
+ */
+function checkTeamShelf(
+  settings: EffectiveSettings,
+  bypass: ShelfBypass | undefined,
+): BuiltCheck | null {
+  if (settings.shelfBypassSecret.value.length === 0) return null;
+  const baseUrl = settings.baseUrl.value;
+  if (bypass !== undefined) {
+    return {
+      result: {
+        name: 'team shelf',
+        status: 'ok',
+        required: false,
+        detail: `team mode: baseUrl is ${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
+      },
+    };
+  }
+  // The secret is set and the shelf is a real one, but THIS run was pointed
+  // elsewhere, so the key was withheld. Not a misconfiguration — the config is
+  // fine — which is why it reads differently from the half-wired case below.
+  const origin = tryOriginOf(baseUrl);
+  if (
+    settings.baseUrl.source !== 'file' &&
+    settings.baseUrl.source !== 'default' &&
+    origin !== null &&
+    isTeamShelfOrigin(origin, settings.publicShelfUrl.value)
+  ) {
+    return {
+      result: {
+        name: 'team shelf',
+        status: 'warn',
+        required: false,
+        // NAMING THE FLAG HERE IS ITSELF THE HAZARD (see FIX_POINT_AT_TENJIN_API
+        // and lib/permissions FLAG_CAVEAT): doctor's lines reach an unattended
+        // agent, and an override is what a prompt-injected one would reach for.
+        // So this says an override happened, never how to make one.
+        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}) rather than from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
+        fix: 'Run doctor with no base-URL override to check the configured team shelf.',
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'team shelf',
+      status: 'warn',
+      required: false,
+      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
+      fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
+    },
+  };
+}
+
+/**
+ * The push experiment's TWO halves, asked separately, because either one alone
+ * reports a healthy sidecar that does nothing: the generated scripts on disk
+ * with no settings.json entries pointing at them (a `push on` whose settings
+ * write refused), or six entries pointing at scripts that are gone (a
+ * half-finished uninstall, a moved data dir). Six entries across five events,
+ * so "half-wired" is a state with several ways in. Both counts are read from
+ * the writer's own plan rather than stated here.
+ *
+ * Never required and never a fail: an experiment that is off-by-default cannot
+ * take down the verb an operator runs when something else is broken.
+ */
+async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
+  const scripts = await pushScriptsPresent(dataDir);
+  const entries = await countPushHookEntries(homeDir, dataDir);
+  const where = entries.path === null ? 'no settings.json found' : entries.path;
+  const registered = `${entries.present}/${entries.planned} hook entries registered (${where})`;
+  if (scripts && entries.present === entries.planned) {
+    return {
+      result: {
+        name: 'push hooks',
+        status: 'ok',
+        required: false,
+        detail: `hooks.push is on: all ${PUSH_SCRIPT_FILES.length} push scripts written, ${registered}`,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'push hooks',
+      status: 'warn',
+      required: false,
+      detail: `hooks.push is on, but the sidecar is only half wired: ${
+        scripts
+          ? `all ${PUSH_SCRIPT_FILES.length} push scripts are written`
+          : 'one or more push scripts are missing'
+      }, ${registered}. Nothing runs unless both halves are there`,
+      fix: 'tenjin push on',
+    },
+  };
+}
 
 /**
  * The delegated session key `tenjin read` presents to recover a piece this wallet
@@ -895,13 +1150,18 @@ async function checkReadPath(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
+  bypass?: ShelfBypass,
 ): Promise<BuiltCheck> {
-  // The shipped public read path. The A2 search-contract check is a B2 follow-up.
+  // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
   const url = `${trimSlash(baseUrl)}/api/articles?limit=1`;
-  const res = await fetchJson(url, { timeoutMs, fetchImpl });
+  const res = await fetchJson(url, {
+    timeoutMs,
+    fetchImpl,
+    ...(bypass !== undefined ? { bypass } : {}),
+  });
   if (!res.ok) {
     return {
       result: {

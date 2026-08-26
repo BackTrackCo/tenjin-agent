@@ -96,12 +96,25 @@ import {
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
+import { renderSkillMarkdown } from '../lib/skill-materialize';
+import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
 
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
+
+/**
+ * A packaged skill file as install would WRITE it on this machine. install shapes
+ * every source file before it compares and writes (lib/skill-materialize), so a
+ * raw read is not what lands: these cases run with no shelf configured, which is
+ * public mode. Comparing raw bytes here would pass until the first shipped marker
+ * and then fail on an install that did exactly the right thing.
+ */
+async function packagedText(name: string, rel = 'SKILL.md', teamMode = false): Promise<string> {
+  return renderSkillMarkdown(await readFile(join(SKILLS_SRC, name, rel), 'utf8'), { teamMode });
+}
 
 const MARKER = 'tenjin-cli:skills';
 /** The full marker as it appears in the undo line the walkthrough prints. */
@@ -243,6 +256,11 @@ type Harnesses = Array<{
   codexNetworkRule?: string;
   warnings: string[];
   notes: string[];
+  hermes?: {
+    mcp: { status: string };
+    plugin: { status: string; scriptPaths: string[] };
+    activation: { status: string };
+  };
 }>;
 type Data = {
   dryRun: boolean;
@@ -287,6 +305,56 @@ describe('runInstall: harness override', () => {
   it('dedupes codex + shared onto the one ~/.agents/skills target', async () => {
     const { data: d } = await runInstall({ harness: ['codex', 'shared'] }, makeCtx(), deps());
     expect(asData(d).harnesses).toHaveLength(1);
+  });
+
+  it('installs and activates the native Hermes plugin when explicitly requested', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.harness).toBe('hermes');
+    expect(h.skillsDir).toBe(join(home, '.hermes', 'skills'));
+    expect(h.hermes?.mcp.status).toBe('installed');
+    expect(h.hermes?.plugin.status).toBe('installed');
+    expect(h.hermes?.activation.status).toBe('installed');
+    expect(await readFile(join(home, '.hermes', 'config.yaml'), 'utf8')).toContain(
+      'enabled:\n    - tenjin',
+    );
+  });
+
+  // The README's `--no-hooks` row says "Register no hooks this run; writes no
+  // config", and the Claude path honors it by writing no scripts at all. Anything
+  // less here (withholding only the `plugins.enabled` line) leaves hook code on
+  // disk and then names a fix that cannot move the blocker.
+  it('--no-hooks writes no Hermes hook code, only the MCP entry', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true, noHooks: true },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.hermes?.mcp.status).toBe('installed');
+    expect(h.hermes?.plugin.status).toBe('skipped');
+    expect(h.hermes?.plugin.scriptPaths).toEqual([]);
+    expect(h.hermes?.activation.status).toBe('skipped');
+    await expect(
+      readFile(join(home, '.hermes', 'plugins', 'tenjin', '__init__.py'), 'utf8'),
+    ).rejects.toThrow();
+    await expect(readFile(join(data, 'hooks', 'tenjin-websearch.mjs'), 'utf8')).rejects.toThrow();
+  });
+
+  it('a stored webSearch of off withholds the plugin and names the real blocker', async () => {
+    const { data: d } = await runInstall(
+      { harness: ['hermes'], noWallet: true, searchHooks: 'off' },
+      makeCtx(),
+      deps({ tenjinCommand: '/opt/tenjin/bin/tenjin', nodeCommand: process.execPath }),
+    );
+    const h = asData(d).harnesses[0]!;
+    expect(h.hermes?.plugin.status).toBe('skipped');
+    // Not "re-run `tenjin install --harness hermes`", which loops forever.
+    expect(h.warnings.join(' ')).toContain('hooks.webSearch auto');
   });
 
   it('rejects an unknown harness as USAGE / exit 2', async () => {
@@ -1097,14 +1165,272 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).toContain('Before a web search or a subagent dispatch, the hooks ask tenjin.blog');
+    expect(text).toContain(
+      `Before a web search or a subagent dispatch, the hooks ask ${PRODUCTION_HOST}`,
+    );
     // The subagent prompt is the surprising half of what leaves the machine, so
     // the disclosure names it and its bound rather than only "the query".
     expect(text).toContain(
       'the query text, or at most 400 characters of the subagent prompt, leaves the machine',
     );
-    expect(text).toContain('tenjin config set hooks.searchMode off');
+    expect(text).toContain('tenjin config set hooks.webSearch off');
     expect(text).toContain(join(data, 'hooks'));
+    // The promise only the UNPUSHED bundle can make. See the push case below.
+    expect(text).toContain('They can never block or change the tool call.');
+    expect(text).not.toContain('Push arms:');
+  });
+
+  // The recipient is read off `config.baseUrl`, which is what the generated
+  // scripts read. Naming tenjin.blog on a machine with a configured shelf
+  // discloses a host that, on the base WebSearch arm, is never asked at all.
+  it('names the configured shelf as the recipient, not the tenjin.blog literal', async () => {
+    const SHELF = 'https://team-shelf.example';
+    // WITH the secret, because the fallthrough sentence below is gated on team
+    // mode and team mode is "a secret is set AND baseUrl is the team's own shelf".
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, shelfBypassSecret: 'door-key' }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain('the hooks ask team-shelf.example the same question');
+    expect(text).not.toContain(`the hooks ask ${PRODUCTION_HOST}`);
+    // The dispatch arm's fallthrough is the one thing the marketplace still sees,
+    // and it is named rather than left implied.
+    expect(text).toContain(
+      `A subagent dispatch team-shelf.example has nothing for is then asked of ${PRODUCTION_HOST} as well.`,
+    );
+  });
+
+  /**
+   * `publicShelfUrl` is operator-settable, and it is what the scripts read for
+   * the second leg. Naming the production host here omits the recipient that
+   * actually receives the query text on that leg — the same shape the shelf-host
+   * fix closed on the first leg.
+   */
+  it('names the configured publicShelfUrl as the fallthrough, not the tenjin.blog literal', async () => {
+    const SHELF = 'https://team-shelf.example';
+    const MIRROR = 'https://mirror.example';
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({
+        baseUrl: SHELF,
+        publicShelfUrl: MIRROR,
+        shelfBypassSecret: 'door-key',
+        hooks: { push: 'on' },
+      }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain(
+      'A subagent dispatch team-shelf.example has nothing for is then asked of mirror.example as well.',
+    );
+    // The push sentence's team-mode second leg names it too.
+    expect(text).toContain('and then, in team mode, on mirror.example,');
+    expect(text).not.toContain(PRODUCTION_HOST);
+  });
+
+  /**
+   * The half-set state: a custom `baseUrl` and no `shelfBypassSecret`. The two
+   * setup commands are independent, so this is both the documented sequence's
+   * intermediate step and the terminal state for a shelf with no Deployment
+   * Protection. The scripts gate the second leg on team mode, and `teamShelfOrigin`
+   * is null on an empty secret, so nobody is asked a second time — the sentence
+   * must not claim otherwise. Over-disclosure sends nothing extra, but it is false
+   * in the one text an operator cannot check later without reading the scripts.
+   */
+  it('promises no fallthrough on a custom shelf with no bypass secret', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://shelf.example' }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    // The FIRST leg is still named off baseUrl: that one is asked in either mode.
+    expect(text).toContain('the hooks ask shelf.example the same question');
+    expect(text).not.toContain('is then asked of');
+  });
+
+  /**
+   * `baseUrl` and `publicShelfUrl` set to the SAME custom origin (review r6 nit 1).
+   * The disclosure used to derive from `isTeamShelfOrigin`, which answers "is this
+   * a shelf of the team's own" and returns false when the two match — so it named
+   * `tenjin.blog` on a machine whose hooks ask this host and never touch the
+   * marketplace at all. No secret here, which is the silent variant: with one,
+   * `doctor` and the half-wired check catch the collision loudly, and nothing
+   * writes `publicShelfUrl` in the first place, so this state ships unannounced.
+   */
+  it('names the shelf when baseUrl and publicShelfUrl are the same custom origin', async () => {
+    const SHELF = 'https://shelf.internal.example';
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, publicShelfUrl: SHELF }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain('the hooks ask shelf.internal.example the same question');
+    expect(text).not.toContain(`the hooks ask ${PRODUCTION_HOST}`);
+    // No secret, so no team mode and no second leg to disclose.
+    expect(text).not.toContain('is then asked of');
+  });
+
+  it('keeps naming the marketplace when the base URL is the marketplace', async () => {
+    // Including its alias: an alias of production is not somebody's team shelf.
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ baseUrl: `https://${PRODUCTION_HOST}` }),
+    );
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).toContain(`the hooks ask ${PRODUCTION_HOST} the same question`);
+    expect(text).not.toContain('is then asked of');
+  });
+
+  /**
+   * With the experiment armed the disclosure has to stop promising the hooks are
+   * advisory: the research arm can deny a WebSearch or WebFetch outright and
+   * answer it from the marketplace. It also has to stop reporting the six push
+   * entries inside the search-hook count, which is the number an operator reads
+   * to decide whether the experiment wired anything at all.
+   */
+  it('discloses the deny and counts the push arms apart, once push is on', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+    );
+    const text = human(res);
+    expect(text).not.toContain('They can never block or change the tool call.');
+    expect(text).toContain(
+      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+    );
+    expect(text).toContain(
+      'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
+    );
+    // ...and not the old "beside these", which put the entry that carries the
+    // deny outside the set of arms it belongs to.
+    expect(text).not.toContain('more hook entries run beside these');
+    expect(text).toContain('Turn it off: tenjin push off');
+    // Three search EVENTS wired (PreToolUse carries two of the four base
+    // entries), and the six push entries reported as their own count rather than
+    // folded into that number — which is what the combined count used to do.
+    // Without the split this line reads 'auto mode, 7 hook event(s)'.
+    expect(text).toContain('auto mode, 3 hook event(s) registered');
+    expect(text).toContain('Push arms: 6');
+  });
+
+  /**
+   * THE `remind` BRANCH, which the round-5 `auto` fix did not reach. In the
+   * generated WebSearch script the push lookup runs before the reminder line, so
+   * with push armed `remind` makes the same one request `auto` does. The flat
+   * "they send nothing off-machine" was therefore false on exactly the arm that
+   * can cancel a tool call — and it is the string `tenjin push on` prints too.
+   */
+  it('drops the nothing-leaves-the-machine claim on the remind branch once push is on', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
+    );
+    const text = human(res);
+    expect(text).not.toContain('they send nothing off-machine');
+    expect(text).toContain('the query text does leave the machine');
+    expect(text).toContain('that call may be denied and answered from the shelf instead');
+  });
+
+  it('keeps the remind branch flat when push is NOT armed', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
+    );
+    const text = human(res);
+    expect(text).toContain('they send nothing off-machine');
+    expect(text).not.toContain('the query text does leave the machine');
+  });
+
+  /**
+   * The undo line prints directly under a disclosure that includes the push
+   * arms, and `hooks.webSearch` does not reach them: every arm reads
+   * `hooks.push` and nothing in the generated push core reads `webSearch` at all.
+   * Naming one key for both was the CLI telling an operator to flip the wrong
+   * switch.
+   */
+  it('names both switches in the undo line, but only once the arms are armed', async () => {
+    const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
+    const base = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
+    expect(base).toContain(
+      '`tenjin config set hooks.webSearch off` (or `hooks.agentDispatch off`) silences them',
+    );
+    expect(base).not.toContain('tenjin push off` silences');
+
+    await rm(join(home, '.claude', 'settings.json'), { force: true });
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ hooks: { webSearch: 'auto', push: 'on' } }),
+    );
+    const armed = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
+    expect(armed).toContain('`tenjin push off` silences the push arms');
+    expect(armed).toContain('neither covers the other');
+  });
+
+  /**
+   * The run that wires the experiment and nothing else: `config set hooks.push
+   * on` on a machine whose search entries are already current. Branching the
+   * message on the COMBINED count while printing the search-only one made this
+   * exact run say "0 hook event(s) registered".
+   */
+  it('does not report zero events on a run that registered only the push arms', async () => {
+    const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ hooks: { webSearch: 'auto', push: 'on' } }),
+    );
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive));
+
+    // Drop the four push-only event keys, leaving every search entry current.
+    // The next run registers push arms and nothing else.
+    const settingsPath = join(home, '.claude', 'settings.json');
+    const parsed = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+      hooks: Record<string, unknown>;
+    };
+    for (const event of [
+      'UserPromptSubmit',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'SubagentStart',
+    ]) {
+      delete parsed.hooks[event];
+    }
+    await writeFile(settingsPath, JSON.stringify(parsed, null, 2));
+
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive));
+    const text = human(res);
+    expect(text).not.toContain('0 hook event(s)');
+    expect(text).toContain('already registered');
+    expect(text).toContain('Push arms: 6');
   });
 
   // The disclosure names the count, the file and the undo. It does NOT recite the
@@ -2531,7 +2857,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
     // Every file the skill ships, already identical — including the one that
     // lives in the same subdirectory as the operator's own notes.
     for (const rel of SHIPPED_SKILL_FILES['tenjin-search']) {
-      await writeFile(join(dir, rel), await readFile(join(SKILLS_SRC, 'tenjin-search', rel)));
+      await writeFile(join(dir, rel), await packagedText('tenjin-search', rel));
     }
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
@@ -2550,17 +2876,14 @@ describe('runInstall: hosted skill already present (#35)', () => {
   it('writes a shipped reference file into an existing skill directory', async () => {
     const dir = join(home, '.claude', 'skills', 'tenjin-search');
     await mkdir(join(dir, 'references'), { recursive: true });
-    await writeFile(
-      join(dir, 'SKILL.md'),
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
-    );
+    await writeFile(join(dir, 'SKILL.md'), await packagedText('tenjin-search'));
     await writeFile(join(dir, 'references', 'notes.md'), 'my private notes');
 
     const { data } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     const skill = asData(data).harnesses[0]!.skills.find((x) => x.name === 'tenjin-search')!;
     expect(skill.status).toBe('updated');
     expect(await readFile(join(dir, 'references', 'permissions.md'), 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'references', 'permissions.md'), 'utf8'),
+      await packagedText('tenjin-search', 'references/permissions.md'),
     );
     expect(await readFile(join(dir, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2678,7 +3001,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(join(managed, 'SKILL.md'), 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      await packagedText('tenjin-search'),
     );
   });
 
@@ -2752,7 +3075,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(join(real, 'SKILL.md'), 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
+      await packagedText('tenjin-search'),
     );
     expect(await readFile(join(real, 'references', 'notes.md'), 'utf8')).toBe('my private notes');
   });
@@ -2789,9 +3112,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
 
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     expect((await lstat(join(dir, 'SKILL.md'))).isSymbolicLink()).toBe(true);
-    expect(await readFile(managed, 'utf8')).toBe(
-      await readFile(join(SKILLS_SRC, 'tenjin-search', 'SKILL.md'), 'utf8'),
-    );
+    expect(await readFile(managed, 'utf8')).toBe(await packagedText('tenjin-search'));
   });
 
   // Treating every read failure as "absent" classified an unreadable skill as a
@@ -2950,6 +3271,100 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(h.skills.find((s) => s.name === 'tenjin-publish')?.status).toBe('updated');
     const text = await readFile(join(stale, 'SKILL.md'), 'utf8');
     expect(isDisabled(text)).toBe(false);
+  });
+
+  /**
+   * install SHAPES what it writes by the machine's configured mode, through the same
+   * resolver the self-heal and doctor use (lib/skill-materialize). These cases sit
+   * here rather than in skill-writer.test.ts because what they pin is the WIRING —
+   * that install reads the raw config, that a `--base-url` cannot reach it, and that
+   * a mode change is reported as an update rather than as up-to-date.
+   */
+  describe('shapes the installed skills by the configured mode', () => {
+    const TEAM = {
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    };
+    const searchAt = () => join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+
+    async function configure(config: Record<string, unknown>): Promise<void> {
+      await writeFile(join(data, 'config.json'), JSON.stringify(config));
+    }
+
+    it('writes the team arm on a team-mode machine, and no marker', async () => {
+      await configure(TEAM);
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      const written = await readFile(searchAt(), 'utf8');
+      expect(written).toBe(await packagedText('tenjin-search', 'SKILL.md', true));
+      expect(written).not.toContain('tenjin:when');
+      expect(written).toContain('teammate-useful');
+      expect(written).not.toContain('Public + durable + costly to reproduce');
+    });
+
+    it('writes the public arm with no config, and with the key alone', async () => {
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(await readFile(searchAt(), 'utf8')).toBe(await packagedText('tenjin-search'));
+
+      // The half-set state: the key landed before the shelf did. Team mode there
+      // would render team guidance on a machine still publishing to the marketplace.
+      await configure({ shelfBypassSecret: TEAM.shelfBypassSecret });
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(await readFile(searchAt(), 'utf8')).toBe(await packagedText('tenjin-search'));
+    });
+
+    /**
+     * A `--base-url` re-points THIS run; it does not change what mode the machine is
+     * configured in. The file being written outlives the command, so shaping it by a
+     * one-off flag would leave a team machine reading public guidance until the next
+     * install — and would let any single command silently rewrite every wired skill.
+     */
+    it('ignores --base-url when deciding which arm to write', async () => {
+      await configure(TEAM);
+      await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ baseUrl: 'https://tenjin.blog' }),
+        deps(),
+      );
+      expect(await readFile(searchAt(), 'utf8')).toBe(
+        await packagedText('tenjin-search', 'SKILL.md', true),
+      );
+    });
+
+    /**
+     * The compare happens on the SHAPED source, so a mode flip is a real update. If
+     * install compared raw packaged bytes it would report `up-to-date` and leave the
+     * previous mode's guidance in place, which is the whole failure the seam exists
+     * to prevent.
+     */
+    it('reports a mode flip as an update, not up-to-date', async () => {
+      const first = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(
+        asData(first.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('installed');
+
+      const same = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(
+        asData(same.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('up-to-date');
+
+      await configure(TEAM);
+      const flipped = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      expect(
+        asData(flipped.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('updated');
+      expect(await readFile(searchAt(), 'utf8')).toContain('teammate-useful');
+    });
+
+    // A dry run must resolve the same bytes the real run would, or `would-update`
+    // means nothing on a machine whose mode decides the content.
+    it('a dry run judges against the shaped content too', async () => {
+      await configure(TEAM);
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+      const dry = await runInstall({ harness: ['claude'], dryRun: true }, makeCtx(), deps());
+      expect(
+        asData(dry.data).harnesses[0]!.skills.find((s) => s.name === 'tenjin-search')!.status,
+      ).toBe('up-to-date');
+    });
   });
 
   it('the packaged CLI skills are model-invocable (guards the frontmatter)', async () => {
@@ -3242,7 +3657,16 @@ describe('runInstall: search hooks', () => {
   async function persistedMode(): Promise<string | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    return (JSON.parse(raw) as { hooks?: { searchMode?: string } }).hooks?.searchMode;
+    const hooks = (JSON.parse(raw) as { hooks?: { webSearch?: string; searchMode?: string } })
+      .hooks;
+    return hooks?.webSearch ?? hooks?.searchMode;
+  }
+  async function persistedAgentMode(): Promise<string | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    const hooks = (JSON.parse(raw) as { hooks?: { agentDispatch?: string; dispatchMode?: string } })
+      .hooks;
+    return hooks?.agentDispatch ?? hooks?.dispatchMode;
   }
 
   // A bare headless install is the one that most needs the hooks, and it is the
@@ -3255,17 +3679,25 @@ describe('runInstall: search hooks', () => {
     expect(h.mode).toBe('auto');
     expect(h.added).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(h.scriptsDir).toBe(join(data, 'hooks'));
-    expect(h.scripts).toHaveLength(4);
+    // All EIGHT bodies, though only three events are registered: `push off`
+    // unwires nothing, so a body that followed the entry plan would go stale
+    // under an entry that is still firing it.
+    expect(h.scripts).toHaveLength(8);
     for (const file of [
       'tenjin-websearch.mjs',
       'tenjin-dispatch.mjs',
       'tenjin-sessionstart.mjs',
       'tenjin-stop.mjs',
+      'tenjin-push-prompt.mjs',
+      'tenjin-push-failure.mjs',
+      'tenjin-push-subagent.mjs',
+      'tenjin-push-context.mjs',
     ]) {
       expect(existsSync(join(data, 'hooks', file)), file).toBe(true);
     }
 
     const hooks = (await settings()).hooks as Record<string, { matcher?: string }[]>;
+    // Narrow unless `tenjin push on` widened it; see WEBSEARCH_PUSH_MATCHER.
     expect(hooks.PreToolUse?.[0]?.matcher).toBe('WebSearch');
     expect(hooks.PreToolUse?.[1]?.matcher).toBe('Agent|Task');
     expect(hooks.SessionStart?.[0]?.matcher).toBe('startup|clear|compact');
@@ -3306,7 +3738,8 @@ describe('runInstall: search hooks', () => {
     expect(hooksOf(res.data)).toMatchObject({ skipped: 'mode-off', mode: 'off', added: [] });
     expect((await settings()).hooks).toBeUndefined();
     expect(await persistedMode()).toBe('off');
-    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.searchMode auto');
+    expect(await persistedAgentMode()).toBe('off');
+    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.webSearch auto');
   });
 
   it('--search-hooks remind wires the hooks in remind mode', async () => {

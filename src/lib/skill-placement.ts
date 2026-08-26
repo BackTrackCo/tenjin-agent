@@ -5,9 +5,13 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitWriteNotice } from './output';
 import type { Io } from './output';
+import { loadRawConfig } from './config';
+import { isTeamModeConfig } from './settings';
+import { skillMaterialize } from './skill-materialize';
 import { readSkillFile, skillFrontmatterName, skillsDirsFor } from './skill-wiring';
 import { installSkill } from './skill-writer';
 import { OPTIONAL_PAY_SKILL, SKILL_NAMES, resolveSkillsSource } from './skills-source';
+import { resolveHermesHomeLenient } from './hermes';
 
 /**
  * Optional skills, where PRESENCE is the whole mechanism: the tenjin-pay skill
@@ -15,6 +19,13 @@ import { OPTIONAL_PAY_SKILL, SKILL_NAMES, resolveSkillsSource } from './skills-s
  * taught a lane the operator turned off, and turning the lane on is what makes
  * the teaching appear. No conditional content, no markers: the unit of
  * consent stays the one the whole pipeline already has, a skill directory.
+ *
+ * Its CONTENT still goes through the same shaping every other skill's does
+ * (lib/skill-materialize): presence and content are different questions, and the
+ * placer is one of the writers that has to materialize for the comparers to keep
+ * agreeing. tenjin-pay ships no marker today, so it is a no-op there — but a
+ * placer that skipped shaping would be the one writer whose `up-to-date` meant
+ * something different from everyone else's.
  *
  * Removal follows `uninstall`'s rules exactly (lib/uninstall removeSkills):
  * only a SKILL.md whose frontmatter still claims our name is ours to delete,
@@ -28,10 +39,13 @@ export async function placeOptionalSkill(
   skillsDir: string,
   skillsSource: string,
   present: boolean,
+  teamMode: boolean,
 ): Promise<{ changed: boolean }> {
   const skillDir = join(skillsDir, name);
   if (present) {
-    const { status } = await installSkill(join(skillsSource, name), skillDir, false, name);
+    const { status } = await installSkill(join(skillsSource, name), skillDir, false, name, {
+      materialize: skillMaterialize({ teamMode }),
+    });
     return { changed: status !== 'up-to-date' };
   }
   if (lstatSync(skillDir, { throwIfNoEntry: false })?.isDirectory() !== true) {
@@ -58,10 +72,23 @@ export async function placeOptionalSkill(
  */
 export async function syncBazaarSkill(
   enabled: boolean,
-  deps: { io: Io; homeDir?: string; skillsSourceDir?: string },
+  deps: {
+    io: Io;
+    homeDir?: string;
+    skillsSourceDir?: string;
+    env?: NodeJS.ProcessEnv;
+    /** Where `config.json` lives, for the team-mode fact the content is shaped by.
+     *  Absent means public, for a caller with no data dir to read. */
+    dataDir?: string;
+  },
 ): Promise<void> {
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) return;
+  // Same fail-safe as the heal's: an unreadable config throws out of here rather
+  // than being guessed as public, which on a team machine would write the other
+  // mode's text. The caller is already best-effort after a successful persist.
+  const teamMode =
+    deps.dataDir === undefined ? false : isTeamModeConfig(await loadRawConfig(deps.dataDir));
   let source: string;
   try {
     source =
@@ -69,8 +96,12 @@ export async function syncBazaarSkill(
   } catch {
     return; // no readable source: nothing safe to write, nothing to remove FROM
   }
+  const env = deps.env ?? process.env;
+  // Lenient, like `skill-heal` and `uninstall`: a stray relative HERMES_HOME must
+  // not stop an operator's own `config set bazaarPay`. Resolving it at all is
+  // what puts the Hermes skills directory in scope for the sync.
   const touched: string[] = [];
-  for (const dir of skillsDirsFor(home)) {
+  for (const dir of skillsDirsFor(home, resolveHermesHomeLenient(home, env).home)) {
     try {
       if (lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
       const consented = SKILL_NAMES.some(
@@ -78,7 +109,13 @@ export async function syncBazaarSkill(
           lstatSync(join(dir, name, 'SKILL.md'), { throwIfNoEntry: false })?.isFile() === true,
       );
       if (!consented) continue;
-      const { changed } = await placeOptionalSkill(OPTIONAL_PAY_SKILL, dir, source, enabled);
+      const { changed } = await placeOptionalSkill(
+        OPTIONAL_PAY_SKILL,
+        dir,
+        source,
+        enabled,
+        teamMode,
+      );
       if (changed) touched.push(join(dir, OPTIONAL_PAY_SKILL));
     } catch {
       // This directory keeps what it has; `tenjin doctor` reports the drift.

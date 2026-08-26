@@ -344,11 +344,24 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   {
     command: 'tenjin config set',
     reason:
-      'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy.',
+      'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy — ' +
+      'and, through shelfBypassSecret + baseUrl, put the machine in team mode, where a publish ' +
+      'skips the scan’s warn tier (except the credential checks secret-assignment and ' +
+      'hex32-value and the injection check embedded-instruction) and prices at 0.',
   },
   {
     command: 'tenjin install',
     reason: 'Writes into harness config and skills directories.',
+  },
+  {
+    command: 'tenjin push',
+    reason:
+      'Writes hook entries into harness settings, and arms the one hook in this CLI that can ' +
+      'CANCEL a tool call the agent asked for (the abort-and-answer WebSearch/WebFetch deny) ' +
+      'and inject shelf content into later turns. Narrower authority than its list-mates — it ' +
+      'cannot spend, open the keystore or publish under your identity — but which hooks run in ' +
+      'your harness is an operator decision, and `runPushOn` has no consent gate of its own. ' +
+      'A prefix rule pins the verb, not the flags, so it would clear `off` and `status` too.',
   },
   {
     command: 'tenjin mcp',
