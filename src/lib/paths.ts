@@ -65,14 +65,13 @@ export function hooksDir(dir: string = dataDir()): string {
  *
  * Not atomic, deliberately: two sessions ending at the same instant can both read
  * this file before either writes, and one loop is then named twice. The cost is a
- * duplicate line, and taking the search store's lock here would put a
- * cross-process wait at the end of every turn to buy nothing but tidiness.
+ * duplicate line, and serializing it would put a cross-process wait at the end of
+ * every turn to buy nothing but tidiness.
  *
- * Its own file, NOT a field in searches.json, and that separation is the whole
- * point: the hook runs outside the CLI with no access to the lock `recordSearch`
- * takes, so a hook writing searches.json could erase a search landing at the same
- * moment. Nothing but the hook writes this file, and losing it costs one repeated
- * nag rather than a lost search.
+ * STILL A FILE, and the last of the hook state that is. The searches it nags
+ * about moved into `state.db` (tenjin-agent#209); this did not, because the plan
+ * scopes it to a follow-up along with `hook-health.json`. Nothing but the Stop
+ * hook writes it, and losing it costs one repeated nag.
  */
 export function nagStatePath(dir: string = dataDir()): string {
   return join(dir, 'hook-nags.json');

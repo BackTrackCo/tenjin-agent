@@ -279,7 +279,7 @@ export interface ShelfRoute {
  * optional string in the store schema with no URL validation, and the only
  * writers are this CLI's own two configured values — so any OTHER origin in that
  * field is a corrupt or planted entry, not a third shelf, and one hand-edited
- * `searches.json` row would otherwise make `tenjin outcome --search-id` POST to
+ * search row would otherwise make `tenjin outcome --search-id` POST to
  * a host the operator never configured. An unrecognised origin therefore routes
  * to the configured base exactly as a missing or unparseable one does: fail open
  * to the configured shelf, never out to a foreign one. This is the same

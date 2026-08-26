@@ -82,12 +82,12 @@ export class LockTimeoutError extends Error {
  * manual call diagnosable. Always released in the finally.
  *
  * ⚠ MIRRORED, MUST UPDATE TOGETHER. The generated WebSearch hook script in
- * lib/hook-scripts.ts (`withStoreLock`) reimplements this protocol byte for byte,
- * because it runs as a standalone .mjs outside the CLI and cannot import this
- * module, yet writes the same searches.json. If you change what the lock IS
- * (directory vs file), where it lives, or the no-stale-steal rule, change it
- * there too. Two writers of one file that disagree about the mutex have no mutex.
- * lib/hook-scripts.test.ts pins the two together and fails loudly on drift.
+ * NO LONGER MIRRORED IN THE HOOKS. The generated scripts used to reimplement
+ * this protocol byte for byte — they run as standalone .mjs files outside the
+ * CLI and cannot import this module, yet wrote the same searches.json, and two
+ * writers of one file that disagree about the mutex have no mutex. That file is
+ * gone (tenjin-agent#209): hook state is one SQLite database and WAL serializes
+ * the writers, so nothing outside this module implements this protocol any more.
  */
 export async function withFileLock<T>(
   lockPath: string,
