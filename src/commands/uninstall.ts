@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import {
-  keptItems,
+  KEPT_ITEMS,
   REMOVED_FROM_DATA_DIR,
   removeFromSettings,
   removeHookScripts,
@@ -9,7 +9,6 @@ import {
   type UninstallReport,
 } from '../lib/uninstall';
 import { sanitizeForTerminal } from '../lib/output';
-import { loadRawConfig } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -18,16 +17,9 @@ import type { CommandContext, CommandResult } from '../context';
  * The shape of this command is the promise it makes. It removes the skills, the
  * hook scripts, our hook entries and permission rules in the harness's
  * settings.json, and the legacy pointer line older versions wrote into
- * CLAUDE.md/AGENTS.md. "The hook scripts" INCLUDES the push experiment's four
- * arms (prompt, failure, subagent, context) and all six of their settings.json
- * entries, whatever `hooks.push` currently says: `tenjin push off` leaves the
- * files on disk on purpose, so uninstall is the only thing that takes them away.
- * It does NOT remove the wallet, the config (the team shelf's shared
- * `shelfBypassSecret` included, which the receipt names on its own line, with the
- * command that clears it, on the machines that actually hold one), the library,
- * the push ledger, the search ledger, or
- * parked candidates: `install` did not create those, a wallet holds funds, and
- * the ledger is the experiment's only record. The hook scripts are
+ * CLAUDE.md/AGENTS.md. It does NOT remove the wallet, the config, the library,
+ * the search ledger, or parked candidates: `install` did not create those, and a
+ * wallet holds funds while a candidate is unpublished work. The hook scripts are
  * the one thing under `~/.tenjin` it does remove, because `install` generated
  * them. The receipt names both halves on every run, so the operator learns the
  * boundary from the command rather than from the docs.
@@ -42,8 +34,6 @@ import type { CommandContext, CommandResult } from '../context';
 export interface UninstallDeps {
   /** Home whose harness directories are cleaned; tests inject a temp dir. */
   home?: string;
-  /** Environment the Hermes home is resolved from; defaults to process.env. */
-  env?: NodeJS.ProcessEnv;
 }
 
 export async function runUninstall(
@@ -58,7 +48,7 @@ export async function runUninstall(
   // at one that does not.
   const settings = await removeFromSettings(home);
   const scripts = await removeHookScripts(ctx.dataDir);
-  const skills = await removeSkills(home, deps.env);
+  const skills = await removeSkills(home);
   const markers = await removeMarkerLines(home);
 
   const report: UninstallReport = {
@@ -67,25 +57,10 @@ export async function runUninstall(
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
     markers,
-    // Read rather than assumed: the shelf-key item is an imperative to clear a
-    // shared credential, and on the machines that do not have one it is a false
-    // line in a receipt whose only job is to be checked.
-    kept: keptItems(await hasShelfSecret(ctx.dataDir)),
+    kept: [...KEPT_ITEMS],
   };
 
   return { data: report, humanLines: humanLines(report) };
-}
-
-/** Does this machine's config actually hold a team door key? `''` is the default. */
-async function hasShelfSecret(dataDir: string): Promise<boolean> {
-  try {
-    const raw = await loadRawConfig(dataDir);
-    return typeof raw.shelfBypassSecret === 'string' && raw.shelfBypassSecret !== '';
-  } catch {
-    // An unreadable config is not a reason to fail an uninstall, and the quiet
-    // side is the safe one here: the key, if there is one, stays as it was.
-    return false;
-  }
 }
 
 function humanLines(report: UninstallReport): string[] {

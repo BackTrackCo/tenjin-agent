@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { assertOnBaseOrigin, resolveResourceRef } from './resource-ref';
 import { CliError } from './errors';
 import { recordSearch } from './search-store';
-import { knownDeploymentOrigins } from './production-origin';
 
 let dir: string;
 beforeEach(async () => {
@@ -21,7 +20,7 @@ const BASE = 'https://tenjin.blog';
 describe('resolveResourceRef', () => {
   it('uses a full https URL verbatim', async () => {
     const ref = await resolveResourceRef('https://tenjin.blog/api/read/iris/slug', dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', shelfBaseUrl: BASE });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug' });
   });
 
   it('resolves a uuid to the stored candidate URL', async () => {
@@ -35,11 +34,7 @@ describe('resolveResourceRef', () => {
       ],
     });
     const ref = await resolveResourceRef(RES, dir, BASE);
-    expect(ref).toEqual({
-      url: 'https://tenjin.blog/api/read/iris/slug',
-      resourceId: RES,
-      shelfBaseUrl: BASE,
-    });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', resourceId: RES });
   });
 
   it('fails RESOURCE_NOT_FOUND for an unknown uuid', async () => {
@@ -65,7 +60,7 @@ describe('resolveResourceRef', () => {
 describe('trailing-slash canonicalization', () => {
   it('resolves a trailing-slash URL to the canonical no-slash form', async () => {
     const ref = await resolveResourceRef('https://tenjin.blog/api/read/iris/slug/', dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', shelfBaseUrl: BASE });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug' });
   });
 
   it('canonicalizes a stored candidate URL on the same terms', async () => {
@@ -79,11 +74,7 @@ describe('trailing-slash canonicalization', () => {
       ],
     });
     const ref = await resolveResourceRef(RES, dir, BASE);
-    expect(ref).toEqual({
-      url: 'https://tenjin.blog/api/read/iris/slug',
-      resourceId: RES,
-      shelfBaseUrl: BASE,
-    });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/read/iris/slug', resourceId: RES });
   });
 
   it('still refuses an off-origin URL that arrives with a trailing slash', async () => {
@@ -96,7 +87,7 @@ describe('trailing-slash canonicalization', () => {
 
   it('leaves a non-read URL on the base origin alone', async () => {
     const ref = await resolveResourceRef('https://tenjin.blog/api/other/', dir, BASE);
-    expect(ref).toEqual({ url: 'https://tenjin.blog/api/other/', shelfBaseUrl: BASE });
+    expect(ref).toEqual({ url: 'https://tenjin.blog/api/other/' });
   });
 });
 
@@ -145,82 +136,5 @@ describe('origin pinning (SIWX/payment trust boundary)', () => {
     // and the message still names both origins so the operator can tell them apart.
     expect(err?.message).toContain('https://evil.example');
     expect(err?.message).toContain('https://tenjin.blog');
-  });
-});
-
-/**
- * The cutover property (tenjin#738). The server builds candidate urls from its
- * own global, so at the flip every candidate arrives on the other origin at once
- * and an installed CLI would refuse whole responses. What is widened is the
- * identity of ONE deployment, so the refusal branch has to behave identically
- * for everything outside the set.
- */
-describe('assertOnBaseOrigin across the deployment alias set', () => {
-  const SIBLINGS = knownDeploymentOrigins().filter((o) => o !== BASE);
-
-  it('accepts a candidate on the deployment other origin', () => {
-    for (const sibling of SIBLINGS) {
-      expect(() =>
-        assertOnBaseOrigin(`${sibling}/api/read/iris/slug`, BASE, 'search candidate URL'),
-      ).not.toThrowError();
-      // and symmetrically, once the config default flips to the new origin.
-      expect(() =>
-        assertOnBaseOrigin(`${BASE}/api/read/iris/slug`, sibling, 'search candidate URL'),
-      ).not.toThrowError();
-    }
-  });
-
-  it('resolves a stored candidate on the other origin against either base', async () => {
-    const sibling = SIBLINGS[0];
-    expect(sibling).toBeDefined();
-    const url = `${sibling}/api/read/iris/slug`;
-    await recordSearch(dir, {
-      searchId: '0197aaaa-bbbb-cccc-dddd-000000000003',
-      at: '2026-08-17T00:00:00.000Z',
-      question: 'q',
-      decision: 'CANDIDATES',
-      candidates: [{ resourceId: RES, url, title: 't', price: '1' }],
-    });
-    // The re-assert runs against the CURRENT base, which is still the old origin
-    // on an installed client; the URL is passed through unrewritten.
-    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({
-      url,
-      resourceId: RES,
-      shelfBaseUrl: BASE,
-    });
-  });
-
-  it('gives a self-hosted base no aliasing at all', () => {
-    const SELF_HOSTED = 'https://notes.internal';
-    for (const sibling of knownDeploymentOrigins()) {
-      expect(() => assertOnBaseOrigin(`${sibling}/x`, SELF_HOSTED, 'resource URL')).toThrowError();
-    }
-    expect(() =>
-      assertOnBaseOrigin(`${SELF_HOSTED}/x`, SELF_HOSTED, 'resource URL'),
-    ).not.toThrowError();
-  });
-
-  it('refuses an origin outside the set with the same error it always gave', () => {
-    for (const base of knownDeploymentOrigins()) {
-      let err: CliError | undefined;
-      try {
-        assertOnBaseOrigin('https://evil.example/x', base, 'resource URL');
-      } catch (e) {
-        err = e as CliError;
-      }
-      expect(err).toBeInstanceOf(CliError);
-      expect(err?.code).toBe('USAGE');
-      expect(err?.message).toContain('https://evil.example');
-      expect(err?.fix).toContain('tenjin config get baseUrl');
-      expect(err?.fix).not.toContain('--base-url');
-    }
-  });
-
-  it('does not let a lookalike host ride in on the alias set', () => {
-    for (const base of knownDeploymentOrigins()) {
-      const host = new URL(base).host;
-      expect(() => assertOnBaseOrigin(`https://${host}.evil.example/x`, base, 'u')).toThrowError();
-      expect(() => assertOnBaseOrigin(`https://evil-${host}/x`, base, 'u')).toThrowError();
-    }
   });
 });

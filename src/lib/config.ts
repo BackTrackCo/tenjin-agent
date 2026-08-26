@@ -1,7 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { CliError } from './errors';
-import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
 import { HARNESS_TARGETS } from './skill-wiring';
 import { writeFileAtomic } from './atomic-json';
@@ -42,58 +41,20 @@ const PublishConfigSchema = z.object({
  * answer when one exists, `remind` says the marketplace is there without sending
  * the query anywhere, `off` leaves the installed hook inert.
  */
-export const WebSearchModeSchema = z.enum(['auto', 'remind', 'off']);
-export type WebSearchMode = z.infer<typeof WebSearchModeSchema>;
+export const SearchHookModeSchema = z.enum(['auto', 'remind', 'off']);
+export type SearchHookMode = z.infer<typeof SearchHookModeSchema>;
 
 /**
- * What the subagent-dispatch hook does, on its own switch. Disjoint from
- * `hooks.webSearch`: both default `auto`, no `inherit`. The split exists because
- * a dispatch prompt is the most sensitive payload any hook sees: a fleet can keep
- * `webSearch auto` and still run dispatch as `remind` (a local nudge, nothing
- * sent) or `off`.
- */
-export const AgentDispatchModeSchema = z.enum(['auto', 'remind', 'off']);
-export type AgentDispatchMode = z.infer<typeof AgentDispatchModeSchema>;
-
-// Backward compat aliases — old keys still parse, new code uses the WebSearch/AgentDispatch names.
-export const SearchHookModeSchema = WebSearchModeSchema;
-export type SearchHookMode = WebSearchMode;
-/** Legacy: accepted on read for old config files that stored `inherit`. */
-export const DispatchHookModeSchema = z.enum(['inherit', 'auto', 'remind', 'off']);
-export type DispatchHookMode = z.infer<typeof DispatchHookModeSchema>;
-
-/** Validate a dispatch-hook mode at a command edge for the new disjoint key. */
-export function parseAgentDispatchHookModeFlag(value: string, flagName: string): AgentDispatchMode {
-  const parsed = AgentDispatchModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** Validate a web-search hook mode at a command edge. */
-export function parseWebSearchHookModeFlag(value: string, flagName: string): WebSearchMode {
-  const parsed = WebSearchModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** @deprecated use parseAgentDispatchHookModeFlag — kept for `hooks.dispatchMode` alias */
-export function parseDispatchHookModeFlag(value: string, flagName: string): DispatchHookMode {
-  const parsed = DispatchHookModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "inherit", "auto", "remind", or "off".',
-  });
-}
-
-/**
- * @deprecated use parseWebSearchHookModeFlag — kept for `hooks.searchMode` alias
+ * Validate a search-hook mode at a command edge (`--search-hooks`), the same way
+ * publish-mode values are validated: an unrecognized value is USAGE, never a
+ * silent fallback to the default.
  */
 export function parseSearchHookModeFlag(value: string, flagName: string): SearchHookMode {
-  return parseWebSearchHookModeFlag(value, flagName);
+  const parsed = SearchHookModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
+    fix: 'Use "auto", "remind", or "off".',
+  });
 }
 
 /**
@@ -132,67 +93,17 @@ export function parseSessionPrimerFlag(value: string, flagName: string): Session
 }
 
 /**
- * Whether the push experiment's hook scripts are wired and speaking (docs/command-reference.md#push-experimental).
- * `on` is what `tenjin push on` writes: `tenjin install` then wires the extra hook
- * entries (prompt, failure, subagent, context) alongside the search hooks it always
- * wires. `off` (the default) leaves any already-wired push scripts on disk but
- * inert — every push arm reads this at run time before it spends a request, so
- * turning the experiment off never needs a re-install.
- */
-export const PushModeSchema = z.enum(['on', 'off']);
-export type PushMode = z.infer<typeof PushModeSchema>;
-
-export function parsePushModeFlag(value: string, flagName: string): PushMode {
-  const parsed = PushModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
-  });
-}
-
-/**
- * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
- * notes half): `block` raises a blocking reason, once per session, when the
- * session carried a research signal (a recorded search, or a push-ledger row) and
- * nothing has captured it yet; `nudge` says the same thing as additionalContext
- * with no block; `off` is silent. Default `off`.
- */
-export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);
-export type CaptureMode = z.infer<typeof CaptureModeSchema>;
-
-export function parseCaptureModeFlag(value: string, flagName: string): CaptureMode {
-  const parsed = CaptureModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "block", "nudge", or "off".',
-  });
-}
-
-/**
  * The harness-hook block. EVERY key is read by the installed scripts at run
  * time, which is what makes them runtime toggles rather than install-time
- * choices: `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
- * `hooks.stopNag off` or `hooks.sessionPrimer off` silences a hook immediately,
- * with no re-install and nothing to unwire. The scripts stay registered and
- * no-op, which is also what lets turning one back on be a single `config set`.
+ * choices: `tenjin config set hooks.searchMode off`, `hooks.stopNag off` or
+ * `hooks.sessionPrimer off` silences a hook immediately, with no re-install and
+ * nothing to unwire. The scripts stay registered and no-op, which is also what
+ * lets turning one back on be a single `config set`.
  */
 const HooksConfigSchema = z.object({
-  webSearch: WebSearchModeSchema,
-  agentDispatch: AgentDispatchModeSchema,
+  searchMode: SearchHookModeSchema,
   stopNag: StopNagModeSchema,
   sessionPrimer: SessionPrimerModeSchema,
-  push: PushModeSchema,
-  capture: CaptureModeSchema,
-});
-
-/**
- * Legacy hook fields kept for one release so an old config.json still parses.
- * `searchMode` maps to `webSearch`; `dispatchMode` (including `inherit`) maps
- * to `agentDispatch` per the migration in loadConfig / resolve* below.
- */
-const LegacyHooksFields = z.object({
-  searchMode: SearchHookModeSchema.optional(),
-  dispatchMode: DispatchHookModeSchema.optional(),
 });
 
 /**
@@ -257,31 +168,6 @@ export const ConfigSchema = z.object({
   sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
   baseUrl: z.url(),
-  /**
-   * The PUBLIC marketplace, consume-only, and the second shelf a team-mode
-   * lookup falls through to. Distinct from `baseUrl` because in team mode
-   * `baseUrl` is the team's own deployment: `publish`, `read` and the first leg
-   * of every search go there, and this is the shelf that still gets asked when
-   * the team's own has nothing. In public mode the two are the same origin and
-   * nothing falls through.
-   */
-  publicShelfUrl: z.url(),
-  /**
-   * The team shelf's Vercel "Protection Bypass for Automation" secret, and the
-   * ONE key that decides which mode this CLI is in: empty (the default) is
-   * public mode, byte-for-byte what it always did; non-empty is team mode.
-   *
-   * It is a DOOR KEY, not a credential of the operator's: it gets a request past
-   * Deployment Protection on the team's preview deployment and authenticates
-   * nobody. Stored in plain config.json alongside everything else for exactly
-   * that reason — anything that can read this file can already read the wallet's
-   * keystore path and rewrite `baseUrl`. It is redacted from `config get` and
-   * `config list` all the same, because those outputs are pasted into issues.
-   *
-   * Sent ONLY to `baseUrl`'s origin; see lib/http.ts's `bypass` option, which
-   * derives that from the request URL rather than from the caller's intent.
-   */
-  shelfBypassSecret: z.string(),
   rpcUrl: z.url(),
   /**
    * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
@@ -322,7 +208,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: InstallConfigSchema.partial().passthrough().optional(),
-    hooks: HooksConfigSchema.partial().merge(LegacyHooksFields).passthrough().optional(),
+    hooks: HooksConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
@@ -364,10 +250,7 @@ export const CONFIG_DEFAULTS: Config = {
   // leak fails closed instead of silently running uncapped.
   sendMaxAmount: '0',
   allowlistCreators: [],
-  baseUrl: PRODUCTION_ORIGIN,
-  publicShelfUrl: PRODUCTION_ORIGIN,
-  // Empty = public mode. Setting it is the whole of "turn on team mode".
-  shelfBypassSecret: '',
+  baseUrl: 'https://tenjin.blog',
   rpcUrl: 'https://mainnet.base.org',
   evalCohort: false,
   bazaarPay: false,
@@ -376,18 +259,8 @@ export const CONFIG_DEFAULTS: Config = {
   install: { harness: [] },
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
-  // leaves the installed script inert without touching settings.json. Both hooks
-  // are `auto` by default and disjoint — no `inherit`. `push` and `capture`
-  // default `off`: the push experiment (docs/command-reference.md#push-experimental) is opt-in only,
-  // through `tenjin push on`.
-  hooks: {
-    webSearch: 'auto',
-    agentDispatch: 'auto',
-    stopNag: 'on',
-    sessionPrimer: 'on',
-    push: 'off',
-    capture: 'off',
-  },
+  // leaves the installed script inert without touching settings.json.
+  hooks: { searchMode: 'auto', stopNag: 'on', sessionPrimer: 'on' },
   update: { mode: 'nudge' },
 };
 
@@ -410,18 +283,11 @@ export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
 export const HOOKS_CONFIG_KEYS = [
-  'hooks.webSearch',
-  'hooks.agentDispatch',
+  'hooks.searchMode',
   'hooks.stopNag',
   'hooks.sessionPrimer',
-  'hooks.push',
-  'hooks.capture',
 ] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
-
-/** Legacy aliases still accepted on `config set/get` for one release. */
-export const LEGACY_HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.dispatchMode'] as const;
-export type LegacyHooksConfigKey = (typeof LEGACY_HOOKS_CONFIG_KEYS)[number];
 
 /** The dotted key `config get/set` accepts for the nested update block. */
 export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
@@ -468,47 +334,6 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
  *  the default defaultPrice (a shallow spread would drop it). */
 export async function loadConfig(dir: string): Promise<Config> {
   const raw = await loadRawConfig(dir);
-  const rawHooks = raw.hooks as
-    | {
-        webSearch?: WebSearchMode;
-        agentDispatch?: AgentDispatchMode;
-        searchMode?: WebSearchMode;
-        dispatchMode?: DispatchHookMode;
-        stopNag?: StopNagMode;
-        sessionPrimer?: SessionPrimerMode;
-      }
-    | undefined;
-  // Backward compat: new webSearch wins, else legacy searchMode, else default.
-  const resolvedWebSearch =
-    rawHooks?.webSearch ?? rawHooks?.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-  // Migration for agentDispatch: new key wins; else legacy dispatchMode (if not inherit) wins;
-  // else if legacy is inherit or missing but webSearch resolved, copy webSearch; else default.
-  // Since dispatch never shipped to npm (only searchMode did), the elaborate branch is only
-  // for the unreleased `inherit` branch; the important legacy is searchMode -> webSearch.
-  let resolvedAgentDispatch: AgentDispatchMode;
-  if (rawHooks?.agentDispatch !== undefined) {
-    resolvedAgentDispatch = rawHooks.agentDispatch;
-  } else if (rawHooks?.dispatchMode !== undefined && rawHooks.dispatchMode !== 'inherit') {
-    resolvedAgentDispatch = rawHooks.dispatchMode as AgentDispatchMode;
-  } else if (rawHooks?.dispatchMode === 'inherit') {
-    resolvedAgentDispatch = resolvedWebSearch;
-  } else if (rawHooks?.dispatchMode === undefined && rawHooks?.searchMode !== undefined) {
-    // Old file had only searchMode (dispatch inherited): preserve previous behavior for one release.
-    resolvedAgentDispatch = resolvedWebSearch;
-  } else if (
-    rawHooks?.dispatchMode === undefined &&
-    rawHooks?.webSearch !== undefined &&
-    rawHooks?.agentDispatch === undefined
-  ) {
-    // New file with only webSearch set after the rename — keep disjoint: do NOT copy.
-    resolvedAgentDispatch = CONFIG_DEFAULTS.hooks.agentDispatch;
-  } else {
-    resolvedAgentDispatch = CONFIG_DEFAULTS.hooks.agentDispatch;
-  }
-  // If the file had neither new nor legacy hooks at all, loadSettings' file-or-default
-  // semantics would say `default` rather than `file` — but loadConfig's job is to produce
-  // the effective Config object, so defaults are correct here regardless. The provenance
-  // question lives in resolve* below.
   return {
     ...CONFIG_DEFAULTS,
     ...raw,
@@ -518,12 +343,9 @@ export async function loadConfig(dir: string): Promise<Config> {
     },
     install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
     hooks: {
-      webSearch: resolvedWebSearch,
-      agentDispatch: resolvedAgentDispatch,
-      stopNag: rawHooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
-      sessionPrimer: rawHooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
-      push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
-      capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
+      searchMode: raw.hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.searchMode,
+      stopNag: raw.hooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
+      sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
   };
@@ -562,25 +384,16 @@ export interface EffectiveSettings {
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
-  publicShelfUrl: ResolvedSetting<string>;
-  shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
   evalCohort: ResolvedSetting<boolean>;
   bazaarPay: ResolvedSetting<boolean>;
   bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
-  hooksWebSearch: ResolvedSetting<WebSearchMode>;
-  hooksAgentDispatch: ResolvedSetting<AgentDispatchMode>;
+  hooksSearchMode: ResolvedSetting<SearchHookMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
   hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
-  hooksPush: ResolvedSetting<PushMode>;
-  hooksCapture: ResolvedSetting<CaptureMode>;
   updateMode: ResolvedSetting<UpdateMode>;
-  /** @deprecated use hooksWebSearch — kept for backward compat */
-  hooksSearchMode: ResolvedSetting<WebSearchMode>;
-  /** @deprecated use hooksAgentDispatch — kept for backward compat (never `inherit`) */
-  hooksDispatchMode: ResolvedSetting<AgentDispatchMode>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -605,8 +418,6 @@ export interface ResolveSettingsInput {
  */
 export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings {
   const { config, flags, env, project } = input;
-  const webSearch = resolveHooksWebSearch(config);
-  const agentDispatch = resolveHooksAgentDispatch(config);
   return {
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
@@ -614,22 +425,15 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
-    publicShelfUrl: fileOrDefault('publicShelfUrl', config),
-    shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
     evalCohort: fileOrDefault('evalCohort', config),
     bazaarPay: fileOrDefault('bazaarPay', config),
     bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
-    hooksWebSearch: webSearch,
-    hooksAgentDispatch: agentDispatch,
-    hooksSearchMode: webSearch,
-    hooksDispatchMode: agentDispatch,
+    hooksSearchMode: resolveHooksSearchMode(config),
     hooksStopNag: resolveHooksStopNag(config),
     hooksSessionPrimer: resolveHooksSessionPrimer(config),
-    hooksPush: resolveHooksPush(config),
-    hooksCapture: resolveHooksCapture(config),
     updateMode: resolveUpdateMode(config),
   };
 }
@@ -642,88 +446,26 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
 }
 
-/** hooks.webSearch: file or default. Legacy `hooks.searchMode` counts as `file`. */
-export function resolveHooksWebSearch(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  const hooks = config.hooks as
-    { webSearch?: WebSearchMode; searchMode?: WebSearchMode } | undefined;
-  if (hooks?.webSearch !== undefined) return { value: hooks.webSearch, source: 'file' };
-  if (hooks?.searchMode !== undefined) return { value: hooks.searchMode, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.webSearch, source: 'default' };
-}
-
-/** @deprecated use resolveHooksWebSearch */
-export function resolveHooksSearchMode(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  return resolveHooksWebSearch(config);
-}
-
-/** hooks.agentDispatch: file or default, disjoint from webSearch. Legacy `dispatchMode` (including `inherit`) honoured on read. */
-export function resolveHooksAgentDispatch(
-  config: PartialConfig,
-): ResolvedSetting<AgentDispatchMode> {
-  const hooks = config.hooks as
-    | {
-        agentDispatch?: AgentDispatchMode;
-        dispatchMode?: DispatchHookMode;
-        webSearch?: WebSearchMode;
-        searchMode?: WebSearchMode;
-      }
-    | undefined;
-  if (hooks?.agentDispatch !== undefined) return { value: hooks.agentDispatch, source: 'file' };
-  const legacy = hooks?.dispatchMode;
-  if (legacy !== undefined && legacy !== 'inherit') {
-    return { value: legacy as AgentDispatchMode, source: 'file' };
-  }
-  if (legacy === 'inherit') {
-    const webSearch = hooks?.webSearch ?? hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-    return { value: webSearch as AgentDispatchMode, source: 'file' };
-  }
-  // File had only legacy searchMode (dispatch inherited implicitly) — preserve prior behaviour for one release.
-  if (
-    hooks?.searchMode !== undefined &&
-    hooks?.dispatchMode === undefined &&
-    hooks?.agentDispatch === undefined
-  ) {
-    const webSearch = hooks.webSearch ?? hooks.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-    return { value: webSearch as AgentDispatchMode, source: 'file' };
-  }
-  return { value: CONFIG_DEFAULTS.hooks.agentDispatch, source: 'default' };
-}
-
-/** @deprecated use resolveHooksAgentDispatch — `inherit` never surfaces; value is already resolved */
-export function resolveHooksDispatchMode(
-  config: PartialConfig,
-): ResolvedSetting<AgentDispatchMode> {
-  return resolveHooksAgentDispatch(config);
-}
-
-/** hooks.sessionPrimer: file or default, same shape as hooks.webSearch. */
+/** hooks.sessionPrimer: file or default, same shape as hooks.searchMode. */
 function resolveHooksSessionPrimer(config: PartialConfig): ResolvedSetting<SessionPrimerMode> {
-  const fromFile = (config.hooks as { sessionPrimer?: SessionPrimerMode } | undefined)
-    ?.sessionPrimer;
+  const fromFile = config.hooks?.sessionPrimer;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.hooks.sessionPrimer, source: 'default' };
 }
 
-/** hooks.stopNag: file or default, same shape as hooks.webSearch. */
+/** hooks.stopNag: file or default, same shape as hooks.searchMode. */
 function resolveHooksStopNag(config: PartialConfig): ResolvedSetting<StopNagMode> {
-  const fromFile = (config.hooks as { stopNag?: StopNagMode } | undefined)?.stopNag;
+  const fromFile = config.hooks?.stopNag;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.hooks.stopNag, source: 'default' };
 }
 
-/** hooks.push: file or default, same shape as hooks.webSearch — read at run time
- *  by every push arm, so a set takes effect with no re-install. */
-function resolveHooksPush(config: PartialConfig): ResolvedSetting<PushMode> {
-  const fromFile = config.hooks?.push;
+/** hooks.searchMode: file or default. No env, flag, or project layer, because the
+ *  installed hook script reads the global file directly and has no CLI edge. */
+function resolveHooksSearchMode(config: PartialConfig): ResolvedSetting<SearchHookMode> {
+  const fromFile = config.hooks?.searchMode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.push, source: 'default' };
-}
-
-/** hooks.capture: file or default, same shape as hooks.webSearch. */
-function resolveHooksCapture(config: PartialConfig): ResolvedSetting<CaptureMode> {
-  const fromFile = config.hooks?.capture;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.capture, source: 'default' };
+  return { value: CONFIG_DEFAULTS.hooks.searchMode, source: 'default' };
 }
 
 /**
@@ -796,24 +538,11 @@ export function resolvePublishDefaultPrice(input: {
   return result;
 }
 
-/**
- * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
- *
- * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
- * team shelf's shared door key, and every other secret in this tree is 0600
- * (the wallet, the passphrase, the session key, the spend ledger, the generated
- * hook scripts) — wallet/local.ts even warns when it finds one that is not.
- * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
- * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
- * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
- * the key world-readable. `config --json` already redacts it, which is the same
- * care applied one layer up. Keep this in step with `persist` in commands/config.ts,
- * the other writer of this file.
- */
+/** Persist a full, validated config via the atomic writer (0700 dir, 0644 file). */
 export async function writeConfig(dir: string, config: Config): Promise<void> {
   const validated = ConfigSchema.parse(config);
   await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-    mode: 0o600,
+    mode: 0o644,
     dirMode: 0o700,
   });
 }

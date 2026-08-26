@@ -41,10 +41,8 @@ describe('writeFileAtomic', () => {
     expect((await stat(target)).mode & 0o777).toBe(0o600);
   });
 
-  // The WRITER's default, not config.json's mode: config.json is written at 0600
-  // by both of its writers, because it holds the team shelf's door key.
-  it.skipIf(isWindows)('defaults the file mode to 0644 when none is asked for', async () => {
-    const target = join(dir, 'notes.json');
+  it.skipIf(isWindows)('defaults the file mode to 0644 (config)', async () => {
+    const target = join(dir, 'config.json');
     await writeFileAtomic(target, 'x');
     expect((await stat(target)).mode & 0o777).toBe(0o644);
   });

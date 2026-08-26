@@ -78,13 +78,11 @@ the origin it is locked to.
 
 Never propose an allowlist line for `tenjin send`, `tenjin publish`, `tenjin
 edit`, `tenjin wallet create`, `tenjin config set`, `tenjin install`, `tenjin
-push`, `tenjin mcp`, or `tenjin update`, and never propose a broad one
-(`Bash(tenjin:*)`, `Bash(tenjin wallet:*)`, `Bash(tenjin config:*)`) that would
-swallow them. Each is a human decision: `tenjin send` moves money out of the
-wallet, `tenjin config set` can widen the spend policy the agent runs under,
-`tenjin push` arms hooks in the operator's harness including the one that can
-cancel a tool call outright, and `tenjin update` replaces the binary you then
-run.
+mcp`, or `tenjin update`, and never propose a broad one (`Bash(tenjin:*)`,
+`Bash(tenjin wallet:*)`, `Bash(tenjin config:*)`) that would swallow them. Each is
+a human decision: `tenjin send` moves money out of the wallet, `tenjin config set`
+can widen the spend policy the agent runs under, and `tenjin update` replaces the
+binary you then run.
 
 `publish` and `edit` are the exception you still never propose: when the operator
 sets `publish.mode` to auto or full-auto, `tenjin install` writes both rules. The

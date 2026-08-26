@@ -29,15 +29,11 @@ snapshot you re-verify, since a stale date undersells fresh evidence, and add a
 one-line "updated: what changed" note. Publish separately only when it genuinely
 answers a different question.
 
-## Sales, reads, and your profile
+## Sales and reads
 
-`tenjin stats` prints this month's earnings, full reads, and glances across your pieces
-(`--json` for the raw atomic-USDC number). Every publish receipt also returns `deskUrl`, the
-human dashboard, which is the right answer when the user just wants to look or wants the
-per-sale list; the CLI has no events verb.
-
-`tenjin profile` shows the handle, display name, and bio behind this wallet; `tenjin profile
-set --handle <handle> [--display-name <name>] [--bio <text>]` claims or renames the handle
-and sets the rest (omitted flags keep their stored value). Do this once before a first
-publish, or when a piece shows a bare 0x address where a name belongs. Both verbs sign with
-the wallet on first use and reuse the cached session after that.
+Sales are a hosted surface, not a CLI verb. Every publish receipt returns `deskUrl`, the
+human dashboard, which is the right answer when the user just wants to look.
+Otherwise `GET /api/me/stats` (this month's earnings and paid-read totals) and
+`GET /api/me/events` (one entry per settled sale, newest first). Both take the
+`SIGN-IN-WITH-X` wallet header the hosted `tenjin` skill documents. Without a
+signature, point at the desk URL rather than guessing at numbers.

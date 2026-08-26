@@ -287,23 +287,21 @@ describe('eval fixtures', () => {
   });
 });
 
-// The item field list in the tenjin-search skill, checked against the wire
+// The candidate field list in the tenjin-search skill, checked against the wire
 // schema it describes. This is the third time in two weeks that skill text has
 // drifted from the wire, and it is the worst place for it: the list is what an
 // agent uses to decide whether it already has enough to buy on, so a stale entry
 // sends it looking for a field the server stopped sending. Cheap to keep honest,
 // so keep it honest per-commit rather than per-review.
-//
-// "item" since search v3, which renamed the array from `candidates` to `items`.
-const ITEM_BULLET = /An item is a lean hit:([\s\S]*?`)\./;
+const CANDIDATE_BULLET = /A candidate is a lean hit:([\s\S]*?`)\./;
 
 describe('skill text follows the wire schema', () => {
-  it('the tenjin-search item bullet names exactly the candidate schema keys', () => {
+  it('the tenjin-search candidate bullet names exactly the candidate schema keys', () => {
     const skill = readFileSync(`${SKILLS_DIR}tenjin-search/SKILL.md`, 'utf8');
-    const bullet = ITEM_BULLET.exec(skill);
+    const bullet = CANDIDATE_BULLET.exec(skill);
     expect(
       bullet?.[1],
-      'tenjin-search/SKILL.md has no "An item is a lean hit:" list',
+      'tenjin-search/SKILL.md has no "A candidate is a lean hit:" list',
     ).toBeDefined();
 
     // The doc names the nested handle as `creator.handle`, which is the useful

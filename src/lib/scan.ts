@@ -581,51 +581,6 @@ function scanPemBlocks(lines: string[]): ScanFinding[] {
   return out;
 }
 
-/**
- * Does this finding survive the team-shelf warn drop?
- *
- * A team shelf is not public, so the warn tier's "is this safe to make PUBLIC"
- * question stops applying: a repo slug is the POINT of a team note. Two OTHER
- * questions do not stop applying, so the block tier survives whole plus the three
- * warns that ask one of them rather than the public-safety one.
- *
- * "Is this a live credential?" — a team shelf is a hosted Postgres with logs and a
- * static shared door key, and a leaked key there is leaked.
- *
- * - `secret-assignment` — DEPLOY_API_KEY="pk_live_…" is a live key whose shape no
- *   block detector matches.
- * - `hex32-value` — the SAME 0x+64-hex private-key detector as `raw-private-key`
- *   above, demoted to warn only because a block finding is permanently
- *   non-bypassable and a post carrying a tx hash must not be hard-blocked. Warn is
- *   the surfaced-for-review tier there, not the safe tier, so on a team shelf the
- *   finding still has to be seen.
- *
- * "Would this text steer the agent that reads it?" — injection risk does not move
- * with audience the way a rights or third-party-data concern does, because the body
- * is fed to a model either way, and team-shelf bodies are the ones the push sidecar
- * injects into teammates' agents unasked.
- *
- * - `embedded-instruction` — imperative "ignore all previous instructions" shapes
- *   and BEGIN SYSTEM/HIDDEN PROMPT headers. The per-injection nonce fence
- *   (push-scripts.ts) is the real reader-side boundary and is identical in both
- *   arms; keeping the check is what puts a human in front of the laundering path,
- *   where an already-poisoned agent captures at turn end and publishes to the very
- *   shelf the sidecar re-injects (review r6).
- *
- * All three are kept BY NAME rather than promoted to block, so the consent cascade
- * still governs them: `review` and `auto` confirm, `full-auto` clears them unseen
- * exactly as it already does on the marketplace. Callers: commands/publish.ts and
- * commands/edit.ts, which must never disagree — this predicate is why they can't.
- */
-export function survivesTeamDrop(f: ScanFinding): boolean {
-  return (
-    f.severity === 'block' ||
-    f.check === 'secret-assignment' ||
-    f.check === 'hex32-value' ||
-    f.check === 'embedded-instruction'
-  );
-}
-
 const FENCE = /^(\s*)(`{3,}|~{3,})/;
 
 /**

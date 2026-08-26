@@ -32,19 +32,10 @@ export async function runInspect(
   deps: InspectDeps = {},
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
-  const ref = await resolveResourceRef(
-    args.ref,
-    ctx.dataDir,
-    settings.baseUrl,
-    // The second origin only exists in TEAM mode. In public mode `publicShelfUrl`
-    // is a shelf nothing falls through to, so widening on it would accept a URL
-    // from an origin no search on this machine can even surface.
-    settings.teamMode ? settings.publicShelfUrl : undefined,
-  );
+  const ref = await resolveResourceRef(args.ref, ctx.dataDir, settings.baseUrl);
 
   const result = await fetchRead(ref.url, {
     timeoutMs: ctx.flags.timeout,
-    ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 

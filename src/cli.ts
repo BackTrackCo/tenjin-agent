@@ -110,11 +110,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     if (command !== 'install') {
       try {
         const { healWiredSkills } = await import('./lib/skill-heal');
-        // The data dir, because the skill text it writes is shaped by the machine's
-        // configured mode (lib/skill-materialize). Resolved the same way the update
-        // nudge above resolves it, and for the same reason: a failed buildContext
-        // leaves no ctx to read one from.
-        await healWiredSkills({ io, dataDir: dataDir(process.env) });
+        await healWiredSkills({ io });
       } catch {
         // Nothing here is the command's business.
       }
@@ -151,11 +147,11 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('install'))
     .description(
-      'Detect installed harnesses (Claude Code, Codex, Hermes), wire Tenjin, then run doctor last',
+      'Detect installed harnesses (Claude Code, Codex), wire the Tenjin skills, then run the doctor checks last',
     )
     .option(
       '--harness <name>',
-      'target a specific harness: claude | codex | hermes | shared (repeatable; overrides detection)',
+      'target a specific harness: claude | codex | shared (repeatable; overrides detection)',
       collect,
       [],
     )
@@ -188,7 +184,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option(
       '--search-hooks <mode>',
-      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.webSearch and hooks.agentDispatch (both auto by default, disjoint)',
+      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.searchMode',
     )
     .option('--no-hooks', 'register no harness hooks this run (writes no config)')
     .action(async function (this: Command) {
@@ -444,56 +440,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  // The account surface (#208): thin verbs over /api/me and /api/me/stats on the
-  // same session-key auth publish/edit use. No consent gate: operator-invoked
-  // account edits, not content. Group-level flags so `tenjin profile --json set`
-  // parses like the config group; a bare `tenjin profile` shows.
-  const profile = addGlobalFlags(
-    program
-      .command('profile')
-      .description(
-        'Show your publisher profile (handle, display name, bio); `profile set` claims a handle so bylines show a name, not your address',
-      ),
-  );
-  profile.action(async function (this: Command) {
-    await runCommand('profile', this, async (ctx) => {
-      const { runProfileShow } = await import('./commands/profile');
-      return runProfileShow(ctx);
-    });
-  });
-  addGlobalFlags(profile.command('set'))
-    .description(
-      'Claim or rename your handle and set the display name / bio shown on your pieces. Omitted flags keep their stored value. Signs with your wallet on first use (mints a 24h read+write session)',
-    )
-    .option('--handle <handle>', 'word-handle, 2-32 chars of a-z, 0-9, or -')
-    .option('--display-name <name>', 'display name (≤100 chars)')
-    .option('--bio <text>', 'short bio (≤280 chars)')
-    .action(async function (this: Command) {
-      await runCommand('profile.set', this, async (ctx) => {
-        const o = this.opts();
-        const { runProfileSet } = await import('./commands/profile');
-        return runProfileSet(
-          {
-            ...(typeof o.handle === 'string' ? { handle: o.handle } : {}),
-            ...(typeof o.displayName === 'string' ? { displayName: o.displayName } : {}),
-            ...(typeof o.bio === 'string' ? { bio: o.bio } : {}),
-          },
-          ctx,
-        );
-      });
-    });
-
-  addGlobalFlags(program.command('stats'))
-    .description(
-      "This month's earnings, full reads, and glances across your pieces. Signs with your wallet on first use (mints a read-scoped 24h session); per-sale detail lives on the desk URL",
-    )
-    .action(async function (this: Command) {
-      await runCommand('stats', this, async (ctx) => {
-        const { runStats } = await import('./commands/stats');
-        return runStats(ctx);
-      });
-    });
-
   addGlobalFlags(program.command('pay <url>'))
     .description(
       'Pay any x402 endpoint (exact scheme, USDC on Base): probe, then pay a 402 under the spend policy. The configured base URL is always payable; other origins need the bazaarPay toggle and a registry-verified listing. Every paid call pays: no library, no dedupe (that is `buy`)',
@@ -566,9 +512,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option(
       '--search-id <id>',
-      'the search this file answers (closes its open loop, and prefills its question); repeatable up to 10 when one piece answers a whole research thread, and the server accepts or refuses the named searches as one batch',
-      collect,
-      [],
+      'the search this file answers (closes its open loop, and prefills its question)',
     )
     .option('--draft', 'save as a private draft instead of publishing')
     .option('--yes', 'clear soft findings and the review confirm (never a hard block)')
@@ -596,9 +540,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
-            ...(Array.isArray(o.searchId) && o.searchId.length > 0
-              ? { searchId: o.searchId as string[] }
-              : {}),
+            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.draft === true ? { draft: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
@@ -719,14 +661,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
-    .option('--search-id <id>', 'the search to report against (repeatable)', collect, [])
+    .option('--search-id <id>', 'the search to report against')
     .option(
       '--last',
       'target the most recent tenjin search (entries the WebSearch hook recorded are skipped; use --search-id for those)',
-    )
-    .option(
-      '--all-open',
-      "close this session's open WebSearch-hook MISSes (requires --status regenerated; deliberate and answered searches are left open)",
     )
     .requiredOption(
       '--status <status>',
@@ -741,11 +679,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runOutcome(
           {
             status: String(o.status),
-            ...(Array.isArray(o.searchId) && o.searchId.length > 0
-              ? { searchId: o.searchId as string[] }
-              : {}),
+            ...(typeof o.searchId === 'string' ? { searchId: o.searchId } : {}),
             ...(o.last === true ? { last: true } : {}),
-            ...(o.allOpen === true ? { allOpen: true } : {}),
             ...(typeof o.resource === 'string' ? { resource: o.resource } : {}),
             ...(typeof o.contentHash === 'string' ? { contentHash: o.contentHash } : {}),
           },
@@ -764,49 +699,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       const ctx = buildContext(this, io);
       const { runMcpServer } = await import('./mcp/run');
       await runMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
-    });
-
-  // ---- push (sidecar) ----
-  // `tenjin push on|off|status` (docs/command-reference.md#push-experimental): the runtime toggle for the push
-  // experiment, which surfaces a Tenjin finding beside a failing command, a
-  // stuck edit loop, or a subagent dispatch, without being asked. See
-  // commands/push.ts for the mechanism; this block only wires the three verbs.
-  const push = addGlobalFlags(
-    program
-      .command('push')
-      .description(
-        'The push experiment (docs/command-reference.md, "Push (experimental)"): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push on|off|status`',
-      ),
-  );
-  addGlobalFlags(push.command('on'))
-    .description(
-      'Turn the push experiment on: persist hooks.push=on, then wire its four hook scripts (idempotent; safe to re-run)',
-    )
-    .action(async function (this: Command) {
-      await runCommand('push.on', this, async (ctx) => {
-        const { runPushOn } = await import('./commands/push');
-        return runPushOn(ctx);
-      });
-    });
-  addGlobalFlags(push.command('off'))
-    .description(
-      'Turn the push experiment off: persists hooks.push=off and exits instantly; any wired scripts stay on disk but go inert on their next run',
-    )
-    .action(async function (this: Command) {
-      await runCommand('push.off', this, async (ctx) => {
-        const { runPushOff } = await import('./commands/push');
-        return runPushOff(ctx);
-      });
-    });
-  addGlobalFlags(push.command('status'))
-    .description(
-      'Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, and the last 7 days of ledger tallies',
-    )
-    .action(async function (this: Command) {
-      await runCommand('push.status', this, async (ctx) => {
-        const { runPushStatus } = await import('./commands/push');
-        return runPushStatus(ctx);
-      });
     });
 
   return program;

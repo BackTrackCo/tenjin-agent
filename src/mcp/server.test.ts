@@ -129,11 +129,10 @@ describe('buildTenjinMcpServer, tool surface', () => {
 describe('tenjin_search', () => {
   it('returns the exact success envelope as structuredContent with a non-empty text summary', async () => {
     const miss = {
-      schemaVersion: 3,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      decision: 'MISS',
       calibration: 'no match',
-      matched: 0,
-      items: [],
     };
     const fetchImpl = (async () =>
       new Response(JSON.stringify(miss), {
@@ -154,9 +153,7 @@ describe('tenjin_search', () => {
     const sc = res.structuredContent as SuccessEnvelope;
     expect(sc.ok).toBe(true);
     expect(sc.command).toBe('search');
-    // v3: a miss is an empty result, not a `decision` word to branch on.
-    expect(sc.data.matched).toBe(0);
-    expect(sc.data.items).toEqual([]);
+    expect(sc.data.decision).toBe('MISS');
     expect((res.content as { text: string }[])[0]?.text ?? '').not.toBe('');
   });
 });
@@ -317,73 +314,6 @@ describe('tenjin_publish consent', () => {
     const sc = res.structuredContent as { data: { search?: { id: string; closed: boolean } } };
     expect(sc.data.search).toMatchObject({ id: SEARCH_ID, closed: true });
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
-  });
-
-  // The tool schema accepting an array cannot force the handler to forward one,
-  // so a regression that drops arrays would ship green on the scalar case alone.
-  it('forwards an array of searchIds to the wire and closes each loop', async () => {
-    const second = '0197bbbb-cccc-7ddd-8eee-aaaaaaaaaaaa';
-    const file = join(dir, 'thread.md');
-    await writeFile(file, '# Thread answer\n\nClean public prose answering a whole thread.\n');
-    for (const id of [SEARCH_ID, second]) {
-      await recordSearch(dir, {
-        searchId: id,
-        at: new Date().toISOString(),
-        question: `what ${id} asked`,
-        decision: 'MISS',
-        candidates: [],
-      });
-    }
-
-    let body: Record<string, unknown> | undefined;
-    const fetchImpl = (async (_u: string | URL, init?: RequestInit) => {
-      body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      return new Response(
-        JSON.stringify({
-          id: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-          slug: 's',
-          title: 'Thread answer',
-          status: 'published',
-          price: '100000',
-          url: `${BASE}/a/iris/s`,
-          tags: [],
-        }),
-        { status: 201, headers: { 'content-type': 'application/json' } },
-      );
-    }) as unknown as typeof fetch;
-
-    const client = await connect({
-      dataDir: dir,
-      flags: { baseUrl: BASE },
-      deps: {
-        publish: {
-          cwd: dir,
-          env: {},
-          fetchImpl,
-          provider: testWalletProvider(),
-          useSession: false,
-        },
-      },
-    });
-    const res = await client.callTool({
-      name: 'tenjin_publish',
-      arguments: { file, mode: 'auto', searchId: [SEARCH_ID, second] },
-    });
-
-    expect(res.isError).toBeFalsy();
-    expect(body?.searchId).toEqual([SEARCH_ID, second]);
-    const sc = res.structuredContent as {
-      data: { search?: unknown; searches: { id: string; closed: boolean }[] };
-    };
-    expect(sc.data.searches).toHaveLength(2);
-    expect(sc.data.searches.every((s) => s.closed)).toBe(true);
-    // No single result to repeat, so the flat key is gone: the duality an agent
-    // reading only `.search` would trip over.
-    expect(sc.data.search).toBeUndefined();
-    const stored = await loadSearches(dir);
-    for (const id of [SEARCH_ID, second]) {
-      expect(stored.find((s) => s.searchId === id)?.resolved?.by, id).toBe('publish');
-    }
   });
 
   // The same edge check the CLI applies, over MCP: an agent-supplied id is not a
@@ -607,11 +537,10 @@ describe('tenjin_edit', () => {
 describe('MCP adapter never writes to real stdout', () => {
   it('read and write tool calls produce no process.stdout output (the transport owns the wire)', async () => {
     const miss = {
-      schemaVersion: 3,
+      schemaVersion: 2,
       searchId: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      decision: 'MISS',
       calibration: 'no match',
-      matched: 0,
-      items: [],
     };
     const searchFetch = (async () =>
       new Response(JSON.stringify(miss), {

@@ -14,40 +14,16 @@ import {
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
 } from './hook-scripts';
-import {
-  PUSH_CONTEXT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-} from './push-scripts';
 
-/**
- * Every script `install` (or `tenjin push on`) generates, which is exactly what
- * uninstall claims and removes: ownership is by filename in both directions.
- *
- * THE PUSH ARMS ARE IN THIS LIST UNCONDITIONALLY, whatever `hooks.push` says.
- * Every install writes all four bodies (`scriptPlan` is `specs(dataDir, { push:
- * true })`, and `wireSearchHooks` writes that plan on both paths), so they are on
- * disk on machines that never ran `tenjin push on` — inert, because nothing
- * points at them. Uninstall is the command an operator reaches for to get their
- * machine back, and `hooks.push` is a KEPT value under the data dir — reading it here would mean an operator who ran
- * `tenjin push off` before `tenjin uninstall` kept four generated scripts and
- * six settings.json entries pointing at files that no longer exist. Removal
- * stays ownership-gated either way: a filename we never wrote is not found, and
- * a hook entry naming somebody else's script is left alone.
- */
+/** Every script `install` generates, which is exactly what uninstall claims and
+ *  removes: ownership is by filename in both directions. */
 const HOOK_SCRIPT_FILES = [
   WEBSEARCH_HOOK_FILE,
   DISPATCH_HOOK_FILE,
   SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-  PUSH_CONTEXT_HOOK_FILE,
 ] as const;
 import { hooksDir } from './paths';
-import { resolveHermesHomeLenient } from './hermes';
 import { SHIPPED_SKILL_FILES } from './skills-source';
 import { resolveThroughLink } from './skill-writer';
 import {
@@ -130,38 +106,15 @@ export type SettingsSkipReason =
  * remembered mode. That is the intended model (installing is the consent, each
  * time), and docs/agent-permissions.md carries the full paragraph, but an operator
  * uninstalling to revoke should not have to find it there.
- *
- * `shelfBypassSecret` gets its own item for a different reason: every other kept
- * value is the operator's own state, and that one is a SHARED TEAM CREDENTIAL —
- * the door key to a deployment their teammates are also behind. An uninstall is
- * often "I am handing this machine on", and a kept-items list that says only
- * "config" leaves the key readable for whoever gets it next. Named, with the one
- * command that clears it, because the alternative is clearing it for them: the
- * key is not ours to revoke, and a teammate's shelf must not go dark because
- * somebody uninstalled the CLI.
- *
- * That item is CONDITIONAL, which is why this is a function and not a constant.
- * `shelfBypassSecret` defaults to `''`, so on a public-mode machine — most of
- * them — a static entry printed an imperative to clear a credential that is not
- * there. A receipt whose items an operator can check and find false is a receipt
- * they stop reading, and this one's whole job is to be read.
  */
-export function keptItems(hasShelfSecret: boolean): string[] {
-  return [
-    'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
-    ...(hasShelfSecret
-      ? [
-          'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
-        ]
-      : []),
-    'the push ledger under ~/.tenjin (it is the experiment’s only record)',
-    'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
-  ];
-}
+export const KEPT_ITEMS: readonly string[] = [
+  'your wallet, config (publish.mode included, so a later install resumes it), library, and search history under ~/.tenjin',
+  'anything an older version left in ~/.tenjin/candidates (nothing reads it now)',
+];
 
 /**
  * The one thing under the data dir this command DOES remove, named beside
- * {@link keptItems} so the boundary reads as a boundary.
+ * {@link KEPT_ITEMS} so the boundary reads as a boundary.
  */
 export const REMOVED_FROM_DATA_DIR =
   'the generated hook scripts in ~/.tenjin/hooks (install writes them back)';
@@ -357,7 +310,7 @@ export async function removeHookScripts(dataDir: string): Promise<{
  * Remove the skills we installed, in every harness location.
  *
  * REMOVES THE FILES WE SHIPPED, NOT THE DIRECTORY THEY SIT IN. Everything else in
- * that directory belongs to the operator — a local override, anything
+ * that directory belongs to the operator — notes, a local override, anything
  * they put beside our files — and a recursive delete of a directory we only
  * partly own is the data-loss shape this repo already unlearned once on the
  * write side (see lib/skill-writer.ts: "Only the files this package SHIPS are
@@ -372,17 +325,10 @@ export async function removeHookScripts(dataDir: string): Promise<{
  * with their own is not ours to delete just for sitting at our path, and neither
  * is a directory reached through a symlink.
  */
-export async function removeSkills(
-  homeDir: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<string[]> {
+export async function removeSkills(homeDir: string): Promise<string[]> {
   const removed: string[] = [];
   const names = [...CLI_SKILL_NAMES, ...OPTIONAL_SKILL_NAMES, HOSTED_SKILL_NAME];
-  // Lenient, like `skill-heal`: uninstall is a cleanup command, so a stray
-  // relative HERMES_HOME must not stop it. Resolving it at all is what puts the
-  // Hermes skills directory in scope; `skillsDirsFor` requires the argument
-  // precisely so a new caller cannot quietly leave that directory behind.
-  for (const dir of skillsDirsFor(homeDir, resolveHermesHomeLenient(homeDir, env).home)) {
+  for (const dir of skillsDirsFor(homeDir)) {
     if (lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
     for (const name of names) {
       const skillDir = join(dir, name);
