@@ -8,6 +8,7 @@ import {
   RETIRED_STATE_ENTRIES,
   STATE_DB_FILE,
   STORE_DDL,
+  STORE_BUSY_TIMEOUT_MS,
   STORE_SQL,
   STORE_USER_VERSION,
   openStore,
@@ -15,7 +16,12 @@ import {
   removeRetiredState,
   storeSource,
 } from './state-store';
-import { pushContextHookScript, pushFailureHookScript, pushPromptHookScript } from './push-scripts';
+import {
+  pushContextHookScript,
+  pushFailureHookScript,
+  pushPromptHookScript,
+  pushSubagentHookScript,
+} from './push-scripts';
 import {
   dispatchHookScript,
   sessionPrimerHookScript,
@@ -194,6 +200,55 @@ describe('storeSource stays in sync with the module', () => {
   });
 });
 
+/**
+ * The generated hooks end in `main().catch(quiet)`, so a programming error in
+ * them — a constant referenced but never declared — is not a crash an operator
+ * can see. It is a hook that silently does nothing, forever, on every machine
+ * the install reached. That happened once during this work (`STATE_REPLAYED_PREFIX`
+ * was used before it existed) and cost nothing but time only because a test
+ * asserted on stdout; nothing structural would have caught it.
+ */
+describe('the generated scripts are complete', () => {
+  const scripts = (): [string, string][] => [
+    ['push-prompt', pushPromptHookScript(dataDir)],
+    ['push-failure', pushFailureHookScript(dataDir)],
+    ['push-subagent', pushSubagentHookScript(dataDir)],
+    ['push-context', pushContextHookScript(dataDir)],
+    ['websearch', websearchHookScript(dataDir)],
+    ['dispatch', dispatchHookScript(dataDir)],
+    ['stop', stopHookScript(dataDir)],
+    ['sessionstart', sessionPrimerHookScript(dataDir)],
+  ];
+
+  it('parse as valid ES modules', async () => {
+    const { execFile } = await import('node:child_process');
+    for (const [name, source] of scripts()) {
+      const path = join(scriptDir, `check-${name}.mjs`);
+      await writeFile(path, source);
+      const code = await new Promise<number | null>((resolve) => {
+        execFile(process.execPath, ['--check', path], (err) =>
+          resolve(err === null ? 0 : ((err as { code?: number }).code ?? 1)),
+        );
+      });
+      expect(code, `${name} does not parse`).toBe(0);
+    }
+  });
+
+  it('declare every shared constant they reference', () => {
+    for (const [name, source] of scripts()) {
+      // The `STATE_*` / `STORE_*` families are the ones spliced in from another
+      // module, so they are the ones a rename can leave dangling.
+      const used = new Set(source.match(/\b(?:STATE|STORE)_[A-Z0-9_]+\b/g) ?? []);
+      for (const token of used) {
+        expect(
+          new RegExp(`(?:const|let|var)\\s+${token}\\b`).test(source),
+          `${name} uses ${token} without declaring it`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
 describe('openStore', () => {
   it('creates the schema at user_version 1 and is idempotent', async () => {
     const first = await openStore(dataDir);
@@ -216,6 +271,33 @@ describe('openStore', () => {
     );
   });
 
+  /**
+   * THE COLD START IS A DIFFERENT SHAPE FROM A WRITE. Twelve openers meeting an
+   * empty database all take `BEGIN IMMEDIATE` at once and queue behind whoever
+   * wins, and 250 ms — sized for a sub-millisecond insert — was not always
+   * enough for the last of them: measured on this machine, the plan's own
+   * 8-process case tripped it about one run in six and the loser printed
+   * `state store unavailable (database is locked)` to stderr, which Claude Code
+   * shows the operator. The bootstrap has its own longer wait and a retry.
+   */
+  it('survives a dozen openers racing an empty database', async () => {
+    const opened = await Promise.all(Array.from({ length: 12 }, () => openStore(dataDir)));
+    expect(opened.every((store) => store !== null)).toBe(true);
+    for (const store of opened) store?.close();
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    // The schema was created ONCE; the retry must not have run the DDL twice.
+    expect(
+      rows("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'pairings'")[0],
+    ).toEqual({ n: 1 });
+  });
+
+  /** ...and the raised wait is put back, so no ordinary fire inherits it. */
+  it('restores the steady-state busy timeout after the bootstrap', async () => {
+    const store = await openStore(dataDir);
+    expect(store?.get('PRAGMA busy_timeout')).toEqual({ timeout: STORE_BUSY_TIMEOUT_MS });
+    store?.close();
+  });
+
   it('returns null for a corrupt database rather than throwing', async () => {
     await writeFile(join(dataDir, STATE_DB_FILE), 'this is not a database');
     expect(await openStore(dataDir)).toBeNull();
@@ -225,6 +307,70 @@ describe('openStore', () => {
     const probe = await probeSqlite();
     expect(probe.ok).toBe(true);
     expect(probe.version).toMatch(/^\d+\.\d+/);
+  });
+});
+
+describe('fail-open before the store is even opened', () => {
+  /**
+   * A machine id is not worth a dead hook. `os.userInfo()` throws
+   * ERR_SYSTEM_ERROR when the process uid has no passwd entry — a devcontainer
+   * or CI image started with `--user 1001`, or Kubernetes with an arbitrary uid
+   * — and computing it at MODULE scope put that throw outside every try/catch
+   * and before `main()`. Every hook on such a host exited 1 with a stack trace,
+   * with push off, before config.json was read.
+   */
+  it('survives a host where os.userInfo() throws', async () => {
+    await writeConfig();
+    for (const [name, source] of [
+      ['context', pushContextHookScript(dataDir)],
+      ['stop', stopHookScript(dataDir)],
+      ['sessionstart', sessionPrimerHookScript(dataDir)],
+    ] as const) {
+      // The BINDING throws, wherever it is called. If the call sat at module
+      // scope again, the module would die on load and this would catch it.
+      const broken = source.replace(
+        "import { homedir, hostname, userInfo } from 'node:os';",
+        "import { homedir } from 'node:os';\n" +
+          "const boom = () => { const e = new Error('uv_os_get_passwd'); e.code = 'ERR_SYSTEM_ERROR'; throw e; };\n" +
+          'const hostname = boom;\n' +
+          'const userInfo = boom;',
+      );
+      expect(broken).not.toBe(source);
+      const run = await runScript(
+        broken,
+        JSON.stringify({
+          session_id: 's1',
+          cwd: '/repo/one',
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: '/repo/one/src/x.ts' },
+        }),
+      );
+      expect(run.code, `${name} died`).toBe(0);
+      expect(run.stderr, `${name} wrote a stack trace`).not.toContain('ERR_SYSTEM_ERROR');
+    }
+    // And the store still works: the id falls back to the uid.
+    expect(String(rows('SELECT machine FROM sessions')[0]?.machine ?? '')).toMatch(
+      /^[0-9a-f]{16}$|^$/,
+    );
+  });
+
+  /**
+   * Hook scripts are regenerated only by `tenjin install`, so v1 hooks can meet
+   * a database a newer CLI already migrated. A `!==` gate stamped the version
+   * back down; the newer side migrated again; the two ping-ponged forever.
+   */
+  it('never downgrades a database a newer build already migrated', async () => {
+    const store = await openStore(dataDir);
+    store?.run(`PRAGMA user_version = ${STORE_USER_VERSION + 1}`);
+    store?.close();
+
+    const reopened = await openStore(dataDir);
+    expect(reopened).not.toBeNull();
+    reopened?.close();
+    expect(rows('PRAGMA user_version')[0]).toEqual({
+      user_version: STORE_USER_VERSION + 1,
+    });
   });
 });
 
@@ -545,30 +691,30 @@ describe('fail-open', () => {
 });
 
 describe('pairings: open, close, replay', () => {
-  const failure = (command: string, stderr: string, session = 's1') =>
+  const failure = (command: string, stderr: string, session = 's1', cwd = '/repo/one') =>
     JSON.stringify({
       session_id: session,
-      cwd: '/repo/one',
+      cwd,
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command },
       tool_response: { stdout: '', stderr },
     });
 
-  const success = (command: string, session = 's1') =>
+  const success = (command: string, session = 's1', cwd = '/repo/one') =>
     JSON.stringify({
       session_id: session,
-      cwd: '/repo/one',
+      cwd,
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command },
       tool_response: { stdout: 'ok\n', stderr: '' },
     });
 
-  const edit = (path: string, session = 's1') =>
+  const edit = (path: string, session = 's1', cwd = '/repo/one') =>
     JSON.stringify({
       session_id: session,
-      cwd: '/repo/one',
+      cwd,
       hook_event_name: 'PreToolUse',
       tool_name: 'Edit',
       tool_input: { file_path: path },
@@ -643,6 +789,43 @@ describe('pairings: open, close, replay', () => {
     expect(rows("SELECT * FROM events WHERE hook = 'failure'")).toHaveLength(1);
   });
 
+  /**
+   * THE FLOOR IS ABOUT MEANING, NOT SHAPE. `/E[A-Z]{3,}/` matched ERROR, ERRORS,
+   * ESLINT, EXPECTED — ordinary capitalised English that toolchains print all
+   * day — so a bare "2 failed", deliberately below the floor, cleared it on the
+   * strength of the word ERROR appearing anywhere in the output and got a coarse
+   * key identical in every repo on earth.
+   */
+  it('does not take an English word in caps for an errno', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    for (const output of [
+      'FAIL  some suite\n\nERRORS\n2 failed\n',
+      'FAIL  suite\nESLINT found problems\n2 failed\n',
+      'FAIL  suite\nEXPECTED something else\n2 failed\n',
+    ]) {
+      await runScript(
+        pushFailureHookScript(dataDir),
+        failure('pnpm test', output, 'sess-' + output.length),
+      );
+    }
+    expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 0 });
+  });
+
+  /** ...and the tokens that ARE errnos still clear it. */
+  it('takes a real errno, an ERR_ code and a compiler code', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    const cases: [string, string][] = [
+      ['e1', "Error: ENOENT: no such file or directory, open 'x'\n"],
+      ['e2', 'ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile\n'],
+      ['e3', 'src/a.ts(3,9): error TS2345: Argument of type X\n'],
+      ['e4', 'error[E0412]: cannot find type `Foo`\n'],
+    ];
+    for (const [session, output] of cases) {
+      await runScript(pushFailureHookScript(dataDir), failure('pnpm test', output, session));
+    }
+    expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: cases.length });
+  });
+
   it('replays a closed pairing locally, before any shelf is asked', async () => {
     const shelf = await serveSearch((baseUrl) => ({
       status: 200,
@@ -677,26 +860,112 @@ describe('pairings: open, close, replay', () => {
     }
   });
 
-  it('promotes to verified on a second independent close', async () => {
+  /**
+   * 04's close rule end to end, through two hook processes in two sessions.
+   *
+   * This used to be unreachable. A second session that hit the same failure took
+   * the replay branch and returned before `openPairing`, so it never had a row
+   * of its own to close — and `openForHead` selects `status = 'open'`, so the
+   * first session's now-`unverified` row could not be closed again either.
+   * `closes` stopped at 1 forever, and the verified wording was dead code.
+   * A replayed pairing is now remembered per command head, so the session that
+   * was SHOWN it can be its second independent closer.
+   */
+  it('reaches verified through two sessions, and says so on the next replay', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+
+    // Session 1 opens the pairing and closes it.
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'unverified',
+      closes: 1,
+    });
+
+    // Session 2 is SHOWN it, fixes the same file, and passes.
+    const replay = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's2'),
+    );
+    expect(replay.stdout).toContain('Someone once fixed this by touching');
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts', 's2'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate', 's2'));
+
+    // One pairing, two independent closers, promoted.
+    expect(rows('SELECT * FROM pairings')).toHaveLength(1);
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'verified',
+      closes: 2,
+    });
+    expect(
+      rows('SELECT session FROM pairing_closes ORDER BY session').map((r) => r.session),
+    ).toEqual(['s1', 's2']);
+
+    // And a third session gets the STRONG wording, which was unreachable before.
+    const verified = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's3'),
+    );
+    expect(verified.stdout).toContain('Fixed here 2 time(s) by changing');
+    expect(verified.stdout).not.toContain('Someone once fixed this');
+    expect(rows("SELECT strength FROM injections WHERE session = 's3'")[0]?.strength).toBe(
+      'strong',
+    );
+  });
+
+  /**
+   * "Two INDEPENDENT closes" means two SESSIONS. With a bare counter one session
+   * could close, be replayed to itself, close again and self-promote; the
+   * (pairing_id, session) primary key is what makes that impossible.
+   */
+  it('never lets one session verify a pairing by itself', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
     await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
     await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
     await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+    // The same session hits it again, is replayed its own pairing, and passes again.
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
 
-    const store = await openStore(dataDir);
-    const id = rows('SELECT id FROM pairings')[0]?.id;
-    // A second close, as a second session's success would do it.
-    store?.run(STORE_SQL.closePairing, [
-      Date.now(),
-      'pnpm db:migrate',
-      '["migrate.ts"]',
-      'code',
-      id,
-    ]);
-    store?.close();
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'unverified',
+      closes: 1,
+    });
+    expect(rows('SELECT COUNT(*) AS n FROM pairing_closes')[0]).toEqual({ n: 1 });
+  });
 
-    const verified = rows('SELECT status, closes FROM pairings')[0];
-    expect(verified).toEqual({ status: 'verified', closes: 2 });
+  /**
+   * A laptop runs several checkouts. `pnpm test` passing in one repo must not
+   * close another repo's pairing and stamp it with a file that repo has never
+   * had — nor may a failure in one repo be answered with the other's fix.
+   */
+  it('never closes or replays across projects', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    expect(rows('SELECT status FROM pairings')[0]?.status).toBe('open');
+
+    // A different repo, same command head, an edit and a pass.
+    await runScript(
+      pushContextHookScript(dataDir),
+      edit('/repo/two/src/other.ts', 's2', '/repo/two'),
+    );
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate', 's2', '/repo/two'));
+    expect(rows('SELECT status FROM pairings')[0]?.status).toBe('open');
+
+    // Close it properly in its own repo, then hit the same failure in the other.
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+    expect(rows('SELECT status FROM pairings')[0]?.status).toBe('unverified');
+
+    const elsewhere = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's3', '/repo/two'),
+    );
+    // No replay from a checkout that never had migrate.ts; it opens its own row.
+    expect(elsewhere.stdout).not.toContain('Someone once fixed this');
+    expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 2 });
   });
 
   it('classifies an env-var failure as user scope, so it never syncs', async () => {
@@ -735,6 +1004,155 @@ describe('pairings: open, close, replay', () => {
     const { existsSync } = await import('node:fs');
     expect(existsSync(join(dataDir, STATE_DB_FILE))).toBe(false);
   });
+});
+
+describe('what the store is allowed to hold, and hand back', () => {
+  /**
+   * A command line is the one input this arm sees that routinely carries a
+   * credential: leading `FOO=bar` assignments are stepped over by the head
+   * parser, so `DATABASE_URL=postgres://app:pw@db.internal/x pnpm db:migrate` is
+   * allowlisted. `clean()` only strips control bytes, so the raw line used to
+   * land verbatim in `events.data`, `pairings.cmd` and `pairings.fix_cmd` — and
+   * `fix_cmd` is read back OUT into a later session's context by the replay.
+   */
+  it('never stores or replays a credential from the command line', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    const secret = 'postgres://app:hunter2@db.internal/x';
+    const command = `DATABASE_URL=${secret} pnpm db:migrate`;
+    const ENOENT =
+      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n" +
+      '    at run (/repo/one/src/migrate.ts:12:3)\n';
+    const fire = (session: string, response: Record<string, string>) =>
+      JSON.stringify({
+        session_id: session,
+        cwd: '/repo/one',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: response,
+      });
+
+    await runScript(pushFailureHookScript(dataDir), fire('s1', { stdout: '', stderr: ENOENT }));
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: 's1',
+        cwd: '/repo/one',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: '/repo/one/src/migrate.ts' },
+      }),
+    );
+    await runScript(pushFailureHookScript(dataDir), fire('s1', { stdout: 'ok\n', stderr: '' }));
+
+    // Nothing anywhere in the database.
+    const dump = JSON.stringify([
+      rows('SELECT data FROM events'),
+      rows('SELECT cmd, fix_cmd, error_line FROM pairings'),
+      rows('SELECT fix_cmd FROM pairing_closes'),
+    ]);
+    expect(dump).not.toContain('hunter2');
+    expect(dump).not.toContain('db.internal');
+
+    // ...and nothing in what a LATER session is handed back.
+    const replay = await runScript(
+      pushFailureHookScript(dataDir),
+      fire('s2', { stdout: '', stderr: ENOENT }),
+    );
+    expect(replay.stdout).toContain('Someone once fixed this by touching');
+    expect(replay.stdout).not.toContain('hunter2');
+    expect(replay.stdout).not.toContain('db.internal');
+  });
+
+  /**
+   * The close rule's only evidence is the edited-files record, and it used to be
+   * one JSON map bounded at 200 keys evicted in Object.keys ORDER — insertion
+   * order, which re-writing an existing key does not change. So re-editing the
+   * earliest-touched file (very often exactly the config the failing command
+   * named) put the freshest timestamp in the map and then deleted it on the next
+   * new-path edit, and the pairing never closed.
+   */
+  it('closes a pairing fixed in a file edited long before 200 others', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    const edit = (path: string) =>
+      JSON.stringify({
+        session_id: 's1',
+        cwd: '/repo/one',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: path },
+      });
+    // The file the failure will name, touched FIRST.
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/drizzle.config.ts'));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: 's1',
+        cwd: '/repo/one',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm db:migrate' },
+        tool_response: {
+          stdout: '',
+          stderr:
+            "Error: ENOENT: no such file or directory, open 'x'\n" +
+            '    at load (/repo/one/drizzle.config.ts:4:1)\n',
+        },
+      }),
+    );
+    // 210 unrelated files, then the fix to the original one.
+    for (let i = 0; i < 210; i += 1) {
+      await runScript(pushContextHookScript(dataDir), edit(`/repo/one/src/f${i}.ts`));
+    }
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/drizzle.config.ts'));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: 's1',
+        cwd: '/repo/one',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm db:migrate' },
+        tool_response: { stdout: 'ok\n', stderr: '' },
+      }),
+    );
+    expect(rows('SELECT status FROM pairings')[0]?.status).toBe('unverified');
+    expect(JSON.parse(String(rows('SELECT fix_files FROM pairings')[0]?.fix_files))).toContain(
+      'drizzle.config.ts',
+    );
+  }, 60_000);
+
+  /**
+   * Parallel subagents share their parent's session id, and both hook events can
+   * fire for one failure on some harnesses. The "seen this signature" check was
+   * a read-modify-write of one JSON list, so two processes both passed it: one
+   * failure opened two pairings and spent two lookups.
+   */
+  it('opens one pairing when two hooks fire for one failure at once', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    const payload = JSON.stringify({
+      session_id: 's1',
+      cwd: '/repo/one',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'pnpm db:migrate' },
+      tool_response: {
+        stdout: '',
+        stderr:
+          "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n" +
+          '    at run (/repo/one/src/migrate.ts:12:3)\n',
+      },
+    });
+    const runs = await Promise.all(
+      Array.from({ length: 6 }, () => runScript(pushFailureHookScript(dataDir), payload)),
+    );
+    for (const run of runs) {
+      expect(run.code).toBe(0);
+      expect(run.stderr).toBe('');
+    }
+    expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 1 });
+    expect(rows("SELECT COUNT(*) AS n FROM events WHERE hook = 'failure'")[0]).toEqual({ n: 1 });
+  }, 30_000);
 });
 
 describe('the search store round-trips through the database', () => {

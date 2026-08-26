@@ -283,7 +283,7 @@ function isFree(candidate) {
  * already agreed. \`tenjin push status\` tallies these.
  */
 function recordDecision(row) {
-  recordInjection({
+  return recordInjection({
     session: row.session,
     cwd: row.cwd,
     eventUid: row.eventUid,
@@ -499,7 +499,7 @@ function fullForm(opener, header, body, deny) {
  * allowed to interrupt anyone. \`allowDeny\` is the research arm's alone; every
  * other arm fires beside a call that has already been made or allowed.
  *
- * \`source\` is what a public lookup is recorded as in searches.json, and it is
+ * \`source\` is what a public lookup is recorded under in the search store, and it is
  * NOT cosmetic. The research arm stands in front of a WebSearch the agent asked
  * for, so it records 'websearch-hook' exactly as the unpushed path did: that is
  * the source the Stop hook's MISS reminder nags on, the demand budget counts,
@@ -694,31 +694,38 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
       text = fullForm(opener, headerLine(j.top), body, deny);
     }
   }
-  recordDecision({ ...row, action: 'injected', form, deny, tokens: Math.ceil(text.length / 4) });
+  // THE WRITE IS THE DECISION. The \`alreadyShown\` check above is a cheap
+  // pre-filter that saves a wasted body fetch, but between it and here this arm
+  // may have awaited a whole HTTP round trip, and a concurrent fire in the same
+  // session can have claimed the piece meanwhile. The unique index refuses the
+  // second row, and THAT is what makes once-per-session a bound rather than a
+  // best-effort race — so a refusal turns into the skip it always meant.
+  const claimed = recordDecision({
+    ...row,
+    action: 'injected',
+    form,
+    deny,
+    tokens: Math.ceil(text.length / 4),
+  });
+  if (claimed === 'duplicate') {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+    return { kind: 'done' };
+  }
   return { kind: 'done', decided: { text, form, deny } };
 }
 
 // ---- per-session state (edits seen, packages seen, error signatures seen) ----
 //
-// One row per (session, key) in \`session_state\`, upserted. This used to be a
-// whole-file JSON read-modify-write per session under the push directory, with
-// last-writer-wins as its documented contract: two arms inside it at once (the
-// context arm looks two packages up concurrently) dropped each other's
-// unrelated keys, and a 24h pruner swept the directory to keep it from growing.
-// Per-key upserts make the clobbering impossible, and there is no directory left
-// to prune.
-
-/** A string array value, or []. */
-function stateList(sessionId, key) {
-  const value = getState(sessionId, key);
-  return Array.isArray(value) ? value.filter((v) => typeof v === 'string') : [];
-}
-
-/** A record value, or {}. */
-function stateMap(sessionId, key) {
-  const value = getState(sessionId, key);
-  return isRecord(value) ? value : {};
-}
+// One row per MEMBER in \`session_state\` — \`edited:<path>\`, \`sig:<hash>\`,
+// \`package:<name>\`, \`edits:<path>\` — each written by a single statement.
+//
+// This used to be a whole-file JSON read-modify-write per session under the push
+// directory, with last-writer-wins as its documented contract, and the first cut
+// of the store kept the shape: one JSON blob per key. That moved the race rather
+// than closing it — two hook processes for one session (parallel subagents share
+// their parent's session id) both read the blob, both added their own entry, and
+// the second write dropped the first. A member per row makes every write atomic,
+// so the claim in this comment is now true rather than aspirational.
 
 // ---- package extraction ----
 const NODE_BUILTINS = new Set([
@@ -1220,16 +1227,43 @@ function signatureOf(line) {
 // ---- sig_v1: the mechanical lane's key (04, "Two knowledge lanes") ----
 
 /**
- * The errno-shaped token a failure names, or ''. Extracted from the RAW line,
- * before normalization, because normalization is what destroys it:
- * \`ERR_PNPM_OUTDATED_LOCKFILE\` has the exact shape of an environment variable
- * name, and the rule that turns env-var names into \`E\` would eat the most
- * specific thing the line says.
+ * POSIX/libuv errno names, spelled out.
+ *
+ * A WHITELIST, NOT A SHAPE. \`/E[A-Z]{3,}/\` matches ERROR, ERRORS, ESLINT,
+ * EXPECTED, EXIT and every other capitalised English word a toolchain prints,
+ * so a bare "2 failed" — deliberately BELOW the specificity floor — cleared it
+ * on the strength of the word ERROR appearing anywhere in the output, and got a
+ * coarse key that is byte-identical in every repo on earth. That is precisely
+ * the cross-repo replay the floor exists to prevent.
  */
-const SIG_ERRNO_RE = /\b(E[A-Z]{3,}|ERR_[A-Z0-9_]+|TS\d{3,5}|E\d{3,4})\b/;
+const ERRNO_NAMES = new Set([
+  'ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'EISDIR', 'ENOTDIR', 'ENOTEMPTY', 'ENAMETOOLONG',
+  'ELOOP', 'EXDEV', 'EROFS', 'EMFILE', 'ENFILE', 'ENOSPC', 'EDQUOT', 'EFBIG', 'EBUSY',
+  'EAGAIN', 'EPIPE', 'ESPIPE', 'EBADF', 'EINVAL', 'ERANGE', 'ENOMEM', 'ENOSYS', 'EINTR',
+  'EADDRINUSE', 'EADDRNOTAVAIL', 'ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT',
+  'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'ENOTCONN', 'EPROTO', 'EPROTONOSUPPORT',
+  'ENOTFOUND', 'EAI_AGAIN', 'ECANCELED', 'EDESTADDRREQ', 'EMSGSIZE', 'EOVERFLOW',
+]);
+
+/**
+ * The errno-shaped token a failure names, or ''.
+ *
+ * Read off the RAW error line, before normalization, because normalization is
+ * what destroys it: \`ERR_PNPM_OUTDATED_LOCKFILE\` has the exact shape of an
+ * environment variable name, and the rule that turns env-var names into \`E\`
+ * would eat the most specific thing the line says.
+ *
+ * A token qualifies only if it carries a digit or an underscore — \`TS2345\`,
+ * \`E0412\`, \`ERR_MODULE_NOT_FOUND\` — or is a real errno by name. Everything
+ * else is English.
+ */
+const SIG_ERRNO_RE = /\b(ERR_[A-Z0-9]+(?:_[A-Z0-9]+)*|TS\d{3,5}|E\d{3,4}|E[A-Z]{3,})\b/g;
 function errnoOf(text) {
-  const m = SIG_ERRNO_RE.exec(String(text));
-  return m === null ? '' : m[1];
+  for (const m of String(text).matchAll(SIG_ERRNO_RE)) {
+    const token = m[1];
+    if (/[_\d]/.test(token) || ERRNO_NAMES.has(token)) return token;
+  }
+  return '';
 }
 
 /** \`at fn (/a/b/file.ts:12:3)\`, \`File "/a/b.py", line 3\`, tsc's
@@ -1289,7 +1323,10 @@ function normalizeForSig(text) {
  */
 function sigV1(line, text) {
   const message = normalizeForSig(line);
-  const errno = errnoOf(line) || errnoOf(text);
+  // ANCHORED TO THE ERROR LINE. Scanning the whole 20 KB of output for an errno
+  // meant a token from an unrelated log line hundreds of lines away could clear
+  // the floor for a message that says nothing specific at all.
+  const errno = errnoOf(line);
   const frame = topFrameFile(text);
   if (errno === '' && frame === '') return null;
   return {
@@ -1356,6 +1393,22 @@ function pairingScope(errorLine, fixFiles) {
   return 'code';
 }
 
+/**
+ * The command as it may be STORED and REPLAYED.
+ *
+ * \`clean()\` only strips control bytes, and a command line is the one input
+ * to this arm that routinely carries a credential: an allowlisted
+ * \`DATABASE_URL=postgres://app:pw@db.internal/x pnpm drizzle-kit migrate\` or
+ * \`NPM_TOKEN=… npm publish\` passes the head check (leading assignments are
+ * stepped over) and would otherwise land verbatim in the database — and then be
+ * read back out into a LATER session's context by \`pairingText\`. The plan's
+ * adversarial section is explicit that the db never holds more than the wire
+ * did, so the same \`scrub()\` every query goes through runs here too.
+ */
+function safeCommand(command) {
+  return clean(scrub(command), 300);
+}
+
 /** The bare package name of \`name@1.2.3\`, keeping a scope intact. */
 function bareName(spec) {
   const at = spec.lastIndexOf('@');
@@ -1401,17 +1454,24 @@ function stalenessNote(pairing, cwd) {
   return null;
 }
 
-/** Tracked files this session edited since \`sinceMs\`. Written by the context
- *  arm on every Edit/Write/MultiEdit, which is the only way a hook process sees
- *  a file change without asking git. */
+/**
+ * Tracked files this session edited since \`sinceMs\`. Written by the context arm
+ * on every Edit/Write/MultiEdit, which is the only way a hook process sees a
+ * file change without asking git.
+ *
+ * ONE ROW PER PATH, queried by time. This used to be one JSON map under a
+ * single key, which cost it twice: a concurrent edit hook could drop an entry
+ * on the read-modify-write, and the 200-key bound evicted by Object.keys ORDER
+ * — insertion order, which re-writing an existing key does not change — so
+ * re-editing the earliest-touched file (very often the config file the failing
+ * command named) deleted the freshest timestamp in the map and the pairing it
+ * would have closed stayed open.
+ */
 function editedSince(sessionId, sinceMs) {
-  const edited = stateMap(sessionId, STATE_EDITED);
   const out = [];
-  for (const path of Object.keys(edited)) {
-    const at = edited[path];
-    if (typeof at !== 'number' || at < sinceMs) continue;
-    if (!isTrackedPath(path)) continue;
-    const base = path.split(/[/\\]/).pop();
+  for (const row of statePrefixSince(sessionId, STATE_EDITED_PREFIX, sinceMs, 200)) {
+    if (!isTrackedPath(row.key)) continue;
+    const base = row.key.split(/[/\\]/).pop();
     if (typeof base === 'string' && base.length > 0) out.push(base);
   }
   return out.slice(0, 8);
@@ -1431,7 +1491,11 @@ function pairingText(pairing, staleNote) {
       : 'Someone once fixed this by touching: ' + files + '.',
   );
   if (typeof pairing.fixCmd === 'string' && pairing.fixCmd.length > 0) {
-    lines.push('It passed afterwards on: ' + pairing.fixCmd);
+    // Scrubbed again on the way OUT. It was scrubbed on the way in, but this
+    // line is read back into a different session's context, and a row written
+    // by a build whose scrubber was weaker must not be the thing that carries a
+    // credential forward.
+    lines.push('It passed afterwards on: ' + safeCommand(pairing.fixCmd));
   }
   if (staleNote !== null) lines.push(staleNote);
   return lines.join('\n');
@@ -1451,18 +1515,50 @@ function pairingText(pairing, staleNote) {
  * inject as a fix.
  */
 function closeOpenPairings(sessionId, cwd, command, heads) {
-  const passed = clean(command, 300);
+  const passed = safeCommand(command);
+  const closeIf = (pairing) => {
+    if (pairing === null) return;
+    const changed = editedSince(sessionId, pairing.at);
+    if (changed.length === 0) return;
+    const named = changed.filter((f) => pairing.errorFiles.includes(f));
+    const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
+    if (named.length === 0 && !sameCommand) return;
+    const fixFiles = named.length > 0 ? named : changed;
+    closePairing(
+      pairing.id,
+      sessionId,
+      passed,
+      fixFiles,
+      pairingScope(pairing.errorLine, fixFiles),
+    );
+  };
   for (const head of heads) {
-    for (const pairing of openPairingsForHead(head, Date.now(), 8)) {
-      const changed = editedSince(sessionId, pairing.at);
-      if (changed.length === 0) continue;
-      const named = changed.filter((f) => pairing.errorFiles.includes(f));
-      const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
-      if (named.length === 0 && !sameCommand) continue;
-      const fixFiles = named.length > 0 ? named : changed;
-      closePairing(pairing.id, passed, fixFiles, pairingScope(pairing.errorLine, fixFiles));
-    }
+    // Rows this session opened itself. Project-scoped: a passing \`pnpm test\`
+    // in one repo must not close another repo's pairing and stamp it with a
+    // file that repo has never had.
+    for (const pairing of openPairingsForHead(cwd, head, Date.now(), 8)) closeIf(pairing);
+    // AND the row this session was SHOWN rather than opened. Without this the
+    // second close 04 promotes to \`verified\` is unreachable: a session that
+    // hits a known failure takes the replay branch and never opens a row of its
+    // own, so its later success had nothing to close. Independence is enforced
+    // by \`pairing_closes\`, not by this lookup.
+    const replayed = replayedPairing(sessionId, head);
+    if (replayed !== null) closeIf(pairingById(replayed));
   }
+}
+
+/**
+ * Remember that this session was shown pairing \`id\` behind \`head\`, so its
+ * later success on that head can close it as an independent second closer.
+ */
+function rememberReplay(sessionId, head, id) {
+  if (typeof head !== 'string' || head.length === 0) return;
+  setState(sessionId, STATE_REPLAYED_PREFIX + head, id);
+}
+
+function replayedPairing(sessionId, head) {
+  const id = getState(sessionId, STATE_REPLAYED_PREFIX + head);
+  return typeof id === 'number' ? id : null;
 }
 
 async function main() {
@@ -1496,12 +1592,12 @@ async function main() {
   const line = errorLine(text.slice(-20000));
   if (line === null) return quiet();
 
-  const signature = signatureOf(line);
-  const signatures = stateList(sessionId, STATE_SIGNATURES);
-  // Once per signature per session: the same failing command re-run five times
-  // is one problem, and both events can fire for one failure on some harnesses.
-  if (signatures.includes(signature)) return quiet();
-  setState(sessionId, STATE_SIGNATURES, [...signatures.slice(-49), signature]);
+  // ONCE PER SIGNATURE PER SESSION, CLAIMED ATOMICALLY. The same failing command
+  // re-run five times is one problem, both hook events can fire for one failure
+  // on some harnesses, and parallel subagents share their parent's session id —
+  // so the read-modify-write this replaces had a window that two processes both
+  // passed, opening duplicate pairings and spending two lookups on one failure.
+  if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) return quiet();
 
   const packages = [...new Set([...packagesInCommand(command), ...packagesInError(text)])];
   const scrubbed = scrub(line);
@@ -1510,7 +1606,7 @@ async function main() {
     cwd,
     hook: 'failure',
     tool: 'Bash',
-    data: { event, command: clean(command, 300) },
+    data: { event, command: safeCommand(command) },
   });
 
   // THE MECHANICAL LANE, AND IT RUNS FIRST — before the query is built and
@@ -1521,10 +1617,14 @@ async function main() {
   // avoid.
   const sig = sigV1(line, text);
   if (sig !== null) {
-    const match = findPairing(sig.key, sig.coarseKey);
+    const match = findPairing(cwd, sig.key, sig.coarseKey);
     if (match !== null && !alreadyShown(sessionId, 'pairing:' + match.id)) {
       const body = pairingText(match, stalenessNote(match, cwd));
-      recordInjection({
+      // BEFORE the emit, because emit exits the process: this is what lets this
+      // session's later success close the pairing it was shown, which is the
+      // only route to \`verified\` through the hooks.
+      rememberReplay(sessionId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
+      const claimed = recordInjection({
         session: sessionId,
         cwd,
         eventUid,
@@ -1539,6 +1639,22 @@ async function main() {
         form: 'short',
         tokens: Math.ceil(body.length / 4),
       });
+      // A concurrent fire in this session claimed the same pairing first: the
+      // unique index refused this row, so this process records the skip and
+      // stays silent rather than injecting the same text twice.
+      if (claimed === 'duplicate') {
+        recordInjection({
+          session: sessionId,
+          cwd,
+          eventUid,
+          hook: 'failure',
+          shelf: 'local',
+          candidate: { id: 'pairing:' + match.id, title: match.errorLine, price: '0' },
+          action: 'skipped',
+          reason: 'already-injected',
+        });
+        return quiet();
+      }
       return emit(event, body);
     }
     // Nothing local yet. Open a pairing so the NEXT success on this head can
@@ -1551,7 +1667,7 @@ async function main() {
       // The LAST allowlisted head, which is the build/test step the failure
       // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
       cmdHead: heads.length > 0 ? heads[heads.length - 1] : null,
-      cmd: clean(command, 300),
+      cmd: safeCommand(command),
       errorLine: clean(scrubbed, 300),
       errorFiles: filesInError(text),
       pkgVersions: pkgVersions(cwd, packages),
@@ -1661,7 +1777,19 @@ async function main() {
       text = fullForm(shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER, headerLine(top), body);
     }
   }
-  recordDecision({ ...base, action: 'injected', form, deny: false, tokens: Math.ceil(text.length / 4) });
+  const claimed = recordDecision({
+    ...base,
+    action: 'injected',
+    form,
+    deny: false,
+    tokens: Math.ceil(text.length / 4),
+  });
+  // Same rule as every other arm: the unique index is the bound, so a piece a
+  // concurrent fire already claimed is recorded as a skip and not shown twice.
+  if (claimed === 'duplicate') {
+    recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
+    return quiet();
+  }
   emit('SubagentStart', text);
 }
 
@@ -1733,23 +1861,26 @@ async function main() {
   // tool call. A .toml, a Dockerfile and a drizzle.config.ts are all fixes; the
   // churn and read arms below still only care about source files.
   if (isEdit) {
-    const edited = stateMap(sessionId, STATE_EDITED);
-    edited[filePath.slice(-200)] = Date.now();
-    // Bounded: a session that touches thousands of files keeps the last 200.
-    const paths = Object.keys(edited);
-    if (paths.length > 200) for (const k of paths.slice(0, paths.length - 200)) delete edited[k];
-    setState(sessionId, STATE_EDITED, edited);
+    // ONE ROW PER PATH, upserted. The close rule reads these back by TIME, so a
+    // re-edit has to move the timestamp and nothing else; the JSON map this
+    // replaces lost entries to concurrent writers and evicted by insertion
+    // order, which a re-edit does not change.
+    setState(sessionId, STATE_EDITED_PREFIX + filePath.slice(-200), true);
   }
 
   if (!/\.(m?[jt]sx?|cjs|py)$/.test(filePath)) return quiet();
 
   if (isRead) {
-    const seen = stateList(sessionId, STATE_PACKAGES);
-    const fresh = packagesInSource(fileHead(filePath)).filter((p) => !seen.includes(p));
-    const room = READ_PACKAGES_MAX - seen.length;
-    const take = fresh.slice(0, Math.max(0, Math.min(READ_PER_FILE, room)));
+    const room = READ_PACKAGES_MAX - countStatePrefix(sessionId, STATE_PACKAGES_PREFIX);
+    if (room <= 0) return quiet();
+    // CLAIMED ONE AT A TIME, so two concurrent Read hooks cannot both decide the
+    // same package is fresh and spend two lookups on it.
+    const take = [];
+    for (const pkg of packagesInSource(fileHead(filePath))) {
+      if (take.length >= Math.min(READ_PER_FILE, room)) break;
+      if (claimState(sessionId, STATE_PACKAGES_PREFIX + pkg)) take.push(pkg);
+    }
     if (take.length === 0) return quiet();
-    setState(sessionId, STATE_PACKAGES, [...seen, ...take]);
     // CONCURRENT, not sequential. This arm is log-only: nothing it learns
     // reaches the model, and it runs in front of the agent's next step, so the
     // two lookups cost ONE round trip of waiting rather than two. Awaited all
@@ -1774,14 +1905,9 @@ async function main() {
   }
 
   if (isEdit) {
-    const edits = stateMap(sessionId, STATE_EDITS);
-    const key = filePath.slice(-200);
-    const n = (typeof edits[key] === 'number' ? edits[key] : 0) + 1;
-    edits[key] = n;
-    // Bounded: a session that touches thousands of files keeps the last 200.
-    const keys = Object.keys(edits);
-    if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete edits[k];
-    setState(sessionId, STATE_EDITS, edits);
+    // One statement, so two concurrent edit hooks cannot both read N and both
+    // write N+1 — which would step over the Nth edit this arm triggers on.
+    const n = bumpState(sessionId, STATE_EDITS_PREFIX + filePath.slice(-200));
     if (n !== CHURN_EDITS) return quiet();
     // SCRUBBED, like every other arm's query. A basename is operator-chosen text
     // going on the wire, and \`clean()\` is not the secret filter — it bounds the

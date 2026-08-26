@@ -70,6 +70,26 @@ export const STORE_USER_VERSION = 1;
 export const STORE_BUSY_TIMEOUT_MS = 250;
 
 /**
+ * The wait for the ONE-TIME schema transaction, and how many times it is tried.
+ *
+ * 250 ms is sized for a steady-state write: sub-millisecond inserts queueing
+ * behind each other, inside every arm's budget. The cold start is a different
+ * shape — a burst of hooks meeting an empty database all take `BEGIN IMMEDIATE`
+ * at once, and the winner holds the write lock for the whole DDL while the rest
+ * queue. Measured on this machine, the plan's own 8-process case tripped that
+ * ceiling about one run in six: the loser printed
+ * `tenjin: state store unavailable (database is locked)` to stderr, which Claude
+ * Code shows the operator, and lost its state for that fire.
+ *
+ * So the bootstrap gets its own, longer wait, and it is put back immediately
+ * afterwards so no ordinary fire ever inherits it. This is a once-per-machine
+ * cost (the gate is `user_version < 1`), and it stays inside every hook's
+ * watchdog — the tightest is the prompt arm's 2700 ms budget.
+ */
+export const STORE_BOOTSTRAP_TIMEOUT_MS = 1000;
+export const STORE_BOOTSTRAP_TRIES = 3;
+
+/**
  * The whole schema, run once at `user_version = 0`.
  *
  * Rules that keep it cheap to extend: JSON `data`/`value` columns carry
@@ -139,7 +159,15 @@ CREATE TABLE IF NOT EXISTS injections (
   outcome_by TEXT,
   synced_at INTEGER
 );
-CREATE INDEX IF NOT EXISTS injections_session_resource ON injections(session, resource_id);
+-- ONCE PER SESSION, ENFORCED BY THE DATABASE. The already-shown check used to be
+-- a bare SELECT and the injected row a bare INSERT, with a body fetch in
+-- between, so two concurrent fires for one session could both read "not shown"
+-- and both inject: the bound was advisory. This index is what makes it a bound.
+-- The second INSERT is refused, and the arm records the skip instead of
+-- emitting. It serves the already-shown lookup too: same columns, same filter.
+CREATE UNIQUE INDEX IF NOT EXISTS injections_shown_once
+  ON injections(session, resource_id)
+  WHERE action = 'injected' AND resource_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS injections_hook_at ON injections(hook, at);
 CREATE INDEX IF NOT EXISTS injections_outcome ON injections(outcome) WHERE outcome IS NOT NULL;
 
@@ -191,6 +219,21 @@ CREATE TABLE IF NOT EXISTS pairings (
   closed_at INTEGER,
   synced_at INTEGER
 );
+-- WHO CLOSED A PAIRING, one row per closer. 04's rule is "two INDEPENDENT
+-- closes -> verified", and independence has to be enforced rather than trusted:
+-- with a bare counter the same session could close twice and self-promote. The
+-- primary key is the enforcement, so a repeat close from the same session is an
+-- INSERT OR IGNORE that changes nothing, and pairings.closes is recomputed from
+-- a COUNT rather than incremented.
+CREATE TABLE IF NOT EXISTS pairing_closes (
+  pairing_id INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  fix_cmd TEXT,
+  fix_files TEXT,
+  PRIMARY KEY (pairing_id, session)
+);
+
 CREATE INDEX IF NOT EXISTS pairings_key_status ON pairings(key, status);
 CREATE INDEX IF NOT EXISTS pairings_coarse_status ON pairings(coarse_key, status);
 CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';
@@ -256,6 +299,30 @@ export const STORE_SQL = {
   setState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
   deleteState: 'DELETE FROM session_state WHERE session = ? AND key = ?',
+  /**
+   * Claim one key for this session, atomically. `DO NOTHING` plus
+   * `changes()` is the whole point: the read-modify-write these replaced
+   * ("is this signature already seen? then add it to the list") had a window
+   * two concurrent hook processes both passed, so one failure opened two
+   * pairings and spent two lookups.
+   */
+  claimState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(session, key) DO NOTHING`,
+  /** Rows under one key prefix, newest first. Used for the per-path `edited:`
+   *  rows the close rule reads. */
+  statePrefixSince: `SELECT key, value, at FROM session_state
+     WHERE session = ? AND key >= ? AND key < ? AND at >= ? ORDER BY at DESC LIMIT ?`,
+  countStatePrefix: `SELECT COUNT(*) AS n FROM session_state
+     WHERE session = ? AND key >= ? AND key < ?`,
+  /**
+   * Bump a counter key and hand back the new value, in one statement. The churn
+   * arm's "Nth edit to this file" was a whole-map read-modify-write, so two
+   * concurrent edit hooks could both read N and both write N+1.
+   */
+  bumpState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, '1', ?)
+     ON CONFLICT(session, key)
+     DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), at = excluded.at
+     RETURNING value`,
 
   recordSearch: `INSERT INTO searches (
        search_id, at, session, question, fingerprint, decision, candidates,
@@ -279,8 +346,22 @@ export const STORE_SQL = {
      WHERE session = ? AND fingerprint = ? LIMIT 1`,
   countBySource: `SELECT COUNT(*) AS n FROM searches
      WHERE session = ? AND source = ? AND at >= ?`,
+  /**
+   * MISSes nothing has closed, newest first, inside the window.
+   *
+   * FILTERED BEFORE THE LIMIT, not after. The Stop hook takes 25 rows and then
+   * discards the sources it never nags about (`push-hook`, `dispatch-hook`) and
+   * the sessions that are not its own — so with the push arms on, a machine that
+   * writes a MISS row for every unanswered lookup pushed a deliberate
+   * `tenjin search` MISS out of the 25 newest within the hour, and the loop it
+   * exists to raise was never raised again. The file version was protected by
+   * the demand budget that capped those sources at 15 of 50; the predicate here
+   * is what replaces it.
+   */
   openLoops: `SELECT * FROM searches
      WHERE decision = 'MISS' AND resolved_by IS NULL AND at >= ?
+       AND (source IS NULL OR source IN ('cli', 'websearch-hook'))
+       AND (? = '' OR session = ? OR session = '')
      ORDER BY at DESC, rowid DESC LIMIT ?`,
   /** Did this session ask for a search ITSELF? The push arms search on their own
    *  initiative, so their rows are not evidence the session researched anything
@@ -292,30 +373,53 @@ export const STORE_SQL = {
        uid, at, session, project, machine, kind, key, coarse_key,
        cmd_head, cmd, error_line, error_files, pkg_versions, scope, status
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`,
-  /** A local match, best first: verified outranks unverified, then most recent. */
+  /**
+   * A local match, best first: verified outranks unverified, then most recent.
+   *
+   * SCOPED TO THE PROJECT. 04's whole close rule is about a fix that changed a
+   * file in the repo the failure happened in, so a pairing from a different
+   * checkout on the same laptop is not an answer — it names files that do not
+   * exist here. `IS` rather than `=` so a payload with no cwd matches the rows
+   * written without one and nothing else.
+   */
   findPairing: `SELECT * FROM pairings
-     WHERE (key = ? OR (coarse_key IS NOT NULL AND coarse_key = ?))
+     WHERE project IS ?
+       AND (key = ? OR (coarse_key IS NOT NULL AND coarse_key = ?))
        AND status IN ('unverified', 'verified')
      ORDER BY CASE status WHEN 'verified' THEN 0 ELSE 1 END, closes DESC, at DESC
      LIMIT 1`,
-  /** Pairings this success could be closing: same command head, still open. */
+  /** Pairings this success could be closing: same project, same command head,
+   *  still open. Without the project predicate a passing `pnpm test` in one repo
+   *  closed another repo's pairing and stamped it with a file that repo has
+   *  never had. */
   openForHead: `SELECT * FROM pairings
-     WHERE status = 'open' AND cmd_head = ? AND at <= ? ORDER BY at DESC LIMIT ?`,
-  /** A close is `unverified`; the SECOND independent close promotes to
-   *  `verified` (04, "Close rule"). `closes` is the count, so the promotion is
-   *  one statement rather than a read-then-write race. */
-  closePairing: `UPDATE pairings SET
-       status = CASE WHEN closes + 1 >= 2 THEN 'verified' ELSE 'unverified' END,
-       closes = closes + 1,
+     WHERE status = 'open' AND project IS ? AND cmd_head = ? AND at <= ?
+     ORDER BY at DESC LIMIT ?`,
+  /** One replayed pairing, by id, so the session that was SHOWN it can close it
+   *  too — the second independent close 04 promotes to `verified`. */
+  pairingById: 'SELECT * FROM pairings WHERE id = ?',
+  /** Claim a close for this session. OR IGNORE, so a session that closes the
+   *  same pairing twice changes nothing: independence is the primary key's job,
+   *  not the caller's. */
+  claimClose: `INSERT OR IGNORE INTO pairing_closes (pairing_id, session, at, fix_cmd, fix_files)
+     VALUES (?, ?, ?, ?, ?)`,
+  /** Recompute the pairing from its closers. `closes` is a COUNT rather than an
+   *  increment, so two closes racing cannot both read the same old value, and a
+   *  repeat close from one session cannot promote anything (04, "Close rule":
+   *  two INDEPENDENT closes -> verified). */
+  syncPairing: `UPDATE pairings SET
+       closes = (SELECT COUNT(*) FROM pairing_closes WHERE pairing_id = pairings.id),
+       status = CASE
+         WHEN (SELECT COUNT(*) FROM pairing_closes WHERE pairing_id = pairings.id) >= 2
+           THEN 'verified'
+         WHEN (SELECT COUNT(*) FROM pairing_closes WHERE pairing_id = pairings.id) >= 1
+           THEN 'unverified'
+         ELSE status END,
        closed_at = ?,
        fix_cmd = COALESCE(fix_cmd, ?),
        fix_files = COALESCE(fix_files, ?),
        scope = ?
      WHERE id = ?`,
-  /** A later close of an already-closed pairing on the same key, from a
-   *  DIFFERENT session: two independent closes make it `verified`. */
-  closedOnKey: `SELECT * FROM pairings
-     WHERE key = ? AND status = 'unverified' AND session <> ? ORDER BY at DESC LIMIT 1`,
 
   /** `tenjin push status`, one pass over the window. */
   statusRows: `SELECT hook, shelf, action, reason, resource_id, deny, tokens
@@ -344,6 +448,8 @@ const STORE_SQL = __SQL__;
 const STORE_DDL = __DDL__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
+const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
+const STORE_BOOTSTRAP_TRIES = __BOOTSTRAP_TRIES__;
 
 /**
  * The \`session_state\` keys, named once so a typo is a missing constant rather
@@ -358,11 +464,23 @@ const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
  *    is stored under the '' session — the same bucket a payload naming no
  *    session falls into.
  */
-const STATE_EDITS = 'edits';
-const STATE_EDITED = 'edited';
-const STATE_PACKAGES = 'packages';
-const STATE_SIGNATURES = 'signatures';
 const STATE_CACHE = 'dispatch_cache';
+/**
+ * PREFIXES, NOT KEYS. Each of these was one JSON blob under a single key that
+ * every writer read, mutated and wrote back whole — so two hook processes in
+ * one session dropped each other's entries, and the bounded ones evicted by
+ * insertion order rather than by time. One row per member makes each write a
+ * single statement, which is what the per-key upsert claim in the arms' comment
+ * was always supposed to mean.
+ */
+const STATE_EDITS_PREFIX = 'edits:';
+const STATE_EDITED_PREFIX = 'edited:';
+const STATE_PACKAGES_PREFIX = 'package:';
+const STATE_SIGNATURES_PREFIX = 'sig:';
+/** Which pairing this session was SHOWN behind a given command head. It is what
+ *  lets the session that was replayed a pairing be its second independent
+ *  closer, which is the only route to \`verified\` through the hooks. */
+const STATE_REPLAYED_PREFIX = 'replayed:';
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
 const MACHINE_SESSION = '';
@@ -395,7 +513,40 @@ function shortHash(text) {
   return createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
 }
 
-const MACHINE_ID = shortHash(hostname() + ' ' + (userInfo().username || ''));
+/**
+ * A stable id for this machine, computed ONCE AND LAZILY.
+ *
+ * NEVER AT MODULE SCOPE. \`os.userInfo()\` throws ERR_SYSTEM_ERROR when the
+ * process uid has no passwd entry — the ordinary state in a devcontainer or a
+ * CI image started with \`--user 1001\`, or on Kubernetes with an arbitrary
+ * uid. At module scope that throw sits outside every try/catch and before
+ * \`main()\`, so on such a host EVERY hook would exit 1 with a stack trace —
+ * with push off, and before config.json is even read. This file's whole
+ * contract is fail-open, and a machine id is not worth breaking it for, so both
+ * halves are guarded and the fallback is the uid, or nothing.
+ */
+let MACHINE_ID = null;
+function machineId() {
+  if (MACHINE_ID !== null) return MACHINE_ID;
+  let host = '';
+  let user = '';
+  try {
+    host = hostname();
+  } catch {
+    // No hostname is a machine id of '', not a dead hook.
+  }
+  try {
+    user = userInfo().username || '';
+  } catch {
+    // getpwuid failed: an arbitrary container uid. The uid is a stable enough
+    // discriminator on its own, and '' is fine when even that is unavailable.
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+    user = uid === null ? '' : 'uid:' + uid;
+  }
+  MACHINE_ID = shortHash(host + ' ' + user);
+  return MACHINE_ID;
+}
+
 function projectId(cwd) {
   return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;
 }
@@ -427,25 +578,14 @@ async function openStore() {
     db.exec('PRAGMA busy_timeout = ' + STORE_BUSY_TIMEOUT_MS);
     db.exec('PRAGMA journal_mode = wal');
     db.exec('PRAGMA synchronous = normal');
-    if (storeVersion(db) !== STORE_USER_VERSION) {
-      // ONE transaction for the whole schema, gated on the version inside it: a
-      // racer blocks on BEGIN IMMEDIATE, then reads the new version and skips.
-      db.exec('BEGIN IMMEDIATE');
-      try {
-        if (storeVersion(db) !== STORE_USER_VERSION) {
-          db.exec(STORE_DDL);
-          db.exec(STORE_SQL.setUserVersion);
-        }
-        db.exec('COMMIT');
-      } catch (err) {
-        try {
-          db.exec('ROLLBACK');
-        } catch {
-          // Already rolled back by the failure itself.
-        }
-        throw err;
-      }
-    }
+    // LESS THAN, NEVER NOT-EQUAL. Hook scripts are regenerated only by
+    // \`tenjin install\`, so a machine can run v1 hooks against a database a
+    // newer CLI already migrated. On \`!==\` the stale hook stamps the version
+    // back down, the newer side migrates again, and the two ping-pong forever —
+    // and any non-idempotent statement in that later migration (#212 adds one
+    // under version 2) then throws and costs the newer build its store. A
+    // higher version is left exactly as it is.
+    if (storeVersion(db) < STORE_USER_VERSION) bootstrap(db);
     try {
       chmodSync(STATE_DB_PATH, 0o600);
     } catch {
@@ -466,6 +606,60 @@ async function openStore() {
   return STORE;
 }
 
+/**
+ * Create the schema, once, under a longer wait than an ordinary write gets.
+ *
+ * ONE transaction for the whole thing, gated on the version INSIDE it, so a
+ * racer blocks on BEGIN IMMEDIATE and then reads the new version and skips. The
+ * retry is for the cold-start stampede: with a burst of hooks meeting an empty
+ * database, the last waiter can still exceed even the raised timeout, and one
+ * more look costs nothing once the winner has committed — by then the version
+ * check short-circuits and there is no second DDL run.
+ *
+ * The busy timeout is restored in the \`finally\`, so nothing after this point
+ * inherits the bootstrap's patience.
+ */
+function bootstrap(db) {
+  try {
+    db.exec('PRAGMA busy_timeout = ' + STORE_BOOTSTRAP_TIMEOUT_MS);
+    for (let attempt = 0; attempt < STORE_BOOTSTRAP_TRIES; attempt += 1) {
+      if (storeVersion(db) >= STORE_USER_VERSION) return;
+      try {
+        db.exec('BEGIN IMMEDIATE');
+      } catch (err) {
+        // Someone else holds the write lock. Look again; they are almost
+        // certainly committing the very schema this call wanted.
+        if (attempt === STORE_BOOTSTRAP_TRIES - 1) throw err;
+        continue;
+      }
+      try {
+        if (storeVersion(db) < STORE_USER_VERSION) {
+          db.exec(STORE_DDL);
+          db.exec(STORE_SQL.setUserVersion);
+        }
+        db.exec('COMMIT');
+        return;
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          // Already rolled back by the failure itself.
+        }
+        if (attempt === STORE_BOOTSTRAP_TRIES - 1) throw err;
+      }
+    }
+  } finally {
+    try {
+      db.exec('PRAGMA busy_timeout = ' + STORE_BUSY_TIMEOUT_MS);
+    } catch {
+      // The open is about to fail anyway; the pragma is not what to report.
+    }
+  }
+}
+
+/** The stored schema version, or -1 when it cannot be read — which sorts BELOW
+ *  every real version, so an unreadable pragma still runs the (idempotent) DDL
+ *  rather than being mistaken for a newer database and skipped. */
 function storeVersion(db) {
   const row = db.prepare(STORE_SQL.userVersion).get();
   return isRecord(row) && typeof row.user_version === 'number' ? row.user_version : -1;
@@ -486,12 +680,35 @@ function storeUnavailable(err) {
  * BUSY past the timeout, a disk full, a schema from a newer build — none of
  * them are the tool call's problem.
  */
+/** Run one statement. Returns the driver's result (which carries \`changes\`,
+ *  the row count an \`ON CONFLICT DO NOTHING\` claim turns on) or null when
+ *  nothing ran. */
 function storeRun(sql, params) {
   if (STORE === null) return null;
   try {
     return STORE.prepare(sql).run(...params);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Run one INSERT and say what it did.
+ *
+ * \`storeRun\` cannot answer the question the once-per-session unique index
+ * asks: a refused duplicate and a broken database both come back as "nothing
+ * was written", and the caller has to treat them oppositely — a duplicate means
+ * another fire in this session claimed the piece first (record the skip, stay
+ * silent), while a missing store means fail open (emit anyway).
+ */
+function storeInsert(sql, params) {
+  if (STORE === null) return 'no-store';
+  try {
+    STORE.prepare(sql).run(...params);
+    return 'ok';
+  } catch (err) {
+    const message = err && err.message ? String(err.message) : '';
+    return /UNIQUE constraint failed/i.test(message) ? 'duplicate' : 'error';
   }
 }
 
@@ -551,7 +768,7 @@ function recordEvent(row) {
     Date.now(),
     storeSession(row.session),
     projectId(row.cwd),
-    MACHINE_ID,
+    machineId(),
     String(row.hook),
     row.tool === undefined ? null : String(row.tool),
     row.errorHash === undefined ? null : String(row.errorHash),
@@ -566,6 +783,12 @@ function recordEvent(row) {
  * (\`logged\`), or was deliberately not shown (\`skipped\`, with a reason). This
  * is what \`tenjin push status\` tallies and what the judge (#210) later writes
  * an outcome onto.
+ *
+ * RETURNS WHAT THE WRITE DID, because on the \`injected\` path the write IS the
+ * decision: 'ok', 'duplicate' (the once-per-session index refused it — another
+ * fire in this session got there first, so this one records a skip and stays
+ * silent), 'no-store' (fail open: the caller emits anyway) or 'error'. Callers
+ * that are only logging an outcome ignore it.
  */
 function recordInjection(row) {
   const id = uid();
@@ -580,13 +803,13 @@ function recordInjection(row) {
         : typeof candidate.id === 'string'
           ? candidate.id
           : null;
-  storeRun(STORE_SQL.insertInjection, [
+  return storeInsert(STORE_SQL.insertInjection, [
     id,
     row.eventUid === undefined ? null : String(row.eventUid),
     Date.now(),
     storeSession(row.session),
     projectId(row.cwd),
-    MACHINE_ID,
+    machineId(),
     String(row.hook),
     String(row.shelf === undefined ? 'public' : row.shelf),
     resourceId,
@@ -606,10 +829,10 @@ function recordInjection(row) {
     row.deny === true ? 1 : 0,
     typeof row.tokens === 'number' ? row.tokens : null,
   ]);
-  return id;
 }
 
-/** Has this session already been shown this piece, by ANY hook? */
+/** Has this session already been shown this piece, by ANY hook? A cheap
+ *  pre-check that saves a wasted body fetch; the unique index is the bound. */
 function alreadyShown(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
   return storeGet(STORE_SQL.alreadyShown, [storeSession(sessionId), resourceId]) !== null;
@@ -663,6 +886,73 @@ function clearState(sessionId, key) {
   storeRun(STORE_SQL.deleteState, [storeSession(sessionId), key]);
 }
 
+/**
+ * Claim \`key\` for this session: true the FIRST time, false ever after.
+ *
+ * ONE STATEMENT, because the pattern it replaces was a read-modify-write of a
+ * JSON list under a single key ("is this signature in the array? then append
+ * it"), and two hook processes for one session both passed the check before
+ * either wrote. One failure then opened two pairings and spent two lookups.
+ * \`DO NOTHING\` plus the row count is the whole guard.
+ */
+function claimState(sessionId, key, value) {
+  if (STORE === null) return true;
+  const result = storeRun(STORE_SQL.claimState, [
+    storeSession(sessionId),
+    key,
+    storeJson(value === undefined ? true : value),
+    Date.now(),
+  ]);
+  // A store that refused the write for any OTHER reason must not silence the
+  // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
+  if (result === null) return true;
+  return typeof result.changes === 'number' ? result.changes > 0 : true;
+}
+
+/**
+ * Bump a counter key and hand back the new value. One statement, so two
+ * concurrent edit hooks cannot both read N and both write N+1 — which is how
+ * the churn arm's "Nth edit to this file" trigger could be missed entirely.
+ */
+function bumpState(sessionId, key) {
+  const row = storeGet(STORE_SQL.bumpState, [storeSession(sessionId), key, Date.now()]);
+  if (row === null) return 0;
+  const n = Number(row.value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * The keys under \`prefix\` touched since \`sinceMs\`, newest first.
+ *
+ * ONE ROW PER PATH, which is what makes the close rule's evidence survive.
+ * \`edited\` used to be a single JSON map, so a concurrent write could drop an
+ * entry, and its 200-key eviction ran on Object.keys ORDER — insertion order,
+ * which a re-edit does not change — so re-editing the oldest-inserted file
+ * (very often exactly the config file the failing command named) evicted the
+ * freshest timestamp in the map and the pairing never closed.
+ */
+function statePrefixSince(sessionId, prefix, sinceMs, limit) {
+  const rows = storeAll(STORE_SQL.statePrefixSince, [
+    storeSession(sessionId),
+    prefix,
+    prefix + String.fromCharCode(0xffff),
+    sinceMs,
+    limit,
+  ]);
+  return rows.map((row) => ({
+    key: typeof row.key === 'string' ? row.key.slice(prefix.length) : '',
+    at: typeof row.at === 'number' ? row.at : 0,
+  }));
+}
+
+function countStatePrefix(sessionId, prefix) {
+  return storeCount(STORE_SQL.countStatePrefix, [
+    storeSession(sessionId),
+    prefix,
+    prefix + String.fromCharCode(0xffff),
+  ]);
+}
+
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */
 function touchSession(sessionId, cwd) {
   storeRun(STORE_SQL.touchSession, [
@@ -670,14 +960,14 @@ function touchSession(sessionId, cwd) {
     projectId(cwd),
     typeof cwd === 'string' ? cwd : null,
     Date.now(),
-    MACHINE_ID,
+    machineId(),
   ]);
 }
 
 /** Stop: stamp ended_at, creating the row if this machine never saw the start. */
 function endSession(sessionId) {
   const now = Date.now();
-  storeRun(STORE_SQL.endSession, [storeSession(sessionId), now, now, MACHINE_ID]);
+  storeRun(STORE_SQL.endSession, [storeSession(sessionId), now, now, machineId()]);
 }
 
 // ---- searches (what searches.json used to hold) ----
@@ -723,9 +1013,19 @@ function spentSince(sessionId, source, sinceMs) {
   return storeCount(STORE_SQL.countBySource, [storeSession(sessionId), source, sinceMs]);
 }
 
-/** MISSes nothing has closed, newest first, inside \`sinceMs\`. */
-function openLoops(sinceMs, limit) {
-  return storeAll(STORE_SQL.openLoops, [sinceMs, limit]).map(searchRow);
+/**
+ * MISSes nothing has closed, newest first, inside \`sinceMs\`.
+ *
+ * The source and session predicates are IN THE QUERY, not applied afterwards:
+ * the Stop hook takes a bounded number of rows and then discards the sources it
+ * never nags about, so filtering after the LIMIT let a machine with the push
+ * arms on bury a deliberate \`tenjin search\` MISS under its own telemetry
+ * within the hour. An empty \`sessionId\` means "every session", which is
+ * what an unscoped turn end wants.
+ */
+function openLoops(sessionId, sinceMs, limit) {
+  const scope = typeof sessionId === 'string' ? sessionId : '';
+  return storeAll(STORE_SQL.openLoops, [sinceMs, scope, scope, limit]).map(searchRow);
 }
 
 /** A stored row in the shape the callers used to read out of searches.json. */
@@ -757,7 +1057,7 @@ function openPairing(row) {
     Date.now(),
     storeSession(row.session),
     projectId(row.cwd),
-    MACHINE_ID,
+    machineId(),
     'sig_v1',
     String(row.key),
     typeof row.coarseKey === 'string' ? row.coarseKey : null,
@@ -773,30 +1073,57 @@ function openPairing(row) {
 
 /** The best local match for a signature: verified first, then most closed, then
  *  most recent. Fine key, then coarse — one indexed query does both. */
-function findPairing(key, coarseKey) {
+function findPairing(cwd, key, coarseKey) {
   const coarse = typeof coarseKey === 'string' && coarseKey.length > 0 ? coarseKey : '';
-  const row = storeGet(STORE_SQL.findPairing, [String(key), coarse]);
+  const row = storeGet(STORE_SQL.findPairing, [projectId(cwd), String(key), coarse]);
   return row === null ? null : pairingRow(row);
 }
 
-function openPairingsForHead(cmdHead, beforeMs, limit) {
-  return storeAll(STORE_SQL.openForHead, [String(cmdHead), beforeMs, limit]).map(pairingRow);
+function openPairingsForHead(cwd, cmdHead, beforeMs, limit) {
+  return storeAll(STORE_SQL.openForHead, [
+    projectId(cwd),
+    String(cmdHead),
+    beforeMs,
+    limit,
+  ]).map(pairingRow);
+}
+
+/** One pairing by id, for the session that was SHOWN it and later fixed it. */
+function pairingById(id) {
+  const row = storeGet(STORE_SQL.pairingById, [id]);
+  return row === null ? null : pairingRow(row);
 }
 
 /**
- * Close one pairing. The FIRST close is \`unverified\` ("someone once fixed this
- * by touching X"); a SECOND independent one promotes it to \`verified\` and it
- * injects as a fix. The promotion is inside the UPDATE so two closes racing
- * cannot both read \`closes = 0\`.
+ * Record that \`sessionId\` closed this pairing, then recompute it.
+ *
+ * TWO STATEMENTS, AND THE FIRST ONE IS THE GUARD. 04's rule is "two INDEPENDENT
+ * closes -> verified", so the closers are rows in \`pairing_closes\` keyed
+ * (pairing_id, session): a session closing the same pairing twice is an
+ * \`INSERT OR IGNORE\` that changes nothing and cannot self-promote, and
+ * \`closes\` is recomputed as a COUNT rather than incremented, so two closers
+ * racing cannot both read the same old value.
+ *
+ * Returns the resulting status, so the caller can say what it did.
  */
-function closePairing(id, fixCmd, fixFiles, scope) {
-  storeRun(STORE_SQL.closePairing, [
-    Date.now(),
+function closePairing(id, sessionId, fixCmd, fixFiles, scope) {
+  const now = Date.now();
+  storeRun(STORE_SQL.claimClose, [
+    id,
+    storeSession(sessionId),
+    now,
+    typeof fixCmd === 'string' ? fixCmd : null,
+    storeJson(fixFiles),
+  ]);
+  storeRun(STORE_SQL.syncPairing, [
+    now,
     typeof fixCmd === 'string' ? fixCmd : null,
     storeJson(fixFiles),
     String(scope),
     id,
   ]);
+  const after = pairingById(id);
+  return after === null ? 'open' : after.status;
 }
 
 function pairingRow(row) {
@@ -827,6 +1154,8 @@ function pairingRow(row) {
  */
 export function storeSource(): string {
   return STORE_CORE_JS.replaceAll('__DB_FILE__', JSON.stringify(STATE_DB_FILE))
+    .replaceAll('__BOOTSTRAP_TIMEOUT_MS__', String(STORE_BOOTSTRAP_TIMEOUT_MS))
+    .replaceAll('__BOOTSTRAP_TRIES__', String(STORE_BOOTSTRAP_TRIES))
     .replaceAll('__SQL__', JSON.stringify(STORE_SQL, null, 2))
     .replaceAll('__DDL__', JSON.stringify(STORE_DDL))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
@@ -894,21 +1223,44 @@ export async function openStore(dataDir: string): Promise<Store | null> {
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
     db.exec('PRAGMA journal_mode = wal');
     db.exec('PRAGMA synchronous = normal');
-    if (storeVersionOf(db) !== STORE_USER_VERSION) {
-      db.exec('BEGIN IMMEDIATE');
+    // `<`, never `!==`: see the note in the hook template above. A database a
+    // newer build has already migrated is left alone rather than downgraded.
+    // Same raised wait and same retry as the hooks get, for the same reason: a
+    // CLI command can be the one that meets an empty database beside a burst of
+    // them.
+    if (storeVersionOf(db) < STORE_USER_VERSION) {
       try {
-        if (storeVersionOf(db) !== STORE_USER_VERSION) {
-          db.exec(STORE_DDL);
-          db.exec(STORE_SQL.setUserVersion);
+        db.exec(`PRAGMA busy_timeout = ${STORE_BOOTSTRAP_TIMEOUT_MS}`);
+        for (let attempt = 0; attempt < STORE_BOOTSTRAP_TRIES; attempt += 1) {
+          if (storeVersionOf(db) >= STORE_USER_VERSION) break;
+          try {
+            db.exec('BEGIN IMMEDIATE');
+          } catch (err) {
+            if (attempt === STORE_BOOTSTRAP_TRIES - 1) throw err;
+            continue;
+          }
+          try {
+            if (storeVersionOf(db) < STORE_USER_VERSION) {
+              db.exec(STORE_DDL);
+              db.exec(STORE_SQL.setUserVersion);
+            }
+            db.exec('COMMIT');
+            break;
+          } catch (err) {
+            try {
+              db.exec('ROLLBACK');
+            } catch {
+              // Already rolled back by the failure itself.
+            }
+            if (attempt === STORE_BOOTSTRAP_TRIES - 1) throw err;
+          }
         }
-        db.exec('COMMIT');
-      } catch (err) {
+      } finally {
         try {
-          db.exec('ROLLBACK');
+          db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
         } catch {
-          // Already rolled back by the failure itself.
+          // The open is about to fail anyway; the pragma is not what to report.
         }
-        throw err;
       }
     }
     try {
