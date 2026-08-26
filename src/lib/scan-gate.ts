@@ -3,8 +3,9 @@ import { sanitizeForTerminal } from './output';
 import type { ScanFinding } from './scan';
 
 /**
- * The server-side ingest scan gate as the CLI sees it (session-observer plan,
- * PR 2b; server sibling tenjin#723). The gate runs the same rule corpus in the
+ * The server-side ingest scan gate as the CLI sees it; the consent half is
+ * `throughScanGate` in lib/consent.ts, the server sibling is tenjin#723. The
+ * gate runs the same rule corpus in the
  * marketplace's write path, so a publisher not running this CLI is gated too;
  * this module is the client half of that protocol.
  *
@@ -63,7 +64,8 @@ export const serverScanReportSchema = z
 
 export interface ServerScanReport {
   findings: ServerScanFinding[];
-  /** `ran` | `skipped` today. Open: the observer lane (PR 5) reads it fail-closed. */
+  /** `ran` | `skipped` today. Open: the unattended lane behind
+   *  `PublishDeps.ackServerWarnings` (commands/publish.ts) reads it fail-closed. */
   semantic?: string;
   ackToken?: string;
   acked?: boolean;
@@ -222,9 +224,13 @@ export function mergeScanFindings(
   }
 
   for (const f of server) {
-    const oKey = offsetKey(f.check, f.line, f.span);
     const vKey = valueKey(f.check, f.excerpt);
-    const seen = byOffset.get(oKey) ?? byValue.get(vKey);
+    // BY VALUE ONLY. `byOffset` holds local entries, whose coordinates point into
+    // the operator's file, while a server finding's point into the submitted
+    // field; reading it here collapsed a distinct server finding into a local one
+    // on a coordinate coincidence, and the operator then acked what the render
+    // had dropped.
+    const seen = byValue.get(vKey);
     if (seen !== undefined) {
       if (seen.source === 'local') seen.source = 'both';
       continue;
@@ -246,8 +252,9 @@ export function mergeScanFindings(
 /**
  * The gate's report on a write that SUCCEEDED, as machine data. `acked` records
  * that this run answered a warn-tier hold rather than sailing past one, and
- * `semantic` is the check marker the unattended observer lane (PR 5) reads
- * fail-closed. Findings stay the server's own renderable data, so a detector
+ * `semantic` is the check marker the unattended lane behind
+ * `PublishDeps.ackServerWarnings` (commands/publish.ts) reads fail-closed.
+ * Findings stay the server's own renderable data, so a detector
  * this release has never heard of arrives intact.
  */
 export function scanReceipt(report: ServerScanReport): {

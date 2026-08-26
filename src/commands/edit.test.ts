@@ -1594,6 +1594,15 @@ describe('runEdit — a team shelf narrows the scan exactly as publish does', ()
 // too; these run against a STUBBED gate response.
 // ---------------------------------------------------------------------------
 
+/** Write `publish.ackServerWarnings` into the ctx's global config. */
+async function setAckConfig(value: 'mode' | 'on' | 'off'): Promise<void> {
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ publish: { ackServerWarnings: value } }),
+    'utf8',
+  );
+}
+
 const GATE_FINDING = {
   check: 'email',
   severity: 'warn',
@@ -1643,7 +1652,11 @@ describe('runEdit — server ingest gate', () => {
     expect(stub.puts()).toHaveLength(1);
   });
 
-  it('re-sends the identical body with the token on an explicit yes', async () => {
+  // The same rule publish holds to, in the command that shares the gate: a
+  // `--yes` covers what an earlier render showed, and GATE_FINDING is the
+  // server's own, so the standing yes is what clears this hold.
+  it('re-sends the identical body with the token on a standing yes', async () => {
+    await setAckConfig('on');
     const stub = stubServer({
       put: { ...STORED, title: 'A new title', scan: { findings: [GATE_FINDING], acked: true } },
       respond: (call, attempt) =>
@@ -1662,6 +1675,24 @@ describe('runEdit — server ingest gate', () => {
     expect(puts[1]?.body?.scanAck).toBe('v1.tok.mac');
     expect(puts[1]?.body?.title).toBe(puts[0]?.body?.title);
     expect((res.data as { scan: { acked: boolean } }).scan.acked).toBe(true);
+  });
+
+  it('holds an edit whose --yes could not have covered the server finding', async () => {
+    const stub = stubServer({
+      respond: (call, attempt) =>
+        call.method === 'PUT' && attempt === 2
+          ? gateResponse('scan_needs_ack', { findings: [GATE_FINDING], ackToken: 'v1.tok.mac' })
+          : undefined,
+    });
+    const err = (await runEdit(
+      args({ title: 'A new title', yes: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string; fix?: string };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.fix).toContain('beyond what your --yes answered');
+    // The token stays unsent, so the edit did not land.
+    expect(stub.puts()).toHaveLength(1);
   });
 
   it('renders scan_blocked as a hard failure with no ack path', async () => {

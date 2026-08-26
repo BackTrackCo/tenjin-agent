@@ -14,6 +14,7 @@ import {
   resolveSettings,
 } from './config';
 import type {
+  AckServerWarnings,
   EffectiveSettings,
   PartialConfig,
   Provenance,
@@ -415,6 +416,8 @@ export interface ResolvedPublishSettings {
   modeSource: Provenance;
   defaultPriceAtomic: string;
   defaultPriceSource: Provenance;
+  /** The standing answer to the server gate's warn tier; see lib/consent.ts. */
+  ackServerWarnings: AckServerWarnings;
   /** Non-fatal notices for stderr (e.g. the full-auto downgrade). */
   warnings: string[];
   /** The `.tenjin.json` that contributed the project layer, if one was found. */
@@ -445,6 +448,10 @@ export async function resolvePublishSettings(
     modeSource: mode.source,
     defaultPriceAtomic: price.value,
     defaultPriceSource: price.source,
+    // Global config only, on purpose: the project layer never contributes here
+    // (see resolveAckServerWarnings), so `project` is deliberately not passed.
+    ackServerWarnings:
+      config.publish?.ackServerWarnings ?? CONFIG_DEFAULTS.publish.ackServerWarnings,
     warnings,
     ...(project !== null ? { projectConfigPath: project.path } : {}),
   };

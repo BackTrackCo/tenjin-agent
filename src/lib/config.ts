@@ -27,13 +27,44 @@ export function parsePublishModeFlag(value: string, flagName: string): PublishMo
 }
 
 /**
+ * The standing answer to the MARKETPLACE gate's warn tier (lib/consent.ts,
+ * `acksServerWarnings`), which is a different question from `publish.mode`: the
+ * mode decides what a run asks about the findings it can see locally, and this
+ * decides whether a yes already given also covers findings only the server
+ * found.
+ *
+ * `mode` (the default) derives the answer: `full-auto` acks, and anything else
+ * acks only when the server contributed nothing the local pass had not already
+ * rendered. `off` never acks, whatever the mode says, which is the off switch a
+ * `full-auto` machine has without changing its mode. `on` is the operator's
+ * standing yes for server findings, and it still needs a yes for the run: it
+ * restores the pre-gate reading of `--yes` rather than manufacturing one.
+ */
+export const AckServerWarningsSchema = z.enum(['mode', 'on', 'off']);
+export type AckServerWarnings = z.infer<typeof AckServerWarningsSchema>;
+
+/**
+ * Validate an ack-setting value at a command edge: an unrecognized value is
+ * USAGE (exit 2), never silently dropped onto the looser reading.
+ */
+export function parseAckServerWarnings(value: string, keyName: string): AckServerWarnings {
+  const parsed = AckServerWarningsSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${keyName} ${JSON.stringify(value)}`, {
+    fix: 'Use "mode", "on", or "off".',
+  });
+}
+
+/**
  * The publish block (B3): `mode` governs the confirm cascade a `publish` runs,
  * `defaultPrice` is the atomic USDC price a card is published at when no
- * per-publish price is given. Stored atomic like the spend keys.
+ * per-publish price is given (stored atomic like the spend keys), and
+ * `ackServerWarnings` is the standing answer to the server gate's warn tier.
  */
 const PublishConfigSchema = z.object({
   mode: PublishModeSchema,
   defaultPrice: atomicString,
+  ackServerWarnings: AckServerWarningsSchema,
 });
 
 /**
@@ -372,7 +403,7 @@ export const CONFIG_DEFAULTS: Config = {
   evalCohort: false,
   bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
-  publish: { mode: 'review', defaultPrice: '100000' },
+  publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
   install: { harness: [] },
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
@@ -405,7 +436,11 @@ export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>)
 );
 
 /** The dotted keys `config get/set` accept for the nested publish block. */
-export const PUBLISH_CONFIG_KEYS = ['publish.mode', 'publish.defaultPrice'] as const;
+export const PUBLISH_CONFIG_KEYS = [
+  'publish.mode',
+  'publish.defaultPrice',
+  'publish.ackServerWarnings',
+] as const;
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
@@ -515,6 +550,8 @@ export async function loadConfig(dir: string): Promise<Config> {
     publish: {
       mode: raw.publish?.mode ?? CONFIG_DEFAULTS.publish.mode,
       defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
+      ackServerWarnings:
+        raw.publish?.ackServerWarnings ?? CONFIG_DEFAULTS.publish.ackServerWarnings,
     },
     install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
     hooks: {
@@ -570,6 +607,7 @@ export interface EffectiveSettings {
   bazaarRegistries: ResolvedSetting<string[]>;
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
+  publishAckServerWarnings: ResolvedSetting<AckServerWarnings>;
   hooksWebSearch: ResolvedSetting<WebSearchMode>;
   hooksAgentDispatch: ResolvedSetting<AgentDispatchMode>;
   hooksStopNag: ResolvedSetting<StopNagMode>;
@@ -622,6 +660,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     bazaarRegistries: fileOrDefault('bazaarRegistries', config),
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
+    publishAckServerWarnings: resolveAckServerWarnings(config),
     hooksWebSearch: webSearch,
     hooksAgentDispatch: agentDispatch,
     hooksSearchMode: webSearch,
@@ -632,6 +671,21 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     hooksCapture: resolveHooksCapture(config),
     updateMode: resolveUpdateMode(config),
   };
+}
+
+/**
+ * publish.ackServerWarnings: the GLOBAL config file or the default, deliberately
+ * with no project `.tenjin.json` layer and no env override. The other two publish
+ * keys take the project layer because a repo may reasonably state its own price
+ * and its own mode; this one only ever LOOSENS what a yes covers, so a file
+ * checked into a repo the operator cloned must not be able to set it. That is the
+ * same reason `resolvePublishMode` gates `full-auto` out of the project layer,
+ * applied one step earlier: here there is no benign reading of the key at all.
+ */
+function resolveAckServerWarnings(config: PartialConfig): ResolvedSetting<AckServerWarnings> {
+  const fromFile = config.publish?.ackServerWarnings;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.publish.ackServerWarnings, source: 'default' };
 }
 
 /** update.mode: file or default, no env or flag. Every surface that reports a

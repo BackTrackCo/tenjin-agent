@@ -430,6 +430,9 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
         'price, findings, card, target) for you to show the user before re-calling with yes:true. A ' +
         'hard block (a live secret) returns PUBLISH_BLOCKED and is NEVER cleared by yes or any mode. ' +
+        'The marketplace scans server-side as well, so either refusal can also arrive AFTER the ' +
+        'local scan passed, carrying findings marked source:"server" that a yes:true given before ' +
+        'them does not clear; render those and ask again. ' +
         'The wallet signs the write locally; the key never leaves this machine.',
       inputSchema: publishInput,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -474,7 +477,10 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'clear:["scope"]. Under the same publish.mode consent as publishing, an update returns ' +
         'NEEDS_CONFIRMATION with the before/after summary for you to show the user before ' +
         're-calling with yes:true, and a live secret in the new content returns PUBLISH_BLOCKED, ' +
-        'which yes never clears. Reading is owner-scoped, so even a show (postId only) signs with ' +
+        'which yes never clears. The marketplace scans server-side as well, so either refusal can ' +
+        'also arrive after the local scan passed, carrying findings marked source:"server" that a ' +
+        'yes:true given before them does not clear; render those and ask again. ' +
+        'Reading is owner-scoped, so even a show (postId only) signs with ' +
         'the local wallet on first use, minting a read-scoped 24h session; the key never leaves ' +
         'this machine.',
       inputSchema: editInput,

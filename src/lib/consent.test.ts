@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  acksServerWarnings,
   dedupeFindings,
   describeFindings,
   needsConfirmation,
@@ -7,6 +8,8 @@ import {
   resolveWriteAuth,
   writeModeNotices,
 } from './consent';
+import type { ServerAckInput } from './consent';
+import type { AckServerWarnings, PublishMode } from './config';
 import { testSigner } from './read-test-utils';
 import type { ResolvedPublishSettings } from './settings';
 import type { ScanFinding } from './scan';
@@ -55,6 +58,71 @@ describe('needsConfirmation — the D38 gate, shared by publish and edit', () =>
     ['full-auto', 3, false],
   ] as const)('%s mode with %i warning(s) → %s', (mode, warns, expected) => {
     expect(needsConfirmation(mode, warns)).toBe(expected);
+  });
+});
+
+describe('acksServerWarnings: a confirmation must post-date its findings', () => {
+  const MODES: readonly PublishMode[] = ['review', 'auto', 'full-auto'];
+  const SETTINGS: readonly AckServerWarnings[] = ['mode', 'on', 'off'];
+
+  it.each([
+    // mode, yes, setting, serverAddedUnseen, expected
+    // The default reading. A yes covers what an earlier render showed; the
+    // marketplace's own findings post-date it and are not covered.
+    ['review', true, 'mode', true, false],
+    ['review', true, 'mode', false, true],
+    ['auto', true, 'mode', true, false],
+    ['auto', true, 'mode', false, true],
+    ['auto', false, 'mode', false, false],
+    ['review', false, 'mode', true, false],
+    // full-auto acks unasked: clearing soft findings unasked is its contract.
+    ['full-auto', false, 'mode', true, true],
+    ['full-auto', true, 'mode', true, true],
+    // `off` is the switch a full-auto machine gets without changing its mode.
+    ['full-auto', true, 'off', false, false],
+    ['auto', true, 'off', false, false],
+    // `on` is a standing yes for server findings. It never manufactures the
+    // run's yes, so a run that was never told yes still holds.
+    ['auto', true, 'on', true, true],
+    ['review', true, 'on', true, true],
+    ['auto', false, 'on', true, false],
+  ] as const)('%s yes=%s setting=%s unseen=%s → %s', (mode, yes, setting, unseen, expected) => {
+    expect(acksServerWarnings({ mode, yes, setting, serverAddedUnseen: unseen })).toBe(expected);
+  });
+
+  it('honours an override whatever the mode, the flag and the config say', () => {
+    for (const mode of MODES) {
+      for (const setting of SETTINGS) {
+        for (const yes of [true, false]) {
+          for (const serverAddedUnseen of [true, false]) {
+            const base = { mode, yes, setting, serverAddedUnseen };
+            expect(acksServerWarnings({ ...base, override: false })).toBe(false);
+            expect(acksServerWarnings({ ...base, override: true })).toBe(true);
+          }
+        }
+      }
+    }
+  });
+
+  // THE INVARIANT THIS FUNCTION EXISTS TO HOLD. The rule it replaced was
+  // `yes || full-auto`, which acked server findings the operator had not been
+  // shown. Every reachable input must ack no MORE than that rule did: the change
+  // may narrow what is auto-acked and may not widen it, config values included,
+  // so `on` is a standing yes rather than a manufactured one.
+  it('never acks anything the pre-gate `yes || full-auto` rule would not have', () => {
+    for (const mode of MODES) {
+      for (const setting of SETTINGS) {
+        for (const yes of [true, false]) {
+          for (const serverAddedUnseen of [true, false]) {
+            const input: ServerAckInput = { mode, yes, setting, serverAddedUnseen };
+            const previously = yes || mode === 'full-auto';
+            if (acksServerWarnings(input)) {
+              expect(previously, JSON.stringify(input)).toBe(true);
+            }
+          }
+        }
+      }
+    }
   });
 });
 

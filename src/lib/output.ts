@@ -252,6 +252,7 @@ function humanMode(io: Io, opts: EmitOptions): boolean {
  * printed because it is the difference between "fix your file" and "the
  * marketplace refused this": the detector may be one this release predates, so
  * the line has to stand on the server's own words rather than on recognition.
+ * The tier rides the same line, for the payloads that mix block and warn.
  */
 function findingLines(io: Io, details: unknown): string[] {
   if (typeof details !== 'object' || details === null || !('findings' in details)) return [];
@@ -260,23 +261,29 @@ function findingLines(io: Io, details: unknown): string[] {
   const rendered: string[] = [];
   for (const f of findings) {
     if (typeof f !== 'object' || f === null) continue;
-    const { check, line, excerpt, source } = f as {
+    const { check, line, excerpt, source, severity } = f as {
       check?: unknown;
       line?: unknown;
       excerpt?: unknown;
       source?: unknown;
+      severity?: unknown;
     };
     if (typeof check !== 'string' || typeof line !== 'number' || typeof excerpt !== 'string') {
       continue;
     }
     const from = source === 'server' ? ' [server]' : source === 'both' ? ' [local+server]' : '';
+    // THE TIER IS PRINTED because one payload can mix them: a `scan_blocked`
+    // envelope ships the block finding alongside the warns the same pass found,
+    // and without the tier nothing on the page says which one is the refusal.
+    // An open string, sanitized like the rest: the server owns its own tier names.
+    const tier = typeof severity === 'string' && severity.length > 0 ? `${severity}, ` : '';
     // The detector id is sanitized too: on a server finding it is a name this
     // release may never have seen, so it is untrusted text like the excerpt.
     rendered.push(
       paint(
         io,
         'dim',
-        `  ${sanitizeForTerminal(check)}${from} (line ${line}): ${sanitizeForTerminal(excerpt)}`,
+        `  ${sanitizeForTerminal(check)}${from} (${sanitizeForTerminal(tier)}line ${line}): ${sanitizeForTerminal(excerpt)}`,
       ),
     );
   }

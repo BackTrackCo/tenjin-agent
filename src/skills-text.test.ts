@@ -938,10 +938,16 @@ describe('the public render did not move', () => {
   // in agent search" rather than the older browse-only wording), so the else arm
   // carries main's sentence and the public render is byte-for-byte main's
   // unshaped SKILL.md again. The team arm keeps its own browse-only line.
+  //
+  // Re-pinned again for the marketplace ingest gate: a `--yes` re-run can now hit
+  // a SECOND exit 3 carrying findings marked `[server]` that the first payload
+  // could not have shown, and an agent told only to re-run with `--yes` would
+  // loop on it. Both arms moved; the team arm also drops the claim that the
+  // survivors are the only findings there are, since the shelf scans at ingest.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': 'a3d2ff8e259851b2ed8733921286cbea',
-      'tenjin-publish': 'cb678b98cbb919c1af60e576d232b0b9',
+      'tenjin-publish': 'e2e76eea964d825ffef18911f71a890b',
     });
   });
 

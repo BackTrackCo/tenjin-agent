@@ -17,10 +17,26 @@ once, and refuses as `NEEDS_CONFIRMATION`; an explicit yes re-runs the identical
 content carrying the server's ack token, and exactly once, since the token is
 bound to that content and that finding set.
 
-Mode semantics are the local ones, unchanged: `review` and `auto` stop on a
-server warn the same way they stop on a local one, and `full-auto` acknowledges
-it. Callers that must never acknowledge, whatever the configured mode says, pass
-`ackServerWarnings: false`.
+A confirmation covers the findings it post-dates, so a `--yes` clears the
+server's hold only when the merge added nothing the local pass had not already
+rendered. The `--yes` was an answer to a payload built before any server call,
+and the marketplace's set is strictly larger than the local one (its semantic
+checks have no local counterpart at all), so reading that yes as an answer to
+findings it could not have contained is reading it as an answer to a question
+nobody asked. `review` and `auto` therefore stop on a server-only warn even with
+`--yes`, render it marked `[server]` with its tier, and say in the fix that the
+yes did not cover it. `full-auto` still acknowledges unasked: clearing soft
+findings unasked is that mode's contract.
+
+New config key `publish.ackServerWarnings` sets a standing answer without
+changing the mode. `off` never acknowledges, which is the off switch an
+unattended `full-auto` machine needs; `on` lets a `--yes` cover the server's
+findings too, which is what a non-interactive machine sets once instead of
+re-running forever; `mode` (the default) derives the answer as above. It reads
+from the global config only, never from a project `.tenjin.json`, because it can
+only ever loosen what a yes covers. In-process callers whose answer is not the
+operator's to configure still pass `ackServerWarnings: false` and never
+acknowledge at all.
 
 Findings travel as data — detector id, tier, redacted excerpt, offset — so a
 detector this release has never heard of renders faithfully rather than being

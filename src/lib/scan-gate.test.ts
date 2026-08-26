@@ -130,7 +130,7 @@ const local = (over: Partial<ScanFinding> = {}): ScanFinding => ({
 });
 
 describe('mergeScanFindings', () => {
-  it('collapses the same detector at the same offset and marks it as both', () => {
+  it('collapses one value both scans found and marks it as both', () => {
     const merged = mergeScanFindings(
       [local()],
       [{ check: 'email', severity: 'warn', line: 7, span: [0, 6], excerpt: 'a@b.co' }],
@@ -148,6 +148,20 @@ describe('mergeScanFindings', () => {
     );
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({ line: 12, source: 'both' });
+  });
+
+  // The offset key is a LOCAL-side key. Reading it in the server loop collapsed a
+  // distinct server finding into a local one whose coordinates merely coincided
+  // (routine on a draft with no frontmatter, where body and raw lines agree), and
+  // the operator then acked a set the render had dropped a member of.
+  it('keeps a server finding that only shares coordinates with a local one', () => {
+    const merged = mergeScanFindings(
+      [local()],
+      [{ check: 'email', severity: 'warn', line: 7, span: [0, 6], excerpt: 'other@b.co' }],
+    );
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toMatchObject({ excerpt: 'a@b.co', source: 'local' });
+    expect(merged[1]).toMatchObject({ excerpt: 'other@b.co', source: 'server' });
   });
 
   it('keeps a server-only finding, tagged server, with its field', () => {

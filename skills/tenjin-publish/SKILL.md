@@ -317,16 +317,20 @@ private draft, leaves the loop open, and sends no attribution.
 `--yes` on an explicit yes.** Never ask a generic "shall I publish?" before
 running: the findings are the question, and a `--yes` re-run after a bare yes
 silently clears the three warn checks that survive here (`secret-assignment`,
-`hex32-value`, `embedded-instruction`) — which on this shelf are the only findings
-there are, and each one is either a live credential or text that would steer the
-next agent to read it. A hard block refuses in every mode and no `--yes` clears it.
+`hex32-value`, `embedded-instruction`), each one either a live credential or text
+that would steer the next agent to read it. The shelf scans at ingest too, and
+its warn tier is advisory there, so today those three are what a payload carries.
+A hard block refuses in every mode and no `--yes` clears it.
 <!-- tenjin:else -->
 **On any exit 3, render THAT payload's findings and price as one yes/no, then
 re-run with `--yes` on an explicit yes.** Never ask a generic "shall I publish?"
 before running: the findings are the question, and a `--yes` re-run after a bare
 yes silently clears WARN-tier findings (PII, wallet addresses, internal
-hostnames) the user never saw. A hard block refuses in every mode and no `--yes`
-clears it.
+hostnames) the user never saw. The marketplace scans at ingest too, so a `--yes`
+re-run can hit a SECOND exit 3 carrying findings marked `[server]` that the first
+payload could not have shown: render those the same way, and follow that
+payload's own `fix` rather than re-running with `--yes` again. A hard block
+refuses in every mode and no `--yes` clears it.
 <!-- /tenjin:when -->
 
 Exit 4 is a publish that failed AFTER approval: the write, not the gate. Nothing

@@ -478,6 +478,26 @@ describe('runPublish — card-flag values pass the scan', () => {
     }
   });
 
+  // `--excerpt` is the one shipped field that never passes through the file: a
+  // frontmatter excerpt is inside `raw` already, so this one was reaching the
+  // public page unscanned, and "a block-tier secret never leaves the machine"
+  // was not true of it.
+  it('a secret in --excerpt hard-blocks before any wallet touch, in every mode', async () => {
+    for (const mode of ['auto', 'full-auto', 'review']) {
+      const { fetch, calls } = stubServer();
+      const { provider, signCount } = spyProvider();
+      await expect(
+        runPublish(
+          baseArgs(await writeDoc(CLEAN), { mode, yes: true, excerpt: `Ships ${SECRET} today.` }),
+          makeCtx(),
+          hermetic({ fetchImpl: fetch, provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+      expect(calls).toHaveLength(0);
+      expect(signCount()).toBe(0);
+    }
+  });
+
   it('the same secret in-file and via-flag behave identically (both block)', async () => {
     const viaFlag = runPublish(
       baseArgs(await writeDoc(CLEAN), { mode: 'full-auto', yes: true, scope: SECRET }),
@@ -1891,6 +1911,15 @@ function stubGate(
   return { fetch: fetchFn, bodies: () => bodies };
 }
 
+/** Write `publish.ackServerWarnings` into the ctx's global config. */
+async function setAckConfig(value: 'mode' | 'on' | 'off'): Promise<void> {
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ publish: { ackServerWarnings: value } }),
+    'utf8',
+  );
+}
+
 const SERVER_EMAIL = {
   check: 'email',
   severity: 'warn',
@@ -1935,7 +1964,10 @@ describe('runPublish — server ingest gate', () => {
     expect(bodies()[0]?.scanAck).toBeUndefined();
   });
 
-  it('re-runs the identical content carrying the token on an explicit yes', async () => {
+  it('re-runs the identical content carrying the token on a standing yes', async () => {
+    // `publish.ackServerWarnings on` is the operator's standing yes for the
+    // marketplace's own findings; the run's `--yes` is still required.
+    await setAckConfig('on');
     const { fetch, bodies } = stubGate(
       'scan_needs_ack',
       { findings: [SERVER_EMAIL], checks: { semantic: 'ran' }, ackToken: 'v1.tok.mac' },
@@ -1957,6 +1989,121 @@ describe('runPublish — server ingest gate', () => {
     expect((res.humanLines ?? []).join('\n')).toContain('Acknowledged marketplace scan findings');
   });
 
+  /**
+   * THE MATRIX THE CONSENT CLAIM RESTS ON: review/auto x a local warn x `--yes` x
+   * `needs_ack`. The `--yes` in every one of these answered a payload rendered
+   * BEFORE any server call, so it covers the local warn and nothing the server
+   * added afterwards. WARN carries a wallet address the local scan flags, which
+   * is what puts a rendered local finding into the merge; the server's reply
+   * decides whether anything post-dates the yes.
+   */
+  describe('a --yes covers the findings it post-dates and no others', () => {
+    // The server's set is exactly what the yes already answered: the merge adds
+    // nothing, so the yes covers the hold and the token goes back.
+    const LOCAL_WALLET = {
+      check: 'wallet-address',
+      severity: 'warn',
+      line: 1,
+      span: [8, 50],
+      excerpt: `0x${'b'.repeat(4)}…${'b'.repeat(4)}`,
+    };
+
+    for (const mode of ['review', 'auto'] as const) {
+      it(`${mode}: acks when the server found only what the local pass rendered`, async () => {
+        const { fetch, bodies } = stubGate('scan_needs_ack', {
+          findings: [LOCAL_WALLET],
+          ackToken: 'v1.tok.mac',
+        });
+        await expect(
+          runPublish(
+            baseArgs(await writeDoc(WARN), { mode, yes: true }),
+            makeCtx(),
+            hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+          ),
+        ).resolves.toBeDefined();
+        expect(bodies()).toHaveLength(2);
+        expect(bodies()[1]?.scanAck).toBe('v1.tok.mac');
+      });
+
+      it(`${mode}: holds when the server added one the local pass never rendered`, async () => {
+        const { fetch, bodies } = stubGate('scan_needs_ack', {
+          findings: [LOCAL_WALLET, SERVER_EMAIL],
+          checks: { semantic: 'ran' },
+          ackToken: 'v1.tok.mac',
+        });
+        const err = (await runPublish(
+          baseArgs(await writeDoc(`${WARN}\nBody ${mode}.\n`), { mode, yes: true }),
+          makeCtx(),
+          hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+        ).catch((e: unknown) => e)) as { code: string; fix?: string; details: unknown };
+        expect(err.code).toBe('NEEDS_CONFIRMATION');
+        // Not retried: the token stays unsent, so nothing was published.
+        expect(bodies()).toHaveLength(1);
+        // The fix does NOT point back at --yes, which would be the same wall.
+        expect(err.fix).toContain('beyond what your --yes answered');
+        expect(err.fix).toContain('publish.ackServerWarnings on');
+        // Both are rendered, each marked with where it came from.
+        const findings = (err.details as { findings: { check: string; source: string }[] })
+          .findings;
+        expect(findings).toEqual([
+          expect.objectContaining({ check: 'wallet-address', source: 'both' }),
+          expect.objectContaining({ check: 'email', source: 'server' }),
+        ]);
+      });
+
+      it(`${mode}: the standing yes clears that same hold`, async () => {
+        await setAckConfig('on');
+        const { fetch, bodies } = stubGate('scan_needs_ack', {
+          findings: [LOCAL_WALLET, SERVER_EMAIL],
+          ackToken: 'v1.tok.mac',
+        });
+        await expect(
+          runPublish(
+            baseArgs(await writeDoc(`${WARN}\nStanding ${mode}.\n`), { mode, yes: true }),
+            makeCtx(),
+            hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+          ),
+        ).resolves.toBeDefined();
+        expect(bodies()[1]?.scanAck).toBe('v1.tok.mac');
+      });
+    }
+
+    // `on` is a standing yes, never a manufactured one: with no --yes on the run
+    // there is no yes for it to extend, and `auto` on clean local content holds.
+    it('the standing yes does not stand in for a --yes nobody gave', async () => {
+      await setAckConfig('on');
+      const { fetch, bodies } = stubGate('scan_needs_ack', {
+        findings: [SERVER_EMAIL],
+        ackToken: 'v1.tok.mac',
+      });
+      await expect(
+        runPublish(
+          baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+          makeCtx(),
+          hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+      expect(bodies()).toHaveLength(1);
+    });
+
+    // The off switch a dogfood machine gets without leaving full-auto.
+    it('off refuses to ack under full-auto, the one mode that acks unasked', async () => {
+      await setAckConfig('off');
+      const { fetch, bodies } = stubGate('scan_needs_ack', {
+        findings: [SERVER_EMAIL],
+        ackToken: 'v1.tok.mac',
+      });
+      await expect(
+        runPublish(
+          baseArgs(await writeDoc(CLEAN), { mode: 'full-auto', yes: true }),
+          makeCtx(),
+          hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+      expect(bodies()).toHaveLength(1);
+    });
+  });
+
   it('full-auto acknowledges server warns unasked; auto stops on them', async () => {
     const envelope = {
       findings: [SERVER_EMAIL],
@@ -1974,8 +2121,9 @@ describe('runPublish — server ingest gate', () => {
     expect(fullAuto.bodies()[1]?.scanAck).toBe('v1.tok.mac');
 
     // `auto` is the mode that reaches the gate on clean local content and stops
-    // there. `review` never gets that far without a --yes, and that --yes IS the
-    // operator's yes, so review has no separate stop-on-server-warn behaviour.
+    // there with no --yes at all. `review` needs a --yes to get that far, and
+    // that yes still does not cover a server-only finding; the matrix above is
+    // where both modes are held with one.
     //
     // A DIFFERENT body than the full-auto half above, which published for real
     // and so left a same-machine dedup marker on CLEAN's content hash: republish
@@ -2154,13 +2302,87 @@ describe('runPublish — server ingest gate', () => {
         { status: 422, headers: { 'content-type': 'application/json' } },
       );
     }) as unknown as typeof fetch;
-    await expect(
-      runPublish(
-        baseArgs(await writeDoc(CLEAN), { mode: 'full-auto' }),
-        makeCtx(),
-        hermetic({ fetchImpl: always, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    const err = (await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'full-auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: always, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string; fix?: string; details: unknown };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
     expect(bodies).toHaveLength(2);
+    // WRAPPED like the first rejection. Raw, this reached the renderer as
+    // ScanGateError's own details: no `source`, so the marketplace's findings
+    // printed as if the local scan had found them, and no `fix` at all.
+    expect(err.fix).toContain('never retried twice');
+    const details = err.details as {
+      findings: { check: string; source: string }[];
+      scan: { source: string };
+    };
+    expect(details.scan.source).toBe('server');
+    expect(details.findings).toEqual([
+      expect.objectContaining({ check: 'email', source: 'server' }),
+    ]);
+  });
+
+  it('wraps a block that arrives on the retry, with the source marker intact', async () => {
+    let sent = 0;
+    const thenBlocks = (async () => {
+      sent += 1;
+      const body =
+        sent === 1
+          ? { code: 'scan_needs_ack', details: { scan: { findings: [], ackToken: 'v1.tok.mac' } } }
+          : {
+              code: 'scan_blocked',
+              details: {
+                scan: {
+                  findings: [
+                    {
+                      ...SERVER_EMAIL,
+                      check: 'aws-access-key',
+                      severity: 'block',
+                      excerpt: 'AKIA…',
+                    },
+                  ],
+                },
+              },
+            };
+      return new Response(JSON.stringify({ error: { message: 'gate', ...body } }), {
+        status: 422,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const err = (await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'full-auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: thenBlocks, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string; fix?: string; details: unknown };
+    expect(err.code).toBe('PUBLISH_BLOCKED');
+    expect(err.fix).toContain('no acknowledgement path');
+    expect((err.details as { findings: { source: string }[] }).findings[0]).toMatchObject({
+      check: 'aws-access-key',
+      severity: 'block',
+      source: 'server',
+    });
+  });
+
+  // The local warns are a different decision from the block: they never blocked
+  // anything, and naming them in the refusal told the operator to remove
+  // material that was not the reason for it.
+  it('names only the server findings on a block, so the fix stays true', async () => {
+    const { fetch } = stubGate('scan_blocked', {
+      findings: [
+        { ...SERVER_EMAIL, check: 'aws-access-key', severity: 'block', excerpt: 'AKIA…[redacted]' },
+      ],
+    });
+    const err = (await runPublish(
+      // WARN carries a local wallet-address warn that full-auto clears, so the
+      // request reaches the gate with a local finding in hand.
+      baseArgs(await writeDoc(WARN), { mode: 'full-auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { message: string; fix?: string; details: unknown };
+    expect(err.message).toContain('1 finding(s) (aws-access-key)');
+    expect(err.message).not.toContain('wallet-address');
+    expect(err.fix).toContain('block-tier material');
+    expect((err.details as { findings: unknown[] }).findings).toHaveLength(1);
   });
 });

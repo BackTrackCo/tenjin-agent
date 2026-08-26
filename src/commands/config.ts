@@ -24,6 +24,7 @@ import {
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
   loadRawConfig,
+  parseAckServerWarnings,
   parseAgentDispatchHookModeFlag,
   parseCaptureModeFlag,
   parsePushModeFlag,
@@ -134,6 +135,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   bazaarRegistries: 'x402 discovery registries for `discover` and the pay lane',
   'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
   'publish.defaultPrice': 'price used when none is given',
+  'publish.ackServerWarnings':
+    "whether a yes covers the MARKETPLACE scan's warn findings: mode=only the ones an earlier render already showed you (full-auto still acks), on=any of them, off=never",
   'hooks.webSearch':
     'harness WebSearch hook (before WebSearch): auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.agentDispatch':
@@ -343,10 +346,11 @@ async function halfWiredTeamShelf(
 }
 
 /**
- * `config set publish.mode|publish.defaultPrice`. mode validates to the enum;
- * defaultPrice parses decimal USD at the edge into atomic (matching the spend
- * keys). The subkey is merged into the nested publish block, so a sibling subkey
- * (or an unknown one a newer CLI wrote) is preserved.
+ * `config set publish.mode|publish.defaultPrice|publish.ackServerWarnings`. mode
+ * and ackServerWarnings validate to their enums; defaultPrice parses decimal USD
+ * at the edge into atomic (matching the spend keys). The subkey is merged into
+ * the nested publish block, so a sibling subkey (or an unknown one a newer CLI
+ * wrote) is preserved.
  */
 async function setPublishKey(
   key: PublishConfigKey,
@@ -357,9 +361,17 @@ async function setPublishKey(
   const entry: RenderedSetting =
     key === 'publish.mode'
       ? { value: parsePublishMode(value), source: 'file' }
-      : { value: toMoney(parseUsdToAtomic(value)), source: 'file' };
-  const subkey = key === 'publish.mode' ? 'mode' : 'defaultPrice';
-  const stored = key === 'publish.mode' ? (entry.value as string) : (entry.value as Money).atomic;
+      : key === 'publish.ackServerWarnings'
+        ? { value: parseAckServerWarnings(value, key), source: 'file' }
+        : { value: toMoney(parseUsdToAtomic(value)), source: 'file' };
+  const subkey =
+    key === 'publish.mode'
+      ? 'mode'
+      : key === 'publish.ackServerWarnings'
+        ? 'ackServerWarnings'
+        : 'defaultPrice';
+  const stored =
+    key === 'publish.defaultPrice' ? (entry.value as Money).atomic : (entry.value as string);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     publish: { ...existing.publish, [subkey]: stored },
@@ -753,6 +765,12 @@ function renderSetting(
 function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings): RenderedSetting {
   if (key === 'publish.mode') {
     return { value: settings.publishMode.value, source: settings.publishMode.source };
+  }
+  if (key === 'publish.ackServerWarnings') {
+    return {
+      value: settings.publishAckServerWarnings.value,
+      source: settings.publishAckServerWarnings.source,
+    };
   }
   return {
     value: toMoney(settings.publishDefaultPrice.value),

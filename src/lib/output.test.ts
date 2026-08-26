@@ -106,8 +106,8 @@ describe('emitFailure', () => {
     });
     emitFailure(cap.io, 'publish', err);
     const out = cap.stdout();
-    expect(out).toContain('aws-access-key (line 12): AKIA…MPLE');
-    expect(out).toContain('email (line 4): a@b.com');
+    expect(out).toContain('aws-access-key (warn, line 12): AKIA…MPLE');
+    expect(out).toContain('email (warn, line 4): a@b.com');
     expect(out).not.toContain('schemaVersion'); // still no envelope
     // the finding lines come after the fix line
     expect(out.indexOf('review then --yes')).toBeLessThan(out.indexOf('aws-access-key'));
@@ -139,9 +139,47 @@ describe('emitFailure', () => {
     });
     emitFailure(cap.io, 'publish', err);
     const out = cap.stdout();
-    expect(out).toContain('wallet-address [local+server] (line 2): 0xab…cd');
-    expect(out).toContain('semantic-pii [server] (line 1): reads as…');
-    expect(out).toContain('email (line 4): a@b.com');
+    expect(out).toContain('wallet-address [local+server] (warn, line 2): 0xab…cd');
+    expect(out).toContain('semantic-pii [server] (warn, line 1): reads as…');
+    expect(out).toContain('email (warn, line 4): a@b.com');
+  });
+
+  // A blocked envelope ships the block finding beside the warns the same pass
+  // found. Without the tier on the line, nothing on the page says which one is
+  // the refusal the operator has to act on.
+  it('at a TTY, prints the tier so a mixed block/warn payload is readable', () => {
+    const cap = captureIo(true);
+    const err = new CliError('PUBLISH_BLOCKED', 'blocked', {
+      details: {
+        findings: [
+          {
+            check: 'aws-access-key',
+            severity: 'block',
+            line: 3,
+            excerpt: 'AKIA…[redacted]',
+            source: 'server',
+          },
+          { check: 'email', severity: 'warn', line: 9, excerpt: 'a@b.com', source: 'server' },
+          // An open string: the server owns its own tier names, and one this
+          // release predates renders rather than being dropped or normalized.
+          { check: 'quantum-seed', severity: 'notice', line: 1, excerpt: 'x…', source: 'server' },
+        ],
+      },
+    });
+    emitFailure(cap.io, 'publish', err);
+    const out = cap.stdout();
+    expect(out).toContain('aws-access-key [server] (block, line 3): AKIA…[redacted]');
+    expect(out).toContain('email [server] (warn, line 9): a@b.com');
+    expect(out).toContain('quantum-seed [server] (notice, line 1): x…');
+  });
+
+  it('at a TTY, still renders a finding that carries no tier at all', () => {
+    const cap = captureIo(true);
+    const err = new CliError('NEEDS_CONFIRMATION', 'held', {
+      details: { findings: [{ check: 'email', line: 4, excerpt: 'a@b.com', source: 'server' }] },
+    });
+    emitFailure(cap.io, 'publish', err);
+    expect(cap.stdout()).toContain('email [server] (line 4): a@b.com');
   });
 
   it('leaves the machine envelope unchanged when details.findings is present', () => {

@@ -82,6 +82,14 @@ Open couplings:
   write failure. `tenjin update` also does not rewrite installed hook scripts
   (tenjin-agent#171), so adoption lags a release; wait for it.
 
+  **Team shelves stay advisory.** A team deployment runs the same gate, because
+  it sits in the shared write path, and it keeps the block tier on purpose. It
+  sets no `SCAN_WARN_MODE`, so its warn tier reports on the success response and
+  holds nothing, and this coupling does not ask you to flip it there. Under
+  `enforce` a shelf would re-impose exactly the warn findings the team drop
+  (`survivesTeamDrop`, `src/lib/scan.ts`) exists to remove, so flipping it is a
+  deliberate change of what a team note is allowed to carry, not a rollout step.
+
 ## One-time owner setup
 
 Credentials are configured on this repo (`gh variable list` / `gh secret list` to

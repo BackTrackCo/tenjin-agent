@@ -108,8 +108,9 @@ export interface EditDeps {
   /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
   cwd?: string;
   /**
-   * Force the answer to the server gate's warn tier, whatever `publish.mode`
-   * says. The unattended observer lane (PR 5) passes `false`: it never acks.
+   * Force the answer to the server gate's warn tier, whatever `publish.mode` and
+   * `publish.ackServerWarnings` say; the same seam `PublishDeps` carries, for the
+   * same unattended callers. `false` never acks.
    */
   ackServerWarnings?: boolean;
 }
@@ -272,6 +273,7 @@ export async function runEdit(
     localWarns: warns,
     mode: settings.mode,
     yes: args.yes === true,
+    ackSetting: settings.ackServerWarnings,
     ...(deps.ackServerWarnings !== undefined ? { ackOverride: deps.ackServerWarnings } : {}),
     detail: { mode: settings.mode, postId: stored.id, changes },
     noun: 'Edit',
