@@ -59,7 +59,7 @@ describe('recommended allowlist shape', () => {
   it('recommends every free (non-paying) verb the command surface exposes', () => {
     expect(ALWAYS_SAFE_ALLOWLIST.map((e) => e.command)).toEqual([
       'tenjin search',
-      'tenjin fund',
+      'tenjin wallet fund',
       'tenjin inspect',
       'tenjin read',
       'tenjin outcome',

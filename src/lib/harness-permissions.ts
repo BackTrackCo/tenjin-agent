@@ -74,7 +74,7 @@ export function claudeSettingsPath(homeDir: string): string {
  */
 export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin search:*)',
-  'Bash(tenjin fund:*)',
+  'Bash(tenjin wallet fund:*)',
   'Bash(tenjin inspect:*)',
   'Bash(tenjin read:*)',
   'Bash(tenjin outcome:*)',
@@ -177,7 +177,10 @@ function retiredFor(mode: PublishMode): Set<string> {
  * `Bash(tenjin candidate list:*)` is the first entry: the candidate pen was
  * removed, and machines installed before that still carry its rule.
  */
-export const LEGACY_ALLOWLIST_RULES: readonly string[] = ['Bash(tenjin candidate list:*)'];
+export const LEGACY_ALLOWLIST_RULES: readonly string[] = [
+  'Bash(tenjin candidate list:*)',
+  'Bash(tenjin fund:*)',
+];
 
 /**
  * Verb fragments that must never appear in {@link FREE_VERB_RULES}. Asserted by

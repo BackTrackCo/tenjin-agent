@@ -239,11 +239,11 @@ const walletInput = {
 // and the test seams are CLI-side concerns (a stdio server may be headless and
 // a tool call must not block for minutes), pinned off at the call site.
 //
-// It also takes no `--base-url` equivalent, which is what makes this narrower
-// than a `Bash(tenjin fund:*)` allowlist rule and is why the Bash verb stays a
-// human decision (lib/permissions.ts NEVER_ALLOWLISTED): a prefix rule pins the
-// verb, not the flags, and a mint against an attacker-named host is a wallet
-// signature the operator did not intend to make.
+// It also takes no `--base-url` equivalent, matching the CLI: fund's Bash form
+// is already in the free tier (lib/permissions.ts ALWAYS_SAFE_ALLOWLIST,
+// `Bash(tenjin wallet fund:*)`), because `FUND_ORIGIN` in commands/fund.ts is
+// hardcoded and takes no override from flag, env, or config on either surface,
+// so neither can be pointed at an attacker-named host.
 const fundInput = {
   amountUsd: z
     .string()
@@ -553,7 +553,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) =>
-      runCore('fund', (ctx) =>
+      runCore('wallet.fund', (ctx) =>
         runFund(ctx, {
           ...deps.fund,
           ...(args.amountUsd !== undefined ? { amountUsd: args.amountUsd } : {}),

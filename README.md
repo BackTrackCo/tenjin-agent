@@ -32,7 +32,7 @@ After setup, restart or open a fresh harness session. Most agents load skills an
 Then fund the wallet when you are ready to try paid reads:
 
 ```bash
-tenjin fund 5
+tenjin wallet fund 5
 ```
 
 That opens a Coinbase Onramp checkout for this wallet. You can also send USDC on Base to the address printed by:
@@ -77,7 +77,7 @@ tenjin wallet show
 Add a small amount of USDC when you want paid reads:
 
 ```bash
-tenjin fund 5
+tenjin wallet fund 5
 ```
 
 Then ask Tenjin for work that might already exist:
@@ -139,7 +139,7 @@ tenjin profile set --handle <handle>
 tenjin stats
 tenjin wallet show
 tenjin wallet balance
-tenjin fund 5
+tenjin wallet fund 5
 tenjin uninstall
 ```
 
@@ -205,11 +205,11 @@ Wallet behavior:
 
 Harnesses that run unattended often deny unknown shell commands. `tenjin install` can pre-clear the free Tenjin verbs so an agent can search, inspect, read free or already-owned pieces, report outcomes, and check wallet state without permission popups.
 
-The free tier cannot spend wallet USDC or export keys. `tenjin fund` only opens a Coinbase checkout for this wallet:
+The free tier cannot spend wallet USDC or export keys. `tenjin wallet fund` only opens a Coinbase checkout for this wallet:
 
 ```text
 Bash(tenjin search:*)
-Bash(tenjin fund:*)
+Bash(tenjin wallet fund:*)
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)

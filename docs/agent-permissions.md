@@ -19,7 +19,7 @@ The free tier is nine rules for the `permissions.allow` array of Claude Code's
 
 ```
 Bash(tenjin search:*)
-Bash(tenjin fund:*)
+Bash(tenjin wallet fund:*)
 Bash(tenjin inspect:*)
 Bash(tenjin read:*)
 Bash(tenjin outcome:*)
@@ -41,7 +41,7 @@ needs the wallet.
 | Rule                            | Why it is safe to pre-clear                                                                                                        |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.                  |
-| `Bash(tenjin fund:*)`           | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, origin-pinned (no `--base-url`). |
+| `Bash(tenjin wallet fund:*)`    | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, origin-pinned (no `--base-url`). |
 | `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                          |
 | `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below).     |
 | `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.      |
@@ -308,7 +308,7 @@ prefix rule pins the **verb**, not the flags, so clearing the check would clear
 the install with it. Nothing stops you adding the rule yourself; it stays off the
 recommended set.
 
-### `tenjin fund`, free on both surfaces
+### `tenjin wallet fund`, free on both surfaces
 
 Free by owner decision (2026-08-12), because on either surface the command just
 opens the fund modal. Minting a checkout link moves no money: the destination is
@@ -374,9 +374,9 @@ Both are denied, never wrongly allowed:
 ## Delegating to a subagent
 
 The free tier is the answer to "what may a read-only subagent run", with nothing
-subtracted. All nine are safe to hand over: `search`, `fund`, `inspect`, `read`,
+subtracted. All nine are safe to hand over: `search`, `wallet fund`, `inspect`, `read`,
 `outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`.
-None can spend and none can move your keys; `fund` mints a checkout link only a
+None can spend and none can move your keys; `wallet fund` mints a checkout link only a
 human can pay.
 
 Everything that mutates stays in a mutation-capable, human-gated context:

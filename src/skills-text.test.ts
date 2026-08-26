@@ -948,9 +948,15 @@ describe('the public render did not move', () => {
   // could not have shown, and an agent told only to re-run with `--yes` would
   // loop on it. Both arms moved; the team arm also drops the claim that the
   // survivors are the only findings there are, since the shelf scans at ingest.
+  //
+  // Re-pinned merging main into #158: #158's own wallet fund rename touches
+  // skills/tenjin-search/SKILL.md's fund line outside any `tenjin:when` arm,
+  // so tenjin-search's digest carries that rename on top of whatever main's
+  // own chain above pins. tenjin-publish is untouched by #158, so it keeps
+  // main's value unchanged.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'a3d2ff8e259851b2ed8733921286cbea',
+      'tenjin-search': 'c59faaebcd6e2030376d426aee9e9a7a',
       'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
     });
   });
