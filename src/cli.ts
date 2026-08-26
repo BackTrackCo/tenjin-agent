@@ -442,6 +442,56 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // The account surface (#208): thin verbs over /api/me and /api/me/stats on the
+  // same session-key auth publish/edit use. No consent gate: operator-invoked
+  // account edits, not content. Group-level flags so `tenjin profile --json set`
+  // parses like the config group; a bare `tenjin profile` shows.
+  const profile = addGlobalFlags(
+    program
+      .command('profile')
+      .description(
+        'Show your publisher profile (handle, display name, bio); `profile set` claims a handle so bylines show a name, not your address',
+      ),
+  );
+  profile.action(async function (this: Command) {
+    await runCommand('profile', this, async (ctx) => {
+      const { runProfileShow } = await import('./commands/profile');
+      return runProfileShow(ctx);
+    });
+  });
+  addGlobalFlags(profile.command('set'))
+    .description(
+      'Claim or rename your handle and set the display name / bio shown on your pieces. Omitted flags keep their stored value. Signs with your wallet on first use (mints a 24h read+write session)',
+    )
+    .option('--handle <handle>', 'word-handle, 2-32 chars of a-z, 0-9, or -')
+    .option('--display-name <name>', 'display name (≤100 chars)')
+    .option('--bio <text>', 'short bio (≤280 chars)')
+    .action(async function (this: Command) {
+      await runCommand('profile.set', this, async (ctx) => {
+        const o = this.opts();
+        const { runProfileSet } = await import('./commands/profile');
+        return runProfileSet(
+          {
+            ...(typeof o.handle === 'string' ? { handle: o.handle } : {}),
+            ...(typeof o.displayName === 'string' ? { displayName: o.displayName } : {}),
+            ...(typeof o.bio === 'string' ? { bio: o.bio } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
+  addGlobalFlags(program.command('stats'))
+    .description(
+      "This month's earnings, full reads, and glances across your pieces. Signs with your wallet on first use (mints a read-scoped 24h session); per-sale detail lives on the desk URL",
+    )
+    .action(async function (this: Command) {
+      await runCommand('stats', this, async (ctx) => {
+        const { runStats } = await import('./commands/stats');
+        return runStats(ctx);
+      });
+    });
+
   addGlobalFlags(program.command('pay <url>'))
     .description(
       'Pay any x402 endpoint (exact scheme, USDC on Base): probe, then pay a 402 under the spend policy. The configured base URL is always payable; other origins need the bazaarPay toggle and a registry-verified listing. Every paid call pays: no library, no dedupe (that is `buy`)',

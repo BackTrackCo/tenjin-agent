@@ -245,13 +245,16 @@ export async function runPublish(
   // "pk_live_…" is a live key whose shape no block detector matches, and a
   // 0x+64-hex is the raw-private-key detector demoted to warn only because a block
   // finding is permanently non-bypassable — so "a leaked key there is leaked"
-  // applies to both verbatim. They are kept by name rather than promoted to block,
-  // so the consent cascade still governs them: `review` and `auto` confirm, and
-  // `full-auto` clears them unseen on a team shelf exactly as it already does on
-  // the marketplace (the price scan.ts concedes at the detector). Every other warn
-  // is dropped. The rule itself lives beside the tier assignment as
-  // `survivesTeamDrop` (lib/scan.ts) so this filter and edit.ts cannot drift; they
-  // did once. The two other surfaces that characterise this drop say the same:
+  // applies to both verbatim, and to the two catch-alls behind them
+  // (`high-entropy-string`, `env-dump-block`). They are kept as warns rather than
+  // promoted to block, so the consent cascade still governs them: `review` and
+  // `auto` confirm, and `full-auto` clears them unseen on a team shelf exactly as
+  // it already does on the marketplace (the price scan.ts concedes at the
+  // detector). Every other warn is dropped. WHICH warns survive is a `teamSurvives`
+  // flag on the rule in scan-rules.json, read by `survivesTeamDrop` (lib/scan.ts),
+  // so this filter and edit.ts cannot drift (they did once) and a new credential
+  // detector joins by marking itself rather than by an edit here. The two other
+  // surfaces that characterise this drop say the same:
   // docs/command-reference.md and skills/tenjin-publish/SKILL.md.
   const scanned = await scanDraft(args, cwd, raw, card);
   const findings = runtime.teamMode ? scanned.filter(survivesTeamDrop) : scanned;

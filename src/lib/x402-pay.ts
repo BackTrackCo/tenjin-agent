@@ -1,5 +1,6 @@
 import { x402Client, x402HTTPClient } from '@x402/core/client';
 import { ExactEvmScheme } from '@x402/evm';
+import { BuilderCodeClientExtension } from '@x402/extensions/builder-code';
 import type { ClientEvmSigner } from '@x402/evm';
 import type { PaymentRequired } from '@x402/core/types';
 import type { TypedDataDefinition } from 'viem';
@@ -54,6 +55,49 @@ const ALLOWED_USDC_BY_NETWORK: Record<string, string> = {
   'eip155:84532': '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
 };
 
+/**
+ * Tenjin's registered ERC-8021 builder code, claimed here as the client service
+ * code (`s`). One value, not a CLI-specific second code: Base registers one code
+ * per account, and Schema 2 already separates the roles structurally, so a
+ * payment this CLI brokers to Tenjin carries the code in BOTH `a` (seller) and
+ * `s` (client) while a payment to any other seller carries it only in `s`. It
+ * names the client, never the user, and is public by construction. Attribution
+ * only, never proof: the ERC-8021 suffix is emitted by the FACILITATOR at
+ * settlement, so a facilitator without the extension registered puts nothing on
+ * chain, and `s` is unauthenticated and seller-writable, so an occurrence of the
+ * code proves nothing about who brokered the payment. Constant, not
+ * configurable: a per-install override would make the code meaningless as a
+ * client identity.
+ */
+export const TENJIN_CLI_BUILDER_CODE = 'bc_kc0altv3';
+
+/**
+ * Drop any `builder-code.info.s` the SELLER declared, leaving its `a` and schema
+ * untouched. Without this a 402 that names its own `s` silently wins: the SDK
+ * merges the enriched payload onto the server's extensions as the base and
+ * copies a client field only where the server left it unset, so the client
+ * extension's `{info: {s}}` is discarded and Tenjin's code never reaches the
+ * payload, with no error. Narrowing the top-level `extensions` key set does not
+ * help, the override lives inside the entry. Per ERC-8021 Schema 2 `a` is the
+ * seller's to declare and `s` is the client's, so removing it here restores the
+ * roles rather than suppressing seller data, and this is client-side composition
+ * of what we send: nothing off-spec goes on the wire.
+ */
+function withoutSellerServiceCodes(
+  extensions: PaymentRequired['extensions'],
+  key: string,
+): PaymentRequired['extensions'] {
+  const entry = extensions?.[key];
+  if (!isPlainObject(entry) || !isPlainObject(entry.info)) return extensions;
+  const info = { ...entry.info };
+  delete info.s;
+  return { ...extensions, [key]: { ...entry, info } };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export async function buildExactPayment(
   paymentRequired: PaymentRequired,
   signer: TenjinSigner,
@@ -100,12 +144,23 @@ export async function buildExactPayment(
 
   const core = new x402Client();
   core.register(requirement.network, new ExactEvmScheme(toClientSigner(signer)));
+  // The SDK fires this hook only for sellers whose 402 advertises `builder-code`,
+  // so a seller that never declared the extension still gets an extension-free
+  // payload. That gating is why attribution stays spec-clean; hand-setting
+  // `payload.extensions` here would stuff the key onto sellers who never asked.
+  const builderCode = new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE);
+  core.registerExtension(builderCode);
   const http = new x402HTTPClient(core);
 
   // Sign EXACTLY the requirement the price check ran against: pass a single-accept
   // challenge so createPaymentPayload cannot re-select a different (e.g. costlier)
-  // accepts entry between the check and the signature.
-  const bound: PaymentRequired = { ...paymentRequired, accepts: [requirement] };
+  // accepts entry between the check and the signature. Narrow `accepts` only: the
+  // builder-code entry must survive into `bound`, or the hook never fires.
+  const bound: PaymentRequired = {
+    ...paymentRequired,
+    accepts: [requirement],
+    extensions: withoutSellerServiceCodes(paymentRequired.extensions, builderCode.key),
+  };
 
   let headers: Record<string, string>;
   try {
