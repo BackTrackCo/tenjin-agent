@@ -46,14 +46,16 @@ jobs:
       - name: Audit (warn-only)
         run: |
           pnpm audit --audit-level=high || echo "::warning title=pnpm audit::high/critical advisories in the lockfile; add a range-scoped override in pnpm-workspace.yaml"
-      # Packed-artifact smoke on the engines floor (Node 22). npm-packs the
+      # Packed-artifact smoke on the engines floor (Node 24). npm-packs the
       # CLI, installs the tarball into a throwaway consumer, and exercises the
       # PUBLISHED shape (--version, config, a bogus command) — catching
       # externalized chunks and missing `files` entries the source-tree tests
-      # can't. Last so no earlier step runs on anything but Node 24.
-      - name: Set up Node 22 (engines floor)
+      # can't. The floor IS Node 24 now (tenjin-agent#209: the hook state store
+      # is `node:sqlite`), so this pins the same major the rest of the job uses
+      # and stays a separate step because it exercises the packed tarball.
+      - name: Set up Node 24 (engines floor)
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Packed-artifact smoke
         run: bash scripts/pack-smoke.sh

@@ -1,6 +1,6 @@
 // Vendors the zero-install skill: fetch the canonical skills.md and write it to
 // skills/tenjin/SKILL.md verbatim, with a "do not hand-edit" banner spliced in.
-// Dependency-free (Node >=22 global fetch) so drift CI needs no install. The
+// Dependency-free (Node >=24 global fetch) so drift CI needs no install. The
 // transform is a pure string splice: same fetched bytes -> byte-identical output,
 // which is what lets `git diff --exit-code` be a meaningful drift signal.
 import { mkdir, writeFile } from 'node:fs/promises';
