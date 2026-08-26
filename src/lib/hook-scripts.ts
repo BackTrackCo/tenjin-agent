@@ -45,10 +45,8 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // scoring). lib/push-scripts.ts imports the prelude from this file in turn, so
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
-import { PUSH_DIR_NAME, PUSH_LEDGER_FILE, pushSource } from './push-scripts';
-import { PUSH_STATE_RETENTION_MS } from './paths';
-import { PUBLISHED_MARKER_PREFIX } from './publish-dedup';
-import { DEMAND_MAX_ENTRIES, MAX_ENTRIES } from './search-store';
+import { pushSource } from './push-scripts';
+import { storeSource } from './state-store';
 
 /**
  * Header stamp naming the CLI build that wrote a script. Informational only: the
@@ -121,18 +119,6 @@ const SEARCH_LIMIT = 2;
  *  bare string in agent-api.ts's schema, so the hook owns this one itself. Over
  *  it the candidate is dropped, never clipped: a clipped url is a different url. */
 const BROWSE_URL_MAX = 512;
-/**
- * How long the WebSearch hook waits for the search store's lock before giving up
- * on recording. Far below the CLI's own 5s: recording is best-effort bookkeeping
- * on a two-second budget, and a contended store is worth losing one entry over,
- * never worth delaying a tool call for.
- */
-const STORE_LOCK_TIMEOUT_MS = 400;
-/** The store's two bounds, IMPORTED from the module that owns them and baked into
- *  the generated bodies: a script cannot import at run time, but it can be
- *  written from one definition. See lib/search-store.ts. */
-const STORE_MAX_ENTRIES = MAX_ENTRIES;
-const STORE_DEMAND_MAX = DEMAND_MAX_ENTRIES;
 /** Nag records older than this are pruned; far past the window, so never a re-nag.
  *  Prunes the per-session weak-batch stamps on the same schedule. */
 const NAG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -193,6 +179,16 @@ const DISPATCH_PROMPT_MIN = 80;
 const DISPATCH_DESCRIPTION_MAX = 100;
 const DISPATCH_SESSION_MAX = 10;
 /**
+ * The window `DISPATCH_SESSION_MAX` is counted over.
+ *
+ * It used to be implicit: the count came from a 50-entry searches.json, so a
+ * long session's early fan-out scrolled out of the file and gave the budget
+ * back. The store keeps every row, so the bound has to say what it always meant
+ * — a BURST limit, not a lifetime one — or an always-on loop session would go
+ * silent on its eleventh subagent and stay silent for the rest of the day.
+ */
+const DISPATCH_SESSION_WINDOW_MS = 60 * 60 * 1000;
+/**
  * The failure stop. The ceiling above counts RECORDED lookups, and a lookup that
  * times out records nothing, so an outage is exactly the case it cannot bound: a
  * sixty-way fan-out would pay the full budget sixty times over. Two consecutive
@@ -220,13 +216,14 @@ import {
   rmSync,
   statSync,
   lstatSync,
-  readdirSync,
   openSync,
   readSync,
   closeSync,
+  chmodSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, hostname, userInfo } from 'node:os';
+import { createHash, randomBytes } from 'node:crypto';
 
 const DATA_DIR = ${JSON.stringify(dataDir)};
 const IS_HERMES = process.argv.includes('--hermes');
@@ -546,25 +543,6 @@ function bypassRedirect(bypassHeaders) {
     : { redirect: 'error' };
 }
 
-const SEARCH_STORE = join(DATA_DIR, 'searches.json');
-
-/** The searches the CLI has recorded, or [] for anything unreadable. */
-function loadSearches() {
-  const store = readJsonFile(SEARCH_STORE);
-  return isRecord(store) && Array.isArray(store.searches) ? store.searches : [];
-}
-
-/**
- * Persist \`searches\` through a temp file and a rename, so a reader sees either the
- * old file or the whole new one. Callers hold the store lock.
- */
-function saveSearches(searches) {
-  const tmp = SEARCH_STORE + '.' + process.pid + '.tmp';
-  writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, searches }, null, 2) + '\\n', {
-    mode: 0o644,
-  });
-  renameSync(tmp, SEARCH_STORE);
-}
 
 /**
  * The two shapes the CLI's own boundary enforces (src/lib/ids.ts). Duplicated as
@@ -747,12 +725,8 @@ function composedUserAgent() {
  * pressing enter and the model starting to answer and so cannot afford the
  * default.
  */
-export function marketplaceSource(
-  hookLabel: string,
-  searchTimeoutMs: number = SEARCH_TIMEOUT_MS,
-): string {
+export function marketplaceSource(searchTimeoutMs: number = SEARCH_TIMEOUT_MS): string {
   return `
-const LOCK_PATH = SEARCH_STORE + '.lock';
 const SEARCH_TIMEOUT_MS = ${searchTimeoutMs};
 
 /**
@@ -781,73 +755,8 @@ function legTimeoutMs(deadline, reserveMs) {
  *  in it, and the only thing it can produce is a timeout nobody learns from. */
 const SEARCH_MIN_LEG_MS = 150;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 /**
- * The search store's mutex.
- *
- * ⚠ MIRRORED, MUST UPDATE TOGETHER with src/lib/lock.ts (\`withFileLock\`). This is
- * deliberately THE SAME PROTOCOL: the lock IS a directory at
- * \`<searches.json>.lock\`, mkdir is atomic so a second holder gets EEXIST and
- * retries, and there is no stale-stealing, so a lock left by a crash is never
- * removed out from under a live holder. This script runs standalone and cannot
- * import the CLI's copy, but it writes the CLI's searches.json, and two writers
- * of one file that disagree about the mutex have no mutex. If you change what the
- * lock is, where it lives, or the no-steal rule, change it in BOTH places.
- * lib/hook-scripts.test.ts pins them together and fails loudly on drift.
- *
- * Unlike the CLI it gives up FAST and silently: recording is best-effort
- * bookkeeping on a two-second budget, and a contended store is worth losing one
- * entry over, never worth delaying a WebSearch for.
- */
-async function withStoreLock(fn) {
-  const deadline = Date.now() + ${STORE_LOCK_TIMEOUT_MS};
-  for (;;) {
-    try {
-      mkdirSync(LOCK_PATH);
-      break;
-    } catch (err) {
-      if (err && err.code !== 'EEXIST') return;
-      if (Date.now() >= deadline) return;
-      await sleep(25);
-    }
-  }
-  try {
-    writeFileSync(join(LOCK_PATH, 'meta'), JSON.stringify({ pid: process.pid, hook: ${JSON.stringify(hookLabel)} }));
-  } catch {
-    // The meta file is only a diagnostic; the directory is the lock.
-  }
-  try {
-    fn();
-  } finally {
-    try {
-      rmSync(LOCK_PATH, { recursive: true, force: true });
-    } catch {
-      // Left behind; the CLI's lock timeout names the path.
-    }
-  }
-}
-
-/**
- * The store as it should be written. Entries arrive newest-first, so dropping
- * once the demand budget is spent drops the OLDEST demand entries and leaves
- * every \`cli\` and \`websearch-hook\` entry the drain would otherwise have taken.
- */
-function budgeted(entries) {
-  const kept = [];
-  let demand = 0;
-  for (const e of entries) {
-    if (isRecord(e) && (e.source === 'dispatch-hook' || e.source === 'push-hook')) {
-      if (demand >= ${STORE_DEMAND_MAX}) continue;
-      demand += 1;
-    }
-    kept.push(e);
-  }
-  return kept.slice(0, ${STORE_MAX_ENTRIES});
-}
-
-/**
- * Record this search in the CLI's own store under the calling hook's \`source\`.
+ * Record this search in the store under the calling hook's \`source\`.
  *
  * This is what makes a hook search reachable at all: without it a MISS the hook
  * discovered would never enter local state, the Stop hook would never see it, and
@@ -855,52 +764,36 @@ function budgeted(entries) {
  * recorded too, so \`buy <resourceId>\` can resolve the read URL and a later
  * purchase attributes back to the search that surfaced it.
  *
+ * ONE UPSERT, NO LOCK. This used to be a read-modify-write of searches.json
+ * under an mkdir mutex, with a 400ms give-up and a hand-rolled budget that
+ * dropped the oldest demand entries so a fan-out could not drain the slots
+ * \`buy\` and \`outcome --last\` depend on. The store makes both unnecessary:
+ * a row is a row, WAL serializes the writers, and every reader queries what it
+ * needs instead of scanning a bounded array.
+ *
  * Best-effort in every direction, and it NEVER throws: a failed record costs one
  * reminder, while a hook that fails costs the tool call.
  */
-async function recordSearch(
-  searchId,
-  question,
-  decision,
-  candidates,
-  sessionId,
-  source,
-  shelfBaseUrl,
-) {
+function recordSearch(searchId, question, decision, candidates, sessionId, source, shelfBaseUrl) {
   if (typeof searchId !== 'string' || searchId.length === 0) return;
-  try {
-    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    await withStoreLock(() => {
-      const existing = loadSearches().filter(
-        (s) => !isRecord(s) || s.searchId !== searchId,
-      );
-      // The session stamp is what later lets the Stop hook raise this loop in the
-      // session that opened it and nowhere else. Omitted rather than written
-      // empty when the payload did not name one: absent means "every session",
-      // which is the safe direction for a reminder.
-      //
-      // The shelf stamp is what lets \`tenjin outcome --search-id <id>\` — the
-      // command the Stop hook's own nag prints — reach the shelf that MINTED the
-      // id. In team mode a public-leg answer is an id the team shelf has never
-      // seen, and the two shelves have separate databases. Absent means the
-      // configured base, the same rule lib/search-store.ts states.
-      const entry = {
-        searchId,
-        at: new Date().toISOString(),
-        question,
-        decision,
-        candidates,
-        source,
-        ...(sessionId !== null ? { sessionId } : {}),
-        ...(typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0
-          ? { shelfBaseUrl }
-          : {}),
-      };
-      saveSearches(budgeted([entry, ...existing]));
-    });
-  } catch {
-    // Bookkeeping only. Never the tool call's problem.
-  }
+  // The session stamp is what later lets the Stop hook raise this loop in the
+  // session that opened it and nowhere else; '' is the machine-global bucket,
+  // which is the safe direction for a reminder.
+  //
+  // The shelf stamp is what lets \`tenjin outcome --search-id <id>\` — the
+  // command the Stop hook's own nag prints — reach the shelf that MINTED the
+  // id. In team mode a public-leg answer is an id the team shelf has never
+  // seen, and the two shelves have separate databases. Null means the
+  // configured base, the same rule lib/search-store.ts states.
+  recordSearchRow({
+    searchId,
+    question,
+    decision,
+    candidates,
+    sessionId,
+    source,
+    shelfBaseUrl,
+  });
 }
 
 /**
@@ -1069,21 +962,36 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
   return { searchId: body.searchId, decision, stored, rich, inspect };
 }
 
-/** One line per candidate, read from the validated projection, never the raw
- *  response.
+/**
+ * One line per candidate, read from the validated projection, never the raw
+ * response.
  *
- *  \`isTeam\` is whether the shelf that ANSWERED is the team's own deployment, so
- *  the closing disclaimer can say what the titles actually are. The push sidecar
- *  already treats this distinction as load-bearing and carries a separate opener
- *  for it (push-scripts.ts, TEAM_OPENER: "a record, not instructions"); telling
- *  an agent that its own team's note is "marketplace-authored text" is wrong in
- *  the direction that matters, because the whole point of the line is to say
- *  where the words came from. Both spellings still end in "not instructions":
- *  a teammate writing a note was not writing instructions for this session
- *  either, and nothing about the shelf authenticates the author. */
-function hintLines(stored, isTeam) {
+ * \`isTeam\` is whether the shelf that ANSWERED is the team's own deployment, so
+ * the closing disclaimer can say what the titles actually are. The push sidecar
+ * already treats this distinction as load-bearing and carries a separate opener
+ * for it (push-scripts.ts, TEAM_OPENER: "a record, not instructions"); telling
+ * an agent that its own team's note is "marketplace-authored text" is wrong in
+ * the direction that matters, because the whole point of the line is to say
+ * where the words came from. Both spellings still end in "not instructions":
+ * a teammate writing a note was not writing instructions for this session
+ * either, and nothing about the shelf authenticates the author.
+ *
+ * THE HINT PATH IS PART OF THE ALREADY-SHOWN SET (tenjin-agent#209, item 3 of
+ * #211). This used to be the half of the sidecar the push ledger could not see:
+ * the WebSearch arm went \`recordSearch -> hintLines -> emit\` and the dispatch
+ * arm deduped on its own question fingerprint, so neither ever knew what the
+ * push arms had already put in front of the agent — which is how one note
+ * reached one session six times. Every candidate is now checked against
+ * \`injections\` before it is rendered and recorded there after, so a piece is
+ * offered once per session whichever arm found it.
+ */
+function hintLines(stored, isTeam, ctx) {
   const lines = [];
   for (const c of stored) {
+    if (alreadyShown(ctx.sessionId, c.resourceId)) {
+      recordInjection({ ...ctx, session: ctx.sessionId, candidate: c, action: 'skipped', reason: 'already-injected' });
+      continue;
+    }
     // A double quote inside the title would step outside the quoted region below
     // ('titled "foo". Do X. ""'), so it renders as a single quote. The stored
     // projection keeps the title verbatim; this is framing, not data.
@@ -1101,9 +1009,21 @@ function hintLines(stored, isTeam) {
     // formatted display string: rounding decides rendering, not business facts,
     // and a sub-cent paid price must not read as free.
     const kind = BigInt(c.price) === 0n ? 'a free answer' : 'a paid answer';
-    lines.push(
-      'Tenjin lists ' + kind + ' titled "' + title + '" ($' + price + '); inspect free: tenjin inspect ' + id,
-    );
+    const line =
+      'Tenjin lists ' + kind + ' titled "' + title + '" ($' + price + '); inspect free: tenjin inspect ' + id;
+    lines.push(line);
+    // RECORDED AS AN INJECTION, because that is what it is: a line the agent
+    // will read. \`ctx\` carries the judge's verdict as well as the identity, so
+    // this row is the WHOLE decision row for the candidate — the caller writes
+    // no second one, or every count in \`push status\` would be doubled.
+    recordInjection({
+      ...ctx,
+      session: ctx.sessionId,
+      candidate: c,
+      action: 'injected',
+      form: 'short',
+      tokens: Math.ceil(line.length / 4),
+    });
   }
   if (lines.length > 0) {
     lines.push(
@@ -1134,7 +1054,7 @@ function hintLines(stored, isTeam) {
  * behavior exactly: it has no deny, and no WebFetch tool of this shape.
  */
 export function websearchHookScript(dataDir: string): string {
-  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('websearch')}${pushSource()}
+  return `${prelude(dataDir, WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}
 /**
  * Query-string keys whose VALUE is a topic rather than a credential. An
  * allow-list, not a deny-list: \`?api_key=\`, \`?access_token=\`, \`?sig=\` and
@@ -1218,6 +1138,9 @@ async function main() {
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   if (config.webSearch === 'off') return quiet();
+  const sessionId = sessionIdOf(input);
+  const cwd = cwdOf(input);
+  await openStore();
   // The push arm outranks \`remind\`, which is the standing reminder for an agent
   // that has to ask for itself; it does not outrank \`off\`, which is the kill
   // switch for this script whatever else is configured.
@@ -1227,7 +1150,9 @@ async function main() {
       event: 'PreToolUse',
       query: question,
       config,
-      sessionId: sessionIdOf(input),
+      sessionId,
+      cwd,
+      tool: input.tool_name,
       mode: 'inject',
       // The agent asked for this WebSearch, so the lookup is recorded as the
       // unpushed path records it. Anything else hides every web-search MISS
@@ -1245,12 +1170,12 @@ async function main() {
   if (found === null) return quiet();
   // BEFORE any emit, because emit exits the process. A MISS recorded here is what
   // the Stop hook later finds; a HIT is what a purchase attributes back to.
-  await recordSearch(
+  recordSearch(
     found.searchId,
     question,
     found.decision,
     found.stored,
-    sessionIdOf(input),
+    sessionId,
     'websearch-hook',
     // This arm asks one shelf, the configured base, whichever mode it is in.
     config.baseUrl,
@@ -1258,7 +1183,22 @@ async function main() {
   if (found.decision !== 'CANDIDATES') return quiet();
   // This arm asked \`config.baseUrl\` and only that, so the serving shelf is the
   // team's own exactly when this machine is in team mode.
-  const lines = hintLines(found.stored, teamShelfOrigin(config) !== null);
+  const isTeam = teamShelfOrigin(config) !== null;
+  const eventUid = recordEvent({
+    session: sessionId,
+    cwd,
+    hook: 'research',
+    tool: input.tool_name,
+    data: { event: 'PreToolUse', query: clean(question, 512) },
+  });
+  const lines = hintLines(found.stored, isTeam, {
+    sessionId,
+    cwd,
+    eventUid,
+    hook: 'research',
+    shelf: isTeam ? 'team' : 'public',
+    searchId: found.searchId,
+  });
   if (lines.length === 0) return quiet();
   emit('PreToolUse', lines.join('\\n'));
 }
@@ -1281,28 +1221,8 @@ main().catch(quiet);
  * ledger row and nothing else, whatever `hooks.push` is set to.
  */
 export function dispatchHookScript(dataDir: string): string {
-  return `${prelude(dataDir, WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('dispatch')}${pushSource()}
+  return `${prelude(dataDir, WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}
 const HEALTH_PATH = join(DATA_DIR, 'hook-health.json');
-
-/** A fan-out re-dispatches near-identical prompts; case and spacing carry no
- *  meaning here. */
-function fingerprint(question) {
-  return question.toLowerCase().replace(/\\s+/g, ' ').trim();
-}
-
-/** Asking twice buys nothing: the answer is in the store, and on CANDIDATES it is
- *  already in the transcript. Session-scoped; the ledger is machine-global. */
-function alreadyAsked(question, sessionId) {
-  const fp = fingerprint(question);
-  const stamp = sessionId === null ? '' : sessionId;
-  return loadSearches().some(
-    (s) =>
-      isRecord(s) &&
-      typeof s.question === 'string' &&
-      fingerprint(s.question) === fp &&
-      (typeof s.sessionId === 'string' ? s.sessionId : '') === stamp,
-  );
-}
 
 /** What a subagent was sent to find out. Too short to hold a research question
  *  and nothing is sent. */
@@ -1316,22 +1236,22 @@ function dispatchQuestion(toolInput) {
 }
 
 /**
- * How many dispatch lookups one session has spent; each costs up to the fetch
- * budget in front of a tool call. Counted from the bounded store, so the ceiling
- * rate-limits a BURST rather than capping a session for life.
+ * How many dispatch lookups this session has spent RECENTLY; each costs up to
+ * the fetch budget in front of a tool call.
  *
- * The unstamped '' bucket is a real session, exactly as it is in alreadyAsked: a
- * harness that names no session would otherwise be the one place the ceiling
- * never binds, which is backwards, since nothing there scopes anything.
+ * WINDOWED, NOT LIFETIME. This used to be counted out of the 50-entry
+ * searches.json, so the ceiling rate-limited a BURST rather than capping a
+ * session for life: an always-on loop's early fan-out scrolled off the bottom
+ * and gave the session its budget back. The store keeps every row, so the
+ * window that was implicit in the file's bound is now explicit and says what it
+ * always meant.
+ *
+ * The unstamped '' bucket is a real session, exactly as it is in the fingerprint
+ * check: a harness that names no session would otherwise be the one place the
+ * ceiling never binds, which is backwards, since nothing there scopes anything.
  */
 function spentThisSession(sessionId) {
-  const stamp = sessionId === null ? '' : sessionId;
-  return loadSearches().filter(
-    (s) =>
-      isRecord(s) &&
-      s.source === 'dispatch-hook' &&
-      (typeof s.sessionId === 'string' ? s.sessionId : '') === stamp,
-  ).length;
+  return spentSince(sessionId, 'dispatch-hook', Date.now() - ${DISPATCH_SESSION_WINDOW_MS});
 }
 
 /** A consecutive-failure count and when it last changed, on the same terms as the
@@ -1389,7 +1309,11 @@ async function main() {
   if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const sessionId = sessionIdOf(input);
-  if (alreadyAsked(question, sessionId)) return quiet();
+  const cwd = cwdOf(input);
+  await openStore();
+  // Asking twice buys nothing: the answer is in the store, and on CANDIDATES it
+  // is already in the transcript. Session-scoped; the store is machine-global.
+  if (alreadyAskedStore(question, sessionId)) return quiet();
   if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) return quiet();
 
   const nowMs = Date.now();
@@ -1463,7 +1387,7 @@ async function main() {
     return quiet();
   }
   if (health.failures !== 0) writeHealth(0, nowMs);
-  await recordSearch(
+  recordSearch(
     found.searchId,
     question,
     found.decision,
@@ -1483,7 +1407,7 @@ async function main() {
   // ledger and never shown. The ledger row is written WHATEVER \`hooks.push\`
   // says, because the noise this removes is identical with push off and the
   // ledger is the only place the "would this have been worth showing" question
-  // can be answered from later; ledgerAppend creates the directory on demand.
+  // can be answered from later.
   // \`judged\` was computed once per leg above, on the leg that answered.
   if (judged === null) return quiet();
   // The subagent arm's handoff (docs/command-reference.md#push-experimental, T5). SubagentStart carries the agent
@@ -1502,8 +1426,7 @@ async function main() {
     // strength 'none'. Caching it would hand the next subagent a pointer the
     // parent hook would itself have skipped as 'weak'.
     if (judged.top !== null && judged.strength !== 'none') {
-      const state = loadState(sessionId);
-      state.cache = {
+      setState(sessionId, STATE_CACHE, {
         at: new Date().toISOString(),
         query: question,
         // WHICH SHELF ANSWERED, carried so the subagent arm's ledger row says the
@@ -1517,20 +1440,26 @@ async function main() {
         score: judged.score,
         second: judged.second,
         strength: judged.strength,
-      };
-      saveState(sessionId, state);
+      });
     }
   }
   // The row every fire leaves behind, on the shape lib/push-scripts.ts's
   // shelfDecide writes so \`tenjin push status\` reads dispatch rows with
   // everything else. \`action\` is the only field that differs between the two
   // outcomes below.
-  const row = {
-    at: new Date().toISOString(),
+  const eventUid = recordEvent({
     session: sessionId,
+    cwd,
+    hook: 'dispatch',
+    tool: input.tool_name,
+    data: { event: 'PreToolUse', query: clean(question, ${QUESTION_MAX}) },
+  });
+  const row = {
+    session: sessionId,
+    cwd,
+    eventUid,
     trigger: 'dispatch',
     event: 'PreToolUse',
-    query: clean(question, ${QUESTION_MAX}),
     shelf,
     searchId: found.searchId,
     candidate:
@@ -1549,7 +1478,7 @@ async function main() {
     corroborated: judged.corroborated ?? null,
   };
   if (judged.strength !== 'strong') {
-    ledgerAppend({ ...row, action: 'logged', form: 'short' });
+    recordDecision({ ...row, action: 'logged', form: 'short' });
     return quiet();
   }
   // RANK 1 ALONE. \`judge\` scored rank 1 against rank 2 and only rank 1 cleared
@@ -1560,15 +1489,34 @@ async function main() {
   // saying the little that survived beats saying nothing on a strong hit.
   const top = found.stored.filter((c) => c.resourceId === judged.top.resourceId);
   // Two legs here, so it is the leg that ANSWERED that decides the wording.
-  const lines = hintLines(top.length > 0 ? top : found.stored, shelf === 'team');
+  // \`hintLines\` writes its own \`injections\` rows, one per candidate it
+  // renders or skips as already-shown, so the summary row below carries no
+  // candidate: recording the same piece twice would double every count in
+  // \`push status\`.
+  const lines = hintLines(top.length > 0 ? top : found.stored, shelf === 'team', {
+    sessionId,
+    cwd,
+    eventUid,
+    hook: 'dispatch',
+    shelf,
+    searchId: found.searchId,
+    score: judged.score,
+    second: judged.second,
+    strength: judged.strength,
+    confidence: judged.confidence ?? null,
+    corroborated: judged.corroborated ?? null,
+  });
   if (lines.length === 0) {
-    // Nothing renderable (an empty title, an unformattable price): the finding
-    // never reached the model, so the row says \`logged\` and not \`injected\`.
-    ledgerAppend({ ...row, action: 'logged', form: 'short' });
+    // Nothing renderable (an empty title, an unformattable price), or every
+    // candidate already shown this session: the finding never reached the model,
+    // so the row says \`logged\` and not \`injected\`.
+    recordDecision({ ...row, action: 'logged', form: 'short' });
     return quiet();
   }
+  // NO ROW HERE. \`hintLines\` wrote one per candidate it rendered, carrying the
+  // same verdict fields \`row\` holds; a second row would double every count in
+  // \`push status\` for the one arm that renders more than one candidate.
   const text = lines.join('\\n');
-  ledgerAppend({ ...row, action: 'injected', form: 'short', tokens: Math.ceil(text.length / 4) });
   // The hint lands in the PARENT's context only: tool_input is already formed, so
   // the subagent never sees it and the disclaimer always travels with the titles.
   emit('PreToolUse', text);
@@ -1587,10 +1535,22 @@ main().catch(quiet);
  * shelf serves at the moment a trigger fires.
  */
 export function sessionPrimerHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}
+  return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}${storeSource()}
 async function main() {
-  // Drained even though nothing reads it: an unread stdin can block the writer.
-  await readStdin();
+  // Drained even though nothing reads it — an unread stdin can block the writer
+  // — but the payload IS parsed for the session id and cwd, because this is
+  // where a session is opened: \`sessions\` needs a started_at per project for
+  // the judge's windows (#210) and the importance score (#212), and this is the
+  // only hook that runs at the start.
+  const raw = await readStdin();
+  let input = null;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    // Unparseable stdin costs the session row, never the primer.
+  }
+  await openStore();
+  touchSession(sessionIdOf(input), cwdOf(input));
   if (readConfig().sessionPrimer === 'off') return quiet();
   // fd 1 directly, not emit(), which would append the update signal.
   try {
@@ -1654,11 +1614,8 @@ main().catch(quiet);
  * nothing but tidiness.
  */
 export function stopHookScript(dataDir: string): string {
-  return `${prelude(dataDir, STOP_WATCHDOG_MS)}
+  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
-const PUSH_DIR = join(DATA_DIR, ${JSON.stringify(PUSH_DIR_NAME)});
-const LEDGER_PATH = join(DATA_DIR, ${JSON.stringify(PUSH_LEDGER_FILE)});
-const LEDGER_TAIL_BYTES = 262144;
 const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
 const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
 const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
@@ -1675,151 +1632,63 @@ function captureReason(config, publishMode) {
   return text.replace('<mode>', publishMode);
 }
 
-/** A session id as a filename component. */
-function markerPath(name, sessionId) {
-  return join(PUSH_DIR, name + '-' + sessionId.replace(/[^A-Za-z0-9_-]/g, '_'));
-}
-
-function markerExists(name, sessionId) {
-  try {
-    statSync(markerPath(name, sessionId));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Sweep this hook's own leavings: one capture marker per session, forever, on a
- * machine that never turns push on.
+ * Has this session already been asked to capture?
  *
- * \`hooks.capture\` is an independent key, and the push core's pruner — the only
- * other thing that reads this directory — runs from its state save and returns
- * early on every arm when \`hooks.push\` is not \`on\`. So a capture-only machine
- * had no pruner at all. Inodes rather than bytes (each marker is a timestamp),
- * but that directory is also what the push pruner readdirs the day push IS
- * turned on.
- *
- * Same retention as that pruner, from the same constant, and the same posture:
- * bounded, best-effort, and never the turn end's problem. Only \`capture-\` and
- * \`published-\` markers, because the rest of the directory belongs to the push
- * core and is its to age out.
- *
- * \`published-\` markers are \`tenjin publish\`'s content-hash dedup, written on
- * a successful create and never rewritten. The push core skips them for the same
- * reason it skips \`capture-\` — a pinned mtime it cannot reason about — so this
- * pass is the only thing that ages them out, exactly as it is for the capture
- * markers. No live-marker exclusion is needed: nothing holds one open, and a
- * swept marker costs at worst one duplicate post a day later rather than a
- * repeated blocked turn end.
- *
- * THE LIVE SESSION'S OWN MARKER IS NEVER SWEPT, whatever its age. The marker is
- * written once, at first ask, and \`markerExists\` only stats it, so its mtime
- * stays pinned at that moment: a session still running 24h later would have its
- * own marker aged out from under it and be asked a SECOND time, which under
- * \`hooks.capture block\` means a second blocked turn end. "Once per session and
- * no more" is what command-reference.md promises and what this exclusion makes
- * true; the session id is in hand at the call site for exactly this. Every other
- * session's marker still ages out, and this one ages out on the next session's
- * sweep.
+ * A ROW, NOT A MARKER FILE. This was \`push/capture-asked-<session>\`, one inode
+ * per session forever on a machine that never turned push on, aged out by a
+ * pruner that had to be careful not to sweep the LIVE session's own marker — the
+ * marker's mtime was pinned at first ask, so a session still running past the
+ * retention window would be asked a SECOND time, which under
+ * \`hooks.capture block\` is a second blocked turn end. The row has no mtime and
+ * no pruner, so the whole hazard is gone with it.
  */
-function pruneCaptureMarkers(liveSessionId) {
-  try {
-    const now = Date.now();
-    // Compared as a full path built by the same \`markerPath\`, so the sanitizing
-    // it does to a session id cannot make the two spellings disagree.
-    const keep = liveSessionId === null ? null : markerPath('capture-asked', liveSessionId);
-    for (const name of readdirSync(PUSH_DIR)) {
-      if (!name.startsWith('capture-') && !name.startsWith(${JSON.stringify(PUBLISHED_MARKER_PREFIX)}))
-        continue;
-      const path = join(PUSH_DIR, name);
-      if (path === keep) continue;
-      try {
-        if (now - statSync(path).mtimeMs > ${PUSH_STATE_RETENTION_MS}) {
-          rmSync(path, { force: true });
-        }
-      } catch {
-        // Skipped: a marker that cannot be stat'd is not one to delete.
-      }
-    }
-  } catch {
-    // No push directory on this machine yet, which is the common case.
-  }
+function captureAsked(sessionId) {
+  return getState(sessionId, STATE_CAPTURE_ASKED) !== null;
+}
+
+function markCaptureAsked(sessionId) {
+  setState(sessionId, STATE_CAPTURE_ASKED, new Date().toISOString());
 }
 
 /**
  * Did this session do any research at all? Two signals, either of which is
  * enough: a search the SESSION asked for (the CLI's own \`tenjin search\`, the
- * WebSearch hook, the dispatch hook), or a push-ledger row showing a finding was
- * actually put in front of it. A session that only edited files is not asked to
+ * WebSearch hook, the dispatch hook), or an injection row showing a finding was
+ * actually put in front of it. Two indexed queries. A session that only edited files is not asked to
  * publish anything, because it has nothing to write down.
  *
  * NEITHER SIGNAL MAY BE THE SIDECAR'S OWN TELEMETRY. The push arms search on
  * their own initiative — the log-only read arm fires on the first source file
- * the agent opens, and every arm writes a ledger row whatever the outcome — so
- * counting those made \`capture: block\` fire at the end of essentially every
- * push-on session, including one that only read and edited code. So:
- * \`push-hook\` searches do not count, and a ledger row counts only when a real
- * trigger surfaced something (not 'read', not 'churn', not a 'skipped' row, and
- * not a 'logged' one).
+ * the agent opens, and every arm writes a row whatever the outcome — so counting
+ * those made \`capture: block\` fire at the end of essentially every push-on
+ * session, including one that only read and edited code. So: \`push-hook\`
+ * searches do not count, and an injection row counts only when a real trigger
+ * surfaced something (not 'read', not 'churn', not a 'skipped' row, and not a
+ * 'logged' one).
  *
  * 'logged' IS EXCLUDED FOR THE SAME REASON 'skipped' IS: a log-only row records
  * a finding that was judged and then NOT put in front of the model, so nothing
  * about it is evidence the session did research. It became reachable outside the
  * 'read'/'churn' triggers when the dispatch hook started logging its weaker hits
- * instead of injecting them (tenjin-agent#211). NET BEHAVIOUR IS UNCHANGED there:
- * a dispatch lookup is also recorded in searches.json under 'dispatch-hook',
- * which the loop above already counts, so a session that dispatched a subagent
- * is still a session that researched — this only stops the ledger from
- * DOUBLE-counting it through a row the agent never saw.
+ * instead of injecting them (tenjin-agent#211). NET BEHAVIOUR IS UNCHANGED
+ * there: a dispatch lookup is also recorded under 'dispatch-hook', which the
+ * first query already counts, so a session that dispatched a subagent is still
+ * a session that researched — this only stops the row from DOUBLE-counting it
+ * through an injection the agent never saw.
  *
- * The ledger is read from its TAIL, the same bound and reason as the push core's
- * own reader (lib/push-scripts.ts): a file that has grown for months must not be
- * parsed whole at the end of every turn. Duplicated rather than shared because
- * this script embeds no push core; it only reads one field.
+ * TWO INDEXED QUERIES, not a whole-file scan plus a 256 KB tail parse at every
+ * turn end.
  */
-function didResearch(sessionId, searches) {
-  for (const s of searches) {
-    if (isRecord(s) && s.sessionId === sessionId && s.source !== 'push-hook') return true;
-  }
-  let text;
-  try {
-    const size = statSync(LEDGER_PATH).size;
-    if (size <= LEDGER_TAIL_BYTES) {
-      text = readFileSync(LEDGER_PATH, 'utf8');
-    } else {
-      const fd = openSync(LEDGER_PATH, 'r');
-      try {
-        const buf = Buffer.alloc(LEDGER_TAIL_BYTES);
-        readSync(fd, buf, 0, LEDGER_TAIL_BYTES, size - LEDGER_TAIL_BYTES);
-        text = buf.toString('utf8');
-      } finally {
-        closeSync(fd);
-      }
-      text = text.slice(text.indexOf('\\n') + 1);
-    }
-  } catch {
-    return false;
-  }
-  for (const line of text.split('\\n')) {
-    if (line.length === 0) continue;
-    try {
-      const row = JSON.parse(line);
-      if (
-        isRecord(row) &&
-        row.session === sessionId &&
-        row.trigger !== 'read' &&
-        row.trigger !== 'churn' &&
-        row.action !== 'skipped' &&
-        row.action !== 'logged'
-      ) {
-        return true;
-      }
-    } catch {
-      // A torn or foreign line is skipped, never fatal.
-    }
-  }
-  return false;
+function didResearch(sessionId) {
+  if (storeGet(STORE_SQL.researchedBySession, [storeSession(sessionId)]) !== null) return true;
+  return (
+    storeGet(
+      "SELECT 1 FROM injections WHERE session = ? AND hook NOT IN ('read', 'churn')" +
+        " AND action NOT IN ('skipped', 'logged') LIMIT 1",
+      [storeSession(sessionId)],
+    ) !== null
+  );
 }
 
 /** The text of a tool_result's \`content\`, which the harness writes either as a
@@ -2009,32 +1878,26 @@ function subagentsRunning(transcriptPath) {
  * RECORDED BEFORE THE ASK, like the nag record below and for the same reason: an
  * ask we cannot mark is an ask that repeats at every turn end.
  */
-function captureAsk(config, sessionId, searches, transcriptPath) {
+function captureAsk(config, sessionId, transcriptPath) {
   if (config.capture === 'off') return null;
   // No session id means no marker to write and no way to clear it: the ask would
   // fire at every turn end forever. The nag arm degrades to machine-global here;
   // this one degrades to silence, because it is the one that can block.
   if (sessionId === null) return null;
-  if (markerExists('capture-asked', sessionId)) return null;
+  if (captureAsked(sessionId)) return null;
   // AFTER the two cheap gates, so a capture-off machine and an already-asked
   // session never open the transcript at all, and NO MARKER IS WRITTEN on this
   // path: the ask has to fire at the REAL end of the turn, so the session stays
   // eligible at the next Stop.
   if (subagentsRunning(transcriptPath)) return null;
-  if (!didResearch(sessionId, searches)) return null;
-  try {
-    mkdirSync(PUSH_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(markerPath('capture-asked', sessionId), new Date().toISOString(), {
-      mode: 0o600,
-    });
-  } catch {
-    // UNWRITABLE STATE DIRECTORY IS THE ONE CASE WITH NO FLOOR UNDER IT. The
-    // marker is what makes the ask once-per-session, so if this write failed the
-    // ask fires again at the next turn end, and the next. A nudge that repeats
-    // is noise the operator can work through; a BLOCK that repeats is a session
-    // they cannot end. Degrade to the nudge and let them out.
-    return config.capture === 'block' ? 'nudge' : config.capture;
-  }
+  if (!didResearch(sessionId)) return null;
+  markCaptureAsked(sessionId);
+  // AN UNRECORDABLE ASK IS THE ONE CASE WITH NO FLOOR UNDER IT. The row is what
+  // makes the ask once-per-session, so if the store is unavailable the ask fires
+  // again at the next turn end, and the next. A nudge that repeats is noise the
+  // operator can work through; a BLOCK that repeats is a session they cannot
+  // end. Degrade to the nudge and let them out.
+  if (!captureAsked(sessionId)) return config.capture === 'block' ? 'nudge' : config.capture;
   return config.capture;
 }
 
@@ -2152,7 +2015,7 @@ function weakLine(batch) {
  */
 function ownedByThisSession(entry, sessionId) {
   if (sessionId === null) return true;
-  const stamp = typeof entry.sessionId === 'string' ? entry.sessionId : '';
+  const stamp = entry.sessionId === null ? '' : entry.sessionId;
   return stamp === '' || stamp === sessionId;
 }
 
@@ -2173,7 +2036,11 @@ async function main() {
     // Unparseable stdin: fall back to machine-global behavior.
   }
   const config = readConfig();
-  const searches = loadSearches();
+  await openStore();
+  // The session is over: stamp \`ended_at\` so the judge's per-session windows
+  // and the importance score (#212) have a close as well as an open.
+  endSession(sessionId);
+  const searches = openLoops(Date.now() - ${OPEN_LOOP_WINDOW_MS}, ${MAX_STRONG_LOOPS + MAX_WEAK_LOOPS + 20});
   // The mode the next publish IN THIS DIRECTORY would actually run under. The
   // Stop hook's cwd IS the session's working directory, so it is the place that
   // publish runs. Precedence follows lib/config.ts: an env var outranks the
@@ -2185,13 +2052,7 @@ async function main() {
   // FIRST, because a block ends the turn and everything below it is a reminder
   // that will still be there next time. \`nudge\` says the same words as context
   // and rides along with whatever else this turn had to say.
-  const ask = captureAsk(config, sessionId, searches, transcriptPath);
-  // AFTER the ask, so a session older than the retention window is not asked a
-  // second time by its own prune within this turn — and passed this session's id
-  // so it is not asked a second time on a LATER turn either, once the marker it
-  // wrote at first ask is older than the retention window. Once per turn end,
-  // one bounded readdir.
-  pruneCaptureMarkers(sessionId);
+  const ask = captureAsk(config, sessionId, transcriptPath);
   const reason = captureReason(config, publishMode);
   if (ask === 'block') emitBlock(reason);
   const nudge = ask === 'nudge' ? reason : null;
@@ -2233,18 +2094,18 @@ async function main() {
 
   const strong = [];
   const weak = [];
+  // \`searches\` is already MISS-only, unresolved, and inside the window: that is
+  // what \`openLoops\` selects, indexed, instead of the whole-file scan the JSON
+  // store needed.
   for (const s of searches) {
-    if (!isRecord(s) || s.decision !== 'MISS') continue;
-    if (typeof s.searchId !== 'string' || typeof s.question !== 'string') continue;
-    if (s.resolved !== undefined && s.resolved !== null) continue;
+    if (s.searchId.length === 0 || s.question.length === 0) continue;
     if (nagged[s.searchId] !== undefined) continue;
     // BEFORE the nag record is written below: a skipped entry must stay unnagged
     // so its own session still raises it.
     if (!ownedByThisSession(s, sessionId)) continue;
-    const at = Date.parse(String(s.at));
-    if (!Number.isFinite(at) || now - at > ${OPEN_LOOP_WINDOW_MS} || at > now) continue;
+    if (s.at > now) continue;
     // THREE-WAY, default SILENCE. No source predates sources, so it reads 'cli'.
-    const source = typeof s.source === 'string' ? s.source : 'cli';
+    const source = s.source === null ? 'cli' : s.source;
     if (source === 'websearch-hook') {
       // A suppressed weak entry is skipped UNNAGGED, exactly like an entry owned
       // by another session: the batch was rate-limited, not delivered, so the id
