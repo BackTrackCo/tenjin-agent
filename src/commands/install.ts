@@ -12,6 +12,7 @@ import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { skillMaterialize } from '../lib/skill-materialize';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
+import { removeRetiredState } from '../lib/state-store';
 import {
   hookFallthroughAsked,
   hookFallthroughHost,
@@ -460,6 +461,14 @@ async function installBody(
   // `install` far more often than they would run a cleanup command.
   const pointerCleanup = dryRun ? [] : await removeMarkerLines(home);
 
+  // One-time cleanup of the files the state store replaced (tenjin-agent#209:
+  // push-ledger.jsonl, the push/ working directory and its markers,
+  // searches.json and its lock directory, and the long-dead candidates/). There
+  // is deliberately no import path — plan 03, owner decision 3 — so the sidecar
+  // starts clean, and this is the command that rewrites the hook scripts
+  // anyway. Reported rather than silent: it is the operator's data dir.
+  const retiredState = dryRun ? [] : await removeRetiredState(ctx.dataDir);
+
   // The five decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
@@ -574,6 +583,9 @@ async function installBody(
     // versions wrote a pointer line into CLAUDE.md/AGENTS.md; nothing writes one
     // now, so an install that finds one removes it and says which file it touched.
     pointerCleanup,
+    // Same reason as the pointer line: files under the operator's data dir were
+    // deleted, so the run says which ones.
+    retiredState,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
     bazaarPay,
@@ -595,6 +607,7 @@ async function installBody(
   // to stdout at a TTY and never an envelope).
   const humanLines = buildWalkthrough(ctx.io, {
     pointerCleanup,
+    retiredState,
     dryRun,
     dataDir: ctx.dataDir,
     harnesses,
@@ -645,6 +658,8 @@ interface WalkthroughState {
   /** Legacy pointer files this run cleaned; disclosed because they are the
    *  operator's own notes and we edited them. */
   pointerCleanup: string[];
+  /** Retired sidecar state this run deleted; disclosed for the same reason. */
+  retiredState: string[];
   /** Where the wallet keystore lives, for the create disclosure. */
   dataDir: string;
   harnesses: HarnessResult[];
@@ -713,6 +728,14 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
   if (s.pointerCleanup.length > 0) {
     lines.push(
       `Removed the old Tenjin pointer line from ${s.pointerCleanup.join(' and ')}; the skills carry their own triggers now.`,
+    );
+  }
+  // Same again: files under ~/.tenjin were deleted, and the operator learns it
+  // here or not at all. Named individually because "old sidecar state" could
+  // mean anything, and one of them is the push experiment's own record.
+  if (s.retiredState.length > 0) {
+    lines.push(
+      `Removed ${s.retiredState.join(', ')}: the hook sidecar keeps its state in ~/.tenjin/state.db now, and starts fresh.`,
     );
   }
   // Same reason as the pointer line above: we edited the operator's settings.json
