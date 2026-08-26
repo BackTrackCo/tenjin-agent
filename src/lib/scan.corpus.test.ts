@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { scan } from './scan';
+import { scan, TEAM_SURVIVOR_CHECKS } from './scan';
 import corpus from './scan-corpus.json';
 import rules from './scan-rules.json';
 
@@ -191,5 +191,46 @@ describe('scan corpus — ReDoS budget on transcript-scale input', () => {
     const started = performance.now();
     scan(Array.from({ length: 8000 }, () => record).join('\n'));
     expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+  });
+});
+
+/**
+ * The team-shelf survivor set, checked for the failure the corpus gate above cannot
+ * see: a survivor NAME that no longer names a detector. `survivesTeamDrop` reads
+ * `teamSurvives` out of the corpus, so a flagged rule resolves by construction, but
+ * `hex32-value` is not a rule id but the warn form `scanHex64` demotes
+ * `raw-private-key` to in hash context, and renaming that literal drops 64-hex key
+ * material out of team mode with every other test still green.
+ *
+ * ADDING a survivor is free by construction, which is the point of the data field.
+ * REMOVING one has to fail, so the floor below is a subset check, not an equality.
+ */
+describe('team-shelf survivor set', () => {
+  /** Restated independently of scan.ts: two copies disagreeing is the signal. */
+  const EMITTED = ['hex32-value'];
+  const CORPUS_RULE_IDS = new Set((rules as { rules: { id: string }[] }).rules.map((r) => r.id));
+
+  it('resolves every survivor name to a rule id or a known emitted check', () => {
+    const unresolved = [...TEAM_SURVIVOR_CHECKS].filter(
+      (name) => !CORPUS_RULE_IDS.has(name) && !EMITTED.includes(name),
+    );
+    expect(unresolved, 'survivor names that name no detector').toEqual([]);
+  });
+
+  it('still emits every known emitted check, so renaming the literal fails here', () => {
+    const emitted = scan(`The key hash: 0x${'c'.repeat(64)}`).map((f) => f.check);
+    for (const name of EMITTED) expect(emitted, `${name} is no longer emitted`).toContain(name);
+  });
+
+  it('keeps every check that asks the credential or the injection question', () => {
+    for (const name of [
+      'secret-assignment',
+      'hex32-value',
+      'high-entropy-string',
+      'env-dump-block',
+      'embedded-instruction',
+    ]) {
+      expect(TEAM_SURVIVOR_CHECKS.has(name), `${name} no longer survives the team drop`).toBe(true);
+    }
   });
 });

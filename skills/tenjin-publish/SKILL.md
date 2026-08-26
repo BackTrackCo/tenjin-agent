@@ -81,18 +81,26 @@ the things a public scan warns on — are the point of a team note rather than a
 leak, so every one of those warn checks is dropped and none of them will ever stop
 you.
 
-Exactly four survive:
+Exactly six survive:
 
-- The whole BLOCKING tier: structured credential shapes — provider token formats,
-  private keys, connection URIs with an embedded password. This shelf is a hosted
-  database with logs and a door key the whole team holds, so a live credential
-  published here is still a live credential loose. Exits 3 in every mode, and no
-  `--yes` and no mode clears it.
+- The whole BLOCKING tier: structured credential shapes — provider tokens, private
+  keys in and out of PEM framing, seed phrases, connection URIs with an embedded
+  password, and TOTP provisioning URIs. This shelf is a hosted database with logs
+  and a door key the whole team holds, so a live credential published here is still
+  a live credential loose. Exits 3 in every mode, and no `--yes` and no mode clears
+  it.
 - `secret-assignment`: a secret-named assignment such as
   `DEPLOY_API_KEY="pk_live_…"`, whose shape no block detector matches.
 - `hex32-value`: a `0x` + 64-hex value in hash context — the same detector as the
   blocking raw private key, kept a warn only so a receipt or tx hash is not
   permanently unpublishable.
+- `high-entropy-string`: a long token whose character profile reads as key material
+  and that no named detector claimed. It is what is left for `SEGMENT_WRITE_KEY=…`
+  or `Authorization: Basic …`, whose key name `secret-assignment` does not
+  recognize and whose value shape nothing above matches.
+- `env-dump-block`: three or more consecutive `KEY=VALUE` lines carrying a
+  substantial value, which is what a pasted `.env` looks like. A note written up
+  from a transcript or a config paste is exactly where one turns up.
 - `embedded-instruction`: an "ignore all previous instructions" imperative or a
   `BEGIN SYSTEM PROMPT` header. The one survivor that is not about credentials.
   Injection risk does not shrink for being private the way a publicness concern
@@ -100,23 +108,27 @@ Exactly four survive:
   it unasked. If the imperative is source material the note is ABOUT, say so and
   clear it; if you cannot say where it came from, do not.
 
-The last three are warns, so the cascade governs them as it does anywhere:
+The last five are warns, so the cascade governs them as it does anywhere:
 `review` and `auto` exit 3 on them, `full-auto` and `--yes` clear them unseen. The
 publicness triage is what is gone here, because publicness is not what this shelf
 is for.
 <!-- tenjin:else -->
 The CLI runs a deterministic scan in every mode. Its BLOCKING tier is structured
-credential shapes only — provider tokens, private keys, seed phrases, connection
-URIs with an embedded password — and no mode and no `--yes` clears it. Everything
-else warns: `review` surfaces warnings, `--yes` and `full-auto` clear them. A
+credential shapes only — provider tokens, private keys in and out of PEM framing,
+seed phrases, connection URIs with an embedded password, and TOTP provisioning
+URIs — and no mode and no `--yes` clears it. Everything else warns: `review`
+surfaces warnings, `--yes` and `full-auto` clear them. A
 secret with no recognizable shape is a prompt to look, not a stop.
 
 It matches patterns, so warnings split in two and only the second is worth the
 user's attention:
 
 - Usually fine when the piece is genuinely about them: `local-path`,
-  `wallet-address`, `embedded-instruction`, `email`, `private-network-endpoint`,
-  `high-entropy-string`.
+  `wallet-address`, `embedded-instruction`, `email`, `private-network-endpoint` in
+  a local-dev walkthrough, `high-entropy-string` where the piece quotes an opaque
+  handle. Genuinely about them is the whole condition: an unexplained
+  `high-entropy-string` is a secret with no recognizable shape, which is a prompt
+  to look.
 - Usually a real stop, because the draft carries context from somewhere it should
   not have travelled: `customer-identifier`, `confidential-marker`,
   `internal-hostname`, `private-repo-reference`, `secret-assignment`,
@@ -316,8 +328,9 @@ private draft, leaves the loop open, and sends no attribution.
 **On any exit 3, render THAT payload's findings as one yes/no, then re-run with
 `--yes` on an explicit yes.** Never ask a generic "shall I publish?" before
 running: the findings are the question, and a `--yes` re-run after a bare yes
-silently clears the three warn checks that survive here (`secret-assignment`,
-`hex32-value`, `embedded-instruction`) — which on this shelf are the only findings
+silently clears the five warn checks that survive here (`secret-assignment`,
+`hex32-value`, `high-entropy-string`, `env-dump-block`, `embedded-instruction`) —
+which on this shelf are the only findings
 there are, and each one is either a live credential or text that would steer the
 next agent to read it. A hard block refuses in every mode and no `--yes` clears it.
 <!-- tenjin:else -->

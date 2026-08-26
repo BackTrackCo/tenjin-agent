@@ -937,10 +937,15 @@ describe('the public render did not move', () => {
   // `collaboration-url`, `cloud-resource-id`, `env-dump-block`) and the block tier
   // gained seed phrases. Only tenjin-publish's else arm moved; tenjin-search is
   // untouched, which is why its digest still holds.
+  //
+  // Re-pinned once more (review r7): the block tier was enumerated three ways
+  // across the two arms and safety-model.md, so all three now name the same five
+  // families (TOTP provisioning URIs is what the public arm was missing), and the
+  // "usually fine" warn bucket got back the qualifiers that make it conditional.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': 'a3d2ff8e259851b2ed8733921286cbea',
-      'tenjin-publish': '720e8dfe41c6377d71eb7a705936f1e4',
+      'tenjin-publish': 'b5312fcaf8aefad153ed4433b833dc22',
     });
   });
 

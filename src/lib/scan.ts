@@ -98,6 +98,8 @@ interface Rule {
   tier: string;
   description: string;
   source: string;
+  /** Warn rules only: this check outlives the team-shelf warn drop. See `survivesTeamDrop`. */
+  teamSurvives?: boolean;
   match: { kind: string; pattern?: string; flags?: string; algorithm?: string };
   excerpt: RuleExcerpt;
   skip?: { handler: string };
@@ -157,6 +159,11 @@ function compileLineDetectors(rules: Rule[]): LineDetector[] {
   for (const rule of rules) {
     if (rule.tier !== 'block' && rule.tier !== 'warn') {
       throw new Error(`scan-rules.json: rule ${rule.id} has unknown tier ${rule.tier}`);
+    }
+    if (rule.teamSurvives === true && rule.tier !== 'warn') {
+      throw new Error(
+        `scan-rules.json: rule ${rule.id} flags teamSurvives on the ${rule.tier} tier, which survives whole`,
+      );
     }
     if (rule.match.kind === 'algorithm') {
       if (!ALGORITHMS.has(rule.match.algorithm ?? '')) {
@@ -722,18 +729,43 @@ function shannonBits(token: string): number {
 }
 
 /**
+ * The one survivor no rule entry can carry the flag for: `hex32-value` is not a
+ * rule id but the warn form `scanHex64` demotes `raw-private-key` to in hash
+ * context. Named here, and pinned by scan.corpus.test.ts so renaming the emitting
+ * literal fails loudly rather than shrinking the survivor set in silence.
+ */
+const EMITTED_TEAM_SURVIVORS = ['hex32-value'];
+
+/** Warn checks a team shelf keeps. Exported so a test can resolve every name in it. */
+export const TEAM_SURVIVOR_CHECKS: ReadonlySet<string> = new Set([
+  ...CORPUS.rules.filter((r) => r.teamSurvives === true).map((r) => r.id),
+  ...EMITTED_TEAM_SURVIVORS,
+]);
+
+/**
  * Does this finding survive the team-shelf warn drop?
  *
  * A team shelf is not public, so the warn tier's "is this safe to make PUBLIC"
  * question stops applying: a repo slug is the POINT of a team note. Two OTHER
- * questions do not stop applying, so the block tier survives whole plus the three
- * warns that ask one of them rather than the public-safety one.
+ * questions do not stop applying, so the block tier survives whole plus the warns
+ * that ask one of them rather than the public-safety one.
+ *
+ * WHICH warns is data, not a list in this function: `teamSurvives: true` on the
+ * rule in scan-rules.json. A hardcoded list is how the two catch-alls below spent a
+ * release filtered out: they landed beside a predicate written before they
+ * existed, and nothing in a data-driven set can arrive that way again.
  *
  * "Is this a live credential?" — a team shelf is a hosted Postgres with logs and a
  * static shared door key, and a leaked key there is leaked.
  *
  * - `secret-assignment` — DEPLOY_API_KEY="pk_live_…" is a live key whose shape no
  *   block detector matches.
+ * - `high-entropy-string` — the catch-all BEHIND the named shapes, firing only
+ *   where no named detector did. It is what is left for `SEGMENT_WRITE_KEY=…` or
+ *   `Authorization: Basic …`, whose key name `secret-assignment` does not
+ *   recognize and whose value shape no block detector knows.
+ * - `env-dump-block` — a pasted .env file. The Stop hook captures from transcripts
+ *   and tool output, so a config paste is the exact input this detector is for.
  * - `hex32-value` — the SAME 0x+64-hex private-key detector as `raw-private-key`
  *   above, demoted to warn only because a block finding is permanently
  *   non-bypassable and a post carrying a tx hash must not be hard-blocked. Warn is
@@ -752,18 +784,16 @@ function shannonBits(token: string): number {
  *   where an already-poisoned agent captures at turn end and publishes to the very
  *   shelf the sidecar re-injects (review r6).
  *
- * All three are kept BY NAME rather than promoted to block, so the consent cascade
- * still governs them: `review` and `auto` confirm, `full-auto` clears them unseen
- * exactly as it already does on the marketplace. Callers: commands/publish.ts and
- * commands/edit.ts, which must never disagree — this predicate is why they can't.
+ * All are kept as warns rather than promoted to block, so the consent cascade still
+ * governs them: `review` and `auto` confirm, `full-auto` clears them unseen exactly
+ * as it already does on the marketplace. What a wrongly dropped warn costs differs
+ * by mode: `review` stops once per note either way and loses only the finding from
+ * the prompt body, but `auto` goes promptless and `full-auto` publishes unattended.
+ * Callers: commands/publish.ts and commands/edit.ts, which must never disagree —
+ * this predicate is why they can't.
  */
 export function survivesTeamDrop(f: ScanFinding): boolean {
-  return (
-    f.severity === 'block' ||
-    f.check === 'secret-assignment' ||
-    f.check === 'hex32-value' ||
-    f.check === 'embedded-instruction'
-  );
+  return f.severity === 'block' || TEAM_SURVIVOR_CHECKS.has(f.check);
 }
 
 const FENCE = /^(\s*)(`{3,}|~{3,})/;
