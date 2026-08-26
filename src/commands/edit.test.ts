@@ -1690,7 +1690,7 @@ describe('runEdit — server ingest gate', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     ).catch((e: unknown) => e)) as { code: string; fix?: string };
     expect(err.code).toBe('NEEDS_CONFIRMATION');
-    expect(err.fix).toContain('beyond what your --yes answered');
+    expect(err.fix).toContain('a --yes does not cover them');
     // The token stays unsent, so the edit did not land.
     expect(stub.puts()).toHaveLength(1);
   });

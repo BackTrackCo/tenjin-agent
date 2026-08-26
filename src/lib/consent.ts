@@ -255,18 +255,42 @@ export async function throughScanGate<T>(flow: ScanGateFlow<T>): Promise<T> {
 }
 
 /**
- * What the operator does next about a held write. The three cases are different
- * instructions, and the third is the one that matters: their `--yes` answered an
- * earlier render that could not have contained these findings, so pointing them
- * back at `--yes` would be pointing them at the same wall.
+ * What the operator does next about a held write.
+ *
+ * ADVISE `--yes` ONLY WHERE A `--yes` WOULD ACTUALLY ACK, and settle that by
+ * asking {@link acksServerWarnings} itself, with `yes: true`, about the run the
+ * operator is being sent to make. Deciding it here on `flow.yes` alone read the
+ * flag and ignored the setting and the override that also gate the ack, so the
+ * payload advised a re-run that provably could not clear the hold: under
+ * `ackServerWarnings off` that is an infinite loop, and the skill's "follow that
+ * payload's own fix" rule cannot escape a fix that is itself the loop.
+ *
+ * Then the three ways a `--yes` cannot help, which are three different remedies:
+ * a caller that never acks whatever the operator configures, the operator's own
+ * standing `off`, and the ordinary case where the marketplace found something
+ * the local pass never rendered.
  */
 function heldFix<T>(flow: ScanGateFlow<T>, hasToken: boolean, serverAddedUnseen: boolean): string {
   if (!hasToken) return 'Resolve the findings in the content, then re-run.';
-  if (!(flow.yes && serverAddedUnseen)) {
+  const yesWouldAck = acksServerWarnings({
+    mode: flow.mode,
+    yes: true,
+    setting: flow.ackSetting,
+    ...(flow.ackOverride !== undefined ? { override: flow.ackOverride } : {}),
+    serverAddedUnseen,
+  });
+  if (yesWouldAck) {
     return 'Review the findings, then re-run with --yes to proceed anyway (or resolve them in the content).';
   }
+  if (flow.ackOverride === false) {
+    return 'This run never acknowledges marketplace findings, whatever the mode or the config say. Resolve them in the content, then re-run.';
+  }
+  if (flow.ackSetting === 'off') {
+    return 'publish.ackServerWarnings is off, so no --yes acknowledges a marketplace finding. Resolve them in the content, or change that setting deliberately with `tenjin config set publish.ackServerWarnings mode`.';
+  }
   return (
-    'The marketplace found these beyond what your --yes answered, so that yes does not clear them. ' +
+    'These came from the marketplace rather than the local scan, so a --yes does not cover them: ' +
+    'a --yes answers the payload rendered before the marketplace was asked. ' +
     'Resolve them in the content, or acknowledge marketplace findings standingly with ' +
     '`tenjin config set publish.ackServerWarnings on` and re-run with --yes.'
   );

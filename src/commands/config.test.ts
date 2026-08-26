@@ -473,6 +473,58 @@ describe('publish.defaultPrice key', () => {
   });
 });
 
+/**
+ * The consent seam the held payload sends operators to: a scan-gate hold whose
+ * `fix` names `tenjin config set publish.ackServerWarnings on`, so the command it
+ * names has to work and has to refuse a value it does not know.
+ */
+describe('publish.ackServerWarnings key', () => {
+  it.each(['mode', 'on', 'off'] as const)('round-trips %s through the file', async (value) => {
+    const set = await runConfigSet(
+      { key: 'publish.ackServerWarnings', value },
+      makeCtx(),
+      await hermeticHome(),
+    );
+    expect(set.data).toEqual({ key: 'publish.ackServerWarnings', value, source: 'file' });
+    const get = await runConfigGet({ key: 'publish.ackServerWarnings' }, makeCtx());
+    expect(get.data).toEqual({ key: 'publish.ackServerWarnings', value, source: 'file' });
+    expect(await readRawFile()).toEqual({ publish: { ackServerWarnings: value } });
+  });
+
+  // A typo must not land on the looser reading by accident: this key decides
+  // whether one --yes covers the marketplace's own findings.
+  it.each(['yes', 'true', 'ON', 'auto', ''])('rejects %j as USAGE', async (bad) => {
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.ackServerWarnings', value: bad }, makeCtx()),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+  });
+
+  it('merges with the sibling publish subkeys rather than replacing them', async () => {
+    await runConfigSet(
+      { key: 'publish.mode', value: 'full-auto' },
+      makeCtx(),
+      await hermeticHome(),
+    );
+    await runConfigSet({ key: 'publish.ackServerWarnings', value: 'off' }, makeCtx());
+    expect(await readRawFile()).toEqual({
+      publish: { mode: 'full-auto', ackServerWarnings: 'off' },
+    });
+  });
+
+  // Setting it is not a mode change, so it must not touch the harness allowlist
+  // the way `config set publish.mode` deliberately does.
+  it('does not sync the harness allowlist the way publish.mode does', async () => {
+    const set = await runConfigSet(
+      { key: 'publish.ackServerWarnings', value: 'on' },
+      makeCtx(),
+      await hermeticHome(),
+    );
+    expect(set.data).not.toHaveProperty('allowlist');
+  });
+});
+
 describe('forward compatibility', () => {
   it('preserves an unknown top-level block through a set', async () => {
     await writeFile(configFile(), JSON.stringify({ future: { some: 'block' } }));

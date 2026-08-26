@@ -56,6 +56,27 @@ describe('resolvePublishSettings — precedence', () => {
     });
   });
 
+  /**
+   * The key is global-only because it can only widen what a yes covers, so a
+   * `.tenjin.json` a cloned repo carries must not set it. Failing closed is the
+   * point; failing closed SILENTLY is not, because an operator then believes a
+   * consent setting is in force that is not.
+   */
+  it('ignores publish.ackServerWarnings in a project file, and says so', async () => {
+    await writeProject({ publish: { ackServerWarnings: 'on' } });
+    const r = await resolvePublishSettings(input(), committed);
+    expect(r.ackServerWarnings).toBe('mode');
+    expect(r.warnings.join('\n')).toContain('Ignoring publish.ackServerWarnings');
+    expect(r.warnings.join('\n')).toContain('.tenjin.json');
+  });
+
+  it('reads publish.ackServerWarnings from the global config, silently', async () => {
+    await writeGlobal({ ackServerWarnings: 'off' });
+    const r = await resolvePublishSettings(input(), committed);
+    expect(r.ackServerWarnings).toBe('off');
+    expect(r.warnings).toEqual([]);
+  });
+
   it('global config sets mode and price (file source)', async () => {
     await writeGlobal({ mode: 'review', defaultPrice: '200000' });
     const r = await resolvePublishSettings(input(), committed);

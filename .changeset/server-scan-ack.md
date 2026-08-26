@@ -34,7 +34,11 @@ unattended `full-auto` machine needs; `on` lets a `--yes` cover the server's
 findings too, which is what a non-interactive machine sets once instead of
 re-running forever; `mode` (the default) derives the answer as above. It reads
 from the global config only, never from a project `.tenjin.json`, because it can
-only ever loosen what a yes covers. In-process callers whose answer is not the
+only ever loosen what a yes covers; a project file that names it is ignored with
+a stderr line rather than silently. The held payload's `fix` is derived from the
+same decision the acknowledgement is, so it never advises a `--yes` that the
+mode, the setting or the caller has already ruled out, and the Stop hook's
+`publish.mode=full-auto` line says when `off` still stops a publish. In-process callers whose answer is not the
 operator's to configure still pass `ackServerWarnings: false` and never
 acknowledge at all.
 

@@ -2097,7 +2097,7 @@ describe('runPublish — server ingest gate', () => {
         // Not retried: the token stays unsent, so nothing was published.
         expect(bodies()).toHaveLength(1);
         // The fix does NOT point back at --yes, which would be the same wall.
-        expect(err.fix).toContain('beyond what your --yes answered');
+        expect(err.fix).toContain('a --yes does not cover them');
         expect(err.fix).toContain('publish.ackServerWarnings on');
         // Both are rendered, each marked with where it came from.
         const findings = (err.details as { findings: { check: string; source: string }[] })
@@ -2146,7 +2146,7 @@ describe('runPublish — server ingest gate', () => {
       expect(err.code).toBe('NEEDS_CONFIRMATION');
       // The token stays unsent: nothing was acked.
       expect(bodies()).toHaveLength(1);
-      expect(err.fix).toContain('beyond what your --yes answered');
+      expect(err.fix).toContain('a --yes does not cover them');
       const findings = (err.details as { findings: { source: string }[] }).findings;
       expect(findings).toHaveLength(2);
       expect(findings[0]).toMatchObject({ check: 'wallet-address', source: 'both' });
@@ -2161,14 +2161,62 @@ describe('runPublish — server ingest gate', () => {
         findings: [SERVER_EMAIL],
         ackToken: 'v1.tok.mac',
       });
-      await expect(
-        runPublish(
-          baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
-          makeCtx(),
-          hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
-        ),
-      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+      const err = (await runPublish(
+        baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ).catch((e: unknown) => e)) as { code: string; fix?: string };
+      expect(err.code).toBe('NEEDS_CONFIRMATION');
       expect(bodies()).toHaveLength(1);
+      // And HERE a --yes genuinely would ack, so that is what the fix advises:
+      // the string tracks the decision rather than the flag.
+      expect(err.fix).toContain('re-run with --yes to proceed anyway');
+    });
+
+    /**
+     * THE FIX STRING IS DERIVED FROM THE SAME DECISION THE ACK IS, so it never
+     * advises a re-run that cannot clear the hold. Under `off` the old string
+     * took the "re-run with --yes" branch whenever the findings deduped into
+     * local ones, and that re-run reproduced the identical state forever: the
+     * skill's "follow that payload's own fix" rule cannot escape a fix that is
+     * itself the loop.
+     */
+    it('never advises a --yes that the setting has already ruled out', async () => {
+      await setAckConfig('off');
+      const { fetch, bodies } = stubGate('scan_needs_ack', {
+        // Deduplicates into the local wallet warn, so serverAddedUnseen is false
+        // and the old code advised --yes here.
+        findings: [LOCAL_WALLET],
+        ackToken: 'v1.tok.mac',
+      });
+      const err = (await runPublish(
+        baseArgs(await writeDoc(`${WARN}\nOff path.\n`), { mode: 'auto', yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ).catch((e: unknown) => e)) as { code: string; fix?: string };
+      expect(err.code).toBe('NEEDS_CONFIRMATION');
+      expect(bodies()).toHaveLength(1);
+      expect(err.fix).toContain('publish.ackServerWarnings is off');
+      expect(err.fix).not.toContain('re-run with --yes to proceed anyway');
+      // And it must not advise undoing the very setting the operator chose.
+      expect(err.fix).not.toContain('ackServerWarnings on');
+    });
+
+    // The primary hold path: `auto`, clean local content, no --yes at all. Every
+    // finding is server-only, so a --yes cannot clear it either, and advising one
+    // burned a signed round trip to say so.
+    it('does not advise a --yes on the no-yes hold it cannot clear', async () => {
+      const { fetch } = stubGate('scan_needs_ack', {
+        findings: [SERVER_EMAIL],
+        ackToken: 'v1.tok.mac',
+      });
+      const err = (await runPublish(
+        baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ).catch((e: unknown) => e)) as { fix?: string };
+      expect(err.fix).toContain('a --yes does not cover them');
+      expect(err.fix).not.toContain('re-run with --yes to proceed anyway');
     });
 
     // The off switch a dogfood machine gets without leaving full-auto.

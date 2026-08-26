@@ -581,6 +581,8 @@ export interface ResolvedSetting<T> {
 export interface ProjectPublishLayer {
   publish?: { mode?: PublishMode; defaultPrice?: string };
   gitignored: boolean;
+  /** The file named `publish.ackServerWarnings`, which this layer never supplies. */
+  ignoredAckServerWarnings?: boolean;
 }
 
 /** publish.mode resolution: value, source, and the downgrade warning (if any). */
@@ -681,8 +683,14 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
  * checked into a repo the operator cloned must not be able to set it. That is the
  * same reason `resolvePublishMode` gates `full-auto` out of the project layer,
  * applied one step earlier: here there is no benign reading of the key at all.
+ *
+ * Exported because `resolvePublishSettings` (lib/settings.ts) resolves the same
+ * key for the two writing commands, and two global-only readings that disagreed
+ * would disagree about consent.
  */
-function resolveAckServerWarnings(config: PartialConfig): ResolvedSetting<AckServerWarnings> {
+export function resolveAckServerWarnings(
+  config: PartialConfig,
+): ResolvedSetting<AckServerWarnings> {
   const fromFile = config.publish?.ackServerWarnings;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.publish.ackServerWarnings, source: 'default' };

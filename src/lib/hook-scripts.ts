@@ -398,6 +398,9 @@ function readConfig() {
   const fromEnv = process.env.TENJIN_PUBLISH_MODE;
   const envPinned = isPublishMode(fromEnv);
   const publishMode = envPinned ? fromEnv : publish.mode;
+  // Global-file only, matching lib/config.ts's resolveAckServerWarnings: no env
+  // and no project layer, because the key can only widen what a yes covers.
+  const ack = publish.ackServerWarnings;
   const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '${PRODUCTION_ORIGIN}';
   const publicShelfUrl =
     typeof cfg.publicShelfUrl === 'string' ? cfg.publicShelfUrl : '${PRODUCTION_ORIGIN}';
@@ -418,6 +421,7 @@ function readConfig() {
     // \`nudge\` says the same thing as context and lets the turn end.
     capture: capture === 'block' || capture === 'nudge' ? capture : 'off',
     publishMode: isPublishMode(publishMode) ? publishMode : 'review',
+    ackServerWarnings: ack === 'on' || ack === 'off' ? ack : 'mode',
     envPinned,
     baseUrl,
     // The public marketplace, consume-only, and the ONE place the team shelf's
@@ -1768,10 +1772,15 @@ function saveNags(nagged, sessions) {
  * NEVER EMITTED ALONE. It is context for the loops below it, not a standing
  * announcement, so a turn with nothing open says nothing at all.
  */
-function modeLine(mode) {
-  if (mode === 'auto') return 'publish.mode=auto: a clean publish proceeds without asking.';
+function modeLine(mode, ack) {
+  // \`ackServerWarnings off\` outranks the mode at the marketplace gate, so a
+  // full-auto machine carrying it DOES stop on a server warn. This line is in the
+  // model's context at every turn end, and stating the mode's contract without
+  // the setting that overrides it is telling the agent it will never be asked.
+  const held = ack === 'off' ? ' Marketplace scan findings still stop it (publish.ackServerWarnings=off).' : '';
+  if (mode === 'auto') return 'publish.mode=auto: a clean publish proceeds without asking.' + held;
   if (mode === 'full-auto') {
-    return 'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.';
+    return 'publish.mode=full-auto: publish without asking; hedge warnings, stop only on hard blocks.' + held;
   }
   return 'publish.mode=review: publishing asks first.';
 }
@@ -1952,7 +1961,7 @@ async function main() {
   // The mode heads the block: it is what decides whether the publish arm below
   // needs the operator's word, and an agent that has to run \`tenjin config get\`
   // to find out defaults to asking (tenjin-agent #161).
-  const lines = [modeLine(publishMode)];
+  const lines = [modeLine(publishMode, config.ackServerWarnings)];
   for (const s of strong) lines.push(strongLine(s));
   if (weak.length > 0) lines.push(weakLine(weak));
   if (nudge !== null) lines.push(nudge);

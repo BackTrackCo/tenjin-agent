@@ -110,14 +110,25 @@ describe('acksServerWarnings: a confirmation must post-date its findings', () =>
   // may narrow what is auto-acked and may not widen it, config values included,
   // so `on` is a standing yes rather than a manufactured one.
   it('never acks anything the pre-gate `yes || full-auto` rule would not have', () => {
+    // TOTAL over every input, `override` included: the old rule checked override
+    // first too (`override ?? (yes || full-auto)`), so enumerating it here is a
+    // like-for-like comparison rather than an exemption.
     for (const mode of MODES) {
       for (const setting of SETTINGS) {
         for (const yes of [true, false]) {
           for (const serverAddedUnseen of [true, false]) {
-            const input: ServerAckInput = { mode, yes, setting, serverAddedUnseen };
-            const previously = yes || mode === 'full-auto';
-            if (acksServerWarnings(input)) {
-              expect(previously, JSON.stringify(input)).toBe(true);
+            for (const override of [true, false, undefined]) {
+              const input: ServerAckInput = {
+                mode,
+                yes,
+                setting,
+                serverAddedUnseen,
+                ...(override !== undefined ? { override } : {}),
+              };
+              const previously = override ?? (yes || mode === 'full-auto');
+              if (acksServerWarnings(input)) {
+                expect(previously, JSON.stringify(input)).toBe(true);
+              }
             }
           }
         }

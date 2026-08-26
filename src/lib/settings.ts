@@ -9,6 +9,7 @@ import {
   PublishModeSchema,
   SEND_MAX_UNSET,
   loadRawConfig,
+  resolveAckServerWarnings,
   resolvePublishDefaultPrice,
   resolvePublishMode,
   resolveSettings,
@@ -442,16 +443,25 @@ export async function resolvePublishSettings(
   const mode = resolvePublishMode({ config, project: layer, env, flag: input.flag });
   const price = resolvePublishDefaultPrice({ config, project: layer });
   const warnings = mode.downgradedWarning !== undefined ? [mode.downgradedWarning] : [];
+  // Said out loud for the same reason the downgrade is: a consent setting the
+  // operator believes is in force, and is not, is worse than one they know is
+  // ignored. `writeModeNotices` puts every entry of this list on stderr.
+  if (layer?.ignoredAckServerWarnings === true) {
+    warnings.push(
+      `Ignoring publish.ackServerWarnings in ${project?.path ?? PROJECT_CONFIG_FILE}: it is read from the global config only, since it can only widen what a yes covers. Set it with \`tenjin config set publish.ackServerWarnings <mode|on|off>\`.`,
+    );
+  }
 
   return {
     mode: mode.value,
     modeSource: mode.source,
     defaultPriceAtomic: price.value,
     defaultPriceSource: price.source,
-    // Global config only, on purpose: the project layer never contributes here
-    // (see resolveAckServerWarnings), so `project` is deliberately not passed.
-    ackServerWarnings:
-      config.publish?.ackServerWarnings ?? CONFIG_DEFAULTS.publish.ackServerWarnings,
+    // Global config only, on purpose: the project layer never contributes here,
+    // so `project` is deliberately not passed. ONE reader, the same one
+    // `resolveSettings` uses, because two global-only readings that drifted
+    // would drift about consent.
+    ackServerWarnings: resolveAckServerWarnings(config).value,
     warnings,
     ...(project !== null ? { projectConfigPath: project.path } : {}),
   };
@@ -504,6 +514,14 @@ export async function loadProjectConfig(
         ? { defaultPrice: parseProjectPrice(defaultPrice, path) }
         : {}),
     };
+    // The block is passthrough, so this key parses here and is then never read:
+    // `ackServerWarnings` is global-only because it can only loosen what a yes
+    // covers. Failing closed is the point, but doing it SILENTLY leaves an
+    // operator believing a consent setting is in force that is not, so it says
+    // so on stderr the way a downgraded `full-auto` does.
+    if ((parsed.data.publish as { ackServerWarnings?: unknown }).ackServerWarnings !== undefined) {
+      layer.ignoredAckServerWarnings = true;
+    }
   }
   return { path, layer };
 }
