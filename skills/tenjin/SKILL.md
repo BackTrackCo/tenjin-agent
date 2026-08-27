@@ -166,7 +166,9 @@ secrets; generalize the NAMES, keep the technical specifics).
   piece above — no extra headers required. OPTIONALLY add `X-Tenjin-Search-Id: <searchId>` on
   that read to link it to this search (helps measure discovery quality).
 - `POST https://tenjin.blog/api/answer` — buy ONE answer instead of a shortlist. Free `200`
-  `{ decision: "MISS" }` when nothing fits; otherwise a `402` at a flat price whose
+  `{ decision: "MISS" }` when nothing matches CONFIDENTLY (a semantic match strong enough
+  to clear the confidence bucket — sharing a word with your question is not enough);
+  otherwise a `402` at a flat price whose
   `sources` array names the pieces the answer will be written from
   (`{ resourceId, url, slug, title, price, creator }`) — GET any of those `url`s unpaid to
   inspect a piece first. The paid retry returns the answer with a citation per claim
