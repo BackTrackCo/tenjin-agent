@@ -106,7 +106,15 @@ const FIX_CHECK_NETWORK_AND_BASE_URL =
  * the secret itself never reaches any check output.
  */
 const FIX_SET_SHELF_BYPASS =
-  'That deployment is access-protected and these probes carried no bypass key: `tenjin config set shelfBypassSecret <value>`.';
+  'That deployment is access-protected and these probes did not get past it: `tenjin config set shelfBypassSecret <value>`.';
+/**
+ * The same page, from a URL where the team key is not the answer. Naming
+ * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
+ * this describes what happened and points at the two things that can cause it,
+ * without prescribing either.
+ */
+const FIX_PAGE_NOT_THE_API =
+  'Something between this machine and that URL answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall). Check your network path and the configured base URL (`tenjin config get baseUrl`).';
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
@@ -221,7 +229,13 @@ export async function collectDoctorChecks(
     // The three baseUrl probes carry the team shelf's bypass. Without it every
     // one of them reports a protected team deployment as unreachable, which is
     // the check saying "your CLI is broken" about the one setting that is right.
-    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkApiContract(
+      baseUrl,
+      ctx.flags.timeout,
+      deps.fetchImpl,
+      bypass,
+      shelfKeyIsTheRemedy(settings),
+    ),
     await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
     await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
     await checkSkills(
@@ -398,6 +412,8 @@ async function checkApiContract(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
+  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
+  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
   const res = await fetchJson(url, {
@@ -423,7 +439,14 @@ async function checkApiContract(
             ? `OpenAPI document at ${url} was not valid JSON`
             : `Could not reach the Tenjin API at ${url}: ${res.message}`,
         fix: gated
-          ? FIX_SET_SHELF_BYPASS
+          ? // The page is a fact about the response; whether the team key fixes
+            // it is a fact about the CONFIG, and only the second one licenses
+            // naming the key. On the public marketplace the key is inert
+            // (`resolveShelfBypass` refuses it), and on an override the origin
+            // belongs to this run, so both get the neutral line instead.
+            shelfKeyRemedy
+            ? FIX_SET_SHELF_BYPASS
+            : FIX_PAGE_NOT_THE_API
           : malformed
             ? FIX_POINT_AT_TENJIN_API
             : FIX_CHECK_NETWORK_AND_BASE_URL,
@@ -980,6 +1003,29 @@ function checkTeamShelf(
 }
 
 /**
+ * Is the team's bypass key a remedy THIS MACHINE can use?
+ *
+ * Two conditions, and both are about the config rather than about any response:
+ * the base URL came from config, and it points at a shelf of the team's own.
+ *
+ * - Not from config means the origin belongs to this RUN (`--base-url`,
+ *   `TENJIN_BASE_URL`). Naming the key against a host a flag chose is doctor
+ *   coaching the team's door key toward it, which is the move FLAG_CAVEAT exists
+ *   to stop; the withheld-key warn already names the override instead.
+ * - The public marketplace is not access-protected and takes no key: a secret
+ *   set beside it is refused outright (`resolveShelfBypass` fails safe to public
+ *   mode), so the advice would be inert AND would trip the other half-wired warn.
+ *
+ * Shared by the `api-contract` fix line and {@link halfWiredShelfWarn} so the
+ * two cannot answer differently about one machine.
+ */
+function shelfKeyIsTheRemedy(settings: EffectiveSettings): boolean {
+  if (settings.baseUrl.source !== 'file' && settings.baseUrl.source !== 'project') return false;
+  const origin = tryOriginOf(settings.baseUrl.value);
+  return origin !== null && isTeamShelfOrigin(origin, settings.publicShelfUrl.value);
+}
+
+/**
  * The other half-wiring: `baseUrl` on a shelf of the team's own, no secret.
  *
  * Response-INDEPENDENT on purpose. The symptom is a protection page answering
@@ -988,18 +1034,13 @@ function checkTeamShelf(
  * config change here. This check reads the two settings alone, so it is true
  * before the network says anything and stays true when the network says nothing.
  *
- * Only a CONFIGURED base URL counts. An `env` or `flag` source is THIS RUN's
- * override, not the machine's setup, and the withheld-key warn above already
- * names an override; a second line asking for a credential for an origin nobody
- * configured would coach writing the team key toward a host the flag chose.
- * Empty secret plus the public marketplace stays silent: that is the default
- * machine, with nothing to be half-wired about.
+ * The gate is {@link shelfKeyIsTheRemedy}: there is nothing to warn about unless
+ * the missing key is one this machine could actually use. Empty secret plus the
+ * public marketplace stays silent, because that is the default machine.
  */
 function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
-  if (settings.baseUrl.source !== 'file' && settings.baseUrl.source !== 'project') return null;
+  if (!shelfKeyIsTheRemedy(settings)) return null;
   const baseUrl = settings.baseUrl.value;
-  const origin = tryOriginOf(baseUrl);
-  if (origin === null || !isTeamShelfOrigin(origin, settings.publicShelfUrl.value)) return null;
   return {
     result: {
       name: 'team shelf',

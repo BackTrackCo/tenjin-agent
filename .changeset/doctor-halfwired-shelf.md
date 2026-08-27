@@ -21,6 +21,10 @@ marketplace stays silent.
 And `fetchJson` now reports whether the 2xx that failed to parse looked like an
 access gate — an HTML content-type, or a followed redirect that landed on
 another host — because the transport is the only place holding the response.
-The `api-contract` check reads that flag and swaps its fix line to
-`shelfBypassSecret` when it is set. No check output carries the secret's value,
-only the key's name.
+The `api-contract` check reads that flag and says a page answered instead of the
+API. It points at `shelfBypassSecret` only on a machine where that key is a
+remedy: a configured base URL on a shelf of the team's own. Against the public
+marketplace the key is refused anyway, and against an override the origin
+belongs to that one run, so both get a line about a proxy or a sign-in wall and
+no credential to write. No check output carries the secret's value, only the
+key's name.

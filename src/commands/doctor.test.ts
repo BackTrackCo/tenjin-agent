@@ -697,21 +697,61 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
    * that branch carried sent the operator to change `baseUrl`, which was correct
    * (#218). The transport's `gateSuspected` is what separates them.
    */
-  it('an HTML 200 at openapi points at the missing bypass key, not at baseUrl', async () => {
-    const err = await catchDoctor(
-      routeFetch({
-        '/openapi.json': {
-          body: '<html><body>Authentication Required</body></html>',
-          headers: { 'content-type': 'text/html; charset=utf-8' },
-        },
-        '/api/articles': { body: ARTICLES_OK },
-      }),
+  const GATE_PAGE = routeFetch({
+    '/openapi.json': {
+      body: '<html><body>Authentication Required</body></html>',
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    },
+    '/api/articles': { body: ARTICLES_OK },
+  });
+
+  it('an HTML 200 at a configured shelf points at the bypass key, not at baseUrl', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
     );
+    const err = await catchDoctor(GATE_PAGE);
     expect(err.code).toBe('CONTRACT_MISMATCH');
     const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
     expect(check.detail).toContain('HTML page');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('config set baseUrl');
+  });
+
+  /**
+   * The page is a fact about the response; whether the team key repairs it is a
+   * fact about the config. On the marketplace the key is inert, and on a flag or
+   * env origin it belongs to this run, so neither may be told to write one.
+   */
+  it('an HTML 200 from the marketplace or an override names no credential', async () => {
+    for (const setup of [
+      async (): Promise<CommandContext> => {
+        await writeFile(join(dir, 'config.json'), JSON.stringify({}));
+        return ctxFor();
+      },
+      async (): Promise<CommandContext> => {
+        await writeFile(join(dir, 'config.json'), JSON.stringify({}));
+        return {
+          flags: { json: false, timeout: 5000, baseUrl: 'https://attacker.example' },
+          dataDir: dir,
+          io: captureIo().io,
+        };
+      },
+    ]) {
+      const ctx = await setup();
+      const err = (await runDoctor(ctx, {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: GATE_PAGE,
+      }).catch((e: unknown) => e)) as CliError;
+      const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+      // Still names what actually came back: that part is true either way.
+      expect(check.detail).toContain('HTML page');
+      expect(check.fix).not.toContain('shelfBypassSecret');
+      expect(check.fix).toContain('page instead of the API');
+    }
   });
 
   it('a plain garbage 200 still points at baseUrl, with no gate claimed', async () => {
