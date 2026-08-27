@@ -747,6 +747,167 @@ describe('fail-open', () => {
   });
 });
 
+/**
+ * Fail-open is the contract for SILENCE. It was accidentally also the contract
+ * for BOUNDS: `storeCount` answered 0 for an unreadable database, so the
+ * per-arm lookup cap, the per-session injection cap and the outage brake all
+ * disengaged at the one moment there was no other bookkeeping either, and the
+ * sidecar became an uncapped network client in front of every tool call.
+ */
+describe('a fire with no store makes no request at all', () => {
+  const arms: [string, string, () => string][] = [
+    [
+      'prompt',
+      'push-prompt',
+      () =>
+        JSON.stringify({
+          session_id: 's1',
+          cwd: '/repo/one',
+          hook_event_name: 'UserPromptSubmit',
+          prompt: STRONG_QUERY,
+        }),
+    ],
+    [
+      'failure',
+      'push-failure',
+      () =>
+        JSON.stringify({
+          session_id: 's1',
+          cwd: '/repo/one',
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm db:migrate' },
+          tool_response: {
+            stdout: '',
+            stderr:
+              "Error: ENOENT: no such file or directory, open 'x'\n    at run (/repo/one/a.ts:1:1)\n",
+          },
+        }),
+    ],
+    [
+      'context',
+      'push-context',
+      () =>
+        JSON.stringify({
+          session_id: 's1',
+          cwd: '/repo/one',
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Read',
+          tool_input: { file_path: '/repo/one/src/x.ts' },
+        }),
+    ],
+    [
+      'websearch',
+      'websearch',
+      () =>
+        JSON.stringify({
+          session_id: 's1',
+          cwd: '/repo/one',
+          tool_name: 'WebSearch',
+          tool_input: { query: STRONG_TITLE },
+        }),
+    ],
+    [
+      'dispatch',
+      'dispatch',
+      () =>
+        JSON.stringify({
+          session_id: 's1',
+          cwd: '/repo/one',
+          tool_name: 'Task',
+          tool_input: { description: 'research', prompt: STRONG_QUERY },
+        }),
+    ],
+  ];
+
+  it('asks no shelf, emits nothing, and exits 0 on a corrupt store', async () => {
+    const shelf = await serveSearch((baseUrl) => ({
+      status: 200,
+      json: strongAnswer(baseUrl, '11111111-1111-4111-8111-111111111111', STRONG_TITLE),
+    }));
+    try {
+      await writeFile(
+        join(dataDir, 'config.json'),
+        JSON.stringify({
+          baseUrl: shelf.baseUrl,
+          hooks: { push: 'on', webSearch: 'auto', agentDispatch: 'auto' },
+        }),
+      );
+      await writeFile(join(dataDir, STATE_DB_FILE), 'not a database');
+
+      const sources: Record<string, string> = {
+        'push-prompt': pushPromptHookScript(dataDir),
+        'push-failure': pushFailureHookScript(dataDir),
+        'push-context': pushContextHookScript(dataDir),
+        websearch: websearchHookScript(dataDir),
+        dispatch: dispatchHookScript(dataDir),
+      };
+      for (const [name, script, payload] of arms) {
+        const run = await runScript(sources[script] as string, payload());
+        expect(run.code, `${name} exit`).toBe(0);
+        expect(run.stdout, `${name} spoke`).toBe('');
+        expect(run.stderr, `${name} stderr`).toContain('tenjin: state store unavailable');
+      }
+      // THE POINT: no bookkeeping means no bounds, so it must mean no requests.
+      expect(shelf.hits()).toBe(0);
+    } finally {
+      await shelf.close();
+    }
+  }, 30_000);
+
+  it('reads an unknown count as a bound that engages, not one that disappears', async () => {
+    const store = await openStore(dataDir);
+    // A live store counts for real...
+    expect(store?.get(STORE_SQL.bucketCount, ['prompt', 0])).toEqual({ n: 0 });
+    store?.close();
+    // ...and the helpers the arms use return Infinity without one, which is what
+    // makes `spent < cap` and `injected < max` refuse rather than wave through.
+    // Asserted through the generated source, since the helper is not exported.
+    const source = pushPromptHookScript(dataDir);
+    expect(source).toContain('if (STORE === null) return Infinity;');
+    expect(source).toMatch(/function claimState[\s\S]{0,400}if \(STORE === null\) return false;/);
+  });
+
+  /**
+   * A BUSY past the timeout is the realistic failure of the once-per-session
+   * insert, under exactly the contention the index was added for. Every caller
+   * branched on 'duplicate' alone, so the row went unwritten and the piece was
+   * shown anyway — the second injection the index exists to prevent.
+   */
+  it('does not show a piece whose row the database refused', async () => {
+    const shelf = await serveSearch((baseUrl) => ({
+      status: 200,
+      json: strongAnswer(baseUrl, '11111111-1111-4111-8111-111111111111', STRONG_TITLE),
+    }));
+    try {
+      await writeConfig({ baseUrl: shelf.baseUrl });
+      // A trigger that refuses every injected row, standing in for the BUSY.
+      const store = await openStore(dataDir);
+      store?.run(
+        "CREATE TRIGGER no_inject BEFORE INSERT ON injections WHEN NEW.action = 'injected'" +
+          " BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+      );
+      store?.close();
+
+      const run = await runScript(
+        pushPromptHookScript(dataDir),
+        JSON.stringify({
+          session_id: 's1',
+          hook_event_name: 'UserPromptSubmit',
+          prompt: STRONG_QUERY,
+        }),
+      );
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+      expect(rows("SELECT reason FROM injections WHERE session = 's1'")).toEqual([
+        { reason: 'already-injected' },
+      ]);
+    } finally {
+      await shelf.close();
+    }
+  });
+});
+
 describe('pairings: open, close, replay', () => {
   const failure = (command: string, stderr: string, session = 's1', cwd = '/repo/one') =>
     JSON.stringify({
