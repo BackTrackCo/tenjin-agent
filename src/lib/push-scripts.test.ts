@@ -297,6 +297,7 @@ async function ledger(): Promise<LedgerRow[]> {
         form: r.form ?? undefined,
         tokens: r.tokens ?? undefined,
         agentType: event.agentType,
+        marker: event.marker,
       } as LedgerRow;
     });
   } finally {
@@ -3338,8 +3339,10 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(dispatched.stdout).toBe('');
 
     const first = await runScript(pushSubagentHookScript(dataDir), start);
-    // Free and strong, so the subagent opens with the body rather than a pointer.
-    expect(injected(first)).toContain(BODY_MD);
+    expect(injected(first)).toContain('Read it free: tenjin read');
+    expect(injected(first)).toContain(RESOURCE_ID);
+    // The ladder's last rung works with zero tools: carry the id back.
+    expect(injected(first)).toContain('carry the resource id');
     const rows = await ledger();
     expect(rows.find((r) => r.trigger === 'subagent')).toMatchObject({
       event: 'SubagentStart',
@@ -3358,25 +3361,70 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
-   * ⚠ THE ONE PLACE #211 ITEM 2 CHANGED SOMETHING BEYOND NOISE, pinned here so
-   * it is visible rather than silent. The dispatch hook now writes its own
-   * ledger row, and an `injected` row puts its candidate in the session's
-   * `seen` set — the "same finding twice in one session" guard that every arm
-   * reads out of `pushBudget`. So on a STRONG hit the parent gets the pointer
-   * and the subagent handoff (T5) is then skipped as `already-injected`, which
-   * is the opposite of the trade the handoff exists to make: the subagent is a
-   * fresh context that never saw the parent's line.
-   *
-   * Not fixable from lib/hook-scripts.ts — `seen` is populated in
-   * lib/push-scripts.ts's `pushBudget`, so the call is whether a `dispatch` row
-   * should feed it at all.
+   * The routing flip of tenjin-agent#228: a strong FREE hit is RELAYED to the
+   * subagent it was found for. The old contract (pinned here until 2026-08-27)
+   * had the parent claim it as 'injected', which put it in the session's seen
+   * set and made the SubagentStart arm skip it as already-injected; the
+   * strongest hit was structurally the one the child could never receive. The
+   * 'relayed' row is outside the child's alreadyShown set, so the child
+   * delivers, and the parent keeps exactly one line naming the handoff.
    */
-  it('a strong dispatch hit takes the parent pointer INSTEAD of the subagent handoff', async () => {
-    const { baseUrl } = await serve(echo());
+  it('relays a strong free hit: the child delivers and the parent keeps one relay line', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
 
     const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
-    expect(injected(dispatched)).toContain('Tenjin lists');
+    const relay = injected(dispatched) ?? '';
+    expect(relay).toContain('handed to the subagent');
+    expect(relay).not.toContain('Tenjin lists');
+    expect((await ledger()).find((r) => r.trigger === 'dispatch')).toMatchObject({
+      action: 'relayed',
+      strength: 'strong',
+      form: 'short',
+    });
+    const afterDispatch = hits();
+
+    const run = await runScript(pushSubagentHookScript(dataDir), start);
+    const text = injected(run) ?? '';
+    expect(text).toContain('Read it free: tenjin read');
+    expect(text).toContain(RESOURCE_ID);
+    // Pointer only: no body fetch happened and no fenced body was emitted.
+    expect(text).not.toContain(BODY_MD);
+    expect(text).not.toContain('tenjin-body');
+    expect(hits()).toBe(afterDispatch);
+    expect((await ledger()).find((r) => r.trigger === 'subagent')).toMatchObject({
+      action: 'injected',
+      form: 'short',
+    });
+  });
+
+  it('stamps one delivery marker into both the emitted text and the event row', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+
+    const run = await runScript(pushSubagentHookScript(dataDir), start);
+    const match = /\[tenjin-delivery ([0-9A-HJKMNP-TV-Z]{26})\]/.exec(injected(run) ?? '');
+    expect(match).not.toBeNull();
+    const row = (await ledger()).find((r) => r.trigger === 'subagent');
+    expect(row).toMatchObject({ action: 'injected', marker: match![1] });
+  });
+
+  /**
+   * The paid half of the routing rule: the parent is the only context with
+   * buy / --yes authority, so a strong PAID hit keeps today's parent claim
+   * exactly, and the child skips it as already-injected.
+   */
+  it('a strong PAID hit keeps the parent claim, and the child skips it', async () => {
+    const { baseUrl } = await serve(echo({ price: '150000' }));
+    await pushOn(baseUrl);
+
+    const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(injected(dispatched)).toContain('Tenjin lists a paid answer');
+    expect((await ledger()).find((r) => r.trigger === 'dispatch')).toMatchObject({
+      action: 'injected',
+      form: 'short',
+    });
 
     const run = await runScript(pushSubagentHookScript(dataDir), start);
     expect(run.stdout).toBe('');
@@ -3384,6 +3432,70 @@ describe('the subagent arm (SubagentStart)', () => {
       action: 'skipped',
       reason: 'already-injected',
     });
+  });
+
+  it('does not repeat the relay line when a second dispatch lands on the same piece', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const first = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(injected(first) ?? '').toContain('handed to the subagent');
+
+    // A different question (the fingerprint dedupe would swallow a repeat of
+    // the same one) that still lands on the same echoed resource.
+    const second = await runScript(
+      dispatchHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Task',
+        tool_input: {
+          prompt:
+            'Determine whether the zod resolver optional chain parse throw persists on the newest minor release',
+        },
+      }),
+    );
+    expect(second.stdout).toBe('');
+    const dispatchRows = (await ledger()).filter((r) => r.trigger === 'dispatch');
+    expect(dispatchRows.filter((r) => r.action === 'relayed')).toHaveLength(1);
+    expect(dispatchRows.at(-1)).toMatchObject({ action: 'skipped', reason: 'already-injected' });
+  });
+
+  /**
+   * A paid pointer that reaches a child (a moderate hit rides the cache) is
+   * metadata plus defer-to-parent wording: no inspect command, no buy
+   * guidance a context without spend authority cannot act on.
+   */
+  it('a paid pointer defers to the parent instead of teaching inspect or buy', async () => {
+    const paidSolo = (req: StubRequest): { status: number; json: unknown } => {
+      const out = soloEcho(req);
+      if (!req.url.startsWith('/api/search')) return out;
+      const json = out.json as { items: Array<Record<string, unknown>> };
+      return { ...out, json: { ...json, items: [{ ...json.items[0], price: '150000' }] } };
+    };
+    const { baseUrl } = await serve(paidSolo);
+    await pushOn(baseUrl);
+
+    const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(dispatched.stdout).toBe('');
+
+    const run = await runScript(pushSubagentHookScript(dataDir), start);
+    const text = injected(run) ?? '';
+    expect(text).toContain('let your parent decide');
+    expect(text).toContain(RESOURCE_ID);
+    expect(text).not.toContain('tenjin inspect');
+    expect(text).not.toContain('tenjin buy');
+    expect(text).not.toContain('Read it free');
+  });
+
+  /** The full-body arm is retired for child delivery: no code path from the
+   *  SubagentStart arm reaches a body fetch or the fenced full form. */
+  it('has no route from the subagent arm to a body fetch', () => {
+    const source = pushSubagentHookScript(dataDir);
+    const arm = source.slice(source.lastIndexOf('const CACHE_TTL_MS'));
+    expect(arm.length).toBeGreaterThan(0);
+    expect(arm).not.toContain('fetchFreeBody');
+    expect(arm).not.toContain('fullForm(');
   });
 
   /**

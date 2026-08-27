@@ -1175,7 +1175,10 @@ function parseSearchBody(body, url, limit) {
 function hintLines(stored, isTeam, ctx) {
   const lines = [];
   for (const c of stored) {
-    if (alreadyShown(ctx.sessionId, c.resourceId)) {
+    // The WIDER set, injected or relayed: a piece the dispatch arm handed to a
+    // subagent this session was already announced to the parent once, and the
+    // hint path re-rendering it is the repeat the rule exists to stop.
+    if (alreadyShownAny(ctx.sessionId, c.resourceId)) {
       recordInjection({ ...ctx, session: ctx.sessionId, candidate: c, action: 'skipped', reason: 'already-injected' });
       continue;
     }
@@ -1438,13 +1441,17 @@ export function dispatchHookScript(dataDir: string): string {
 const HEALTH_PATH = join(DATA_DIR, 'hook-health.json');
 
 /** What a subagent was sent to find out. Too short to hold a research question
- *  and nothing is sent. */
+ *  and nothing is sent. Scrubbed exactly as the WebSearch arm scrubs its own
+ *  query: a dispatch prompt is a work order, and a work order names paths,
+ *  hostnames and ids that must ride to NEITHER shelf. The one scrubbed string
+ *  built here is what askTenjin sends on both legs, what recordSearch stores,
+ *  and what the event row keeps. */
 function dispatchQuestion(toolInput) {
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.trim() : '';
   if (prompt.length < ${DISPATCH_PROMPT_MIN}) return '';
-  const head = clean(prompt.slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
+  const head = clean(scrub(prompt.slice(0, ${DISPATCH_PROMPT_SLICE})), ${DISPATCH_PROMPT_SLICE});
   const description =
-    typeof toolInput.description === 'string' ? clean(toolInput.description, ${DISPATCH_DESCRIPTION_MAX}) : '';
+    typeof toolInput.description === 'string' ? clean(scrub(toolInput.description), ${DISPATCH_DESCRIPTION_MAX}) : '';
   return description === '' ? head : description + ': ' + head;
 }
 
@@ -1710,6 +1717,33 @@ async function main() {
   if (judged.strength !== 'strong') {
     recordDecision({ ...row, action: 'logged', form: 'short' });
     return quiet();
+  }
+  // STRONG AND FREE GOES TO THE CHILD (tenjin-agent#228). The parent claim
+  // below writes an 'injected' row, and the SubagentStart arm skips anything
+  // in that set, so the strongest hit was structurally the one the subagent
+  // it was found FOR could never receive. When the handoff cache was written
+  // above and the top piece is free, the pointer now travels with the
+  // dispatch: the row says 'relayed', which the child's alreadyShown check
+  // (action 'injected' only) does not see, and the parent keeps one line
+  // naming the handoff so the delivery stays visible in its transcript. A
+  // paid top stays on the parent path on purpose: the parent is the only
+  // context with buy / --yes authority, and a paid pointer inside a child is
+  // an approval dead end.
+  if (config.push === 'on' && sessionId !== null && isFree(judged.top)) {
+    // The once-per-session rule the claim carried, kept on the wider
+    // injected-or-relayed set, so a second dispatch landing on the same piece
+    // re-announces nothing.
+    if (alreadyShownAny(sessionId, judged.top.resourceId)) {
+      recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+      return quiet();
+    }
+    recordDecision({ ...row, action: 'relayed', form: 'short' });
+    const relayTitle = clean(judged.top.title, 120).replace(/"/g, "'");
+    return emit(
+      'PreToolUse',
+      'Tenjin found a strong free match, "' + relayTitle +
+        '"; the pointer is handed to the subagent at its first turn.',
+    );
   }
   // RANK 1 ALONE. The verdict is rank 1's, so rank 2 would ride in on rank 1's
   // evidence if it were printed beside it. The fallback covers a projection that

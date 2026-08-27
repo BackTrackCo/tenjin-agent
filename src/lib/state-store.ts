@@ -401,6 +401,16 @@ export const STORE_SQL = {
    */
   alreadyShown: `SELECT 1 FROM injections
      WHERE session = ? AND resource_id = ? AND action = 'injected' LIMIT 1`,
+  /**
+   * The wider seen set: injected OR relayed. A 'relayed' row is a strong free
+   * dispatch hit the parent handed to its subagent instead of rendering
+   * (tenjin-agent#228): the child's own alreadyShown check must NOT see it,
+   * because the child delivery is the point of the relay, but a hint arm
+   * re-offering the piece to the parent, or a second dispatch re-announcing
+   * the handoff, is exactly the repeat the once-per-session rule stops.
+   */
+  alreadyShownAny: `SELECT 1 FROM injections
+     WHERE session = ? AND resource_id = ? AND action IN ('injected', 'relayed') LIMIT 1`,
   injectedCount: `SELECT COUNT(*) AS n FROM injections WHERE session = ? AND action = 'injected'`,
 
   /**
@@ -1339,6 +1349,14 @@ function recordInjection(row) {
 function alreadyShown(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
   return storeGet(STORE_SQL.alreadyShown, [storeSession(sessionId), resourceId]) !== null;
+}
+
+/** Like alreadyShown, but counting a parent relay too. A relayed piece is not
+ *  an 'injected' claim (the child still has to deliver it), yet it is a line
+ *  the parent already read, so the parent-facing arms dedupe on this set. */
+function alreadyShownAny(sessionId, resourceId) {
+  if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
+  return storeGet(STORE_SQL.alreadyShownAny, [storeSession(sessionId), resourceId]) !== null;
 }
 
 /** How many full-form injections this session has had. */

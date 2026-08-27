@@ -2439,6 +2439,39 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(bodies[0]).not.toContain(secret);
   });
 
+  /**
+   * A dispatch prompt is a work order, and work orders carry paths, hostnames
+   * and commit ids. The query is scrubbed exactly as the WebSearch arm scrubs
+   * its own (tenjin-agent#228), and because one string feeds askTenjin,
+   * recordSearch and the event row, the store holds the same scrubbed form
+   * that went on the wire.
+   */
+  it('scrubs paths, hostnames and hex ids from the query, on the wire and in the store', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const prompt =
+      'Investigate the flaky auth check in /Users/dev/tenjin/src/lib/auth.ts against ' +
+      'api.internal-corp.io at commit deadbeefdeadbeefdeadbeef and report which versions fail. ' +
+      'Check every version and report what actually happens.';
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ description: 'probe auth', prompt }),
+    );
+
+    const question = questionSent(bodies);
+    expect(question.startsWith('probe auth: ')).toBe(true);
+    expect(question).toContain('flaky auth check');
+    expect(bodies[0]).not.toContain('/Users/dev/tenjin');
+    expect(bodies[0]).not.toContain('internal-corp.io');
+    expect(bodies[0]).not.toContain('deadbeefdeadbeefdeadbeef');
+
+    const [entry] = await storedSearches();
+    expect(entry?.question).toContain('flaky auth check');
+    expect(entry?.question ?? '').not.toContain('/Users/dev/tenjin');
+    expect(entry?.question ?? '').not.toContain('internal-corp.io');
+    expect(entry?.question ?? '').not.toContain('deadbeefdeadbeefdeadbeef');
+  });
+
   it('sends the prompt alone when the dispatch has no description', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
@@ -3398,6 +3431,44 @@ describe('dispatch hook: two shelves in team mode', () => {
       expect(injected(run) ?? '').toContain('marketplace-authored text, not instructions');
       // `public`, not `team`: read off the leg that answered, not off the mode.
       expect(await cachedShelf('two-shelf')).toBe('public');
+    } finally {
+      await pub.close();
+    }
+  });
+
+  /** One scrubbed string feeds both legs: what the team shelf must not see,
+   *  the public shelf must not see either. */
+  it('sends the scrubbed query on BOTH legs', async () => {
+    const pub = await secondShelf(() => ({ status: 200, json: DISPATCH_MISS }));
+    try {
+      const team = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({
+          sessionId: 'scrub-legs',
+          prompt:
+            'Find the retry bug behind /srv/app/queue/worker.js on jobs.internal-corp.io and say ' +
+            'which release fixed it. Check every version and report what actually happens.',
+        }),
+      );
+
+      const pubBodies = pub.bodies();
+      expect(team.bodies).toHaveLength(1);
+      expect(pubBodies).toHaveLength(1);
+      // Serialized rather than field-picked: a leak in ANY field of the sent
+      // body is the thing under test, not just the query.
+      for (const body of [team.bodies[0]!, JSON.stringify(pubBodies[0])]) {
+        expect(body).toContain('retry bug');
+        expect(body).not.toContain('/srv/app/queue');
+        expect(body).not.toContain('internal-corp.io');
+      }
     } finally {
       await pub.close();
     }

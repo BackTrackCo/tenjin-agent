@@ -2229,6 +2229,41 @@ export function pushFailureHookScript(dataDir: string): string {
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
 
+/**
+ * The child pointer: the short form's header and excerpt, then a capability
+ * ladder instead of one imperative. A child agent type may lack Bash, the
+ * tenjin allowlist, or tools altogether, and a pointer whose only resolution
+ * path is a command it cannot run is dead context (tenjin-agent#228), so
+ * every rung ends in something ANY child can do: carry the id back to its
+ * parent. A paid piece gets metadata and defer-to-parent wording only; this
+ * context has no spend authority and never receives purchase guidance. The
+ * closing marker line is the delivery receipt: the same uid sits in the event
+ * row, so a transcript grep proves which context actually received this.
+ */
+function childPointer(candidate, opener, marker) {
+  const lines = [opener, headerLine(candidate)];
+  if (candidate.excerpt !== '') lines.push(clean(candidate.excerpt, 300));
+  if (isFree(candidate)) {
+    lines.push(
+      'Read it free: tenjin read ' + candidate.resourceId +
+        '; or fetch ' + candidate.url +
+        '; or, if you cannot run tools, carry the resource id ' +
+        candidate.resourceId + ' into your final answer for your parent.',
+    );
+  } else {
+    lines.push(
+      'Paid piece: this context cannot approve a purchase; carry the resource id ' +
+        candidate.resourceId + ' into your final answer and let your parent decide.',
+    );
+  }
+  lines.push(
+    'Afterwards report whether it helped: tenjin outcome --last --status used|ignored|wrong, ' +
+      'or state in your final answer whether you used it.',
+  );
+  lines.push('[tenjin-delivery ' + marker + ']');
+  return lines.join('\n');
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -2264,6 +2299,10 @@ async function main() {
   // Whichever shelf the dispatch hook actually asked. A cache written before
   // that field existed reads as 'public', which is what it was.
   const shelf = cache.shelf === 'team' ? 'team' : 'public';
+  // The delivery receipt: one uid per fire, stamped into the event row here
+  // and into the emitted text below. An 'injected' row is a database claim,
+  // not proof of receipt; the marker is what a transcript grep can confirm.
+  const marker = uid();
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
@@ -2278,6 +2317,7 @@ async function main() {
       event: 'SubagentStart',
       query: clean(String(cache.query || ''), 512),
       agentType,
+      marker,
     },
   });
   const base = {
@@ -2307,16 +2347,13 @@ async function main() {
     recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
     return quiet();
   }
-  let form = 'short';
-  const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
-  let text = shortForm(top, opener);
-  if (isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
-    const body = await fetchFreeBody(top, config);
-    if (body !== null) {
-      form = 'full';
-      text = fullForm(opener, headerLine(top), body);
-    }
-  }
+  // POINTER ONLY, whatever the strength (tenjin-agent#228). The full-body
+  // upgrade this arm ran on a strong free hit had zero confirmed uses in the
+  // 19 sampled injections, at up to 6k chars each, while the one verified win
+  // was a short pointer; the body fetch is retired for child delivery until
+  // receipts prove a child reads more than the pointer.
+  const form = 'short';
+  const text = childPointer(top, shelf === 'team' ? TEAM_SHORT_OPENER : PUBLIC_SHORT_OPENER, marker);
   const claimed = recordDecision({
     ...base,
     action: 'injected',
