@@ -116,7 +116,7 @@ const FIX_SET_SHELF_BYPASS =
  * 307 interstitial) would read as "doctor says my config is fine as is".
  */
 const FIX_ROTATE_SHELF_BYPASS =
-  'The configured shelfBypassSecret was sent and did not get past that deployment, so the key is likely stale or rotated. Update it: `tenjin config set shelfBypassSecret <value>`.';
+  'The configured shelfBypassSecret was sent and did not get past. Either the key is stale or rotated (update it: `tenjin config set shelfBypassSecret <value>`), or something between you and the shelf answered instead (a proxy, WAF, or another sign-in layer); confirm which before rotating.';
 /**
  * The same page, from a URL where the team key is not the answer. Naming
  * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
