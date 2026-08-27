@@ -137,8 +137,11 @@ export const STORE_BOOTSTRAP_TIMEOUT_MS = 500;
 export const STORE_BOOTSTRAP_TRIES = 2;
 
 /**
+ * THE RELAY WINDOW, and the canonical statement of the invariant every other
+ * comment about the relay cites rather than restates.
+ *
  * How long a `relayed` row suppresses a parent-facing re-announcement, and how
- * long the dispatch relay holds its claim on a piece.
+ * long a dispatch holds the session's one handoff slot.
  *
  * It is the handoff cache's own TTL and must stay equal to
  * `PUSH_CACHE_TTL_MS` (lib/push-scripts.ts), which `push-scripts.test.ts`
@@ -147,6 +150,17 @@ export const STORE_BOOTSTRAP_TRIES = 2;
  * parent, and the suppression has to lift with it. It lives here rather than
  * beside the cache TTL because `state-store.ts` is the file both the dispatch
  * arm and the subagent arm already import; the reverse direction is a cycle.
+ *
+ * WHY IT EXPIRES AT ALL: a relay commits at PreToolUse, before the Task it
+ * hands off to is even permitted to run, so a denied or never-launched
+ * subagent must not leave the piece suppressed in every context for the rest
+ * of the session. An `injected` row is different in kind and never expires:
+ * some context really did receive the piece.
+ *
+ * WHY THE CLAIM AND THE CACHE STAY IN LOCKSTEP: the claim is taken on the
+ * cache SLOT and the cache is written only by whoever wins it, in that order,
+ * so both rows carry the same `at` and lapse together. A losing dispatch
+ * writes neither.
  */
 export const STORE_RELAY_WINDOW_MS = 120_000;
 
@@ -423,16 +437,10 @@ export const STORE_SQL = {
    * point of the relay, but a hint arm re-offering the piece to the parent is
    * exactly the repeat the once-per-session rule stops.
    *
-   * The window is what keeps that suppression honest. A relay is committed at
-   * PreToolUse, before the tool call is even permitted to run, so a denied or
-   * never-launched Task would otherwise leave the piece suppressed in every
-   * context for the rest of the session with nothing having delivered it.
-   * Past the handoff cache's own TTL the cached pointer is unreachable, so
-   * the relayed row stops suppressing and the parent arms may speak again.
-   * An 'injected' row is different in kind and never expires: some context
-   * really did receive the piece.
+   * The `at >=` bound is the safety property, not an optimization: see
+   * `STORE_RELAY_WINDOW_MS` for why the suppression has to expire.
    */
-  alreadyShownAny: `SELECT 1 FROM injections
+  alreadyShownOrLiveRelay: `SELECT 1 FROM injections
      WHERE session = ? AND resource_id = ?
        AND (action = 'injected' OR (action = 'relayed' AND at >= ?)) LIMIT 1`,
   injectedCount: `SELECT COUNT(*) AS n FROM injections WHERE session = ? AND action = 'injected'`,
@@ -472,12 +480,16 @@ export const STORE_SQL = {
    * changed rows when the holder is too fresh to displace, which is the same
    * arbitration `claimState` gets from `DO NOTHING`, only time-bounded.
    *
-   * The dispatch relay is the caller. Its rule is once per handoff, not once
-   * per session: a check-then-write there let two dispatches on one piece in
-   * one assistant message both pass the check and both announce, while a
+   * The dispatch relay is the caller, and it claims the handoff SLOT: a
+   * check-then-write there let two dispatches in one assistant message both
+   * pass the check and both write the one session-wide cache key, and a
    * permanent claim would have made an unconsumed handoff suppress the piece
-   * forever. Neither is a job for the `injections` unique index, which covers
-   * `action='injected'` only and must keep doing so — widening it would refuse
+   * forever (`STORE_RELAY_WINDOW_MS`). The stored value names the piece the
+   * winner parked, so a loser can tell "another dispatch already relayed MY
+   * piece" from "another piece holds the slot" without a second race.
+   *
+   * Not a job for the `injections` unique index, which covers
+   * `action='injected'` only and must keep doing so: widening it would refuse
    * the child's own delivery row for the piece the parent relayed to it.
    */
   claimStateFresh: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
@@ -866,12 +878,6 @@ const STATE_SIGNATURES_PREFIX = 'sig:';
  *  agent because parallel subagents share their parent's session id, and a list
  *  because one head answers for a whole build step. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
-/** Which pieces this session has already relayed to a subagent, one row per
- *  piece. The arbiter for the dispatch relay line, held only as long as the
- *  handoff it names can still be consumed. Distinct from
- *  \`STATE_REPLAYED_PREFIX\` above, which is the failure arm's error->fix
- *  pairing replay: different mechanism, different lane, adjacent name. */
-const STATE_RELAYED_PREFIX = 'relay:';
 /**
  * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
  * off, or a deployment too old to have the route), keyed by origin under the
@@ -898,6 +904,26 @@ const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
  * a row attribute.
  */
 const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
+/**
+ * THE SESSION'S ONE HANDOFF SLOT, and the arbiter for the dispatch relay line.
+ *
+ * A SLOT, NOT A PIECE. \`STATE_CACHE\` is a single session-wide key, so keying
+ * the claim by resource id let a later dispatch of any strength above 'none'
+ * overwrite a handoff an earlier one had already announced as relayed: the
+ * relayed piece then reached no context at all while its \`relayed\` row
+ * suppressed it from every parent arm for the window, and the parent
+ * transcript asserted a delivery that never happened. Claiming the slot makes
+ * one live handoff per session a bound; a dispatch that loses it leaves the
+ * live handoff alone and falls through to the ordinary parent hint.
+ *
+ * The value is the resource id the winner parked. Held only as long as the
+ * handoff it names can still be consumed (\`RELAY_WINDOW_MS\`).
+ *
+ * Adjacent to \`STATE_REPLAYED_PREFIX\` above and unrelated to it: that one is
+ * the failure arm's error->fix pairing replay, a different lane.
+ */
+const STATE_RELAY_SLOT = 'relay:handoff';
+
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
 /** The shelf's per-trigger use rates, fetched by the SessionStart primer once
@@ -1403,11 +1429,12 @@ function alreadyShown(sessionId, resourceId) {
  *  A relayed piece is not an 'injected' claim (the child still has to deliver
  *  it), yet it is a line the parent already read, so the parent-facing arms
  *  dedupe on this set — for as long as a subagent can still be reached by it,
- *  and no longer. */
-function alreadyShownAny(sessionId, resourceId) {
+ *  and no longer. That window is in the name because it is the safety
+ *  property: unbounded, this would suppress a piece nothing ever delivered. */
+function alreadyShownOrLiveRelay(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
   return (
-    storeGet(STORE_SQL.alreadyShownAny, [
+    storeGet(STORE_SQL.alreadyShownOrLiveRelay, [
       storeSession(sessionId),
       resourceId,
       Date.now() - RELAY_WINDOW_MS,
@@ -1507,16 +1534,16 @@ function claimState(sessionId, key, value) {
 }
 
 /**
- * Claim \`key\` for this session unless a claim newer than \`windowMs\` holds it.
+ * Claim \`key\` for this session unless a claim newer than \`windowMs\` holds it,
+ * recording \`value\` as the winner's mark.
  *
  * THE CLAIM IS THE DECISION, the same way the injections unique index is for
- * an injected row: the dispatch relay's once-per-handoff rule was a read
- * followed by a write, and two Task calls in one assistant message fire
- * PreToolUse concurrently, so both read "not relayed" and both announced. One
- * statement makes the loser lose. Time-bounded rather than permanent because
- * the relay commits before the tool call it hands off to is allowed to run.
+ * an injected row: the dispatch relay's rule was a read followed by a write,
+ * and two Task calls in one assistant message fire PreToolUse concurrently, so
+ * both read "free" and both wrote. One statement makes the loser lose.
+ * Time-bounded rather than permanent (\`RELAY_WINDOW_MS\`).
  */
-function claimStateFresh(sessionId, key, windowMs) {
+function claimStateFresh(sessionId, key, windowMs, value) {
   // Same contract as claimState: no store is no dedupe, and the arms return
   // before they reach here, so a caller that somehow did holds nothing.
   if (STORE === null) return false;
@@ -1524,7 +1551,7 @@ function claimStateFresh(sessionId, key, windowMs) {
   const result = storeRun(STORE_SQL.claimStateFresh, [
     storeSession(sessionId),
     key,
-    storeJson(true),
+    storeJson(value === undefined ? true : value),
     now,
     now - windowMs,
   ]);

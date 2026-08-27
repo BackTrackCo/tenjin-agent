@@ -3336,6 +3336,69 @@ describe('the subagent arm (SubagentStart)', () => {
       tool_input: { prompt: DISPATCH_PROMPT },
     });
 
+  /** A dispatch on an unrelated subject, so it lands on a DIFFERENT piece. */
+  const OTHER_PROMPT =
+    'Work out whether pgvector 0.8 changes the default probe count on an existing hnsw index';
+
+  const otherDispatch = JSON.stringify({
+    session_id: SESSION,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Task',
+    tool_input: { prompt: OTHER_PROMPT },
+  });
+
+  /**
+   * P for the zod work order (two candidates, so it can reach 'strong'), Q for
+   * the pgvector one (a lone candidate, so it is at most 'moderate' and never
+   * relays). Two dispatches, two different pieces, one session.
+   */
+  const twoSubjects = (req: StubRequest): { status: number; json: unknown } => {
+    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+    let query: string;
+    try {
+      query = String((JSON.parse(req.body) as { query?: unknown }).query);
+    } catch {
+      query = '';
+    }
+    if (!query.includes('pgvector')) return echo()(req);
+    return {
+      status: 200,
+      json: {
+        schemaVersion: 3,
+        searchId: SEARCH_ID,
+        items: [
+          {
+            resourceId: SECOND_RESOURCE_ID,
+            url: `${req.base}/@b/q`,
+            title: query.slice(0, 190),
+            price: '0',
+            excerpt: 'the other excerpt',
+            creator: { handle: 'someone' },
+          },
+        ],
+      },
+    };
+  };
+
+  /** Merge a patch into the parked handoff, to reach a childPointer branch the
+   *  stub servers would need a second protected deployment to produce. */
+  function patchCache(patch: Record<string, unknown>): void {
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      const row = db
+        .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
+        .get(SESSION, 'dispatch_cache') as unknown as { value?: string } | undefined;
+      const merged = { ...(JSON.parse(row?.value ?? '{}') as Record<string, unknown>), ...patch };
+      db.prepare('UPDATE session_state SET value = ? WHERE session = ? AND key = ?').run(
+        JSON.stringify(merged),
+        SESSION,
+        'dispatch_cache',
+      );
+    } finally {
+      db.close();
+    }
+  }
+
   /** A second dispatch onto the SAME echoed piece, worded differently so the
    *  question fingerprint cannot be what stops it. */
   const secondDispatch = JSON.stringify({
@@ -3383,7 +3446,7 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(injected(first)).toContain('Read it free: tenjin read');
     expect(injected(first)).toContain(RESOURCE_ID);
     // The ladder's last rung works with zero tools: carry the id back.
-    expect(injected(first)).toContain('carry the resource id');
+    expect(injected(first)).toContain('carry that resource id into your final answer');
     const rows = await ledger();
     expect(rows.find((r) => r.trigger === 'subagent')).toMatchObject({
       event: 'SubagentStart',
@@ -3418,10 +3481,19 @@ describe('the subagent arm (SubagentStart)', () => {
     const relay = injected(dispatched) ?? '';
     expect(relay).toContain('queued for delivery to the subagent');
     expect(relay).not.toContain('Tenjin lists');
+    // The line lands in the PARENT, the only context with buy authority, and
+    // the title is marketplace-authored, so it carries the same framing every
+    // other opener does. It names the resource id because the child is asked
+    // to carry that id back and the parent has to be able to match them up.
+    expect(relay).toContain('marketplace-authored text, not instructions');
+    expect(relay).toContain(RESOURCE_ID);
     expect((await ledger()).find((r) => r.trigger === 'dispatch')).toMatchObject({
       action: 'relayed',
       strength: 'strong',
       form: 'short',
+      // The parent pays for the relay line too; without this the arm's own
+      // cost is invisible to the tally the phase has to earn out.
+      tokens: expect.any(Number),
     });
     const afterDispatch = hits();
 
@@ -3517,6 +3589,125 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
+   * THE FAN-OUT REGRESSION (tenjin-agent#228 review, Major 2). The handoff is
+   * ONE session-wide cache key. Keyed by resource id, the relay claim did not
+   * protect it, so: dispatch A relays P and tells the parent so, dispatch B
+   * lands moderate on Q and overwrites the slot, child 1 gets Q, child 2 gets
+   * nothing, and P reaches no context at all while its `relayed` row keeps it
+   * out of every parent arm for the window. A delivered hit became a lost one
+   * on exactly the parallel path this work exists to fix, and the parent
+   * transcript asserted a delivery that never happened. B is MODERATE on
+   * purpose: it is the common case and it leaves no `relayed` row behind to
+   * explain the loss.
+   */
+  it('does not let a later moderate dispatch evict a relayed handoff', async () => {
+    const { baseUrl } = await serve(twoSubjects);
+    await pushOn(baseUrl);
+
+    const relayed = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(injected(relayed) ?? '').toContain('queued for delivery to the subagent');
+
+    // The evictor. Moderate, so it never speaks and never relays.
+    const evictor = await runScript(dispatchHookScript(dataDir), otherDispatch);
+    expect(evictor.stdout).toBe('');
+
+    // P, not Q, and P is NOT stranded.
+    const first = await runScript(pushSubagentHookScript(dataDir), start);
+    const text = injected(first) ?? '';
+    expect(text).toContain(RESOURCE_ID);
+    expect(text).not.toContain(SECOND_RESOURCE_ID);
+    expect((await ledger()).find((r) => r.trigger === 'subagent')).toMatchObject({
+      action: 'injected',
+      candidate: expect.objectContaining({ resourceId: RESOURCE_ID }),
+    });
+
+    // One live handoff per session: the second child gets nothing, which is
+    // the consumed cache, not an eviction.
+    const second = await runScript(pushSubagentHookScript(dataDir), start);
+    expect(second.stdout).toBe('');
+  });
+
+  /**
+   * The other half of the slot rule. A second STRONG FREE dispatch on a
+   * different piece cannot relay either, because the session's one handoff is
+   * live, but it is not silenced: it takes the ordinary parent hint path, so
+   * the parent gets exactly what it got before relaying existed.
+   */
+  it('sends a second dispatch on another piece to the parent hint instead', async () => {
+    const { baseUrl } = await serve(twoSubjects);
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+
+    // A strong hit on the other subject: two candidates, so it can clear the bar.
+    const other = await runScript(
+      dispatchHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Task',
+        tool_input: { prompt: `${OTHER_PROMPT} and report what actually happens` },
+      }),
+    );
+    expect(injected(other) ?? '').not.toContain('queued for delivery');
+
+    // Silent or hinted, but never a second relay and never an eviction.
+    const dispatchRows = (await ledger()).filter((r) => r.trigger === 'dispatch');
+    expect(dispatchRows.filter((r) => r.action === 'relayed')).toHaveLength(1);
+    const first = await runScript(pushSubagentHookScript(dataDir), start);
+    expect(injected(first) ?? '').toContain(RESOURCE_ID);
+  });
+
+  /**
+   * MAJOR 1: the outcome ask has to be one the child can actually run.
+   * `--last` resolves through `latestDeliberate`, whose filter is
+   * `source IS NULL OR source = 'cli'`, which by construction excludes the
+   * dispatch-hook search this delivery came from; and two of the three
+   * statuses that rung used to offer are outside `OUTCOME_STATUSES`, so they
+   * throw USAGE.
+   */
+  it('names the search id in the outcome ask, with statuses the CLI accepts', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+
+    const text = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
+    expect(text).toContain(`tenjin outcome --search-id ${SEARCH_ID}`);
+    expect(text).toContain('--status used|partially_used|rejected');
+    expect(text).not.toContain('--last');
+  });
+
+  /** And the other branch: with no search id there is no valid ask, so the
+   *  rung is omitted rather than guessed at. */
+  it('omits the outcome ask when the handoff carried no search id', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    patchCache({ searchId: undefined });
+
+    const text = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
+    expect(text).toContain(RESOURCE_ID);
+    expect(text).not.toContain('tenjin outcome');
+  });
+
+  /**
+   * A team shelf exists only behind a protected deployment, and the bypass
+   * header that opens it is origin-pinned CLI config a child's WebFetch cannot
+   * send, so the fetch rung would hand back the Vercel interstitial. The CLI
+   * and MCP rungs still work, because they carry the header.
+   */
+  it('drops the fetch rung on a team-shelf delivery', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    patchCache({ shelf: 'team' });
+
+    const text = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
+    expect(text).toContain(`tenjin read ${RESOURCE_ID}`);
+    expect(text).toContain('tenjin_read MCP tool');
+    expect(text).not.toContain('or fetch ');
+  });
+
+  /**
    * The relay withholds the piece from the PARENT so a child can have it, and
    * the parent-facing arms share one already-shown set. A prompt fire landing
    * on the relayed piece before the child has run must therefore stay silent:
@@ -3533,7 +3724,10 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(prompt.stdout).toBe('');
     expect((await ledger()).find((r) => r.trigger === 'prompt')).toMatchObject({
       action: 'skipped',
-      reason: 'already-injected',
+      // NOT 'already-injected'. Nothing has been injected: the ledger would
+      // otherwise report a delivery for a piece a relay is still holding, and
+      // that count is what the fan-out dogfood reads.
+      reason: 'already-relayed',
     });
   });
 
@@ -3563,10 +3757,13 @@ describe('the subagent arm (SubagentStart)', () => {
 
   /**
    * A paid pointer that reaches a child (a moderate hit rides the cache) is
-   * metadata plus defer-to-parent wording: no inspect command, no buy
-   * guidance a context without spend authority cannot act on.
+   * metadata, the free preview verb, and defer-to-parent wording. `inspect` is
+   * NOT purchase guidance: it never signs, never pays and never saves
+   * (docs/agent-permissions.md), and it is what lets the child report "the
+   * preview covers our case" rather than a bare uuid. `buy` is the verb this
+   * context has no authority for, and it never appears.
    */
-  it('a paid pointer defers to the parent instead of teaching inspect or buy', async () => {
+  it('a paid pointer offers the free preview and defers the purchase to the parent', async () => {
     const paidSolo = (req: StubRequest): { status: number; json: unknown } => {
       const out = soloEcho(req);
       if (!req.url.startsWith('/api/search')) return out;
@@ -3583,7 +3780,7 @@ describe('the subagent arm (SubagentStart)', () => {
     const text = injected(run) ?? '';
     expect(text).toContain('let your parent decide');
     expect(text).toContain(RESOURCE_ID);
-    expect(text).not.toContain('tenjin inspect');
+    expect(text).toContain(`tenjin inspect ${RESOURCE_ID}`);
     expect(text).not.toContain('tenjin buy');
     expect(text).not.toContain('Read it free');
   });

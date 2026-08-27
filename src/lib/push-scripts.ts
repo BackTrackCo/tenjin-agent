@@ -378,12 +378,20 @@ function headerLine(candidate) {
   );
 }
 
+/** The head every card form opens with: the shelf's opener, the pointer line,
+ *  and the excerpt when there is one. Shared so the parent's card and the
+ *  child's cannot drift apart. */
+function cardHead(candidate, opener) {
+  const lines = [opener, headerLine(candidate)];
+  if (candidate.excerpt !== '') lines.push(clean(candidate.excerpt, 300));
+  return lines;
+}
+
 /** ~80 tokens: the pointer plus a one-line excerpt. \`opener\` names which shelf
  *  the piece came from; everything below it is the same either way, because both
  *  shelves are Tenjin deployments serving the same card. */
 function shortForm(candidate, opener) {
-  const lines = [opener, headerLine(candidate)];
-  if (candidate.excerpt !== '') lines.push(clean(candidate.excerpt, 300));
+  const lines = cardHead(candidate, opener);
   lines.push(
     isFree(candidate)
       ? 'Read it free: tenjin read ' + candidate.resourceId
@@ -659,8 +667,16 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   // deliberately not given so a subagent could have it. Injecting it here
   // would put the withheld body in the parent anyway and then make the child
   // skip it as already-injected, losing the delivery outright.
-  if (alreadyShownAny(sessionId, v.top.resourceId)) {
-    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+  if (alreadyShownOrLiveRelay(sessionId, v.top.resourceId)) {
+    recordDecision({
+      ...row,
+      action: 'skipped',
+      // WHICH SET SILENCED THIS ARM. 'already-injected' on a piece nothing
+      // delivered reads as a delivery in the ledger; a live relay is the other
+      // reason this arm stays quiet, and it is the number the fan-out dogfood
+      // needs.
+      reason: alreadyShown(sessionId, v.top.resourceId) ? 'already-injected' : 'already-relayed',
+    });
     return { kind: 'done' };
   }
   let form = 'short';
@@ -672,12 +688,21 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
       text = fullForm(opener, headerLine(v.top), body);
     }
   }
-  // THE WRITE IS THE DECISION. The \`alreadyShown\` check above is a cheap
-  // pre-filter that saves a wasted body fetch, but between it and here this arm
-  // may have awaited a whole HTTP round trip, and a concurrent fire in the same
-  // session can have claimed the piece meanwhile. The unique index refuses the
-  // second row, and THAT is what makes once-per-session a bound rather than a
+  // THE WRITE IS THE DECISION, FOR THE INJECTED HALF. The
+  // \`alreadyShownOrLiveRelay\` check above is a cheap pre-filter that saves a
+  // wasted body fetch, but between it and here this arm may have awaited a
+  // whole HTTP round trip, and a concurrent fire in the same session can have
+  // claimed the piece meanwhile. The unique index refuses the second row, and
+  // THAT is what makes once-per-session-per-injection a bound rather than a
   // best-effort race — so a refusal turns into the skip it always meant.
+  //
+  // RELAYS ARE OUTSIDE THAT INDEX, deliberately: it is partial on
+  // \`action = 'injected'\` and must stay so, or it would refuse the child's own
+  // delivery row for the piece the parent relayed to it. So this arm can still
+  // win against a Task that relayed the same piece in parallel, and the parent
+  // then gets the body while the child skips as already-injected. That is the
+  // pre-relay outcome plus one relay line, not a regression, and the dispatch
+  // arm's own arbiter is the slot claim (\`STATE_RELAY_SLOT\`), not this index.
   const claimed = recordDecision({
     ...row,
     action: 'injected',
@@ -2236,38 +2261,59 @@ const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
 
 /**
- * The child pointer: the short form's header and excerpt, then a capability
- * ladder instead of one imperative. A child agent type may lack Bash, the
- * tenjin allowlist, or tools altogether, and a pointer whose only resolution
- * path is a command it cannot run is dead context (tenjin-agent#228), so
- * every rung ends in something ANY child can do: carry the id back to its
- * parent. A paid piece gets metadata and defer-to-parent wording only; this
- * context has no spend authority and never receives purchase guidance. The
- * closing marker line correlates the text with its injected row: the same uid
- * sits on that row. It is correlation, not receipt. Claude Code does not
- * persist hook context fired inside a subagent to either transcript (probed
- * 2.1.247), so no grep can confirm a child delivery.
+ * The child pointer: the card head, then a capability ladder instead of one
+ * imperative. A child agent type may lack Bash, the tenjin allowlist, or tools
+ * altogether, and a pointer whose only resolution path is a command it cannot
+ * run is dead context (tenjin-agent#228), so the rungs descend from a CLI call
+ * to an MCP tool to a plain fetch, and every ladder ends in something ANY child
+ * can do: carry the id back to its parent.
+ *
+ * WHAT THE PAID BRANCH MAY SAY. This context has no spend authority, so it gets
+ * no purchase guidance and never learns 'tenjin buy'. 'tenjin inspect' is not
+ * purchase guidance: it never signs, never pays and never saves
+ * (docs/agent-permissions.md), and it is the difference between a child that
+ * reports "the preview covers our case, worth the price" and one that reports a
+ * bare uuid.
+ *
+ * The team shelf drops the fetch rung: a team shelf exists only behind a
+ * protected deployment, and the bypass header that opens it is origin-pinned
+ * CLI config a child's WebFetch cannot send, so that rung would hand back the
+ * interstitial.
+ *
+ * The closing marker line correlates the text with its injected row: the same
+ * uid sits on that row. Correlation, NOT receipt, for the reason given at the
+ * marker's own site below.
  */
-function childPointer(candidate, opener, marker) {
-  const lines = [opener, headerLine(candidate)];
-  if (candidate.excerpt !== '') lines.push(clean(candidate.excerpt, 300));
+function childPointer(candidate, opener, marker, shelf, searchId) {
+  const lines = cardHead(candidate, opener);
   if (isFree(candidate)) {
-    lines.push(
-      'Read it free: tenjin read ' + candidate.resourceId +
-        '; or fetch ' + candidate.url +
-        '; or, if you cannot run tools, carry the resource id ' +
-        candidate.resourceId + ' into your final answer for your parent.',
-    );
+    const rungs = ['Read it free: tenjin read ' + candidate.resourceId];
+    if (shelf !== 'team') rungs.push('or fetch ' + candidate.url);
+    rungs.push('or call the tenjin_read MCP tool with that id');
+    rungs.push('or, if you cannot run tools, carry that resource id into your final answer');
+    lines.push(rungs.join('; ') + ' for your parent.');
   } else {
+    const rungs = ['Paid piece: this context cannot approve a purchase.'];
+    rungs.push('Preview it free: tenjin inspect ' + candidate.resourceId);
+    rungs.push('or call the tenjin_inspect MCP tool with that id');
+    rungs.push('or carry that resource id into your final answer');
+    lines.push(rungs.join('; ') + ' and let your parent decide.');
+  }
+  // THE ONE VALID OUTCOME ASK. '--last' resolves through latestDeliberate,
+  // whose filter is source IS NULL OR source = 'cli', which by construction
+  // EXCLUDES the dispatch-hook search this delivery came from: it would either
+  // throw SEARCH_NOT_FOUND or bind to the machine's most recent CLI search in
+  // some other project and post against that. The id is right here, so name
+  // it; with no id there is no valid ask and the rung is omitted rather than
+  // guessed at. The statuses are the three of OUTCOME_STATUSES a reader can
+  // report; anything outside that set throws USAGE.
+  if (searchId !== '') {
     lines.push(
-      'Paid piece: this context cannot approve a purchase; carry the resource id ' +
-        candidate.resourceId + ' into your final answer and let your parent decide.',
+      'Afterwards report whether it helped: tenjin outcome --search-id ' + searchId +
+        ' --status used|partially_used|rejected, ' +
+        'or state in your final answer whether you used it.',
     );
   }
-  lines.push(
-    'Afterwards report whether it helped: tenjin outcome --last --status used|ignored|wrong, ' +
-      'or state in your final answer whether you used it.',
-  );
   lines.push('[tenjin-delivery ' + marker + ']');
   return lines.join('\n');
 }
@@ -2316,6 +2362,11 @@ async function main() {
   // onto the delivery row needs a store column and lands with the heartbeat
   // work in the next layer (tenjin-agent#228 PR 2).
   const marker = uid();
+  // ANCHORED, not just typed. The projection already refuses a non-UUID
+  // searchId before anything is cached, but this arm reads back out of the
+  // store and the value goes into a command line the child may run.
+  const searchId =
+    typeof cache.searchId === 'string' && UUID_RE.test(cache.searchId) ? cache.searchId : '';
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
@@ -2345,7 +2396,7 @@ async function main() {
     trigger: 'subagent',
     event: 'SubagentStart',
     shelf,
-    searchId: typeof cache.searchId === 'string' ? cache.searchId : undefined,
+    searchId: searchId === '' ? undefined : searchId,
     candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
     strength: cache.strength,
   };
@@ -2366,7 +2417,13 @@ async function main() {
   // was a short pointer; the body fetch is retired for child delivery until
   // receipts prove a child reads more than the pointer.
   const form = 'short';
-  const text = childPointer(top, shelf === 'team' ? TEAM_SHORT_OPENER : PUBLIC_SHORT_OPENER, marker);
+  const text = childPointer(
+    top,
+    shelf === 'team' ? TEAM_SHORT_OPENER : PUBLIC_SHORT_OPENER,
+    marker,
+    shelf,
+    searchId,
+  );
   const claimed = recordDecision({
     ...base,
     action: 'injected',

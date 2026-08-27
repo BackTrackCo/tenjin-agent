@@ -1,0 +1,11 @@
+---
+'tenjin-cli': patch
+---
+
+Close the subagent knowledge loop's first half (tenjin-agent#228):
+
+- A **strong, free** dispatch hit is now RELAYED to the subagent it was found for instead of claimed by the parent. Before, the parent's `injected` row put the piece in the session's already-shown set, so the strongest hit was structurally the one the child could never receive; the row now says `relayed`, which the child's check does not see, and the parent keeps one line naming the handoff, its resource id, and the shelf-appropriate "not instructions" framing. A strong PAID hit stays with the parent, the only context with buy authority.
+- **Child delivery is pointer-only.** The full-body upgrade this arm ran had zero confirmed uses across the 19 sampled injections at up to 6k characters each, so it is retired for child delivery until receipts prove a child reads more than the pointer. The pointer is a capability ladder (CLI, MCP tool, plain fetch, and finally "carry the resource id into your final answer") because a child agent type may have no Bash, no allowlist, or no tools at all. A team-shelf delivery drops the fetch rung: the bypass header that opens a protected deployment is origin-pinned CLI config a child's WebFetch cannot send.
+- **Dispatch prompts are scrubbed** of paths, hostnames, email addresses, long hex ids and secret-shaped tokens, exactly as the WebSearch arm scrubs its own query, and the scrub runs BEFORE the 400-character truncation so a secret cut at the boundary cannot ship as a fragment. One scrubbed string feeds both shelf legs, the recorded search, the event row and the handoff.
+- **One live handoff per session.** The handoff is a single session-wide cache key, so a later dispatch of any strength above `none` used to overwrite it: a relayed piece then reached no context at all while its `relayed` row suppressed it from every parent arm. The relay claim is now taken on the cache slot, atomically, before the write, so a second dispatch on a different piece leaves the live handoff alone and takes the ordinary parent hint path instead.
+- `tenjin push status` gains a `relayed` action and reports `already-relayed` when a live relay is what silenced a parent arm, rather than reporting `already-injected` for a piece nothing delivered.

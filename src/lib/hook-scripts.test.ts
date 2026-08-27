@@ -2472,6 +2472,31 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(entry?.question ?? '').not.toContain('deadbeefdeadbeefdeadbeef');
   });
 
+  /**
+   * SCRUB BEFORE SLICE, pinned at the boundary that makes the order matter.
+   *
+   * The fixture above is 219 chars against a 400-char slice, so
+   * `scrub(prompt).slice(0, 400)` and `scrub(prompt.slice(0, 400))` are the
+   * same expression on it and the regression greptile found is unpinned. Here
+   * the commit id STRADDLES offset 400: slicing first leaves a 12-character
+   * fragment, which is under the hex rule's 16-character floor, so the head of
+   * a real commit id ships. Scrubbing first removes the whole token.
+   */
+  it('scrubs a secret that straddles the slice boundary', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const commit = 'abcdef0123456789abcdef0123456789abcdef01';
+    const lead = 'Work out why the migration replays, checking each release in turn. ';
+    // The id starts at offset 387, so a 400-char slice keeps 13 hex characters
+    // of it: a recognisable head, and one short of the rule's 16-char floor.
+    const prompt = `${lead.padEnd(377, 'x ').slice(0, 377)}at commit ${commit} and report what actually happens.`;
+    expect(prompt.indexOf(commit)).toBe(387);
+
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+
+    expect(bodies[0]).not.toContain(commit.slice(0, 13));
+  });
+
   it('sends the prompt alone when the dispatch has no description', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });

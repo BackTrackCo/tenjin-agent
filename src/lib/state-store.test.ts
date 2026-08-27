@@ -337,7 +337,7 @@ describe('the hot-path queries never scan', () => {
         ['recentReasons', STORE_SQL.recentReasons, ['s', 40]],
         ['injectedCount', STORE_SQL.injectedCount, ['s']],
         ['alreadyShown', STORE_SQL.alreadyShown, ['s', 'r']],
-        ['alreadyShownAny', STORE_SQL.alreadyShownAny, ['s', 'r', 0]],
+        ['alreadyShownOrLiveRelay', STORE_SQL.alreadyShownOrLiveRelay, ['s', 'r', 0]],
         ['bucketCount', STORE_SQL.bucketCount, ['prompt', 0]],
         ['findPairing', STORE_SQL.findPairing, ['p', 'k', 'c']],
         ['openForHead', STORE_SQL.openForHead, ['p', 'h', 0, 8]],
@@ -1398,6 +1398,60 @@ describe('concurrency', () => {
       await shelf.close();
     }
   }, 30_000);
+});
+
+/**
+ * The dispatch relay's arbiter, pinned on its own.
+ *
+ * Every other test that touches it drives the prompt arm through
+ * `alreadyShownOrLiveRelay`, which reads the `relayed` ROW; the DO UPDATE
+ * success path — an expired holder displaced — had no assertion at all, so
+ * mutating the WHERE clause to constant false kept the suite green while the
+ * session's handoff slot became unclaimable for the rest of the session.
+ */
+describe('claimStateFresh arbitrates on the holder age', () => {
+  it('takes a free slot, refuses a fresh holder, and displaces an expired one', async () => {
+    await writeConfig();
+    (await openStore(dataDir))?.close();
+    const handle = db();
+    try {
+      const claim = (value: string, heldSinceMs: number): number => {
+        const now = Date.now();
+        const result = handle
+          .prepare(STORE_SQL.claimStateFresh)
+          .run('s', 'relay:handoff', JSON.stringify(value), now, now - heldSinceMs);
+        return Number(result.changes);
+      };
+      const held = (): unknown =>
+        JSON.parse(
+          (
+            handle
+              .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
+              .get('s', 'relay:handoff') as unknown as { value: string }
+          ).value,
+        );
+
+      // Absent: taken, and the value marks who took it.
+      expect(claim('piece-a', 60_000)).toBe(1);
+      expect(held()).toBe('piece-a');
+
+      // A holder younger than the window: refused, and it keeps the slot.
+      expect(claim('piece-b', 60_000)).toBe(0);
+      expect(held()).toBe('piece-a');
+
+      // The holder ages past the window: displaced. Backdated rather than
+      // waited out, because the window is minutes of wall clock and a timer
+      // would be a flake. Without this path the slot is a permanent claim, and
+      // one unconsumed handoff suppresses relaying for the whole session.
+      handle
+        .prepare('UPDATE session_state SET at = at - ? WHERE session = ? AND key = ?')
+        .run(120_000, 's', 'relay:handoff');
+      expect(claim('piece-c', 60_000)).toBe(1);
+      expect(held()).toBe('piece-c');
+    } finally {
+      handle.close();
+    }
+  });
 });
 
 describe('fail-open', () => {
