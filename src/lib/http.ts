@@ -141,6 +141,40 @@ export interface FetchJsonFailure {
   status?: number;
   requestId?: string;
   message: string;
+  /**
+   * On `invalid-json` only: the 2xx that failed to parse looks like an
+   * access-protection or sign-in page rather than a malformed API document. See
+   * {@link looksLikeAccessGate} for what "looks like" means. Callers use it to
+   * point at the missing credential instead of at the base URL, which is the one
+   * setting that was already correct (#218).
+   */
+  gateSuspected?: boolean;
+}
+
+/**
+ * Does this 2xx read as a protection page rather than as a broken API document?
+ *
+ * Two independent signals, either one enough:
+ *
+ * - an HTML content-type, because a Vercel Deployment Protection interstitial
+ *   and every sign-in wall answer 200 with a page;
+ * - a final URL whose host is not the one asked for, because a gate that
+ *   redirects to sign in lands the probe on another host and `fetch` follows it
+ *   silently on the unpinned requests this function serves.
+ *
+ * Decided HERE because this transport is the only place holding the `Response`;
+ * a caller re-deriving it from the failure message would be guessing. An
+ * unreadable final URL is NOT suspicion: `res.url` is empty on a synthesized
+ * Response, so only a host that reads AND differs counts.
+ */
+function looksLikeAccessGate(requestedUrl: string, res: Response): boolean {
+  if (/^\s*text\/html\b/i.test(res.headers.get('content-type') ?? '')) return true;
+  if (res.url.length === 0) return false;
+  try {
+    return new URL(requestedUrl).host !== new URL(res.url).host;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -266,6 +300,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
           kind: 'invalid-json',
           status: res.status,
           ...(requestId !== undefined ? { requestId } : {}),
+          gateSuspected: looksLikeAccessGate(url, res),
           message: `Response from ${url} was not valid JSON`,
         };
       }

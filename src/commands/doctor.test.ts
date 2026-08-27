@@ -105,8 +105,15 @@ function routeFetch(routes: Record<string, unknown>): typeof fetch {
     for (const [needle, value] of Object.entries(routes)) {
       if (!url.includes(needle)) continue;
       if (value instanceof Error) throw value;
-      const { body, status = 200 } = value as { body: unknown; status?: number };
-      return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+      const {
+        body,
+        status = 200,
+        headers,
+      } = value as { body: unknown; status?: number; headers?: Record<string, string> };
+      return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+        status,
+        ...(headers !== undefined ? { headers } : {}),
+      });
     }
     throw new Error(`unexpected fetch: ${url}`);
   }) as typeof fetch;
@@ -595,6 +602,58 @@ describe('runDoctor — passing outcomes', () => {
       // Not the half-wired warning: the config is fine, this run is not.
       expect(check?.detail).not.toContain('PUBLIC mode');
     });
+
+    /**
+     * The mirror half of the wrong state (#218): baseUrl on a shelf of your own
+     * and no secret. It is the half that breaks every probe, and it used to emit
+     * no check at all, so the operator was left with a CONTRACT_MISMATCH telling
+     * them to change the one setting that was right.
+     */
+    describe('the half-wired shelf with no secret', () => {
+      async function withConfig(
+        config: Record<string, unknown>,
+        flags: { baseUrl?: string } = {},
+        env: NodeJS.ProcessEnv = {},
+      ): Promise<CheckResult | undefined> {
+        await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+        const res = await runDoctor(
+          { flags: { json: false, timeout: 5000, ...flags }, dataDir: dir, io: captureIo().io },
+          {
+            walletPassphrase: NO_OS_STORE,
+            homeDir: skillHome,
+            skillsSourceDir: pkgSrc,
+            env,
+            fetchImpl: healthyFetch,
+          },
+        );
+        return checkNamed(res, 'team shelf');
+      }
+
+      it('warns when the configured baseUrl is a shelf of your own', async () => {
+        const check = await withConfig({ baseUrl: TEAM });
+        expect(check?.status).toBe('warn');
+        // Never fails the command: an unauthenticated machine still works
+        // against an unprotected shelf.
+        expect(check?.required).toBe(false);
+        expect(check?.detail).toContain('unauthenticated');
+        expect(check?.fix).toContain('shelfBypassSecret');
+        // The secret is what is MISSING here, but the rule holds either way:
+        // no check output carries a value for it, only the key name.
+        expect(`${check?.detail} ${check?.fix}`).not.toContain(SECRET);
+      });
+
+      it('says nothing on a default machine, where baseUrl is the marketplace', async () => {
+        expect(await withConfig({})).toBeUndefined();
+        expect(await withConfig({ baseUrl: 'https://tenjin.blog' })).toBeUndefined();
+      });
+
+      it('says nothing when the shelf URL came from a flag or the environment', async () => {
+        // This run's override, not the machine's setup. Asking for a credential
+        // for an origin the flag chose is how the team key leaves the team.
+        expect(await withConfig({}, { baseUrl: TEAM })).toBeUndefined();
+        expect(await withConfig({}, {}, { TENJIN_BASE_URL: TEAM })).toBeUndefined();
+      });
+    });
   });
 });
 
@@ -630,6 +689,42 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('CONTRACT_MISMATCH');
+  });
+
+  /**
+   * Same code, different cause. An access-protection page is a 200 that is not
+   * JSON, so it lands on the identical branch as a broken API — and the fix line
+   * that branch carried sent the operator to change `baseUrl`, which was correct
+   * (#218). The transport's `gateSuspected` is what separates them.
+   */
+  it('an HTML 200 at openapi points at the missing bypass key, not at baseUrl', async () => {
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': {
+          body: '<html><body>Authentication Required</body></html>',
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.detail).toContain('HTML page');
+    expect(check.fix).toContain('shelfBypassSecret');
+    expect(check.fix).not.toContain('config set baseUrl');
+  });
+
+  it('a plain garbage 200 still points at baseUrl, with no gate claimed', async () => {
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': { body: 'garbage{', headers: { 'content-type': 'application/json' } },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.detail).toContain('was not valid JSON');
+    expect(check.fix).toContain('config set baseUrl');
+    expect(check.fix).not.toContain('shelfBypassSecret');
   });
 
   it('a missing info.version at openapi is CONTRACT_MISMATCH', async () => {

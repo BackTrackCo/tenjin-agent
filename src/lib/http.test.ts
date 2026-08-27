@@ -35,6 +35,67 @@ describe('fetchJson', () => {
     expect(res).toMatchObject({ ok: false, kind: 'invalid-json', status: 200 });
   });
 
+  /**
+   * An access-protected deployment answers 200 with its own page, so the failure
+   * is indistinguishable from a broken API by status alone. Only this transport
+   * holds the Response, so it is the only place that can tell doctor which one
+   * happened (#218).
+   */
+  describe('gateSuspected on an invalid-json 2xx', () => {
+    /** A Response whose `url` is the FINAL one, as real fetch reports it after redirects. */
+    function landedAt(finalUrl: string, body: string, init: ResponseInit = {}): Response {
+      const res = new Response(body, { status: 200, ...init });
+      Object.defineProperty(res, 'url', { value: finalUrl });
+      return res;
+    }
+
+    it('is set when the body arrives as text/html', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        new Response('<html><body>Authentication Required</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
+    });
+
+    it('is set when a followed redirect landed the probe on another host', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        landedAt('https://vercel.com/sso-api?url=shelf', 'not json{');
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
+    });
+
+    it('is unset for plain bad JSON served by the requested origin', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        landedAt('https://shelf.example/openapi.json', 'not json{', {
+          headers: { 'content-type': 'application/json' },
+        });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: false });
+    });
+
+    // A Response built without a url (every stub in this file, and any non-fetch
+    // impl) must not read as a redirect: an unknown final host is not a foreign one.
+    it('is unset when the response carries no final URL to compare', async () => {
+      const fetchImpl: typeof fetch = async () => new Response('not json{', { status: 200 });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: false });
+    });
+  });
+
   it('flags a non-2xx status as an http failure carrying the status', async () => {
     const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 500 });
     const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });

@@ -99,6 +99,14 @@ const FIX_POINT_AT_TENJIN_API =
   'Point the configured base URL at a Tenjin API (expected an OpenAPI document): `tenjin config set baseUrl <url>`.';
 const FIX_CHECK_NETWORK_AND_BASE_URL =
   'Check your network connection and the configured base URL (`tenjin config get baseUrl`).';
+/**
+ * The base URL was RIGHT and the credential was missing. Sending the operator to
+ * `baseUrl` here (what a bare CONTRACT_MISMATCH did, #218) asks them to change
+ * the one setting that was already correct. Names the config key and no value:
+ * the secret itself never reaches any check output.
+ */
+const FIX_SET_SHELF_BYPASS =
+  'That deployment is access-protected and these probes carried no bypass key: `tenjin config set shelfBypassSecret <value>`.';
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
@@ -237,7 +245,8 @@ export async function collectDoctorChecks(
     built.push(await checkPushHooks(home, ctx.dataDir));
   }
 
-  // Same rule: only when a secret is set is there a team shelf to be wrong about.
+  // Same rule: silent unless one of the two settings claims a team shelf, so a
+  // default machine gets no check about a feature it never turned on.
   const teamShelf = checkTeamShelf(settings, bypass);
   if (teamShelf !== null) built.push(teamShelf);
 
@@ -398,15 +407,26 @@ async function checkApiContract(
   });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
+    // Same failure code either way (the contract was not met), but a different
+    // cause and so a different fix: the transport saw the response and says
+    // whether it was a protection page. Only it can, so doctor asks rather than
+    // guessing from the body it no longer has.
+    const gated = malformed && res.gateSuspected === true;
     return {
       result: {
         name: 'api-contract',
         status: 'fail',
         required: true,
-        detail: malformed
-          ? `OpenAPI document at ${url} was not valid JSON`
-          : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix: malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL,
+        detail: gated
+          ? `${url} answered with an HTML page (an access-protection or sign-in page), not a Tenjin API document`
+          : malformed
+            ? `OpenAPI document at ${url} was not valid JSON`
+            : `Could not reach the Tenjin API at ${url}: ${res.message}`,
+        fix: gated
+          ? FIX_SET_SHELF_BYPASS
+          : malformed
+            ? FIX_POINT_AT_TENJIN_API
+            : FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
     };
@@ -894,12 +914,14 @@ const POSTURE: Record<DirState, string> = {
  * Is team mode actually on, and does the operator know which answer they got?
  *
  * Team mode needs TWO settings, and the setup is two independent commands, so
- * the reachable wrong state is a machine with the bypass secret and `baseUrl`
- * still on the public marketplace. The CLI fails that safe to public mode —
+ * BOTH halves are reachable: a machine with the bypass secret and `baseUrl`
+ * still on the public marketplace, and a machine with `baseUrl` on a shelf of
+ * its own and no secret. The CLI fails the first safe to public mode —
  * publishes keep the client scan and the confirm cascade — but silently, and an
  * operator who believes they are on the team shelf would keep writing internal
- * notes at a command that sends them to tenjin.blog. Warn, never fail: public
- * mode is a working machine, just not the one they meant to configure.
+ * notes at a command that sends them to tenjin.blog. The second half is the one
+ * that breaks every network probe (see {@link halfWiredShelfWarn}). Warn, never
+ * fail, for both: each is a working machine, just not the one they configured.
  *
  * Reports what the probes ACTUALLY DID — it is handed the same `bypass` they
  * were, rather than re-deriving the answer — so a run whose base URL came from
@@ -910,7 +932,7 @@ function checkTeamShelf(
   settings: EffectiveSettings,
   bypass: ShelfBypass | undefined,
 ): BuiltCheck | null {
-  if (settings.shelfBypassSecret.value.length === 0) return null;
+  if (settings.shelfBypassSecret.value.length === 0) return halfWiredShelfWarn(settings);
   const baseUrl = settings.baseUrl.value;
   if (bypass !== undefined) {
     return {
@@ -953,6 +975,38 @@ function checkTeamShelf(
       required: false,
       detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
       fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
+    },
+  };
+}
+
+/**
+ * The other half-wiring: `baseUrl` on a shelf of the team's own, no secret.
+ *
+ * Response-INDEPENDENT on purpose. The symptom is a protection page answering
+ * every probe, and `checkApiContract` now names that when it sees one, but a
+ * deployment that is not protected today can be protected tomorrow with no
+ * config change here. This check reads the two settings alone, so it is true
+ * before the network says anything and stays true when the network says nothing.
+ *
+ * Only a CONFIGURED base URL counts. An `env` or `flag` source is THIS RUN's
+ * override, not the machine's setup, and the withheld-key warn above already
+ * names an override; a second line asking for a credential for an origin nobody
+ * configured would coach writing the team key toward a host the flag chose.
+ * Empty secret plus the public marketplace stays silent: that is the default
+ * machine, with nothing to be half-wired about.
+ */
+function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
+  if (settings.baseUrl.source !== 'file' && settings.baseUrl.source !== 'project') return null;
+  const baseUrl = settings.baseUrl.value;
+  const origin = tryOriginOf(baseUrl);
+  if (origin === null || !isTeamShelfOrigin(origin, settings.publicShelfUrl.value)) return null;
+  return {
+    result: {
+      name: 'team shelf',
+      status: 'warn',
+      required: false,
+      detail: `baseUrl is ${sanitizeForTerminal(baseUrl)}, a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated; if that deployment is access-protected they were answered by its protection page rather than by Tenjin`,
+      fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
     },
   };
 }
