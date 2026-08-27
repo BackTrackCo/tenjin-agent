@@ -7,6 +7,8 @@ import { MANAGERS, classifyManager, refuse, resolveManagerScript } from '../lib/
 import type { Delegable } from '../lib/install-location';
 import { emitWriteNotice, sanitizeForTerminal } from '../lib/output';
 import { channelTag, fetchDistTags, isNewer, resolveTarget } from '../lib/update-check';
+import { detectHookOwners } from '../lib/harness-hooks';
+import type { HookOwner } from '../lib/harness-hooks';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -51,7 +53,13 @@ export type SpawnResult =
 export type UpdateSpawn = (
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeoutMs: number },
+  opts: {
+    cwd: string;
+    timeoutMs: number;
+    /** Variables layered ONTO this process's environment, for the per-profile
+     *  `TENJIN_DATA_DIR` the refresh pass sets. Absent means inherit unchanged. */
+    env?: Record<string, string>;
+  },
   onOutput: (chunk: string) => void,
 ) => Promise<SpawnResult>;
 
@@ -87,6 +95,16 @@ export interface UpdateDeps {
   /** The owning manager's entry script, or null when it has none to find.
    *  Injectable so the argv shape is asserted without depending on the runner. */
   managerScript?: string | null;
+  /** Home whose harness settings the hook-owner detector reads. Defaults to os.homedir(). */
+  homeDir?: string;
+  /** The hook-owner detector; injected so tests choose the profiles without a settings file. */
+  detectHookOwners?: (homeDir: string) => Promise<HookOwner[]>;
+  /**
+   * The CLI entry the refresh child runs. Defaults to `process.argv[1]`, which
+   * after the swap resolves to the NEWLY installed script — that is the whole
+   * point of spawning rather than calling.
+   */
+  refreshCommand?: string;
 }
 
 interface UpdateData {
@@ -237,10 +255,111 @@ export async function runUpdate(
     ctx.io,
     `tenjin update: replaced the global tenjin-cli with ${latest} via ${manager}`,
   );
+
+  const refresh = await refreshProfiles(ctx, deps, onOutput);
   return {
-    data: data(true),
-    humanLines: [`Updated tenjin-cli ${current} -> ${latest}. New builds pick it up immediately.`],
+    data: { ...data(true), refresh },
+    humanLines: [`Updated tenjin-cli ${current} -> ${latest}.`, refreshLine(refresh)],
   };
+}
+
+/** How long one `install --refresh` child gets. Local file writes only, no
+ *  registry: a minute is already generous, and `update` must not hang a turn. */
+const REFRESH_TIMEOUT_MS = 60_000;
+
+/** What the post-swap re-materialize did, per profile. */
+export interface RefreshOutcome {
+  /** Data dirs a refresh was run for, whether or not it succeeded. */
+  profiles: string[];
+  /** Profiles whose refresh did not exit 0, with the manual command to finish them. */
+  failed: string[];
+  /** Present when at least one profile failed; names `tenjin install`. */
+  fix?: string;
+}
+
+/**
+ * Re-materialize what the swap left stale, on the NEW binary.
+ *
+ * `update` replaces the package and nothing else, but `install` bakes this
+ * build's identity into files: the generated hook scripts carry a version, and
+ * the wired skills carry this release's instructions. Until something rewrites
+ * them the highest-volume request path keeps reporting the previous version and
+ * agents keep reading the previous release's guidance (tenjin-agent#171).
+ *
+ * SPAWNED, NOT CALLED. This process is the OLD build; it cannot render the new
+ * version's copies, and re-exec is the only way to reach code that can. The
+ * child is the freshly installed entry, and what it runs is
+ * `install --refresh` — a mode that converges existing surfaces and creates
+ * none, which is the only kind of write an unattended upgrade may make.
+ *
+ * ONCE PER HOOK-OWNER PROFILE. `install` bakes its data dir into the scripts it
+ * generates, so a machine whose hooks were installed under `TENJIN_DATA_DIR`
+ * has hooks belonging to THAT profile while a bare `tenjin update` resolves the
+ * default one. Refreshing only the invoking profile there would leave the
+ * registered scripts — the ones the harness actually fires — stale forever,
+ * which is exactly the shelf runbook's manual re-install step. So the detector
+ * reads the harness settings and each profile it names is refreshed with
+ * `TENJIN_DATA_DIR` set to it. A machine with no registered hooks has no other
+ * profile to find, and gets one refresh for the invoking one.
+ *
+ * NEVER FAILS THE UPDATE. The swap already happened and is the thing the
+ * operator asked for. A refusal, a crash, a timeout, or an older-binary
+ * "unknown option --refresh" all land here as a warn naming the manual command.
+ */
+async function refreshProfiles(
+  ctx: CommandContext,
+  deps: UpdateDeps,
+  onOutput: (chunk: string) => void,
+): Promise<RefreshOutcome> {
+  const home = deps.homeDir ?? homedir();
+  const detect = deps.detectHookOwners ?? detectHookOwners;
+  const owners = await detect(home).catch(() => []);
+  const profiles = owners.length > 0 ? owners.map((o) => o.dataDir) : [ctx.dataDir];
+
+  const entry = deps.refreshCommand ?? process.argv[1];
+  // No absolute entry to re-exec (an embedder, a stripped argv) means there is
+  // nothing to spawn; report the profiles as unrefreshed rather than guessing at
+  // a command, since guessing is how a hook script gets rewritten by the wrong
+  // binary.
+  if (entry === undefined || entry.length === 0) {
+    return { profiles: [], failed: profiles, fix: REFRESH_MANUAL_FIX };
+  }
+
+  const failed: string[] = [];
+  for (const dataDir of profiles) {
+    const outcome = await (deps.spawnImpl ?? spawnCapture)(
+      process.execPath,
+      [entry, 'install', '--refresh'],
+      { cwd: homedir(), timeoutMs: REFRESH_TIMEOUT_MS, env: { TENJIN_DATA_DIR: dataDir } },
+      onOutput,
+    );
+    if (outcome.kind !== 'exit' || outcome.code !== 0) failed.push(dataDir);
+  }
+  return {
+    profiles,
+    failed,
+    ...(failed.length > 0 ? { fix: REFRESH_MANUAL_FIX } : {}),
+  };
+}
+
+const REFRESH_MANUAL_FIX =
+  'Run `tenjin install` to bring the skills and hook scripts up to this version.';
+
+/**
+ * One line reporting what the refresh actually did.
+ *
+ * It replaces "New builds pick it up immediately", which was true of the binary
+ * and false of everything install had written — so it read as reassurance about
+ * precisely the thing that was NOT handled (tenjin-agent#171).
+ */
+function refreshLine(refresh: RefreshOutcome): string {
+  if (refresh.failed.length > 0) {
+    return `Could not refresh the skills and hook scripts for ${refresh.failed.join(', ')}. ${REFRESH_MANUAL_FIX}`;
+  }
+  const count = refresh.profiles.length;
+  return count > 1
+    ? `Refreshed the skills and hook scripts for ${count} profiles: ${refresh.profiles.join(', ')}.`
+    : `Refreshed the skills and hook scripts for ${refresh.profiles[0]}.`;
 }
 
 /**
@@ -252,7 +371,14 @@ export const spawnCapture: UpdateSpawn = (cmd, args, opts, onOutput) =>
   new Promise((res) => {
     let child;
     try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd: opts.cwd });
+      child = spawn(cmd, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: opts.cwd,
+        // Layered onto this process's environment rather than replacing it: the
+        // child is a Node CLI that needs PATH and HOME, and only the keys named
+        // here are being decided.
+        ...(opts.env !== undefined ? { env: { ...process.env, ...opts.env } } : {}),
+      });
     } catch (cause) {
       // An argv or option Node rejects outright throws here; ENOENT arrives on
       // the 'error' event instead. Both mean the same thing to the caller.

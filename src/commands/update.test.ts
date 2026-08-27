@@ -55,7 +55,13 @@ const forbiddenFetch: typeof fetch = async () => {
 
 /** Records every spawn; optionally emits output and picks the outcome. */
 function spawnRecorder(opts: { result?: SpawnResult; output?: string } = {}) {
-  const calls: { cmd: string; args: string[]; cwd: string; timeoutMs: number }[] = [];
+  const calls: {
+    cmd: string;
+    args: string[];
+    cwd: string;
+    timeoutMs: number;
+    env?: Record<string, string>;
+  }[] = [];
   const impl: UpdateSpawn = async (cmd, args, spawnOpts, onOutput) => {
     calls.push({ cmd, args, ...spawnOpts });
     if (opts.output !== undefined) onOutput(opts.output);
@@ -97,6 +103,13 @@ async function deps(overrides: Partial<UpdateDeps> = {}): Promise<UpdateDeps> {
     fetchImpl: registry({ latest: '0.1.0-alpha.7', alpha: '0.1.0-alpha.5' }).fetchImpl,
     spawnImpl: forbiddenSpawn,
     managerScript: null,
+    // The post-swap refresh detects hook owners from the harness settings file,
+    // so both seams are pinned here: without them a run in this suite reads the
+    // DEVELOPER'S own ~/.claude/settings.json and refreshes whatever profiles it
+    // finds there. No default is hermetic, so every test states its own.
+    homeDir: dir,
+    detectHookOwners: async () => [],
+    refreshCommand: join(dir, 'bin', 'tenjin.js'),
     ...overrides,
   };
 }
@@ -126,6 +139,7 @@ describe('runUpdate', () => {
       latest: '0.1.0-alpha.7',
       updateAvailable: true,
       updated: true,
+      refresh: { profiles: [dir], failed: [] },
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
   });
@@ -724,5 +738,190 @@ describe('resolveNpmCli', () => {
   it('returns a script or null on this machine, never anything else', () => {
     const found = resolveNpmCli(process.execPath);
     expect(found === null || found.endsWith('npm-cli.js')).toBe(true);
+  });
+});
+
+/**
+ * `update` swapped the binary and nothing else, so the skills and the generated
+ * hook scripts stayed at the previous version until someone re-ran `install` by
+ * hand (tenjin-agent#171). It now re-materializes them by spawning the FRESHLY
+ * INSTALLED entry, which is the only code that can render the new version's
+ * copies.
+ */
+describe('runUpdate: the post-swap refresh', () => {
+  const ENTRY = '/usr/local/lib/node_modules/tenjin-cli/dist/index.js';
+
+  /** A spawn seam that answers per call, so the manager can succeed while the
+   *  refresh fails — the case the whole warn path exists for. */
+  function scriptedSpawn(outcomes: SpawnResult[]) {
+    const calls: {
+      cmd: string;
+      args: string[];
+      env?: Record<string, string>;
+      timeoutMs: number;
+    }[] = [];
+    const impl: UpdateSpawn = async (cmd, args, spawnOpts) => {
+      calls.push({
+        cmd,
+        args,
+        timeoutMs: spawnOpts.timeoutMs,
+        ...(spawnOpts.env !== undefined ? { env: spawnOpts.env } : {}),
+      });
+      return outcomes[calls.length - 1] ?? { kind: 'exit', code: 0 };
+    };
+    return { impl, calls, refreshes: () => calls.slice(1) };
+  }
+
+  it('runs the new entry once per detected hook-owner profile, each with its own data dir', async () => {
+    const { ctx } = makeCtx();
+    const spawned = scriptedSpawn([]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: spawned.impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => [
+          { dataDir: '/home/u/.tenjin', scripts: [] },
+          { dataDir: '/home/u/.tenjin-shelf', scripts: [] },
+        ],
+      }),
+    );
+    // The manager first, then one refresh per profile.
+    expect(spawned.calls.length).toBe(3);
+    for (const call of spawned.refreshes()) {
+      expect(call.cmd).toBe(process.execPath);
+      expect(call.args).toEqual([ENTRY, 'install', '--refresh']);
+    }
+    // The whole point of the per-profile loop: a shelf machine's hooks are
+    // regenerated from the SHELF config, not from whichever profile ran update.
+    expect(spawned.refreshes().map((c) => c.env?.TENJIN_DATA_DIR)).toEqual([
+      '/home/u/.tenjin',
+      '/home/u/.tenjin-shelf',
+    ]);
+    expect((result.data as { refresh: { profiles: string[] } }).refresh.profiles).toEqual([
+      '/home/u/.tenjin',
+      '/home/u/.tenjin-shelf',
+    ]);
+  });
+
+  it('refreshes the invoking profile only when no hooks are registered', async () => {
+    const { ctx } = makeCtx();
+    const spawned = scriptedSpawn([]);
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: spawned.impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => [],
+      }),
+    );
+    expect(spawned.refreshes().length).toBe(1);
+    expect(spawned.refreshes()[0]?.env?.TENJIN_DATA_DIR).toBe(dir);
+  });
+
+  it('never spawns a refresh when the swap itself failed', async () => {
+    const { ctx } = makeCtx();
+    // Every reason the manager can end badly. None may reach the refresh: there
+    // is no new binary to run, and the old one would rewrite hooks with the
+    // version the operator was trying to leave.
+    for (const outcome of [
+      { kind: 'exit', code: 1 },
+      { kind: 'timeout' },
+      { kind: 'start-failed', cause: new Error('ENOENT') },
+    ] as SpawnResult[]) {
+      const spawned = scriptedSpawn([outcome]);
+      await caught(async () =>
+        runUpdate(
+          { check: false },
+          ctx,
+          await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY }),
+        ),
+      );
+      expect(spawned.calls.length).toBe(1);
+    }
+  });
+
+  /**
+   * The swap is what the operator asked for and it already happened, so a failed
+   * refresh is a nag, not a failure. That is also the compatibility contract for
+   * `--refresh`: an old `update` runs it on a NEWER binary, so a future rename
+   * lands here as "unknown option" and costs a warn rather than a wedge.
+   */
+  it('warns and names the manual command when a refresh fails, and still reports updated', async () => {
+    for (const outcome of [
+      { kind: 'exit', code: 1 },
+      { kind: 'timeout' },
+      { kind: 'start-failed', cause: new Error('unknown option --refresh') },
+    ] as SpawnResult[]) {
+      const { ctx } = makeCtx();
+      const result = await runUpdate(
+        { check: false },
+        ctx,
+        await deps({
+          spawnImpl: scriptedSpawn([{ kind: 'exit', code: 0 }, outcome]).impl,
+          refreshCommand: ENTRY,
+          detectHookOwners: async () => [{ dataDir: '/home/u/.tenjin-shelf', scripts: [] }],
+        }),
+      );
+      const data = result.data as { updated: boolean; refresh: { failed: string[]; fix?: string } };
+      expect(data.updated).toBe(true);
+      expect(data.refresh.failed).toEqual(['/home/u/.tenjin-shelf']);
+      expect(data.refresh.fix).toContain('tenjin install');
+      const lines = result.humanLines?.join(' ') ?? '';
+      expect(lines).toContain('Could not refresh');
+      expect(lines).toContain('/home/u/.tenjin-shelf');
+      expect(lines).toContain('tenjin install');
+    }
+  });
+
+  /**
+   * The line it replaces was true of the binary and false of everything install
+   * had written, so it read as reassurance about exactly the thing that was not
+   * handled.
+   */
+  it('reports what the refresh did instead of the old immediacy claim', async () => {
+    const { ctx } = makeCtx();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: scriptedSpawn([]).impl, refreshCommand: ENTRY }),
+    );
+    const lines = result.humanLines?.join(' ') ?? '';
+    expect(lines).not.toContain('pick it up immediately');
+    expect(lines).toContain('Refreshed the skills and hook scripts');
+  });
+
+  it('reports every profile as unrefreshed when there is no entry to re-exec', async () => {
+    const { ctx } = makeCtx();
+    const spawned = scriptedSpawn([]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: '' }),
+    );
+    // Guessing at a command is how a hook script gets rewritten by the wrong binary.
+    expect(spawned.refreshes().length).toBe(0);
+    const data = result.data as { updated: boolean; refresh: { failed: string[] } };
+    expect(data.updated).toBe(true);
+    expect(data.refresh.failed).toEqual([dir]);
+  });
+
+  it('survives a detector that throws, refreshing the invoking profile', async () => {
+    const { ctx } = makeCtx();
+    const spawned = scriptedSpawn([]);
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: spawned.impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => {
+          throw new Error('settings.json is a directory');
+        },
+      }),
+    );
+    expect(spawned.refreshes().map((c) => c.env?.TENJIN_DATA_DIR)).toEqual([dir]);
   });
 });

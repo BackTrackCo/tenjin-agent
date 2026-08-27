@@ -27,8 +27,11 @@ Useful flags:
 | `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.                                                                                              |
 | `--no-hooks`            |                               | Register no hooks this run.                                                                                                      |
 | `--no-wallet`           |                               | Create no wallet.                                                                                                                |
+| `--refresh`             |                               | Re-materialize what this machine already has, at this build. Never prompts, never creates a wallet, never writes config.         |
 
 `install` is idempotent. Re-run it after upgrading the CLI or changing harnesses.
+
+**`--refresh`** is the narrow, non-interactive half, and it is what [`tenjin update`](#tenjin-update) runs for you after a successful upgrade. It re-renders the wired skills, rewrites the generated hook scripts that are already on disk, and updates the settings.json hook entries this CLI already owns. It adds nothing: a skill that is not wired stays unwired, a hook script that is absent stays absent, an event with no entry of ours gets none, and no permission rule is written at all. Rules a newer version would grant are reported and left for an explicit `tenjin install`, because widening an agent's allowlist during an unattended upgrade is not a refresh. On a machine where nothing was ever installed it is a no-op and says so.
 
 ### Hooks
 
@@ -61,6 +64,8 @@ Installs the newest version npm offers this build, pinned to the exact version t
 | `--check` | Report whether a newer version exists without installing. |
 
 The manager that owns the install performs it: npm, pnpm, and bun are each driven with their own global-add command. What cannot be driven is refused with the instruction that is correct there, rather than writing a global you never had: a source checkout updates by git, an npx run has nothing installed to replace, a project-local copy updates where it is declared, and yarn is refused because `yarn global add` exists only in yarn 1. `--check` answers from all of them.
+
+**The swap is not the whole upgrade.** The wired skills and the generated hook scripts are copies of a particular version, so after a successful swap `update` runs [`tenjin install --refresh`](#tenjin-install) on the newly installed binary and reports what it did. It runs it **once per profile whose hooks this machine has registered**, with `TENJIN_DATA_DIR` set to each, so a machine installed under a redirected data dir gets the scripts the harness actually fires brought up to date rather than only the profile that typed `update`. A refresh that fails or times out is a warning naming `tenjin install`; it never fails the update, because the swap already happened.
 
 Deliberately not in the recommended permission allowlist: it replaces the binary your agent then runs. See [agent-permissions.md](./agent-permissions.md).
 

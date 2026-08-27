@@ -191,6 +191,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.webSearch and hooks.agentDispatch (both auto by default, disjoint)',
     )
     .option('--no-hooks', 'register no harness hooks this run (writes no config)')
+    .option(
+      '--refresh',
+      'non-interactive: re-materialize the skills, hook scripts and hook entries this machine already has, at this build. Asks nothing, creates no wallet, writes no config, and adds no permission rule or hook entry that is not already there. This is what `tenjin update` runs after a successful upgrade',
+    )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
@@ -216,6 +220,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
               : {}),
             ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
             ...(o.hooks === false ? { noHooks: true } : {}),
+            ...(o.refresh === true ? { refresh: true } : {}),
           },
           ctx,
         );

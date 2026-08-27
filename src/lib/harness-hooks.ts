@@ -1,5 +1,5 @@
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir } from './paths';
@@ -493,8 +493,11 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   const scriptsDir = hooksDir(dataDir);
   const plan = specs(dataDir, { push });
 
-  const found = await inspectSettings(homeDir, scriptsDir, mode);
-  if ('result' in found) return found.result;
+  const found = await inspectSettings(homeDir);
+  if ('refusal' in found) {
+    const { path, reason, message } = found.refusal;
+    return refuse(path, scriptsDir, mode, reason, message);
+  }
   const { path, raw, settings, hooks } = found;
 
   const nextHooks: Record<string, unknown> = { ...hooks };
@@ -780,17 +783,26 @@ interface SettingsInspection {
   hooks: Record<string, unknown>;
 }
 
+/** Why the settings file cannot be written, in the terms {@link refuse} renders. */
+interface SettingsRefusal {
+  reason: HooksSkipReason;
+  message: string;
+  path: string;
+}
+
 /**
  * Resolve and read the settings file. Every refusal lives here, so the shape
  * checks and the write agree by construction. Symlinks are resolved before the
  * write for the same reason lib/harness-permissions.ts resolves them: committing
  * with a rename over a dotfiles-managed link would sever it.
+ *
+ * Returns the refusal as DATA rather than as a rendered `HooksResult`, because
+ * two writers now share it and they report differently: `wireSearchHooks` owes
+ * the operator a mode and a scripts dir, `refreshHooks` owes a warning line.
  */
 async function inspectSettings(
   homeDir: string,
-  scriptsDir: string,
-  mode: WebSearchMode,
-): Promise<SettingsInspection | { result: HooksResult }> {
+): Promise<SettingsInspection | { refusal: SettingsRefusal }> {
   const declaredPath = claudeSettingsPath(homeDir);
   const entry = await lstat(declaredPath).catch(() => null);
 
@@ -800,13 +812,11 @@ async function inspectSettings(
       path = await realpath(declaredPath);
     } catch (err) {
       return {
-        result: refuse(
-          declaredPath,
-          scriptsDir,
-          mode,
-          'unresolvable',
-          `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
-        ),
+        refusal: {
+          reason: 'unresolvable',
+          path: declaredPath,
+          message: `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
+        },
       };
     }
   }
@@ -818,13 +828,11 @@ async function inspectSettings(
       raw = await readFile(path, 'utf8');
     } catch (err) {
       return {
-        result: refuse(
+        refusal: {
+          reason: 'unreadable',
           path,
-          scriptsDir,
-          mode,
-          'unreadable',
-          `${path} could not be read (${(err as Error).message}); no hooks were registered.`,
-        ),
+          message: `${path} could not be read (${(err as Error).message}); no hooks were registered.`,
+        },
       };
     }
     let parsed: unknown;
@@ -832,24 +840,20 @@ async function inspectSettings(
       parsed = JSON.parse(raw);
     } catch (err) {
       return {
-        result: refuse(
+        refusal: {
+          reason: 'unparsable',
           path,
-          scriptsDir,
-          mode,
-          'unparsable',
-          `${path} is not valid JSON (${(err as Error).message}); it was left exactly as it is.`,
-        ),
+          message: `${path} is not valid JSON (${(err as Error).message}); it was left exactly as it is.`,
+        },
       };
     }
     if (!isPlainObject(parsed)) {
       return {
-        result: refuse(
+        refusal: {
+          reason: 'unexpected-shape',
           path,
-          scriptsDir,
-          mode,
-          'unexpected-shape',
-          `${path} is not a JSON object; it was left exactly as it is.`,
-        ),
+          message: `${path} is not a JSON object; it was left exactly as it is.`,
+        },
       };
     }
     settings = parsed;
@@ -858,14 +862,218 @@ async function inspectSettings(
   const hooksValue = settings.hooks;
   if (hooksValue !== undefined && !isPlainObject(hooksValue)) {
     return {
-      result: refuse(
+      refusal: {
+        reason: 'unexpected-shape',
         path,
-        scriptsDir,
-        mode,
-        'unexpected-shape',
-        `${path} has a "hooks" key that is not an object; it was left exactly as it is.`,
-      ),
+        message: `${path} has a "hooks" key that is not an object; it was left exactly as it is.`,
+      },
     };
   }
   return { path, raw, settings, hooks: hooksValue ?? {} };
+}
+
+/**
+ * A Tenjin data dir whose generated hook scripts this machine's harness is
+ * registered to run.
+ *
+ * There can be more than one. `install` bakes its data dir into the scripts it
+ * generates and into the entry that names them, so a machine that ran
+ * `TENJIN_DATA_DIR=~/.tenjin-shelf tenjin install` has hooks belonging to the
+ * shelf profile while a bare `tenjin` still resolves `~/.tenjin`. That split is
+ * a deliberate, supported setup, and it is invisible until something reads the
+ * entries back.
+ */
+export interface HookOwner {
+  /** The data dir the scripts live under: two levels up from the script path. */
+  dataDir: string;
+  /** The registered script paths under it, deduped, in the order first seen. */
+  scripts: string[];
+}
+
+/** Our generated hook scripts are all `tenjin-<something>.mjs`, under `hooks/`. */
+const TENJIN_HOOK_SCRIPT = /^tenjin-[A-Za-z0-9._-]+\.mjs$/;
+
+/**
+ * Undo {@link quoteForShell}. A settings entry's command is written by this
+ * module and nowhere else, so the two forms it can take are the two that
+ * function emits; anything else is read as a bare token and then rejected by the
+ * shape checks in {@link hookOwnerOf}.
+ */
+function unquoteFromShell(token: string): string {
+  if (token.length >= 2 && token.startsWith(`'`) && token.endsWith(`'`)) {
+    return token.slice(1, -1).replaceAll(`'\\''`, `'`);
+  }
+  if (token.length >= 2 && token.startsWith('"') && token.endsWith('"')) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+/**
+ * The data dir behind one settings command, or null when the command is not one
+ * of ours.
+ *
+ * THREE shape checks, all required, because this answer decides which profile an
+ * unattended `update` re-materializes: the command must be `node <path>`, the
+ * basename must be one of our generated script names, and the parent directory
+ * must be `hooks`. The last is what makes `dirname(dirname(path))` the data dir
+ * rather than a guess — {@link hooksDir} is `join(dataDir, 'hooks')`, so any
+ * other parent means the path did not come from this CLI and its grandparent is
+ * nothing in particular.
+ */
+function hookOwnerOf(command: string): { dataDir: string; script: string } | null {
+  if (!command.startsWith('node ')) return null;
+  const script = unquoteFromShell(command.slice('node '.length).trim());
+  if (!TENJIN_HOOK_SCRIPT.test(basename(script))) return null;
+  const dir = dirname(script);
+  if (basename(dir) !== 'hooks') return null;
+  return { dataDir: dirname(dir), script };
+}
+
+/**
+ * Every profile whose hooks this machine's harness actually fires.
+ *
+ * Read-only and best-effort, like {@link countPushHookEntries}: a settings file
+ * that is missing, unreadable, not JSON, or shaped unexpectedly answers "none",
+ * never an error. `update` calls this to decide what to re-materialize, and a
+ * detector that threw would turn a stray edit in someone's settings.json into a
+ * failed upgrade.
+ */
+export async function detectHookOwners(homeDir: string): Promise<HookOwner[]> {
+  let hooks: unknown;
+  try {
+    const parsed: unknown = JSON.parse(await readFile(claudeSettingsPath(homeDir), 'utf8'));
+    hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
+  } catch {
+    return [];
+  }
+  if (!isPlainObject(hooks)) return [];
+  const owners = new Map<string, HookOwner>();
+  for (const list of Object.values(hooks)) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (!isPlainObject(entry) || !Array.isArray(entry.hooks)) continue;
+      for (const handler of entry.hooks) {
+        if (!isPlainObject(handler) || typeof handler.command !== 'string') continue;
+        const owner = hookOwnerOf(handler.command);
+        if (owner === null) continue;
+        const found = owners.get(owner.dataDir) ?? { dataDir: owner.dataDir, scripts: [] };
+        if (!found.scripts.includes(owner.script)) found.scripts.push(owner.script);
+        owners.set(owner.dataDir, found);
+      }
+    }
+  }
+  return [...owners.values()];
+}
+
+/** What one {@link refreshHooks} pass did. Nothing here can be an addition. */
+export interface HookRefreshResult {
+  /** The settings file consulted; null when there is none on this machine. */
+  path: string | null;
+  scriptsDir: string;
+  /** Script bodies this run rewrote. Empty when every one was already current. */
+  scripts: string[];
+  /** Events whose entry of ours this run rewrote in place. */
+  updated: HookEvent[];
+  /** Events carrying an entry of ours that already matched. */
+  alreadyPresent: HookEvent[];
+  /** Why the settings file was left alone, when it was. */
+  warning?: string;
+}
+
+/**
+ * Bring the hook surfaces this machine ALREADY has up to this build, and add
+ * none.
+ *
+ * The difference from {@link wireSearchHooks} is the whole point: that one
+ * materializes the plan, this one converges what exists. A script the plan names
+ * but disk does not carry is left absent, and an event with no entry of ours
+ * gets none. So an unattended caller (`tenjin update`) can run it on any machine
+ * without turning an upgrade into an install.
+ *
+ * `push` is read from the machine's own config by the caller rather than
+ * defaulted here, because it decides the WebSearch entry's matcher: planning
+ * `push: true` on a machine with the experiment off would rewrite the existing
+ * entry to the widened `WebSearch|WebFetch` matcher and start firing the hook on
+ * a tool the operator never armed it for.
+ */
+export async function refreshHooks(opts: {
+  homeDir: string;
+  dataDir: string;
+  push: boolean;
+  platform?: string;
+}): Promise<HookRefreshResult> {
+  const { homeDir, dataDir, push, platform } = opts;
+  const scriptsDir = hooksDir(dataDir);
+
+  // Bodies first, and only for files already on disk. `scriptPlan` is the full
+  // writer set (see its own note on why bodies ignore `push`); the presence
+  // filter is what keeps this from materializing a script this machine lacks.
+  const onDisk: HookSpec[] = [];
+  for (const spec of scriptPlan(dataDir)) {
+    if ((await stat(join(scriptsDir, spec.scriptFile)).catch(() => null)) !== null) {
+      onDisk.push(spec);
+    }
+  }
+  const scripts = await writeScripts(onDisk, scriptsDir);
+
+  const found = await inspectSettings(homeDir);
+  if ('refusal' in found) {
+    return {
+      path: found.refusal.path,
+      scriptsDir,
+      scripts,
+      updated: [],
+      alreadyPresent: [],
+      warning: found.refusal.message,
+    };
+  }
+  const { path, raw, settings, hooks } = found;
+
+  const nextHooks: Record<string, unknown> = { ...hooks };
+  const updatedEvents = new Set<HookEvent>();
+  const currentEvents = new Set<HookEvent>();
+  for (const spec of specs(dataDir, { push })) {
+    const list = nextHooks[spec.event];
+    if (!Array.isArray(list)) continue;
+    const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
+    // The one branch that separates this from the writer: no entry means no
+    // entry. An install adds it; a refresh has nothing to converge.
+    if (idx === -1) continue;
+    const desired = {
+      ...(spec.matcher !== undefined ? { matcher: spec.matcher } : {}),
+      hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform, spec.timeoutSeconds)],
+    };
+    if (JSON.stringify(list[idx]) === JSON.stringify(desired)) {
+      currentEvents.add(spec.event);
+      continue;
+    }
+    nextHooks[spec.event] = list.map((e, i) => (i === idx ? desired : e));
+    updatedEvents.add(spec.event);
+  }
+  const updated = HOOK_EVENTS.filter((e) => updatedEvents.has(e));
+  // An event whose other entry was rewritten reports as `updated`, matching how
+  // the writer collapses a multi-entry event by its strongest outcome.
+  const alreadyPresent = HOOK_EVENTS.filter((e) => currentEvents.has(e) && !updatedEvents.has(e));
+  if (updated.length === 0) {
+    return { path, scriptsDir, scripts, updated, alreadyPresent };
+  }
+
+  // The same two compares the writer makes, for the same reasons: the first
+  // refuses before a byte is written, the second sits adjacent to the commit so
+  // a harness writing settings.json during the script pass is not erased.
+  const changed = async (): Promise<boolean> =>
+    (await readFile(path, 'utf8').catch(() => null)) !== raw;
+  if (await changed()) {
+    return {
+      path,
+      scriptsDir,
+      scripts,
+      updated: [],
+      alreadyPresent,
+      warning: `${path} changed while it was being refreshed, so its hook entries were left alone. Re-run \`tenjin install\`.`,
+    };
+  }
+  await writeFileAtomic(path, `${JSON.stringify({ ...settings, hooks: nextHooks }, null, 2)}\n`);
+  return { path, scriptsDir, scripts, updated, alreadyPresent };
 }

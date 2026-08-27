@@ -46,7 +46,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   HOOK_EVENTS,
+  detectHookOwners,
   quoteForShell,
+  refreshHooks,
   wireSearchHooks,
   hooksSkipped,
   PUSH_CONTEXT_EDIT_MATCHER,
@@ -643,5 +645,181 @@ describe('wireSearchHooks: a refusal changes nothing at all', () => {
     expect(result.added).toEqual([]);
     expect(result.scripts).toEqual([scriptPath]);
     expect(await readFile(scriptPath, 'utf8')).not.toBe('// stale\n');
+  });
+});
+
+/**
+ * The detector `tenjin update` uses to decide which profiles to re-materialize.
+ * It reads paths, not script bodies, so it answers for hooks written by any
+ * version. Everything it can meet in a real settings.json is data someone else
+ * may have written, so nothing here may throw.
+ */
+describe('detectHookOwners', () => {
+  const nodeCmd = (path: string): string => `node ${quoteForShell(path, 'linux')}`;
+
+  it('finds the data dir behind each registered script', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const owners = await detectHookOwners(home);
+    expect(owners.map((o) => o.dataDir)).toEqual([data]);
+    // Every base script is named, once each, however many events point at it.
+    expect(owners[0]?.scripts.map((s) => s.replace(`${data}/hooks/`, '')).sort()).toEqual(
+      [DISPATCH_HOOK_FILE, SESSIONSTART_HOOK_FILE, STOP_HOOK_FILE, WEBSEARCH_HOOK_FILE].sort(),
+    );
+  });
+
+  /**
+   * The whole reason the detector exists: a machine can carry hooks for a
+   * profile that is not the one a bare `tenjin` resolves. Refreshing only the
+   * invoking profile there leaves the scripts the harness actually fires stale.
+   */
+  it('finds every profile on a machine whose hooks are split across two', async () => {
+    const shelf = await mkdtemp(join(tmpdir(), 'tenjin-hooks-shelf-'));
+    try {
+      await writeSettings({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'WebSearch',
+              hooks: [
+                { type: 'command', command: nodeCmd(join(data, 'hooks', WEBSEARCH_HOOK_FILE)) },
+              ],
+            },
+          ],
+          Stop: [
+            {
+              hooks: [{ type: 'command', command: nodeCmd(join(shelf, 'hooks', STOP_HOOK_FILE)) }],
+            },
+          ],
+        },
+      });
+      const owners = await detectHookOwners(home);
+      expect(owners.map((o) => o.dataDir).sort()).toEqual([data, shelf].sort());
+    } finally {
+      await rm(shelf, { recursive: true, force: true });
+    }
+  });
+
+  it('claims nothing for entries that are not ours', async () => {
+    await writeSettings({
+      hooks: {
+        PreToolUse: [
+          // Someone else's hook, in a directory that happens to be called hooks.
+          { hooks: [{ type: 'command', command: nodeCmd('/opt/other/hooks/lint.mjs') }] },
+          // Our filename, but not under a `hooks/` dir, so the grandparent is
+          // nothing in particular and must not be read as a data dir.
+          { hooks: [{ type: 'command', command: nodeCmd(`/opt/${WEBSEARCH_HOOK_FILE}`) }] },
+          // Not `node <path>` at all.
+          { hooks: [{ type: 'command', command: `bash ${join(data, 'hooks', STOP_HOOK_FILE)}` }] },
+          // A shape the harness allows and this module never writes.
+          { hooks: [{ type: 'command' }] },
+          { hooks: 'not an array' },
+          'not an object',
+        ],
+      },
+    });
+    expect(await detectHookOwners(home)).toEqual([]);
+  });
+
+  it('answers empty on a missing, unreadable or malformed settings file', async () => {
+    expect(await detectHookOwners(home)).toEqual([]);
+    for (const contents of ['{ not json', '[]', '"a string"', JSON.stringify({ hooks: 7 })]) {
+      await writeSettings(contents);
+      expect(await detectHookOwners(home)).toEqual([]);
+    }
+    await writeSettings({ hooks: { PreToolUse: 'not an array' } });
+    expect(await detectHookOwners(home)).toEqual([]);
+  });
+});
+
+/**
+ * `install --refresh`'s writer. The contract it has to keep, on every path, is
+ * that it converges what exists and materializes nothing: an unattended `update`
+ * runs it, and an upgrade that installs surfaces is not an upgrade.
+ */
+describe('refreshHooks', () => {
+  it('brings drifted script bodies and entries up to date', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const scriptPath = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
+    await writeFile(scriptPath, '// an older version wrote this\n');
+    // And an entry whose timeout drifted, which only a rewrite can fix.
+    const settings = await readSettings();
+    const drifted = entriesFor(settings, 'Stop');
+    drifted[0]!.hooks[0]!.timeout = 999;
+    await writeSettings(settings);
+
+    const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(result.scripts).toEqual([scriptPath]);
+    expect(await readFile(scriptPath, 'utf8')).not.toBe('// an older version wrote this\n');
+    expect(result.updated).toEqual(['Stop']);
+    expect(entriesFor(await readSettings(), 'Stop')[0]?.hooks[0]?.timeout).not.toBe(999);
+  });
+
+  it('registers nothing on a machine that never installed', async () => {
+    const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(result.scripts).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(result.alreadyPresent).toEqual([]);
+    expect(existsSync(settingsPath())).toBe(false);
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+  });
+
+  /**
+   * The narrower half of the same rule: surfaces exist, but not all of them.
+   * A refresh must converge the ones that do and leave the gaps alone, because
+   * filling a gap is what `tenjin install` is for.
+   */
+  it('adds no entry and no script the machine does not already have', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    // Drop one script and one event, as a half-finished uninstall would.
+    await rm(join(data, 'hooks', STOP_HOOK_FILE));
+    const settings = await readSettings();
+    delete (settings.hooks as Record<string, unknown>).SessionStart;
+    await writeSettings(settings);
+
+    await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(existsSync(join(data, 'hooks', STOP_HOOK_FILE))).toBe(false);
+    expect(entriesFor(await readSettings(), 'SessionStart')).toEqual([]);
+    // What was there is still there.
+    expect(entriesFor(await readSettings(), 'Stop').length).toBe(1);
+  });
+
+  /**
+   * The push arms are registered by `tenjin push on`, and the WebSearch entry's
+   * matcher widens to WebSearch|WebFetch with them. A refresh that planned the
+   * armed set on an unarmed machine would rewrite that entry and start firing
+   * the hook on a tool the operator never armed it for.
+   */
+  it('does not widen the WebSearch matcher on a machine without push', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    const entry = entriesFor(await readSettings(), 'PreToolUse').find((e) =>
+      e.hooks[0]?.command.includes(WEBSEARCH_HOOK_FILE),
+    );
+    expect(entry?.matcher).toBe('WebSearch');
+  });
+
+  it('leaves an unreadable settings file alone and says so', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    await writeSettings('{ not json');
+    const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(result.updated).toEqual([]);
+    expect(result.warning).toContain('not valid JSON');
+    expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
+    // The scripts are ours and were still brought up to date.
+    expect(result.scriptsDir).toBe(join(data, 'hooks'));
+  });
+
+  it('refuses to commit over a settings file that changed underneath it', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const settings = await readSettings();
+    entriesFor(settings, 'Stop')[0]!.hooks[0]!.timeout = 999;
+    await writeSettings(settings);
+    const theirs = JSON.stringify({ hooks: {}, theirs: true }, null, 2);
+    fsHooks.settingsInterleave = theirs;
+
+    const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(result.updated).toEqual([]);
+    expect(result.warning).toContain('changed while it was being refreshed');
+    expect(await readFile(settingsPath(), 'utf8')).toBe(theirs);
   });
 });
