@@ -893,6 +893,47 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // The read path behind the capture ask's preview. The ask names a bounded few
+  // of a session's queued child findings and clips each body to fit a paragraph
+  // at a turn end; these two verbs are how everything stored is reached
+  // (tenjin-agent#228). Read-only and local: no wallet, no shelf, no spend.
+  const finding = addGlobalFlags(
+    program
+      .command('finding')
+      .description(
+        "Read what a session's subagents wrote at their own end, whole: the capture ask names a few and clips them, `tenjin finding list|show` reaches everything stored",
+      ),
+  );
+  addGlobalFlags(finding.command('list'))
+    .description(
+      'List the subagent findings this machine holds from the last 8 hours, newest first, with a preview and the id `tenjin finding show` takes',
+    )
+    .option('--session <id>', 'Only findings queued by one harness session')
+    .option('--limit <n>', 'How many to list (default 20, max 200)')
+    .action(async function (this: Command) {
+      await runCommand('finding.list', this, async (ctx) => {
+        const opts = this.opts();
+        const { runFindingList } = await import('./commands/finding');
+        return runFindingList(
+          {
+            ...(typeof opts.session === 'string' ? { session: opts.session } : {}),
+            ...(typeof opts.limit === 'string' ? { limit: opts.limit } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+  addGlobalFlags(finding.command('show <id>'))
+    .description(
+      'Print one stored finding whole, with the child that wrote it and the loop it closed',
+    )
+    .action(async function (this: Command, id: string) {
+      await runCommand('finding.show', this, async (ctx) => {
+        const { runFindingShow } = await import('./commands/finding');
+        return runFindingShow({ id }, ctx);
+      });
+    });
+
   return program;
 }
 

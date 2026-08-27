@@ -433,6 +433,38 @@ describe('session command group', () => {
   });
 });
 
+describe('finding command group', () => {
+  it('registers both leaves, so the id the capture ask prints is reachable', async () => {
+    const cap = captureIo();
+    expect(await main(['finding', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('list [options]');
+    expect(cap.stdout()).toContain('show [options] <id>');
+  });
+
+  it('a bare `tenjin finding` is USAGE rather than a silent default view', async () => {
+    const cap = captureIo();
+    expect(await main(['finding'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+
+  it('show requires the id, and reports an unknown one as not found', async () => {
+    const missingArg = captureIo();
+    expect(await main(['finding', 'show'], missingArg.io)).toBe(2);
+    expect(JSON.parse(missingArg.stdout()).error.code).toBe('USAGE');
+
+    const unknown = captureIo();
+    expect(await main(['finding', 'show', 'no-such-id', '--json'], unknown.io)).toBe(1);
+    expect(JSON.parse(unknown.stdout()).error.code).toBe('RESOURCE_NOT_FOUND');
+  });
+
+  it('the leaves take trailing global flags like every other command', async () => {
+    const cap = captureIo();
+    const code = await main(['finding', 'list', '--timeout', 'abc'], cap.io);
+    expect(code).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});
+
 /**
  * The post-command skills self-heal, at the dispatcher. It runs after the
  * envelope, so what matters here is that a command's contract is untouched by it;

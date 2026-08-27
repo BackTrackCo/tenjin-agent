@@ -5404,16 +5404,73 @@ describe('the capture ask (Stop)', () => {
    * The count is the QUEUE's, not the list's. The list is bounded to five, so a
    * headline that reported its own length under-reported exactly the sessions
    * with the most to publish, and never said it had.
+   *
+   * AND A COUNT IS NOT A READ PATH. Naming two of seven and reporting five
+   * unnamed leaves the parent with no way to reach those five, so the headline
+   * says where they are as well as how many they are.
    */
-  it('names how many are queued, not how many it listed', async () => {
+  it('names how many are queued, not how many it listed, and where the rest are', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     await writeSearchSignal();
     for (let i = 0; i < 7; i += 1) await queueFinding(`UID${i}`, `finding number ${i}`);
 
     const reason = await askReason();
     expect(reason).toContain('7 finding(s) your subagents stated at their own end');
-    expect(reason).toContain('(the 5 newest are named here)');
+    expect(reason).toContain('the 5 newest are named here');
+    expect(reason).toContain('the rest are in `tenjin finding list`');
     expect(reason.match(/ wrote:\n/g)).toHaveLength(5);
+  });
+
+  /**
+   * EVERY DISPLAY BOUND NEEDS A WAY PAST IT. The ask lists five and clips each
+   * body; both are bounds on a paragraph at a turn end, over rows stored whole.
+   * So each listed finding carries the id `tenjin finding show` takes, and the
+   * ask says so — without it the parent is told to publish from a preview it
+   * cannot expand.
+   */
+  it('names each finding by the id the read path takes', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    await queueFinding('UID-READABLE', 'a short finding nothing clipped');
+
+    const reason = await askReason();
+    expect(reason).toContain('- UID-READABLE general-purpose subagent a1');
+    expect(reason).toContain('tenjin finding show <id>');
+  });
+
+  it('points a clipped body at the command that returns it whole', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    await queueFinding('UID1', 'x'.repeat(600));
+
+    const reason = await askReason();
+    expect(reason).toContain('[clipped]');
+    expect(reason).toContain('read it whole with `tenjin finding show <id>`');
+  });
+
+  /**
+   * THE CASE THE CHILD-BOUNDARY ASK EXISTS FOR. A capture triggered by a
+   * FAILURE — the lookup missed, or was weak, local, skipped, or never injected
+   * — leaves no session-owned `searches` row and no qualifying injection, so
+   * `didResearch` said no and the ask never fired. The child's harvested
+   * finding then sat in the store with the one context that could publish it
+   * never told it existed, which is the loop failing to close for exactly the
+   * case it was built to catch. A queued finding is itself the signal.
+   */
+  it('fires on a queued finding alone, with no other research signal', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await queueFinding('UID-ORPHAN', 'what the child settled after the lookup missed');
+
+    const reason = await askReason();
+    expect(reason.startsWith(publicAsk)).toBe(true);
+    expect(reason).toContain('1 finding(s) your subagents stated at their own end');
+    expect(reason).toContain('what the child settled after the lookup missed');
+  });
+
+  it('still asks nothing of a session that neither researched nor queued anything', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
   });
 
   /**

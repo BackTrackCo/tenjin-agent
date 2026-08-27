@@ -211,6 +211,12 @@ const MAX_WEAK_LOOPS = 3;
  * headline that quoted this LIMIT as the total would be wrong on exactly the
  * sessions with the most to publish, and silent about it.
  *
+ * AND NEITHER BOUND MAY BE THE END OF THE LINE. Both of these are DISPLAY
+ * bounds over rows stored whole, so the ask names each finding's id and points
+ * at `tenjin finding list` / `tenjin finding show <id>`: the preview stays
+ * short and everything stored stays reachable. Widening either instead would
+ * only move the cliff, and would spend the parent's context to do it.
+ *
  * `FINDING_LINE_MAX` is a DISPLAY bound (the stored body is whole, bounded at
  * capture by `PUSH_FINDING_MAX_CHARS`), and a body it cuts is MARKED. 160 cut a
  * two-sentence finding before its second sentence, which is the one carrying
@@ -2447,10 +2453,21 @@ function queuedFindingsLine(sessionId) {
     const loop = row.searchId === null ? '' : ', search ' + clean(row.searchId, 64);
     const body = clipBody(row.body, ${FINDING_LINE_MAX});
     if (body.endsWith(FINDING_CLIP_MARK)) anyClipped = true;
-    return '- ' + who + agent + loop + ' wrote:\\n  ' + body;
+    // THE ID IS WHAT MAKES THE LIST A POINTER RATHER THAN THE ONLY COPY. It is
+    // the argument \`tenjin finding show\` takes, so a body this list clipped can
+    // be read whole without the parent having to find it some other way.
+    return '- ' + clean(row.uid, 64) + ' ' + who + agent + loop + ' wrote:\\n  ' + body;
   });
+  // EVERYTHING STORED IS REACHABLE, and the list says how. What is listed is
+  // bounded and each body is clipped to fit one paragraph at a turn end; the
+  // read path is not bounded by either, so the omitted findings and the cut
+  // bodies are a command away instead of being lost to the display bound.
   const unnamed =
-    total > rows.length ? ' (the ' + String(rows.length) + ' newest are named here)' : '';
+    total > rows.length
+      ? ' (the ' +
+        String(rows.length) +
+        ' newest are named here; the rest are in \`tenjin finding list\`)'
+      : '';
   return (
     String(total) +
     ' finding(s) your subagents stated at their own end, held locally and unpublished' +
@@ -2461,8 +2478,8 @@ function queuedFindingsLine(sessionId) {
     (anyClipped
       ? ' A body marked ' +
         FINDING_CLIP_MARK.trim() +
-        ' is cut to fit this list, so read it as a pointer to what that child settled rather than as the whole finding.'
-      : '')
+        ' is cut to fit this list; read it whole with \`tenjin finding show <id>\` before publishing it.'
+      : ' Read any of them whole with \`tenjin finding show <id>\`.')
   );
 }
 
@@ -2516,6 +2533,20 @@ function markCaptureAsked(sessionId) {
  */
 function didResearch(sessionId) {
   if (storeGet(STORE_SQL.researchedBySession, [storeSession(sessionId)]) !== null) return true;
+  // A STORED FINDING IS ITSELF A RESEARCH SIGNAL, and this is the gate the
+  // child-boundary ask exists to get past. A capture triggered by a FAILURE --
+  // the lookup missed, was weak, was local, was skipped, or was never injected
+  // -- leaves neither a countable \`searches\` row nor a qualifying injection, so
+  // the two signals either side of this one both say no and the ask never
+  // fires: the child's harvested finding stays stored and the parent, the only
+  // context with publish authority, is never shown it. The loop then fails to
+  // close for exactly the case it was built for. Same window as
+  // \`queuedFindingsLine\`, so an ask this raises always has something to name.
+  //
+  // NOT THE SIDECAR'S OWN TELEMETRY, which is what the rule above is about: a
+  // finding row exists only because a child was asked at its own boundary and
+  // answered in its own words.
+  if (queuedFindingCount(sessionId, Date.now() - ${OPEN_LOOP_WINDOW_MS}) > 0) return true;
   // \`shelf <> 'local'\` for the same reason 'read'/'churn' and the log-only
   // actions are excluded: a pairing this machine replayed out of its own record
   // is the sidecar's telemetry, not evidence the session researched anything. A
