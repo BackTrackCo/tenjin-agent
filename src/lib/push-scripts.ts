@@ -653,7 +653,13 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   // THE 6x FIX. One already-shown set across every hook, not one per script:
   // the WebSearch and dispatch hint paths write to the same table, so a note
   // this session has already been handed cannot come back through another arm.
-  if (alreadyShown(sessionId, v.top.resourceId)) {
+  // The set is the WIDER one, injected or live-relayed: this function serves
+  // the prompt, failure and WebSearch arms, all of which speak into the
+  // PARENT, and a piece the dispatch arm relayed is one the parent was
+  // deliberately not given so a subagent could have it. Injecting it here
+  // would put the withheld body in the parent anyway and then make the child
+  // skip it as already-injected, losing the delivery outright.
+  if (alreadyShownAny(sessionId, v.top.resourceId)) {
     recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
     return { kind: 'done' };
   }

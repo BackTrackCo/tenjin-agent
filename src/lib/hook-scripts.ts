@@ -1730,11 +1730,22 @@ async function main() {
   // context with buy / --yes authority, and a paid pointer inside a child is
   // an approval dead end.
   if (config.push === 'on' && sessionId !== null && isFree(judged.top)) {
-    // The once-per-session rule the claim carried, kept on the wider
-    // injected-or-relayed set, so a second dispatch landing on the same piece
-    // re-announces nothing.
-    if (alreadyShownAny(sessionId, judged.top.resourceId)) {
+    // Some context already got the whole piece; a relay would be the second
+    // delivery, not the first.
+    if (alreadyShown(sessionId, judged.top.resourceId)) {
       recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+      return quiet();
+    }
+    // THE CLAIM IS THE DECISION. Parallel Task calls in one assistant message
+    // fire this hook concurrently, and differently worded prompts sail past
+    // the question fingerprint, so a check-then-write on the relayed rows let
+    // both fires announce the same piece — the repeat this rule exists to
+    // stop. The claim expires with the handoff cache it names: a relay is
+    // committed here, at PreToolUse, before the Task is even permitted to
+    // run, so a denied or never-launched subagent must not leave the piece
+    // suppressed in every context for the rest of the session.
+    if (!claimStateFresh(sessionId, STATE_RELAYED_PREFIX + judged.top.resourceId, RELAY_WINDOW_MS)) {
+      recordDecision({ ...row, action: 'skipped', reason: 'already-relayed' });
       return quiet();
     }
     recordDecision({ ...row, action: 'relayed', form: 'short' });
@@ -1742,7 +1753,7 @@ async function main() {
     return emit(
       'PreToolUse',
       'Tenjin found a strong free match, "' + relayTitle +
-        '"; the pointer is handed to the subagent at its first turn.',
+        '"; the pointer is queued for delivery to the subagent at its first turn.',
     );
   }
   // RANK 1 ALONE. The verdict is rank 1's, so rank 2 would ride in on rank 1's

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   STATE_DB_FILE,
+  STORE_RELAY_WINDOW_MS,
   STORE_SQL,
   loadSearches,
   openStore,
@@ -29,6 +30,7 @@ import {
   websearchHookScript,
 } from './hook-scripts';
 import {
+  PUSH_CACHE_TTL_MS,
   PUSH_PROMPT_BODY_TIMEOUT_MS,
   PUSH_PROMPT_BUDGET_MS,
   PUSH_PROMPT_SEARCH_TIMEOUT_MS,
@@ -398,6 +400,24 @@ function sessionState(session: string, key: string): unknown {
       .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
       .get(session, key) as unknown as { value?: string } | undefined;
     return row?.value === undefined ? null : JSON.parse(row.value);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Backdate everything the relay window is measured against, by `ms`.
+ *
+ * The window is two minutes of wall clock, so the only test that can observe
+ * its far side without a timer is one that moves the rows instead: the
+ * `relayed` injection row the parent-facing arms read, and the `relay:` claim
+ * the next dispatch would have to displace.
+ */
+function ageRelayState(ms: number): void {
+  const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+  try {
+    db.prepare(`UPDATE injections SET at = at - ? WHERE action = 'relayed'`).run(ms);
+    db.prepare(`UPDATE session_state SET at = at - ? WHERE key LIKE 'relay:%'`).run(ms);
   } finally {
     db.close();
   }
@@ -3316,6 +3336,27 @@ describe('the subagent arm (SubagentStart)', () => {
       tool_input: { prompt: DISPATCH_PROMPT },
     });
 
+  /** A second dispatch onto the SAME echoed piece, worded differently so the
+   *  question fingerprint cannot be what stops it. */
+  const secondDispatch = JSON.stringify({
+    session_id: SESSION,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Task',
+    tool_input: {
+      prompt:
+        'Determine whether the zod resolver optional chain parse throw persists on the newest minor release',
+    },
+  });
+
+  /** A parent-context fire, on the same session, that lands on the same piece
+   *  the dispatch relayed. */
+  const parentPrompt = JSON.stringify({
+    session_id: SESSION,
+    hook_event_name: 'UserPromptSubmit',
+    prompt:
+      'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps',
+  });
+
   const start = JSON.stringify({
     session_id: SESSION,
     hook_event_name: 'SubagentStart',
@@ -3375,7 +3416,7 @@ describe('the subagent arm (SubagentStart)', () => {
 
     const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
     const relay = injected(dispatched) ?? '';
-    expect(relay).toContain('handed to the subagent');
+    expect(relay).toContain('queued for delivery to the subagent');
     expect(relay).not.toContain('Tenjin lists');
     expect((await ledger()).find((r) => r.trigger === 'dispatch')).toMatchObject({
       action: 'relayed',
@@ -3439,26 +3480,85 @@ describe('the subagent arm (SubagentStart)', () => {
     await pushOn(baseUrl);
 
     const first = await runScript(dispatchHookScript(dataDir), dispatch());
-    expect(injected(first) ?? '').toContain('handed to the subagent');
+    expect(injected(first) ?? '').toContain('queued for delivery to the subagent');
 
-    // A different question (the fingerprint dedupe would swallow a repeat of
-    // the same one) that still lands on the same echoed resource.
-    const second = await runScript(
-      dispatchHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Task',
-        tool_input: {
-          prompt:
-            'Determine whether the zod resolver optional chain parse throw persists on the newest minor release',
-        },
-      }),
-    );
+    const second = await runScript(dispatchHookScript(dataDir), secondDispatch);
     expect(second.stdout).toBe('');
     const dispatchRows = (await ledger()).filter((r) => r.trigger === 'dispatch');
     expect(dispatchRows.filter((r) => r.action === 'relayed')).toHaveLength(1);
-    expect(dispatchRows.at(-1)).toMatchObject({ action: 'skipped', reason: 'already-injected' });
+    expect(dispatchRows.at(-1)).toMatchObject({ action: 'skipped', reason: 'already-relayed' });
+  });
+
+  /**
+   * The same rule under the interleaving that actually breaks a check then a
+   * write: two Task calls in ONE assistant message fire this hook as two
+   * concurrent processes, and their prompts differ, so the question
+   * fingerprint does not pair them. The arbiter is a single-statement claim,
+   * so one of the two must lose whatever order the writes land in — which is
+   * what makes once-per-handoff a bound rather than a best-effort race.
+   */
+  it('lets only one of two concurrent dispatches relay the same piece', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    // Bootstrap the schema first: two processes racing the CREATE TABLEs is a
+    // different race, and one of them failing open is not what this pins.
+    (await openStore(dataDir))?.close();
+
+    const runs = await Promise.all([
+      runScript(dispatchHookScript(dataDir), dispatch()),
+      runScript(dispatchHookScript(dataDir), secondDispatch),
+    ]);
+
+    const spoke = runs.filter((r) => (injected(r) ?? '').includes('queued for delivery'));
+    expect(spoke).toHaveLength(1);
+    const dispatchRows = (await ledger()).filter((r) => r.trigger === 'dispatch');
+    expect(dispatchRows.filter((r) => r.action === 'relayed')).toHaveLength(1);
+    expect(dispatchRows.filter((r) => r.reason === 'already-relayed')).toHaveLength(1);
+  });
+
+  /**
+   * The relay withholds the piece from the PARENT so a child can have it, and
+   * the parent-facing arms share one already-shown set. A prompt fire landing
+   * on the relayed piece before the child has run must therefore stay silent:
+   * injecting it here would put the withheld body in the parent anyway, and
+   * its 'injected' row would then make the child skip its own delivery.
+   */
+  it('keeps a relayed piece out of the parent-facing prompt arm', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    const prompt = await runScript(pushPromptHookScript(dataDir), parentPrompt);
+
+    expect(prompt.stdout).toBe('');
+    expect((await ledger()).find((r) => r.trigger === 'prompt')).toMatchObject({
+      action: 'skipped',
+      reason: 'already-injected',
+    });
+  });
+
+  /**
+   * And the reconciliation that keeps that suppression honest. The relay is
+   * committed at PreToolUse, before the Task is permitted to run, so a denied
+   * or never-launched subagent would otherwise leave the piece unreachable in
+   * every context for the rest of the session. The relayed row suppresses
+   * only while the handoff cache it names is still consumable; past that the
+   * parent arms speak again. Backdated rather than waited out: the window is
+   * two minutes and a timer would be a flake.
+   */
+  it('lets the parent arm speak again once an unconsumed handoff has expired', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    ageRelayState(PUSH_CACHE_TTL_MS + 60_000);
+
+    const prompt = await runScript(pushPromptHookScript(dataDir), parentPrompt);
+    expect(injected(prompt)).not.toBeNull();
+    expect((await ledger()).find((r) => r.trigger === 'prompt')).toMatchObject({
+      action: 'injected',
+      candidate: expect.objectContaining({ resourceId: RESOURCE_ID }),
+    });
   });
 
   /**
@@ -3486,6 +3586,17 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(text).not.toContain('tenjin inspect');
     expect(text).not.toContain('tenjin buy');
     expect(text).not.toContain('Read it free');
+  });
+
+  /**
+   * The relay's suppression window IS the handoff cache's TTL, and the two
+   * constants live in different files because state-store.ts is the one both
+   * arms already import (the other direction is a cycle). Drift would mean
+   * either a piece suppressed after no subagent could still receive it, or a
+   * live handoff re-announced to the parent.
+   */
+  it('measures the relay window against the same TTL the handoff cache uses', () => {
+    expect(STORE_RELAY_WINDOW_MS).toBe(PUSH_CACHE_TTL_MS);
   });
 
   /** The full-body arm is retired for child delivery: no code path from the

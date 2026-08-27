@@ -248,10 +248,12 @@ export interface PushLedgerTallies {
   rows: number;
   byTriggerAction: Record<string, Record<string, number>>;
   byShelf: Record<string, number>;
-  /** Why a row did not inject. The nine the shipped core writes are
+  /** Why a row did not inject. The ten the shipped core writes are
    *  `lookup-cap`, `quiet`, `no-time`, `no-answer`, `miss`, `weak`,
-   *  `already-injected`, `already-claimed` (a second agent in the session hit
-   *  the same failure signature and the first holds the claim) and `watchdog`
+   *  `already-injected`, `already-relayed` (this session already handed the
+   *  same piece to a subagent and that handoff has not expired),
+   *  `already-claimed` (a second agent in the session hit the same failure
+   *  signature and the first holds the claim) and `watchdog`
    *  (docs/command-reference.md#push-experimental),
    *  and the team leg by fingerprint adds `keys-off` (the shelf has
    *  KNOWLEDGE_KEYS off; #212 PR B) — but the values are taken from the rows,

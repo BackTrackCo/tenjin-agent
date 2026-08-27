@@ -337,7 +337,7 @@ describe('the hot-path queries never scan', () => {
         ['recentReasons', STORE_SQL.recentReasons, ['s', 40]],
         ['injectedCount', STORE_SQL.injectedCount, ['s']],
         ['alreadyShown', STORE_SQL.alreadyShown, ['s', 'r']],
-        ['alreadyShownAny', STORE_SQL.alreadyShownAny, ['s', 'r']],
+        ['alreadyShownAny', STORE_SQL.alreadyShownAny, ['s', 'r', 0]],
         ['bucketCount', STORE_SQL.bucketCount, ['prompt', 0]],
         ['findPairing', STORE_SQL.findPairing, ['p', 'k', 'c']],
         ['openForHead', STORE_SQL.openForHead, ['p', 'h', 0, 8]],

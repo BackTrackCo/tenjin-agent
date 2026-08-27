@@ -137,6 +137,20 @@ export const STORE_BOOTSTRAP_TIMEOUT_MS = 500;
 export const STORE_BOOTSTRAP_TRIES = 2;
 
 /**
+ * How long a `relayed` row suppresses a parent-facing re-announcement, and how
+ * long the dispatch relay holds its claim on a piece.
+ *
+ * It is the handoff cache's own TTL and must stay equal to
+ * `PUSH_CACHE_TTL_MS` (lib/push-scripts.ts), which `push-scripts.test.ts`
+ * pins: past that instant the SubagentStart arm rejects the cached pointer as
+ * stale, so no subagent can still receive what the relay withheld from the
+ * parent, and the suppression has to lift with it. It lives here rather than
+ * beside the cache TTL because `state-store.ts` is the file both the dispatch
+ * arm and the subagent arm already import; the reverse direction is a cycle.
+ */
+export const STORE_RELAY_WINDOW_MS = 120_000;
+
+/**
  * The whole schema, run once at `user_version = 0` and never again: a database
  * that already has a schema is stepped up by {@link STORE_MIGRATIONS} instead,
  * so this text is the version 1 shape and stays it.
@@ -402,15 +416,25 @@ export const STORE_SQL = {
   alreadyShown: `SELECT 1 FROM injections
      WHERE session = ? AND resource_id = ? AND action = 'injected' LIMIT 1`,
   /**
-   * The wider seen set: injected OR relayed. A 'relayed' row is a strong free
-   * dispatch hit the parent handed to its subagent instead of rendering
-   * (tenjin-agent#228): the child's own alreadyShown check must NOT see it,
-   * because the child delivery is the point of the relay, but a hint arm
-   * re-offering the piece to the parent, or a second dispatch re-announcing
-   * the handoff, is exactly the repeat the once-per-session rule stops.
+   * The wider seen set: injected, or relayed WHILE THE HANDOFF IS STILL LIVE.
+   * A 'relayed' row is a strong free dispatch hit the parent handed to its
+   * subagent instead of rendering (tenjin-agent#228): the child's own
+   * alreadyShown check must NOT see it, because the child delivery is the
+   * point of the relay, but a hint arm re-offering the piece to the parent is
+   * exactly the repeat the once-per-session rule stops.
+   *
+   * The window is what keeps that suppression honest. A relay is committed at
+   * PreToolUse, before the tool call is even permitted to run, so a denied or
+   * never-launched Task would otherwise leave the piece suppressed in every
+   * context for the rest of the session with nothing having delivered it.
+   * Past the handoff cache's own TTL the cached pointer is unreachable, so
+   * the relayed row stops suppressing and the parent arms may speak again.
+   * An 'injected' row is different in kind and never expires: some context
+   * really did receive the piece.
    */
   alreadyShownAny: `SELECT 1 FROM injections
-     WHERE session = ? AND resource_id = ? AND action IN ('injected', 'relayed') LIMIT 1`,
+     WHERE session = ? AND resource_id = ?
+       AND (action = 'injected' OR (action = 'relayed' AND at >= ?)) LIMIT 1`,
   injectedCount: `SELECT COUNT(*) AS n FROM injections WHERE session = ? AND action = 'injected'`,
 
   /**
@@ -442,6 +466,23 @@ export const STORE_SQL = {
    */
   claimState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO NOTHING`,
+  /**
+   * Claim one key, taking a claim older than the given instant over from
+   * whoever held it. Still ONE statement: `DO UPDATE ... WHERE` reports zero
+   * changed rows when the holder is too fresh to displace, which is the same
+   * arbitration `claimState` gets from `DO NOTHING`, only time-bounded.
+   *
+   * The dispatch relay is the caller. Its rule is once per handoff, not once
+   * per session: a check-then-write there let two dispatches on one piece in
+   * one assistant message both pass the check and both announce, while a
+   * permanent claim would have made an unconsumed handoff suppress the piece
+   * forever. Neither is a job for the `injections` unique index, which covers
+   * `action='injected'` only and must keep doing so — widening it would refuse
+   * the child's own delivery row for the piece the parent relayed to it.
+   */
+  claimStateFresh: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at
+       WHERE session_state.at < ?`,
   /** Rows under one key prefix, newest first. Used for the per-agent, per-path
    *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
@@ -788,6 +829,7 @@ const STORE_DDL = __DDL__;
 const STORE_MIGRATIONS = __MIGRATIONS__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
+const RELAY_WINDOW_MS = __RELAY_WINDOW_MS__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TRIES = __BOOTSTRAP_TRIES__;
 
@@ -824,6 +866,12 @@ const STATE_SIGNATURES_PREFIX = 'sig:';
  *  agent because parallel subagents share their parent's session id, and a list
  *  because one head answers for a whole build step. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
+/** Which pieces this session has already relayed to a subagent, one row per
+ *  piece. The arbiter for the dispatch relay line, held only as long as the
+ *  handoff it names can still be consumed. Distinct from
+ *  \`STATE_REPLAYED_PREFIX\` above, which is the failure arm's error->fix
+ *  pairing replay: different mechanism, different lane, adjacent name. */
+const STATE_RELAYED_PREFIX = 'relay:';
 /**
  * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
  * off, or a deployment too old to have the route), keyed by origin under the
@@ -1351,12 +1399,20 @@ function alreadyShown(sessionId, resourceId) {
   return storeGet(STORE_SQL.alreadyShown, [storeSession(sessionId), resourceId]) !== null;
 }
 
-/** Like alreadyShown, but counting a parent relay too. A relayed piece is not
- *  an 'injected' claim (the child still has to deliver it), yet it is a line
- *  the parent already read, so the parent-facing arms dedupe on this set. */
+/** Like alreadyShown, but counting a parent relay whose handoff is still live.
+ *  A relayed piece is not an 'injected' claim (the child still has to deliver
+ *  it), yet it is a line the parent already read, so the parent-facing arms
+ *  dedupe on this set — for as long as a subagent can still be reached by it,
+ *  and no longer. */
 function alreadyShownAny(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
-  return storeGet(STORE_SQL.alreadyShownAny, [storeSession(sessionId), resourceId]) !== null;
+  return (
+    storeGet(STORE_SQL.alreadyShownAny, [
+      storeSession(sessionId),
+      resourceId,
+      Date.now() - RELAY_WINDOW_MS,
+    ]) !== null
+  );
 }
 
 /** How many full-form injections this session has had. */
@@ -1446,6 +1502,32 @@ function claimState(sessionId, key, value) {
   ]);
   // A store that refused the write for any OTHER reason must not silence the
   // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
+  if (result === null) return true;
+  return typeof result.changes === 'number' ? result.changes > 0 : true;
+}
+
+/**
+ * Claim \`key\` for this session unless a claim newer than \`windowMs\` holds it.
+ *
+ * THE CLAIM IS THE DECISION, the same way the injections unique index is for
+ * an injected row: the dispatch relay's once-per-handoff rule was a read
+ * followed by a write, and two Task calls in one assistant message fire
+ * PreToolUse concurrently, so both read "not relayed" and both announced. One
+ * statement makes the loser lose. Time-bounded rather than permanent because
+ * the relay commits before the tool call it hands off to is allowed to run.
+ */
+function claimStateFresh(sessionId, key, windowMs) {
+  // Same contract as claimState: no store is no dedupe, and the arms return
+  // before they reach here, so a caller that somehow did holds nothing.
+  if (STORE === null) return false;
+  const now = Date.now();
+  const result = storeRun(STORE_SQL.claimStateFresh, [
+    storeSession(sessionId),
+    key,
+    storeJson(true),
+    now,
+    now - windowMs,
+  ]);
   if (result === null) return true;
   return typeof result.changes === 'number' ? result.changes > 0 : true;
 }
@@ -1745,7 +1827,8 @@ export function storeSource(): string {
     .replaceAll('__DDL__', JSON.stringify(STORE_DDL))
     .replaceAll('__MIGRATIONS__', JSON.stringify(STORE_MIGRATIONS))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
-    .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS));
+    .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS))
+    .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS));
 }
 
 // ---------------------------------------------------------------------------
