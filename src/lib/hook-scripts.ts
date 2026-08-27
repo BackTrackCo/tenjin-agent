@@ -1628,7 +1628,9 @@ function cacheSlot(sessionId, slotId, entry) {
 }
 
 /** The lean stored projection, back in the shape judge() scores. The display
- *  fields it never held read as absent, which can only lower a verdict. */
+ *  fields it never held read as absent, which is NOT the same as scoring lower:
+ *  an absent \`confidence\` also takes judge()'s 'low' demotion off the table.
+ *  The caller clamps rather than trusting this to be monotone. */
 function storedAsRich(candidates) {
   const rich = [];
   for (const c of Array.isArray(candidates) ? candidates : []) {
@@ -1657,9 +1659,8 @@ function storedAsRich(candidates) {
  * delivery: a fan-out of five children onto one question left four of them with
  * nothing, and the answer was sitting in the store the whole time. Re-judged
  * from the stored candidates rather than trusted, because the stored projection
- * has no excerpt and no answer card, so the verdict this reaches can only be
- * the same or weaker than the one the original lookup reached. Zero network
- * either way.
+ * has no excerpt and no answer card, and CLAMPED below, because re-judging a
+ * projection is not monotone on its own. Zero network either way.
  */
 function replayHandoff(args) {
   const { question, sessionId, cwd, config, slotId, tool, agentId } = args;
@@ -1670,6 +1671,16 @@ function replayHandoff(args) {
   if (rich.length === 0) return;
   const judged = judgeLeg(question, { decision: 'CANDIDATES', rich, inspect: null });
   if (judged === null || judged.top === null || judged.strength === 'none') return;
+  // NEVER ABOVE 'moderate'. A replay must not stamp a verdict the lookup it
+  // replays never reached, and two things here would let it: the projection has
+  // no \`confidence\`, so judge()'s one-directional 'low' demotion cannot fire and
+  // a hit the server itself called low-confidence comes back 'strong'; and with
+  // both ranks stripped of their excerpts the rank-1-over-rank-2 margin can
+  // WIDEN past a test the original failed. A card's own score can only fall
+  // without its excerpt, so 'moderate' here still implies at least 'moderate'
+  // there. Child delivery is a pointer at either strength, so the clamp costs
+  // the ledger a distinction, never a delivery.
+  const strength = judged.strength === 'strong' ? 'moderate' : judged.strength;
   // Which shelf ANSWERED, recovered the same way the row was filed: the public
   // leg is the only one that stamps the public shelf's own base.
   const shelf =
@@ -1685,7 +1696,7 @@ function replayHandoff(args) {
     top: judged.top,
     score: judged.score,
     second: judged.second,
-    strength: judged.strength,
+    strength,
     confidence: judged.confidence ?? null,
     corroborated: judged.corroborated ?? null,
   });
@@ -1721,7 +1732,7 @@ function replayHandoff(args) {
     },
     score: judged.score,
     second: judged.second,
-    strength: judged.strength,
+    strength,
     action: 'logged',
     reason: 'replayed',
     form: 'short',
@@ -1795,11 +1806,26 @@ async function main() {
     });
     return quiet();
   }
-  if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) return quiet();
+  // THE CLAIM GOES BACK ON BOTH PRE-LOOKUP ABORTS, for the reason it goes back
+  // on a failed lookup below: it stands for an answer this session holds, and
+  // neither of these paths reaches one. Both bounds below are deliberately
+  // TEMPORARY (the burst cap counts a rolling hour, the outage brake expires on
+  // its own), so a permanent claim held across either outlives the bound that
+  // caused it and turns one busy minute, or one bad ten minutes, into the reason
+  // this question is never asked again for the rest of the session. No
+  // \`searches\` row exists for it either, so replayHandoff has nothing to put in
+  // its place.
+  if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) {
+    clearState(sessionId, askedKey);
+    return quiet();
+  }
 
   const nowMs = Date.now();
   const health = readHealth();
-  if (stopped(health, nowMs)) return quiet();
+  if (stopped(health, nowMs)) {
+    clearState(sessionId, askedKey);
+    return quiet();
+  }
 
   // TEAM FIRST, THEN PUBLIC — the same order every other trigger uses, and the
   // order the plan states for EVERY fire. This arm asked \`baseUrl\` and stopped:

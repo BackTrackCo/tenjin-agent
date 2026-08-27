@@ -481,6 +481,22 @@ function ageSlots(ms: number): void {
   }
 }
 
+/**
+ * Backdate every recorded search by `ms`.
+ *
+ * The dispatch burst cap counts a rolling window rather than a session's life,
+ * so rolling the rows is how a case observes the window passing without waiting
+ * an hour for it (tenjin-agent#216: the clock is the flake).
+ */
+function ageSearches(ms: number): void {
+  const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+  try {
+    db.prepare('UPDATE searches SET at = at - ?').run(ms);
+  } finally {
+    db.close();
+  }
+}
+
 /** One `session_state` value, parsed. Null when the key was never written. */
 function sessionState(session: string, key: string): unknown {
   const path = join(dataDir, STATE_DB_FILE);
@@ -4204,6 +4220,8 @@ describe('the subagent handoff slots', () => {
     'Find out whether the zod resolver throws on an optional chain during parse, and what pinning changes';
   const PGVECTOR_PROMPT =
     'Find out whether the pgvector collation flips when the testcontainer image is swapped in CI runs';
+  const REDIS_PROMPT =
+    'Find out whether the redis pipeline drops its reply order once the connection is resumed midflight';
 
   const dispatchOf = (prompt: string): string =>
     JSON.stringify({
@@ -4437,6 +4455,111 @@ describe('the subagent handoff slots', () => {
     await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
     await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
     expect(queries()).toHaveLength(2);
+  });
+
+  /**
+   * The two bounds that abort BEFORE the lookup must not keep the claim either.
+   *
+   * Both are windows on purpose (the burst cap counts a rolling hour, the
+   * outage brake expires on its own so a recovered server needs no
+   * intervention), and a permanent claim held across either outlives the bound
+   * that caused it. Neither writes a `searches` row, so the replay has nothing
+   * to hand over in the claim's place: the question is simply never asked again
+   * for the rest of the session.
+   */
+  it('gives the claim back when the outage brake refused the lookup', async () => {
+    let down = true;
+    const { baseUrl, queries } = await serve((req) =>
+      down ? { status: 502, json: {} } : perQuestion(req),
+    );
+    await pushOn(baseUrl);
+
+    // Two failed lookups arm the brake.
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    await runScript(dispatchHookScript(dataDir), dispatchOf(PGVECTOR_PROMPT));
+    expect(queries()).toHaveLength(2);
+
+    // A third, never-asked question is braked before it can reach the wire.
+    await runScript(dispatchHookScript(dataDir), dispatchOf(REDIS_PROMPT));
+    expect(queries()).toHaveLength(2);
+
+    // The brake's own window passes and the shelf answers again.
+    down = false;
+    await writeFile(
+      join(dataDir, 'hook-health.json'),
+      JSON.stringify({ failures: 2, atMs: Date.now() - 60 * 60 * 1000 }),
+    );
+    await runScript(dispatchHookScript(dataDir), dispatchOf(REDIS_PROMPT));
+    expect(queries()).toHaveLength(3);
+  });
+
+  it('gives the claim back when the burst cap refused the lookup', async () => {
+    // A distinct searchId per lookup: the cap counts recorded searches, and the
+    // rows are keyed on that id, so one id for all of them would upsert ten
+    // lookups into one row and the cap would never engage.
+    let nth = 0;
+    const { baseUrl, queries } = await serve((req) => {
+      if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+      nth += 1;
+      return {
+        status: 200,
+        json: {
+          schemaVersion: 3,
+          searchId: `${String(nth).padStart(8, '0')}-2222-4222-8222-222222222222`,
+          items: [
+            {
+              resourceId: RESOURCE_ID,
+              url: `${req.base}/@a/p`,
+              title: 'Pinning the zod resolver',
+              price: '0',
+              excerpt: 'the excerpt',
+              creator: { handle: 'vraspar' },
+            },
+          ],
+        },
+      };
+    });
+    await pushOn(baseUrl);
+
+    // Fill the burst window, whatever size it is, and keep the question the cap
+    // was the one to refuse.
+    let refused = '';
+    for (let i = 0; i < 20 && refused === ''; i += 1) {
+      const prompt = `${ZOD_PROMPT}, on attempt number ${i}`;
+      const before = queries().length;
+      await runScript(dispatchHookScript(dataDir), dispatchOf(prompt));
+      if (queries().length === before) refused = prompt;
+    }
+    expect(refused).not.toBe('');
+    const spent = queries().length;
+
+    ageSearches(2 * 60 * 60 * 1000);
+    await runScript(dispatchHookScript(dataDir), dispatchOf(refused));
+    expect(queries()).toHaveLength(spent + 1);
+  });
+
+  /**
+   * A replay re-judges the stored projection, and the display fields it never
+   * held do not all lower the verdict: with no `confidence` on the projection,
+   * judge()'s one-directional 'low' demotion cannot fire, so a hit the
+   * marketplace itself called low-confidence came back 'strong' the second time
+   * and that escalation is what the row and the handoff carried.
+   */
+  it('never replays a verdict stronger than the lookup it replays', async () => {
+    const { baseUrl, queries } = await serve(echo({ confidence: 'low' }));
+    await pushOn(baseUrl);
+
+    // Locally strong on the cards, demoted by the server's own bucket.
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    expect(queries()).toHaveLength(1);
+    ageSlots(PUSH_CACHE_TTL_MS + 60_000);
+
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    expect(queries()).toHaveLength(1);
+    expect((await ledger()).filter((r) => r.trigger === 'dispatch')).toMatchObject([
+      { action: 'logged', reason: undefined, strength: 'moderate' },
+      { action: 'logged', reason: 'replayed', strength: 'moderate' },
+    ]);
   });
 });
 
