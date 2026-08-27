@@ -1719,6 +1719,15 @@ async function main() {
   //
   // \`handoffHolder\` is read only to LABEL the loss (same piece, or another
   // one), never to decide it: the claim already decided, atomically.
+  // A slot can outlive its cache, and PRESENCE is not liveness: the child
+  // rejects a cache older than the window, so a stale row must not read here as
+  // a live handoff. Same rule, same window, on both sides.
+  const liveHandoff = (sid) => {
+    const parked = getState(sid, STATE_CACHE);
+    if (parked === null || typeof parked.at !== 'string') return false;
+    const at = Date.parse(parked.at);
+    return Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS;
+  };
   let handoff = false;
   let handoffHolder = '';
   if (config.push === 'on' && sessionId !== null) {
@@ -1836,7 +1845,7 @@ async function main() {
       // park could not be written either. Going silent on the strength of the
       // slot alone would then withhold the piece from every context until the
       // window ends, which is the failure this arm exists to prevent.
-      if (handoffHolder === judged.top.resourceId && getState(sessionId, STATE_CACHE) !== null) {
+      if (handoffHolder === judged.top.resourceId && liveHandoff(sessionId)) {
         recordDecision({ ...row, action: 'skipped', reason: 'already-relayed' });
         return quiet();
       }
