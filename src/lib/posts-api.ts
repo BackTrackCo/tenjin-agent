@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { httpRequest, type HttpResponse, type HttpResult, type ShelfBypass } from './http';
 import { rateLimitError } from './agent-api';
+import { UUID_RE } from './ids';
 import { sanitizeWireText } from './output';
 import {
   parseScanRejection,
@@ -87,10 +88,11 @@ const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
 export const SEARCH_ID_WIRE_RE =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 /**
- * How many searches one create request may name. The server's cap is stricter in
- * kind, bounding a post's claims across its whole lifetime, so N requests of 10
- * cannot land 10N; the numbers coincide only because the CLI never sends
- * `searchId` on the update path, where an `edit` reusing this would be refused.
+ * How many searches one request may name. The server's cap is stricter in kind,
+ * bounding a post's claims across its whole lifetime, so N requests of 10 cannot
+ * land 10N. The update path sends `searchId` too, but only when `edit --status
+ * published` promotes a draft carrying claims recorded at draft time, which the
+ * create path already capped.
  */
 export const SEARCH_ID_MAX = 10;
 
@@ -318,7 +320,12 @@ export const resourceEchoSchema = z
 
 export const ownPostSchema = z
   .object({
-    id: z.string(),
+    // Shape-checked like agent-api's resourceId, and not only for hygiene: the id
+    // is the one receipt member that skips sanitizeForTerminal, because it is
+    // rendered into copy-pasteable commands (publish's undo line, delete's
+    // confirmCommand). A server answering `"<uuid> --yes"` would otherwise put a
+    // one-shot destructive flag into the exact string this CLI prints as safe.
+    id: z.string().regex(UUID_RE, 'id must be a uuid'),
     slug: z.string(),
     title: z.string(),
     status: z.string(),
@@ -508,6 +515,13 @@ export interface PostUpdateInput {
   priceAtomic?: string;
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
+  /**
+   * The searches a promotion claims: the ids recorded when the draft was saved,
+   * carried on the PUT because a draft claims nobody's demand until it goes
+   * public (see PublishInput.searchId). Sent only by `edit --status published`;
+   * server-side the claims accumulate and are never echoed back.
+   */
+  searchId?: string | string[];
   /** See PublishInput.scanAck; the edit path passes through the same gate. */
   scanAck?: string;
 }
@@ -521,6 +535,7 @@ export interface PostUpdateBody {
   price?: string;
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
+  searchId?: string | string[];
   scanAck?: string;
 }
 
@@ -589,9 +604,15 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
       fix: 'Pass at least one field flag, or run `tenjin edit <postId>` with no flags to view the post.',
     });
   }
-  // Added AFTER the emptiness check on purpose: an acknowledgement is not a
-  // change, so a PUT carrying only a token is still nothing to update.
-  return input.scanAck !== undefined ? { ...body, scanAck: input.scanAck } : body;
+  // Both added AFTER the emptiness check on purpose: neither an acknowledgement
+  // nor an attribution claim is a change, so a PUT carrying only them is still
+  // nothing to update. `searchId` only ever rides a status promotion.
+  const searchId = toWireSearchId(normalizeSearchIds(input.searchId, 'searchId'));
+  return {
+    ...body,
+    ...(searchId !== undefined ? { searchId } : {}),
+    ...(input.scanAck !== undefined ? { scanAck: input.scanAck } : {}),
+  };
 }
 
 /**

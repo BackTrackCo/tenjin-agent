@@ -33,3 +33,12 @@ headless refusal and a declined prompt end with nothing on disk that a later wri
 could reuse. An approved prompt pays one extra in-memory signature for that, with
 no second keystore prompt and no extra round trip. `tenjin delete` is never
 allowlisted: no mode carries it, and it is not delegable to a subagent.
+
+Promoting a draft settles what the draft publish deferred. `edit --status
+published` re-scans the stored body at the block tier (a draft made on the web
+desk was never scanned locally), claims the searches a
+`publish --draft --search-id` parked on the draft (the ids ride the same PUT and
+their local loops close), and writes the same-body dedup marker, so the next
+publish of the promoted body dedups instead of creating a duplicate. The
+server-returned post id is shape-checked as a uuid before it can reach the undo
+line or the delete confirm payload.

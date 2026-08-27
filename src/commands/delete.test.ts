@@ -208,6 +208,19 @@ describe('runDelete — the request', () => {
     expect(stub.calls).toHaveLength(0);
   });
 
+  // The confirm payload's commands are built from the VALIDATED input id, and the
+  // schema refuses a non-uuid echo outright: a server answering `"<uuid> --yes"`
+  // must never reach a rendered `confirmCommand`, where commander would split it
+  // into an id plus the flag that skips the prompt and the exit-3 payload.
+  it('refuses a server-sent id carrying a flag before any prompt or payload', async () => {
+    const stub = stubServer({ get: { ...STORED, id: `${POST_ID} --yes` } });
+    const { ctx } = makeCtx();
+    await expect(
+      runDelete(args(), ctx, hermetic('auto', { fetchImpl: stub.fetch })),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    expect(stub.calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
   it('maps a 404 to RESOURCE_NOT_FOUND and never asks about a post it could not read', async () => {
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ error: { code: 'not_found' } }), {

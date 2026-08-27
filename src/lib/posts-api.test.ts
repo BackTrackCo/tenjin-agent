@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildPostCreateBody,
   buildPostUpdateBody,
+  deletePost,
   getOwnPost,
   publishPost,
   updatePost,
@@ -422,6 +423,21 @@ describe('publishPost — write failures after approval', () => {
       }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
+
+  // The id is the one receipt member rendered into copy-pasteable commands (the
+  // undo line), so an echo like `"<uuid> --yes"` is a contract violation, never
+  // data: commander would split it into an id plus the flag that skips consent.
+  it('refuses a 201 whose id smuggles a flag past the uuid shape', async () => {
+    const { fetch } = capturingFetch(() =>
+      ok201({ ...CREATED_POST, id: `${CREATED_POST.id} --yes` }),
+    );
+    await expect(
+      publishPost({ status: 'published', title: 'T', bodyMd: 'B' }, fakeAuth().auth, {
+        ...OPTS,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -476,6 +492,26 @@ describe('buildPostUpdateBody — bounds', () => {
 
   it('refuses an empty update rather than burning a nonce on a no-op', () => {
     expect(() => buildPostUpdateBody({})).toThrow(/Nothing to update/);
+  });
+
+  // The promotion's attribution: it rides only ever WITH a change (like scanAck,
+  // it is not itself an update), and it takes the create path's wire shape.
+  it('ships searchId beside a real change, one as a bare string and several as an array', () => {
+    expect(buildPostUpdateBody({ status: 'published', searchId: SEARCH_A })).toEqual({
+      status: 'published',
+      searchId: SEARCH_A,
+    });
+    expect(buildPostUpdateBody({ status: 'published', searchId: [SEARCH_A, SEARCH_B] })).toEqual({
+      status: 'published',
+      searchId: [SEARCH_A, SEARCH_B],
+    });
+  });
+
+  it('a searchId alone is still nothing to update, and a malformed one is refused', () => {
+    expect(() => buildPostUpdateBody({ searchId: SEARCH_A })).toThrow(/Nothing to update/);
+    expect(() => buildPostUpdateBody({ status: 'published', searchId: 'nope' })).toThrow(
+      /Invalid searchId/,
+    );
   });
 });
 
@@ -536,6 +572,15 @@ describe('getOwnPost', () => {
     expect(recovered).toEqual(['proof_expired']);
     expect(calls).toHaveLength(2);
     expect(post.id).toBe(CREATED_POST.id);
+  });
+
+  // The read feeds delete's confirmCommand and edit's receipts, so an id that is
+  // not exactly a uuid never parses out of the response at all.
+  it('refuses a response whose id smuggles a flag past the uuid shape', async () => {
+    const { fetch } = capturingFetch(() => ok200({ ...STORED_POST, id: `${POST_ID} --yes` }));
+    await expect(
+      getOwnPost(POST_ID, fakeAuth().auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 });
 
@@ -614,5 +659,98 @@ describe('updatePost', () => {
         fetchImpl: mismatch.fetch,
       }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+});
+
+/**
+ * The recovery loop is a copy of updatePost's, which is where a paste-level slip
+ * would live, so it gets updatePost's coverage: every arm below mirrors a case
+ * the PUT block pins. There is no contract-mismatch arm because a DELETE parses
+ * no response body; the deliberate 200/202 acceptance stands in as the
+ * response-shape decision under test.
+ */
+describe('deletePost', () => {
+  it('signs a bodiless DELETE at the owner-scoped route and accepts 204, 200 and 202', async () => {
+    for (const status of [204, 200, 202]) {
+      const { fetch, calls } = capturingFetch(() => new Response(null, { status }));
+      const { auth, signed } = fakeAuth();
+      await deletePost(POST_ID, auth, { ...OPTS, fetchImpl: fetch });
+      expect(calls).toHaveLength(1);
+      const call = calls[0]!;
+      expect(call.method).toBe('DELETE');
+      expect(call.url).toBe(`https://tenjin.blog/api/posts/${POST_ID}`);
+      expect(call.body).toBe('');
+      // Bodiless, so signed without a content-digest over phantom bytes.
+      expect(signed[0]).toEqual({ method: 'DELETE', url: call.url });
+    }
+  });
+
+  it('signs every attempt afresh on a recoverable 401, because each DELETE burns a nonce', async () => {
+    let attempt = 0;
+    const { fetch } = capturingFetch(() => {
+      attempt++;
+      return attempt === 1
+        ? new Response(JSON.stringify({ error: { code: 'nonce_already_used' } }), { status: 401 })
+        : new Response(null, { status: 204 });
+    });
+    const { auth, signed, recovered } = fakeAuth(() => true);
+    await deletePost(POST_ID, auth, { ...OPTS, fetchImpl: fetch });
+    expect(recovered).toEqual(['nonce_already_used']);
+    expect(signed).toHaveLength(2);
+  });
+
+  it('does not retry a fatal 401 (session_key_unbound)', async () => {
+    const { fetch, calls } = capturingFetch(
+      () =>
+        new Response(JSON.stringify({ error: { code: 'session_key_unbound' } }), {
+          status: 401,
+          headers: { 'www-authenticate': 'Session error="session_key_unbound"' },
+        }),
+    );
+    await expect(
+      deletePost(POST_ID, fakeAuth(() => false).auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'PUBLISH_FAILED' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('caps retries so an always-401 server cannot loop', async () => {
+    const { fetch, calls } = capturingFetch(
+      () =>
+        new Response(JSON.stringify({ error: { code: 'proof_expired' } }), {
+          status: 401,
+          headers: { 'www-authenticate': 'Session error="proof_expired"' },
+        }),
+    );
+    await expect(
+      deletePost(POST_ID, fakeAuth(() => true).auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'PUBLISH_FAILED' });
+    expect(calls.length).toBe(4); // initial + MAX_RECOVERIES
+  });
+
+  it('maps a 429 to RATE_LIMITED so an agent backs off', async () => {
+    const { fetch } = capturingFetch(
+      () => new Response('{}', { status: 429, headers: { 'retry-after': '30' } }),
+    );
+    await expect(
+      deletePost(POST_ID, fakeAuth().auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('maps 404 to RESOURCE_NOT_FOUND (exit 1: the write definitively did not land)', async () => {
+    const { fetch } = capturingFetch(() => ok200({ error: { code: 'post_not_found' } }, 404));
+    await expect(
+      deletePost(POST_ID, fakeAuth().auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND', exitCode: 1 });
+  });
+
+  it('maps any other refusal to DELETE_FAILED (exit 4, after the operator confirmed)', async () => {
+    const { fetch } = capturingFetch(() => ok200({ error: { message: 'nope' } }, 500));
+    await expect(
+      deletePost(POST_ID, fakeAuth().auth, { ...OPTS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'DELETE_FAILED',
+      exitCode: 4,
+      fix: expect.stringContaining('still live'),
+    });
   });
 });

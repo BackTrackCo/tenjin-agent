@@ -4,7 +4,12 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
-import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
+import {
+  linkSearchesToDraft,
+  loadSearches,
+  markSearchResolved,
+  type StoredSearch,
+} from '../lib/search-store';
 import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
@@ -137,9 +142,10 @@ export async function runPublish(
   // turn a clean turn end into a confirm prompt or a keystore unlock, and so no
   // request is made at all.
   //
-  // DRAFTS ARE OUT, both ways: a draft answers nobody and no command promotes
-  // one, so reaching a public piece MEANS publishing the same body a second time.
-  // Deduping that would make the promotion silently do nothing.
+  // DRAFTS ARE OUT, both ways: a draft parks privately, so parking the same text
+  // twice is legitimate and a draft writes no marker to match. The marker is
+  // written wherever the body actually goes public — below on a non-draft
+  // publish, and in edit.ts when `--status published` promotes a draft.
   if (status !== 'draft') {
     const already = await publishedUrlFor(ctx.dataDir, body);
     if (already !== null) {
@@ -330,9 +336,10 @@ export async function runPublish(
     ...(card !== undefined ? { resource: card } : {}),
     // The attribution half of `--search-id`, and it follows the SAME rule the
     // local ledger already follows: a draft answers nobody, so it claims nobody's
-    // demand either. Sending it on a draft put one demand signal on two posts —
-    // no command promotes a draft, so reaching a public piece means a second
-    // publish carrying the same id — with one of them possibly never shipping.
+    // demand either, and a draft that never ships must not hold a claim. The ids
+    // are not lost: they are parked on the draft locally (linkSearchesToDraft
+    // below), and `edit --status published` carries them when the piece actually
+    // goes public.
     ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
   };
 
@@ -359,14 +366,22 @@ export async function runPublish(
   });
 
   // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
-  // loop: the draft is still the pending answer, and the later real publish is
-  // what resolves it.
+  // loop: the draft is still the pending answer, and the promotion (`edit
+  // --status published`) is what resolves it.
   const parksPrivately = status === 'draft';
 
   // The post exists: remember it against the body, so the next publish of the
   // same text this machine attempts hands back this url instead of creating a
   // second row. Not for a draft, whose whole purpose is to be published later.
   if (!parksPrivately) await recordPublished(ctx.dataDir, body, result.url);
+  // Park the named claims on the draft (record's own spelling: the store matches
+  // ids by exact string), so the promotion can send what this create withheld.
+  if (parksPrivately) {
+    const parked = claimableIds
+      .map((id) => stored.get(id)?.searchId)
+      .filter((id): id is string => id !== undefined);
+    await linkSearchesToDraft(ctx.dataDir, parked, result.resourceId);
+  }
 
   // One close per id, each reporting for itself: the piece is published and the
   // server has every id, so an unrecorded search warns without costing the rest.
@@ -381,7 +396,7 @@ export async function runPublish(
         ctx,
         id,
         stored.get(id) ?? null,
-        parksPrivately,
+        parksPrivately ? result.resourceId : null,
         id === prefillFrom ? prefill : 'none',
       ),
     );
@@ -515,14 +530,18 @@ async function closeNamedSearch(
   ctx: CommandContext,
   searchId: string,
   stored: StoredSearch | null,
-  parksPrivately: boolean,
+  draftPostId: string | null,
   prefill: PrefillOutcome,
 ): Promise<SearchReceipt> {
   const open = (reason: string): SearchReceipt => {
     ctx.io.stderr.write(`${reason}\n`);
     return { id: searchId, closed: false, prefill };
   };
-  if (parksPrivately) return open(`Saved as a draft, so search ${searchId} stays open.`);
+  if (draftPostId !== null) {
+    return open(
+      `Saved as a draft, so search ${searchId} stays open; \`tenjin edit ${draftPostId} --status published\` claims it when the piece goes up.`,
+    );
+  }
   if (stored === null) {
     return open(`Published, but search ${searchId} is not in the local store.`);
   }

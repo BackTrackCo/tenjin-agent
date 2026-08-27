@@ -226,7 +226,7 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 
 On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
 
-**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and looks for a `published:<hash>` record in the state store (`~/.tenjin/state.db`). On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The record is written after a successful publish and is never aged out. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: nothing promotes a draft, so publishing the same body again is how a draft ever reaches a public piece. It is a same-machine guard, not a guarantee across machines.
+**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and looks for a `published:<hash>` record in the state store (`~/.tenjin/state.db`). On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The record is never aged out. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: a draft parks privately, writes no record, and is never deduped against one. The record is written when the body actually goes public, whether by a non-draft `publish` or by promoting the draft with `tenjin edit <post-id> --status published`. It is a same-machine guard, not a guarantee across machines.
 
 The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
@@ -248,7 +248,12 @@ It accepts the card flags from `publish`, plus:
 `--status draft` is the reversible way to take a piece off the marketplace: the id
 and the body survive, and `--status published` puts it back. It is an ordinary
 change flag, so it diffs like the rest (setting the status a post already has
-writes nothing) and it runs the same `publish.mode` consent gate.
+writes nothing) and it runs the same `publish.mode` consent gate. A promotion to
+`published` is the draft actually going public, so it settles what the draft
+publish deferred: the stored body is re-scanned at the block tier (a draft made
+on the web desk was never scanned locally), any searches named by the
+`publish --draft --search-id` that created the draft are claimed on the same PUT
+and their local loops closed, and the same-body dedup marker is written.
 
 ### `tenjin delete <post-id>`
 

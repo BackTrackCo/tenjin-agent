@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
+import { publishedUrlFor } from '../lib/publish-dedup';
+import { loadSearches, recordSearch } from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
@@ -1845,5 +1847,107 @@ describe('runEdit — --status', () => {
       ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
       expect(stub.calls, bad).toHaveLength(0);
     }
+  });
+});
+
+/**
+ * What a promotion settles beyond the status flip (review 5044520292): it is the
+ * draft actually going public, so it writes the same-body dedup marker publish
+ * writes, carries the searches `publish --draft --search-id` parked on the
+ * draft, and re-scans the STORED body at the block tier, since "scanned when
+ * written" holds only for drafts this CLI wrote.
+ */
+describe('runEdit — promoting a draft', () => {
+  const DRAFT = { ...STORED, status: 'draft' };
+  const SEARCH = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
+  // publish.test.ts's fixtures: a hard block in every mode, and a warn-tier
+  // secret-named assignment (`pk_live_` deliberately matches no block detector).
+  const BLOCK_BODY = '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
+  const WARN_BODY = '# The Answer\n\nSet DEPLOY_API_KEY="pk_live_zzzz9988aabb" to deploy.\n';
+
+  async function parkClaim(
+    draftPostId: string = POST_ID,
+    searchId: string = SEARCH,
+  ): Promise<void> {
+    await recordSearch(dir, {
+      searchId,
+      at: new Date().toISOString(),
+      question: 'does ox 0.14 still export Bytes.from',
+      decision: 'MISS',
+      candidates: [],
+      draftPostId,
+    });
+  }
+
+  it('records the dedup marker, so the next same-body publish dedups instead of duplicating', async () => {
+    await edit({ status: 'published' }, { get: DRAFT });
+    expect(await publishedUrlFor(dir, STORED.bodyMd)).toBe(STORED.url);
+  });
+
+  it('writes no marker on a demotion, which takes nothing public', async () => {
+    await edit({ status: 'draft' });
+    expect(await publishedUrlFor(dir, STORED.bodyMd)).toBeNull();
+  });
+
+  it('carries the parked claim on the PUT and closes its loop, on both surfaces', async () => {
+    await parkClaim();
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    // One claim ships as the bare string the create path would send.
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    expect(data.searches).toEqual([{ id: SEARCH, closed: true }]);
+  });
+
+  it('claims nothing when the parked draft is a different post', async () => {
+    await parkClaim('0197dddd-eeee-4fff-8aaa-bbbbbbbbbbbb');
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    expect(stub.putBody()).toEqual({ status: 'published' });
+    expect(data.searches).toBeUndefined();
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  it('claims nothing on a demotion', async () => {
+    await parkClaim();
+    const { stub } = await edit({ status: 'draft' });
+    expect(stub.putBody()).toEqual({ status: 'draft' });
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  it('block-scans the stored body: a secret in it refuses the promotion, before the PUT', async () => {
+    const stub = stubServer({ get: { ...DRAFT, bodyMd: BLOCK_BODY } });
+    await expect(
+      runEdit(
+        args({ status: 'published', yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  // Only the BLOCK tier rides the promotion: the warn tier confirms newly typed
+  // text, and re-asking about text the create already gated would tax every
+  // promotion. auto mode with no --yes is the probe, since one counted warn
+  // would turn it into NEEDS_CONFIRMATION.
+  it('warn-tier text in the stored body does not gate the promotion', async () => {
+    const stub = stubServer({ get: { ...DRAFT, bodyMd: WARN_BODY } });
+    await runEdit(
+      args({ status: 'published' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('a promotion that replaces the body scans the NEW body, not the stored one', async () => {
+    const file = await writeDoc('# The Answer\n\nA clean replacement body.\n');
+    const { stub } = await edit(
+      { status: 'published', body: file },
+      { get: { ...DRAFT, bodyMd: BLOCK_BODY } },
+    );
+    expect(stub.putBody()).toMatchObject({
+      status: 'published',
+      bodyMd: '# The Answer\n\nA clean replacement body.\n',
+    });
   });
 });

@@ -134,7 +134,12 @@ export async function runDelete(
       throw new CliError('NEEDS_CONFIRMATION', confirmMessage(stored), {
         fix: 'Show the user what would be removed, then re-run with --yes on an explicit yes. `tenjin edit <postId> --status draft` unpublishes instead, and is reversible.',
         details: {
-          postId: stored.id,
+          // args.postId, NOT stored.id, in every command-shaped member below:
+          // the input id passed UUID_RE at the top, and building the copy-paste
+          // strings from it means a server echo can never smuggle a flag into
+          // them even if the response schema loosens. The read already proved
+          // the two ids name the same post.
+          postId: args.postId,
           title: sanitizeForTerminal(stored.title),
           status: sanitizeForTerminal(stored.status),
           url: sanitizeForTerminal(stored.url),
@@ -142,8 +147,8 @@ export async function runDelete(
           irreversible: true,
           // Named rather than described: the payload is what an agent hands the
           // user, and #221 is a report of an agent inventing a command instead.
-          confirmCommand: `tenjin delete ${stored.id} --yes`,
-          reversibleAlternative: `tenjin edit ${stored.id} --status draft`,
+          confirmCommand: `tenjin delete ${args.postId} --yes`,
+          reversibleAlternative: `tenjin edit ${args.postId} --status draft`,
         },
       });
     }
@@ -151,7 +156,7 @@ export async function runDelete(
     if (!approved) {
       throw new CliError('REFUSED', 'Delete not confirmed; nothing was removed.', {
         fix: 'Re-run with --yes to remove the piece, or `tenjin edit <postId> --status draft` to unpublish it reversibly.',
-        details: { postId: stored.id, title: sanitizeForTerminal(stored.title) },
+        details: { postId: args.postId, title: sanitizeForTerminal(stored.title) },
       });
     }
   }
@@ -160,7 +165,7 @@ export async function runDelete(
   // justified. On the interactive path it mints one now; on `--yes` the phase
   // above already did, and this reuses it rather than signing twice.
   await deletePost(args.postId, sessionAt('read+write'), client);
-  return receipt(stored);
+  return receipt(args.postId, stored);
 }
 
 /**
@@ -191,13 +196,14 @@ function confirmMessage(post: OwnPost): string {
 /**
  * The delete receipt. `deleted: true` is the machine signal, and the identity
  * fields are echoed from the pre-delete read because after the write there is
- * nothing left on the server to name the thing that is gone.
+ * nothing left on the server to name the thing that is gone. The id is the
+ * caller's own validated input, for the same reason the refusal payload's is.
  */
-function receipt(post: OwnPost): CommandResult {
+function receipt(postId: string, post: OwnPost): CommandResult {
   return {
     data: {
       deleted: true,
-      postId: post.id,
+      postId,
       title: post.title,
       status: post.status,
       url: post.url,

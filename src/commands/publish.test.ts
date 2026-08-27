@@ -782,6 +782,21 @@ describe('runPublish — publish <file> --search-id', () => {
     expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
+  // What the withheld claim becomes instead: parked on the draft's post id, so
+  // `edit --status published` can send it when the piece actually goes public.
+  it('parks the withheld claim on the draft for the promotion to carry', async () => {
+    await seed();
+    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, draft: true, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    const entry = (await loadSearches(dir))[0];
+    expect(entry?.draftPostId).toBe(CREATED.id);
+    expect(entry?.resolved).toBeUndefined();
+  });
+
   // The server's declared pattern is narrower than the CLI's own UUID_RE, and the
   // value is now SENT, so a shape the server would 400 has to be refused here —
   // before the wallet signature, not after it.
@@ -2574,6 +2589,21 @@ describe('runPublish — the undo line', () => {
     const line = (res.humanLines ?? []).find((l) => l.startsWith('Undo:')) ?? '';
     expect(line).not.toBe('');
     expect(line).not.toContain('--yes');
+  });
+
+  // The schema behind the receipt refuses a server-sent id that is not exactly a
+  // uuid, so `"<uuid> --yes"` can never reach the undo line or `data.undo`: the
+  // pin above constrains the author, this one constrains the wire.
+  it('refuses a server-sent id carrying a flag, so no undo command can smuggle --yes', async () => {
+    const { fetch } = stubServer({ ...CREATED, id: `${CREATED.id} --yes` });
+    const { provider } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
 
   // A draft is not up, so demoting it undoes nothing; offering `--status draft`

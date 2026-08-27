@@ -285,14 +285,16 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
     command: 'tenjin edit',
     note:
       'Updates posts your wallet ALREADY OWNS: reprices, refreshes an as-of date, repairs an ' +
-      'answer card. Owner-scoped on both legs (GET and PUT /api/posts/<id> are signed and ' +
-      'owner-only), spends nothing, moves no keys, and creates no new public content: a ' +
-      'narrower blast radius than the publish rule beside it. It rides the same mode for the ' +
-      'same reason: edit runs the identical publish.mode consent gate in the CLI ' +
-      '(lib/consent.ts needsConfirmation), so a mode that publishes unattended and then ' +
-      'cannot fix its own post\u2019s price is the asymmetry the mode exists to remove. It ' +
-      'opens the keystore on the same terms as the publish rule beside it, and takes the ' +
-      'same prefix-rule caveats. Removed by the same return to review.',
+      'answer card, and flips status both ways, so it CAN PROMOTE A DRAFT TO PUBLISHED under ' +
+      'this same gate (promotion re-runs the block-tier secret scan over the stored body). ' +
+      'Owner-scoped on both legs (GET and PUT /api/posts/<id> are signed and owner-only), ' +
+      'spends nothing, moves no keys, and mints no new posts: a narrower blast radius than ' +
+      'the publish rule beside it, though promotion means existing drafts can go public. It ' +
+      'rides the same mode for the same reason: edit runs the identical publish.mode consent ' +
+      'gate in the CLI (lib/consent.ts needsConfirmation), so a mode that publishes ' +
+      'unattended and then cannot fix its own post\u2019s price is the asymmetry the mode ' +
+      'exists to remove. It opens the keystore on the same terms as the publish rule beside ' +
+      'it, and takes the same prefix-rule caveats. Removed by the same return to review.',
   },
 ];
 

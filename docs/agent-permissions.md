@@ -235,8 +235,10 @@ the mode you chose does nothing. That is why two rules track the mode:
   strictly broader credential than the read-only one `tenjin session start` asks
   for as an explicit opt-in.
 - `Bash(tenjin edit:*)` updates posts your wallet already owns: reprices, refreshes
-  an as-of date, repairs an answer card. Owner-scoped on both legs, spends nothing,
-  and creates no new public content, but it opens the keystore on the same terms,
+  an as-of date, repairs an answer card, and flips status both ways, so it can
+  promote a draft to published under the same mode gate (a promotion re-runs the
+  block-tier secret scan over the stored body). Owner-scoped on both legs, spends
+  nothing, and mints no new posts, but it opens the keystore on the same terms,
   and it runs the same `publish.mode` gate in the CLI. A mode that can publish a
   post unattended but cannot fix that post's price is the asymmetry the mode exists
   to remove.
