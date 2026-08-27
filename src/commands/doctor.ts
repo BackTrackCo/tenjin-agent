@@ -249,21 +249,21 @@ export async function collectDoctorChecks(
       ctx.flags.timeout,
       deps.fetchImpl,
       bypass,
-      shelfKeyIsTheRemedy(settings),
+      shelfKeyIsTheRemedy(settings, bypass),
     ),
     await checkReadPath(
       baseUrl,
       ctx.flags.timeout,
       deps.fetchImpl,
       bypass,
-      shelfKeyIsTheRemedy(settings),
+      shelfKeyIsTheRemedy(settings, bypass),
     ),
     await checkSearchContract(
       baseUrl,
       ctx.flags.timeout,
       deps.fetchImpl,
       bypass,
-      shelfKeyIsTheRemedy(settings),
+      shelfKeyIsTheRemedy(settings, bypass),
     ),
     await checkSkills(
       home,
@@ -1116,7 +1116,13 @@ function checkTeamShelf(
  * {@link halfWiredShelfWarn} so they cannot answer differently about one
  * machine.
  */
-function shelfKeyIsTheRemedy(settings: EffectiveSettings): boolean {
+function shelfKeyIsTheRemedy(settings: EffectiveSettings, bypass?: ShelfBypass): boolean {
+  // A key that WAS issued for this request is the remedy whatever named the
+  // origin: resolveShelfBypass keys on the configured and effective origins
+  // matching, not on baseUrl.source, so repeating the configured shelf through
+  // --base-url or TENJIN_BASE_URL still sends it. Deciding on source alone hid
+  // a rejected key behind the neutral page advice.
+  if (bypass !== undefined) return true;
   // Exactly 'file': resolveBaseUrl never returns 'project' today (a project
   // .tenjin.json baseUrl is dropped on the floor by loadProjectConfig, by
   // design). If a project layer ever lands, whether a repo-checked-in file may

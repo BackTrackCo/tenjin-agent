@@ -90,9 +90,9 @@ function captureIo(isTTY = false): { io: Io; stderr: () => string } {
   return { io, stderr: () => err.join('') };
 }
 
-function ctxFor(): CommandContext {
+function ctxFor(baseUrl?: string): CommandContext {
   return {
-    flags: { json: false, timeout: 5000, baseUrl: undefined },
+    flags: { json: false, timeout: 5000, baseUrl },
     dataDir: dir,
     io: captureIo().io,
   };
@@ -689,8 +689,8 @@ describe('runDoctor — passing outcomes', () => {
 });
 
 describe('runDoctor — required failures throw the mapped CliError', () => {
-  async function catchDoctor(fetchImpl: typeof fetch): Promise<CliError> {
-    const err = await runDoctor(ctxFor(), {
+  async function catchDoctor(fetchImpl: typeof fetch, baseUrlFlag?: string): Promise<CliError> {
+    const err = await runDoctor(ctxFor(baseUrlFlag), {
       walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
@@ -810,6 +810,28 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     expect(find(checks, 'search-contract').fix).toContain('stale or rotated');
     // A secret is configured on this run, so this assertion can actually fail.
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
+  /**
+   * Same rejected key, named through --base-url instead of read from the file.
+   * resolveShelfBypass keys on the configured and effective origins matching,
+   * not on baseUrl.source, so the key IS sent here; advice that read source
+   * alone told this operator to check the base URL while their key was the
+   * thing being refused.
+   */
+  it('a repeated shelf origin via --base-url still says rotate, not check the URL', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    const SHELF = 'https://backtrack.tenjin.sh';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(GATE_PAGE, SHELF);
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    const checks = (err.details as { checks: CheckResult[] }).checks;
+    const check = find(checks, 'api-contract');
+    expect(check.fix).toContain('stale or rotated');
+    expect(JSON.stringify(checks)).not.toContain(SECRET);
   });
 
   it('a 401 HTML page at a configured shelf with no secret says set the key', async () => {
