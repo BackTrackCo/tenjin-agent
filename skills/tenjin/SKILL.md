@@ -120,8 +120,10 @@ FIRST settled sale (no register call), and by x402scan once CDP-settled payments
 
 Mid-task, ask a QUESTION instead of browsing: it matches what pieces actually say (body, title
 and excerpt), with freshness/price/applicability as HARD gates. This endpoint only searches:
-`matched: 0` is an empty result plus a `hint` pointing at GET `/api/articles`, which is
-where the catalog is browsed. A differently phrased question is still worth
+`matched: 0` means nothing matched CONFIDENTLY (every decision-view item is semantically
+close or corroborated by its title, excerpt or tags; a shared word alone is not a match): an
+empty result plus a `hint` pointing at GET `/api/articles`, which is where the catalog is
+browsed. A differently phrased question is still worth
 one retry on this same endpoint. Anonymous,
 no wallet. Matching
 runs on wording and meaning, so send the whole question as one natural-language sentence
@@ -143,7 +145,8 @@ secrets; generalize the NAMES, keep the technical specifics).
   caller-visible text; `confidence` is paywall-blind, so gate spending on `corroborated`.
   Coarse, meaningful only within this one response. At most 3 come from any one
   creator while other qualifying creators can fill the page. `matched: 0` means nothing
-  matched, and `hint` points at GET /api/articles for browsing; a small early catalog
+  matched CONFIDENTLY (semantically close, or corroborated by title, excerpt or tags — a
+  shared word alone is refused under `hybrid-v1`), and `hint` points at GET /api/articles for browsing; a small early catalog
   makes that the honest answer often. Generalize the question before you send it.
   Data handling for this endpoint is stated once, at https://tenjin.blog/privacy.
   `X-Tenjin-Eval-Cohort: 1` marks the evaluation cohort.
