@@ -1302,6 +1302,37 @@ function storeVersionOf(db: SqliteDatabase): number {
 }
 
 /**
+ * The \`node:sqlite\` module for the CLI's OWN process, resolved through
+ * \`process.getBuiltinModule\` rather than a literal \`import('node:sqlite')\`.
+ *
+ * THE BUNDLER IS THE REASON. esbuild does not know \`sqlite\` as a Node builtin
+ * (it is newer than its list), so it rewrote the literal specifier to a bare
+ * \`sqlite\` on every CLI-side site — \`push status\` read an empty store,
+ * \`doctor\` reported the module missing, the one-time ledger import never ran —
+ * while the generated hook scripts, which are string templates the bundler
+ * never sees, kept writing to the very same database. Marking the module
+ * external or flagging \`node-colon-prefix-import\` did not stop the rewrite
+ * (probed 2026-08-27, tsup 8.5.1). \`getBuiltinModule\` takes a runtime string,
+ * so there is nothing for a bundler to touch, and it answers \`undefined\` on
+ * a Node without the module instead of throwing, which is the fail-open
+ * shape every caller here already handles. Node >= 22.3 (engines floor 24).
+ */
+function loadSqlite(): { DatabaseSync: new (path: string) => SqliteDatabase } | null {
+  const proc = process as unknown as {
+    getBuiltinModule?: (id: string) => unknown;
+  };
+  const mod = proc.getBuiltinModule?.('node:sqlite');
+  if (
+    typeof mod === 'object' &&
+    mod !== null &&
+    typeof (mod as { DatabaseSync?: unknown }).DatabaseSync === 'function'
+  ) {
+    return mod as { DatabaseSync: new (path: string) => SqliteDatabase };
+  }
+  return null;
+}
+
+/**
  * Open (and create) the store for the CLI.
  *
  * Same contract as the hooks' copy: `null` for every failure, so a `push
@@ -1315,9 +1346,8 @@ export async function openStore(dataDir: string): Promise<Store | null> {
   let db: SqliteDatabase | null = null;
   try {
     const { mkdirSync, chmodSync } = await import('node:fs');
-    const sqlite = (await import('node:sqlite')) as unknown as {
-      DatabaseSync: new (path: string) => SqliteDatabase;
-    };
+    const sqlite = loadSqlite();
+    if (sqlite === null) return null;
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     const path = stateDbPath(dataDir);
     db = new sqlite.DatabaseSync(path);
@@ -1472,9 +1502,8 @@ export async function removeRetiredState(dataDir: string): Promise<string[]> {
 /** Is `node:sqlite` importable and answering? What `tenjin doctor` probes. */
 export async function probeSqlite(): Promise<{ ok: boolean; version: string | null }> {
   try {
-    const sqlite = (await import('node:sqlite')) as unknown as {
-      DatabaseSync: new (path: string) => SqliteDatabase;
-    };
+    const sqlite = loadSqlite();
+    if (sqlite === null) return { ok: false, version: null };
     const db = new sqlite.DatabaseSync(':memory:');
     try {
       const row = db.prepare('SELECT sqlite_version() AS v').get();
