@@ -791,6 +791,48 @@ describe('refreshHooks', () => {
     expect(await readFile(outside, 'utf8')).toBe(`${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n`);
   });
 
+  /**
+   * The parent half of the same question. A leaf check does not cover it: the
+   * data dir comes out of a settings file this CLI does not own, so a `hooks`
+   * that is a LINK redirects every write in the plan at once, and the marker on
+   * a planted file at the other end would otherwise say "ours".
+   */
+  it('refuses when the hooks directory itself is a link, and says so', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const elsewhere = await mkdtemp(join(tmpdir(), 'tenjin-hooks-elsewhere-'));
+    const planted = `#!/usr/bin/env node\n${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n// planted\n`;
+    await writeFile(join(elsewhere, STOP_HOOK_FILE), planted);
+    await rm(join(data, 'hooks'), { recursive: true });
+    await symlink(elsewhere, join(data, 'hooks'));
+
+    const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(await readFile(join(elsewhere, STOP_HOOK_FILE), 'utf8')).toBe(planted);
+    expect(result.scripts).toEqual([]);
+    expect(result.warning).toContain('not a directory');
+    await rm(elsewhere, { recursive: true, force: true });
+  });
+
+  /**
+   * And the false positive that rules out the blunter guards. A symlink ABOVE
+   * the data dir is ordinary — `/var` is one on macOS, and a home directory on
+   * another volume is another — so requiring the resolved script path to equal
+   * the literal one would refuse to refresh perfectly normal machines.
+   */
+  it('still refreshes when a symlink sits above the data dir', async () => {
+    const real = await mkdtemp(join(tmpdir(), 'tenjin-hooks-real-'));
+    const linked = join(home, 'linked-profile');
+    await symlink(real, linked);
+    await wireSearchHooks({ homeDir: home, dataDir: linked, mode: 'auto' });
+    const scriptPath = join(linked, 'hooks', WEBSEARCH_HOOK_FILE);
+    await writeFile(scriptPath, olderBuild);
+
+    const result = await refreshHooks({ homeDir: home, dataDir: linked, push: false });
+    expect(result.scripts).toEqual([scriptPath]);
+    expect(result.warning).toBeUndefined();
+    expect(await readFile(scriptPath, 'utf8')).not.toBe(olderBuild);
+    await rm(real, { recursive: true, force: true });
+  });
+
   it('registers nothing on a machine that never installed', async () => {
     const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
     expect(result.scripts).toEqual([]);

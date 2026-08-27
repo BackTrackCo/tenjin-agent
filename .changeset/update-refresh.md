@@ -40,7 +40,9 @@ whose directory names pin one, so running it after the swap would execute the
 build that was just replaced and report success over the previous version's
 bytes. The version-free link beside the store is derived and used when it is
 there, and otherwise the profile is reported unrefreshed. And it rewrites a hook
-script only when the bytes on disk carry the generated header marker, and never
-through a symlink: an unattended writer takes its paths from settings.json,
-which anything on the machine can write, so a path of the right shape is not
-proof that the file at it is ours.
+script only when the bytes on disk carry the generated header marker, never
+through a symlink standing where a script should be, and not at all when the
+`hooks` directory has itself been replaced by a link: an unattended writer takes
+its paths from settings.json, which anything on the machine can write, so a path
+of the right shape is not proof that the file at it is ours. Symlinks above the
+data dir are left alone, since those are ordinary machine layout.

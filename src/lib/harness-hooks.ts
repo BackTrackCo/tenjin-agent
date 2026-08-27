@@ -697,9 +697,21 @@ async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<strin
  * proved from the BYTES instead: an unreadable file, or one without the
  * generated header, is left exactly as it is.
  *
- * `lstat` rather than `stat`, and no write through a link: a symlink at one of
- * our own paths would redirect the replacement to whatever it names, which is
- * the one way this could write outside the profile it was handed.
+ * `lstat` rather than `stat`, so a symlink standing where a script should be is
+ * skipped rather than written through.
+ *
+ * WHAT BOUNDS THIS IS THE MARKER, NOT THE PATH, and the distinction is worth
+ * stating because a path check cannot do the job. `<dataDir>/hooks` may resolve
+ * through symlinks well above it — `/var` is one on macOS, and a home directory
+ * on another volume is another — so "the resolved leaf sits under the resolved
+ * hooks dir" is true even when the whole directory is a link, and demanding the
+ * resolved path EQUAL the literal one would refuse the ordinary machines above.
+ * The marker is what actually holds: the destination must already contain a
+ * header this CLI wrote, so the worst a redirected path reaches is a Tenjin hook
+ * script, which is the file a refresh exists to rewrite.
+ *
+ * The one component this writer does own is `hooks` itself; see
+ * {@link refreshHooks}, which refuses when that is not a real directory.
  */
 async function writeOwnedScripts(plan: HookSpec[], scriptsDir: string): Promise<string[]> {
   const owned: HookSpec[] = [];
@@ -1026,6 +1038,14 @@ export interface HookRefreshResult {
  * `push: true` on a machine with the experiment off would rewrite the existing
  * entry to the widened `WebSearch|WebFetch` matcher and start firing the hook on
  * a tool the operator never armed it for.
+ *
+ * `<dataDir>/hooks` must be a REAL DIRECTORY. The data dir arrives from
+ * `detectHookOwners`, which read it out of a settings file this CLI does not
+ * own, and `hooks` is the one component of that path this writer puts there
+ * itself — so a link standing in its place is the one redirection that is never
+ * a machine's own layout, as opposed to the symlinks above it that routinely
+ * are (see {@link writeOwnedScripts}). Refused rather than followed, and
+ * reported: the operator's own `tenjin install` still writes through it.
  */
 export async function refreshHooks(opts: {
   homeDir: string;
@@ -1039,8 +1059,20 @@ export async function refreshHooks(opts: {
   // Bodies first, and only for files already on disk that are OURS BY CONTENT.
   // `scriptPlan` is the full writer set (see its own note on why bodies ignore
   // `push`); this filter is what keeps the refresh from materializing a script
-  // the machine lacks, and from overwriting one it did not write.
-  const scripts = await writeOwnedScripts(scriptPlan(dataDir), scriptsDir);
+  // the machine lacks, and from overwriting one it did not write. An absent
+  // `hooks` is nothing to refresh; one that exists but is not a directory is a
+  // redirection this writer refuses to follow (see the header).
+  const dirEntry = await lstat(scriptsDir).catch(() => null);
+  const redirected = dirEntry !== null && !dirEntry.isDirectory();
+  const scriptWarning = redirected
+    ? `${scriptsDir} is not a directory, so no hook script was rewritten. Re-run \`tenjin install\` if that path is yours.`
+    : undefined;
+  const scripts = redirected ? [] : await writeOwnedScripts(scriptPlan(dataDir), scriptsDir);
+  /** The settings half's warning wins the line; the script half's is appended. */
+  const warn = (settingsWarning?: string): { warning?: string } => {
+    const joined = [scriptWarning, settingsWarning].filter((w) => w !== undefined).join(' ');
+    return joined.length > 0 ? { warning: joined } : {};
+  };
 
   const found = await inspectSettings(homeDir);
   if ('refusal' in found) {
@@ -1050,7 +1082,7 @@ export async function refreshHooks(opts: {
       scripts,
       updated: [],
       alreadyPresent: [],
-      warning: found.refusal.message,
+      ...warn(found.refusal.message),
     };
   }
   const { path, raw, settings, hooks } = found;
@@ -1081,7 +1113,7 @@ export async function refreshHooks(opts: {
   // the writer collapses a multi-entry event by its strongest outcome.
   const alreadyPresent = HOOK_EVENTS.filter((e) => currentEvents.has(e) && !updatedEvents.has(e));
   if (updated.length === 0) {
-    return { path, scriptsDir, scripts, updated, alreadyPresent };
+    return { path, scriptsDir, scripts, updated, alreadyPresent, ...warn() };
   }
 
   // The same two compares the writer makes, for the same reasons: the first
@@ -1096,9 +1128,11 @@ export async function refreshHooks(opts: {
       scripts,
       updated: [],
       alreadyPresent,
-      warning: `${path} changed while it was being refreshed, so its hook entries were left alone. Re-run \`tenjin install\`.`,
+      ...warn(
+        `${path} changed while it was being refreshed, so its hook entries were left alone. Re-run \`tenjin install\`.`,
+      ),
     };
   }
   await writeFileAtomic(path, `${JSON.stringify({ ...settings, hooks: nextHooks }, null, 2)}\n`);
-  return { path, scriptsDir, scripts, updated, alreadyPresent };
+  return { path, scriptsDir, scripts, updated, alreadyPresent, ...warn() };
 }
