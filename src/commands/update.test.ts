@@ -752,6 +752,14 @@ describe('resolveNpmCli', () => {
 describe('runUpdate: the post-swap refresh', () => {
   const ENTRY = '/usr/local/lib/node_modules/tenjin-cli/dist/index.js';
 
+  /** A profile directory that actually EXISTS: the refresh skips a detected data
+   *  dir that is not already a directory rather than creating it. */
+  const profileDir = async (name: string): Promise<string> => {
+    const path = join(dir, name);
+    await mkdir(path, { recursive: true });
+    return path;
+  };
+
   /** A spawn seam that answers per call, so the manager can succeed while the
    *  refresh fails — the case the whole warn path exists for. */
   function scriptedSpawn(outcomes: SpawnResult[]) {
@@ -783,8 +791,8 @@ describe('runUpdate: the post-swap refresh', () => {
         spawnImpl: spawned.impl,
         refreshCommand: ENTRY,
         detectHookOwners: async () => [
-          { dataDir: '/home/u/.tenjin', scripts: [] },
-          { dataDir: '/home/u/.tenjin-shelf', scripts: [] },
+          { dataDir: await profileDir('.tenjin'), scripts: [] },
+          { dataDir: await profileDir('.tenjin-shelf'), scripts: [] },
         ],
       }),
     );
@@ -793,17 +801,80 @@ describe('runUpdate: the post-swap refresh', () => {
     for (const call of spawned.refreshes()) {
       expect(call.cmd).toBe(process.execPath);
       expect(call.args).toEqual([ENTRY, 'install', '--refresh']);
+      // A minute of local file writes, and the update-check switch: a data dir
+      // read out of settings.json must not gain a tree and a cache file just
+      // because a refresh was pointed at it.
+      expect(call.timeoutMs).toBe(60_000);
+      expect(call.env?.TENJIN_NO_UPDATE_CHECK).toBe('1');
     }
     // The whole point of the per-profile loop: a shelf machine's hooks are
     // regenerated from the SHELF config, not from whichever profile ran update.
     expect(spawned.refreshes().map((c) => c.env?.TENJIN_DATA_DIR)).toEqual([
-      '/home/u/.tenjin',
-      '/home/u/.tenjin-shelf',
+      join(dir, '.tenjin'),
+      join(dir, '.tenjin-shelf'),
     ]);
     expect((result.data as { refresh: { profiles: string[] } }).refresh.profiles).toEqual([
-      '/home/u/.tenjin',
-      '/home/u/.tenjin-shelf',
+      join(dir, '.tenjin'),
+      join(dir, '.tenjin-shelf'),
     ]);
+  });
+
+  /**
+   * The detected paths come out of a settings file this CLI does not own, and
+   * `install --refresh` converges surfaces rather than creating them - but the
+   * process around it would mkdir the tree on its way out. So a path that is not
+   * already a directory is reported, never visited.
+   */
+  it('never visits a detected data dir that is not an existing directory', async () => {
+    const { ctx } = makeCtx();
+    const spawned = scriptedSpawn([]);
+    const real = await profileDir('.tenjin');
+    const planted = join(dir, 'never-created');
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: spawned.impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => [
+          { dataDir: real, scripts: [] },
+          { dataDir: planted, scripts: [] },
+        ],
+      }),
+    );
+    expect(spawned.refreshes().map((c) => c.env?.TENJIN_DATA_DIR)).toEqual([real]);
+    expect(existsSync(planted)).toBe(false);
+    const data = result.data as { refresh: { profiles: string[]; failed: string[]; fix?: string } };
+    expect(data.refresh.profiles).toEqual([real]);
+    expect(data.refresh.failed).toEqual([planted]);
+    expect(data.refresh.fix).toContain('tenjin install');
+  });
+
+  /**
+   * Each profile costs a spawn and up to a minute, and the list is read out of a
+   * file anything on the machine can append to, so N planted entries would cost
+   * N minutes of an agent's turn plus N registry requests.
+   */
+  it('caps how many profiles one update will refresh', async () => {
+    const { ctx } = makeCtx();
+    const spawned = scriptedSpawn([]);
+    const planted = await Promise.all(
+      Array.from({ length: 12 }, (_, i) => profileDir(`.tenjin-${i}`)),
+    );
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: spawned.impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => planted.map((dataDir) => ({ dataDir, scripts: [] })),
+      }),
+    );
+    expect(spawned.refreshes().length).toBe(8);
+    const data = result.data as { refresh: { profiles: string[]; failed: string[] } };
+    expect(data.refresh.profiles).toEqual(planted.slice(0, 8));
+    // The remainder is named rather than silently dropped.
+    expect(data.refresh.failed).toEqual(planted.slice(8));
   });
 
   it('refreshes the invoking profile only when no hooks are registered', async () => {
@@ -851,6 +922,7 @@ describe('runUpdate: the post-swap refresh', () => {
    * lands here as "unknown option" and costs a warn rather than a wedge.
    */
   it('warns and names the manual command when a refresh fails, and still reports updated', async () => {
+    const shelf = await profileDir('.tenjin-shelf');
     for (const outcome of [
       { kind: 'exit', code: 1 },
       { kind: 'timeout' },
@@ -863,16 +935,16 @@ describe('runUpdate: the post-swap refresh', () => {
         await deps({
           spawnImpl: scriptedSpawn([{ kind: 'exit', code: 0 }, outcome]).impl,
           refreshCommand: ENTRY,
-          detectHookOwners: async () => [{ dataDir: '/home/u/.tenjin-shelf', scripts: [] }],
+          detectHookOwners: async () => [{ dataDir: shelf, scripts: [] }],
         }),
       );
       const data = result.data as { updated: boolean; refresh: { failed: string[]; fix?: string } };
       expect(data.updated).toBe(true);
-      expect(data.refresh.failed).toEqual(['/home/u/.tenjin-shelf']);
+      expect(data.refresh.failed).toEqual([shelf]);
       expect(data.refresh.fix).toContain('tenjin install');
       const lines = result.humanLines?.join(' ') ?? '';
       expect(lines).toContain('Could not refresh');
-      expect(lines).toContain('/home/u/.tenjin-shelf');
+      expect(lines).toContain(shelf);
       expect(lines).toContain('tenjin install');
     }
   });

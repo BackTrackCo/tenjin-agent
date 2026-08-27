@@ -1,5 +1,5 @@
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir } from './paths';
@@ -313,6 +313,34 @@ function ownsEntry(entry: unknown, scriptFile: string): boolean {
   return handlers.some(
     (h) => isPlainObject(h) && typeof h.command === 'string' && h.command.includes(scriptFile),
   );
+}
+
+/**
+ * Is this entry ours AND already pointed at `dataDir`? The second half is what
+ * {@link refreshHooks} needs and {@link wireSearchHooks} must not have.
+ *
+ * The filename match above is deliberately blind to which directory an entry
+ * names, so the writer recognizes a moved data dir and rewrites it rather than
+ * duplicating it. A refresh runs ONCE PER DETECTED PROFILE over the same
+ * settings file, so that blindness there means every pass claims every other
+ * pass's entries: two profiles leave the last one in map order owning every
+ * event, and a shelf profile with `push: on` would widen the default profile's
+ * WebSearch matcher. Matching on the entry's OWN data dir keeps each pass to the
+ * entries it wrote; a profile whose entry names a dir nobody detected simply has
+ * no pass to converge it, which is the same answer a refresh gives any surface
+ * that is not there.
+ */
+function ownsEntryUnder(entry: unknown, scriptFile: string, dataDir: string): boolean {
+  if (!ownsEntry(entry, scriptFile)) return false;
+  const handlers = (entry as { hooks: unknown[] }).hooks;
+  const want = resolve(dataDir);
+  return handlers.some((h) => {
+    if (!isPlainObject(h) || typeof h.command !== 'string') return false;
+    const owner = hookOwnerOf(h.command);
+    return (
+      owner !== null && basename(owner.script) === scriptFile && resolve(owner.dataDir) === want
+    );
+  });
 }
 
 interface HookSpec {
@@ -955,17 +983,23 @@ function unquoteFromShell(token: string): string {
  * The data dir behind one settings command, or null when the command is not one
  * of ours.
  *
- * THREE shape checks, all required, because this answer decides which profile an
+ * FOUR shape checks, all required, because this answer decides which profile an
  * unattended `update` re-materializes: the command must be `node <path>`, the
- * basename must be one of our generated script names, and the parent directory
- * must be `hooks`. The last is what makes `dirname(dirname(path))` the data dir
- * rather than a guess — {@link hooksDir} is `join(dataDir, 'hooks')`, so any
- * other parent means the path did not come from this CLI and its grandparent is
- * nothing in particular.
+ * path must be ABSOLUTE, the basename must be one of our generated script names,
+ * and the parent directory must be `hooks`. The last is what makes
+ * `dirname(dirname(path))` the data dir rather than a guess — {@link hooksDir} is
+ * `join(dataDir, 'hooks')`, so any other parent means the path did not come from
+ * this CLI and its grandparent is nothing in particular.
+ *
+ * Absoluteness is its own check because this writer never emits a relative
+ * command, while a hand-edited `node hooks/tenjin-stop.mjs` would answer with the
+ * data dir `.` and be resolved against whatever cwd the reader happens to have —
+ * `homedir()` in the refresh child, which is not a profile anybody registered.
  */
 function hookOwnerOf(command: string): { dataDir: string; script: string } | null {
   if (!command.startsWith('node ')) return null;
   const script = unquoteFromShell(command.slice('node '.length).trim());
+  if (!isAbsolute(script)) return null;
   if (!TENJIN_HOOK_SCRIPT.test(basename(script))) return null;
   const dir = dirname(script);
   if (basename(dir) !== 'hooks') return null;
@@ -1033,6 +1067,12 @@ export interface HookRefreshResult {
  * gets none. So an unattended caller (`tenjin update`) can run it on any machine
  * without turning an upgrade into an install.
  *
+ * ONE PROFILE'S ENTRIES, NEVER ANOTHER'S. `update` runs this once per detected
+ * profile against the SAME settings file, so entries are matched on their own
+ * data dir as well as the script filename (see {@link ownsEntryUnder}). Without
+ * that each pass would claim every pass's entries and the last one would own
+ * every event.
+ *
  * `push` is read from the machine's own config by the caller rather than
  * defaulted here, because it decides the WebSearch entry's matcher: planning
  * `push: true` on a machine with the experiment off would rewrite the existing
@@ -1093,7 +1133,10 @@ export async function refreshHooks(opts: {
   for (const spec of specs(dataDir, { push })) {
     const list = nextHooks[spec.event];
     if (!Array.isArray(list)) continue;
-    const idx = list.findIndex((e) => ownsEntry(e, spec.scriptFile));
+    // Scoped to entries already under THIS pass's data dir (see
+    // {@link ownsEntryUnder}); the writer's filename-only match would let one
+    // profile's pass repoint another profile's entries at its own hooks dir.
+    const idx = list.findIndex((e) => ownsEntryUnder(e, spec.scriptFile, dataDir));
     // The one branch that separates this from the writer: no entry means no
     // entry. An install adds it; a refresh has nothing to converge.
     if (idx === -1) continue;
@@ -1116,9 +1159,11 @@ export async function refreshHooks(opts: {
     return { path, scriptsDir, scripts, updated, alreadyPresent, ...warn() };
   }
 
-  // The same two compares the writer makes, for the same reasons: the first
-  // refuses before a byte is written, the second sits adjacent to the commit so
-  // a harness writing settings.json during the script pass is not erased.
+  // ONE compare, where the writer makes two, and it covers both windows only
+  // because of an ordering this function depends on: `writeOwnedScripts` ran
+  // BEFORE `inspectSettings` read `raw`, so `raw` is already post-script-pass and
+  // a harness that wrote settings.json during that pass shows up here. Move the
+  // script write below the read and this needs the writer's second compare back.
   const changed = async (): Promise<boolean> =>
     (await readFile(path, 'utf8').catch(() => null)) !== raw;
   if (await changed()) {

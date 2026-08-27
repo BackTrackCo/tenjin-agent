@@ -318,7 +318,7 @@ export async function runInstall(
   // flag. A refresh shares none of the five decisions, and the guarantee it
   // makes — no prompt, no wallet, no config write, no new surface — is one a
   // reader can only check by there being no path from here into any of them.
-  if (input.refresh === true) return runInstallRefresh(ctx, deps);
+  if (input.refresh === true) return runInstallRefresh(ctx, deps, input.dryRun === true);
   return withInterruptGuard((markPhase) => installBody(input, ctx, deps, markPhase));
 }
 
@@ -345,6 +345,10 @@ export async function runInstall(
  * an operator runs `tenjin install` on purpose, and the run reports which ones
  * are waiting so the choice is visible rather than silent.
  *
+ * THE EXIT CODE CARRIES THE VERDICT. `update` reads the child's outcome and
+ * nothing else, so a run that refused or found nothing to converge exits
+ * non-zero rather than reporting success; see the throw sites below.
+ *
  * COMPATIBILITY CONTRACT. `--refresh` must keep working, with this name and this
  * "changes nothing that does not already exist" meaning, from its first release
  * onward: every OLD `update` invokes it on the NEXT version's binary, so this
@@ -354,8 +358,20 @@ export async function runInstall(
  * upgrading from before the rename on stale hook scripts. Change the behavior
  * behind it, not the contract.
  */
-async function runInstallRefresh(ctx: CommandContext, deps: InstallDeps): Promise<CommandResult> {
+async function runInstallRefresh(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  dryRun: boolean,
+): Promise<CommandResult> {
   const env = deps.env ?? process.env;
+  // Refused rather than honoured, because this dispatch sits ABOVE the only
+  // place `dryRun` is read: forwarding it would write every script and commit
+  // settings.json against the flag's own help text.
+  if (dryRun) {
+    throw new CliError('USAGE', '`--refresh` and `--dry-run` cannot be combined.', {
+      fix: 'Run `tenjin install --dry-run` to preview a full install, or `tenjin install --refresh` to re-materialize what is already there.',
+    });
+  }
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) {
     throw new CliError(
@@ -397,7 +413,15 @@ async function runInstallRefresh(ctx: CommandContext, deps: InstallDeps): Promis
   const permissions = {
     path: probe.satisfied?.path ?? claudeSettingsPath(home),
     alreadyPresent: probe.satisfied?.alreadyPresent ?? [],
-    /** Rules a `tenjin install` would write. Never written here; see the header. */
+    /**
+     * Rules a `tenjin install` would write. Never written here; see the header.
+     *
+     * KNOWN GAP, deliberately left: this is recomputed from the settings file
+     * alone and nothing persists a decline, so a machine installed with
+     * `--no-allow-free-verbs` reports the full set on every refresh. Answering it
+     * properly needs persisted per-rule state, which is a decision about consent
+     * and not part of a re-materialize. Tracked as tenjin-agent#234.
+     */
     pending: probe.pending ?? [],
   };
 
@@ -407,27 +431,47 @@ async function runInstallRefresh(ctx: CommandContext, deps: InstallDeps): Promis
     hooks.updated.length > 0 ||
     hooks.alreadyPresent.length > 0;
   const data = { refresh: true, dataDir: ctx.dataDir, skills, hooks, permissions, touched };
-  return { data, humanLines: refreshLines(hooks, skills, permissions, ctx.dataDir, touched) };
+
+  // THE EXIT CODE IS THE REPORT. `update` spawns this and reads nothing but the
+  // outcome, so a refusal that returned success would reach the operator as
+  // "Refreshed the skills and hook scripts for <dir>" over a machine where
+  // nothing was refreshed — the exact reassurance this whole path exists to
+  // remove (tenjin-agent#171). The two non-success shapes:
+  //
+  //  - `warning`: `refreshHooks` declined to write (a link where the hooks dir
+  //    belongs, an unreadable settings file, a file that changed underneath).
+  //  - `!touched`: nothing of ours is materialized here at all.
+  //
+  // Both are REFUSED (exit 3) rather than a failure: nothing went wrong, this
+  // run simply had nothing it was allowed to converge, and `update`'s warn path
+  // already names `tenjin install` and never fails the upgrade.
+  if (!touched) {
+    throw new CliError(
+      'REFUSED',
+      `Nothing to refresh for ${ctx.dataDir}: no Tenjin skills or hook scripts are materialized here.`,
+      { fix: 'Run `tenjin install` to set this machine up.', details: data },
+    );
+  }
+  if (hooks.warning !== undefined) {
+    throw new CliError('REFUSED', hooks.warning, {
+      fix: 'Run `tenjin install` to bring the skills and hook scripts up to this version.',
+      details: data,
+    });
+  }
+  return { data, humanLines: refreshLines(hooks, skills, permissions, ctx.dataDir) };
 }
 
 /**
- * What the refresh did, as lines. LOUD about the no-op: a machine where nothing
- * was ever materialized has to say so, because the alternative is an upgrade
- * reporting a successful refresh of nothing at all.
+ * What the refresh did, as lines. Reached only once the run has something to
+ * report: the no-op and the refusals leave through {@link CliError} above, so
+ * this never has to describe a refresh that did not happen.
  */
 function refreshLines(
   hooks: HookRefreshResult,
   skills: HealOutcome,
   permissions: { pending: string[] },
   dataDir: string,
-  touched: boolean,
 ): string[] {
-  if (!touched) {
-    return [
-      `Nothing to refresh for ${dataDir}: no Tenjin skills or hook scripts are materialized here.`,
-      'Run `tenjin install` to set this machine up.',
-    ];
-  }
   const lines = [`Refreshed what is already installed for ${dataDir}.`];
   lines.push(
     skills.ran
@@ -444,7 +488,6 @@ function refreshLines(
       `- hook entries: updated ${hooks.updated.join(', ')} in ${hooks.path ?? 'settings'}`,
     );
   }
-  if (hooks.warning !== undefined) lines.push(`- ${hooks.warning}`);
   if (permissions.pending.length > 0) {
     lines.push(
       `- permissions: ${permissions.pending.length} rule(s) this version would add were NOT written; run \`tenjin install\` to grant them.`,

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,13 @@ import { CliError } from '../lib/errors';
 import { MANAGERS, classifyManager, refuse, resolveManagerScript } from '../lib/install-location';
 import type { Delegable } from '../lib/install-location';
 import { emitWriteNotice, sanitizeForTerminal } from '../lib/output';
-import { channelTag, fetchDistTags, isNewer, resolveTarget } from '../lib/update-check';
+import {
+  NUDGE_OPT_OUT,
+  channelTag,
+  fetchDistTags,
+  isNewer,
+  resolveTarget,
+} from '../lib/update-check';
 import { detectHookOwners } from '../lib/harness-hooks';
 import type { HookOwner } from '../lib/harness-hooks';
 import type { CommandContext, CommandResult } from '../context';
@@ -258,7 +264,7 @@ export async function runUpdate(
     `tenjin update: replaced the global tenjin-cli with ${latest} via ${manager}`,
   );
 
-  const refresh = await refreshProfiles(ctx, deps, onOutput);
+  const refresh = await refreshProfiles(ctx, deps);
   return {
     data: { ...data(true), refresh },
     humanLines: [`Updated tenjin-cli ${current} -> ${latest}.`, refreshLine(refresh)],
@@ -269,11 +275,25 @@ export async function runUpdate(
  *  registry: a minute is already generous, and `update` must not hang a turn. */
 const REFRESH_TIMEOUT_MS = 60_000;
 
+/**
+ * How many detected profiles one `update` will refresh. Each costs a spawn and
+ * up to {@link REFRESH_TIMEOUT_MS}, and the list is read out of a settings file
+ * anything on the machine can append to, so an uncapped loop turns N planted
+ * entries into N minutes of an agent's turn. Well above any real machine: the
+ * default profile plus a shelf is two.
+ */
+const MAX_REFRESH_PROFILES = 8;
+
 /** What the post-swap re-materialize did, per profile. */
 export interface RefreshOutcome {
   /** Data dirs a refresh was run for, whether or not it succeeded. */
   profiles: string[];
-  /** Profiles whose refresh did not exit 0, with the manual command to finish them. */
+  /**
+   * Profiles this update did not bring up to date, with the manual command to
+   * finish them. Both halves land here: a refresh that ran and did not report
+   * success, and one that was never run at all (no entry to re-exec, a data dir
+   * that is not a directory, past the {@link MAX_REFRESH_PROFILES} cap).
+   */
   failed: string[];
   /** Present when at least one profile failed; names `tenjin install`. */
   fix?: string;
@@ -305,18 +325,29 @@ export interface RefreshOutcome {
  * profile to find, and gets one refresh for the invoking one.
  *
  * NEVER FAILS THE UPDATE. The swap already happened and is the thing the
- * operator asked for. A refusal, a crash, a timeout, or an older-binary
- * "unknown option --refresh" all land here as a warn naming the manual command.
+ * operator asked for. A refusal, a run with nothing to converge, a crash, a
+ * timeout, or an older-binary "unknown option --refresh" all land here as a warn
+ * naming the manual command.
  */
-async function refreshProfiles(
-  ctx: CommandContext,
-  deps: UpdateDeps,
-  onOutput: (chunk: string) => void,
-): Promise<RefreshOutcome> {
+async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<RefreshOutcome> {
   const home = deps.homeDir ?? homedir();
   const detect = deps.detectHookOwners ?? detectHookOwners;
   const owners = await detect(home).catch(() => []);
-  const profiles = owners.length > 0 ? owners.map((o) => o.dataDir) : [ctx.dataDir];
+  const candidates = owners.length > 0 ? owners.map((o) => o.dataDir) : [ctx.dataDir];
+
+  // A detected data dir is a path READ OUT of settings.json, not a directory
+  // this CLI put there, and the child would create it: `install --refresh`
+  // converges surfaces rather than materializing them, but the process around it
+  // mkdirs the tree for the update cache on its way out. So a path that is not
+  // already a directory is reported unrefreshed instead of visited. The cap is
+  // the other half of the same argument (see MAX_REFRESH_PROFILES).
+  const present: string[] = [];
+  const unrun: string[] = [];
+  for (const dataDir of candidates) {
+    (isExistingDir(dataDir) ? present : unrun).push(dataDir);
+  }
+  const profiles = present.slice(0, MAX_REFRESH_PROFILES);
+  unrun.push(...present.slice(profiles.length));
 
   const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
   // Nothing safe to re-exec: no argv (an embedder, a stripped argv), or a path
@@ -325,17 +356,30 @@ async function refreshProfiles(
   // script gets rewritten by the wrong binary — and a refresh that ran the OLD
   // build would report success while writing the bytes the update just left.
   if (entry === null) {
-    return { profiles: [], failed: profiles, fix: REFRESH_MANUAL_FIX };
+    return { profiles: [], failed: candidates, fix: REFRESH_MANUAL_FIX };
   }
 
-  const failed: string[] = [];
+  const failed = [...unrun];
   for (const dataDir of profiles) {
     const outcome = await (deps.spawnImpl ?? spawnCapture)(
       process.execPath,
       [entry, 'install', '--refresh'],
-      { cwd: homedir(), timeoutMs: REFRESH_TIMEOUT_MS, env: { TENJIN_DATA_DIR: dataDir } },
-      onOutput,
+      {
+        cwd: homedir(),
+        timeoutMs: REFRESH_TIMEOUT_MS,
+        // TENJIN_DATA_DIR aims the child at this profile; the nudge opt-out is
+        // what keeps it from touching any other file in there (lib/update-check).
+        env: { TENJIN_DATA_DIR: dataDir, [NUDGE_OPT_OUT]: '1' },
+      },
+      // A collecting sink, not the manager's live echo. npm's chatter is minutes
+      // of progress a human wants to see; this child emits one envelope on a
+      // pipe, and painting that JSON into the human's stderr is noise. Its
+      // OUTCOME is the report, below.
+      dropOutput,
     );
+    // The child's exit code IS the verdict: `install --refresh` exits non-zero
+    // when it refused or found nothing to converge, so a machine that never ran
+    // `install` warns here instead of being told its hooks were refreshed.
     if (outcome.kind !== 'exit' || outcome.code !== 0) failed.push(dataDir);
   }
   return {
@@ -343,6 +387,16 @@ async function refreshProfiles(
     failed,
     ...(failed.length > 0 ? { fix: REFRESH_MANUAL_FIX } : {}),
   };
+}
+
+/** Drains the refresh child's pipe without echoing it; see the call site. */
+const dropOutput = (): void => {};
+
+/** A path that already exists AND is a directory. Follows links on purpose: a
+ *  data dir behind a symlink is an ordinary machine layout, an absent one is not
+ *  a profile this command may create. */
+function isExistingDir(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
 const REFRESH_MANUAL_FIX =

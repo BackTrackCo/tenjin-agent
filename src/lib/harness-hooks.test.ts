@@ -711,6 +711,9 @@ describe('detectHookOwners', () => {
           { hooks: [{ type: 'command', command: nodeCmd(`/opt/${WEBSEARCH_HOOK_FILE}`) }] },
           // Not `node <path>` at all.
           { hooks: [{ type: 'command', command: `bash ${join(data, 'hooks', STOP_HOOK_FILE)}` }] },
+          // Our shape, but RELATIVE: the data dir would be `.`, resolved against
+          // whatever cwd the reader has rather than a profile anyone registered.
+          { hooks: [{ type: 'command', command: `node hooks/${STOP_HOOK_FILE}` }] },
           // A shape the harness allows and this module never writes.
           { hooks: [{ type: 'command' }] },
           { hooks: 'not an array' },
@@ -886,6 +889,71 @@ describe('refreshHooks', () => {
     expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
     // The scripts are ours and were still brought up to date.
     expect(result.scriptsDir).toBe(join(data, 'hooks'));
+  });
+
+  /**
+   * THE PINNED CROSS-PROFILE CASE. `update` runs one pass per detected profile
+   * over the SAME settings file, so a filename-only match makes every pass claim
+   * every other pass's entries: the last profile in order would own every event
+   * and the others would have no registered hook at all. Two further symptoms
+   * ride on the same match, both asserted below: the shelf pass would repoint the
+   * default profile's WebSearch entry at the shelf's hooks dir, and — reading
+   * `push` from the SHELF's config — widen that entry's matcher to a tool the
+   * default profile never armed.
+   */
+  it('leaves the other profile’s entries on their own dir and matcher', async () => {
+    const shelf = await mkdtemp(join(tmpdir(), 'tenjin-hooks-shelf-'));
+    const nodeCmd = (path: string): string => `node ${quoteForShell(path, 'linux')}`;
+    const webSearchOf = (s: Record<string, unknown>): Entry | undefined =>
+      entriesFor(s, 'PreToolUse').find((e) => e.hooks[0]?.command.includes(WEBSEARCH_HOOK_FILE));
+    try {
+      // One machine, two profiles: WebSearch under `data`, Stop under `shelf`.
+      // Both timeouts drifted, so each pass has a real rewrite to make.
+      await writeSettings({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'WebSearch',
+              hooks: [
+                {
+                  type: 'command',
+                  command: nodeCmd(join(data, 'hooks', WEBSEARCH_HOOK_FILE)),
+                  timeout: 999,
+                },
+              ],
+            },
+          ],
+          Stop: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: nodeCmd(join(shelf, 'hooks', STOP_HOOK_FILE)),
+                  timeout: 999,
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      const first = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+      // `push: true` is the shelf's own config, which is exactly the widening
+      // that must not reach the default profile's entry.
+      const second = await refreshHooks({ homeDir: home, dataDir: shelf, push: true });
+      expect(first.updated).toEqual(['PreToolUse']);
+      expect(second.updated).toEqual(['Stop']);
+
+      const settings = await readSettings();
+      expect(webSearchOf(settings)?.hooks[0]?.command).toContain(join(data, 'hooks'));
+      expect(webSearchOf(settings)?.hooks[0]?.timeout).not.toBe(999);
+      expect(webSearchOf(settings)?.matcher).toBe('WebSearch');
+      const stop = entriesFor(settings, 'Stop')[0];
+      expect(stop?.hooks[0]?.command).toContain(join(shelf, 'hooks'));
+      expect(stop?.hooks[0]?.timeout).not.toBe(999);
+    } finally {
+      await rm(shelf, { recursive: true, force: true });
+    }
   });
 
   it('refuses to commit over a settings file that changed underneath it', async () => {

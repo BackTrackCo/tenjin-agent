@@ -4194,15 +4194,57 @@ describe('runInstall --refresh', () => {
     expect((result.data as { hooks: { scripts: string[] } }).hooks.scripts).toEqual([script]);
   });
 
-  it('says so loudly on a machine where nothing was ever materialized', async () => {
-    const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
-    expect((result.data as { touched: boolean }).touched).toBe(false);
-    const lines = result.humanLines?.join(' ') ?? '';
-    expect(lines).toContain('Nothing to refresh');
-    expect(lines).toContain('tenjin install');
+  /**
+   * The parent reads the EXIT CODE and nothing else, so a no-op that returned
+   * success would reach the operator as "Refreshed the skills and hook scripts
+   * for <dir>" on a machine where nothing was refreshed.
+   */
+  it('exits non-zero on a machine where nothing was ever materialized', async () => {
+    const err = await caught(() => runInstall({ refresh: true }, makeCtx(), refreshDeps()));
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.exitCode).not.toBe(0);
+    expect(err.message).toContain('Nothing to refresh');
+    expect(err.fix).toContain('tenjin install');
+    expect((err.details as { touched: boolean }).touched).toBe(false);
     // And it materialized none of the things it just declined to refresh.
     expect(existsSync(join(data, 'hooks'))).toBe(false);
     expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  /** The other half of the same rule: a refusal to write is not a refresh either. */
+  it('exits non-zero when the hook writer refused, and carries the reason', async () => {
+    await installed();
+    const elsewhere = await mkdtemp(join(tmpdir(), 'tenjin-refresh-elsewhere-'));
+    await rm(join(data, 'hooks'), { recursive: true });
+    await symlink(elsewhere, join(data, 'hooks'));
+
+    const err = await caught(() => runInstall({ refresh: true }, makeCtx(), refreshDeps()));
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.exitCode).not.toBe(0);
+    expect(err.message).toContain('not a directory');
+    expect(err.fix).toContain('tenjin install');
+    await rm(elsewhere, { recursive: true, force: true });
+  });
+
+  /**
+   * `--refresh` dispatches ABOVE the only place `dryRun` is read, so honouring
+   * the pair would write every script and commit settings.json against the
+   * flag's own help text.
+   */
+  it('refuses --dry-run instead of writing through it', async () => {
+    await installed();
+    const settingsBefore = await readFile(settingsPath(), 'utf8');
+    const script = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
+    const older = `#!/usr/bin/env node\n${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n// older\n`;
+    await writeFile(script, older);
+
+    const err = await caught(() =>
+      runInstall({ refresh: true, dryRun: true }, makeCtx(), refreshDeps()),
+    );
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('USAGE');
+    expect(await readFile(script, 'utf8')).toBe(older);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(settingsBefore);
   });
 
   /**
