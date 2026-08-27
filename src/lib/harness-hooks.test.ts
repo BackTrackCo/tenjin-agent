@@ -217,6 +217,7 @@ describe('wireSearchHooks: push experiment entries', () => {
     expect((settings.hooks as Record<string, unknown>).PostToolUse).toBeUndefined();
     expect((settings.hooks as Record<string, unknown>).PostToolUseFailure).toBeUndefined();
     expect((settings.hooks as Record<string, unknown>).SubagentStart).toBeUndefined();
+    expect((settings.hooks as Record<string, unknown>).SubagentStop).toBeUndefined();
     // The BODIES are written unconditionally, and only the entries are gated:
     // `push off` never unwires, so bodies that follow the entry plan freeze at
     // whatever version was on disk when push was last on. An unregistered body
@@ -247,7 +248,7 @@ describe('wireSearchHooks: push experiment entries', () => {
     expect(entriesFor(await readSettings(), 'UserPromptSubmit')).toHaveLength(1);
   });
 
-  it('wires all four push scripts across six entries when push is true', async () => {
+  it('wires all four push scripts across seven entries when push is true', async () => {
     const result = await wireSearchHooks({
       homeDir: home,
       dataDir: data,
@@ -262,6 +263,7 @@ describe('wireSearchHooks: push experiment entries', () => {
       'PostToolUse',
       'PostToolUseFailure',
       'SubagentStart',
+      'SubagentStop',
     ]);
     const pushFiles = [
       PUSH_PROMPT_HOOK_FILE,
@@ -274,29 +276,31 @@ describe('wireSearchHooks: push experiment entries', () => {
     }
     // The two numbers the docs, the help text and the disclosure all quote, held
     // here so a new arm cannot make every one of them wrong in silence: FOUR
-    // scripts, SIX entries. Entries, not events — `added` above collapses the
-    // three PreToolUse entries into one.
+    // scripts, SEVEN entries. Entries, not events — `added` above collapses the
+    // three PreToolUse entries into one, and the subagent script carries two of
+    // the seven (tenjin-agent#228 added its SubagentStop half).
     expect(pushFiles).toHaveLength(4);
-    expect(result.pushArms).toBe(6);
-    // FIVE events, which is the number the prose kept getting wrong: the four
+    expect(result.pushArms).toBe(7);
+    // SIX events, which is the number the prose kept getting wrong: the five
     // push-only ones plus PreToolUse, which the churn half shares with the base
-    // bundle. PostToolUse carries two of the six on its own.
+    // bundle. PostToolUse carries two of the seven on its own.
     expect(
       new Set([
         'UserPromptSubmit',
         'PostToolUse',
         'PostToolUseFailure',
         'SubagentStart',
+        'SubagentStop',
         'PreToolUse',
       ]).size,
-    ).toBe(5);
+    ).toBe(6);
     const settingsNow = await readSettings();
     const pushEntryEvents = HOOK_EVENTS.filter((event) =>
       entriesFor(settingsNow, event).some((e) =>
         pushFiles.some((f) => e.hooks[0]!.command.includes(f)),
       ),
     );
-    expect(pushEntryEvents).toHaveLength(5);
+    expect(pushEntryEvents).toHaveLength(6);
     // The base bundle's own events, uncounted by the push half.
     expect(result.searchWrote).toBe(3);
 
@@ -322,10 +326,14 @@ describe('wireSearchHooks: push experiment entries', () => {
     expect(postFailure[0]!.matcher).toBe(PUSH_FAILURE_MATCHER);
     expect(postFailure[0]!.hooks[0]!.command).toContain(PUSH_FAILURE_HOOK_FILE);
 
-    const subagent = entriesFor(settings, 'SubagentStart');
-    expect(subagent).toHaveLength(1);
-    expect(subagent[0]!.matcher).toBeUndefined();
-    expect(subagent[0]!.hooks[0]!.command).toContain(PUSH_SUBAGENT_HOOK_FILE);
+    // ONE SCRIPT, TWO EVENTS: the subagent arm owns both ends of a child, the
+    // way the failure arm owns both spellings of a failed Bash call.
+    for (const event of ['SubagentStart', 'SubagentStop'] as const) {
+      const subagent = entriesFor(settings, event);
+      expect(subagent, event).toHaveLength(1);
+      expect(subagent[0]!.matcher).toBeUndefined();
+      expect(subagent[0]!.hooks[0]!.command).toContain(PUSH_SUBAGENT_HOOK_FILE);
+    }
 
     const prompt = entriesFor(settings, 'UserPromptSubmit');
     expect(prompt).toHaveLength(1);
@@ -338,6 +346,7 @@ describe('wireSearchHooks: push experiment entries', () => {
       'PostToolUse',
       'PostToolUseFailure',
       'SubagentStart',
+      'SubagentStop',
     ]) {
       for (const entry of entriesFor(settings, event)) {
         expect(entry.hooks[0]!.timeout).toBe(PUSH_HOOK_TIMEOUT_SECONDS);
@@ -365,12 +374,13 @@ describe('wireSearchHooks: push experiment entries', () => {
       'PostToolUse',
       'PostToolUseFailure',
       'SubagentStart',
+      'SubagentStop',
     ]);
     expect(await readFile(settingsPath(), 'utf8')).toBe(first);
   });
 
   /**
-   * Once wired, push:false on a later call must not tear the six push entries
+   * Once wired, push:false on a later call must not tear the seven push entries
    * back out — `tenjin push off` is a config write, never a re-wire (see
    * commands/push.ts), and this path is the later `tenjin install`.
    *
@@ -387,8 +397,13 @@ describe('wireSearchHooks: push experiment entries', () => {
 
     const settings = await readSettings();
     expect(entriesFor(settings, 'PreToolUse')[0]!.matcher).toBe('WebSearch');
-    // Every push entry is still registered, on all four of its events.
-    for (const event of ['UserPromptSubmit', 'PostToolUseFailure', 'SubagentStart']) {
+    // Every push entry is still registered, on all five of its events.
+    for (const event of [
+      'UserPromptSubmit',
+      'PostToolUseFailure',
+      'SubagentStart',
+      'SubagentStop',
+    ]) {
       expect(entriesFor(settings, event), event).toHaveLength(1);
     }
     expect(entriesFor(settings, 'PostToolUse')).toHaveLength(2);

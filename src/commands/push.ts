@@ -86,8 +86,9 @@ export interface PushOnDeps {
  *    that statement: it only means no past install passed `--harness`, which is
  *    the common case and wires as before.
  *
- * And a run that does wire six entries into the operator's home has to disclose
- * what they do, in the same words `install` uses.
+ * And a run that does wire seven entries into the operator's home has to disclose
+ * what they do, in the same words `install` uses, including the one arm that can
+ * hold a stopping subagent open for a turn.
  */
 export async function runPushOn(
   ctx: CommandContext,

@@ -1048,7 +1048,7 @@ export function hooksDisclosure(
   // So it is one of the arms, not something they run beside, and the count
   // excludes it.
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, subagent dispatches, and the files you read and re-edit; a failed build or test is answered from this machine's own record of fixes and its error text is never sent anywhere. Every arm only adds context beside the call; none can block or change it. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, subagent dispatches, and the files you read and re-edit; a failed build or test is answered from this machine's own record of fixes and its error text is never sent anywhere. Every arm only adds context beside the call; none can block or change it. One arm does cost a turn: when a subagent finishes on an open loop, the SubagentStop arm asks that subagent once for its durable finding and records what it says on this machine, unpublished, and nothing is sent anywhere. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same

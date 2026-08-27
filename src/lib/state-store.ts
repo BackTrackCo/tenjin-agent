@@ -192,6 +192,19 @@ export const STORE_RELAY_WINDOW_MS = 120_000;
 export const STORE_CACHE_SLOT_MAX = 8;
 
 /**
+ * The `events.hook` value a captured child finding is filed under.
+ *
+ * ZERO DDL, BY DESIGN. A finding is one `events` row whose JSON `data` carries
+ * the child's own words, the agent that produced them and the search the ask
+ * was signalled by (the store's designated extension rule). It gets its own
+ * `hook` value rather than a JSON discriminator so the reader is an ordinary
+ * indexed `(session, at)` select and no query in a hook depends on SQLite's
+ * JSON functions. tenjin-agent#228's PR 4 promotes these rows to a
+ * `child_findings` table; until then this string IS the queue.
+ */
+export const STORE_FINDING_HOOK = 'finding';
+
+/**
  * The whole schema, run once at `user_version = 0` and never again: a database
  * that already has a schema is stepped up by {@link STORE_MIGRATIONS} instead,
  * so this text is the version 1 shape and stays it.
@@ -665,6 +678,32 @@ export const STORE_SQL = {
        AND (source IS NULL OR source IN ('cli', 'websearch-hook'))
        AND (? = '' OR session = ? OR session = '')
      ORDER BY at DESC, rowid DESC LIMIT ?`,
+  /**
+   * The newest dispatch lookup this session left OPEN, inside the window.
+   *
+   * The SubagentStop capture ask's first signal (tenjin-agent#228): a child
+   * dispatched against a question the marketplace had no answer for is a child
+   * whose finding nothing else in the session holds. `openLoops` cannot answer
+   * this: it deliberately excludes `dispatch-hook` rows, because the Stop hook
+   * must not nag an operator about the sidecar's own lookups, so the capture
+   * gate asks for exactly the rows that arm filters out. Same
+   * `(session, at)` index, one row.
+   */
+  openDispatchMiss: `SELECT search_id FROM searches
+     WHERE session = ? AND at >= ? AND decision = 'MISS' AND resolved_by IS NULL
+       AND source = 'dispatch-hook'
+     ORDER BY at DESC, rowid DESC LIMIT 1`,
+  /**
+   * The findings children of this session queued, newest first, inside the
+   * window. Read by the Stop hook so the capture ask can name them.
+   *
+   * `hook = 'finding'` rather than a JSON predicate: the generated hooks run on
+   * whatever SQLite `node:sqlite` was built against, and a turn-end read must
+   * not be the one place that assumes the JSON1 extension is present.
+   */
+  queuedFindings: `SELECT uid, at, agent_id, data FROM events
+     WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'
+     ORDER BY at DESC, id DESC LIMIT ?`,
   /** Did this session ask for a search ITSELF? The push arms search on their own
    *  initiative, so their rows are not evidence the session researched anything
    *  — see the Stop hook's \`didResearch\`. */
@@ -1031,6 +1070,20 @@ const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 const STATE_RELAY_SLOT = 'relay:handoff';
 
 const STATE_CAPTURE_ASKED = 'capture_asked';
+/**
+ * Which CHILDREN this session has already asked for a finding, one row per
+ * agent, holding the signal that earned the ask.
+ *
+ * THE CLAIM IS THE ONCE-PER-AGENT RULE. \`SubagentStop\` fires again as soon as
+ * the child has answered the ask, and two hook processes for one agent (a
+ * nested child stopping beside it) would otherwise both read "not asked" and
+ * both block. It is also what the harvest reads: a fenced block is only
+ * harvested from a child this session actually asked.
+ */
+const STATE_AGENT_ASKED_PREFIX = 'capture:agent:';
+/** Which children's findings have already been filed, so a repeated
+ *  \`SubagentStop\` cannot queue the same block twice. */
+const STATE_AGENT_FINDING_PREFIX = 'finding:agent:';
 const STATE_PUBLISHED_PREFIX = 'published:';
 /** The shelf's per-trigger use rates, fetched by the SessionStart primer once
  *  per session for the adaptive cooldown (PUSH_COOLDOWN_* in
@@ -1038,6 +1091,10 @@ const STATE_PUBLISHED_PREFIX = 'published:';
  *  suppressed. */
 const STATE_TRIGGER_RATES = 'trigger_rates';
 const STATE_COOLDOWN_PREFIX = 'cooldown:';
+/** The \`events.hook\` value the child-finding queue lives under, substituted
+ *  from the module's own constant so the writer here and the reader in the Stop
+ *  arm cannot drift apart. */
+const FINDING_HOOK = __FINDING_HOOK__;
 const MACHINE_SESSION = '';
 
 /** The open database, or null once we know we cannot have one. */
@@ -1846,6 +1903,38 @@ function countStatePrefix(sessionId, prefix) {
   ]);
 }
 
+/** The search id of the newest dispatch MISS this session has left open inside
+ *  the window, or null. The capture ask's signal, never a claim. */
+function openDispatchMiss(sessionId, sinceMs) {
+  const row = storeGet(STORE_SQL.openDispatchMiss, [storeSession(sessionId), sinceMs]);
+  return row === null || typeof row.search_id !== 'string' ? null : row.search_id;
+}
+
+/**
+ * The findings this session's children queued, newest first.
+ *
+ * Rows only: what the Stop hook does with them (naming them in the capture ask)
+ * is the caller's business, and PR 4 of tenjin-agent#228 moves the same read
+ * onto a \`child_findings\` table without changing this shape.
+ */
+function queuedFindings(sessionId, sinceMs, limit) {
+  const rows = storeAll(STORE_SQL.queuedFindings, [storeSession(sessionId), sinceMs, limit]);
+  const out = [];
+  for (const row of rows) {
+    const data = storeParse(row.data);
+    if (!isRecord(data)) continue;
+    out.push({
+      uid: typeof row.uid === 'string' ? row.uid : '',
+      at: typeof row.at === 'number' ? row.at : 0,
+      agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
+      agentType: typeof data.agentType === 'string' ? data.agentType : '',
+      searchId: typeof data.searchId === 'string' ? data.searchId : null,
+      body: typeof data.body === 'string' ? data.body : '',
+    });
+  }
+  return out;
+}
+
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */
 function touchSession(sessionId, cwd) {
   storeRun(STORE_SQL.touchSession, [
@@ -2099,7 +2188,8 @@ export function storeSource(): string {
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS))
     .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS))
-    .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX));
+    .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX))
+    .replaceAll('__FINDING_HOOK__', JSON.stringify(STORE_FINDING_HOOK));
 }
 
 // ---------------------------------------------------------------------------

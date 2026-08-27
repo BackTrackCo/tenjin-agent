@@ -25,6 +25,21 @@ import {
 import type { TranscriptLookup } from '../lib/grade';
 import type { CommandContext } from '../context';
 
+/**
+ * The events a `push on` plans an entry on, in plan order. Named here rather
+ * than counted, so a status report that loses one says WHICH one: with nothing
+ * registered at all, every planned event is missing.
+ */
+const PLANNED_PUSH_EVENTS = [
+  'UserPromptSubmit',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'SubagentStart',
+  'SubagentStop',
+  'PostToolUse',
+  'PreToolUse',
+];
+
 let dir: string;
 let home: string;
 beforeEach(async () => {
@@ -245,7 +260,7 @@ describe('runPushOn', () => {
     const lines = result.humanLines ?? [];
     const text = lines.join('\n');
     expect(text).toContain(
-      'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
+      'The push experiment is on, so 7 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
     );
     expect(text).toContain(
       'Every arm only adds context beside the call; none can block or change it.',
@@ -283,7 +298,7 @@ describe('runPushStatus', () => {
       mode: 'off',
       captureMode: 'off',
       scriptsWired: false,
-      hookEntries: { planned: 6, present: 0, path: null },
+      hookEntries: { planned: 7, missing: PLANNED_PUSH_EVENTS, present: 0, path: null },
       ledger: {
         windowDays: 7,
         rows: 0,
@@ -349,20 +364,20 @@ describe('runPushStatus', () => {
     const halfWired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(halfWired.data).toMatchObject({
       scriptsWired: true,
-      hookEntries: { planned: 6, present: 0, path: null },
+      hookEntries: { planned: 7, missing: PLANNED_PUSH_EVENTS, present: 0, path: null },
     });
     const lines = halfWired.humanLines?.join('\n') ?? '';
     expect(lines).toContain('not fully wired yet; run `tenjin push on`');
-    expect(lines).toContain('hook entries: 0/6');
+    expect(lines).toContain('hook entries: 0/7');
 
-    // A real wiring run registers all six.
+    // A real wiring run registers all seven.
     await runPushOn(makeCtx(), { homeDir: home });
     const wired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(wired.data).toMatchObject({
       scriptsWired: true,
-      hookEntries: { planned: 6, present: 6 },
+      hookEntries: { planned: 7, present: 7, missing: [] },
     });
-    expect(wired.humanLines?.join('\n')).toContain('hook entries: 6/6');
+    expect(wired.humanLines?.join('\n')).toContain('hook entries: 7/7');
     expect(wired.humanLines?.join('\n')).not.toContain('not fully wired yet');
 
     // Entries removed behind its back — a half-finished uninstall.
@@ -375,7 +390,7 @@ describe('runPushStatus', () => {
     const gone = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(gone.data).toMatchObject({
       scriptsWired: true,
-      hookEntries: { planned: 6, present: 5 },
+      hookEntries: { planned: 7, present: 6, missing: ['UserPromptSubmit'] },
     });
     expect(gone.humanLines?.join('\n')).toContain('not fully wired yet');
   });

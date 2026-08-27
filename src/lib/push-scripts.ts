@@ -110,6 +110,54 @@ export const PUSH_BODY_TIMEOUT_MS = 1500;
 /** The dispatch cache's shelf life: a subagent that starts later than this
  *  after the lookup is working on something else. */
 export const PUSH_CACHE_TTL_MS = 120_000;
+/**
+ * How far back the SubagentStop capture ask looks for a signal.
+ *
+ * The same hour the dispatch budget is counted over: a child stopping now was
+ * dispatched inside it, and a MISS older than that belongs to work this child
+ * was never sent to do.
+ */
+export const PUSH_CAPTURE_SIGNAL_WINDOW_MS = 60 * 60 * 1000;
+/**
+ * The bound on a harvested finding, in characters.
+ *
+ * A CHILD'S WORDS ARE UNTRUSTED INPUT, and this one is written to the queue a
+ * later `tenjin publish` reads, so the size bound is a safety bound, not a
+ * display one: whatever a child puts between the fences, at most this much of
+ * it is stored, after `scrub()`. Sized for a paragraph, well under the retired
+ * full-body cap, because a finding that needs 6k characters is a document and
+ * the child should write one.
+ */
+export const PUSH_FINDING_MAX_CHARS = 2000;
+/** How much of `last_assistant_message` the harvest reads. The fenced block is
+ *  the end of a final answer; a payload larger than this is truncated from the
+ *  front, never buffered whole a second time. */
+export const PUSH_FINDING_MESSAGE_TAIL = 20000;
+/** The fence the child is asked to mark its finding with, and the one the
+ *  harvest looks for. ONE CONSTANT, so the ask and the parser cannot drift. */
+export const PUSH_FINDING_TAG = 'tenjin-finding';
+/**
+ * What a child is asked for at `SubagentStop`, once, when it stops on an open
+ * loop (tenjin-agent#228).
+ *
+ * ASKED FOR WORDS, NOT FOR A COMMAND. A child may have no Bash, no allowlist
+ * and no tools at all, and the one thing every child can do is write its own
+ * final answer, so the ask ends there and the HOOK does the filing. Nothing
+ * here tells the child to publish: what it says lands in a local queue the
+ * parent's own capture ask names at the end of the session, under the operator's
+ * publish mode, which is the only context that ever had that authority.
+ *
+ * THE FENCE IS THE CONTRACT. The harvest parses one marked block out of
+ * `last_assistant_message`, so the marker has to be stated exactly and the
+ * "nothing durable" arm has to be as easy to take as the block: a child that
+ * invents a finding to satisfy a hook is the failure mode that would poison the
+ * queue.
+ */
+export const SUBAGENT_CAPTURE_REASON =
+  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), state it in your final answer inside a fenced block that opens with ```' +
+  PUSH_FINDING_TAG +
+  ' and closes with ```: a few sentences, self-contained, with no credentials, no customer or account names, and no live data. It is recorded locally for your parent to decide on; nothing is published by saying it. If you settled nothing durable, ignore this and finish as you were.';
+
 /** The churn arm's trigger: the Nth edit to one file in one session. */
 export const PUSH_CHURN_EDITS = 4;
 /** Packages the read arm looks up per session; per Read it takes at most two. */
@@ -2352,9 +2400,23 @@ export function pushFailureHookScript(dataDir: string): string {
  * fix is the one shared row two dispatches used to overwrite and two children
  * used to both read. Every fire that gets as far as opening the store leaves a
  * heartbeat row naming why it ended, delivered or not.
+ *
+ * TWO EVENTS, ONE SCRIPT (the failure arm's precedent). `SubagentStop` closes
+ * the loop the start opens: a child's evidence exists in one context only and
+ * dies with it (tenjin-agent#228). The stop branch records the child's end
+ * unconditionally, then, once per child and only on a signal, spends one extra
+ * child turn asking for the finding in a marked fenced block, which the NEXT
+ * fire harvests out of `last_assistant_message` into the local queue. No parent
+ * harvest arm, no child write access, no findings directory.
  */
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
+const SIGNAL_WINDOW_MS = __SIGNAL_WINDOW__;
+const FINDING_MAX_CHARS = __FINDING_MAX__;
+const MESSAGE_TAIL = __MESSAGE_TAIL__;
+const FINDING_OPEN = __FINDING_OPEN__;
+const FINDING_FENCE = __FINDING_FENCE__;
+const CAPTURE_ASK = __CAPTURE_ASK__;
 
 /**
  * The child pointer: the card head, then a capability ladder instead of one
@@ -2482,10 +2544,223 @@ function takeUsableSlot(sessionId, onReject) {
   return { slot: null, reason };
 }
 
+/**
+ * The child's final answer, bounded, or null when the payload does not carry
+ * one.
+ *
+ * UNDOCUMENTED, THEREFORE OPTIONAL. \`last_assistant_message\` rides the
+ * SubagentStop payload this harness sends today (probed 2026-08-27) and no
+ * published hook contract mentions it. Absent is an ordinary answer: the fire
+ * records why it stayed quiet and ends. Read from the TAIL because a marked
+ * block is the end of a final answer, and because a hook must not hold an
+ * unbounded string.
+ */
+function lastAssistantMessage(input) {
+  const text = input.last_assistant_message;
+  if (typeof text !== 'string' || text.length === 0) return null;
+  return text.length > MESSAGE_TAIL ? text.slice(-MESSAGE_TAIL) : text;
+}
+
+/** The child's own transcript, or null. The deep-evidence pointer for the
+ *  session observer (tenjin-agent#182): a queued finding is one paragraph, and
+ *  this is where the probe trail behind it can still be read. Same bound and
+ *  posture as every other path read off a payload. */
+function agentTranscriptPath(input) {
+  const path = input.agent_transcript_path;
+  return typeof path === 'string' && path.length > 0 && path.length <= 4096 ? path : null;
+}
+
+/**
+ * The marked block out of a child's final answer, scrubbed and bounded, or
+ * null.
+ *
+ * SCRUBBED BEFORE IT IS STORED, not before it is published: this row is the
+ * input to a publish path, and a credential that reaches the queue has already
+ * left the child's context and outlived it. An UNCLOSED fence is read to the
+ * end of the message rather than refused, because the bound makes that safe and
+ * a child that forgot the closing fence still settled the thing.
+ *
+ * ONE LINE OUT, whatever went in: \`clean\` turns control characters into
+ * spaces, which is what makes the stored body safe to splice into the parent's
+ * capture ask without a child's newlines reshaping it.
+ */
+function findingBlock(text) {
+  const open = text.indexOf(FINDING_OPEN);
+  if (open === -1) return null;
+  const start = text.indexOf('\n', open + FINDING_OPEN.length);
+  if (start === -1) return null;
+  const end = text.indexOf(FINDING_FENCE, start + 1);
+  const raw = end === -1 ? text.slice(start + 1) : text.slice(start + 1, end);
+  const body = clean(scrub(raw), FINDING_MAX_CHARS);
+  return body.length === 0 ? null : body;
+}
+
+/**
+ * Why this child is worth one more turn, or null.
+ *
+ * TWO SIGNALS, EITHER OF WHICH IS ENOUGH, and both scoped to this session and
+ * the last hour: a dispatch lookup that found nothing (so nothing on any shelf
+ * holds what this child just worked out), or a failure this session's own
+ * arm opened or replayed a pairing for. Ungated, the ask would fire at the end
+ * of every child a push-on session spawns, which is the noise budget
+ * tenjin-agent#211 spent and the reason the ask is gated at all.
+ *
+ * THE FAILURE SIGNAL IS READ OFF THE \`sig:\` CLAIM, not off \`pairings\`. The
+ * claim is written in the same breath as the pairing is opened or replayed, and
+ * it is a primary-key range read; \`pairings\` has no session index, and adding
+ * one is DDL this PR deliberately does not take (tenjin-agent#228 PR 4 owns the
+ * migration machinery). A hook that may block must not be the one place that
+ * scans a table that never shrinks.
+ */
+function captureSignal(sessionId) {
+  const since = Date.now() - SIGNAL_WINDOW_MS;
+  const searchId = openDispatchMiss(sessionId, since);
+  if (searchId !== null) return { kind: 'dispatch-miss', searchId };
+  if (statePrefixSince(sessionId, STATE_SIGNATURES_PREFIX, since, 1).length > 0) {
+    return { kind: 'failure-pairing', searchId: null };
+  }
+  return null;
+}
+
+/**
+ * The block, and NOTHING ELSE on stdout: this is a control decision, so the
+ * update line \`emit\` appends is left out. Claude Code hands \`reason\` to the
+ * CHILD, which continues one turn and then stops again with
+ * \`stop_hook_active: true\` (probed 2026-08-27).
+ */
+function emitStopBlock(reason) {
+  try {
+    writeFileSync(1, JSON.stringify({ decision: 'block', reason }));
+  } catch {
+    // A closed or full stdout is not this hook's problem to report.
+  }
+  process.exit(0);
+}
+
+/**
+ * SubagentStop: the lifecycle row always, the ask once, the harvest next.
+ *
+ * ONE ROW PER FIRE, WHATEVER HAPPENS, exactly as at SubagentStart: the
+ * lifecycle row is what makes a child's end countable at all (there was no
+ * child-end row of any kind before tenjin-agent#228), and it never depends on
+ * the child complying with anything.
+ *
+ * EVERY FIELD THIS READS IS UNDOCUMENTED. \`agent_id\`, \`stop_hook_active\`,
+ * \`last_assistant_message\` and \`agent_transcript_path\` were probed, not
+ * published, so each absence is a quiet, enumerable exit and never an error and
+ * never a block. \`stop_hook_active\` is the re-block fuse, so the ask requires
+ * it to be present AND false: a harness that omits it gets the lifecycle row
+ * and nothing else, which is the fail-open reading of a missing fuse.
+ */
+function subagentStop(input, sessionId, cwd, agentId, agentType) {
+  const eventUid = uid();
+  const transcript = agentTranscriptPath(input);
+  const beat = (reason, extra) =>
+    recordEvent({
+      uid: eventUid,
+      session: sessionId,
+      cwd,
+      hook: 'subagent',
+      tool: 'SubagentStop',
+      // The CHILD that is stopping, on the column the score and \`push grade\`
+      // partition by. The TYPE stays in \`data\` — it is a label nothing joins on.
+      agentId,
+      data: {
+        event: 'SubagentStop',
+        kind: 'lifecycle',
+        reason,
+        agentType,
+        agentTranscriptPath: transcript,
+        ...extra,
+      },
+    });
+
+  // THE HARVEST COMES FIRST because 'was this child asked' is what tells the
+  // two fires apart. A child nobody asked is never parsed: whatever a child
+  // says on its own is its parent's business, and the queue takes only what
+  // this session's own ask produced.
+  const asked =
+    agentId === null ? null : getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''));
+  if (asked !== null) {
+    const message = lastAssistantMessage(input);
+    if (message === null) {
+      beat('no-message');
+      return quiet();
+    }
+    const body = findingBlock(message);
+    if (body === null) {
+      beat('no-finding');
+      return quiet();
+    }
+    // Once per agent, claimed rather than checked: the same child stopping
+    // twice, or a second fire racing this one, must not queue the block twice.
+    if (!claimState(sessionId, STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''))) {
+      beat('duplicate-finding');
+      return quiet();
+    }
+    const searchId = isRecord(asked) && typeof asked.searchId === 'string' ? asked.searchId : null;
+    // THE QUEUE ROW. Zero DDL: one event row under its own hook, with the
+    // child's words, the child that said them and the loop that earned the ask
+    // in JSON \`data\` (tenjin-agent#228; PR 4 promotes these to a table).
+    recordEvent({
+      session: sessionId,
+      cwd,
+      hook: FINDING_HOOK,
+      tool: 'SubagentStop',
+      // The child that produced the block, on the column: this row is read back
+      // per agent, and \`data\` is for what nothing joins on.
+      agentId,
+      data: {
+        kind: 'finding',
+        agentType,
+        searchId,
+        body,
+        agentTranscriptPath: transcript,
+      },
+    });
+    beat('captured', { searchId, chars: body.length });
+    return quiet();
+  }
+
+  // Present AND false. A missing fuse is not a licence to block.
+  if (input.stop_hook_active !== false) {
+    beat('stop-active');
+    return quiet();
+  }
+  // Without an agent id there is nothing to make the ask once-per-child, and an
+  // ask that repeats is a child that cannot finish.
+  if (agentId === null) {
+    beat('no-agent-id');
+    return quiet();
+  }
+  const signal = captureSignal(sessionId);
+  if (signal === null) {
+    beat('no-signal');
+    return quiet();
+  }
+  if (
+    !claimState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''), {
+      searchId: signal.searchId,
+    })
+  ) {
+    beat('ask-claimed');
+    return quiet();
+  }
+  // BEFORE the emit, because emit exits the process.
+  beat('asked', { signal: signal.kind, searchId: signal.searchId });
+  emitStopBlock(CAPTURE_ASK);
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
-  if (input.hook_event_name !== 'SubagentStart') return quiet();
+  const event = input.hook_event_name;
+  // ONE SCRIPT, TWO EVENTS (the failure arm's precedent): the start hands a
+  // child what the dispatch parked for it, the stop asks the same child for
+  // what it worked out. They share the identity reads, the config gate and the
+  // store, and splitting them would have bought a second generated file that
+  // differs in one branch.
+  if (event !== 'SubagentStart' && event !== 'SubagentStop') return quiet();
   const config = readConfig();
   if (config.push !== 'on') return quiet();
   const { session: sessionId, agent: agentId, invalid } = identityOf(input);
@@ -2505,6 +2780,7 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+  if (event === 'SubagentStop') return subagentStop(input, sessionId, cwd, agentId, agentType);
   // THE UID IS MINTED FIRST so the heartbeat can be written LAST. Every path
   // below ends in exactly one event row carrying the reason this fire ended the
   // way it did, and the decision rows have to point at that row, so the id
@@ -2643,7 +2919,14 @@ main().catch(quiet);
 `;
 
 export function pushSubagentHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))}`;
+  const js = SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))
+    .replaceAll('__SIGNAL_WINDOW__', String(PUSH_CAPTURE_SIGNAL_WINDOW_MS))
+    .replaceAll('__FINDING_MAX__', String(PUSH_FINDING_MAX_CHARS))
+    .replaceAll('__MESSAGE_TAIL__', String(PUSH_FINDING_MESSAGE_TAIL))
+    .replaceAll('__FINDING_OPEN__', JSON.stringify('```' + PUSH_FINDING_TAG))
+    .replaceAll('__FINDING_FENCE__', JSON.stringify('```'))
+    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON));
+  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${js}`;
 }
 
 /**

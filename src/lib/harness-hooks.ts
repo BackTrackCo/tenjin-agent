@@ -44,7 +44,11 @@ import type { WebSearchMode } from './config';
  *    constants in lib/hook-scripts.ts rather than from anything on the wire.
  *  - No hook can block, deny, or modify a tool call. Every PreToolUse entry
  *    emits `additionalContext` and never `permissionDecision`, so the tool
- *    always proceeds; the Stop and SessionStart hooks only ever add a line.
+ *    always proceeds; the SessionStart hook only ever adds a line. Two entries
+ *    can hold a TURN END open instead, each once and each behind its own gate:
+ *    the Stop hook's capture ask under `hooks.capture block`, and the
+ *    SubagentStop arm's finding ask, which returns to the CHILD that is
+ *    stopping and costs it one more turn.
  *
  * OWNERSHIP IS BY PATH, PER EVENT. An entry is ours when its command mentions one
  * of our script filenames, and each script owns AT MOST ONE ENTRY PER EVENT IT IS
@@ -63,9 +67,16 @@ import type { WebSearchMode } from './config';
 
 /**
  * The hook events this module writes, in the order they are reported. The last
- * four (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart) exist
+ * five (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart,
+ * SubagentStop) exist
  * only for the push experiment's arms (docs/command-reference.md#push-experimental) and carry no entry at all
  * unless `push: true` is passed to {@link wireSearchHooks}.
+ *
+ * `SubagentStop` is a SECOND entry on the subagent script, not a script of its
+ * own: one child-lifecycle arm owns both ends of a child (tenjin-agent#228).
+ * Registering a new EVENT is the one kind of change `install --refresh`
+ * (tenjin-agent#224) does not converge, so its release note says to run
+ * `tenjin install` once and doctor names the machine that has not.
  */
 export const HOOK_EVENTS = [
   'PreToolUse',
@@ -75,6 +86,7 @@ export const HOOK_EVENTS = [
   'PostToolUse',
   'PostToolUseFailure',
   'SubagentStart',
+  'SubagentStop',
 ] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
@@ -346,14 +358,16 @@ interface HookSpec {
 }
 
 /**
- * The base four search-hook entries, always planned. `opts.push` adds the six
+ * The base four search-hook entries, always planned. `opts.push` adds the seven
  * push-experiment entries (docs/command-reference.md#push-experimental) on top, across FOUR scripts: the prompt
- * and subagent arms carry one entry each, and the failure and context arms carry
+ * arm carries one entry, and the failure, subagent and context arms carry
  * two apiece because each fires on two different events (a Bash failure surfaces
  * as either PostToolUse or PostToolUseFailure depending on harness version; the
+ * subagent arm owns both ends of a child's life; the
  * context arm's read and churn halves are different events entirely) — so push,
- * when on, plans six entries across four scripts and FIVE events
- * (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart, PreToolUse;
+ * when on, plans seven entries across four scripts and SIX events
+ * (UserPromptSubmit, PostToolUse, PostToolUseFailure, SubagentStart,
+ * SubagentStop, PreToolUse;
  * PostToolUse carries two of them, and PreToolUse is shared with the base
  * bundle). Callers that only ever write
  * the base bundle (`writeSharedHookScripts`, the Hermes adapter,
@@ -413,6 +427,16 @@ function specs(dataDir: string, opts: { push: boolean } = { push: false }): Hook
     },
     {
       event: 'SubagentStart',
+      scriptFile: PUSH_SUBAGENT_HOOK_FILE,
+      script: pushSubagentHookScript(dataDir),
+      timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
+      arm: 'push',
+    },
+    {
+      // The same script under a second event, exactly as the failure arm rides
+      // two: the body branches on `hook_event_name`, and one entry per (script,
+      // event) is what keeps a re-install idempotent.
+      event: 'SubagentStop',
       scriptFile: PUSH_SUBAGENT_HOOK_FILE,
       script: pushSubagentHookScript(dataDir),
       timeoutSeconds: PUSH_HOOK_TIMEOUT_SECONDS,
@@ -672,7 +696,7 @@ function refuseChanged(
  * Every script body this CLI generates, for the WRITER — which is not the same
  * set as the entry plan.
  *
- * `tenjin push off` unwires nothing: the six entries stay registered and keep
+ * `tenjin push off` unwires nothing: the seven entries stay registered and keep
  * invoking the four push scripts, which exit on the config key. Planning the
  * base four for the writer therefore froze those four bodies at whatever version
  * was on disk when push was last on, and every later upgrade left six registered
@@ -754,7 +778,7 @@ function refuse(
 
 /** The four generated push arms, by filename. Written by EVERY install, not only
  *  by `push on` — the bodies are cheap and inert until an entry points at them,
- *  and what `push on` adds is the six settings entries. This is also what
+ *  and what `push on` adds is the seven settings entries. This is also what
  *  `uninstall` removes. Doctor's `checkPushHooks` reads both halves for that
  *  reason: `pushScriptsPresent` is true after any install, so only its
  *  entry-count half distinguishes a wired sidecar from an unwired one. */
@@ -781,9 +805,19 @@ export async function pushScriptsPresent(dataDir: string): Promise<boolean> {
 
 /** What {@link countPushHookEntries} found in settings.json. */
 export interface PushHookEntryCount {
-  /** Entries a `push on` would plan: six, across five events. Derived from
+  /** Entries a `push on` would plan: seven, across six events. Derived from
    *  {@link specs}, never a literal — the two must not be able to disagree. */
   planned: number;
+  /**
+   * The events a planned entry is missing from, in plan order.
+   *
+   * NAMED, NOT JUST COUNTED, because the ways to be half-wired are not alike:
+   * an install that predates an event is missing exactly that one entry while
+   * every other arm runs, and `install --refresh` (tenjin-agent#224) converges
+   * bodies without ever adding it. Doctor says which one, so the fix is a
+   * command rather than a hunt.
+   */
+  missing: HookEvent[];
   /** How many of them are registered right now, matched by the SAME ownership
    *  predicate the writer uses, so "present" here and "already up to date"
    *  there can never disagree. */
@@ -809,28 +843,35 @@ export async function countPushHookEntries(
   dataDir: string,
 ): Promise<PushHookEntryCount> {
   const plan = specs(dataDir, { push: true }).filter((spec) => spec.arm === 'push');
+  const allMissing = plan.map((spec) => spec.event);
   const declaredPath = claudeSettingsPath(homeDir);
   let raw: string;
   try {
     raw = await readFile(declaredPath, 'utf8');
   } catch {
-    return { planned: plan.length, present: 0, path: null };
+    return { planned: plan.length, missing: allMissing, present: 0, path: null };
   }
   let hooks: unknown;
   try {
     const parsed: unknown = JSON.parse(raw);
     hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
   } catch {
-    return { planned: plan.length, present: 0, path: declaredPath };
+    return { planned: plan.length, missing: allMissing, present: 0, path: declaredPath };
   }
-  if (!isPlainObject(hooks)) return { planned: plan.length, present: 0, path: declaredPath };
+  if (!isPlainObject(hooks)) {
+    return { planned: plan.length, missing: allMissing, present: 0, path: declaredPath };
+  }
   let present = 0;
+  const missing: HookEvent[] = [];
   for (const spec of plan) {
     const list = hooks[spec.event];
-    if (!Array.isArray(list)) continue;
-    if (list.some((entry) => ownsEntry(entry, spec.scriptFile))) present += 1;
+    if (Array.isArray(list) && list.some((entry) => ownsEntry(entry, spec.scriptFile))) {
+      present += 1;
+      continue;
+    }
+    missing.push(spec.event);
   }
-  return { planned: plan.length, present, path: declaredPath };
+  return { planned: plan.length, missing, present, path: declaredPath };
 }
 
 interface SettingsInspection {

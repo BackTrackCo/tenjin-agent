@@ -197,6 +197,17 @@ const OPEN_LOOP_WINDOW_MS = 8 * 60 * 60 * 1000;
  */
 const MAX_STRONG_LOOPS = 2;
 const MAX_WEAK_LOOPS = 3;
+/**
+ * How many queued child findings the capture ask names, and how much of each.
+ *
+ * The ask is one paragraph in a model's context at the end of a turn, not a
+ * report: the findings are already stored in full, so what this list has to do
+ * is tell the agent they exist and which child settled each one. The window
+ * matches the open-loop one, so a finding and the MISS it answers age out
+ * together.
+ */
+const MAX_LISTED_FINDINGS = 5;
+const FINDING_LINE_MAX = 160;
 /** Candidates the WebSearch hook asks for, and mentions. Two lines is the cap the
  *  hint has to live inside; asking for more would only be thrown away. */
 const SEARCH_LIMIT = 2;
@@ -2362,12 +2373,47 @@ const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
 /** The ask for this machine's mode, with the resolved publish.mode spliced in.
  *  The mode is in the ask itself rather than on a line above it because it is
  *  what decides whether the agent may run the command it was just handed. */
-function captureReason(config, publishMode) {
+function captureReason(config, publishMode, findings) {
   // The TEAM criteria ("anything a teammate would want to know") only apply when
   // there is a private shelf to hold it. A secret with baseUrl still on the
   // marketplace is public mode, and the ask is the public bar.
   const text = teamShelfOrigin(config) === null ? CAPTURE_REASON : CAPTURE_REASON_TEAM;
-  return text.replace('<mode>', publishMode);
+  const ask = text.replace('<mode>', publishMode);
+  return findings === null ? ask : ask + '\\n' + findings;
+}
+
+/**
+ * The findings this session's CHILDREN queued, named in the parent's capture
+ * ask, or null when there are none.
+ *
+ * WHY IT RIDES THE CAPTURE ASK. A child's evidence dies with the child, so the
+ * SubagentStop arm harvests the child's own statement into the store
+ * (tenjin-agent#228). The parent is the context with publish authority and the
+ * only one that will still be alive at the end of the session, and the capture
+ * ask is the one moment it is already being asked what to write down. A second
+ * surface would be a second publish prompt on one turn end, which is the noise
+ * this file spent tenjin-agent#162 removing.
+ *
+ * ATTRIBUTED, because a finding whose author is unknowable is one the parent
+ * cannot check: the agent type and id name the child, and the search id ties it
+ * to the loop that earned the ask. Bodies are already scrubbed and bounded at
+ * capture; this bound is a display one.
+ */
+function queuedFindingsLine(sessionId) {
+  const rows = queuedFindings(sessionId, Date.now() - ${OPEN_LOOP_WINDOW_MS}, ${MAX_LISTED_FINDINGS});
+  if (rows.length === 0) return null;
+  const items = rows.map((row) => {
+    const who = row.agentType === '' ? 'a subagent' : row.agentType + ' subagent';
+    const agent = row.agentId === null ? '' : ' ' + clean(row.agentId, 64);
+    const loop = row.searchId === null ? '' : ', search ' + clean(row.searchId, 64);
+    return "- " + who + agent + loop + ": '" + clean(row.body, ${FINDING_LINE_MAX}) + "'";
+  });
+  return (
+    String(rows.length) +
+    ' finding(s) your subagents stated at their own end, held locally and unpublished:\\n' +
+    items.join('\\n') +
+    '\\nEach was written by the child that settled it. Publish the ones that hold up, one file per finding, the same way.'
+  );
 }
 
 /**
@@ -2814,11 +2860,16 @@ async function main() {
   // that will still be there next time. \`nudge\` says the same words as context
   // and rides along with whatever else this turn had to say.
   const ask = captureAsk(config, sessionId, transcriptPath);
-  // The sync fallback rides on the ask, and only on the ask: it is a line for
+  // Read only when there is an ask to attach it to: a session with capture off,
+  // or one already asked, must not pay a query for a line nothing will print.
+  // The sync fallback rides on the same ask, for the same reason: it speaks to
   // the operator about this machine's wallet, and the ask is the one Stop
   // output that already speaks to the operator about publishing.
   const reason =
-    captureReason(config, publishMode) + (syncLine === null ? '' : '\\n' + syncLine);
+    ask === null
+      ? ''
+      : captureReason(config, publishMode, queuedFindingsLine(sessionId)) +
+        (syncLine === null ? '' : '\\n' + syncLine);
   if (ask === 'block') emitBlock(reason);
   const nudge = ask === 'nudge' ? reason : null;
 

@@ -352,6 +352,11 @@ describe('the hot-path queries never scan', () => {
           STORE_SQL.takeStateOldestByPrefix,
           ['s', 's', 'dispatch_cache', 'dispatch_cache￿'],
         ],
+        // The SubagentStop capture gate: both run before a child may be held
+        // open for one more turn, so neither may be the read that scans a table
+        // that never shrinks (tenjin-agent#228).
+        ['openDispatchMiss', STORE_SQL.openDispatchMiss, ['s', 0]],
+        ['queuedFindings', STORE_SQL.queuedFindings, ['s', 0, 5]],
         // The one-shot CLI tally is not a hook path, but it reads the same
         // never-pruned table.
         ['statusRows', STORE_SQL.statusRows, [0]],

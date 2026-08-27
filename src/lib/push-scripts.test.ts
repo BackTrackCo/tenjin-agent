@@ -31,10 +31,13 @@ import {
 } from './hook-scripts';
 import {
   PUSH_CACHE_TTL_MS,
+  PUSH_FINDING_MAX_CHARS,
+  PUSH_FINDING_TAG,
   PUSH_PROMPT_BODY_TIMEOUT_MS,
   PUSH_PROMPT_BUDGET_MS,
   PUSH_PROMPT_SEARCH_TIMEOUT_MS,
   PUSH_PROMPT_WATCHDOG_MS,
+  SUBAGENT_CAPTURE_REASON,
   pushContextHookScript,
   pushFailureHookScript,
   pushPromptHookScript,
@@ -4739,6 +4742,234 @@ describe('the subagent handoff slots', () => {
   });
 });
 
+/**
+ * The child-end capture (tenjin-agent#228).
+ *
+ * A child's evidence exists in one context and dies with it, so the only place
+ * to ask for it is the moment that context is still holding it. Every case here
+ * runs the REAL generated script against a real store, because the whole
+ * contract is process behaviour: what lands on stdout (a block, or nothing),
+ * what lands in the store, and what an absent undocumented field does.
+ */
+describe('the subagent arm (SubagentStop)', () => {
+  const FENCE = '```';
+  const FINDING =
+    'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.';
+
+  const stop = (over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'SubagentStop',
+      agent_id: 'a1',
+      agent_type: 'general-purpose',
+      stop_hook_active: false,
+      ...over,
+    });
+
+  /** A child's final answer with the marked block in it. */
+  const answer = (body: string): string =>
+    'Here is what I found, in short.\n\n' +
+    FENCE +
+    PUSH_FINDING_TAG +
+    '\n' +
+    body +
+    '\n' +
+    FENCE +
+    '\nThat is all.';
+
+  /** The signal: a dispatch lookup this session left open. */
+  async function seedDispatchMiss(): Promise<void> {
+    await seedSearch({ decision: 'MISS', source: 'dispatch-hook', sessionId: SESSION });
+  }
+
+  /** The rows the stop arm wrote, lifecycle and finding alike. */
+  async function stopRows(): Promise<Record<string, unknown>[]> {
+    return (await eventRows()).filter((e) => e.tool === 'SubagentStop');
+  }
+
+  /** The block a run emitted, or null when it emitted nothing. */
+  function blocked(run: HookRun): string | null {
+    if (run.stdout.trim().length === 0) return null;
+    const parsed = JSON.parse(run.stdout) as { decision?: string; reason?: string };
+    return parsed.decision === 'block' ? (parsed.reason ?? '') : null;
+  }
+
+  it('asks the child once, on a signal, at its first stop', async () => {
+    await pushOn('https://tenjin.test');
+    await seedDispatchMiss();
+
+    const first = await runScript(pushSubagentHookScript(dataDir), stop());
+    expect(first.code).toBe(0);
+    expect(blocked(first)).toBe(SUBAGENT_CAPTURE_REASON);
+    // The lifecycle row is written BEFORE the block, and names the signal.
+    expect(await stopRows()).toMatchObject([
+      {
+        hook: 'subagent',
+        kind: 'lifecycle',
+        reason: 'asked',
+        agentId: 'a1',
+        signal: 'dispatch-miss',
+      },
+    ]);
+
+    // The fuse: the harness sets stop_hook_active on the fire that follows a
+    // block, and a child that answered must not be asked again.
+    const second = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: 'Nothing durable here.' }),
+    );
+    expect(second.stdout).toBe('');
+    expect((await stopRows()).map((r) => r.reason)).toEqual(['asked', 'no-finding']);
+  });
+
+  it('leaves a child with no signal one lifecycle row and nothing else', async () => {
+    await pushOn('https://tenjin.test');
+    const run = await runScript(pushSubagentHookScript(dataDir), stop());
+    expect(run.stdout).toBe('');
+    expect(await stopRows()).toMatchObject([{ reason: 'no-signal', agentId: 'a1' }]);
+  });
+
+  /**
+   * The claim, as two consumers over one store rather than as a timer
+   * (tenjin-agent#216). A nested child stopping beside its sibling fires this
+   * hook twice for one agent id; exactly one may block, or the child is asked
+   * twice for one finding.
+   */
+  it('blocks exactly once per agent when two fires race', async () => {
+    await pushOn('https://tenjin.test');
+    await seedDispatchMiss();
+
+    const runs = await Promise.all([
+      runScript(pushSubagentHookScript(dataDir), stop()),
+      runScript(pushSubagentHookScript(dataDir), stop()),
+    ]);
+    expect(runs.filter((r) => blocked(r) !== null)).toHaveLength(1);
+    const reasons = (await stopRows()).map((r) => r.reason);
+    expect(reasons.filter((r) => r === 'asked')).toHaveLength(1);
+    // The loser lands on whichever side of the claim it lost: it either failed
+    // the claim outright, or it read the winner's claim first and went to
+    // harvest a child that has not answered yet. Both are quiet.
+    expect(reasons).toHaveLength(2);
+    expect(['ask-claimed', 'no-message']).toContain(reasons.find((r) => r !== 'asked'));
+    expect(sessionState(SESSION, 'capture:agent:a1')).not.toBeNull();
+  });
+
+  it('harvests the fenced block from the next fire, scrubbed and bounded', async () => {
+    await pushOn('https://tenjin.test');
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    const secret = 'AKIAIOSFODNN7EXAMPLEKEYX ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const long = 'x'.repeat(PUSH_FINDING_MAX_CHARS + 500);
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({
+        stop_hook_active: true,
+        agent_transcript_path: '/tmp/child.jsonl',
+        last_assistant_message: answer(FINDING + ' ' + secret + ' ' + long),
+      }),
+    );
+    expect(run.stdout).toBe('');
+
+    const finding = (await stopRows()).find((r) => r.kind === 'finding');
+    expect(finding).toMatchObject({
+      hook: 'finding',
+      agentId: 'a1',
+      agentType: 'general-purpose',
+      searchId: SEARCH_ID,
+      agentTranscriptPath: '/tmp/child.jsonl',
+    });
+    const body = String(finding?.body);
+    expect(body).toContain('Pinning the resolver to 4.1');
+    // Scrubbed before it is stored: this row is the input to a publish path.
+    expect(body).not.toContain('ghp_aaaa');
+    expect(body).not.toContain('AKIAIOSFODNN7EXAMPLEKEYX');
+    expect(body.length).toBeLessThanOrEqual(PUSH_FINDING_MAX_CHARS);
+    // Bounded, not truncated silently into the next row: one finding per child.
+    const again = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer('a second finding') }),
+    );
+    expect(again.stdout).toBe('');
+    expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(1);
+    expect((await stopRows()).map((r) => r.reason)).toContain('duplicate-finding');
+  });
+
+  /**
+   * Every field this arm reads was PROBED, not published (2026-08-27), so each
+   * absence has to end in a quiet, enumerable row: a hook that throws on a
+   * harness that renames a field is a hook that breaks every child on that
+   * harness.
+   */
+  it('fails open and quiet when an undocumented field is absent', async () => {
+    await pushOn('https://tenjin.test');
+    await seedDispatchMiss();
+
+    // No stop_hook_active: the re-block fuse is missing, so the ask cannot fire.
+    const noFuse = await runScript(
+      pushSubagentHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'SubagentStop',
+        agent_id: 'a1',
+      }),
+    );
+    expect(noFuse.stdout).toBe('');
+
+    // No agent_id: nothing to make the ask once-per-child.
+    const noAgent = await runScript(
+      pushSubagentHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'SubagentStop',
+        stop_hook_active: false,
+      }),
+    );
+    expect(noAgent.stdout).toBe('');
+
+    // Asked, then a payload with no last_assistant_message to harvest from.
+    await runScript(pushSubagentHookScript(dataDir), stop());
+    const noMessage = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true }),
+    );
+    expect(noMessage.code).toBe(0);
+    expect(noMessage.stderr).toBe('');
+    expect(noMessage.stdout).toBe('');
+    expect((await stopRows()).map((r) => r.reason)).toEqual([
+      'stop-active',
+      'no-agent-id',
+      'asked',
+      'no-message',
+    ]);
+    expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(0);
+  });
+
+  /** A child nobody asked keeps its own words: the queue takes only what this
+   *  session's own ask produced. */
+  it('never harvests from a child it did not ask', async () => {
+    await pushOn('https://tenjin.test');
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer(FINDING) }),
+    );
+    expect(run.stdout).toBe('');
+    expect(await stopRows()).toMatchObject([{ kind: 'lifecycle', reason: 'stop-active' }]);
+  });
+
+  it('says nothing and records nothing with push off', async () => {
+    await writeConfig({ baseUrl: 'https://tenjin.test' });
+    await seedDispatchMiss();
+    const run = await runScript(pushSubagentHookScript(dataDir), stop());
+    expect(run.stdout).toBe('');
+    expect(await stopRows()).toEqual([]);
+  });
+
+  it('substitutes every placeholder into the generated script', () => {
+    expect(pushSubagentHookScript(dataDir)).not.toMatch(/__[A-Z_]+__/);
+  });
+});
+
 describe('the context arm (log-only)', () => {
   /**
    * The upserted `edited:<path>` state row keeps only the LAST timestamp per
@@ -5072,6 +5303,54 @@ describe('the capture ask (Stop)', () => {
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: publicAsk });
     expect((JSON.parse(run.stdout) as { reason: string }).reason).toContain('rights-clean');
+  });
+
+  /**
+   * The other half of the child-end capture (tenjin-agent#228): a queued
+   * finding is worth nothing until the context with publish authority is told
+   * it exists, and the capture ask is the one moment that context is already
+   * being asked what to write down.
+   */
+  it('names the findings this session subagents queued, with their attribution', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    // One finding, filed the way the SubagentStop arm files it.
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.insertEvent, [
+      'UID1',
+      Date.now(),
+      SESSION,
+      null,
+      'machine',
+      'finding',
+      'SubagentStop',
+      null,
+      null,
+      JSON.stringify({
+        kind: 'finding',
+        agentId: 'a1',
+        agentType: 'general-purpose',
+        searchId: SEARCH_ID,
+        body: 'Pinning the resolver to 4.1 stops the parse throw.',
+      }),
+    ]);
+    store?.close();
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const reason = (JSON.parse(run.stdout) as { reason: string }).reason;
+    // The ask itself is unchanged; the list rides under it.
+    expect(reason.startsWith(publicAsk)).toBe(true);
+    expect(reason).toContain('1 finding(s) your subagents stated at their own end');
+    expect(reason).toContain('general-purpose subagent a1');
+    expect(reason).toContain(SEARCH_ID);
+    expect(reason).toContain('Pinning the resolver to 4.1');
+  });
+
+  it('leaves the ask exactly as it was when no finding is queued', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: publicAsk });
   });
 
   it('names the resolved publish mode in the ask', async () => {

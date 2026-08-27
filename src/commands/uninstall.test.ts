@@ -565,6 +565,7 @@ describe('runUninstall — the push experiment’s arms', () => {
         'SessionStart',
         'Stop',
         'SubagentStart',
+        'SubagentStop',
         'UserPromptSubmit',
       ].sort(),
     );

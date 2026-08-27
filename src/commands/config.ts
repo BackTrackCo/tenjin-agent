@@ -605,7 +605,7 @@ async function setHooksKey(
         ? `The installed Stop hook predates \`hooks.capture\` and will not ask for a note. Run \`tenjin install\` to update it.`
         : undefined;
   // `hooks.push` IS NOT THE WHOLE SWITCH. Every other key here is read by a
-  // script that is already wired; this one also needs six settings entries
+  // script that is already wired; this one also needs seven settings entries
   // across four scripts, and only `tenjin push on` writes them. Setting the key
   // alone persists and echoes as effective while no arm fires, which
   // command-reference.md already warns about and the CLI used to accept in
