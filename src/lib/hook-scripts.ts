@@ -17,11 +17,23 @@
  *    `hooks.agentDispatch off`) takes effect immediately and no re-install is
  *    needed to change behavior or to disarm the hook.
  *
- * FAIL-OPEN IS THE CONTRACT. Neither script may block a tool call, delay one past
- * its budget, or write to stderr: a non-zero exit or stderr text would surface in
- * the transcript as a hook error, which is a worse outcome than the nudge is
- * worth. Every path ends in exit 0, every body is wrapped, and a watchdog timer
- * exits the process even if a socket hangs past the abort.
+ * FAIL-OPEN IS THE CONTRACT. Neither script may block a tool call or delay one
+ * past its budget: a non-zero exit would surface in the transcript as a hook
+ * error, which is a worse outcome than the nudge is worth. Every path ends in
+ * exit 0, every body is wrapped, and a watchdog timer exits the process even if
+ * a socket hangs past the abort.
+ *
+ * STDERR IS WRITTEN IN EXACTLY ONE CASE, and this rule used to say "never".
+ * The exception is the state store failing to open (tenjin-agent#209): one line,
+ * `tenjin: state store unavailable (<reason>)`, at most once per process, and
+ * never on any other path — not a miss, not a timeout, not a malformed payload,
+ * not a refused write once the store IS open. The trade was made deliberately,
+ * because the two outcomes it separates are otherwise identical from outside: a
+ * sidecar that had nothing to say, and one that has silently stopped
+ * remembering anything and will keep both its caps and its dedup at zero. The
+ * first is the normal case and must stay silent; the second is a machine-level
+ * fault an operator can only fix if they are told. Everything else still ends
+ * in a wordless exit 0.
  *
  * The bodies use string concatenation rather than template literals on purpose:
  * they live inside TypeScript template literals here, and a backtick or `${` in
@@ -1025,7 +1037,7 @@ function hintLines(stored, isTeam, ctx) {
     });
     // The unique index is the bound, so a candidate a concurrent fire in this
     // session already claimed is recorded as a skip and left out of the text.
-    if (claimed === 'duplicate') {
+    if (!mayShow(claimed)) {
       recordInjection({
         ...ctx,
         session: ctx.sessionId,
@@ -1152,7 +1164,15 @@ async function main() {
   if (config.webSearch === 'off') return quiet();
   const sessionId = sessionIdOf(input);
   const cwd = cwdOf(input);
-  await openStore();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
   // The push arm outranks \`remind\`, which is the standing reminder for an agent
   // that has to ask for itself; it does not outrank \`off\`, which is the kill
   // switch for this script whatever else is configured.
@@ -1322,7 +1342,15 @@ async function main() {
 
   const sessionId = sessionIdOf(input);
   const cwd = cwdOf(input);
-  await openStore();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
   // Asking twice buys nothing: the answer is in the store, and on CANDIDATES it
   // is already in the transcript. Session-scoped; the store is machine-global.
   if (alreadyAskedStore(question, sessionId)) return quiet();

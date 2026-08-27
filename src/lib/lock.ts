@@ -81,7 +81,6 @@ export class LockTimeoutError extends Error {
  * timeout error names the path); the pid+acquiredAt meta exists only to make that
  * manual call diagnosable. Always released in the finally.
  *
- * ⚠ MIRRORED, MUST UPDATE TOGETHER. The generated WebSearch hook script in
  * NO LONGER MIRRORED IN THE HOOKS. The generated scripts used to reimplement
  * this protocol byte for byte — they run as standalone .mjs files outside the
  * CLI and cannot import this module, yet wrote the same searches.json, and two

@@ -461,14 +461,6 @@ async function installBody(
   // `install` far more often than they would run a cleanup command.
   const pointerCleanup = dryRun ? [] : await removeMarkerLines(home);
 
-  // One-time cleanup of the files the state store replaced (tenjin-agent#209:
-  // push-ledger.jsonl, the push/ working directory and its markers,
-  // searches.json and its lock directory, and the long-dead candidates/). There
-  // is deliberately no import path — plan 03, owner decision 3 — so the sidecar
-  // starts clean, and this is the command that rewrites the hook scripts
-  // anyway. Reported rather than silent: it is the operator's data dir.
-  const retiredState = dryRun ? [] : await removeRetiredState(ctx.dataDir);
-
   // The five decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
@@ -487,6 +479,19 @@ async function installBody(
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
   );
+
+  // One-time cleanup of the files the state store replaced (tenjin-agent#209:
+  // push-ledger.jsonl, the push/ working directory and its markers,
+  // searches.json and its lock directory, and the long-dead candidates/). There
+  // is deliberately no import path — plan 03, owner decision 3 — so the sidecar
+  // starts clean. Reported rather than silent: it is the operator's data dir.
+  //
+  // AFTER THE SCRIPTS ARE REWRITTEN, not before. Until `resolveHooks` has
+  // replaced them, the scripts on disk are the OLD ones and the harness may
+  // still fire them — so a cleanup that ran first could have `push/` or
+  // `searches.json` recreated behind it seconds later, and since this runs once
+  // per install, nothing would ever remove them again.
+  const retiredState = dryRun ? [] : await removeRetiredState(ctx.dataDir);
   const hermesResult = harnesses.find((result) => result.harness === 'hermes');
   if (hermesResult !== undefined) {
     const tenjinCommand = deps.tenjinCommand ?? process.argv[1];
