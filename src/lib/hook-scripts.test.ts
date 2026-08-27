@@ -2497,6 +2497,30 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(bodies[0]).not.toContain(commit.slice(0, 13));
   });
 
+  /**
+   * The scrub window is bounded for speed (the path rule is quadratic on one
+   * unbroken token), so a token that starts inside the slice and runs past the
+   * window would reach scrub truncated, and an unmatched fragment would ship.
+   * The window is cut back to the last whitespace, so scrub sees whole tokens
+   * only and a straddling one is dropped rather than halved.
+   */
+  it('drops a token that runs past the scrub window instead of truncating it', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const lead = 'Investigate the failing upload path in this run. '
+      .padEnd(300, 'x ')
+      .slice(0, 300);
+    // Starts inside the 400-char slice, runs past the 1600-char scrub window.
+    const secret = `https://vault.internal.example.com/${'k'.repeat(1600)}`;
+    const prompt = `${lead}${secret} and say what breaks.`;
+    expect(prompt.indexOf(secret)).toBeLessThan(400);
+
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+
+    expect(bodies[0]).not.toContain('vault.internal.example.com');
+    expect(bodies[0]).not.toContain('kkkkkkkkkk');
+  });
+
   it('sends the prompt alone when the dispatch has no description', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });

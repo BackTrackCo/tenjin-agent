@@ -1465,10 +1465,14 @@ function dispatchQuestion(toolInput) {
   // pays for it: the path rule is quadratic on one unbroken path-like token, and
   // a work order can be tens of KB (measured 388ms at 45KB). 4x the slice is
   // more than any single token that can straddle the boundary.
-  const head = clean(
-    scrub(prompt.slice(0, ${DISPATCH_PROMPT_SLICE * 4})).slice(0, ${DISPATCH_PROMPT_SLICE}),
-    ${DISPATCH_PROMPT_SLICE},
-  );
+  // Cut the window back to the last whitespace first, so scrub only ever sees
+  // WHOLE tokens: a token that starts inside the slice and runs past the window
+  // is dropped entirely rather than handed over truncated, which is the one way
+  // a secret-shaped value could survive the scrub as an unmatched fragment.
+  const window = prompt.slice(0, ${DISPATCH_PROMPT_SLICE * 4});
+  const whole =
+    window.length < prompt.length ? window.slice(0, window.search(/\\s\\S*$/) + 1) : window;
+  const head = clean(scrub(whole).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
   const description =
     typeof toolInput.description === 'string' ? clean(scrub(toolInput.description), ${DISPATCH_DESCRIPTION_MAX}) : '';
   return description === '' ? head : description + ': ' + head;
