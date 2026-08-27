@@ -184,8 +184,8 @@ export function parsePushModeFlag(value: string, flagName: string): PushMode {
 /**
  * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
  * notes half): `block` raises a blocking reason, once per session, when the
- * session carried a research signal (a recorded search, or a push-ledger row) and
- * nothing has captured it yet; `nudge` says the same thing as additionalContext
+ * session carried a research signal (a search it asked for, or a row showing an
+ * arm actually surfaced something) and nothing has captured it yet; `nudge` says the same thing as additionalContext
  * with no block; `off` is silent. Default `off`.
  */
 export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);

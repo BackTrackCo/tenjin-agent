@@ -120,7 +120,8 @@ function humanLines(report: UninstallReport): string[] {
   // hook scripts this same receipt just listed as removed.
   lines.push('Kept:');
   for (const item of report.kept) lines.push(`  - ${item}`);
-  lines.push(`Removed from ~/.tenjin: ${REMOVED_FROM_DATA_DIR}`);
+  lines.push('Removed from ~/.tenjin:');
+  for (const item of REMOVED_FROM_DATA_DIR) lines.push(`  - ${item}`);
 
   if (settings.warning !== undefined) {
     lines.push(`! ${sanitizeForTerminal(settings.warning)}`);

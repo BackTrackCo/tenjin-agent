@@ -3,11 +3,12 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPTURE_REASON_TEAM, stopHookScript, websearchHookScript } from './lib/hook-scripts';
-import { PUSH_LEDGER_FILE, pushFailureHookScript, pushPromptHookScript } from './lib/push-scripts';
+import { pushFailureHookScript, pushPromptHookScript } from './lib/push-scripts';
+import { STATE_DB_FILE, STORE_SQL, openStore } from './lib/state-store';
 import { readLedgerTallies, runPushStatus } from './commands/push';
 import type { PushLedgerTallies } from './commands/push';
 import type { CommandContext } from './context';
@@ -198,13 +199,45 @@ interface LedgerRow {
   candidate?: { id?: string; resourceId?: string } | null;
 }
 
+/**
+ * The decision rows a run left behind, projected back into the flat shape the
+ * ledger used to write: the store splits them across `events` (the query and
+ * the harness event name) and `injections` (the decision), and this file's
+ * assertions are about the sidecar's behaviour rather than its columns.
+ */
 async function ledger(): Promise<LedgerRow[]> {
-  const path = join(dataDir, PUSH_LEDGER_FILE);
-  if (!existsSync(path)) return [];
-  return (await readFile(path, 'utf8'))
-    .split('\n')
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as LedgerRow);
+  if (!existsSync(join(dataDir, STATE_DB_FILE))) return [];
+  const store = await openStore(dataDir);
+  if (store === null) return [];
+  try {
+    return store
+      .all(
+        `SELECT i.*, e.data AS event_data FROM injections i
+           LEFT JOIN events e ON e.uid = i.event_uid
+         ORDER BY i.id`,
+        [],
+      )
+      .map((r) => {
+        const event = typeof r.event_data === 'string' ? JSON.parse(r.event_data) : {};
+        return {
+          session: r.session === '' ? null : r.session,
+          trigger: r.hook,
+          event: event.event,
+          query: event.query,
+          shelf: r.shelf,
+          searchId: r.search_id ?? undefined,
+          candidate: r.resource_id === null ? null : { resourceId: r.resource_id, title: r.title },
+          strength: r.strength,
+          action: r.action,
+          reason: r.reason ?? undefined,
+          form: r.form ?? undefined,
+          deny: r.deny === 1,
+          tokens: r.tokens ?? undefined,
+        } as LedgerRow;
+      });
+  } finally {
+    store.close();
+  }
 }
 
 function injected(run: HookRun): string | null {
@@ -350,7 +383,9 @@ describe('the sidecar, end to end over one session', () => {
     const blocked = JSON.parse(stop.stdout) as { decision?: string; reason?: string };
     expect(blocked.decision).toBe('block');
     expect(blocked.reason).toBe(CAPTURE_REASON_TEAM.replace('<mode>', 'review'));
-    expect(existsSync(join(dataDir, 'push', `capture-asked-${SESSION}`))).toBe(true);
+    const asked = await openStore(dataDir);
+    expect(asked?.get(STORE_SQL.getState, [SESSION, 'capture_asked'])).not.toBeNull();
+    asked?.close();
 
     // Once per session, whether or not anything was published: the second stop
     // is silent, which is what lets the operator end the session.

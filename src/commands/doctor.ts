@@ -61,6 +61,7 @@ import type {
   WalletVerification,
 } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
+import { probeSqlite } from '../lib/state-store';
 
 /**
  * One environment/reachability check. The doctor agent builds the check list
@@ -140,6 +141,9 @@ interface BuiltCheck {
 export interface DoctorDeps {
   /** Environment for wallet-key detection and settings precedence. */
   env?: NodeJS.ProcessEnv;
+  /** The `node:sqlite` probe; tests inject a failing one to exercise the
+   * damaged-install diagnosis without a damaged install. */
+  probeSqlite?: typeof probeSqlite;
   /** Injected fetch for the reachability checks; tests pass a canned stub. */
   fetchImpl?: typeof fetch;
   /** Inject the active wallet provider. When set, NO local fs/env is consulted —
@@ -235,6 +239,7 @@ export async function collectDoctorChecks(
 
   const built: BuiltCheck[] = [
     checkNode(),
+    await checkStateStore(deps.probeSqlite ?? probeSqlite),
     configCheck,
     // The three baseUrl probes carry the team shelf's bypass. Without it every
     // one of them reports a protected team deployment as unreachable, which is
@@ -378,7 +383,7 @@ export async function runDoctor(
 function checkNode(): BuiltCheck {
   const version = process.versions.node;
   const major = Number.parseInt(version.split('.')[0] ?? '0', 10);
-  if (major >= 22) {
+  if (major >= 24) {
     return { result: { name: 'node', status: 'ok', required: true, detail: `Node ${version}` } };
   }
   return {
@@ -386,10 +391,51 @@ function checkNode(): BuiltCheck {
       name: 'node',
       status: 'fail',
       required: true,
-      detail: `Node ${version} is unsupported (need >= 22)`,
-      fix: 'Install Node 22 or newer',
+      detail: `Node ${version} is unsupported (need >= 24)`,
+      fix: 'Install Node 24 or newer',
     },
     failCode: 'NODE_UNSUPPORTED',
+  };
+}
+
+/**
+ * Is `node:sqlite` there and answering?
+ *
+ * The hook sidecar's whole state — the already-shown set, the lookup buckets,
+ * the per-session working state, the local error/fix pairings — lives in one
+ * SQLite file opened through Node's built-in module (tenjin-agent#209). The
+ * hooks fail OPEN without it, which is the right posture for a tool call and
+ * the wrong one for a diagnosis: a machine whose sidecar has quietly stopped
+ * remembering anything looks identical from the outside to one that simply had
+ * nothing to say. So doctor asks directly.
+ */
+async function checkStateStore(probe_: typeof probeSqlite): Promise<BuiltCheck> {
+  const probe = await probe_();
+  if (probe.ok) {
+    return {
+      result: {
+        name: 'state-store',
+        status: 'ok',
+        required: true,
+        detail: `node:sqlite OK (SQLite ${probe.version ?? 'unknown'})`,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'state-store',
+      status: 'fail',
+      required: true,
+      // Anyone reading this already cleared the >=24 preflight in src/index.ts,
+      // so "upgrade Node" cannot be the remedy: the runtime is supported and the
+      // import still failed, which points at the install — a damaged or
+      // re-bundled dist (tsup once shipped `import("sqlite")`, tenjin-agent#225),
+      // a patched runtime. Distinct code from the preflight so `--json` readers
+      // can tell the two apart.
+      detail: `node:sqlite failed to load on Node ${process.versions.node}, so the hooks keep no state at all`,
+      fix: 'Reinstall tenjin-cli (npm i -g tenjin-cli@latest); if it persists, report the output of node -e "import(\'node:sqlite\')"',
+    },
+    failCode: 'INTERNAL',
   };
 }
 
