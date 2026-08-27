@@ -1739,7 +1739,11 @@ async function main() {
       }
     }
     if (handoff) {
-      setState(sessionId, STATE_CACHE, {
+      // The announcement below is a promise that a child will find this. If the
+      // cache write did not land, take the promise back: release the slot and
+      // fall through to the ordinary parent hint, rather than announcing a
+      // handoff to nobody while the relayed row suppresses the parent arms.
+      const parked = setState(sessionId, STATE_CACHE, {
         at: new Date().toISOString(),
         query: question,
         // WHICH SHELF ANSWERED, carried so the subagent arm's ledger row says the
@@ -1752,6 +1756,10 @@ async function main() {
         top: judged.top,
         strength: judged.strength,
       });
+      if (!parked) {
+        clearState(sessionId, STATE_RELAY_SLOT);
+        handoff = false;
+      }
     }
   }
   // The row every fire leaves behind, on the shape lib/push-scripts.ts's

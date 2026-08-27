@@ -1483,7 +1483,11 @@ function getStateRaw(sessionId, key) {
 
 /** Upsert one key. Per key, so concurrent arms cannot clobber each other. */
 function setState(sessionId, key, value) {
-  storeRun(STORE_SQL.setState, [storeSession(sessionId), key, storeJson(value), Date.now()]);
+  // Answers whether the row actually landed. storeRun swallows a busy database,
+  // a full disk and every other write error as null, and a caller that has
+  // ALREADY told someone the write happened (the relay announcement) cannot
+  // treat that silence as success.
+  return storeRun(STORE_SQL.setState, [storeSession(sessionId), key, storeJson(value), Date.now()]) !== null;
 }
 
 function clearState(sessionId, key) {
