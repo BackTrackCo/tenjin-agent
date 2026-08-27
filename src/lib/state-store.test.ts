@@ -195,6 +195,15 @@ describe('storeSource stays in sync with the module', () => {
     }
   });
 
+  /**
+   * `STORE_DDL` is a plain template literal, so a backtick in one of its SQL
+   * comments silently ends it and the file stops parsing. That happened twice
+   * during this work; the parse error names a line 40 above the real cause.
+   */
+  it('has no backtick in the DDL that would close its own template', () => {
+    expect(STORE_DDL).not.toContain('`');
+  });
+
   it('leaves no unsubstituted placeholder', () => {
     expect(storeSource()).not.toMatch(/__[A-Z_]+__/);
   });
@@ -245,6 +254,54 @@ describe('the generated scripts are complete', () => {
           `${name} uses ${token} without declaring it`,
         ).toBe(true);
       }
+    }
+  });
+});
+
+/**
+ * The queries a hook runs before it is allowed to speak, checked against the
+ * planner rather than against the DDL.
+ *
+ * `failStreak` runs on EVERY push fire before every lookup and `injectedCount`
+ * on every injection decision; both filter by session, and with only a partial
+ * index on `resource_id` to work with, both fell back to a full SCAN of the one
+ * table that never shrinks — measured at roughly 7 ms at 200k rows, synchronous,
+ * inside a 1500 ms budget, with up to 8 concurrent processes. An index is easy
+ * to add and just as easy to lose, so this asserts the plan, not its existence.
+ */
+describe('the hot-path queries never scan', () => {
+  it('plans every per-fire read against an index', async () => {
+    const store = await openStore(dataDir);
+    store?.close();
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      const plan = (sql: string, params: (string | number)[]): string =>
+        (
+          db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as unknown as {
+            detail: string;
+          }[]
+        )
+          .map((row) => row.detail)
+          .join(' | ');
+      const hotPaths: [string, string, (string | number)[]][] = [
+        ['recentReasons', STORE_SQL.recentReasons, ['s', 40]],
+        ['injectedCount', STORE_SQL.injectedCount, ['s']],
+        ['alreadyShown', STORE_SQL.alreadyShown, ['s', 'r']],
+        ['bucketCount', STORE_SQL.bucketCount, ['prompt', 0]],
+        ['findPairing', STORE_SQL.findPairing, ['p', 'k', 'c']],
+        ['openForHead', STORE_SQL.openForHead, ['p', 'h', 0, 8]],
+        ['openLoops', STORE_SQL.openLoops, [0, '', '', 25]],
+        ['researchedBySession', STORE_SQL.researchedBySession, ['s']],
+        ['getState', STORE_SQL.getState, ['s', 'k']],
+        // The one-shot CLI tally is not a hook path, but it reads the same
+        // never-pruned table.
+        ['statusRows', STORE_SQL.statusRows, [0]],
+      ];
+      for (const [name, sql, params] of hotPaths) {
+        expect(plan(sql, params), `${name} scans`).not.toContain('SCAN');
+      }
+    } finally {
+      db.close();
     }
   });
 });
@@ -811,6 +868,53 @@ describe('pairings: open, close, replay', () => {
     expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 0 });
   });
 
+  /**
+   * THE FLOOR IS ENFORCED AT STORAGE AND WAS BYPASSED AT RETRIEVAL. `sigV1`
+   * refuses a signature with neither errno nor frame, but the COARSE key drops
+   * the frame — so when the frame alone cleared the floor, the coarse key was a
+   * hash of the message and nothing else: exactly the key the floor exists to
+   * reject, smuggled back in on the lookup side.
+   *
+   * This repo's own suite is the case. Vitest's summary line normalizes every
+   * digit to N, so it collapses to one string for every failing run in the
+   * project; one coarse key would then cover every test failure there is, and
+   * any recorded fix would replay at all of them.
+   */
+  it('stores no coarse key when only the frame cleared the floor', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failure(
+        'pnpm test',
+        'FAIL  src/a.test.ts\n Tests  2 failed | 5 passed (7)\n    at run (/repo/one/src/a.test.ts:12:3)\n',
+      ),
+    );
+    const opened = rows('SELECT key, coarse_key FROM pairings');
+    // The frame cleared the floor, so the pairing exists...
+    expect(opened).toHaveLength(1);
+    expect(String(opened[0]?.key)).toMatch(/^[0-9a-f]{16}$/);
+    // ...but there is no message-only key for a different failure to match on.
+    expect(opened[0]?.coarse_key).toBeNull();
+  });
+
+  /** A different test file, same vitest summary line: the two must not match. */
+  it('does not replay one test failure at another', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    const summary = (file: string) =>
+      `FAIL  src/${file}\n Tests  2 failed | 5 passed (7)\n    at run (/repo/one/src/${file}:12:3)\n`;
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm test', summary('a.test.ts')));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/a.test.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm test'));
+    expect(rows('SELECT status FROM pairings')[0]?.status).toBe('unverified');
+
+    const other = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm test', summary('b.test.ts'), 's2'),
+    );
+    expect(other.stdout).toBe('');
+    expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 2 });
+  });
+
   /** ...and the tokens that ARE errnos still clear it. */
   it('takes a real errno, an ERR_ code and a compiler code', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
@@ -912,6 +1016,92 @@ describe('pairings: open, close, replay', () => {
     expect(rows("SELECT strength FROM injections WHERE session = 's3'")[0]?.strength).toBe(
       'strong',
     );
+  });
+
+  /**
+   * The second closer is RECRUITED by the suggestion, so independence alone is
+   * too weak a bar: a session shown "someone once fixed this by touching
+   * migrate.ts" re-runs the failing command by definition, which satisfies the
+   * same-command branch of the close rule while it edits anything at all. Being
+   * shown a pairing therefore buys no relaxation, and a close corroborates only
+   * if its fix OVERLAPS the first closer's.
+   */
+  it('does not promote on a second close that touched something else', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+
+    // Session 2 is shown it, edits something unrelated, and the command passes.
+    const replay = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's2'),
+    );
+    expect(replay.stdout).toContain('Someone once fixed this by touching');
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/unrelated.ts', 's2'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate', 's2'));
+
+    // The close is RECORDED — it is real evidence — but it corroborates nothing.
+    expect(rows('SELECT COUNT(*) AS n FROM pairing_closes')[0]).toEqual({ n: 2 });
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'unverified',
+      closes: 1,
+    });
+    // And the wording still names only what the corroborating closers touched.
+    expect(JSON.parse(String(rows('SELECT fix_files FROM pairings')[0]?.fix_files))).toEqual([
+      'migrate.ts',
+    ]);
+    const third = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's3'),
+    );
+    expect(third.stdout).toContain('Someone once fixed this by touching');
+    expect(third.stdout).not.toContain('Fixed here');
+  });
+
+  /** ...and a shown session that neither touched a named file nor re-ran the
+   *  failing command does not close it at all. */
+  it('does not close for a shown session with no named file and a different command', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT, 's2'));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/unrelated.ts', 's2'));
+    // A different command on the same allowlisted head.
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate --force', 's2'));
+
+    expect(rows('SELECT COUNT(*) AS n FROM pairing_closes')[0]).toEqual({ n: 1 });
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'unverified',
+      closes: 1,
+    });
+  });
+
+  /**
+   * The replayed-pairing branch is the one that reaches `verified`, so a
+   * cross-project close there does not merely add a weak row — it manufactures
+   * the confident one, stamped with a filename the first repo has never had.
+   */
+  it('never closes a shown pairing from another checkout', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+    const before = rows('SELECT status, closes, fix_files FROM pairings')[0];
+
+    // The SAME session is shown it in repo one, then moves to repo two, edits
+    // there, and the same command head passes.
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT, 's2'));
+    await runScript(
+      pushContextHookScript(dataDir),
+      edit('/repo/two/src/other.ts', 's2', '/repo/two'),
+    );
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate', 's2', '/repo/two'));
+
+    expect(rows('SELECT status, closes, fix_files FROM pairings')[0]).toEqual(before);
+    expect(rows('SELECT COUNT(*) AS n FROM pairing_closes')[0]).toEqual({ n: 1 });
   });
 
   /**

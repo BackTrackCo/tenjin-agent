@@ -83,11 +83,19 @@ export const STORE_BUSY_TIMEOUT_MS = 250;
  *
  * So the bootstrap gets its own, longer wait, and it is put back immediately
  * afterwards so no ordinary fire ever inherits it. This is a once-per-machine
- * cost (the gate is `user_version < 1`), and it stays inside every hook's
- * watchdog — the tightest is the prompt arm's 2700 ms budget.
+ * cost (the gate is `user_version < 1`).
+ *
+ * THE BUDGET IS THE PRODUCT, NOT THE TIMEOUT, and the ceiling is 1500 ms, not
+ * 2700. `DatabaseSync` is synchronous, so a `busy_timeout` wait blocks the
+ * event loop and the watchdog timer — which "fires only when the loop is free"
+ * (lib/hook-scripts.ts) — cannot preempt it. The real limit is therefore the
+ * tightest watchdog among the scripts that embed the store, and both the Stop
+ * hook and the SessionStart primer run on 1500 ms. 500 × 2 = 1000 ms worst
+ * case leaves room for the rest of the fire; the first cut said 1000 × 3 and
+ * claimed it fit under 2700, which was wrong twice over.
  */
-export const STORE_BOOTSTRAP_TIMEOUT_MS = 1000;
-export const STORE_BOOTSTRAP_TRIES = 3;
+export const STORE_BOOTSTRAP_TIMEOUT_MS = 500;
+export const STORE_BOOTSTRAP_TRIES = 2;
 
 /**
  * The whole schema, run once at `user_version = 0`.
@@ -169,6 +177,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS injections_shown_once
   ON injections(session, resource_id)
   WHERE action = 'injected' AND resource_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS injections_hook_at ON injections(hook, at);
+-- The other two hot reads. failStreak runs on EVERY push fire before every
+-- lookup and injectedCount on every injection decision, and both filter by
+-- session; the only other index on this table is partial on resource_id, so
+-- both fell back to a full SCAN that grew with a table nothing prunes
+-- (measured ~7 ms at 200k rows, synchronous, inside a 1500 ms budget, with up
+-- to 8 concurrent processes).
+CREATE INDEX IF NOT EXISTS injections_session_at ON injections(session, at);
+CREATE INDEX IF NOT EXISTS injections_session_action ON injections(session, action);
+-- The push status tally reads a 7-day window. Not a hook path, so a scan there
+-- costs a human a moment rather than a tool call its budget, but the table is
+-- the one that never shrinks and this is one index.
+CREATE INDEX IF NOT EXISTS injections_at ON injections(at);
 CREATE INDEX IF NOT EXISTS injections_outcome ON injections(outcome) WHERE outcome IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS session_state (
@@ -231,6 +251,7 @@ CREATE TABLE IF NOT EXISTS pairing_closes (
   at INTEGER NOT NULL,
   fix_cmd TEXT,
   fix_files TEXT,
+  scope TEXT,
   PRIMARY KEY (pairing_id, session)
 );
 
@@ -395,29 +416,48 @@ export const STORE_SQL = {
   openForHead: `SELECT * FROM pairings
      WHERE status = 'open' AND project IS ? AND cmd_head = ? AND at <= ?
      ORDER BY at DESC LIMIT ?`,
-  /** One replayed pairing, by id, so the session that was SHOWN it can close it
-   *  too — the second independent close 04 promotes to `verified`. */
-  pairingById: 'SELECT * FROM pairings WHERE id = ?',
+  /**
+   * One replayed pairing, by id, so the session that was SHOWN it can close it
+   * too — the second independent close 04 promotes to `verified`.
+   *
+   * PROJECT-SCOPED like every other pairing read. It was not, and that was the
+   * worse half of the cross-project bug: this is the branch that reaches
+   * `verified`, the status that injects as a fix rather than as a maybe, so a
+   * session shown a pairing in one repo and succeeding in another did not just
+   * add a weak row — it manufactured the confident one, stamped with a filename
+   * the first repo has never had.
+   */
+  pairingById: 'SELECT * FROM pairings WHERE id = ? AND project IS ?',
+  /** The same row without the project predicate, for reading back a pairing this
+   *  process has just written by id. Never used to FIND one. */
+  pairingByIdUnscoped: 'SELECT status FROM pairings WHERE id = ?',
   /** Claim a close for this session. OR IGNORE, so a session that closes the
    *  same pairing twice changes nothing: independence is the primary key's job,
    *  not the caller's. */
-  claimClose: `INSERT OR IGNORE INTO pairing_closes (pairing_id, session, at, fix_cmd, fix_files)
-     VALUES (?, ?, ?, ?, ?)`,
-  /** Recompute the pairing from its closers. `closes` is a COUNT rather than an
-   *  increment, so two closes racing cannot both read the same old value, and a
-   *  repeat close from one session cannot promote anything (04, "Close rule":
-   *  two INDEPENDENT closes -> verified). */
+  claimClose: `INSERT OR IGNORE INTO pairing_closes
+       (pairing_id, session, at, fix_cmd, fix_files, scope)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  /** Every closer, oldest first. The first one owns the pairing's scope, and
+   *  the rest are only corroboration if their fix agrees with it. */
+  closersOf: `SELECT session, at, fix_cmd, fix_files, scope FROM pairing_closes
+     WHERE pairing_id = ? ORDER BY at, session`,
+  /**
+   * Write back what the closers actually agree on.
+   *
+   * COMPUTED FROM THEM, NOT FROM THE LATEST ONE. The first cut counted rows and
+   * kept the first closer's files with `COALESCE` while overwriting `scope`
+   * from whoever closed last, so "Fixed here 2 time(s) by changing: <first
+   * closer's files>" asserted a corroboration nobody had checked — the second
+   * closer may have touched something else entirely. `closes` is now the number
+   * of closers whose fix AGREES with the first, `fix_files` is what they have
+   * in common, and `scope` belongs to the first closer.
+   */
   syncPairing: `UPDATE pairings SET
-       closes = (SELECT COUNT(*) FROM pairing_closes WHERE pairing_id = pairings.id),
-       status = CASE
-         WHEN (SELECT COUNT(*) FROM pairing_closes WHERE pairing_id = pairings.id) >= 2
-           THEN 'verified'
-         WHEN (SELECT COUNT(*) FROM pairing_closes WHERE pairing_id = pairings.id) >= 1
-           THEN 'unverified'
-         ELSE status END,
+       closes = ?,
+       status = CASE WHEN ? >= 2 THEN 'verified' ELSE 'unverified' END,
        closed_at = ?,
-       fix_cmd = COALESCE(fix_cmd, ?),
-       fix_files = COALESCE(fix_files, ?),
+       fix_cmd = ?,
+       fix_files = ?,
        scope = ?
      WHERE id = ?`,
 
@@ -733,10 +773,35 @@ function storeAll(sql, params) {
   }
 }
 
-/** A count query's answer, or 0 for anything unreadable. */
+/**
+ * A count query's answer.
+ *
+ * UNREADABLE IS NOT ZERO. Every caller of this is a BOUND — the per-arm lookup
+ * cap, the per-session injection cap, the outage brake — and answering 0 for a
+ * database that could not be read turned each of them off at exactly the moment
+ * there was no other bookkeeping either. Fail-open is the right contract for
+ * SILENCE; it is a different decision for bounds, and it fell out of this
+ * helper's default rather than being chosen. An unknown count reads as
+ * Infinity, so a bound built on it engages rather than disappears.
+ */
 function storeCount(sql, params) {
+  if (STORE === null) return Infinity;
   const row = storeGet(sql, params);
-  return row !== null && typeof row.n === 'number' ? row.n : 0;
+  return row !== null && typeof row.n === 'number' ? row.n : Infinity;
+}
+
+/**
+ * May a row that was meant to be INJECTED actually be shown?
+ *
+ * Only on a clean write. A \`duplicate\` is the once-per-session index doing its
+ * job, and an \`error\` — a BUSY past the timeout is the realistic one, under
+ * exactly the contention the guarantee was added for — means the row is not
+ * there either, so showing the piece would be the second injection the index
+ * exists to prevent. The arms return before this point when there is no store
+ * at all, so \`no-store\` is not a case that reaches here.
+ */
+function mayShow(outcome) {
+  return outcome === 'ok';
 }
 
 /** JSON for a text column, or null. Never throws: a value with a cycle in it is
@@ -896,7 +961,10 @@ function clearState(sessionId, key) {
  * \`DO NOTHING\` plus the row count is the whole guard.
  */
 function claimState(sessionId, key, value) {
-  if (STORE === null) return true;
+  // No store is no dedup, and no dedup is not a licence: the arms return before
+  // they reach here, and a caller that somehow did must not be told it holds a
+  // claim nothing recorded.
+  if (STORE === null) return false;
   const result = storeRun(STORE_SQL.claimState, [
     storeSession(sessionId),
     key,
@@ -1088,42 +1156,74 @@ function openPairingsForHead(cwd, cmdHead, beforeMs, limit) {
   ]).map(pairingRow);
 }
 
-/** One pairing by id, for the session that was SHOWN it and later fixed it. */
-function pairingById(id) {
-  const row = storeGet(STORE_SQL.pairingById, [id]);
+/** One pairing by id AND project, for the session that was SHOWN it and later
+ *  fixed it. The project is not optional: see the note on the statement. */
+function pairingById(cwd, id) {
+  const row = storeGet(STORE_SQL.pairingById, [id, projectId(cwd)]);
   return row === null ? null : pairingRow(row);
 }
 
 /**
- * Record that \`sessionId\` closed this pairing, then recompute it.
+ * Record that \`sessionId\` closed this pairing, then recompute it from all
+ * of its closers.
  *
- * TWO STATEMENTS, AND THE FIRST ONE IS THE GUARD. 04's rule is "two INDEPENDENT
- * closes -> verified", so the closers are rows in \`pairing_closes\` keyed
- * (pairing_id, session): a session closing the same pairing twice is an
- * \`INSERT OR IGNORE\` that changes nothing and cannot self-promote, and
- * \`closes\` is recomputed as a COUNT rather than incremented, so two closers
- * racing cannot both read the same old value.
+ * TWO CLOSES ARE ONLY CORROBORATION IF THEY AGREE. 04 asks for "two INDEPENDENT
+ * closes"; independence alone turned out to be too weak, because the second
+ * closer is RECRUITED by the suggestion itself — a session shown "someone once
+ * fixed this by touching foo.ts" re-runs the failing command by definition, so
+ * it satisfied the same-command branch of the close rule while editing anything
+ * at all, and the suggestion became a material cause of its own promotion to
+ * \`verified\`. So a closer counts toward the promotion only if its fix
+ * OVERLAPS the first closer's: the same file was touched both times. An
+ * incompatible close is still RECORDED — it is real evidence about the pairing,
+ * and #212 will want it — it simply does not corroborate.
+ *
+ * \`fix_files\` ends up as what the corroborating closers have in common, so
+ * "Fixed here N time(s) by changing X" names only files every one of them
+ * touched. \`scope\` belongs to the FIRST closer and is never overwritten:
+ * it describes the pairing, and the first close is the one whose files are kept.
  *
  * Returns the resulting status, so the caller can say what it did.
  */
 function closePairing(id, sessionId, fixCmd, fixFiles, scope) {
   const now = Date.now();
+  const files = Array.isArray(fixFiles) ? fixFiles : [];
   storeRun(STORE_SQL.claimClose, [
     id,
     storeSession(sessionId),
     now,
     typeof fixCmd === 'string' ? fixCmd : null,
-    storeJson(fixFiles),
-  ]);
-  storeRun(STORE_SQL.syncPairing, [
-    now,
-    typeof fixCmd === 'string' ? fixCmd : null,
-    storeJson(fixFiles),
+    storeJson(files),
     String(scope),
+  ]);
+
+  const closers = storeAll(STORE_SQL.closersOf, [id]).map((row) => ({
+    at: typeof row.at === 'number' ? row.at : 0,
+    fixCmd: typeof row.fix_cmd === 'string' ? row.fix_cmd : null,
+    fixFiles: storeParse(row.fix_files) || [],
+    scope: typeof row.scope === 'string' ? row.scope : 'ambiguous',
+  }));
+  if (closers.length === 0) return 'open';
+
+  const first = closers[0];
+  const agreeing = [first];
+  for (const closer of closers.slice(1)) {
+    if (closer.fixFiles.some((f) => first.fixFiles.includes(f))) agreeing.push(closer);
+  }
+  // What they ALL touched. With one closer that is simply its own files.
+  const common = first.fixFiles.filter((f) => agreeing.every((c) => c.fixFiles.includes(f)));
+
+  storeRun(STORE_SQL.syncPairing, [
+    agreeing.length,
+    agreeing.length,
+    now,
+    first.fixCmd,
+    storeJson(common.length > 0 ? common : first.fixFiles),
+    first.scope,
     id,
   ]);
-  const after = pairingById(id);
-  return after === null ? 'open' : after.status;
+  const after = storeGet(STORE_SQL.pairingByIdUnscoped, [id]);
+  return after !== null && typeof after.status === 'string' ? after.status : 'open';
 }
 
 function pairingRow(row) {
@@ -1131,6 +1231,7 @@ function pairingRow(row) {
     id: typeof row.id === 'number' ? row.id : 0,
     at: typeof row.at === 'number' ? row.at : 0,
     session: typeof row.session === 'string' ? row.session : '',
+    project: typeof row.project === 'string' ? row.project : null,
     key: typeof row.key === 'string' ? row.key : '',
     coarseKey: typeof row.coarse_key === 'string' ? row.coarse_key : null,
     cmdHead: typeof row.cmd_head === 'string' ? row.cmd_head : null,

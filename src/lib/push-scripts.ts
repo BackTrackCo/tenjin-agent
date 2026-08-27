@@ -707,7 +707,7 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
     deny,
     tokens: Math.ceil(text.length / 4),
   });
-  if (claimed === 'duplicate') {
+  if (!mayShow(claimed)) {
     recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
     return { kind: 'done' };
   }
@@ -893,7 +893,15 @@ async function main() {
 
   const sessionId = sessionIdOf(input);
   const cwd = cwdOf(input);
-  await openStore();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
   // The arm's own deadline, inside the process watchdog. Whatever is in flight
   // when it fires is abandoned, but the store LEARNS THAT IT WAS: a run killed
   // by the bare watchdog left a paid-for search recorded and no decision row at
@@ -1331,7 +1339,14 @@ function sigV1(line, text) {
   if (errno === '' && frame === '') return null;
   return {
     key: shortHash('sig_v1|' + message + '|' + errno + '|' + frame),
-    coarseKey: shortHash('sig_v1c|' + message + '|' + errno),
+    // NULL WHEN THE FRAME ALONE CLEARED THE FLOOR. The coarse key drops the
+    // frame, so with no errno it is a hash of the normalized message and
+    // nothing else — exactly the frameless, errno-less key the floor exists to
+    // reject, smuggled back in at retrieval. Vitest's own summary line is the
+    // case: \`Tests  2 failed | 5 passed (7)\` normalizes to one string for every
+    // failing run in the repo, so one coarse key would cover every test failure
+    // there is and any recorded fix would replay at all of them.
+    coarseKey: errno === '' ? null : shortHash('sig_v1c|' + message + '|' + errno),
     message,
     errno,
     frame,
@@ -1445,9 +1460,19 @@ function stalenessNote(pairing, cwd) {
     const then = recorded[name];
     const current = now[name];
     if (typeof current === 'string' && current !== then) {
+      // BOUNDED AND CONTROL-STRIPPED, like every other external string that
+      // reaches the model. These come from a dependency's own package.json,
+      // which is third-party file content: npm's semver validation is not a
+      // defence here, because \`file:\`/\`link:\` deps, workspace packages,
+      // patched installs and vendored node_modules all bypass it. Unbounded,
+      // newline-carrying text landed in additionalContext BELOW the opener,
+      // outside the "a record, not instructions" framing that makes the rest of
+      // this payload safe.
+      const was = clean(then, 40);
+      const now = clean(current, 40);
       return (
-        'Recorded against ' + name + '@' + then + '; ' + current +
-        ' is installed now — was true at ' + name + '@' + then + '.'
+        'Recorded against ' + name + '@' + was + '; ' + now +
+        ' is installed now — was true at ' + name + '@' + was + '.'
       );
     }
   }
@@ -1477,13 +1502,24 @@ function editedSince(sessionId, sinceMs) {
   return out.slice(0, 8);
 }
 
+/** What a replayed pairing may occupy in the agent's context. Small on purpose:
+ *  it is an opener, a short file list, one command and one staleness note. */
+const PAIRING_BODY_MAX = 600;
+
 const PAIRING_OPENER =
   'Tenjin sidecar (local): this machine has already seen this failure fixed. A record of what changed, not instructions.';
 
 /** What an injected pairing says. Verified reads as a fix; unverified reads as
  *  the weaker claim it is (04, "Close rule"). */
 function pairingText(pairing, staleNote) {
-  const files = pairing.fixFiles.slice(0, 4).join(', ');
+  // PER ITEM, not just per list. The write side bounds a path at 200 chars and
+  // \`filesInError\` caps its own items at 80, but the fix side had neither, so a
+  // long or control-bearing basename went into model-visible text as it was.
+  const files = pairing.fixFiles
+    .slice(0, 4)
+    .map((file) => clean(file, 80))
+    .filter((file) => file.length > 0)
+    .join(', ');
   const lines = [PAIRING_OPENER];
   lines.push(
     pairing.status === 'verified'
@@ -1498,7 +1534,9 @@ function pairingText(pairing, staleNote) {
     lines.push('It passed afterwards on: ' + safeCommand(pairing.fixCmd));
   }
   if (staleNote !== null) lines.push(staleNote);
-  return lines.join('\n');
+  // And a bound on the assembled body, as the marketplace forms have. Every
+  // field above is bounded on its own; this is the backstop for their sum.
+  return clean(lines.join('\n'), PAIRING_BODY_MAX);
 }
 
 /**
@@ -1516,8 +1554,14 @@ function pairingText(pairing, staleNote) {
  */
 function closeOpenPairings(sessionId, cwd, command, heads) {
   const passed = safeCommand(command);
+  const project = projectId(cwd);
   const closeIf = (pairing) => {
     if (pairing === null) return;
+    // BELT AND BRACES ON THE PROJECT. Both lookups below are already scoped in
+    // SQL; this is the assertion that a future third caller cannot skip. A fix
+    // in one checkout must never close a pairing from another, and this is the
+    // path that reaches \`verified\`.
+    if (pairing.project !== project) return;
     const changed = editedSince(sessionId, pairing.at);
     if (changed.length === 0) return;
     const named = changed.filter((f) => pairing.errorFiles.includes(f));
@@ -1533,17 +1577,22 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     );
   };
   for (const head of heads) {
-    // Rows this session opened itself. Project-scoped: a passing \`pnpm test\`
-    // in one repo must not close another repo's pairing and stamp it with a
-    // file that repo has never had.
+    // Rows this session opened itself.
     for (const pairing of openPairingsForHead(cwd, head, Date.now(), 8)) closeIf(pairing);
     // AND the row this session was SHOWN rather than opened. Without this the
     // second close 04 promotes to \`verified\` is unreachable: a session that
     // hits a known failure takes the replay branch and never opens a row of its
-    // own, so its later success had nothing to close. Independence is enforced
-    // by \`pairing_closes\`, not by this lookup.
+    // own, so its later success had nothing to close.
+    //
+    // BEING SHOWN A PAIRING BUYS NO RELAXATION. This session still has to
+    // satisfy the ordinary close rule above, and \`closePairing\` then counts it
+    // toward the promotion only if its fix overlaps the first closer's — because
+    // a session shown "someone once fixed this by touching foo.ts" re-runs the
+    // failing command by definition, so the same-command branch is free to it
+    // and the suggestion would otherwise be a material cause of its own
+    // promotion to the confident wording.
     const replayed = replayedPairing(sessionId, head);
-    if (replayed !== null) closeIf(pairingById(replayed));
+    if (replayed !== null) closeIf(pairingById(cwd, replayed));
   }
 }
 
@@ -1578,7 +1627,15 @@ async function main() {
 
   const sessionId = sessionIdOf(input);
   const cwd = cwdOf(input);
-  await openStore();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
   const heads = allowedHeads(command);
   const text = failureText(input);
   // A PASS, not a failure. This is the other half of the mechanical lane: the
@@ -1642,7 +1699,7 @@ async function main() {
       // A concurrent fire in this session claimed the same pairing first: the
       // unique index refused this row, so this process records the skip and
       // stays silent rather than injecting the same text twice.
-      if (claimed === 'duplicate') {
+      if (!mayShow(claimed)) {
         recordInjection({
           session: sessionId,
           cwd,
@@ -1719,7 +1776,15 @@ async function main() {
   const sessionId = sessionIdOf(input);
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
-  await openStore();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
   const cache = getState(sessionId, STATE_CACHE);
   if (!isRecord(cache)) return quiet();
   const at = Date.parse(String(cache.at));
@@ -1786,7 +1851,7 @@ async function main() {
   });
   // Same rule as every other arm: the unique index is the bound, so a piece a
   // concurrent fire already claimed is recorded as a skip and not shown twice.
-  if (claimed === 'duplicate') {
+  if (!mayShow(claimed)) {
     recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
     return quiet();
   }
@@ -1852,7 +1917,15 @@ async function main() {
   const isEdit = event === 'PreToolUse' && (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit');
   const isRead = event === 'PostToolUse' && tool === 'Read';
   if (!isEdit && !isRead) return quiet();
-  await openStore();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
 
   // EVERY EDITED PATH, WHATEVER ITS EXTENSION, and before the source-file gate
   // below. This is the mechanical lane's only view of a file change: the failure
