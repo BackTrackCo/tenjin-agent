@@ -106,10 +106,13 @@ const FIX_CHECK_NETWORK_AND_BASE_URL =
  * the one setting that was already correct. Names the config key and no value:
  * the secret itself never reaches any check output. Says "if" because the page
  * signal alone does not prove protection; only the off-host redirect does, and
- * the detail line carries that distinction.
+ * the detail line carries that distinction. Names the alternative for the same
+ * reason {@link FIX_ROTATE_SHELF_BYPASS} does: an HTML page also answers a
+ * `baseUrl` that is one typo off any site on the web, and setting a key would
+ * not touch that.
  */
 const FIX_SET_SHELF_BYPASS =
-  'If that deployment is access-protected these probes did not get past it; set the team shelf key: `tenjin config set shelfBypassSecret <value>`.';
+  'If that deployment is access-protected these probes did not get past it; set the team shelf key: `tenjin config set shelfBypassSecret <value>`. If it is not, something else answered instead (a proxy, WAF, or a base URL that is not the shelf you meant); confirm which before setting one.';
 /**
  * Same page, but the probe CARRIED the configured key and still did not get
  * past. Telling this machine to set the secret it already sent (the stale-key
@@ -118,6 +121,14 @@ const FIX_SET_SHELF_BYPASS =
  */
 const FIX_ROTATE_SHELF_BYPASS =
   'The configured shelfBypassSecret was sent and did not get past. Either the key is stale or rotated (update it: `tenjin config set shelfBypassSecret <value>`), or something between you and the shelf answered instead (a proxy, WAF, or another sign-in layer); confirm which before rotating.';
+/**
+ * A keyed probe was redirected, but to the SAME host it asked for: an `http://`
+ * base URL that 301s to https, or a host normalising to its canonical name. The
+ * key was refused by nothing here, so the rotate line would invert #218 all over
+ * again, blaming the setting that was right. `baseUrl` is the one that moves.
+ */
+const FIX_FOLLOW_REDIRECT_IN_BASE_URL =
+  'That URL redirects, and a probe carrying the team shelf key does not follow redirects. Point the configured base URL at the canonical host and scheme it redirects to: `tenjin config set baseUrl <url>`.';
 /**
  * The same page, from a URL where the team key is not the answer. Naming
  * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
@@ -489,6 +500,11 @@ async function loadConfigForDoctor(
  * (whether the gate answered 200 HTML, 401/403, or the blocked 30x
  * interstitial), so "set it" would prescribe the config this machine already
  * has; absent means setting it is the move.
+ *
+ * A blocked redirect qualifies only when its `Location` LEAVES the host asked
+ * for. The transport refuses to follow any 3xx while carrying the key, so the
+ * status alone says nothing about the key: a same-host hop is what an `http://`
+ * base URL or a non-canonical host name gets, with a perfectly good secret.
  */
 function shelfGateFix(
   res: FetchJsonFailure,
@@ -497,8 +513,25 @@ function shelfGateFix(
 ): string | undefined {
   const blocked = res.kind === 'blocked-redirect' && bypass !== undefined;
   if (res.gateSuspected !== true && !blocked) return undefined;
+  if (blocked && res.gateOffOrigin !== true) return FIX_FOLLOW_REDIRECT_IN_BASE_URL;
   if (!shelfKeyRemedy) return FIX_PAGE_NOT_THE_API;
   return bypass !== undefined ? FIX_ROTATE_SHELF_BYPASS : FIX_SET_SHELF_BYPASS;
+}
+
+/**
+ * What a gate-suspected failure SAYS happened, shared by the probes that print
+ * one so a `detail` and its `fix` cannot tell different stories about one
+ * response (read-path used to print the transport's raw "was not valid JSON"
+ * beside a fix about the key). Claims no more than the signal proves: an
+ * off-host landing proves a sign-in redirect, an HTML content-type alone proves
+ * only that a page answered. The status rides both arms, since a 401 is the
+ * most useful word in either sentence.
+ */
+function gateDetail(url: string, res: FetchJsonFailure): string {
+  const status = res.kind === 'http' ? ` ${res.status}` : '';
+  return res.gateOffOrigin === true
+    ? `${url} answered${status} from a different host than the one asked for (an access-protection or sign-in redirect), not from a Tenjin API`
+    : `${url} answered${status} with an HTML page, not JSON`;
 }
 
 async function checkApiContract(
@@ -530,9 +563,7 @@ async function checkApiContract(
         status: 'fail',
         required: true,
         detail: gated
-          ? res.gateOffOrigin === true
-            ? `${url} was answered from a different host than the one asked for (an access-protection or sign-in redirect), not by a Tenjin API`
-            : `${url} answered${res.kind === 'http' ? ` ${res.status}` : ''} with an HTML page, not JSON`
+          ? gateDetail(url, res)
           : malformed
             ? `OpenAPI document at ${url} was not valid JSON`
             : `Could not reach the Tenjin API at ${url}: ${res.message}`,
@@ -1372,7 +1403,13 @@ async function checkReadPath(
         name: 'read-path',
         status: 'fail',
         required: true,
-        detail: `Read path ${url} failed: ${res.message}`,
+        // Gate-aware on BOTH halves. The transport's message for a gate page is
+        // "was not valid JSON", which read beside a fix about the key was one
+        // check telling `--json` two stories about one response.
+        detail:
+          res.gateSuspected === true
+            ? `Read path ${gateDetail(url, res)}`
+            : `Read path ${url} failed: ${res.message}`,
         // Same gate-aware fix as api-contract (see shelfGateFix): the identical
         // protection page answers this probe too, and `--json` carries both.
         fix: shelfGateFix(res, bypass, shelfKeyRemedy) ?? FIX_CHECK_NETWORK_AND_BASE_URL,

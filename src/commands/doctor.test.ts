@@ -882,6 +882,37 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
 
+  /**
+   * The same block, from a redirect that never leaves the host asked for: an
+   * `http://` baseUrl that 301s to https, a host normalising its name. The
+   * transport refuses to follow any 3xx while carrying the key, so the status
+   * alone is not evidence about the key, and "stale or rotated" here would blame
+   * the one setting that was right (#218 inverted). `baseUrl` is what moves.
+   */
+  it('a same-host redirect blocked while carrying the key points at baseUrl, not at the key', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': {
+          body: '',
+          status: 301,
+          headers: { location: 'https://backtrack.tenjin.sh/v2/openapi.json' },
+        },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    expect(err.code).toBe('API_UNREACHABLE');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('canonical host');
+    expect(check.fix).not.toContain('stale or rotated');
+    expect(check.fix).not.toContain('shelfBypassSecret');
+    expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
   it('a gated read path points at the key too, not only api-contract', async () => {
     await writeFile(
       join(dir, 'config.json'),

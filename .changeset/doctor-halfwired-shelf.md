@@ -29,7 +29,10 @@ configured (`file`) base URL on a shelf of the team's own, and the wording
 follows what the probe did: with no secret configured the fix is to set it, and
 when the key was sent and still did not get past (a gate page, a 401/403, or the
 blocked redirect interstitial a rotated key gets) the fix is to update the stale
-key. Against the public marketplace the key is refused anyway, and against an
+key. A blocked redirect counts only when its `Location` leaves the host asked
+for: a same-host 3xx is what an `http://` base URL or a non-canonical host name
+gets with a perfectly good key, so that one says the URL redirects and to point
+`baseUrl` at the host it lands on. Against the public marketplace the key is refused anyway, and against an
 override the origin belongs to that one run, so both get a line about a proxy or
 a sign-in wall and no credential to write. No check output carries the secret's
 value, only the key's name.

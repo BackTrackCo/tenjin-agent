@@ -150,10 +150,12 @@ export interface FetchJsonFailure {
    */
   gateSuspected?: boolean;
   /**
-   * Present (true) only when `gateSuspected` fired on the STRONGER of its two
-   * signals: the final URL's host is not the one asked for. An HTML content-type
-   * alone proves a page came back, not who sent it; an off-host landing proves a
-   * redirect happened, so callers may name access protection outright.
+   * Present (true) only where the response left the host that was asked for:
+   * `gateSuspected`'s STRONGER signal (the final URL's host differs), or, on
+   * `blocked-redirect`, a `Location` that resolves to another host. An HTML
+   * content-type alone proves a page came back, not who sent it, and a 3xx
+   * alone proves only that the URL moved; leaving the host is what lets a
+   * caller name access protection outright.
    */
   gateOffOrigin?: boolean;
 }
@@ -192,6 +194,27 @@ function accessGateSignals(
     gateSuspected: html || offOrigin,
     ...(offOrigin ? { gateOffOrigin: true as const } : {}),
   };
+}
+
+/**
+ * Does an unfollowed 3xx point off the host that was asked for?
+ *
+ * The pinned branch never follows, so `res.url` is still the requested URL and
+ * `Location` is the only evidence about where the hop went. That distinction
+ * carries the whole verdict downstream: a gate's sign-in interstitial lands on
+ * another host, while an `http://` base URL that 301s to https, or a host
+ * normalising to its canonical name, does not, and reading either as a refused
+ * credential blames the wrong setting. A relative target resolves against the
+ * request, so it is same-host by construction; a missing or unparseable one is
+ * NOT an off-host claim.
+ */
+function redirectLeavesHost(requestedUrl: string, location: string | null): boolean {
+  if (location === null || location.length === 0) return false;
+  try {
+    return new URL(requestedUrl).host !== new URL(location, requestedUrl).host;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -286,6 +309,12 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
         kind: 'blocked-redirect',
         status: res.status,
         ...(requestId !== undefined ? { requestId } : {}),
+        // Where it pointed, not that it pointed: only a hop that leaves the host
+        // asked for is evidence about the key. Same-host 3xx happens to a base
+        // URL that needs fixing, with a perfectly good key.
+        ...(redirectLeavesHost(url, res.headers.get('location'))
+          ? { gateOffOrigin: true as const }
+          : {}),
         message:
           `Request to ${url} was redirected (${res.status}) while carrying the team shelf's ` +
           'bypass key; refusing to follow it, because the key opens only the configured origin.',
