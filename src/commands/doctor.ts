@@ -115,6 +115,9 @@ interface BuiltCheck {
 export interface DoctorDeps {
   /** Environment for wallet-key detection and settings precedence. */
   env?: NodeJS.ProcessEnv;
+  /** The `node:sqlite` probe; tests inject a failing one to exercise the
+   * damaged-install diagnosis without a damaged install. */
+  probeSqlite?: typeof probeSqlite;
   /** Injected fetch for the reachability checks; tests pass a canned stub. */
   fetchImpl?: typeof fetch;
   /** Inject the active wallet provider. When set, NO local fs/env is consulted —
@@ -210,7 +213,7 @@ export async function collectDoctorChecks(
 
   const built: BuiltCheck[] = [
     checkNode(),
-    await checkStateStore(),
+    await checkStateStore(deps.probeSqlite ?? probeSqlite),
     configCheck,
     // The three baseUrl probes carry the team shelf's bypass. Without it every
     // one of them reports a protected team deployment as unreachable, which is
@@ -361,8 +364,8 @@ function checkNode(): BuiltCheck {
  * remembering anything looks identical from the outside to one that simply had
  * nothing to say. So doctor asks directly.
  */
-async function checkStateStore(): Promise<BuiltCheck> {
-  const probe = await probeSqlite();
+async function checkStateStore(probe_: typeof probeSqlite): Promise<BuiltCheck> {
+  const probe = await probe_();
   if (probe.ok) {
     return {
       result: {
@@ -378,10 +381,16 @@ async function checkStateStore(): Promise<BuiltCheck> {
       name: 'state-store',
       status: 'fail',
       required: true,
-      detail: 'node:sqlite is unavailable, so the hooks keep no state at all',
-      fix: 'Node 24+ required for hook state',
+      // Anyone reading this already cleared the >=24 preflight in src/index.ts,
+      // so "upgrade Node" cannot be the remedy: the runtime is supported and the
+      // import still failed, which points at the install — a damaged or
+      // re-bundled dist (tsup once shipped `import("sqlite")`, tenjin-agent#225),
+      // a patched runtime. Distinct code from the preflight so `--json` readers
+      // can tell the two apart.
+      detail: `node:sqlite failed to load on Node ${process.versions.node}, so the hooks keep no state at all`,
+      fix: 'Reinstall tenjin-cli (npm i -g tenjin-cli@latest); if it persists, report the output of node -e "import(\'node:sqlite\')"',
     },
-    failCode: 'NODE_UNSUPPORTED',
+    failCode: 'INTERNAL',
   };
 }
 

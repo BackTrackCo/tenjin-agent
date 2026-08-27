@@ -155,6 +155,34 @@ describe('runDoctor — passing outcomes', () => {
     expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
   });
 
+  // The preflight in src/index.ts already refused anything below Node 24, so a
+  // failing probe here is never "upgrade Node": the runtime is supported and the
+  // import still failed, which is a damaged install or bundle (tsup once shipped
+  // `import("sqlite")`, tenjin-agent#225). The remedy and the code must say so,
+  // and must not collide with the preflight's NODE_UNSUPPORTED.
+  it('a failing node:sqlite probe on a supported Node blames the install, not Node', async () => {
+    const err = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+      probeSqlite: async () => ({ ok: false, version: null }),
+    }).then(
+      () => {
+        throw new Error('expected doctor to fail');
+      },
+      (e: unknown) => e as CliError,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('INTERNAL');
+    const checks = (err.details as { checks: CheckResult[] }).checks;
+    const store = find(checks, 'state-store');
+    expect(store.status).toBe('fail');
+    expect(store.detail).toContain(`Node ${process.versions.node}`);
+    expect(store.fix).toContain('Reinstall tenjin-cli');
+    expect(store.fix).not.toMatch(/Node 24/);
+  });
+
   // Doctor is the command you reach for when something is already broken, so the
   // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
   // some other tool would return CONFIG_INVALID and run zero checks on a machine
