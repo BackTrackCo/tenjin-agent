@@ -142,22 +142,30 @@ export interface FetchJsonFailure {
   requestId?: string;
   message: string;
   /**
-   * On `invalid-json` only: the 2xx that failed to parse looks like an
-   * access-protection or sign-in page rather than a malformed API document. See
-   * {@link looksLikeAccessGate} for what "looks like" means. Callers use it to
+   * On `invalid-json`, and on `http` when the status is 401/403: the response
+   * looks like an access-protection or sign-in page rather than an API answer.
+   * See {@link accessGateSignals} for what "looks like" means. Callers use it to
    * point at the missing credential instead of at the base URL, which is the one
    * setting that was already correct (#218).
    */
   gateSuspected?: boolean;
+  /**
+   * Present (true) only when `gateSuspected` fired on the STRONGER of its two
+   * signals: the final URL's host is not the one asked for. An HTML content-type
+   * alone proves a page came back, not who sent it; an off-host landing proves a
+   * redirect happened, so callers may name access protection outright.
+   */
+  gateOffOrigin?: boolean;
 }
 
 /**
- * Does this 2xx read as a protection page rather than as a broken API document?
+ * Does this response read as a protection page rather than as an API answer?
  *
- * Two independent signals, either one enough:
+ * Two independent signals, reported separately because they prove different
+ * amounts (the caller's wording must not outrun the evidence):
  *
  * - an HTML content-type, because a Vercel Deployment Protection interstitial
- *   and every sign-in wall answer 200 with a page;
+ *   and every sign-in wall answer with a page;
  * - a final URL whose host is not the one asked for, because a gate that
  *   redirects to sign in lands the probe on another host and `fetch` follows it
  *   silently on the unpinned requests this function serves.
@@ -167,14 +175,23 @@ export interface FetchJsonFailure {
  * unreadable final URL is NOT suspicion: `res.url` is empty on a synthesized
  * Response, so only a host that reads AND differs counts.
  */
-function looksLikeAccessGate(requestedUrl: string, res: Response): boolean {
-  if (/^\s*text\/html\b/i.test(res.headers.get('content-type') ?? '')) return true;
-  if (res.url.length === 0) return false;
-  try {
-    return new URL(requestedUrl).host !== new URL(res.url).host;
-  } catch {
-    return false;
+function accessGateSignals(
+  requestedUrl: string,
+  res: Response,
+): { gateSuspected: boolean; gateOffOrigin?: true } {
+  const html = /^\s*text\/html\b/i.test(res.headers.get('content-type') ?? '');
+  let offOrigin = false;
+  if (res.url.length > 0) {
+    try {
+      offOrigin = new URL(requestedUrl).host !== new URL(res.url).host;
+    } catch {
+      offOrigin = false;
+    }
   }
+  return {
+    gateSuspected: html || offOrigin,
+    ...(offOrigin ? { gateOffOrigin: true as const } : {}),
+  };
 }
 
 /**
@@ -281,6 +298,11 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
         kind: 'http',
         status: res.status,
         ...(requestId !== undefined ? { requestId } : {}),
+        // 401/403 is one of the three shapes deployment protection answers with
+        // (200 HTML and a 30x interstitial are the others), so the gate signals
+        // ride here too. Other statuses stay unmarked: a 404 or 500 HTML page is
+        // an ordinary broken deployment, not a credential problem.
+        ...(res.status === 401 || res.status === 403 ? accessGateSignals(url, res) : {}),
         message: `Request to ${url} failed with status ${res.status}`,
       };
     }
@@ -300,7 +322,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
           kind: 'invalid-json',
           status: res.status,
           ...(requestId !== undefined ? { requestId } : {}),
-          gateSuspected: looksLikeAccessGate(url, res),
+          ...accessGateSignals(url, res),
           message: `Response from ${url} was not valid JSON`,
         };
       }

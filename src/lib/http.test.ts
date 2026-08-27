@@ -69,7 +69,27 @@ describe('fetchJson', () => {
         timeoutMs: 1000,
         fetchImpl,
       });
+      // The off-host landing is the stronger signal, so it is reported
+      // separately: it licenses the caller to name access protection outright.
+      expect(res).toMatchObject({
+        ok: false,
+        kind: 'invalid-json',
+        gateSuspected: true,
+        gateOffOrigin: true,
+      });
+    });
+
+    it('does not claim the off-origin signal on a same-host HTML page', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        landedAt('https://shelf.example/openapi.json', '<html></html>', {
+          headers: { 'content-type': 'text/html' },
+        });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
       expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
+      expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
     });
 
     it('is unset for plain bad JSON served by the requested origin', async () => {
@@ -100,6 +120,50 @@ describe('fetchJson', () => {
     const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 500 });
     const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
     expect(res).toMatchObject({ ok: false, kind: 'http', status: 500 });
+  });
+
+  /**
+   * A sign-in wall that answers 401/403 with its page is the second of the
+   * three protection shapes (200 HTML, 401/403, 30x interstitial), so the gate
+   * signals ride on those statuses too; a JSON 401 is the API itself refusing,
+   * and any other status stays unmarked (a 404 HTML page is an ordinary broken
+   * deployment, not a credential problem).
+   */
+  describe('gateSuspected on a 401/403 http failure', () => {
+    const htmlPage = (status: number): typeof fetch =>
+      (async () =>
+        new Response('<html><body>Authentication Required</body></html>', {
+          status,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        })) as typeof fetch;
+
+    it('is set on a 401 and a 403 that answer with an HTML page', async () => {
+      for (const status of [401, 403]) {
+        const res = await fetchJson('https://shelf.example/openapi.json', {
+          timeoutMs: 1000,
+          fetchImpl: htmlPage(status),
+        });
+        expect(res).toMatchObject({ ok: false, kind: 'http', status, gateSuspected: true });
+      }
+    });
+
+    it('is unset on a JSON 401 from the requested origin', async () => {
+      const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 401 });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'http', status: 401, gateSuspected: false });
+    });
+
+    it('is not computed at all for other statuses, an HTML 404 included', async () => {
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl: htmlPage(404),
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'http', status: 404 });
+      expect((res as { gateSuspected?: boolean }).gateSuspected).toBeUndefined();
+    });
   });
 
   it('flags a rejected fetch as a network failure', async () => {

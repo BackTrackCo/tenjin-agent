@@ -34,7 +34,7 @@ import type {
   HarnessWiring,
   NotInvocableReason,
 } from '../lib/skill-wiring';
-import { fetchJson, type ShelfBypass } from '../lib/http';
+import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import {
   isTeamModeConfig,
@@ -103,10 +103,20 @@ const FIX_CHECK_NETWORK_AND_BASE_URL =
  * The base URL was RIGHT and the credential was missing. Sending the operator to
  * `baseUrl` here (what a bare CONTRACT_MISMATCH did, #218) asks them to change
  * the one setting that was already correct. Names the config key and no value:
- * the secret itself never reaches any check output.
+ * the secret itself never reaches any check output. Says "if" because the page
+ * signal alone does not prove protection; only the off-host redirect does, and
+ * the detail line carries that distinction.
  */
 const FIX_SET_SHELF_BYPASS =
-  'That deployment is access-protected and these probes did not get past it: `tenjin config set shelfBypassSecret <value>`.';
+  'If that deployment is access-protected these probes did not get past it; set the team shelf key: `tenjin config set shelfBypassSecret <value>`.';
+/**
+ * Same page, but the probe CARRIED the configured key and still did not get
+ * past. Telling this machine to set the secret it already sent (the stale-key
+ * case: a rotated Vercel bypass token answers the 200 gate page, a 401, or the
+ * 307 interstitial) would read as "doctor says my config is fine as is".
+ */
+const FIX_ROTATE_SHELF_BYPASS =
+  'The configured shelfBypassSecret was sent and did not get past that deployment, so the key is likely stale or rotated. Update it: `tenjin config set shelfBypassSecret <value>`.';
 /**
  * The same page, from a URL where the team key is not the answer. Naming
  * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
@@ -236,8 +246,20 @@ export async function collectDoctorChecks(
       bypass,
       shelfKeyIsTheRemedy(settings),
     ),
-    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
-    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkReadPath(
+      baseUrl,
+      ctx.flags.timeout,
+      deps.fetchImpl,
+      bypass,
+      shelfKeyIsTheRemedy(settings),
+    ),
+    await checkSearchContract(
+      baseUrl,
+      ctx.flags.timeout,
+      deps.fetchImpl,
+      bypass,
+      shelfKeyIsTheRemedy(settings),
+    ),
     await checkSkills(
       home,
       which,
@@ -407,6 +429,32 @@ async function loadConfigForDoctor(
   }
 }
 
+/**
+ * The fix line for a probe failure that reads as an access gate, shared by the
+ * three baseUrl probes so `--json` cannot carry two verdicts about one machine.
+ *
+ * Returns undefined when no gate story applies and the caller's ordinary fix
+ * stands. The page is a fact about the response; whether the team key fixes it
+ * is a fact about the CONFIG, and only the second one licenses naming the key.
+ * On the public marketplace the key is inert (`resolveShelfBypass` refuses it),
+ * and on an override the origin belongs to this run, so both get the neutral
+ * line instead. Where the key IS the remedy, what the probe DID decides the
+ * wording: `bypass` present means the key was sent and did not get past
+ * (whether the gate answered 200 HTML, 401/403, or the blocked 30x
+ * interstitial), so "set it" would prescribe the config this machine already
+ * has; absent means setting it is the move.
+ */
+function shelfGateFix(
+  res: FetchJsonFailure,
+  bypass: ShelfBypass | undefined,
+  shelfKeyRemedy: boolean,
+): string | undefined {
+  const blocked = res.kind === 'blocked-redirect' && bypass !== undefined;
+  if (res.gateSuspected !== true && !blocked) return undefined;
+  if (!shelfKeyRemedy) return FIX_PAGE_NOT_THE_API;
+  return bypass !== undefined ? FIX_ROTATE_SHELF_BYPASS : FIX_SET_SHELF_BYPASS;
+}
+
 async function checkApiContract(
   baseUrl: string,
   timeoutMs: number,
@@ -425,31 +473,26 @@ async function checkApiContract(
     const malformed = res.kind === 'invalid-json';
     // Same failure code either way (the contract was not met), but a different
     // cause and so a different fix: the transport saw the response and says
-    // whether it was a protection page. Only it can, so doctor asks rather than
-    // guessing from the body it no longer has.
-    const gated = malformed && res.gateSuspected === true;
+    // whether it read as a protection page. Only it can, so doctor asks rather
+    // than guessing from the body it no longer has. The detail claims no more
+    // than the signal proves: an off-host landing proves a sign-in redirect, an
+    // HTML content-type alone proves only that a page answered.
+    const gated = res.gateSuspected === true;
     return {
       result: {
         name: 'api-contract',
         status: 'fail',
         required: true,
         detail: gated
-          ? `${url} answered with an HTML page (an access-protection or sign-in page), not a Tenjin API document`
+          ? res.gateOffOrigin === true
+            ? `${url} was answered from a different host than the one asked for (an access-protection or sign-in redirect), not by a Tenjin API`
+            : `${url} answered${res.kind === 'http' ? ` ${res.status}` : ''} with an HTML page, not JSON`
           : malformed
             ? `OpenAPI document at ${url} was not valid JSON`
             : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix: gated
-          ? // The page is a fact about the response; whether the team key fixes
-            // it is a fact about the CONFIG, and only the second one licenses
-            // naming the key. On the public marketplace the key is inert
-            // (`resolveShelfBypass` refuses it), and on an override the origin
-            // belongs to this run, so both get the neutral line instead.
-            shelfKeyRemedy
-            ? FIX_SET_SHELF_BYPASS
-            : FIX_PAGE_NOT_THE_API
-          : malformed
-            ? FIX_POINT_AT_TENJIN_API
-            : FIX_CHECK_NETWORK_AND_BASE_URL,
+        fix:
+          shelfGateFix(res, bypass, shelfKeyRemedy) ??
+          (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL),
       },
       failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
     };
@@ -493,6 +536,8 @@ async function checkSearchContract(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
+  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
+  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
   const res = await fetchJson(url, {
@@ -501,13 +546,18 @@ async function checkSearchContract(
     ...(bypass !== undefined ? { bypass } : {}),
   });
   if (!res.ok) {
+    // The gate-aware fix rides here too: a gated failure answers all three
+    // probes at once, `--json` carries every check, and a "check the base URL"
+    // here beside a "set the key" on api-contract is two verdicts on one cause.
     return {
       result: {
         name: 'search-contract',
         status: 'warn',
         required: false,
         detail: `Could not confirm the search endpoint at ${url}`,
-        fix: 'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
+        fix:
+          shelfGateFix(res, bypass, shelfKeyRemedy) ??
+          'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
       },
     };
   }
@@ -1016,11 +1066,16 @@ function checkTeamShelf(
  *   set beside it is refused outright (`resolveShelfBypass` fails safe to public
  *   mode), so the advice would be inert AND would trip the other half-wired warn.
  *
- * Shared by the `api-contract` fix line and {@link halfWiredShelfWarn} so the
- * two cannot answer differently about one machine.
+ * Shared by the three baseUrl probes' fix lines (via {@link shelfGateFix}) and
+ * {@link halfWiredShelfWarn} so they cannot answer differently about one
+ * machine.
  */
 function shelfKeyIsTheRemedy(settings: EffectiveSettings): boolean {
-  if (settings.baseUrl.source !== 'file' && settings.baseUrl.source !== 'project') return false;
+  // Exactly 'file': resolveBaseUrl never returns 'project' today (a project
+  // .tenjin.json baseUrl is dropped on the floor by loadProjectConfig, by
+  // design). If a project layer ever lands, whether a repo-checked-in file may
+  // summon the team's door key must be decided then, not inherited from here.
+  if (settings.baseUrl.source !== 'file') return false;
   const origin = tryOriginOf(settings.baseUrl.value);
   return origin !== null && isTeamShelfOrigin(origin, settings.publicShelfUrl.value);
 }
@@ -1246,6 +1301,8 @@ async function checkReadPath(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
+  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
+  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
@@ -1264,7 +1321,9 @@ async function checkReadPath(
         status: 'fail',
         required: true,
         detail: `Read path ${url} failed: ${res.message}`,
-        fix: FIX_CHECK_NETWORK_AND_BASE_URL,
+        // Same gate-aware fix as api-contract (see shelfGateFix): the identical
+        // protection page answers this probe too, and `--json` carries both.
+        fix: shelfGateFix(res, bypass, shelfKeyRemedy) ?? FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: 'API_UNREACHABLE',
     };
