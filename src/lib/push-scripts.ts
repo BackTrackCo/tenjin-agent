@@ -2243,8 +2243,10 @@ const CACHE_TTL_MS = __CACHE_TTL__;
  * every rung ends in something ANY child can do: carry the id back to its
  * parent. A paid piece gets metadata and defer-to-parent wording only; this
  * context has no spend authority and never receives purchase guidance. The
- * closing marker line is the delivery receipt: the same uid sits in the event
- * row, so a transcript grep proves which context actually received this.
+ * closing marker line correlates the text with its injected row: the same uid
+ * sits on that row. It is correlation, not receipt. Claude Code does not
+ * persist hook context fired inside a subagent to either transcript (probed
+ * 2.1.247), so no grep can confirm a child delivery.
  */
 function childPointer(candidate, opener, marker) {
   const lines = [opener, headerLine(candidate)];
@@ -2305,9 +2307,14 @@ async function main() {
   // Whichever shelf the dispatch hook actually asked. A cache written before
   // that field existed reads as 'public', which is what it was.
   const shelf = cache.shelf === 'team' ? 'team' : 'public';
-  // The delivery receipt: one uid per fire, stamped into the event row here
-  // and into the emitted text below. An 'injected' row is a database claim,
-  // not proof of receipt; the marker is what a transcript grep can confirm.
+  // One uid per fire, stamped into the event row here and into the emitted
+  // text below. What it does NOT prove: Claude Code does not persist hook
+  // context fired inside a subagent to either transcript (probed 2.1.247), so
+  // no grep can confirm a child delivery. This correlates a row with the text
+  // that was emitted, and an 'injected' row stays a database claim. Skip rows
+  // inherit the marker through the ledger join, which is misleading; moving it
+  // onto the delivery row needs a store column and lands with the heartbeat
+  // work in the next layer (tenjin-agent#228 PR 2).
   const marker = uid();
   const eventUid = recordEvent({
     session: sessionId,

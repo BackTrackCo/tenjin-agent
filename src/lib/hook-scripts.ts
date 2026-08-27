@@ -1449,7 +1449,9 @@ const HEALTH_PATH = join(DATA_DIR, 'hook-health.json');
 function dispatchQuestion(toolInput) {
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.trim() : '';
   if (prompt.length < ${DISPATCH_PROMPT_MIN}) return '';
-  const head = clean(scrub(prompt.slice(0, ${DISPATCH_PROMPT_SLICE})), ${DISPATCH_PROMPT_SLICE});
+  // Scrub the WHOLE prompt before slicing: a secret cut at the slice boundary
+  // no longer matches scrub's whole-token patterns, and the fragment ships.
+  const head = clean(scrub(prompt).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
   const description =
     typeof toolInput.description === 'string' ? clean(scrub(toolInput.description), ${DISPATCH_DESCRIPTION_MAX}) : '';
   return description === '' ? head : description + ': ' + head;
