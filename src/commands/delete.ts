@@ -66,11 +66,10 @@ export async function runDelete(
     });
   }
 
-  // Whether this run has ANY way to reach the delete, settled from the flags and
-  // the streams alone, before the wallet is touched. It decides two things, and
-  // it must decide both the same way or they contradict each other.
+  // Whether this run has any way to ASK. It gates the confirmation branch below;
+  // it deliberately does not decide the credential, because being able to ask is
+  // not the same as being told yes.
   const canConfirm = deps.confirm !== undefined || (ctx.io.isTTY && process.stdin.isTTY);
-  const canWrite = args.yes === true || canConfirm;
 
   const runtime = await resolveContextSettings(ctx);
   const provider = resolveWalletProvider(
@@ -78,30 +77,38 @@ export async function runDelete(
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
   await describeWallet(provider); // surfaces WALLET_MISSING with its own fix
+  // The ONE keystore touch: the passphrase is resolved here, once, and both
+  // scopes below sign with this same in-memory signer. That is what makes the
+  // two-phase mint cheap — see sessionAt.
   const signer = await provider.getSigner();
-  // LEAST PRIVILEGE, and the reason it is not simply `read+write`: the common
-  // call is an agent's FIRST one, with no --yes and no TTY, and that run is
-  // structurally incapable of deleting anything — it exists to render the
-  // payload and exit 3. Minting `read+write` for it would leave a write-capable
-  // delegation on disk as the side effect of a refusal, which later writes then
-  // reuse with no wallet signature. So the scope is what this run can actually
-  // do. It costs nothing when the run CAN write: `scopeSatisfies` lets a cached
-  // read+write serve a read, so no branch here signs more often than before.
-  //
-  // What this does not close, stated rather than papered over: a TTY run that
-  // asks and is told no has already minted `read+write`, because the answer
-  // arrives after the read that the question is built from. That delegation is
-  // no broader than the one `publish` or `edit` leaves on the same machine, and
-  // the alternative — mint `read`, then upgrade on yes — costs a second wallet
-  // signature mid-command on the one path a human is standing at.
-  const auth = resolveWriteAuth({
-    signer,
-    baseUrl: runtime.baseUrl,
-    dataDir: ctx.dataDir,
-    scope: canWrite ? 'read+write' : 'read',
-    ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
-    env,
-  });
+  /**
+   * A delegation at exactly `scope`. Called at most twice, and the split is the
+   * point: NO REFUSED DELETE MAY LEAVE A WRITE CREDENTIAL BEHIND.
+   *
+   * The read that the confirmation is built from happens before anyone has
+   * approved anything, so it is minted `read`. Only an actual approval mints
+   * `read+write`, which means a headless refusal AND a human's "no" both end
+   * with nothing on disk but a read-scoped session. Keying this on the ability
+   * to prompt instead would grant the credential for being asked rather than for
+   * answering, which is the same conflation in a smaller place.
+   *
+   * The upgrade is nearly free, and not in a hand-waved way: `establishSession`
+   * makes no network call and opens no keystore. It generates a P-256 keypair and
+   * signs one message with the signer already resolved above, so the extra cost
+   * on an approved delete is one silent in-memory signature, on the path where
+   * the user has just said yes and expects the write. Every other path pays
+   * nothing: `--yes` asks for `read+write` first and reuses it, and a cached
+   * `read+write` satisfies the `read` phase through `scopeSatisfies`.
+   */
+  const sessionAt = (scope: 'read' | 'read+write'): ReturnType<typeof resolveWriteAuth> =>
+    resolveWriteAuth({
+      signer,
+      baseUrl: runtime.baseUrl,
+      dataDir: ctx.dataDir,
+      scope,
+      ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
+      env,
+    });
   const client = {
     baseUrl: runtime.baseUrl,
     timeoutMs: ctx.flags.timeout,
@@ -112,7 +119,13 @@ export async function runDelete(
   // Read first, for edit's reason: nobody can approve the destruction of a post
   // they have only seen the uuid of. The read changes nothing and burns no nonce,
   // and a wrong id fails here as RESOURCE_NOT_FOUND rather than being confirmed.
-  const stored = await getOwnPost(args.postId, auth, client);
+  // `--yes` is the one case where the approval predates the read, so it is also
+  // the one case where this phase may ask for the wider scope.
+  const stored = await getOwnPost(
+    args.postId,
+    sessionAt(args.yes === true ? 'read+write' : 'read'),
+    client,
+  );
   const summary = describePost(stored);
   for (const line of summary) ctx.io.stderr.write(`${line}\n`);
 
@@ -143,7 +156,10 @@ export async function runDelete(
     }
   }
 
-  await deletePost(args.postId, auth, client);
+  // Past every refusal, so this is the first point at which a write credential is
+  // justified. On the interactive path it mints one now; on `--yes` the phase
+  // above already did, and this reuses it rather than signing twice.
+  await deletePost(args.postId, sessionAt('read+write'), client);
   return receipt(stored);
 }
 

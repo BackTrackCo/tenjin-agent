@@ -26,8 +26,10 @@ confirmation still runs, and `--yes` appears only in a refusal payload's
 `confirmCommand`, which answers a question the user has already been shown.
 
 A server refusal after the confirmation is the new `DELETE_FAILED` (exit 4), whose
-message says the piece is still live. A delete that cannot write — no `--yes` and
-no terminal to ask at — mints a `read`-scoped session rather than a write-capable
-one, so refusing never leaves a credential behind that later writes could reuse.
-`tenjin delete` is never allowlisted: no mode carries it, and it is not delegable
-to a subagent.
+message says the piece is still live. No refused delete leaves a write credential
+behind: the owner-scoped read that the preview is built from signs with a
+`read`-scoped session, and only an actual approval mints `read+write`, so both a
+headless refusal and a declined prompt end with nothing on disk that a later write
+could reuse. An approved prompt pays one extra in-memory signature for that, with
+no second keystore prompt and no extra round trip. `tenjin delete` is never
+allowlisted: no mode carries it, and it is not delegable to a subagent.

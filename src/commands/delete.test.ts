@@ -248,13 +248,17 @@ describe('runDelete — the request', () => {
 });
 
 /**
- * Least privilege on the refusal path. The common call is an agent's FIRST one —
- * no `--yes`, no TTY — and that run cannot delete anything: it exists to render
- * the payload and exit 3. Minting `read+write` for it would make a refusal leave
- * a write-capable delegation behind for later writes to reuse with no wallet
- * signature, which is a credential granted as the side effect of saying no.
+ * Least privilege on every refusal path. NO REFUSED DELETE MAY LEAVE A WRITE
+ * CREDENTIAL BEHIND — not the headless first call an agent makes to render the
+ * payload, and not a human who was asked and said no. Both would otherwise cache
+ * a `read+write` delegation that later writes reuse with no wallet signature,
+ * i.e. a credential granted as the side effect of declining.
+ *
+ * So the scope tracks APPROVAL rather than the ability to ask: the read the
+ * preview is built from is `read`, and only `--yes` or a yes at the prompt mints
+ * `read+write`. The signature counts below are what keeps that honest.
  */
-describe('runDelete — the session is scoped to what the run can do', () => {
+describe('runDelete — the session is scoped to what the run was approved to do', () => {
   /** The scope of the delegation cached on disk, or null when none was minted. */
   async function cachedScope(): Promise<string | null> {
     try {
@@ -339,9 +343,35 @@ describe('runDelete — the session is scoped to what the run can do', () => {
     expect(await cachedScope()).toBe('read+write'); // never rebuilt downward
   });
 
-  // A run that CAN ask is a run that can end in a delete, so it takes the wider
-  // scope up front rather than paying a second signature mid-prompt.
-  it('an interactive run mints read+write up front, one signature for the whole flow', async () => {
+  /**
+   * THE CASE THE TWO-PHASE MINT EXISTS FOR (review follow-up on #222). Being able
+   * to ask is not being told yes: an interactive run that is declined must end
+   * with no write credential on disk, exactly like the headless refusal above.
+   * Keying the scope on the ability to prompt granted it for being asked.
+   */
+  it('a declined prompt leaves only a read-scoped session, never a write-capable one', async () => {
+    const stub = stubServer();
+    const { provider } = spyProvider();
+    const { ctx } = makeCtx(true);
+    await expect(
+      runDelete(args(), ctx, {
+        env: {},
+        provider,
+        fetchImpl: stub.fetch,
+        confirm: async () => false,
+      }),
+    ).rejects.toMatchObject({ code: 'REFUSED' });
+    expect(await cachedScope()).toBe('read');
+    expect(stub.calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  /**
+   * The cost of the split, measured rather than asserted. An approved interactive
+   * delete pays ONE extra signature: `establishSession` opens no keystore and
+   * makes no network call, so the upgrade is an in-memory sign with the signer
+   * resolved once at the top, on the path where the user has just said yes.
+   */
+  it('an approved prompt upgrades to read+write for one extra silent signature', async () => {
     const stub = stubServer();
     const { provider, signCount } = spyProvider();
     const { ctx } = makeCtx(true);
@@ -351,8 +381,19 @@ describe('runDelete — the session is scoped to what the run can do', () => {
       fetchImpl: stub.fetch,
       confirm: async () => true,
     });
-    expect(signCount()).toBe(1);
+    expect(signCount()).toBe(2); // read for the preview, read+write for the write
     expect(await cachedScope()).toBe('read+write');
+    expect(stub.calls.map((c) => c.method)).toEqual(['GET', 'DELETE']);
+  });
+
+  // The split must not make the already-approved path pay twice: --yes asks for
+  // the wider scope in the read phase, so the write phase reuses that session.
+  it('--yes signs exactly once across both phases', async () => {
+    const stub = stubServer();
+    const { provider, signCount } = spyProvider();
+    const { ctx } = makeCtx();
+    await runDelete(args({ yes: true }), ctx, { env: {}, provider, fetchImpl: stub.fetch });
+    expect(signCount()).toBe(1);
     expect(stub.calls.map((c) => c.method)).toEqual(['GET', 'DELETE']);
   });
 });
