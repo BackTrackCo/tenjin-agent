@@ -2651,8 +2651,17 @@ function emitStopBlock(reason) {
  * never a block. \`stop_hook_active\` is the re-block fuse, so the ask requires
  * it to be present AND false: a harness that omits it gets the lifecycle row
  * and nothing else, which is the fail-open reading of a missing fuse.
+ *
+ * THE ASK COSTS A CHILD TURN, SO IT IS BUDGETED TWICE OVER: once per session
+ * (\`STATE_SUBAGENT_ASKED\`, because the signal that arms it is session-wide and
+ * would otherwise arm it for every later child), and not at all unless
+ * \`hooks.capture\` is on. Capture is where the queue is READ: with it off the
+ * Stop hook never names a queued finding, so an ask would buy a row nothing in
+ * this CLI ever surfaces. The harvest is deliberately NOT gated on it — a child
+ * already asked has already spent the turn, and its answer is worth filing
+ * whichever way the operator moved the key in between.
  */
-function subagentStop(input, sessionId, cwd, agentId, agentType) {
+function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   const eventUid = uid();
   const transcript = agentTranscriptPath(input);
   const beat = (reason, extra) =>
@@ -2722,6 +2731,14 @@ function subagentStop(input, sessionId, cwd, agentId, agentType) {
     return quiet();
   }
 
+  // NOTHING READS THE QUEUE WITH CAPTURE OFF (\`hooks.capture\`, default off):
+  // the Stop hook's ask is the only reader, and it returns before it looks.
+  // Cheapest gate of the four, and the one that keeps a default push-on machine
+  // from paying a child turn for a row it will never surface.
+  if (config.capture === 'off') {
+    beat('capture-off');
+    return quiet();
+  }
   // Present AND false. A missing fuse is not a licence to block.
   if (input.stop_hook_active !== false) {
     beat('stop-active');
@@ -2736,6 +2753,15 @@ function subagentStop(input, sessionId, cwd, agentId, agentType) {
   const signal = captureSignal(sessionId);
   if (signal === null) {
     beat('no-signal');
+    return quiet();
+  }
+  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE. Both signals are
+  // session-wide, so one MISS or one claimed failure signature arms this arm for
+  // every child that stops in the hour behind it; the per-child claim only stops
+  // the SAME child being asked twice. One ask per session is the cost
+  // tenjin-agent#228 costed, and this is where it is held to it.
+  if (!claimState(sessionId, STATE_SUBAGENT_ASKED, { agentId })) {
+    beat('session-asked');
     return quiet();
   }
   if (
@@ -2780,7 +2806,8 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
-  if (event === 'SubagentStop') return subagentStop(input, sessionId, cwd, agentId, agentType);
+  if (event === 'SubagentStop')
+    return subagentStop(input, sessionId, config, cwd, agentId, agentType);
   // THE UID IS MINTED FIRST so the heartbeat can be written LAST. Every path
   // below ends in exactly one event row carrying the reason this fire ended the
   // way it did, and the decision rows have to point at that row, so the id

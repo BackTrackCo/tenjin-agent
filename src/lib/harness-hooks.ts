@@ -509,7 +509,7 @@ export interface WireHooksOptions {
   mode: WebSearchMode;
   /** Shell-quoting target; injected so both branches are testable on one machine. */
   platform?: string;
-  /** Also plan the six push-experiment entries (docs/command-reference.md#push-experimental). Defaults to
+  /** Also plan the seven push-experiment entries (docs/command-reference.md#push-experimental). Defaults to
    *  false: `tenjin install` on a normal machine registers nothing new, and only
    *  `tenjin push on` (or a later install with `hooks.push` already `on`) passes
    *  true. */

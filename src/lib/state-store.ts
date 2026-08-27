@@ -704,6 +704,14 @@ export const STORE_SQL = {
   queuedFindings: `SELECT uid, at, agent_id, data FROM events
      WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'
      ORDER BY at DESC, id DESC LIMIT ?`,
+  /**
+   * How many there are in that window, which is NOT the number the list above
+   * returns: the list is bounded to what the ask can name, so the count is what
+   * lets the ask say how many it left out instead of quoting its own LIMIT as a
+   * total. Same predicate and same `(session, at)` index, one row.
+   */
+  queuedFindingCount: `SELECT COUNT(*) AS n FROM events
+     WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'`,
   /** Did this session ask for a search ITSELF? The push arms search on their own
    *  initiative, so their rows are not evidence the session researched anything
    *  — see the Stop hook's \`didResearch\`. */
@@ -1084,6 +1092,16 @@ const STATE_AGENT_ASKED_PREFIX = 'capture:agent:';
 /** Which children's findings have already been filed, so a repeated
  *  \`SubagentStop\` cannot queue the same block twice. */
 const STATE_AGENT_FINDING_PREFIX = 'finding:agent:';
+/**
+ * That this SESSION has already spent its one child ask.
+ *
+ * THE PER-AGENT CLAIM ABOVE IS NOT A BUDGET. Its signal is session-wide (an
+ * open dispatch MISS, a claimed failure signature), so with only that claim in
+ * the way one MISS arms the ask for every child that stops in the hour after
+ * it, and the extra child turn tenjin-agent#228 costed once is paid per child.
+ * This row is the budget: one ask per session, whatever the fan-out.
+ */
+const STATE_SUBAGENT_ASKED = 'capture:subagent';
 const STATE_PUBLISHED_PREFIX = 'published:';
 /** The shelf's per-trigger use rates, fetched by the SessionStart primer once
  *  per session for the adaptive cooldown (PUSH_COOLDOWN_* in
@@ -1933,6 +1951,14 @@ function queuedFindings(sessionId, sinceMs, limit) {
     });
   }
   return out;
+}
+
+/** How many findings this session's children have queued inside the window,
+ *  which is what \`queuedFindings\` bounded away: the caller names some and has
+ *  to be able to say how many it did not. */
+function queuedFindingCount(sessionId, sinceMs) {
+  const row = storeGet(STORE_SQL.queuedFindingCount, [storeSession(sessionId), sinceMs]);
+  return row === null || typeof row.n !== 'number' ? 0 : row.n;
 }
 
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */

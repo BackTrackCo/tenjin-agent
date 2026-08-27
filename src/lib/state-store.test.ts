@@ -357,6 +357,7 @@ describe('the hot-path queries never scan', () => {
         // that never shrinks (tenjin-agent#228).
         ['openDispatchMiss', STORE_SQL.openDispatchMiss, ['s', 0]],
         ['queuedFindings', STORE_SQL.queuedFindings, ['s', 0, 5]],
+        ['queuedFindingCount', STORE_SQL.queuedFindingCount, ['s', 0]],
         // The one-shot CLI tally is not a hook path, but it reads the same
         // never-pruned table.
         ['statusRows', STORE_SQL.statusRows, [0]],
