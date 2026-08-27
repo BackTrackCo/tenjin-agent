@@ -58,6 +58,7 @@ import {
 import { claudeSettingsPath } from './harness-permissions';
 import {
   DISPATCH_HOOK_FILE,
+  HOOK_SCRIPT_MARKER,
   SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
@@ -737,10 +738,15 @@ describe('detectHookOwners', () => {
  * runs it, and an upgrade that installs surfaces is not an upgrade.
  */
 describe('refreshHooks', () => {
+  /** What an OLDER build left on disk: a different body, carrying the marker
+   *  every generated script has always carried. That marker is the ownership
+   *  proof, so a stale script must keep it to be refreshable. */
+  const olderBuild = `#!/usr/bin/env node\n${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1). Safe to delete.\n// an older version wrote this\n`;
+
   it('brings drifted script bodies and entries up to date', async () => {
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
     const scriptPath = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
-    await writeFile(scriptPath, '// an older version wrote this\n');
+    await writeFile(scriptPath, olderBuild);
     // And an entry whose timeout drifted, which only a rewrite can fix.
     const settings = await readSettings();
     const drifted = entriesFor(settings, 'Stop');
@@ -749,9 +755,40 @@ describe('refreshHooks', () => {
 
     const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
     expect(result.scripts).toEqual([scriptPath]);
-    expect(await readFile(scriptPath, 'utf8')).not.toBe('// an older version wrote this\n');
+    expect(await readFile(scriptPath, 'utf8')).not.toBe(olderBuild);
     expect(result.updated).toEqual(['Stop']);
     expect(entriesFor(await readSettings(), 'Stop')[0]?.hooks[0]?.timeout).not.toBe(999);
+  });
+
+  /**
+   * A settings.json entry is not proof of ownership: this writer is spawned
+   * unattended by `update` and takes its paths from a file anything on the
+   * machine can write. A path of our shape holding someone else's file must be
+   * left exactly as it is, so ownership is read from the bytes.
+   */
+  it('never overwrites a file at one of our paths that is not ours', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const scriptPath = join(data, 'hooks', STOP_HOOK_FILE);
+    const theirs = '#!/usr/bin/env node\n// somebody else entirely\n';
+    await writeFile(scriptPath, theirs);
+
+    const result = await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(await readFile(scriptPath, 'utf8')).toBe(theirs);
+    expect(result.scripts).not.toContain(scriptPath);
+  });
+
+  it('never writes through a symlink standing where a script should be', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto' });
+    const scriptPath = join(data, 'hooks', STOP_HOOK_FILE);
+    const outside = join(home, 'outside.mjs');
+    // Marker and all: content alone would say "ours", but the link is the way
+    // a write leaves the profile it was handed, so the type is checked too.
+    await writeFile(outside, `${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n`);
+    await rm(scriptPath);
+    await symlink(outside, scriptPath);
+
+    await refreshHooks({ homeDir: home, dataDir: data, push: false });
+    expect(await readFile(outside, 'utf8')).toBe(`${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n`);
   });
 
   it('registers nothing on a machine that never installed', async () => {

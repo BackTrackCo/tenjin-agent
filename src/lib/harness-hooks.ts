@@ -5,6 +5,7 @@ import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir } from './paths';
 import {
   DISPATCH_HOOK_FILE,
+  HOOK_SCRIPT_MARKER,
   SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
@@ -684,6 +685,35 @@ async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<strin
   return written;
 }
 
+/**
+ * {@link writeScripts} for the UNATTENDED writer: rewrite only the scripts that
+ * are already on disk AND already ours.
+ *
+ * `install` is a command a human ran, and it writes to paths this CLI chose. A
+ * refresh is spawned by `update` and rewrites paths it read back out of the
+ * harness's settings.json, which anything on the machine can have written. A
+ * command of the right SHAPE (`node <dir>/hooks/tenjin-stop.mjs`) is therefore
+ * not evidence that the file at the other end is a Tenjin hook, so ownership is
+ * proved from the BYTES instead: an unreadable file, or one without the
+ * generated header, is left exactly as it is.
+ *
+ * `lstat` rather than `stat`, and no write through a link: a symlink at one of
+ * our own paths would redirect the replacement to whatever it names, which is
+ * the one way this could write outside the profile it was handed.
+ */
+async function writeOwnedScripts(plan: HookSpec[], scriptsDir: string): Promise<string[]> {
+  const owned: HookSpec[] = [];
+  for (const spec of plan) {
+    const target = join(scriptsDir, spec.scriptFile);
+    const entry = await lstat(target).catch(() => null);
+    if (entry === null || !entry.isFile()) continue;
+    const onDisk = await readFile(target, 'utf8').catch(() => null);
+    if (onDisk === null || !onDisk.includes(HOOK_SCRIPT_MARKER)) continue;
+    owned.push(spec);
+  }
+  return writeScripts(owned, scriptsDir);
+}
+
 function refuse(
   path: string,
   scriptsDir: string,
@@ -1006,16 +1036,11 @@ export async function refreshHooks(opts: {
   const { homeDir, dataDir, push, platform } = opts;
   const scriptsDir = hooksDir(dataDir);
 
-  // Bodies first, and only for files already on disk. `scriptPlan` is the full
-  // writer set (see its own note on why bodies ignore `push`); the presence
-  // filter is what keeps this from materializing a script this machine lacks.
-  const onDisk: HookSpec[] = [];
-  for (const spec of scriptPlan(dataDir)) {
-    if ((await stat(join(scriptsDir, spec.scriptFile)).catch(() => null)) !== null) {
-      onDisk.push(spec);
-    }
-  }
-  const scripts = await writeScripts(onDisk, scriptsDir);
+  // Bodies first, and only for files already on disk that are OURS BY CONTENT.
+  // `scriptPlan` is the full writer set (see its own note on why bodies ignore
+  // `push`); this filter is what keeps the refresh from materializing a script
+  // the machine lacks, and from overwriting one it did not write.
+  const scripts = await writeOwnedScripts(scriptPlan(dataDir), scriptsDir);
 
   const found = await inspectSettings(homeDir);
   if ('refusal' in found) {

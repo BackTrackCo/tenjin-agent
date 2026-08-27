@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
@@ -316,12 +318,13 @@ async function refreshProfiles(
   const owners = await detect(home).catch(() => []);
   const profiles = owners.length > 0 ? owners.map((o) => o.dataDir) : [ctx.dataDir];
 
-  const entry = deps.refreshCommand ?? process.argv[1];
-  // No absolute entry to re-exec (an embedder, a stripped argv) means there is
-  // nothing to spawn; report the profiles as unrefreshed rather than guessing at
-  // a command, since guessing is how a hook script gets rewritten by the wrong
-  // binary.
-  if (entry === undefined || entry.length === 0) {
+  const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
+  // Nothing safe to re-exec: no argv (an embedder, a stripped argv), or a path
+  // that names the version being replaced (see versionFreeEntry). Report the
+  // profiles as unrefreshed rather than guessing, since guessing is how a hook
+  // script gets rewritten by the wrong binary — and a refresh that ran the OLD
+  // build would report success while writing the bytes the update just left.
+  if (entry === null) {
     return { profiles: [], failed: profiles, fix: REFRESH_MANUAL_FIX };
   }
 
@@ -344,6 +347,37 @@ async function refreshProfiles(
 
 const REFRESH_MANUAL_FIX =
   'Run `tenjin install` to bring the skills and hook scripts up to this version.';
+
+/**
+ * The entry to re-exec, or null when there is none this code may trust.
+ *
+ * `process.argv[1]` is the path Node RESOLVED, symlinks and all (see
+ * `classifyManager`, which reads the manager off exactly that property). Under
+ * npm and bun that path carries no version, so after the swap it is already the
+ * new build. Under pnpm it points into the virtual store, whose directory names
+ * PIN A VERSION: `.../node_modules/.pnpm/tenjin-cli@<version>/node_modules/tenjin-cli/dist/index.js`.
+ * Re-executing that is the worst available outcome — it runs the build the
+ * update just replaced and reports a successful refresh over the previous
+ * version's bytes, which is the exact staleness this whole command exists to
+ * end (tenjin-agent#171).
+ *
+ * The virtual store keeps the version-free link one level out, beside `.pnpm`,
+ * and the swap repoints it, so the same path with the store segments removed is
+ * the new build. It is derived rather than assumed: if the result is not on
+ * disk, this returns null and the caller warns instead of running anything.
+ */
+export function versionFreeEntry(entry: string | undefined): string | null {
+  if (entry === undefined || entry.length === 0) return null;
+  const segs = entry.split(sep);
+  const store = segs.indexOf('.pnpm');
+  if (store === -1) return segs.join(sep);
+  // `.pnpm/<name>@<version>/node_modules/<name>/...`: everything from the second
+  // `node_modules` on is the package's own path within the global tree.
+  const inner = segs.indexOf('node_modules', store);
+  if (inner === -1) return null;
+  const derived = [...segs.slice(0, store), ...segs.slice(inner + 1)].join(sep);
+  return existsSync(derived) ? derived : null;
+}
 
 /**
  * One line reporting what the refresh actually did.

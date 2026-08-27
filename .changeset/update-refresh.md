@@ -33,3 +33,14 @@ harness settings, tolerating anything it finds there.
 
 A failed, refused or timed-out refresh is a warning naming `tenjin install` and
 never fails the update: the swap already happened, and it is what was asked for.
+
+Two things the refresh will not do. It does not re-execute an entry path that
+names a version: under pnpm `process.argv[1]` points into the virtual store,
+whose directory names pin one, so running it after the swap would execute the
+build that was just replaced and report success over the previous version's
+bytes. The version-free link beside the store is derived and used when it is
+there, and otherwise the profile is reported unrefreshed. And it rewrites a hook
+script only when the bytes on disk carry the generated header marker, and never
+through a symlink: an unattended writer takes its paths from settings.json,
+which anything on the machine can write, so a path of the right shape is not
+proof that the file at it is ours.

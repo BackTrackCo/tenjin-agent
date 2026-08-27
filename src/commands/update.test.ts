@@ -9,6 +9,7 @@ import {
   type SpawnResult,
   type UpdateDeps,
   type UpdateSpawn,
+  versionFreeEntry,
 } from './update';
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
@@ -923,5 +924,93 @@ describe('runUpdate: the post-swap refresh', () => {
       }),
     );
     expect(spawned.refreshes().map((c) => c.env?.TENJIN_DATA_DIR)).toEqual([dir]);
+  });
+});
+
+/**
+ * Which path the post-swap refresh may re-execute.
+ *
+ * `process.argv[1]` is the path Node resolved through the bin symlink, so under
+ * pnpm it points into the virtual store, whose directory names pin a version.
+ * Re-running that after the swap would execute the build the update just
+ * replaced and report a successful refresh over the previous version's bytes.
+ */
+describe('versionFreeEntry', () => {
+  const npmEntry = '/usr/local/lib/node_modules/tenjin-cli/dist/index.js';
+
+  it('passes through a path that names no version', () => {
+    expect(versionFreeEntry(npmEntry)).toBe(npmEntry);
+    expect(
+      versionFreeEntry('/home/u/.bun/install/global/node_modules/tenjin-cli/dist/index.js'),
+    ).toBe('/home/u/.bun/install/global/node_modules/tenjin-cli/dist/index.js');
+  });
+
+  it('has nothing to run without an argv', () => {
+    expect(versionFreeEntry(undefined)).toBeNull();
+    expect(versionFreeEntry('')).toBeNull();
+  });
+
+  it('derives the version-free link out of the pnpm virtual store', async () => {
+    // The real layout: the store entry names the version, and the link beside
+    // `.pnpm` does not. The swap repoints that link, so it is the new build.
+    const root = join(dir, 'pnpm', 'global', '5', 'node_modules');
+    const stored = join(
+      root,
+      '.pnpm',
+      'tenjin-cli@0.1.0-alpha.6',
+      'node_modules',
+      'tenjin-cli',
+      'dist',
+    );
+    const linked = join(root, 'tenjin-cli', 'dist');
+    await mkdir(stored, { recursive: true });
+    await mkdir(linked, { recursive: true });
+    await writeFile(join(linked, 'index.js'), '');
+    expect(versionFreeEntry(join(stored, 'index.js'))).toBe(join(linked, 'index.js'));
+  });
+
+  it('refuses rather than running a store path whose link is not there', async () => {
+    const stored = join(
+      dir,
+      'nm',
+      '.pnpm',
+      'tenjin-cli@0.1.0-alpha.6',
+      'node_modules',
+      'tenjin-cli',
+    );
+    await mkdir(stored, { recursive: true });
+    // Nothing at the derived path, so there is no new build to name: a warn
+    // beats running the version the update just replaced.
+    expect(versionFreeEntry(join(stored, 'dist', 'index.js'))).toBeNull();
+    expect(versionFreeEntry(join(dir, 'nm', '.pnpm', 'weird'))).toBeNull();
+  });
+
+  it('keeps a pnpm machine off the old build, reporting it unrefreshed', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: spawned.impl,
+        moduleDir: await installedTree('.pnpm'),
+        refreshCommand: join(
+          dir,
+          'nm',
+          '.pnpm',
+          'tenjin-cli@0.1.0-alpha.6',
+          'node_modules',
+          'tenjin-cli',
+          'dist',
+          'index.js',
+        ),
+      }),
+    );
+    // The manager ran; nothing else did.
+    expect(spawned.calls.length).toBe(1);
+    const data = result.data as { updated: boolean; refresh: { failed: string[]; fix?: string } };
+    expect(data.updated).toBe(true);
+    expect(data.refresh.failed).toEqual([dir]);
+    expect(result.humanLines?.join(' ')).toContain('tenjin install');
   });
 });

@@ -96,7 +96,7 @@ import {
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
-import { WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
+import { HOOK_SCRIPT_MARKER, WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { DoctorChecks } from './doctor';
@@ -4185,9 +4185,12 @@ describe('runInstall --refresh', () => {
   it('brings a drifted hook script back to this build', async () => {
     await installed();
     const script = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
-    await writeFile(script, '// an older version wrote this\n');
+    // What an older build left: a different body carrying the header marker,
+    // which is what proves the file is ours to rewrite.
+    const older = `#!/usr/bin/env node\n${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n// older\n`;
+    await writeFile(script, older);
     const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
-    expect(await readFile(script, 'utf8')).not.toBe('// an older version wrote this\n');
+    expect(await readFile(script, 'utf8')).not.toBe(older);
     expect((result.data as { hooks: { scripts: string[] } }).hooks.scripts).toEqual([script]);
   });
 
