@@ -165,6 +165,22 @@ export const STORE_BOOTSTRAP_TRIES = 2;
 export const STORE_RELAY_WINDOW_MS = 120_000;
 
 /**
+ * How many unconsumed subagent handoff slots one session may hold.
+ *
+ * A slot is written per dispatch and deleted by the subagent that takes it, so
+ * they pile up only when children never start: a denied `Task`, an interrupted
+ * fan-out. Each is dead one TTL later anyway, and the oldest is evicted at the
+ * next write rather than left for the life of an always-on session. Sized above
+ * any plausible one-message fan-out, so eviction is the pathological case and
+ * never the ordinary one.
+ *
+ * It lives here for the same reason the relay window does: `state-store.ts` is
+ * the file the dispatch arm (which writes slots) and the subagent arm (which
+ * drains them) both already import, and the reverse direction is a cycle.
+ */
+export const STORE_CACHE_SLOT_MAX = 8;
+
+/**
  * The whole schema, run once at `user_version = 0` and never again: a database
  * that already has a schema is stepped up by {@link STORE_MIGRATIONS} instead,
  * so this text is the version 1 shape and stays it.
@@ -466,6 +482,37 @@ export const STORE_SQL = {
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
   deleteState: 'DELETE FROM session_state WHERE session = ? AND key = ?',
   /**
+   * Take the OLDEST key under one prefix and hand back what it held, in one
+   * statement.
+   *
+   * The subagent arm is the caller, and its old shape was a `getState` followed
+   * by a `clearState`: two simultaneous `SubagentStart` fires both read the
+   * handoff before either deleted it, so one dispatch's finding was delivered
+   * twice and the other dispatch's was delivered to nobody. `RETURNING` makes
+   * the delete itself the read, so a slot goes to exactly one consumer
+   * (`bumpState` is the precedent that this SQLite floor already carries
+   * RETURNING).
+   *
+   * OLDEST FIRST, so a fan-out drains in dispatch order rather than by whichever
+   * key sorts first, and `key` breaks a same-millisecond tie so two consumers
+   * cannot pick the same row from an ambiguous ordering.
+   *
+   * A RANGE, NOT `LIKE`. Every other prefix statement here is written this way
+   * because it is what the (session, key) primary key can seek on, and because
+   * `LIKE 'dispatch_cache%'` would treat the `_` in the prefix as a wildcard
+   * matching any character at all. The range also covers the single legacy
+   * `dispatch_cache` key a stale hook still writes, which is what makes a mixed
+   * fleet safe: an old dispatch's handoff is consumed by a new subagent arm.
+   * It IS a prefix match either way, so no other `STATE_*` key may ever begin
+   * with those characters.
+   */
+  takeStateOldestByPrefix: `DELETE FROM session_state
+     WHERE session = ? AND key = (
+       SELECT key FROM session_state
+         WHERE session = ? AND key >= ? AND key < ?
+         ORDER BY at, key LIMIT 1)
+     RETURNING key, value`,
+  /**
    * Claim one key for this session, atomically. `DO NOTHING` plus
    * `changes()` is the whole point: the read-modify-write these replaced
    * ("is this signature already seen? then add it to the list") had a window
@@ -579,6 +626,18 @@ export const STORE_SQL = {
      WHERE search_id = ? COLLATE NOCASE`,
   askedFingerprint: `SELECT 1 FROM searches
      WHERE session = ? AND fingerprint = ? LIMIT 1`,
+  /**
+   * The newest answer this session already has for a question, candidates and
+   * all.
+   *
+   * `askedFingerprint` says only THAT the question was asked, which is all a
+   * suppressor needs; the dispatch arm now needs what the answer WAS, so a
+   * second subagent sent after the same thing can be handed the finding the
+   * first lookup already paid for instead of the arm going quiet. Same
+   * (session, fingerprint) key, so the two agree by construction.
+   */
+  searchByFingerprint: `SELECT * FROM searches
+     WHERE session = ? AND fingerprint = ? ORDER BY at DESC, rowid DESC LIMIT 1`,
   countBySource: `SELECT COUNT(*) AS n FROM searches
      WHERE session = ? AND source = ? AND at >= ?`,
   /**
@@ -842,6 +901,7 @@ const STORE_MIGRATIONS = __MIGRATIONS__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
 const RELAY_WINDOW_MS = __RELAY_WINDOW_MS__;
+const CACHE_SLOT_MAX = __CACHE_SLOT_MAX__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TRIES = __BOOTSTRAP_TRIES__;
 
@@ -859,6 +919,21 @@ const STORE_BOOTSTRAP_TRIES = __BOOTSTRAP_TRIES__;
  *    session falls into.
  */
 const STATE_CACHE = 'dispatch_cache';
+/**
+ * ONE SLOT PER DISPATCH, keyed by the dispatch that wrote it.
+ *
+ * \`STATE_CACHE\` was a single key per session, so the second of two dispatches
+ * in one assistant message overwrote the first and one subagent was sent to
+ * find something with the OTHER subagent's finding in front of it. The prefix
+ * is \`STATE_CACHE\` plus a colon on purpose: the take-oldest consumer scans the
+ * range from \`STATE_CACHE\` upward, so it drains the keyed slots AND the single
+ * legacy key a stale hook still writes.
+ */
+const STATE_CACHE_PREFIX = STATE_CACHE + ':';
+/** Which questions this session has already spent a lookup on, claimed rather
+ *  than checked. The searches row says the same thing, but it is written after
+ *  the answer comes back, so two fires in one message both passed the check. */
+const STATE_ASKED_PREFIX = 'asked:';
 /**
  * PREFIXES, NOT KEYS. Each of these was one JSON blob under a single key that
  * every writer read, mutated and wrote back whole — so two hook processes in
@@ -907,7 +982,7 @@ const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 /**
  * THE SESSION'S ONE HANDOFF SLOT, and the arbiter for the dispatch relay line.
  *
- * A SLOT, NOT A PIECE. \`STATE_CACHE\` is a single session-wide key, so keying
+ * A SLOT, NOT A PIECE. \`STATE_CACHE\` was a single session-wide key, so keying
  * the claim by resource id let a later dispatch of any strength above 'none'
  * overwrite a handoff an earlier one had already announced as relayed: the
  * relayed piece then reached no context at all while its \`relayed\` row
@@ -1341,10 +1416,18 @@ function storeParse(value) {
   }
 }
 
-/** One row per hook fire, including the log-only arms. Returns the uid so the
- *  injection rows it produced can point back at it. */
+/**
+ * One row per hook fire, including the log-only arms. Returns the uid so the
+ * injection rows it produced can point back at it.
+ *
+ * THE CALLER MAY MINT THE UID FIRST. An arm whose event row carries the
+ * OUTCOME of the fire (the subagent heartbeat, which names why it stayed
+ * quiet) cannot write that row until it knows the outcome, and by then its
+ * decision rows already need a uid to point at. Passing one in lets the event
+ * be written last and still be the row every decision references.
+ */
 function recordEvent(row) {
-  const id = uid();
+  const id = typeof row.uid === 'string' && row.uid.length > 0 ? row.uid : uid();
   storeRun(STORE_SQL.insertEvent, [
     id,
     Date.now(),
@@ -1435,12 +1518,26 @@ function alreadyShown(sessionId, resourceId) {
  * withholds a piece BECAUSE a relay is in flight has to ask the cache, and has
  * to apply the child's own rule (SubagentStart rejects a cache older than the
  * window). Same rule, same window, on every side.
+ *
+ * Scanned from \`STATE_CACHE\` upward rather than read as one key, because each
+ * dispatch parks under a slot of its own and the take-oldest consumer drains
+ * that whole range: any slot in it is a handoff a child can still be given.
+ * The entry's OWN timestamp decides, which is the rule the child applies; the
+ * \`at\` column is the range filter and not that rule.
  */
 function liveHandoff(sessionId) {
-  const parked = getState(sessionId, STATE_CACHE);
-  if (!isRecord(parked) || typeof parked.at !== 'string') return false;
-  const at = Date.parse(parked.at);
-  return Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS;
+  const parked = statePrefixSince(
+    sessionId,
+    STATE_CACHE,
+    Date.now() - RELAY_WINDOW_MS,
+    CACHE_SLOT_MAX,
+  );
+  for (const row of parked) {
+    if (!isRecord(row.value) || typeof row.value.at !== 'string') continue;
+    const at = Date.parse(row.value.at);
+    if (Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS) return true;
+  }
+  return false;
 }
 
 /** Like alreadyShown, but counting a parent relay whose handoff is still live.
@@ -1539,6 +1636,32 @@ function stateHolds(sessionId, key) {
 }
 
 /**
+ * Take the oldest row under \`prefix\` and hand back its key and parsed value,
+ * or null when there is none left.
+ *
+ * ONE STATEMENT, so a slot belongs to exactly one consumer. The pair it
+ * replaces (read the handoff, then delete it) had a window two \`SubagentStart\`
+ * processes both passed, which is how one child got another child's finding
+ * and a second child got nothing.
+ *
+ * The caller decides what an unusable row means; whatever it decides, the row
+ * is already gone. That is deliberate for the expired case: leaving a stale
+ * handoff in place made it the answer every later subagent in the session read
+ * and rejected, so the same dead row produced the same silent exit for the
+ * rest of the session.
+ */
+function takeStateOldestByPrefix(sessionId, prefix) {
+  const row = storeGet(STORE_SQL.takeStateOldestByPrefix, [
+    storeSession(sessionId),
+    storeSession(sessionId),
+    prefix,
+    prefix + String.fromCharCode(0xffff),
+  ]);
+  if (row === null || typeof row.key !== 'string') return null;
+  return { key: row.key, value: typeof row.value === 'string' ? storeParse(row.value) : null };
+}
+
+/**
  * Claim \`key\` for this session: true the FIRST time, false ever after.
  *
  * ONE STATEMENT, because the pattern it replaces was a read-modify-write of a
@@ -1634,6 +1757,10 @@ function statePrefixSince(sessionId, prefix, sinceMs, limit) {
   return rows.map((row) => ({
     key: typeof row.key === 'string' ? row.key.slice(prefix.length) : '',
     at: typeof row.at === 'number' ? row.at : 0,
+    // The dispatch arm judges a parked handoff by the entry's OWN timestamp,
+    // which is the rule the child applies to it; the \`at\` column is the range
+    // filter, not that rule.
+    value: typeof row.value === 'string' ? storeParse(row.value) : null,
   }));
 }
 
@@ -1696,6 +1823,17 @@ function alreadyAskedStore(question, sessionId) {
       searchFingerprint(question),
     ]) !== null
   );
+}
+
+/** The newest answer this session already holds for this exact question, or
+ *  null. What \`alreadyAskedStore\` suppresses on, read back in full so a second
+ *  fire can re-use the answer the first one paid for. */
+function latestAskedSearch(question, sessionId) {
+  const row = storeGet(STORE_SQL.searchByFingerprint, [
+    storeSession(sessionId),
+    searchFingerprint(question),
+  ]);
+  return row === null ? null : searchRow(row);
 }
 
 /** How many searches this session has spent on \`source\` since \`sinceMs\`.
@@ -1897,7 +2035,8 @@ export function storeSource(): string {
     .replaceAll('__MIGRATIONS__', JSON.stringify(STORE_MIGRATIONS))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS))
-    .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS));
+    .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS))
+    .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX));
 }
 
 // ---------------------------------------------------------------------------

@@ -397,6 +397,23 @@ function agentKey(agent, name) {
 }
 
 /**
+ * The harness's id for THE TOOL CALL being permitted, or null.
+ *
+ * PreToolUse carries it and SubagentStart does not (probed 2026-08-27), so it
+ * cannot pair a dispatch to the child that dispatch spawned. What it can do is
+ * give each dispatch's handoff a key of its own, so two Task calls in one
+ * assistant message stop overwriting each other's finding. Same bound and
+ * posture as every other field read off an untrusted payload: it is a key
+ * fragment, never a claim.
+ */
+function toolUseIdOf(input) {
+  if (!isRecord(input)) return null;
+  const id = input.tool_use_id;
+  if (typeof id !== 'string' || id.length === 0 || id.length > 128) return null;
+  return id;
+}
+
+/**
  * The session's working directory, which is where the next \`tenjin publish\`
  * would run. Same parsed payload as the session id; null when unusable.
  */
@@ -1578,6 +1595,139 @@ function relayLine(candidate, isTeam) {
   );
 }
 
+/**
+ * Park one finding for the subagent this dispatch is about to spawn, in a slot
+ * of its own.
+ *
+ * ONE SLOT PER DISPATCH (tenjin-agent#228). This was a single key per session,
+ * so two Task calls in one assistant message wrote the same row and the second
+ * one's finding replaced the first's: one child then opened with the OTHER
+ * child's answer and the other opened with nothing. The key carries the
+ * harness's \`tool_use_id\` when the payload has one and a fresh uid when it does
+ * not, which is enough to keep the slots apart — SubagentStart carries no
+ * tool_use_id (probed 2026-08-27), so the consumer still takes the oldest
+ * rather than matching, and pairing stays out of reach until the harness names
+ * the dispatch on the child's side.
+ *
+ * \`confidence\` and \`corroborated\` ride along because the dispatch decision row
+ * already carries them and the child's row could not: the same finding was
+ * describable in the parent's ledger and not in the child's.
+ *
+ * Answers whether the slot actually landed, because the caller may already have
+ * announced the handoff to the parent and cannot treat a refused write as one.
+ */
+function cacheSlot(sessionId, slotId, entry) {
+  // Evict before writing, so the cap is a bound on what is HELD rather than on
+  // what is written. An unreadable count is not a licence to drop a handoff.
+  for (let i = 0; i < CACHE_SLOT_MAX; i += 1) {
+    const held = countStatePrefix(sessionId, STATE_CACHE);
+    if (!Number.isFinite(held) || held < CACHE_SLOT_MAX) break;
+    if (takeStateOldestByPrefix(sessionId, STATE_CACHE) === null) break;
+  }
+  return setState(sessionId, STATE_CACHE_PREFIX + slotId, entry);
+}
+
+/** The lean stored projection, back in the shape judge() scores. The display
+ *  fields it never held read as absent, which can only lower a verdict. */
+function storedAsRich(candidates) {
+  const rich = [];
+  for (const c of Array.isArray(candidates) ? candidates : []) {
+    if (!isRecord(c)) continue;
+    if (typeof c.resourceId !== 'string' || typeof c.url !== 'string') continue;
+    if (typeof c.title !== 'string' || typeof c.price !== 'string') continue;
+    rich.push({
+      resourceId: c.resourceId,
+      url: c.url,
+      title: c.title,
+      price: c.price,
+      excerpt: '',
+      handle: '',
+      confidence: null,
+      corroborated: null,
+    });
+  }
+  return rich;
+}
+
+/**
+ * Hand a FRESH child what this session already asked and already paid for.
+ *
+ * The claim below is the one lookup per question per session, and its loser
+ * used to exit quiet — which was correct about the network and wrong about the
+ * delivery: a fan-out of five children onto one question left four of them with
+ * nothing, and the answer was sitting in the store the whole time. Re-judged
+ * from the stored candidates rather than trusted, because the stored projection
+ * has no excerpt and no answer card, so the verdict this reaches can only be
+ * the same or weaker than the one the original lookup reached. Zero network
+ * either way.
+ */
+function replayHandoff(args) {
+  const { question, sessionId, cwd, config, slotId, tool, agentId } = args;
+  if (config.push !== 'on' || sessionId === null) return;
+  const prior = latestAskedSearch(question, sessionId);
+  if (prior === null || prior.decision !== 'CANDIDATES') return;
+  const rich = storedAsRich(prior.candidates);
+  if (rich.length === 0) return;
+  const judged = judgeLeg(question, { decision: 'CANDIDATES', rich, inspect: null });
+  if (judged === null || judged.top === null || judged.strength === 'none') return;
+  // Which shelf ANSWERED, recovered the same way the row was filed: the public
+  // leg is the only one that stamps the public shelf's own base.
+  const shelf =
+    teamShelfOrigin(config) !== null && prior.shelfBaseUrl !== config.publicShelfUrl
+      ? 'team'
+      : 'public';
+  cacheSlot(sessionId, slotId, {
+    at: new Date().toISOString(),
+    slotId,
+    query: question,
+    shelf,
+    searchId: prior.searchId,
+    top: judged.top,
+    score: judged.score,
+    second: judged.second,
+    strength: judged.strength,
+    confidence: judged.confidence ?? null,
+    corroborated: judged.corroborated ?? null,
+  });
+  const eventUid = recordEvent({
+    session: sessionId,
+    cwd,
+    hook: 'dispatch',
+    tool,
+    data: {
+      event: 'PreToolUse',
+      query: clean(question, ${QUESTION_MAX}),
+      agentId,
+      reason: 'replayed',
+    },
+  });
+  // LOGGED, NOT RELAYED. Nothing reached the parent and nothing was asked of
+  // any shelf; what happened is that a child got a second copy of an answer
+  // this session already holds, and \`push status\` should be able to count that
+  // separately from a lookup that spoke.
+  recordDecision({
+    session: sessionId,
+    cwd,
+    eventUid,
+    trigger: 'dispatch',
+    event: 'PreToolUse',
+    shelf,
+    searchId: prior.searchId,
+    candidate: {
+      resourceId: judged.top.resourceId,
+      title: judged.top.title,
+      price: judged.top.price,
+      url: judged.top.url,
+    },
+    score: judged.score,
+    second: judged.second,
+    strength: judged.strength,
+    action: 'logged',
+    reason: 'replayed',
+    form: 'short',
+  });
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -1605,6 +1755,10 @@ async function main() {
   // session would credit a child's dispatch to its parent.
   if (invalid) return quiet();
   const cwd = cwdOf(input);
+  // The handoff slot this fire owns. The harness's own id for the tool call when
+  // the payload carries one, so two dispatches in one assistant message cannot
+  // collide; a uid when it does not, which is no worse than a unique guess.
+  const slotId = toolUseIdOf(input) ?? uid();
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
   // stderr line already written at open. Returning here rather than carrying on
@@ -1614,9 +1768,33 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
-  // Asking twice buys nothing: the answer is in the store, and on CANDIDATES it
-  // is already in the transcript. Session-scoped; the store is machine-global.
-  if (alreadyAskedStore(question, sessionId)) return quiet();
+  // ONE LOOKUP PER QUESTION PER SESSION, CLAIMED RATHER THAN CHECKED
+  // (tenjin-agent#228). Asking twice buys nothing: the answer is in the store,
+  // and on CANDIDATES it is already in the transcript. But the row that proves
+  // it was asked is written only when the answer comes BACK, so a fan-out of
+  // identical prompts fired as concurrent processes all read "not asked" and
+  // all searched. The claim is one statement, so exactly one fire wins it.
+  //
+  // AND THE LOSER STILL DELIVERS. It re-materializes a handoff out of the
+  // answer this session already holds, so the fresh child that lost the race
+  // opens with the finding rather than with nothing, at zero network cost. A
+  // loser whose winner has not recorded its answer YET finds nothing to replay
+  // and exits quiet, exactly as it did before; what it must never do is ask
+  // again.
+  const askedKey = STATE_ASKED_PREFIX + searchFingerprint(question);
+  const claimedAsk = claimState(sessionId, askedKey);
+  if (!claimedAsk || alreadyAskedStore(question, sessionId)) {
+    replayHandoff({
+      question,
+      sessionId,
+      cwd,
+      config,
+      slotId,
+      tool: input.tool_name,
+      agentId,
+    });
+    return quiet();
+  }
   if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) return quiet();
 
   const nowMs = Date.now();
@@ -1687,6 +1865,11 @@ async function main() {
     }
   }
   if (found === null) {
+    // THE CLAIM GOES BACK. It stands for an answer this session holds, and there
+    // is none: keeping it would make one timeout the reason this question is
+    // never asked again for the rest of the session, with nothing to replay to
+    // any child either.
+    clearState(sessionId, askedKey);
     // Restarted rather than incremented once the window has passed, so an outage
     // months ago cannot combine with one failure today to stop the arm.
     const run = nowMs - health.atMs < ${DISPATCH_QUIET_MS} ? health.failures + 1 : 1;
@@ -1728,22 +1911,24 @@ async function main() {
   // subagent arm re-checks it and applies its own once-per-session bounds, but a
   // hit this hook would not show the parent is not one to hand a subagent either.
   //
-  // ONE LIVE HANDOFF PER SESSION, AND THE CLAIM COMES FIRST. \`STATE_CACHE\` is
-  // a single session-wide key, so a later dispatch used to overwrite it
-  // last-write-wins. Once the parent RELAYS instead of claiming, that is a
-  // correctness bug and not just churn: dispatch A relays piece P and says so in
-  // the parent's transcript, dispatch B overwrites the slot, and P reaches no
-  // context at all while its \`relayed\` row suppresses it from every parent arm
-  // for the window. So the claim is taken on the SLOT, before the write, and
-  // only the winner writes: a guard after the write would lose the very race it
-  // is there to fix. A loser leaves the live handoff alone.
+  // ONE RELAY LINE PER SESSION, AND THE CLAIM COMES FIRST. Every dispatch parks
+  // into a slot of its own, so two Task calls in one assistant message no longer
+  // overwrite each other's finding; what stays bounded is what the PARENT is
+  // told. The claim is taken before the park, never after: the announcement is a
+  // promise that a child will find this piece, so a guard after the write would
+  // lose the very race it is there to fix, and a claim standing over a park that
+  // never landed would suppress the piece from every parent arm for the window.
+  // A loser leaves the live handoff alone and says nothing about it.
   //
   // \`handoffHolder\` is read only to LABEL the loss (same piece, or another
   // one), never to decide it: the claim already decided, atomically.
-  // A slot can outlive its cache, and PRESENCE is not liveness: \`liveHandoff\`
-  // (state store) applies the child's own rule, and every arm that withholds a
-  // piece because a relay is in flight asks it, so the hint path below cannot
-  // keep suppressing what this one has stopped suppressing.
+  // A slot can outlive its cache, and PRESENCE is not liveness: the child
+  // rejects a cache older than the window, so a stale row must not read here as
+  // a live handoff. \`liveHandoff\` (state store) applies that rule across the
+  // per-dispatch slots, because each dispatch parks under a key of its own, and
+  // every arm that withholds a piece because a relay is in flight asks the same
+  // function, so the hint path below cannot keep suppressing what this one has
+  // stopped suppressing.
   let handoff = false;
   let handoffHolder = '';
   if (config.push === 'on' && sessionId !== null) {
@@ -1762,14 +1947,13 @@ async function main() {
         const held = getState(sessionId, STATE_RELAY_SLOT);
         handoffHolder = typeof held === 'string' ? held : '';
       }
-    }
-    if (handoff) {
-      // The announcement below is a promise that a child will find this. If the
-      // cache write did not land, take the promise back: release the slot and
-      // fall through to the ordinary parent hint, rather than announcing a
-      // handoff to nobody while the relayed row suppresses the parent arms.
-      const parked = setState(sessionId, STATE_CACHE, {
+      const parked = cacheSlot(sessionId, slotId, {
         at: new Date().toISOString(),
+        // WHOSE HANDOFF THIS IS. The consumer cannot match on it — SubagentStart
+        // carries no tool_use_id — but the row it writes can name the dispatch
+        // it came from, which is what makes "eight dispatches, three deliveries"
+        // a question the ledger answers.
+        slotId,
         query: question,
         // WHICH SHELF ANSWERED, carried so the subagent arm's ledger row says the
         // truth. Read off the leg that actually produced \`found\`, not off the
@@ -1780,8 +1964,17 @@ async function main() {
         searchId: found.searchId,
         top: judged.top,
         strength: judged.strength,
+        // The server's own two verdict fields, which the dispatch decision row
+        // already carried and the handoff dropped: the child's row could not
+        // describe the very hit it delivered.
+        confidence: judged.confidence ?? null,
+        corroborated: judged.corroborated ?? null,
       });
-      if (!parked) {
+      // The announcement below is a promise that a child will find this. If the
+      // park did not land, take the promise back: release the slot and fall
+      // through to the ordinary parent hint, rather than announcing a handoff to
+      // nobody while the relayed row suppresses the parent arms.
+      if (handoff && !parked) {
         clearState(sessionId, STATE_RELAY_SLOT);
         handoff = false;
       }
@@ -1870,10 +2063,10 @@ async function main() {
     // differently worded prompts sail past the question fingerprint, so a
     // check-then-write let both fires announce the same piece.
     if (!handoff) {
-      // Lost the session's one handoff slot. To the SAME piece, this is the
-      // repeat the rule exists to stop, so it is silent. To a DIFFERENT piece,
-      // there is nothing to relay into — the live handoff belongs to someone
-      // else and must not be evicted — so this hit takes the ordinary parent
+      // Lost the session's one relay line. To the SAME piece, a second
+      // announcement is the repeat the rule exists to stop, so it is silent and
+      // the child still gets the slot this fire parked. To a DIFFERENT piece,
+      // the parent hears about it the ordinary way: this hit takes the parent
       // hint path below, exactly as it did before relaying existed.
       // ...but only while a handoff actually exists to be repeated. A slot can
       // outlive its cache: the parked entry expired, or a rollback of a failed

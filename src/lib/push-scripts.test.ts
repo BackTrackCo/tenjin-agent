@@ -390,6 +390,97 @@ async function seedSearch(over: Partial<StoredSearch> = {}): Promise<void> {
   });
 }
 
+/**
+ * Every `events` row a run left behind, oldest first, with its JSON `data`
+ * flattened onto the row.
+ *
+ * The decision rows in `ledger()` cannot answer "why did this fire say
+ * nothing", because a fire that decided nothing writes no decision row at all.
+ * The heartbeat lives here (tenjin-agent#228), so this is where a quiet path's
+ * reason is enumerable from.
+ */
+async function eventRows(): Promise<Record<string, unknown>[]> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    const rows = db
+      .prepare('SELECT hook, tool, data FROM events ORDER BY id')
+      .all() as unknown as Record<string, unknown>[];
+    return rows.map((r) => ({
+      hook: r.hook,
+      tool: r.tool,
+      ...(typeof r.data === 'string' ? (JSON.parse(r.data) as Record<string, unknown>) : {}),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+/** The handoff slots a session is holding, oldest first. */
+function slotKeys(session: string = SESSION): string[] {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db
+        .prepare(
+          `SELECT key FROM session_state
+             WHERE session = ? AND (key = 'dispatch_cache' OR key LIKE 'dispatch@_cache:%' ESCAPE '@')
+             ORDER BY at, key`,
+        )
+        .all(session) as unknown as { key: string }[]
+    ).map((r) => r.key);
+  } finally {
+    db.close();
+  }
+}
+
+/** Write one handoff slot straight into the store, the way a dispatch would. */
+function seedSlot(key: string, value: Record<string, unknown>): void {
+  const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+  try {
+    db.prepare(
+      `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
+    ).run(SESSION, key, JSON.stringify(value), Date.now());
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Backdate every handoff slot by `ms`, in the row AND in the payload the TTL is
+ * actually measured against.
+ *
+ * The TTL is two minutes of wall clock, so a test that waits it out is the
+ * flake tenjin-agent#216 is about. Moving the rows is the same observation
+ * without a timer.
+ */
+function ageSlots(ms: number): void {
+  const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+  try {
+    const rows = db
+      .prepare(
+        `SELECT key, value, at FROM session_state
+           WHERE key = 'dispatch_cache' OR key LIKE 'dispatch@_cache:%' ESCAPE '@'`,
+      )
+      .all() as unknown as { key: string; value: string; at: number }[];
+    for (const row of rows) {
+      const value = JSON.parse(row.value) as { at?: string };
+      value.at = new Date(Date.parse(String(value.at)) - ms).toISOString();
+      db.prepare('UPDATE session_state SET value = ?, at = ? WHERE key = ?').run(
+        JSON.stringify(value),
+        row.at - ms,
+        row.key,
+      );
+    }
+  } finally {
+    db.close();
+  }
+}
+
 /** One `session_state` value, parsed. Null when the key was never written. */
 function sessionState(session: string, key: string): unknown {
   const path = join(dataDir, STATE_DB_FILE);
@@ -3432,18 +3523,24 @@ describe('the subagent arm (SubagentStart)', () => {
   };
 
   /** Merge a patch into the parked handoff, to reach a childPointer branch the
-   *  stub servers would need a second protected deployment to produce. */
+   *  stub servers would need a second protected deployment to produce. Keyed on
+   *  the newest slot in the `dispatch_cache` range, since a dispatch parks under
+   *  a key of its own rather than under the one retired key. */
   function patchCache(patch: Record<string, unknown>, session: string = SESSION): void {
     const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
     try {
       const row = db
-        .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
-        .get(session, 'dispatch_cache') as unknown as { value?: string } | undefined;
+        .prepare(
+          `SELECT key, value FROM session_state
+             WHERE session = ? AND key >= 'dispatch_cache' AND key < 'dispatch_cache' || char(65535)
+             ORDER BY at DESC, key DESC LIMIT 1`,
+        )
+        .get(session) as unknown as { key?: string; value?: string } | undefined;
       const merged = { ...(JSON.parse(row?.value ?? '{}') as Record<string, unknown>), ...patch };
       db.prepare('UPDATE session_state SET value = ? WHERE session = ? AND key = ?').run(
         JSON.stringify(merged),
         session,
-        'dispatch_cache',
+        row?.key ?? 'dispatch_cache',
       );
     } finally {
       db.close();
@@ -3461,8 +3558,12 @@ describe('the subagent arm (SubagentStart)', () => {
     let top: Record<string, unknown>;
     try {
       const row = db
-        .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
-        .get(session, 'dispatch_cache') as unknown as { value?: string } | undefined;
+        .prepare(
+          `SELECT value FROM session_state
+             WHERE session = ? AND key >= 'dispatch_cache' AND key < 'dispatch_cache' || char(65535)
+             ORDER BY at DESC, key DESC LIMIT 1`,
+        )
+        .get(session) as unknown as { value?: string } | undefined;
       top = (JSON.parse(row?.value ?? '{}') as { top?: Record<string, unknown> }).top ?? {};
     } finally {
       db.close();
@@ -3709,16 +3810,20 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
-   * THE FAN-OUT REGRESSION (tenjin-agent#228 review, Major 2). The handoff is
-   * ONE session-wide cache key. Keyed by resource id, the relay claim did not
-   * protect it, so: dispatch A relays P and tells the parent so, dispatch B
-   * lands moderate on Q and overwrites the slot, child 1 gets Q, child 2 gets
-   * nothing, and P reaches no context at all while its `relayed` row keeps it
-   * out of every parent arm for the window. A delivered hit became a lost one
-   * on exactly the parallel path this work exists to fix, and the parent
-   * transcript asserted a delivery that never happened. B is MODERATE on
-   * purpose: it is the common case and it leaves no `relayed` row behind to
-   * explain the loss.
+   * THE FAN-OUT REGRESSION (tenjin-agent#228 review, Major 2). The handoff used
+   * to be ONE session-wide cache key, and keyed by resource id the relay claim
+   * did not protect it: dispatch A relays P and tells the parent so, dispatch B
+   * lands moderate on Q and overwrites the slot, child 1 gets Q, and P reaches
+   * no context at all while its `relayed` row keeps it out of every parent arm
+   * for the window. A delivered hit became a lost one on exactly the parallel
+   * path this work exists to fix, and the parent transcript asserted a delivery
+   * that never happened. B is MODERATE on purpose: it is the common case and it
+   * leaves no `relayed` row behind to explain the loss.
+   *
+   * Slots are per dispatch now, so B parks beside A rather than over it and the
+   * order of arrival decides who gets which: P still reaches the first child,
+   * and Q, which no parent line ever promised, reaches the second instead of
+   * being the reason P was lost.
    */
   it('does not let a later moderate dispatch evict a relayed handoff', async () => {
     const { baseUrl } = await serve(twoSubjects(false));
@@ -3727,7 +3832,7 @@ describe('the subagent arm (SubagentStart)', () => {
     const relayed = await runScript(dispatchHookScript(dataDir), dispatch());
     expect(injected(relayed) ?? '').toContain('queued for delivery to the subagent');
 
-    // The evictor. Moderate, so it never speaks and never relays.
+    // The would-be evictor. Moderate, so it never speaks and never relays.
     const evictor = await runScript(dispatchHookScript(dataDir), otherDispatch);
     expect(evictor.stdout).toBe('');
 
@@ -3741,10 +3846,16 @@ describe('the subagent arm (SubagentStart)', () => {
       candidate: expect.objectContaining({ resourceId: RESOURCE_ID }),
     });
 
-    // One live handoff per session: the second child gets nothing, which is
-    // the consumed cache, not an eviction.
+    // Q went to its own slot, so the second child opens with it rather than
+    // with nothing, and A's relay line still described what child 1 received.
     const second = await runScript(pushSubagentHookScript(dataDir), start);
-    expect(second.stdout).toBe('');
+    const secondText = injected(second) ?? '';
+    expect(secondText).toContain(SECOND_RESOURCE_ID);
+    expect(secondText).not.toContain(RESOURCE_ID);
+
+    // And nothing is left to hand a third child.
+    const third = await runScript(pushSubagentHookScript(dataDir), start);
+    expect(third.stdout).toBe('');
   });
 
   /**
@@ -4074,6 +4185,258 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(run.stdout).toBe('');
     // Nothing was cached, so there is nothing to log either.
     expect(await ledger()).toEqual([]);
+  });
+});
+
+/**
+ * The handoff, per dispatch and taken atomically (tenjin-agent#228).
+ *
+ * Three defects sat in one session-wide `dispatch_cache` key: the second of two
+ * dispatches overwrote the first's finding, two children could both read the
+ * one slot before either deleted it, and an expired slot stayed put and
+ * silenced every later child in the session. Every case here is written as two
+ * consumers over one store rather than as a timer, because the interleaving is
+ * the thing under test and the clock is a flake (tenjin-agent#216).
+ */
+describe('the subagent handoff slots', () => {
+  const OTHER_SEARCH_ID = '44444444-4444-4444-8444-444444444444';
+  const ZOD_PROMPT =
+    'Find out whether the zod resolver throws on an optional chain during parse, and what pinning changes';
+  const PGVECTOR_PROMPT =
+    'Find out whether the pgvector collation flips when the testcontainer image is swapped in CI runs';
+
+  const dispatchOf = (prompt: string): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_input: { prompt },
+    });
+
+  const startOf = (agentId: string): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'SubagentStart',
+      agent_id: agentId,
+      agent_type: 'general-purpose',
+    });
+
+  /** A different lone piece per question, so two dispatches produce two
+   *  distinct findings. Lone, therefore 'moderate': the parent says nothing and
+   *  the slot is the only channel either piece has. */
+  const perQuestion = (req: StubRequest): { status: number; json: unknown } => {
+    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+    let query: string;
+    try {
+      query = String((JSON.parse(req.body) as { query?: unknown }).query);
+    } catch {
+      query = '';
+    }
+    const zod = query.includes('zod');
+    return {
+      status: 200,
+      json: {
+        schemaVersion: 3,
+        searchId: zod ? SEARCH_ID : OTHER_SEARCH_ID,
+        items: [
+          {
+            resourceId: zod ? RESOURCE_ID : SECOND_RESOURCE_ID,
+            url: `${req.base}/@a/p`,
+            title: query.slice(0, 190),
+            price: '0',
+            excerpt: 'the excerpt',
+            creator: { handle: 'vraspar' },
+          },
+        ],
+      },
+    };
+  };
+
+  /** A slot in the shape a dispatch writes, overridable per case. */
+  const slotValue = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    at: new Date().toISOString(),
+    slotId: 'toolu_seeded',
+    query: 'zod resolver optional chain parse throw',
+    shelf: 'public',
+    searchId: SEARCH_ID,
+    top: {
+      resourceId: RESOURCE_ID,
+      title: 'Pinning the zod resolver',
+      price: '0',
+      url: 'https://tenjin.test/@a/p',
+      excerpt: 'the excerpt',
+    },
+    score: 0.9,
+    second: 0.1,
+    strength: 'moderate',
+    ...over,
+  });
+
+  /**
+   * The fan-out case the single key could not survive. Two dispatches in one
+   * assistant message parked two different findings; the two children that
+   * follow must take one slot each, and the delete IS the read, so neither can
+   * take the other's.
+   */
+  it('gives two simultaneous subagents one distinct slot each', async () => {
+    const { baseUrl } = await serve(perQuestion);
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    await runScript(dispatchHookScript(dataDir), dispatchOf(PGVECTOR_PROMPT));
+    expect(slotKeys()).toHaveLength(2);
+
+    const runs = await Promise.all([
+      runScript(pushSubagentHookScript(dataDir), startOf('a1')),
+      runScript(pushSubagentHookScript(dataDir), startOf('a2')),
+    ]);
+
+    const texts = runs.map((r) => injected(r) ?? '');
+    expect(texts.filter((t) => t.includes(RESOURCE_ID))).toHaveLength(1);
+    expect(texts.filter((t) => t.includes(SECOND_RESOURCE_ID))).toHaveLength(1);
+    // Both slots are gone, and neither was served twice.
+    expect(slotKeys()).toEqual([]);
+    const beats = (await eventRows()).filter((e) => e.hook === 'subagent');
+    expect(beats.map((e) => e.reason)).toEqual(['delivered', 'delivered']);
+    expect(new Set(beats.map((e) => e.slotId)).size).toBe(2);
+    expect(new Set(beats.map((e) => e.agentId))).toEqual(new Set(['a1', 'a2']));
+  });
+
+  /**
+   * MIXED FLEETS. A machine whose hooks were installed before this change still
+   * writes the single `dispatch_cache` key, and its subagent arm may be the new
+   * one. The consumer scans the range from that key upward, so the legacy
+   * handoff is drained rather than stranded.
+   */
+  it('consumes the legacy single-key handoff a stale dispatch hook wrote', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl);
+    (await openStore(dataDir))?.close();
+    seedSlot('dispatch_cache', slotValue());
+
+    const run = await runScript(pushSubagentHookScript(dataDir), startOf('a1'));
+    expect(injected(run) ?? '').toContain(RESOURCE_ID);
+    expect(slotKeys()).toEqual([]);
+  });
+
+  /**
+   * An expired slot used to be read, rejected and LEFT IN PLACE, so one dead
+   * handoff produced the same silent exit for every later subagent in the
+   * session. Taking it deletes it, which is what makes the second fire's answer
+   * different from the first's.
+   */
+  it('deletes an expired slot instead of returning it, and says so once', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl);
+    (await openStore(dataDir))?.close();
+    seedSlot('dispatch_cache:toolu_1', slotValue());
+    ageSlots(PUSH_CACHE_TTL_MS + 60_000);
+
+    const first = await runScript(pushSubagentHookScript(dataDir), startOf('a1'));
+    expect(first.stdout).toBe('');
+    expect(slotKeys()).toEqual([]);
+
+    const second = await runScript(pushSubagentHookScript(dataDir), startOf('a2'));
+    expect(second.stdout).toBe('');
+    expect((await eventRows()).map((e) => e.reason)).toEqual(['expired', 'no-cache']);
+  });
+
+  /**
+   * The denominator (audit finding 9). Four of this arm's exits recorded
+   * nothing at all, so zero subagent rows conflated "no dispatch happened",
+   * "the handoff went stale", "the payload was malformed" and "the hook never
+   * ran" — and the delivery rate could not be computed. Every fire that can
+   * open the store now leaves exactly one row naming why it ended.
+   */
+  it('leaves one enumerable reason on every quiet path', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl);
+    (await openStore(dataDir))?.close();
+
+    await runScript(pushSubagentHookScript(dataDir), startOf('a1'));
+    seedSlot('dispatch_cache:toolu_bad', slotValue({ top: 'not a record' }));
+    await runScript(pushSubagentHookScript(dataDir), startOf('a2'));
+    seedSlot('dispatch_cache:toolu_weak', slotValue({ strength: 'none' }));
+    await runScript(pushSubagentHookScript(dataDir), startOf('a3'));
+    seedSlot('dispatch_cache:toolu_old', slotValue());
+    ageSlots(PUSH_CACHE_TTL_MS + 60_000);
+    await runScript(pushSubagentHookScript(dataDir), startOf('a4'));
+    seedSlot('dispatch_cache:toolu_ok', slotValue());
+    const delivered = await runScript(pushSubagentHookScript(dataDir), startOf('a5'));
+
+    expect(injected(delivered)).not.toBeNull();
+    const beats = await eventRows();
+    expect(beats.map((e) => e.reason)).toEqual([
+      'no-cache',
+      'invalid-shape',
+      'weak',
+      'expired',
+      'delivered',
+    ]);
+    // Identity on every one of them, not just the delivery.
+    expect(beats.map((e) => e.agentId)).toEqual(['a1', 'a2', 'a3', 'a4', 'a5']);
+  });
+
+  /**
+   * The asked-claim (audit finding 8) and its replay.
+   *
+   * The suppressor used to be a read of the searches table and the row it reads
+   * is written only when the answer comes BACK, so identical prompts fired
+   * together all passed it and all searched. The claim is one statement, so the
+   * second dispatch spends nothing — and instead of exiting quiet it rebuilds a
+   * handoff out of the answer this session already holds, which is what a child
+   * spawned after the first slot went stale would otherwise never get.
+   */
+  it('spends one lookup on a repeated question and still hands the second child a slot', async () => {
+    const { baseUrl, queries } = await serve(perQuestion);
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    expect(queries()).toHaveLength(1);
+    // The first handoff goes stale with no child having taken it.
+    ageSlots(PUSH_CACHE_TTL_MS + 60_000);
+
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    // Zero duplicate network: the answer came out of the store.
+    expect(queries()).toHaveLength(1);
+    expect(slotKeys()).toHaveLength(2);
+    expect((await ledger()).filter((r) => r.trigger === 'dispatch')).toContainEqual(
+      expect.objectContaining({ action: 'logged', reason: 'replayed', strength: 'moderate' }),
+    );
+
+    const run = await runScript(pushSubagentHookScript(dataDir), startOf('a1'));
+    expect(injected(run) ?? '').toContain(RESOURCE_ID);
+    expect((await eventRows()).filter((e) => e.hook === 'subagent')).toMatchObject([
+      { reason: 'delivered', agentId: 'a1' },
+    ]);
+  });
+
+  /**
+   * The identity stamp, on the arms whose payload names no agent as well.
+   * `events.data` is the store's designated extension point, so this costs no
+   * column and no migration; a parent fire records the field as absent rather
+   * than omitting it, which is what makes "no agent" and "an older hook" two
+   * different answers in the rows.
+   */
+  it('stamps the executing agent onto a parent arm row, absent as null', async () => {
+    const { baseUrl } = await serve(perQuestion);
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    expect(await eventRows()).toMatchObject([{ hook: 'dispatch', agentId: null }]);
+  });
+
+  /** A repeated question whose first lookup FAILED must be askable again: the
+   *  claim stands for an answer this session holds, and a timeout is not one. */
+  it('gives the claim back when the lookup never answered', async () => {
+    const { baseUrl, queries } = await serve((req) =>
+      req.url.startsWith('/api/search') ? { status: 502, json: {} } : { status: 404, json: {} },
+    );
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    expect(queries()).toHaveLength(2);
   });
 });
 

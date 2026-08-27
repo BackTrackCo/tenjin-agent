@@ -3724,16 +3724,33 @@ describe('dispatch hook: two shelves in team mode', () => {
     };
   }
 
-  const cachedShelf = async (sessionId: string): Promise<string | undefined> => {
+  /**
+   * The handoff a dispatch parked for its subagent.
+   *
+   * ONE SLOT PER DISPATCH (tenjin-agent#228), so this reads the newest row in
+   * the `dispatch_cache:` range rather than the single key the cache used to
+   * be. A session here runs one dispatch, so newest and only are the same row.
+   */
+  const cachedSlot = async (sessionId: string): Promise<Record<string, unknown> | undefined> => {
     const store = await openStore(dataDir);
     if (store === null) return undefined;
     try {
-      const row = store.get(STORE_SQL.getState, [sessionId, 'dispatch_cache']);
-      if (row === null || typeof row.value !== 'string') return undefined;
-      return (JSON.parse(row.value) as { shelf?: string }).shelf;
+      const rows = store.all(
+        `SELECT value FROM session_state WHERE session = ? AND key LIKE 'dispatch\\_cache:%' ESCAPE '\\'
+           ORDER BY at DESC LIMIT 1`,
+        [sessionId],
+      );
+      const value = rows[0]?.value;
+      if (typeof value !== 'string') return undefined;
+      return JSON.parse(value) as Record<string, unknown>;
     } finally {
       store.close();
     }
+  };
+
+  const cachedShelf = async (sessionId: string): Promise<string | undefined> => {
+    const slot = await cachedSlot(sessionId);
+    return typeof slot?.shelf === 'string' ? slot.shelf : undefined;
   };
 
   it('falls through to the public shelf, and files the row under the shelf that answered', async () => {
