@@ -23,6 +23,7 @@ import {
   type OwnPost,
   type OwnPostCard,
   type PostUpdateInput,
+  type PublishStatus,
   type ResourceCardUpdate,
 } from '../lib/posts-api';
 import {
@@ -51,6 +52,13 @@ import type { CommandContext, CommandResult } from '../context';
  * narrowing of that scan, and the same publish.mode consent cascade, because an
  * edit ships content to the same page a publish does — the public marketplace,
  * or on a team shelf the team page a publish just wrote.
+ *
+ * `--status draft|published` is the reversible half of taking a piece back
+ * (`tenjin delete` is the other, and confirms in every mode because destroying is
+ * not what publish.mode consented to). It is an ordinary change flag here: it
+ * diffs, it prunes when it matches, and it rides the same consent gate, since
+ * promoting a draft IS putting content up and demoting is the same lever pulled
+ * the safe way.
  *
  * Unlike publish, the wallet is touched BEFORE consent, and that is a real
  * tradeoff, not a technicality: the before→after summary the user approves can
@@ -84,6 +92,11 @@ export interface EditArgs {
   temporalMode?: string;
   provenance?: string;
   methodology?: string;
+  /**
+   * `draft` or `published`: unpublish, or put a draft up. Raw at the edge and
+   * validated there (USAGE on anything else), like `--mode`.
+   */
+  status?: string;
   /** Post fields. */
   title?: string;
   /** Post price, decimal USD at the edge (O1). */
@@ -135,6 +148,7 @@ export async function runEdit(
   // typo must cost nothing, not a signature and a round trip.
   rejectEmptyValues(args);
   assertAppendExclusivity(args);
+  const status = args.status !== undefined ? parseStatusFlag(args.status) : undefined;
   const clears = parseClears(args);
   const cardFlags = cardFlagsFrom(args);
   const priceAtomic = args.price !== undefined ? parseUsdToAtomic(args.price) : undefined;
@@ -182,6 +196,7 @@ export async function runEdit(
   // deriveCard validates the set fields against the server's bounds and reports
   // them under the same dotted `resource.<field>` keys the server would.
   const intent: PostUpdateInput = {
+    ...(status !== undefined ? { status } : {}),
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...(bodyFile !== undefined ? { bodyMd: bodyFile.body } : {}),
     ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
@@ -413,6 +428,17 @@ function diffUpdate(
 ): { input: PostUpdateInput; lines: string[] } {
   const lines: string[] = [];
   const input: PostUpdateInput = {};
+
+  // Status leads the summary because it is the change that decides whether the
+  // rest is public at all. It takes the SAME publish.mode consent every other
+  // change here takes, deliberately: promoting a draft is putting content up,
+  // which is what the mode is consent for, and demoting to draft is the safe
+  // direction of the same lever. No re-scan rides with it — a status flip ships
+  // no new text, and the stored body was scanned when it was written.
+  if (intent.status !== undefined && intent.status !== stored.status) {
+    input.status = intent.status;
+    lines.push(`status: ${sanitizeForTerminal(stored.status)} → ${intent.status}`);
+  }
 
   // Both sides trimmed, because the server trims these before storing them: an
   // untrimmed compare would call " x" a change from "x" forever.
@@ -681,6 +707,7 @@ const CLEAR_CONFLICTS: Record<ClearField, Array<keyof EditArgs>> = {
 
 /** The CLI spelling of each arg key, for error messages. */
 const FLAG_NAME: Record<string, string> = {
+  status: '--status',
   question: '--question',
   task: '--task',
   addQuestion: '--add-question',
@@ -701,6 +728,7 @@ const FLAG_NAME: Record<string, string> = {
 };
 
 const CHANGE_KEYS: Array<keyof EditArgs> = [
+  'status',
   'question',
   'task',
   'addQuestion',
@@ -776,6 +804,25 @@ function assertAppendExclusivity(args: EditArgs): void {
       fix: '--task replaces the stored tasks; --add-task appends to them.',
     });
   }
+}
+
+/**
+ * The two statuses this flag moves a post between, validated at the edge so a
+ * typo is USAGE before the wallet is touched.
+ *
+ * Narrower than the server's status vocabulary on purpose: `unlisted` exists
+ * there, but no CLI verb produces it (`publish --draft` is the only other status
+ * this tool ever sets), so accepting it here would ship a value nothing in this
+ * repo exercises. Widening it is a deliberate edit, not an omission.
+ */
+const STATUS_FLAG_VALUES = ['draft', 'published'] as const;
+
+function parseStatusFlag(raw: string): PublishStatus {
+  const value = raw.trim();
+  if ((STATUS_FLAG_VALUES as readonly string[]).includes(value)) return value as PublishStatus;
+  throw new CliError('USAGE', `Invalid --status: ${JSON.stringify(raw)}`, {
+    fix: `--status takes ${STATUS_FLAG_VALUES.join(' or ')}. Use draft to unpublish, published to put a draft up.`,
+  });
 }
 
 function parseClears(args: EditArgs): ClearField[] {

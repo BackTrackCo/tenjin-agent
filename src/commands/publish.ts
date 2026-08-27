@@ -608,6 +608,7 @@ function receipt(
   const cacheEligible = result.cacheEligible ?? false;
   const deskUrl = `${trimSlash(baseUrl)}/desk`;
   const title = sanitizeForTerminal(result.title);
+  const undo = undoCommands(result.resourceId, result.status);
   // status and url are server-sent open strings (posts-api declares both as bare
   // z.string()), so they get the same treatment as the title beside them: this
   // line is what an author reads to learn where their piece went.
@@ -619,6 +620,7 @@ function receipt(
         ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
         : 'Published without an answer card: ranks below every carded piece in agent search.',
     ...searches.filter((s) => s.closed).map(closeLine),
+    undoLine(undo),
     ...scanNoteLines(result.scan),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
@@ -631,6 +633,7 @@ function receipt(
       cacheEligible,
       missing,
       deskUrl,
+      undo,
       // `search` repeats a lone result for callers that already read it; a
       // batch has no single one to repeat.
       ...(searches.length === 1 ? { search: searches[0] } : {}),
@@ -640,6 +643,38 @@ function receipt(
     },
     humanLines: human,
   };
+}
+
+/** The two commands that take a fresh publish back, with the real id filled in. */
+interface UndoCommands {
+  /** Removes the piece. Confirms in every mode; `--yes` is what answers it. */
+  remove: string;
+  /** Only on a published piece: the reversible half. */
+  unpublish?: string;
+}
+
+/**
+ * THE UNDO LINE, on BOTH surfaces (#221). An agent that has just published is the
+ * one being asked "how do I take that down", and with nothing in the receipt to
+ * answer with it will invent a plausible verb — which is exactly what happened in
+ * the issue that asked for this, before `tenjin delete` existed. So the receipt
+ * carries the real commands with the real id, in `data.undo` for a machine reader
+ * and as a stderr line for a human, rather than leaving either to guess.
+ *
+ * `unpublish` is offered first in the rendered line and omitted entirely on a
+ * draft: a draft is not up, so demoting it is not an undo of anything.
+ */
+function undoCommands(resourceId: string, status: string): UndoCommands {
+  return {
+    remove: `tenjin delete ${resourceId} --yes`,
+    ...(status === 'published' ? { unpublish: `tenjin edit ${resourceId} --status draft` } : {}),
+  };
+}
+
+function undoLine(undo: UndoCommands): string {
+  return undo.unpublish !== undefined
+    ? `Undo: \`${undo.unpublish}\` unpublishes it (reversible), \`${undo.remove}\` removes it.`
+    : `Undo: \`${undo.remove}\` removes it.`;
 }
 
 function closeLine(search: SearchReceipt): string {

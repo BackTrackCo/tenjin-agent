@@ -236,13 +236,31 @@ With no change flag, prints one of your posts and its card. With change flags, m
 
 It accepts the card flags from `publish`, plus:
 
-| Flag                    | Effect                                 |
-| ----------------------- | -------------------------------------- |
-| `--title <text>`        | New post title.                        |
-| `--body <path>`         | Replace the body from a Markdown file. |
-| `--add-question <text>` | Append one question. Repeatable.       |
-| `--add-task <text>`     | Append one task. Repeatable.           |
-| `--clear <field>`       | Empty one card field. Repeatable.      |
+| Flag                    | Effect                                               |
+| ----------------------- | ---------------------------------------------------- |
+| `--title <text>`        | New post title.                                      |
+| `--body <path>`         | Replace the body from a Markdown file.               |
+| `--status <status>`     | `draft` to unpublish, `published` to put a draft up. |
+| `--add-question <text>` | Append one question. Repeatable.                     |
+| `--add-task <text>`     | Append one task. Repeatable.                         |
+| `--clear <field>`       | Empty one card field. Repeatable.                    |
+
+`--status draft` is the reversible way to take a piece off the marketplace: the id
+and the body survive, and `--status published` puts it back. It is an ordinary
+change flag, so it diffs like the rest (setting the status a post already has
+writes nothing) and it runs the same `publish.mode` consent gate.
+
+### `tenjin delete <post-id>`
+
+Removes one of your own pieces (soft-delete, owner-scoped `DELETE /api/posts/<id>`). It reads the post first, prints the title, status, price and url, and then **confirms on every run in every `publish.mode`**: the mode is consent to publish and never consent to destroy, so `full-auto` asks here exactly as `review` does.
+
+At a terminal it asks `y/N` inline. Anywhere else, including under an agent, a pipe, or the MCP server, it refuses with `NEEDS_CONFIRMATION` (exit 3) whose `details` carry the post identity, `confirmCommand`, and `reversibleAlternative`; re-run with `--yes` to confirm. A declined prompt is `REFUSED` (exit 3), and a server refusal after the confirmation is `DELETE_FAILED` (exit 4), which means the piece is still live.
+
+| Flag    | Effect                                                                 |
+| ------- | ---------------------------------------------------------------------- |
+| `--yes` | Confirm the removal without the prompt. Required when there is no TTY. |
+
+Prefer `tenjin edit <post-id> --status draft` when the piece should come down but not be lost. Every successful `publish` prints both commands with the real id, and carries them on the `--json` envelope as `data.undo` (`remove`, plus `unpublish` on a published piece).
 
 ### `tenjin profile`
 

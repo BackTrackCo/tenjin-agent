@@ -46,9 +46,9 @@ function capturingFetch(responder: (call: CapturedCall, attempt: number) => Resp
   return { fetch: fetchFn, calls };
 }
 
-/** The signed body, or undefined for the bodiless GET branch of the union. */
+/** The signed body, or undefined for the bodiless GET/DELETE branch of the union. */
 function signedBody(req: SignableRequest): string | undefined {
-  return req.method === 'GET' ? undefined : req.body;
+  return 'body' in req ? req.body : undefined;
 }
 
 /** A minimal WriteAuth that stamps a fixed header and records recover() calls. */

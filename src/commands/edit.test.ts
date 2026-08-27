@@ -1755,3 +1755,95 @@ describe('runEdit — server ingest gate', () => {
     expect((res.data as { scan?: unknown }).scan).toBeUndefined();
   });
 });
+
+/**
+ * The reversible half of taking a piece back (#221). The point of the block is
+ * that `--status` is an ORDINARY change flag: it diffs, it prunes, and it takes
+ * the same publish.mode consent as a title change — unlike `tenjin delete`, which
+ * confirms in every mode because destroying is not what the mode consented to.
+ */
+describe('runEdit — --status', () => {
+  it('sends the status and nothing else, in both directions', async () => {
+    const down = await edit({ status: 'draft' });
+    expect(down.stub.putBody()).toEqual({ status: 'draft' });
+
+    const up = await edit({ status: 'published' }, { get: { ...STORED, status: 'draft' } });
+    expect(up.stub.putBody()).toEqual({ status: 'published' });
+  });
+
+  it('leads the before/after summary', async () => {
+    const stub = stubServer();
+    const err = (await runEdit(
+      args({ status: 'draft', title: 'A Better Answer' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider, env: {} }),
+    ).catch((e: unknown) => e)) as { details: { changes: string[] } };
+    expect(err.details.changes).toEqual([
+      'status: published → draft',
+      'title: "The Answer" → "A Better Answer"',
+    ]);
+  });
+
+  it('setting the status a post already has is a no-op, not a write', async () => {
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, status: 'published' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+  });
+
+  // Both directions take the ordinary gate: review stops, auto proceeds on clean
+  // content. Promoting a draft IS putting content up, so it must not be cheaper
+  // than a publish; demoting is the same lever pulled the safe way.
+  it.each(['draft', 'published'])(
+    'review mode stops on --status %s until --yes',
+    async (status) => {
+      const stored = status === 'published' ? { ...STORED, status: 'draft' } : STORED;
+      const stopped = stubServer({ get: stored });
+      await expect(
+        runEdit(
+          args({ status }),
+          makeCtx(),
+          hermetic({ fetchImpl: stopped.fetch, provider: spyProvider().provider, env: {} }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+      expect(stopped.puts()).toHaveLength(0);
+
+      const approved = stubServer({ get: stored });
+      await runEdit(
+        args({ status, yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: approved.fetch, provider: spyProvider().provider, env: {} }),
+      );
+      expect(approved.puts()).toHaveLength(1);
+    },
+  );
+
+  it('auto mode applies a clean status change without asking', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ status: 'draft' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toEqual({ status: 'draft' });
+  });
+
+  it('refuses any other status at the edge, before the wallet is touched', async () => {
+    for (const bad of ['unlisted', 'Draft', 'deleted', '']) {
+      const stub = stubServer();
+      await expect(
+        runEdit(
+          args({ yes: true, status: bad }),
+          makeCtx(),
+          hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+      expect(stub.calls, bad).toHaveLength(0);
+    }
+  });
+});

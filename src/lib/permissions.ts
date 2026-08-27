@@ -338,6 +338,16 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
       '(see PUBLISH_MODE_ALLOWLIST). Back on review, `install` takes the rule away again.',
   },
   {
+    command: 'tenjin delete',
+    reason:
+      'Destroys a published piece. It is the one write verb `publish.mode` deliberately does NOT ' +
+      'carry: the mode is consent to publish, and reading it as consent to destroy would let one ' +
+      'decision authorize a different, irreversible one. So no mode ever clears this rule, and ' +
+      'the CLI confirms on every run regardless — a prefix rule here would only remove the ' +
+      'harness prompt in front of a command that asks its own question anyway. Reach for ' +
+      '`tenjin edit --status draft` when the piece should come down reversibly.',
+  },
+  {
     command: 'tenjin wallet create',
     reason: 'Creates the payment credential; a stray run is a wallet you did not mean to have.',
   },
@@ -418,9 +428,10 @@ export const MCP_CAVEAT: readonly string[] = [
   'the same authority with none of the same gate. Aligning the two is tracked separately.',
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
-  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
-  '`mcp__tenjin__tenjin_wallet` gated. `tenjin_buy` is the same opt-in decision as the',
-  'buy line above.',
+  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`,',
+  '`mcp__tenjin__tenjin_delete`, and `mcp__tenjin__tenjin_wallet` gated. `tenjin_buy` is',
+  'the same opt-in decision as the buy line above. `tenjin_delete` is the one whose own',
+  'core still confirms even if you clear it: it never reads publish.mode.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */

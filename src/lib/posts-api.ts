@@ -697,6 +697,66 @@ export async function updatePost(
   }
 }
 
+/**
+ * Soft-delete one of your own posts (`DELETE /api/posts/<id>`). Same signing and
+ * bounded 401-recovery discipline as updatePost, because a DELETE burns a
+ * single-use nonce per attempt exactly as a PUT does.
+ *
+ * It sends no body, so there is nothing for the ingest gate to scan and no
+ * ScanGateError arm here. The server answers 204; 200 and 202 are accepted too
+ * rather than being read as failures, since none of them leaves the caller
+ * anything to reconcile and the route's success shape is not part of what this
+ * command reports. A 404 is exit 1 for updatePost's reason — the post is not
+ * ours or not there, so nothing half-happened — while any other refusal arrives
+ * AFTER the operator confirmed, which is the exit-4 class.
+ */
+export async function deletePost(
+  id: string,
+  auth: WriteAuth,
+  opts: PublishClientOptions,
+): Promise<void> {
+  const url = `${trimSlash(opts.baseUrl)}/api/posts/${encodeURIComponent(id)}`;
+
+  let recoveries = 0;
+  for (;;) {
+    const authHeaders = await auth.headersFor({ method: 'DELETE', url });
+    const res = await httpRequest(url, {
+      method: 'DELETE',
+      timeoutMs: opts.timeoutMs,
+      headers: { accept: 'application/json', ...authHeaders },
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+      ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    });
+    if (!res.ok) throw writeTransportError(url, res);
+
+    if (res.status === 401 && recoveries < MAX_RECOVERIES) {
+      const code = auth401Code(res);
+      if (await auth.recover(code)) {
+        recoveries++;
+        continue;
+      }
+      throw authError(code, res);
+    }
+    if (res.status === 401) throw authError(auth401Code(res), res);
+    if (res.status === 404) throw postNotFound(id);
+    if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+    if (res.status !== 204 && res.status !== 200 && res.status !== 202) throw deleteFailed(res);
+    return;
+  }
+}
+
+/** A delete refused after the operator confirmed it (exit 4). */
+function deleteFailed(res: HttpResponse): CliError {
+  return new CliError(
+    'DELETE_FAILED',
+    serverMessage(res.json) ?? `Delete failed (${res.status}).`,
+    {
+      fix: 'The piece is still live. Review the server error, then re-run `tenjin delete`.',
+      details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+    },
+  );
+}
+
 function parseOwnPost(json: unknown, what: 'read' | 'update'): OwnPost {
   const parsed = ownPostSchema.safeParse(json);
   if (!parsed.success) {

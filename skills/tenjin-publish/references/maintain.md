@@ -21,6 +21,24 @@ Reach for `--add-question` when a later search MISS shows people asking for this
 in wording the card does not carry: no new post, no split sales, and the piece
 starts matching a query it already answered.
 
+## Taking a piece back
+
+Every successful `publish` prints the exact undo commands with the real post id,
+and `--json` carries them as `data.undo`. Hand those over verbatim; never invent a
+verb.
+
+`tenjin edit <postId> --status draft` unpublishes: the piece leaves the
+marketplace, keeps its id and body, and `--status published` puts it back. Reach
+for this first. It is an ordinary edit, so it runs the same `publish.mode` gate as
+the rest of this page.
+
+`tenjin delete <postId>` removes it for good. **It confirms every single time,
+whatever `publish.mode` says**, because the mode is the user's consent to publish
+and not to destroy. Run it, show the user the title, status and url in the exit-3
+payload it comes back with, and only re-run with `--yes` on an explicit yes from
+them. Never pass `--yes` on the first call, and never delete a piece the user did
+not name.
+
 ## Update, or publish again?
 
 Update when the question is the same and the answer moved: a new version tested, a

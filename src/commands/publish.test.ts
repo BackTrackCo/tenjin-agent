@@ -2525,3 +2525,50 @@ describe('runPublish — server ingest gate', () => {
     expect((err.details as { findings: unknown[] }).findings).toHaveLength(1);
   });
 });
+
+/**
+ * The undo line (#221). Its whole job is that an agent reporting a publish has a
+ * real command to hand over: the issue is a report of one inventing `tenjin
+ * delete` from an MCP tool name, before that verb existed. So it carries the real
+ * id, and it rides BOTH surfaces, because an MCP client's stderr is a discard
+ * sink and a line that lives only there is a line it can never show anyone.
+ */
+describe('runPublish — the undo line', () => {
+  it('names both commands with the real post id, on stderr and in the envelope', async () => {
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(res.data).toMatchObject({
+      undo: {
+        remove: `tenjin delete ${CREATED.id} --yes`,
+        unpublish: `tenjin edit ${CREATED.id} --status draft`,
+      },
+    });
+    expect(res.humanLines ?? []).toContain(
+      `Undo: \`tenjin edit ${CREATED.id} --status draft\` unpublishes it (reversible), ` +
+        `\`tenjin delete ${CREATED.id} --yes\` removes it.`,
+    );
+  });
+
+  // A draft is not up, so demoting it undoes nothing; offering `--status draft`
+  // there would be a command that changes nothing dressed as a remedy.
+  it('offers only the removal on a draft, since a draft was never published', async () => {
+    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto', draft: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    const undo = (res.data as { undo: { remove: string; unpublish?: string } }).undo;
+    expect(undo.remove).toBe(`tenjin delete ${CREATED.id} --yes`);
+    expect(undo.unpublish).toBeUndefined();
+    expect(res.humanLines ?? []).toContain(
+      `Undo: \`tenjin delete ${CREATED.id} --yes\` removes it.`,
+    );
+  });
+});
