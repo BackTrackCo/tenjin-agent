@@ -505,6 +505,14 @@ async function loadConfigForDoctor(
  * for. The transport refuses to follow any 3xx while carrying the key, so the
  * status alone says nothing about the key: a same-host hop is what an `http://`
  * base URL or a non-canonical host name gets, with a perfectly good secret.
+ *
+ * A same-origin JSON 401/403 is deliberately NOT a gate: an API refusing in its
+ * own envelope is an honest refusal, and the transport keeps `gateSuspected`
+ * false on it. But on a machine where the door key is the remedy, the missing or
+ * stale key is the likeliest thing being refused, so the REMEDY still names it
+ * while the classification stays put. Nothing here reads `kind` or the gate
+ * flags to say what happened; the detail lines do that, and they say only what
+ * the transport saw.
  */
 function shelfGateFix(
   res: FetchJsonFailure,
@@ -512,7 +520,9 @@ function shelfGateFix(
   shelfKeyRemedy: boolean,
 ): string | undefined {
   const blocked = res.kind === 'blocked-redirect' && bypass !== undefined;
-  if (res.gateSuspected !== true && !blocked) return undefined;
+  const refused =
+    res.kind === 'http' && (res.status === 401 || res.status === 403) && shelfKeyRemedy;
+  if (res.gateSuspected !== true && !blocked && !refused) return undefined;
   if (blocked && res.gateOffOrigin !== true) return FIX_FOLLOW_REDIRECT_IN_BASE_URL;
   if (!shelfKeyRemedy) return FIX_PAGE_NOT_THE_API;
   return bypass !== undefined ? FIX_ROTATE_SHELF_BYPASS : FIX_SET_SHELF_BYPASS;

@@ -883,6 +883,55 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
   });
 
   /**
+   * A same-origin JSON 401 is NOT reclassified as a gate: an API refusing in its
+   * own envelope is an honest refusal, and http.test pins `gateSuspected` false
+   * on it. What changes is only the REMEDY. On a shelf of the team's own the
+   * missing or stale door key is the likeliest thing being refused, and the
+   * network-and-baseUrl line sent the operator to the setting that was right.
+   */
+  const JSON_401 = routeFetch({
+    '/openapi.json': {
+      body: { error: { code: 'unauthorized' } },
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    },
+    '/api/articles': { body: ARTICLES_OK },
+  });
+
+  it('a JSON 401 from a configured shelf names the key without claiming a gate page', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
+    );
+    const err = await catchDoctor(JSON_401);
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('shelfBypassSecret');
+    // The classification is untouched: nothing claims a page answered.
+    expect(check.detail).not.toContain('HTML page');
+    expect(check.detail).toContain('401');
+  });
+
+  it('a JSON 401 with the key already sent says rotate, not set', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(JSON_401);
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('stale or rotated');
+    expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
+  it('a JSON 401 from the marketplace keeps the ordinary advice and names no key', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({}));
+    const err = await catchDoctor(JSON_401);
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).not.toContain('shelfBypassSecret');
+    expect(check.fix).toContain('config get baseUrl');
+  });
+
+  /**
    * The same block, from a redirect that never leaves the host asked for: an
    * `http://` baseUrl that 301s to https, a host normalising its name. The
    * transport refuses to follow any 3xx while carrying the key, so the status

@@ -32,7 +32,10 @@ blocked redirect interstitial a rotated key gets) the fix is to update the stale
 key. A blocked redirect counts only when its `Location` leaves the host asked
 for: a same-host 3xx is what an `http://` base URL or a non-canonical host name
 gets with a perfectly good key, so that one says the URL redirects and to point
-`baseUrl` at the host it lands on. Against the public marketplace the key is refused anyway, and against an
+`baseUrl` at the host it lands on. A same-origin JSON 401 or 403 is still not
+classified as a protection page (an API refusing in its own envelope is an
+honest refusal), but on a shelf of the team's own the fix names the key anyway,
+because a missing or stale secret is the likeliest thing being refused. Against the public marketplace the key is refused anyway, and against an
 override the origin belongs to that one run, so both get a line about a proxy or
 a sign-in wall and no credential to write. No check output carries the secret's
 value, only the key's name.
