@@ -1831,7 +1831,12 @@ async function main() {
       // there is nothing to relay into — the live handoff belongs to someone
       // else and must not be evicted — so this hit takes the ordinary parent
       // hint path below, exactly as it did before relaying existed.
-      if (handoffHolder === judged.top.resourceId) {
+      // ...but only while a handoff actually exists to be repeated. A slot can
+      // outlive its cache: the parked entry expired, or a rollback of a failed
+      // park could not be written either. Going silent on the strength of the
+      // slot alone would then withhold the piece from every context until the
+      // window ends, which is the failure this arm exists to prevent.
+      if (handoffHolder === judged.top.resourceId && getState(sessionId, STATE_CACHE) !== null) {
         recordDecision({ ...row, action: 'skipped', reason: 'already-relayed' });
         return quiet();
       }
