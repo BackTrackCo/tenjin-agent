@@ -255,6 +255,11 @@ on the web desk was never scanned locally), any searches named by the
 `publish --draft --search-id` that created the draft are claimed on the same PUT
 and their local loops closed, and the same-body dedup marker is written.
 
+That re-scan can refuse the promotion with `PUBLISH_BLOCKED`, which `--yes` never
+clears. On the `--json` envelope, each claimed search reports under
+`data.searches` as `{id, closed, relinked?}`, the same entry shape `publish`
+uses minus `prefill`; the field is absent when the promotion claimed nothing.
+
 ### `tenjin delete <post-id>`
 
 Removes one of your own pieces (soft-delete, owner-scoped `DELETE /api/posts/<id>`). It reads the post first, prints the title, status, price and url, and then **confirms on every run in every `publish.mode`**: the mode is consent to publish and never consent to destroy, so `full-auto` asks here exactly as `review` does.

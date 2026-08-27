@@ -767,9 +767,9 @@ describe('runPublish — publish <file> --search-id', () => {
   });
 
   // A draft answers nobody: the local ledger says so and leaves the loop open, so
-  // the wire must say the same. Sending it anyway meant one demand signal claimed
-  // by two posts, since no command promotes a draft and the only route to a public
-  // piece is a second publish naming the same id.
+  // the wire must say the same. The claim is not lost, it is parked on the draft
+  // (the test below), and `edit --status published` carries it when the piece
+  // actually goes public.
   it('sends no searchId on a draft, and leaves the local loop open', async () => {
     await seed();
     const { fetch, body } = bodyServer();
@@ -1924,9 +1924,10 @@ describe('runPublish — the same body is published once per machine', () => {
   });
 
   /**
-   * A draft is the one case where publishing the same body twice is the point:
-   * nothing promotes a draft, so reaching a public piece MEANS a second publish
-   * of the same text. Deduping that would make the promotion silently do nothing.
+   * A draft is the one case where publishing the same body twice is the point: a
+   * draft writes no marker, so parking the same text again is legitimate and the
+   * publish that takes it public is not held back by either draft. Deduping in
+   * either direction would make that publish silently do nothing.
    */
   it('never dedups a draft, in either direction', async () => {
     const file = await writeDoc(CLEAN);

@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
+import { runPublish } from './publish';
 import { publishedUrlFor } from '../lib/publish-dedup';
-import { loadSearches, recordSearch } from '../lib/search-store';
+import { loadSearches, markSearchResolved, recordSearch } from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
@@ -1879,6 +1880,36 @@ describe('runEdit — promoting a draft', () => {
     });
   }
 
+  /** The other half for real: a `publish --draft --search-id` that withholds the
+   *  claim from the create and parks it on the draft it just made. */
+  async function parkedByPublish(): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question: 'does ox 0.14 still export Bytes.from',
+      decision: 'MISS',
+      candidates: [],
+    });
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      if (typeof init?.body === 'string') bodies.push(JSON.parse(init.body));
+      return json(201, { ...STORED, status: 'draft' });
+    }) as unknown as typeof fetch;
+    await runPublish(
+      { file: await writeDoc(STORED.bodyMd, 'draft.md'), searchId: SEARCH, draft: true },
+      makeCtx(),
+      {
+        env: { TENJIN_PUBLISH_MODE: 'auto' },
+        cwd: dir,
+        fetchImpl,
+        provider: spyProvider().provider,
+      },
+    );
+    // The create withheld it (a draft answers nobody); the link is what survives.
+    expect(bodies[0]).not.toHaveProperty('searchId');
+    expect((await loadSearches(dir))[0]?.draftPostId).toBe(POST_ID);
+  }
+
   it('records the dedup marker, so the next same-body publish dedups instead of duplicating', async () => {
     await edit({ status: 'published' }, { get: DRAFT });
     expect(await publishedUrlFor(dir, STORED.bodyMd)).toBe(STORED.url);
@@ -1896,6 +1927,72 @@ describe('runEdit — promoting a draft', () => {
     expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
     expect(data.searches).toEqual([{ id: SEARCH, closed: true }]);
+  });
+
+  // The whole carry, with both real writers: `publish --draft --search-id`
+  // withholds the claim and parks it, and the promotion is the only thing that
+  // reads it back. The two halves meet only in the store, so a test that seeds
+  // the link itself would pass over a parking bug.
+  it('carries a claim from `publish --draft --search-id` through to the promotion', async () => {
+    await parkedByPublish();
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect(data.searches).toEqual([{ id: SEARCH, closed: true }]);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // `UUID_RE` accepts either case and the parked link is matched as SQL text, so
+  // without the store's fold this promotion would succeed with an empty claim
+  // list: a good receipt and the attribution silently gone.
+  it('finds the parked claim when the post id is typed in uppercase', async () => {
+    await parkClaim();
+    const stub = stubServer({ get: DRAFT });
+    const res = await runEdit(
+      args({ postId: POST_ID.toUpperCase(), status: 'published', yes: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect((res.data as { searches?: unknown }).searches).toEqual([{ id: SEARCH, closed: true }]);
+  });
+
+  // An `outcome` report closed the loop while the draft sat there. The claim
+  // still rides the PUT (who ANSWERED it did not change) and the receipt says
+  // the local resolution moved.
+  it('relinks a loop something else closed before the promotion', async () => {
+    await parkClaim();
+    await markSearchResolved(dir, SEARCH, 'outcome');
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect(data.searches).toEqual([{ id: SEARCH, closed: true, relinked: true }]);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // publish's foreign-shelf rule, at the moment the promotion would claim: the
+  // other shelf served the search, so the claim is named on stderr, kept off the
+  // wire, and left open for `tenjin outcome` to close where it belongs.
+  it('never claims a search another shelf answered, and says where to close it', async () => {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question: 'does ox 0.14 still export Bytes.from',
+      decision: 'MISS',
+      candidates: [],
+      shelfBaseUrl: 'https://team.example',
+      draftPostId: POST_ID,
+    });
+    const stub = stubServer({ get: DRAFT });
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runEdit(
+      args({ status: 'published', yes: true }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ status: 'published' });
+    expect((res.data as { searches?: unknown }).searches).toBeUndefined();
+    expect(stderr()).toContain('was answered by https://team.example');
+    expect(stderr()).toContain(`tenjin outcome --search-id ${SEARCH} --status used`);
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
   it('claims nothing when the parked draft is a different post', async () => {

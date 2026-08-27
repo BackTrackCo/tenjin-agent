@@ -138,6 +138,18 @@ const RECENT_LIMIT = 500;
 const DRAFT_LINK_PREFIX = 'draft-search:';
 const MACHINE_SESSION = '';
 
+/**
+ * ONE SPELLING for the draft link's value, on the way in and on the way out.
+ * The link is matched as SQL text under SQLite's BINARY collation while the
+ * command edge's `UUID_RE` takes a post id in either case, so an uppercase
+ * `edit 0197AAAA-… --status published` would find no parked claim and drop the
+ * attribution behind a successful receipt. Folded like the sibling id
+ * (`normalizeSearchIds`); Postgres stores `uuid` lowercased anyway.
+ */
+function foldPostId(postId: string): string {
+  return postId.toLowerCase();
+}
+
 function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
   const searchId = typeof row.search_id === 'string' ? row.search_id : '';
   if (searchId.length === 0) return null;
@@ -239,7 +251,7 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
       store.run(STORE_SQL.setState, [
         MACHINE_SESSION,
         DRAFT_LINK_PREFIX + entry.searchId,
-        entry.draftPostId,
+        foldPostId(entry.draftPostId),
         Date.now(),
       ]);
     }
@@ -316,18 +328,14 @@ export async function linkSearchesToDraft(
   draftPostId: string,
 ): Promise<void> {
   if (searchIds.length === 0) return;
+  const parkedOn = foldPostId(draftPostId);
   await withStore(dataDir, undefined, (store) => {
     const at = Date.now();
     for (const searchId of new Set(searchIds)) {
       // A link to a row this ledger never recorded would never be read back:
       // `searchesForDraft` joins on the searches table.
       if (store.get(STORE_SQL.getSearch, [searchId]) === null) continue;
-      store.run(STORE_SQL.setState, [
-        MACHINE_SESSION,
-        DRAFT_LINK_PREFIX + searchId,
-        draftPostId,
-        at,
-      ]);
+      store.run(STORE_SQL.setState, [MACHINE_SESSION, DRAFT_LINK_PREFIX + searchId, parkedOn, at]);
     }
   });
 }
@@ -342,13 +350,14 @@ export async function searchesForDraft(
   dataDir: string,
   draftPostId: string,
 ): Promise<StoredSearch[]> {
+  const parkedOn = foldPostId(draftPostId);
   return await withStore(dataDir, [] as StoredSearch[], (store) => {
     const out: StoredSearch[] = [];
-    for (const row of store.all(STORE_SQL.searchesForDraft, [draftPostId])) {
+    for (const row of store.all(STORE_SQL.searchesForDraft, [parkedOn])) {
       const entry = rowToSearch(row);
       // The join proved the link, so the row carries it even though the SELECT
       // does not: `s.*` has no draft_post_id column to alias.
-      if (entry !== null) out.push({ ...entry, draftPostId });
+      if (entry !== null) out.push({ ...entry, draftPostId: parkedOn });
     }
     return out;
   });

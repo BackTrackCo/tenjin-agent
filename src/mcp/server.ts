@@ -194,7 +194,9 @@ const editInput = {
     .string()
     .optional()
     .describe(
-      'draft to unpublish this piece (reversible), published to put a draft up; same publish.mode consent as any other change',
+      'draft to unpublish this piece (reversible), published to put a draft up; same publish.mode consent as any other change. ' +
+        'Promoting a draft re-scans the STORED body, so it can return PUBLISH_BLOCKED for text you did not type in this call, ' +
+        'and it claims the searches the draft publish parked, reporting each one under data.searches',
     ),
   title: z.string().optional().describe('New post title'),
   price: z.coerce.string().optional().describe('New post price in decimal USD, e.g. "0.25"'),
