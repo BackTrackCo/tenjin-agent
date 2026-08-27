@@ -1793,7 +1793,18 @@ async function main() {
   // and exits quiet, exactly as it did before; what it must never do is ask
   // again.
   const askedKey = STATE_ASKED_PREFIX + searchFingerprint(question);
-  const claimedAsk = claimState(sessionId, askedKey);
+  let claimedAsk = claimState(sessionId, askedKey);
+  // A CLAIM MARKED RELEASED IS AN ABSENT ONE. The releases below are deletes,
+  // and a store that refuses one leaves a claim standing over an answer that
+  // was never recorded: no \`searches\` row for \`alreadyAskedStore\` to find and
+  // nothing for \`replayHandoff\` to put in its place, so the question is
+  // silently unaskable for the rest of the session once the temporary
+  // condition that caused the release has cleared. \`releaseClaim\` stamps the
+  // marker when it cannot delete, and this takes the row back — in one
+  // statement, so the recovery path is not itself a race.
+  if (!claimedAsk && getState(sessionId, askedKey) === STATE_RELEASED) {
+    claimedAsk = retakeReleasedClaim(sessionId, askedKey);
+  }
   if (!claimedAsk || alreadyAskedStore(question, sessionId)) {
     replayHandoff({
       question,
@@ -1816,14 +1827,14 @@ async function main() {
   // \`searches\` row exists for it either, so replayHandoff has nothing to put in
   // its place.
   if (spentThisSession(sessionId) >= ${DISPATCH_SESSION_MAX}) {
-    clearState(sessionId, askedKey);
+    releaseClaim(sessionId, askedKey);
     return quiet();
   }
 
   const nowMs = Date.now();
   const health = readHealth();
   if (stopped(health, nowMs)) {
-    clearState(sessionId, askedKey);
+    releaseClaim(sessionId, askedKey);
     return quiet();
   }
 
@@ -1895,7 +1906,7 @@ async function main() {
     // is none: keeping it would make one timeout the reason this question is
     // never asked again for the rest of the session, with nothing to replay to
     // any child either.
-    clearState(sessionId, askedKey);
+    releaseClaim(sessionId, askedKey);
     // Restarted rather than incremented once the window has passed, so an outage
     // months ago cannot combine with one failure today to stop the arm.
     const run = nowMs - health.atMs < ${DISPATCH_QUIET_MS} ? health.failures + 1 : 1;
@@ -1999,7 +2010,10 @@ async function main() {
       // The announcement below is a promise that a child will find this. If the
       // park did not land, take the promise back: release the slot and fall
       // through to the ordinary parent hint, rather than announcing a handoff to
-      // nobody while the relayed row suppresses the parent arms.
+      // nobody while the relayed row suppresses the parent arms. A refused
+      // delete needs no \`releaseClaim\` here: this slot is a \`claimStateFresh\`
+      // lease, so a claim the store would not drop expires on its own within
+      // the window, which is the difference from the permanent asked-claim.
       if (handoff && !parked) {
         clearState(sessionId, STATE_RELAY_SLOT);
         handoff = false;

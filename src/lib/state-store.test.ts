@@ -1513,6 +1513,54 @@ main().catch((err) => process.stdout.write('threw: ' + err.message));
  * statement itself, because the delete IS the read and an ORDER BY or a range
  * bound lost in an edit would put that back to a race nothing else catches.
  */
+/**
+ * The recovery half of the asked-claim, at the SQL level.
+ *
+ * `releaseClaim` falls back to stamping `released` when the store refuses the
+ * delete, and this statement is what a later fire takes the row back with. It
+ * has to arbitrate the same way `claimState` does, because two dispatches for
+ * one question can both read the marker: an UPDATE whose `WHERE value = ?` no
+ * longer matched would let both of them spend a lookup, and one whose match
+ * were widened would let either of them steal a LIVE claim.
+ */
+describe('retakeReleasedState arbitrates on the marker', () => {
+  it('takes a released row exactly once and never touches a live claim', async () => {
+    (await openStore(dataDir))?.close();
+    const handle = db();
+    const set = (session: string, key: string, value: unknown): void => {
+      handle.prepare(STORE_SQL.setState).run(session, key, JSON.stringify(value), 1);
+    };
+    const retake = (session: string, key: string): number =>
+      Number(
+        handle
+          .prepare(STORE_SQL.retakeReleasedState)
+          .run(JSON.stringify(true), Date.now(), session, key, JSON.stringify('released')).changes,
+      );
+    try {
+      set('s', 'asked:live', true);
+      set('s', 'asked:gone', 'released');
+      set('other', 'asked:gone', 'released');
+
+      // A live claim is not a released one, and an absent key is neither.
+      expect(retake('s', 'asked:live')).toBe(0);
+      expect(retake('s', 'asked:never-claimed')).toBe(0);
+
+      // The marker goes to exactly one caller; the second finds a claim.
+      expect(retake('s', 'asked:gone')).toBe(1);
+      expect(retake('s', 'asked:gone')).toBe(0);
+    } finally {
+      handle.close();
+    }
+    // Another session's marker is not this one's to take.
+    expect(
+      rows(`SELECT session, value FROM session_state WHERE key = 'asked:gone' ORDER BY session`),
+    ).toEqual([
+      { session: 'other', value: JSON.stringify('released') },
+      { session: 's', value: JSON.stringify(true) },
+    ]);
+  });
+});
+
 describe('takeStateOldestByPrefix', () => {
   const take = (store: { get: (sql: string, params: unknown[]) => unknown }): unknown =>
     store.get(STORE_SQL.takeStateOldestByPrefix, [

@@ -3267,6 +3267,60 @@ describe('dispatch hook: one question per session', () => {
     expect(hits()).toBe(2);
   });
 
+  /**
+   * A claim whose release the store refused must not silence the question.
+   *
+   * The pre-lookup aborts and the failed-lookup path all hand the asked-claim
+   * back with a DELETE, and `storeRun` reports a busy database or a full disk
+   * as silence. A claim left standing there covers an answer that was never
+   * recorded: no `searches` row for `alreadyAskedStore`, nothing for
+   * `replayHandoff`, so the question is unaskable for the rest of the session
+   * once the burst cap or the outage brake that caused the release has
+   * cleared. `releaseClaim` stamps `released` when it cannot delete; this is
+   * the read side that makes the stamp mean something.
+   */
+  it('takes back a claim marked released, and leaves a live one alone', async () => {
+    const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const prompt = longPrompt('whether the release marker is read back');
+
+    // One real fire, purely to learn the key the hook derives for this prompt.
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+    expect(hits()).toBe(1);
+
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    try {
+      const key = store.all(
+        `SELECT key FROM session_state WHERE session = ? AND key LIKE 'asked:%'`,
+        ['abc'],
+      )[0]?.key;
+      if (typeof key !== 'string') throw new Error('no asked-claim row');
+      // Two fresh sessions, so neither inherits the first one's `searches` row:
+      // one holding the claim, one holding a claim its releaser could not drop.
+      store.run(STORE_SQL.setState, ['held', key, JSON.stringify(true), Date.now()]);
+      store.run(STORE_SQL.setState, ['recovered', key, JSON.stringify('released'), Date.now()]);
+    } finally {
+      store.close();
+    }
+
+    // A live claim still means "this session already spent the lookup".
+    const held = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt, sessionId: 'held' }),
+    );
+    expect(held.code).toBe(0);
+    expect(hits()).toBe(1);
+
+    // A released one reads as absent, and the retake is what re-arms the arm.
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt, sessionId: 'recovered' }));
+    expect(hits()).toBe(2);
+
+    // The retake leaves a claim behind, not another marker: it re-arms once.
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt, sessionId: 'recovered' }));
+    expect(hits()).toBe(2);
+  });
+
   // The ledger is machine-global; a sibling session's question is not this one's.
   it('asks again in a different session', async () => {
     const { baseUrl, hits } = await serveJson(() => ({ status: 200, json: DISPATCH_MISS }));

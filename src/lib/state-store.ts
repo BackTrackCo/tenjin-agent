@@ -482,6 +482,19 @@ export const STORE_SQL = {
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
   deleteState: 'DELETE FROM session_state WHERE session = ? AND key = ?',
   /**
+   * Take back a claim its holder marked released, in one statement.
+   *
+   * The release path is a DELETE, and a store that refuses it leaves a claim
+   * standing over an answer that was never recorded — which reads to every
+   * later fire as "already asked" and makes one busy moment the reason a
+   * question is never asked again for the session. The fallback stamps the row
+   * with `STATE_RELEASED` instead, and this is how the next fire takes it: the
+   * `WHERE value = ?` is the arbitration, so two dispatches that both see the
+   * marker cannot both win it, exactly as `claimState`'s `DO NOTHING` is.
+   */
+  retakeReleasedState: `UPDATE session_state SET value = ?, at = ?
+     WHERE session = ? AND key = ? AND value = ?`,
+  /**
    * Take the OLDEST key under one prefix and hand back what it held, in one
    * statement.
    *
@@ -934,6 +947,10 @@ const STATE_CACHE_PREFIX = STATE_CACHE + ':';
  *  than checked. The searches row says the same thing, but it is written after
  *  the answer comes back, so two fires in one message both passed the check. */
 const STATE_ASKED_PREFIX = 'asked:';
+/** The value \`releaseClaim\` stamps on a claim whose delete the store refused.
+ *  It is a sentinel and not a plain absence because the row is still there:
+ *  \`claimState\` sees a row and says no, so the marker needs its own reader. */
+const STATE_RELEASED = 'released';
 /**
  * PREFIXES, NOT KEYS. Each of these was one JSON blob under a single key that
  * every writer read, mutated and wrote back whole — so two hook processes in
@@ -1614,8 +1631,47 @@ function setState(sessionId, key, value) {
   return storeRun(STORE_SQL.setState, [storeSession(sessionId), key, storeJson(value), Date.now()]) !== null;
 }
 
+/** Delete one key. Answers whether the row actually went, for the same reason
+ *  \`setState\` answers whether it landed: \`storeRun\` swallows a busy database
+ *  and a full disk as null, and a caller releasing a claim must not read that
+ *  silence as a release. */
 function clearState(sessionId, key) {
-  storeRun(STORE_SQL.deleteState, [storeSession(sessionId), key]);
+  return storeRun(STORE_SQL.deleteState, [storeSession(sessionId), key]) !== null;
+}
+
+/**
+ * Give back a claim taken with \`claimState\`, and say whether it is gone.
+ *
+ * A CLAIM STANDS FOR AN ANSWER THIS SESSION HOLDS, so one left behind by a
+ * refused delete suppresses its question for the rest of the session while
+ * nothing exists to replay in its place. Three chances, cheapest first:
+ * the delete, the delete again (SQLITE_BUSY is the common refusal and it is
+ * transient), then an UPSERT of \`STATE_RELEASED\` — a different statement
+ * against a row that already exists, so it can land where a delete did not.
+ * A marked claim is not a released one, which is why \`retakeReleasedClaim\`
+ * exists rather than the marker being read as absence directly.
+ */
+function releaseClaim(sessionId, key) {
+  if (clearState(sessionId, key)) return true;
+  if (clearState(sessionId, key)) return true;
+  return setState(sessionId, key, STATE_RELEASED);
+}
+
+/** The other half of \`releaseClaim\`: take a claim its holder marked released.
+ *  One statement, so a marker two fires both see goes to exactly one of them.
+ *  Only reachable when \`claimState\` already answered false, so a refusal here
+ *  is the store's answer and not its silence: no claim, no lookup. */
+function retakeReleasedClaim(sessionId, key) {
+  if (STORE === null) return false;
+  const result = storeRun(STORE_SQL.retakeReleasedState, [
+    storeJson(true),
+    Date.now(),
+    storeSession(sessionId),
+    key,
+    storeJson(STATE_RELEASED),
+  ]);
+  if (result === null) return false;
+  return typeof result.changes === 'number' ? result.changes > 0 : false;
 }
 
 /**
