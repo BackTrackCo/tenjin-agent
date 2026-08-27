@@ -92,6 +92,20 @@ if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
 fi
 echo "pack-smoke: --version -> $GOT_VERSION (ok)"
 
+# 1b) The bundle must keep `node:sqlite` under its `node:` name. tsup's default
+# `removeNodeProtocol` once shipped it as `import("sqlite")`, which resolves to
+# nothing, so every CLI-side state-store open failed open while the generated
+# hooks kept working (tenjin-agent#219 follow-up). Only the packed chunks show it.
+if grep -rq 'import("sqlite")' ./node_modules/tenjin-cli/dist/; then
+  echo "pack-smoke: FAIL — dist imports bare \"sqlite\"; tsup must keep the node: prefix (removeNodeProtocol: false)" >&2
+  exit 1
+fi
+if ! grep -rq 'import("node:sqlite")' ./node_modules/tenjin-cli/dist/; then
+  echo "pack-smoke: FAIL — dist has no import(\"node:sqlite\") at all" >&2
+  exit 1
+fi
+echo "pack-smoke: node:sqlite specifier survives the bundle (ok)"
+
 # 2) `tenjin config` exits 0 and prints a JSON envelope carrying schemaVersion.
 # JSON is validated by node (not jq — not guaranteed on a runner): a fixed script
 # reads the captured stdout on its own stdin and exits nonzero on a bad envelope.

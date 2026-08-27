@@ -17,6 +17,13 @@ export default defineConfig({
   // emitted entry must not use node22-only syntax.
   target: 'node20',
   platform: 'node',
+  // tsup strips the `node:` prefix by default, so `import('node:sqlite')`
+  // shipped as `import('sqlite')` — a bare specifier that resolves to nothing —
+  // and every CLI-side store open (doctor, push status, search recording,
+  // publish dedup) failed open while the generated hooks (raw source, never
+  // bundled) worked. `sqlite` is only a builtin under its `node:` name, unlike
+  // `fs`, so the prefix has to survive the bundle. Pinned by a dist test.
+  removeNodeProtocol: false,
   splitting: true,
   sourcemap: true,
   minify: false,
