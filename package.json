@@ -28,7 +28,7 @@
     "tenjin": "dist/index.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "files": [
     "dist",

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,9 +9,9 @@ import {
   loadSearches,
   markSearchResolved,
   recordSearch,
-  searchStoreLockPath,
   type StoredSearch,
 } from './search-store';
+import { STATE_DB_FILE } from './state-store';
 
 let dir: string;
 beforeEach(async () => {
@@ -115,25 +115,24 @@ describe('search-store', () => {
   });
 
   it('round-trips paidBrowseCount and reads it as unknown on an entry written without it', async () => {
+    const id2 = '0197aaaa-bbbb-cccc-dddd-000000000002';
     await recordSearch(dir, entry({ decision: 'MISS', candidates: [], paidBrowseCount: 3 }));
     expect((await latestSearch(dir))?.paidBrowseCount).toBe(3);
 
-    // A store written by a CLI from before the field. It must still load, and the
-    // missing count must stay `undefined` rather than default to 0: `outcome`
-    // refuses purchase_declined on a zero and must not invent that refusal for an
-    // entry that never recorded whether it had a payable browse tail.
-    const legacy = {
-      schemaVersion: 1,
-      searches: [{ ...entry({ decision: 'MISS', candidates: [] }) }],
-    };
-    await writeFile(join(dir, 'searches.json'), JSON.stringify(legacy), 'utf8');
+    // A row recorded without the field must stay `undefined` rather than default
+    // to 0: `outcome` refuses purchase_declined on a zero and must not invent
+    // that refusal for a search that never recorded whether it had a payable
+    // browse tail. The upsert also must not CLEAR a count a later re-record
+    // omits, which is what the COALESCE in the statement is for.
+    await recordSearch(dir, entry({ searchId: id2, decision: 'MISS', candidates: [] }));
     const loaded = await loadSearches(dir);
-    expect(loaded).toHaveLength(1);
-    expect(loaded[0]?.paidBrowseCount).toBeUndefined();
+    expect(loaded.find((s) => s.searchId === id2)?.paidBrowseCount).toBeUndefined();
+    await recordSearch(dir, entry({ decision: 'MISS', candidates: [] }));
+    expect(loaded.find((s) => s.searchId !== id2)?.paidBrowseCount).toBe(3);
   });
 
   it('reads empty (never throws) on a corrupt store', async () => {
-    await writeFile(join(dir, 'searches.json'), 'not json', 'utf8');
+    await writeFile(join(dir, STATE_DB_FILE), 'not a database', 'utf8');
     expect(await loadSearches(dir)).toEqual([]);
   });
 });
@@ -169,14 +168,20 @@ describe('markSearchResolved', () => {
   // It is bookkeeping for a hook nudge, so it may never fail the verb that ran.
   // It still SAYS what happened, so a caller that reports the close does not
   // report one that did not land.
+  // Bookkeeping for a hook nudge, so it may never fail the verb that ran. It
+  // still SAYS what happened, so a caller that reports the close does not report
+  // one that did not land — and with no data dir at all the honest answer is
+  // `not-found` rather than `failed`: the store opens (creating the dir the way
+  // every other write path does) and simply holds no such search. `failed` is
+  // the answer when the store itself cannot be opened, which is the case below.
   it('never throws, even with no store and no data dir', async () => {
     await rm(dir, { recursive: true, force: true });
-    await expect(markSearchResolved(dir, ID, 'candidate')).resolves.toBe('failed');
+    await expect(markSearchResolved(dir, ID, 'candidate')).resolves.toBe('not-found');
   });
 
   it('leaves a corrupt store readable-as-empty rather than throwing', async () => {
-    await writeFile(join(dir, 'searches.json'), 'not json', 'utf8');
-    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBe('not-found');
+    await writeFile(join(dir, STATE_DB_FILE), 'not a database', 'utf8');
+    await expect(markSearchResolved(dir, ID, 'outcome')).resolves.toBe('failed');
     expect(await loadSearches(dir)).toEqual([]);
   });
 
@@ -237,19 +242,15 @@ describe('markSearchResolved', () => {
     ).resolves.toBe('not-found');
   });
 
-  // A lock nobody releases: the write cannot happen, and the caller is told so
-  // rather than being handed a silent success. Slow by construction (the lock
-  // timeout is 5s), which is why it is the only test that waits.
-  it('reports failed when the store lock cannot be taken', async () => {
-    await recordSearch(dir, entry());
-    await mkdir(searchStoreLockPath(dir), { recursive: true });
-    try {
-      await expect(markSearchResolved(dir, ID, 'publish')).resolves.toBe('failed');
-      expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
-    } finally {
-      await rm(searchStoreLockPath(dir), { recursive: true, force: true });
-    }
-  }, 15_000);
+  // The write cannot happen, and the caller is told so rather than being handed
+  // a silent success. This used to be a lock nobody released, and it was the one
+  // test in the file that had to wait out a 5s timeout; there is no lock any
+  // more, so an unopenable store stands in for the same condition instantly.
+  it('reports failed when the store cannot be opened', async () => {
+    await rm(join(dir, STATE_DB_FILE), { force: true });
+    await writeFile(join(dir, STATE_DB_FILE), 'not a database', 'utf8');
+    await expect(markSearchResolved(dir, ID, 'publish')).resolves.toBe('failed');
+  });
 
   it('round-trips through the schema, so a resolved entry still loads', async () => {
     await recordSearch(dir, entry());
@@ -258,64 +259,44 @@ describe('markSearchResolved', () => {
   });
 });
 
-// The same rule the generated hooks enforce, in the writer a `tenjin search`
-// takes. It belongs to the store rather than to whichever process wrote last.
-describe('search-store: the demand budget', () => {
+/**
+ * What the 50-entry cap and the demand budget existed to protect.
+ *
+ * searches.json held 50 entries, so a wide subagent fan-out drained the slots
+ * `buy <resourceId>` and `outcome --last` depend on; the answer was a
+ * hand-rolled budget capping the two demand sources at 15 between them, written
+ * twice — here and in the generated hook — so the bound belonged to the store
+ * rather than to whichever process wrote last.
+ *
+ * The store is unbounded (plan 03, owner decision 2: no retention, no pruning),
+ * so nothing evicts anything and both copies of the budget are gone. These pin
+ * the property, not the mechanism.
+ */
+describe('search-store: a demand flood costs a deliberate search nothing', () => {
   const id = (n: number): string => `0197aaaa-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
 
-  /** `count` demand entries, newest first, as the store holds them. */
-  async function seedDemand(count: number, extra: StoredSearch[] = []): Promise<void> {
-    for (let i = count - 1; i >= 0; i -= 1) {
-      await recordSearch(dir, entry({ searchId: id(100 + i), source: 'dispatch-hook' }));
-    }
-    for (const e of extra) await recordSearch(dir, e);
-  }
-
-  it('holds dispatch entries to their share, dropping the oldest first', async () => {
-    await seedDemand(20);
-    const loaded = await loadSearches(dir);
-    expect(loaded.filter((s) => s.source === 'dispatch-hook')).toHaveLength(15);
-    // Newest survive: the last written is at the head, the earliest is gone.
-    expect(loaded[0]?.searchId).toBe(id(100));
-    expect(loaded.map((s) => s.searchId)).not.toContain(id(119));
-  });
-
-  // The property the budget exists for, now on the path `tenjin search` uses.
-  it('never lets a demand entry cost a deliberate one its slot', async () => {
+  it('keeps the deliberate entry, its candidate, and `--last`, under a 60-deep flood', async () => {
     const deliberate = entry({ searchId: id(1), source: 'cli' });
     await recordSearch(dir, deliberate);
-    await seedDemand(40);
-    await recordSearch(dir, entry({ searchId: id(2), source: 'cli' }));
+    for (let i = 0; i < 60; i += 1) {
+      await recordSearch(
+        dir,
+        entry({
+          searchId: id(100 + i),
+          source: 'dispatch-hook',
+          at: new Date(Date.now() - (60 - i) * 1000).toISOString(),
+          candidates: [],
+        }),
+      );
+    }
 
     const loaded = await loadSearches(dir);
-    const ids = loaded.map((s) => s.searchId);
-    expect(ids).toContain(id(1));
-    expect(ids).toContain(id(2));
-    expect(loaded.filter((s) => s.source === 'dispatch-hook')).toHaveLength(15);
-    expect(loaded.length).toBeLessThanOrEqual(50);
+    expect(loaded.map((s) => s.searchId)).toContain(id(1));
+    expect(loaded.filter((s) => s.source === 'dispatch-hook')).toHaveLength(60);
     // Still resolvable, which is what the slot was being taken from.
     expect(await findStoredCandidate(dir, 'res-1')).not.toBeNull();
-  });
-
-  // Unchanged for everything else: a store with no demand entries drains oldest
-  // first exactly as it always did.
-  it('evicts the oldest overall when nothing in the store is demand data', async () => {
-    for (let i = 59; i >= 0; i -= 1) {
-      await recordSearch(dir, entry({ searchId: id(200 + i), source: 'cli' }));
-    }
-    const loaded = await loadSearches(dir);
-    expect(loaded).toHaveLength(50);
-    expect(loaded[0]?.searchId).toBe(id(200));
-    expect(loaded.map((s) => s.searchId)).not.toContain(id(259));
-  });
-
-  // websearch-hook entries are nagged, closable and drained, so they are NOT
-  // demand data and keep competing for slots on equal terms.
-  it('budgets only the dispatch source', async () => {
-    for (let i = 19; i >= 0; i -= 1) {
-      await recordSearch(dir, entry({ searchId: id(300 + i), source: 'websearch-hook' }));
-    }
-    const loaded = await loadSearches(dir);
-    expect(loaded.filter((s) => s.source === 'websearch-hook')).toHaveLength(20);
+    expect(await findSearchForResource(dir, { resourceId: 'res-1' })).toBe(id(1));
+    // And `--last` still means "the search I ran", not the newest fan-out row.
+    expect((await latestSearch(dir))?.searchId).toBe(id(1));
   });
 });

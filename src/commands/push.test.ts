@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPushOff, runPushOn, runPushStatus } from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
-import { hooksDir, pushLedgerPath } from '../lib/paths';
+import { hooksDir } from '../lib/paths';
+import { openStore, STORE_SQL } from '../lib/state-store';
 import {
   PUSH_CONTEXT_HOOK_FILE,
   PUSH_FAILURE_HOOK_FILE,
@@ -192,7 +193,6 @@ describe('runPushStatus', () => {
         candidates: 0,
         denies: 0,
         injectedTokens: 0,
-        tail: false,
       },
     });
   });
@@ -274,44 +274,89 @@ describe('runPushStatus', () => {
     expect(gone.humanLines?.join('\n')).toContain('not fully wired yet');
   });
 
+  /** One decision row, as an arm would have written it. */
+  interface SeedRow {
+    at: number;
+    trigger: string;
+    shelf: string;
+    action: string;
+    reason?: string;
+    resourceId?: string;
+    deny?: boolean;
+    tokens?: number;
+  }
+
+  /** Write `rows` into the store's `injections` table. */
+  async function seedRows(dir: string, rows: SeedRow[]): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      rows.forEach((row, i) => {
+        store.run(STORE_SQL.insertInjection, [
+          `seed-${i}`,
+          null,
+          row.at,
+          'sess',
+          null,
+          'machine',
+          row.trigger,
+          row.shelf,
+          row.resourceId ?? null,
+          null,
+          null,
+          null,
+          'search-id',
+          null,
+          null,
+          null,
+          null,
+          null,
+          row.action,
+          row.reason ?? null,
+          null,
+          row.deny === true ? 1 : 0,
+          row.tokens ?? null,
+        ]);
+      });
+    } finally {
+      store.close();
+    }
+  }
+
   it('tallies the last 7 days of ledger rows by trigger x action, shelf, denies, and tokens', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
-    const recent = new Date(now - 60_000).toISOString();
-    const stale = new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString();
-    const lines = [
-      JSON.stringify({
+    const recent = now - 60_000;
+    const stale = now - 8 * 24 * 60 * 60 * 1000;
+    await seedRows(dir, [
+      {
         at: recent,
         trigger: 'failure',
         shelf: 'public',
         action: 'injected',
-        candidate: { resourceId: 'res-1', title: 'a', price: '0.05' },
+        resourceId: 'res-1',
         deny: true,
         tokens: 120,
-      }),
-      JSON.stringify({
+      },
+      {
         at: recent,
         trigger: 'failure',
         shelf: 'public',
         action: 'skipped',
-        candidate: { resourceId: 'res-1', title: 'a' },
+        resourceId: 'res-1',
         reason: 'weak',
-      }),
-      JSON.stringify({ at: recent, trigger: 'read', shelf: 'team', action: 'logged' }),
+      },
+      { at: recent, trigger: 'read', shelf: 'team', action: 'logged' },
       // Outside the 7-day window: must not be counted.
-      JSON.stringify({
+      {
         at: stale,
         trigger: 'failure',
         shelf: 'public',
         action: 'injected',
-        candidate: { resourceId: 'res-stale' },
+        resourceId: 'res-stale',
         reason: 'weak',
         tokens: 999,
-      }),
-      // Torn line: tolerated, never fatal.
-      '{ not json',
-      '',
-    ].join('\n');
-    await writeFile(pushLedgerPath(dir), `${lines}\n`);
+      },
+    ]);
 
     const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
     expect(result.data).toMatchObject({
@@ -341,52 +386,33 @@ describe('runPushStatus', () => {
 
   it('counts a note and a marketplace piece as separate findings, and sorts reasons by count', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
-    const recent = new Date(now - 60_000).toISOString();
-    const lines = [
-      // Team shelf: a note carries `{id}`, never `{resourceId}`.
-      JSON.stringify({
+    const recent = now - 60_000;
+    await seedRows(dir, [
+      // A note is keyed by `candidate.id` and a marketplace piece by
+      // `candidate.resourceId`; both land in the same column.
+      {
         at: recent,
         trigger: 'failure',
         shelf: 'team',
         action: 'injected',
-        candidate: { id: '20260822-k3x9q2', title: 'note' },
+        resourceId: '20260822-k3x9q2',
         tokens: 40,
-      }),
-      JSON.stringify({
+      },
+      {
         at: recent,
         trigger: 'prompt',
         shelf: 'public',
         action: 'injected',
-        candidate: { resourceId: 'res-9', title: 'piece' },
+        resourceId: 'res-9',
         tokens: 60,
-      }),
-      JSON.stringify({
-        at: recent,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'skipped',
-        reason: 'lookup-cap',
-      }),
-      JSON.stringify({
-        at: recent,
-        trigger: 'read',
-        shelf: 'public',
-        action: 'skipped',
-        reason: 'lookup-cap',
-      }),
-      JSON.stringify({
-        at: recent,
-        trigger: 'churn',
-        shelf: 'public',
-        action: 'skipped',
-        reason: 'miss',
-        // A candidate with neither key is no candidate.
-        candidate: { title: 'nameless' },
-      }),
+      },
+      { at: recent, trigger: 'prompt', shelf: 'public', action: 'skipped', reason: 'lookup-cap' },
+      { at: recent, trigger: 'read', shelf: 'public', action: 'skipped', reason: 'lookup-cap' },
+      // A row that reached no candidate at all.
+      { at: recent, trigger: 'churn', shelf: 'public', action: 'skipped', reason: 'miss' },
       // An empty reason is not a reason.
-      JSON.stringify({ at: recent, trigger: 'read', shelf: 'team', action: 'logged', reason: '' }),
-    ].join('\n');
-    await writeFile(pushLedgerPath(dir), `${lines}\n`);
+      { at: recent, trigger: 'read', shelf: 'team', action: 'logged', reason: '' },
+    ]);
 
     const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
     expect(result.data).toMatchObject({
@@ -401,43 +427,33 @@ describe('runPushStatus', () => {
     expect(human).toContain('2 finding(s)');
     // Sorted by count, so the dominant brake reads first.
     expect(human).toContain('reasons: lookup-cap=2, miss=1');
-    // Read whole, so nothing is a floor and the line does not say otherwise.
-    expect((result.data as { ledger: { tail: boolean } }).ledger.tail).toBe(false);
+    // Complete, so nothing is a floor and the line does not say otherwise.
     expect(human).not.toContain('retained tail');
   });
 
   /**
-   * Nothing rotates this file: every arm of every session appends to it forever.
-   * `status` used to parse the whole thing, so the one command an operator runs
-   * to see whether the experiment is doing anything got slower every day it was
-   * left on. It reads the same 256 KB tail the hook scripts read — and says so,
-   * because a tally over a window it did not fully see is a floor, and a floor
-   * printed as a total is the kind of number people plan against.
+   * The tail is gone with the file.
+   *
+   * `push-ledger.jsonl` was append-only and never rotated, so `status` read its
+   * last 256 KB and reported `tail: true` with a human line saying the counts an
+   * operator was reading as totals were floors. The rows are indexed now, so a
+   * large store answers the same window completely — which is what this asserts
+   * with more rows than the old tail could hold.
    */
-  it('reads only the retained tail of a large ledger, and says the counts are floors', async () => {
+  it('counts the whole window on a large store, with no floor and no caveat', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
-    const at = new Date(now - 60_000).toISOString();
-    // One padded row per line, ~1 KB each: comfortably over the 256 KB tail.
-    const row = (i: number): string =>
-      JSON.stringify({
-        at,
-        trigger: 'failure',
+    await seedRows(
+      dir,
+      Array.from({ length: 2000 }, (_, i) => ({
+        at: now - 60_000 - i,
+        trigger: 'prompt',
         shelf: 'public',
-        action: 'injected',
-        candidate: { resourceId: `res-${i}`, title: 'x'.repeat(900) },
-        tokens: 1,
-      });
-    const lines = Array.from({ length: 700 }, (_, i) => row(i));
-    await writeFile(pushLedgerPath(dir), `${lines.join('\n')}\n`);
-    expect((await stat(pushLedgerPath(dir))).size).toBeGreaterThan(262144);
-
+        action: 'skipped',
+        reason: 'miss',
+      })),
+    );
     const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
-    const ledger = (result.data as { ledger: { rows: number; tail: boolean } }).ledger;
-    expect(ledger.tail).toBe(true);
-    // Bounded by the tail, not by the file: every row is inside the 7-day
-    // window, so a whole-file read would have counted all 700.
-    expect(ledger.rows).toBeGreaterThan(0);
-    expect(ledger.rows).toBeLessThan(700);
-    expect(result.humanLines?.join('\n')).toContain('retained tail only');
+    expect((result.data as { ledger: { rows: number } }).ledger.rows).toBe(2000);
+    expect(result.humanLines?.join('\n')).not.toContain('retained tail');
   });
 });

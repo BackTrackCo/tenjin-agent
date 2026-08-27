@@ -60,60 +60,18 @@ export function hooksDir(dir: string = dataDir()): string {
 }
 
 /**
- * THE ONE PLACE each of these two names is written.
- *
- * They used to be literals here AND in lib/push-scripts.ts — the split justified
- * by keeping this foundational module clear of the generator-heavy
- * push-scripts/hook-scripts chain. The dependency only ever needed to point the
- * other way: this module imports nothing but `node:os` and `node:path`, so the
- * generators can import IT. Every reader of these paths fails closed to empty on
- * a rename, which is a sidecar that has quietly stopped seeing anything rather
- * than an error anybody notices.
- */
-export const PUSH_LEDGER_FILE = 'push-ledger.jsonl';
-export const PUSH_DIR_NAME = 'push';
-
-/**
- * How long anything under the push dir survives: per-session working state, the
- * candidate cache, the Stop hook's capture markers, and `publish`'s
- * content-hash `published-` markers. ONE definition because two writers prune
- * that directory, and they split it by prefix — the push core on every state
- * save, which skips both marker prefixes entirely, and the Stop hook on its own
- * pass, which touches only those two and is the only pruner a machine running
- * `hooks.capture` with `hooks.push` off ever gets. A day is short enough that the
- * inodes do not build up on a machine that never turns push on. It is NOT long
- * enough to guarantee a live session outlives it: a marker's mtime is pinned at
- * first ask, so the Stop pruner spares the running session's marker by id rather
- * than by age, and the push core stays off the prefix because it has no id.
- */
-export const PUSH_STATE_RETENTION_MS = 24 * 60 * 60 * 1000;
-
-/** The push experiment's decision ledger (docs/command-reference.md#push-experimental):
- *  one JSON line per push arm's decision, append-only. */
-export function pushLedgerPath(dir: string = dataDir()): string {
-  return join(dir, PUSH_LEDGER_FILE);
-}
-
-/** The push experiment's per-session working state and candidate cache: edits
- *  seen, packages seen, error signatures seen. */
-export function pushDir(dir: string = dataDir()): string {
-  return join(dir, PUSH_DIR_NAME);
-}
-
-/**
  * Which searchIds the Stop hook has already nagged about, so each open loop is
  * raised once per turn-end rather than every turn.
  *
  * Not atomic, deliberately: two sessions ending at the same instant can both read
  * this file before either writes, and one loop is then named twice. The cost is a
- * duplicate line, and taking the search store's lock here would put a
- * cross-process wait at the end of every turn to buy nothing but tidiness.
+ * duplicate line, and serializing it would put a cross-process wait at the end of
+ * every turn to buy nothing but tidiness.
  *
- * Its own file, NOT a field in searches.json, and that separation is the whole
- * point: the hook runs outside the CLI with no access to the lock `recordSearch`
- * takes, so a hook writing searches.json could erase a search landing at the same
- * moment. Nothing but the hook writes this file, and losing it costs one repeated
- * nag rather than a lost search.
+ * STILL A FILE, and the last of the hook state that is. The searches it nags
+ * about moved into `state.db` (tenjin-agent#209); this did not, because the plan
+ * scopes it to a follow-up along with `hook-health.json`. Nothing but the Stop
+ * hook writes it, and losing it costs one repeated nag.
  */
 export function nagStatePath(dir: string = dataDir()): string {
   return join(dir, 'hook-nags.json');

@@ -1,5 +1,4 @@
 import { homedir } from 'node:os';
-import { open, readFile, stat } from 'node:fs/promises';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { persistPushMode } from './config';
 import { hooksDisclosure } from './install';
@@ -7,7 +6,7 @@ import { hookFallthroughAsked, hookFallthroughHost, hookRecipientHost } from '..
 import { CliError } from '../lib/errors';
 import { countPushHookEntries, pushScriptsPresent, wireSearchHooks } from '../lib/harness-hooks';
 import type { HooksResult, PushHookEntryCount } from '../lib/harness-hooks';
-import { pushLedgerPath } from '../lib/paths';
+import { openStore, STORE_SQL } from '../lib/state-store';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -30,10 +29,6 @@ import type { CommandContext, CommandResult } from '../context';
 
 const LEDGER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const LEDGER_WINDOW_DAYS = 7;
-/** ⚠ MIRRORS `LEDGER_TAIL_BYTES` in lib/push-scripts.ts, and for the same
- *  reason: the ledger is append-only and never rotated, so a machine that has
- *  had the experiment on for months has a file no reader should parse whole. */
-const LEDGER_TAIL_BYTES = 262144;
 
 export interface PushOnDeps {
   /** Home whose `.claude/settings.json` gets the push entries; defaults to os.homedir(). */
@@ -148,30 +143,9 @@ export interface PushStatusDeps {
   hookEntries?: (homeDir: string, dataDir: string) => Promise<PushHookEntryCount>;
   /** Home whose `.claude/settings.json` is read; defaults to os.homedir(). */
   homeDir?: string;
-  /** Seam for the ledger read; defaults to the real file read. */
+  /** Seam for the store read; defaults to the real query. */
   ledgerTallies?: (dataDir: string, nowMs: number) => Promise<PushLedgerTallies>;
   now?: () => number;
-}
-
-/** One decision row's shape, as far as `status` reads it. Every field is
- *  optional: a row from an older or newer script build is tolerated, never
- *  fatal — see {@link readLedgerTallies}. */
-interface LedgerRow {
-  at?: unknown;
-  trigger?: unknown;
-  shelf?: unknown;
-  action?: unknown;
-  reason?: unknown;
-  /**
-   * Both shelves write `{resourceId, title, price, url}` now that the team shelf
-   * is a Tenjin deployment. `{id, title}` is what the retired git-backed shelf
-   * wrote, and a ledger written before this release still holds those rows — the
-   * file is append-only and nothing rewrites it, so reading only the current
-   * spelling would silently zero the team half of the first week's numbers.
-   */
-  candidate?: unknown;
-  deny?: unknown;
-  tokens?: unknown;
 }
 
 export interface PushLedgerTallies {
@@ -184,21 +158,14 @@ export interface PushLedgerTallies {
    *  `already-injected` and `watchdog` (docs/command-reference.md#push-experimental),
    *  but the values are taken from the rows, never from a list here, so a new
    *  reason shows up in `status` the day the script starts writing it — and a
-   *  retired one keeps counting out of the append-only rows that still hold it. */
+   *  retired one keeps counting out of the rows that still hold it. */
   byReason: Record<string, number>;
-  /** Distinct findings surfaced in the window, counted across both candidate
-   *  shapes (current `{resourceId}` and the retired `{id}`) — see
-   *  {@link LedgerRow}. */
+  /** Distinct findings surfaced in the window. A marketplace piece is keyed by
+   *  its resourceId and a local pairing by `pairing:<id>`; both land in
+   *  `injections.resource_id`. */
   candidates: number;
   denies: number;
   injectedTokens: number;
-  /**
-   * True when the ledger was larger than the retained tail, so these numbers
-   * cover the last {@link LEDGER_TAIL_BYTES} of it rather than the whole
-   * window. A floor, not a total — and said out loud, because the alternative
-   * is a count an operator reads as complete when it is not.
-   */
-  tail: boolean;
 }
 
 const EMPTY_TALLIES: PushLedgerTallies = {
@@ -210,119 +177,70 @@ const EMPTY_TALLIES: PushLedgerTallies = {
   candidates: 0,
   denies: 0,
   injectedTokens: 0,
-  tail: false,
 };
 
 /**
- * Tally the last {@link LEDGER_WINDOW_DAYS} days of push-ledger rows: total rows,
- * a trigger x action breakdown, a shelf breakdown, how many rows denied a tool
- * call, and the injected-token total. Every line is parsed defensively: a torn
- * or foreign line, or one missing a field, is skipped rather than failing the
- * command.
+ * Tally the last {@link LEDGER_WINDOW_DAYS} days of decision rows: total rows, a
+ * trigger x action breakdown, a shelf breakdown, how many rows denied a tool
+ * call, and the injected-token total.
  *
- * READ FROM THE TAIL, the same 256 KB the hook scripts read (see
- * `ledgerTailRows` in lib/push-scripts.ts). Nothing rotates this file: every arm
- * of every session appends to it forever, so "one status call is not on a tool
- * call's critical path" was an argument about latency that ignored the size.
- * The tail is also where the 7-day window's rows are, by construction.
+ * COMPLETE, NOT A FLOOR. This used to read the last 256 KB of an append-only
+ * `push-ledger.jsonl` and say so — `tail: true`, and a human line explaining
+ * that the numbers an operator was reading as totals were not — because nothing
+ * rotated the file and parsing months of it whole was not an option. The rows
+ * are indexed now, so the window is the window and the field is gone with the
+ * caveat it carried.
  *
- * The cost is that on a large ledger the tally covers the retained tail rather
- * than the whole window, so it reports {@link PushLedgerTallies.tail} and the
- * human line says so — a number an operator might read as "the experiment fired
- * this many times" must not quietly be a floor with no sign of it.
+ * Still defensive about the values: a row missing a field is counted under
+ * `unknown` rather than failing the command.
  */
 export async function readLedgerTallies(
   dataDir: string,
   nowMs: number,
 ): Promise<PushLedgerTallies> {
-  let text: string;
-  let tail = false;
+  const store = await openStore(dataDir);
+  if (store === null) return EMPTY_TALLIES;
   try {
-    const path = pushLedgerPath(dataDir);
-    const size = (await stat(path)).size;
-    if (size <= LEDGER_TAIL_BYTES) {
-      text = await readFile(path, 'utf8');
-    } else {
-      const fd = await open(path, 'r');
-      try {
-        const buf = Buffer.alloc(LEDGER_TAIL_BYTES);
-        await fd.read(buf, 0, LEDGER_TAIL_BYTES, size - LEDGER_TAIL_BYTES);
-        text = buf.toString('utf8');
-      } finally {
-        await fd.close();
+    const rows = store.all(STORE_SQL.statusRows, [nowMs - LEDGER_WINDOW_MS]);
+    const byTriggerAction: Record<string, Record<string, number>> = {};
+    const byShelf: Record<string, number> = {};
+    const byReason: Record<string, number> = {};
+    const candidates = new Set<string>();
+    let denies = 0;
+    let injectedTokens = 0;
+    for (const row of rows) {
+      const trigger = typeof row.hook === 'string' ? row.hook : 'unknown';
+      const action = typeof row.action === 'string' ? row.action : 'unknown';
+      const byAction = (byTriggerAction[trigger] ??= {});
+      byAction[action] = (byAction[action] ?? 0) + 1;
+      const shelf = typeof row.shelf === 'string' ? row.shelf : 'unknown';
+      byShelf[shelf] = (byShelf[shelf] ?? 0) + 1;
+      if (typeof row.reason === 'string' && row.reason !== '') {
+        byReason[row.reason] = (byReason[row.reason] ?? 0) + 1;
       }
-      // The first line is a fragment of whatever row straddles the cut. It would
-      // parse as nothing, but dropping it keeps "lines that failed to parse" a
-      // signal about the ledger rather than about where we started reading.
-      text = text.slice(text.indexOf('\n') + 1);
-      tail = true;
+      if (typeof row.resource_id === 'string' && row.resource_id !== '') {
+        candidates.add(`${shelf}:${row.resource_id}`);
+      }
+      if (row.deny === 1) denies += 1;
+      if (action === 'injected' && typeof row.tokens === 'number' && Number.isFinite(row.tokens)) {
+        injectedTokens += row.tokens;
+      }
     }
+    return {
+      windowDays: LEDGER_WINDOW_DAYS,
+      rows: rows.length,
+      byTriggerAction,
+      byShelf,
+      byReason,
+      candidates: candidates.size,
+      denies,
+      injectedTokens,
+    };
   } catch {
     return EMPTY_TALLIES;
+  } finally {
+    store.close();
   }
-  const cutoff = nowMs - LEDGER_WINDOW_MS;
-  let rows = 0;
-  const byTriggerAction: Record<string, Record<string, number>> = {};
-  const byShelf: Record<string, number> = {};
-  const byReason: Record<string, number> = {};
-  const candidates = new Set<string>();
-  let denies = 0;
-  let injectedTokens = 0;
-  for (const line of text.split('\n')) {
-    if (line.length === 0) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!isRecord(parsed)) continue;
-    const row = parsed as LedgerRow;
-    const at = typeof row.at === 'string' ? Date.parse(row.at) : NaN;
-    if (!Number.isFinite(at) || at < cutoff) continue;
-    rows += 1;
-    const trigger = typeof row.trigger === 'string' ? row.trigger : 'unknown';
-    const action = typeof row.action === 'string' ? row.action : 'unknown';
-    const byAction = (byTriggerAction[trigger] ??= {});
-    byAction[action] = (byAction[action] ?? 0) + 1;
-    const shelf = typeof row.shelf === 'string' ? row.shelf : 'unknown';
-    byShelf[shelf] = (byShelf[shelf] ?? 0) + 1;
-    if (typeof row.reason === 'string' && row.reason !== '') {
-      byReason[row.reason] = (byReason[row.reason] ?? 0) + 1;
-    }
-    const key = candidateKey(row.candidate);
-    if (key !== null) candidates.add(`${shelf}:${key}`);
-    if (row.deny === true) denies += 1;
-    if (action === 'injected' && typeof row.tokens === 'number' && Number.isFinite(row.tokens)) {
-      injectedTokens += row.tokens;
-    }
-  }
-  return {
-    windowDays: LEDGER_WINDOW_DAYS,
-    rows,
-    byTriggerAction,
-    byShelf,
-    byReason,
-    candidates: candidates.size,
-    denies,
-    injectedTokens,
-    tail,
-  };
-}
-
-/**
- * The identity of the finding a row is about: `candidate.resourceId` for a piece
- * on either shelf, `candidate.id` for a row the retired git-backed shelf wrote.
- * Null for a row that reached no candidate at all (a `miss`, a capped lookup),
- * which is a row to count in `rows` and not in `candidates`.
- */
-function candidateKey(candidate: unknown): string | null {
-  if (!isRecord(candidate)) return null;
-  if (typeof candidate.resourceId === 'string' && candidate.resourceId !== '') {
-    return candidate.resourceId;
-  }
-  if (typeof candidate.id === 'string' && candidate.id !== '') return candidate.id;
-  return null;
 }
 
 /** All four push scripts on disk under `<dataDir>/hooks`. HALF the answer, and
@@ -385,7 +303,7 @@ function renderStatusLines(data: {
     `hook entries: ${hookEntries.present}/${hookEntries.planned}${
       hookEntries.path === null ? ' (no settings.json found)' : ` in ${hookEntries.path}`
     }`,
-    `ledger, last ${ledger.windowDays}d${ledger.tail ? ' (retained tail only; the ledger is larger than the 256 KB read, so these are floors)' : ''}: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
+    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
   ];
   for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {
     const byAction = Object.entries(actions)
@@ -435,8 +353,4 @@ function renderWireLines(
     hooksDisclosure(result, shelfHost, fallthroughHost, fallthroughAsked),
     'Undo anytime: `tenjin push off` (the scripts stay, but go inert on their next run).',
   ];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

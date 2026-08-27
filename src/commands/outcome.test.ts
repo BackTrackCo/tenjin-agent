@@ -221,24 +221,15 @@ describe('runOutcome, locally incoherent statuses', () => {
   // The check is local knowledge only, so an entry that predates `paidBrowseCount`
   // cannot answer, and unknown must never become a refusal.
   it('allows purchase_declined on an entry written before paidBrowseCount existed', async () => {
-    await writeFile(
-      join(dir, 'searches.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        searches: [
-          {
-            searchId: LOOKUP,
-            at: new Date().toISOString(),
-            question: 'q',
-            decision: 'CANDIDATES',
-            // All free, so the candidates cannot answer the question either. The
-            // entry predates the field that could, and unknown must stay unknown.
-            candidates: [FREE_CANDIDATE],
-          },
-        ],
-      }),
-      'utf8',
-    );
+    // All free, so the candidates cannot answer the question either. The row is
+    // written without the field that could, and unknown must stay unknown.
+    await recordSearch(dir, {
+      searchId: LOOKUP,
+      at: new Date().toISOString(),
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [FREE_CANDIDATE],
+    });
     const { fetch, urls } = stub();
     await runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch });
     expect(urls).toHaveLength(1);

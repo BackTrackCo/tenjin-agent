@@ -20,21 +20,12 @@
  */
 
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
+import { storeSource } from './state-store';
 
 export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
 export const PUSH_FAILURE_HOOK_FILE = 'tenjin-push-failure.mjs';
 export const PUSH_SUBAGENT_HOOK_FILE = 'tenjin-push-subagent.mjs';
 export const PUSH_CONTEXT_HOOK_FILE = 'tenjin-push-context.mjs';
-
-/**
- * The ledger file and the per-session state directory. Re-exported from
- * lib/paths.ts rather than restated: the generated scripts resolve these
- * themselves, and a second copy here is a rename away from a sidecar that reads
- * an empty ledger, silently.
- */
-import { PUSH_LEDGER_FILE, PUSH_DIR_NAME, PUSH_STATE_RETENTION_MS } from './paths';
-import { PUBLISHED_MARKER_PREFIX } from './publish-dedup';
-export { PUSH_LEDGER_FILE, PUSH_DIR_NAME };
 
 /** Injections a session may receive at full form; past it the short form only. */
 export const PUSH_INJECT_MAX_PER_SESSION = 5;
@@ -47,10 +38,9 @@ export const PUSH_INJECT_MAX_PER_SESSION = 5;
  * most often — ordinary prompts — and every later failure or research lookup is
  * skipped for the rest of the run. A live run measured 62% of fires skipped on
  * `lookup-cap`, prompts and failures between them accounting for all of it.
- * Nothing refilled it either: the 24h pruner sweeps PUSH_DIR, and the ledger
- * lives beside it, so the only thing that ever gave a long session its budget
- * back was the 256 KB tail scrolling its own early rows out of view — a refill
- * keyed on write volume rather than on elapsed time.
+ * Nothing refilled it either: the only thing that ever gave a long session its
+ * budget back was the 256 KB ledger tail scrolling its own early rows out of
+ * view — a refill keyed on write volume rather than on elapsed time.
  *
  * So: a rolling window that recovers on its own, and one bucket per trigger so a
  * prompt flood cannot spend the failure arm's allowance. The buckets ARE the
@@ -140,8 +130,6 @@ function jsBody(js: string): string {
 
 const PUSH_CORE_JS = String.raw`
 // ---- push core (shared by every push arm) ----
-const PUSH_DIR = join(DATA_DIR, __PUSH_DIR__);
-const LEDGER_PATH = join(DATA_DIR, __LEDGER_FILE__);
 const PUSH_INJECT_MAX = __INJECT_MAX__;
 const PUSH_LOOKUP_WINDOW_MS = __LOOKUP_WINDOW_MS__;
 const PUSH_LOOKUP_CAPS = __LOOKUP_CAPS__;
@@ -154,10 +142,6 @@ const PUSH_STRONG = __STRONG__;
 const PUSH_MODERATE = __MODERATE__;
 const PUSH_MARGIN = __MARGIN__;
 const PUSH_MIN_HITS = __MIN_HITS__;
-/** The ledger is read from its tail only: a session's rows are recent by
- *  construction, and a file that has grown for months must not be parsed whole
- *  in front of a tool call. */
-const LEDGER_TAIL_BYTES = 262144;
 
 const STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'when', 'what', 'how', 'why',
@@ -286,71 +270,38 @@ function isFree(candidate) {
   }
 }
 
-/** Append one decision row. Under 4 KB, written with O_APPEND in one call, so
- *  concurrent arms interleave whole lines and the file needs no lock. */
-function ledgerAppend(row) {
-  try {
-    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    appendFileSync(LEDGER_PATH, JSON.stringify(row) + '\n', { mode: 0o600 });
-  } catch {
-    // Bookkeeping only. Never the tool call's problem.
-  }
-}
-
 /**
- * Every ledger row in the tail of the file, whatever session wrote it.
+ * One decision row: what this arm was about to show, or would have shown, or
+ * deliberately did not. The ledger's own field names are preserved on the way
+ * in — \`trigger\`, \`event\`, \`query\` — and mapped onto the store: the arm goes
+ * in \`injections.hook\`, and the event name and the query live on the
+ * \`events\` row \`eventUid\` points back at.
  *
- * The lookup budget is machine-wide and windowed, so it needs the rows this
- * session did NOT write; the per-session bounds below filter this down. ONE READ
- * SERVES BOTH — the file is parsed in front of a tool call, and parsing it twice
- * to answer two questions about the same bytes is latency the human waiting
- * behind the prompt arm can feel.
+ * WHY EVERY OUTCOME IS A ROW, including the skips. The rows a rule would have
+ * changed are exactly the ones a rule has to be judged against, so recording
+ * only the injections would answer every tuning question with the cases that
+ * already agreed. \`tenjin push status\` tallies these.
  */
-function ledgerTailRows() {
-  let text;
-  try {
-    const size = statSync(LEDGER_PATH).size;
-    if (size <= LEDGER_TAIL_BYTES) {
-      text = readFileSync(LEDGER_PATH, 'utf8');
-    } else {
-      const fd = openSync(LEDGER_PATH, 'r');
-      try {
-        const buf = Buffer.alloc(LEDGER_TAIL_BYTES);
-        readSync(fd, buf, 0, LEDGER_TAIL_BYTES, size - LEDGER_TAIL_BYTES);
-        text = buf.toString('utf8');
-      } finally {
-        closeSync(fd);
-      }
-      text = text.slice(text.indexOf('\n') + 1);
-    }
-  } catch {
-    return [];
-  }
-  const rows = [];
-  for (const line of text.split('\n')) {
-    if (line.length === 0) continue;
-    try {
-      const r = JSON.parse(line);
-      if (!isRecord(r)) continue;
-      rows.push(r);
-    } catch {
-      // A torn or foreign line is skipped, never fatal.
-    }
-  }
-  return rows;
-}
-
-/** Whether \`r\` is a lookup that was actually attempted.
- *
- *  A LOOKUP IS AN ATTEMPT, NOT AN ANSWER. Counting only rows that carry a
- *  searchId made a FAILING lookup free — during an outage every row is
- *  'no-answer' with no searchId, the counter stays at zero, and the cap that
- *  exists to bound a runaway loop never engages while each attempt burns the
- *  full fetch timeout in front of a tool call. That is precisely the case worth
- *  bounding, so it is counted, and \`failStreak\` sits under it as the faster
- *  brake. */
-function isLookupRow(r) {
-  return typeof r.searchId === 'string' || r.reason === 'no-answer';
+function recordDecision(row) {
+  return recordInjection({
+    session: row.session,
+    cwd: row.cwd,
+    eventUid: row.eventUid,
+    hook: row.trigger,
+    shelf: row.shelf,
+    candidate: row.candidate,
+    searchId: row.searchId,
+    score: row.score,
+    second: row.second,
+    strength: row.strength,
+    confidence: row.confidence,
+    corroborated: row.corroborated,
+    action: row.action,
+    reason: row.reason,
+    form: row.form,
+    deny: row.deny,
+    tokens: row.tokens,
+  });
 }
 
 /** One bucket key. An unlabelled row and an unlabelled arm must land on the SAME
@@ -366,88 +317,25 @@ function lookupCapFor(trigger) {
 }
 
 /**
- * What has been spent, already seen, and just failed at.
+ * Whether \`trigger\` has anything left in the current window.
  *
- * TWO UNITS, DELIBERATELY. \`lookups\` is a machine-wide count per trigger over
- * the last PUSH_LOOKUP_WINDOW_MS: it bounds requests, and requests are a
- * property of the machine and of the clock, not of a session id that an
- * always-on loop holds for a day. Everything else — the inject cap, the
- * once-per-piece \`seen\` set, the outage brake — stays per session, because each
- * is a property of the one conversation being injected into.
+ * TWO UNITS, DELIBERATELY. This one is a machine-wide count per trigger over the
+ * last PUSH_LOOKUP_WINDOW_MS: it bounds requests, and requests are a property of
+ * the machine and of the clock, not of a session id that an always-on loop holds
+ * for a day. The inject cap, the once-per-piece set and the outage brake stay
+ * per session, because each is a property of the one conversation being injected
+ * into.
  *
- * A NULL SESSION IS A BUCKET, NOT AN EXEMPTION. Treating a payload with no
- * \`session_id\` as "no rows" zeroed every per-session bound at once and bought
- * an unbounded session. Its rows carry \`session: null\`, so they are their own
- * machine-global bucket and the same caps apply to them. Coarser than a real
- * session (two concurrent session-less harnesses share one budget) and that is
- * the right way round: the bound holds, and the cost of the coarse bucket is a
- * lookup deferred, never a bound skipped.
- *
- * The window can only ever be UNDERCOUNTED, never over: the tail is the last
- * LEDGER_TAIL_BYTES, so a machine that writes more than that inside one window
- * loses its oldest rows from the count and is treated as having spent less.
- * That errs toward letting a lookup through, which is the safe direction for a
- * budget whose failure mode this change exists to fix.
- *
- * \`resetAt\` rides along beside \`lookups\`: per trigger, the instant that
- * bucket next frees a slot, which is the OLDEST in-window row's time plus one
- * window. It exists so an exhausted arm can be remembered rather than
- * rediscovered — see {@link rememberCap} — and it inherits the tail's
- * undercount: a scrolled-off oldest row makes this LATER than the truth by at
- * most one window, which costs one deferred lookup and never a bound skipped.
+ * ONE INDEXED COUNT, not a parse. This used to mean reading the last 256 KB of
+ * an append-only ledger in front of every tool call and tallying it in memory —
+ * which also meant the window could only ever be UNDERCOUNTED, since a machine
+ * writing more than the tail inside one window lost its oldest rows from the
+ * count. The count is now exact, and cheap enough that the per-session "this
+ * bucket is full" cache the file version needed is gone with it.
  */
-function pushBudget(sessionId) {
-  const all = ledgerTailRows();
-  const rows = [];
-  const lookups = Object.create(null);
-  const oldest = Object.create(null);
-  const windowStart = Date.now() - PUSH_LOOKUP_WINDOW_MS;
-  const seen = new Set();
-  let injected = 0;
-  for (const r of all) {
-    if (isLookupRow(r)) {
-      const at = Date.parse(String(r.at));
-      if (Number.isFinite(at) && at >= windowStart) {
-        const key = triggerKey(r.trigger);
-        lookups[key] = (lookups[key] ?? 0) + 1;
-        if (oldest[key] === undefined || at < oldest[key]) oldest[key] = at;
-      }
-    }
-    const rowSession = typeof r.session === 'string' && r.session.length > 0 ? r.session : null;
-    if (rowSession !== sessionId) continue;
-    rows.push(r);
-    if (r.action === 'injected') {
-      injected += 1;
-      // A marketplace piece is keyed by its resourceId and a note by its id;
-      // both live in \`candidate\`, and neither is shown twice in one session.
-      if (isRecord(r.candidate)) {
-        if (typeof r.candidate.resourceId === 'string') seen.add(r.candidate.resourceId);
-        else if (typeof r.candidate.id === 'string') seen.add(r.candidate.id);
-      }
-    }
-  }
-  // The trailing run of unanswered lookups, newest first. A 'quiet' row is the
-  // stop itself, so it neither breaks the run nor extends it.
-  let failStreak = 0;
-  let lastFailAtMs = 0;
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const reason = rows[i].reason;
-    if (reason === 'quiet') continue;
-    if (reason !== 'no-answer') break;
-    if (failStreak === 0) {
-      const at = Date.parse(String(rows[i].at));
-      if (Number.isFinite(at)) lastFailAtMs = at;
-    }
-    failStreak += 1;
-  }
-  const resetAt = Object.create(null);
-  for (const key of Object.keys(oldest)) resetAt[key] = oldest[key] + PUSH_LOOKUP_WINDOW_MS;
-  return { injected, lookups, seen, failStreak, lastFailAtMs, resetAt };
-}
-
-/** Whether \`trigger\` has anything left in the current window. */
-function lookupAllowed(budget, trigger) {
-  return (budget.lookups[triggerKey(trigger)] ?? 0) < lookupCapFor(trigger);
+function lookupAllowed(trigger) {
+  const spent = bucketCount(triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
+  return spent < lookupCapFor(trigger);
 }
 
 /** The free body of \`candidate\`, capped, or null. GET of the candidate url is
@@ -611,7 +499,7 @@ function fullForm(opener, header, body, deny) {
  * allowed to interrupt anyone. \`allowDeny\` is the research arm's alone; every
  * other arm fires beside a call that has already been made or allowed.
  *
- * \`source\` is what a public lookup is recorded as in searches.json, and it is
+ * \`source\` is what a public lookup is recorded under in the search store, and it is
  * NOT cosmetic. The research arm stands in front of a WebSearch the agent asked
  * for, so it records 'websearch-hook' exactly as the unpushed path did: that is
  * the source the Stop hook's MISS reminder nags on, the demand budget counts,
@@ -630,30 +518,29 @@ function fullForm(opener, header, body, deny) {
  */
 async function pushDecide(args) {
   const { query, config, sessionId, mode } = args;
-  const at = new Date().toISOString();
+  // ONE EVENT ROW PER FIRE, before anything is asked, so a fire that reaches no
+  // shelf at all is still visible: the arm, the tool, the query and the harness
+  // event name live here, and every decision row below points back at it. An arm
+  // that opened its own row (the failure arm, which does mechanical work before
+  // it ever reaches a shelf) passes it in rather than opening a second one.
+  const eventUid =
+    typeof args.eventUid === 'string'
+      ? args.eventUid
+      : recordEvent({
+          session: sessionId,
+          cwd: args.cwd,
+          hook: args.trigger,
+          tool: args.tool,
+          data: { event: args.event, query: clean(query, 512) },
+        });
   const base = {
-    at,
     session: sessionId,
+    cwd: args.cwd,
+    eventUid,
     trigger: args.trigger,
     event: args.event,
     query: clean(query, 512),
   };
-  // A bucket this session has ALREADY watched fill up, skipped before anything
-  // is read or written: the exhaustion row is on the ledger, \`push status\`
-  // counted it, and re-deriving the same verdict costs a 256 KB tail parse in
-  // front of every later fire on this arm. A null session has no cache and
-  // behaves exactly as it did before.
-  //
-  // STILL COUNTED. The row costs one O_APPEND write and no read, and it is what
-  // keeps "how many fires did the cap swallow" derivable from the ledger — the
-  // number (139 of 226) that found the budget starvation in the first place.
-  // \`cached: true\` marks it as a remembered verdict rather than a fresh one.
-  const cappedUntil = loadState(sessionId).capped[triggerKey(args.trigger)];
-  if (Number.isFinite(cappedUntil) && cappedUntil > Date.now()) {
-    ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap', cached: true });
-    return null;
-  }
-  const budget = pushBudget(sessionId);
 
   // Shelf 1 is always \`baseUrl\`. In team mode that IS the team shelf; in public
   // mode baseUrl is the marketplace and there is no second leg to run. Team mode
@@ -676,25 +563,17 @@ async function pushDecide(args) {
   const first = await shelfDecide(
     args,
     base,
-    budget,
     teamMode ? 'team' : 'public',
     config.baseUrl,
     deadline,
   );
   if (first.kind !== 'miss') return first.decided ?? null;
   if (!teamMode) return null;
-  // Shelf 2, team mode only: the public marketplace, consume-only. A SECOND
-  // BUDGET READ, because the team leg just spent a lookup and may have written a
-  // row; reusing the stale one would let one fire spend two lookups against a
-  // cap that says one.
-  const second = await shelfDecide(
-    args,
-    base,
-    pushBudget(sessionId),
-    'public',
-    config.publicShelfUrl,
-    deadline,
-  );
+  // Shelf 2, team mode only: the public marketplace, consume-only. Its budget is
+  // re-read inside \`shelfDecide\` rather than carried over, because the team leg
+  // just spent a lookup and wrote a row; a stale count would let one fire spend
+  // two lookups against a cap that says one.
+  const second = await shelfDecide(args, base, 'public', config.publicShelfUrl, deadline);
   return second.decided ?? null;
 }
 
@@ -713,7 +592,7 @@ async function pushDecide(args) {
  *              because the same piece already landed this session. \`decided\` is
  *              what the arm emits (null for a log-only or skipped outcome).
  */
-async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadline) {
+async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   const { query, config, sessionId, mode } = args;
   const source = typeof args.source === 'string' ? args.source : 'push-hook';
   const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
@@ -724,18 +603,16 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
   // flood spends the prompt allowance and leaves the failure arm's untouched.
   // The row already carries \`trigger\`, so \`push status\` shows which bucket
   // filled up without a new field.
-  if (!lookupAllowed(budget, base.trigger)) {
-    ledgerAppend({ ...base, action: 'skipped', reason: 'lookup-cap' });
-    // The rest of this session's fires on this arm return before they reach
-    // here, on a remembered verdict and without the ledger parse.
-    rememberCap(sessionId, base.trigger, budget);
+  if (!lookupAllowed(base.trigger)) {
+    recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
     return { kind: 'stop' };
   }
   // The shelf is not answering: stop asking it for a while. Self-healing, and
   // recorded, so \`push status\` shows an outage as an outage rather than as a
   // sidecar that quietly did nothing.
-  if (budget.failStreak >= PUSH_FAILURE_STOP && Date.now() - budget.lastFailAtMs < PUSH_QUIET_MS) {
-    ledgerAppend({ ...base, action: 'skipped', reason: 'quiet' });
+  const outage = failStreak(sessionId);
+  if (outage.streak >= PUSH_FAILURE_STOP && Date.now() - outage.lastAt < PUSH_QUIET_MS) {
+    recordDecision({ ...base, action: 'skipped', reason: 'quiet' });
     return { kind: 'stop' };
   }
   // Out of wall clock: the first leg spent what this one would have needed.
@@ -745,7 +622,7 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
   // of the session.
   const leg = legTimeoutMs(deadline, PUSH_BODY_TIMEOUT);
   if (leg < SEARCH_MIN_LEG_MS) {
-    ledgerAppend({ ...base, action: 'skipped', reason: 'no-time' });
+    recordDecision({ ...base, action: 'skipped', reason: 'no-time' });
     return { kind: 'stop' };
   }
   let found = null;
@@ -760,18 +637,10 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
     // session on the strength of that would turn one misconfigured secret into a
     // sidecar that never speaks again. The failure streak above is the brake
     // that handles a real outage.
-    ledgerAppend({ ...base, action: 'skipped', reason: 'no-answer' });
+    recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
     return { kind: 'miss' };
   }
-  await recordSearch(
-    found.searchId,
-    query,
-    found.decision,
-    found.stored,
-    sessionId,
-    source,
-    shelfBaseUrl,
-  );
+  recordSearch(found.searchId, query, found.decision, found.stored, sessionId, source, shelfBaseUrl);
   const j = judge(query, found);
   const row = {
     ...base,
@@ -791,25 +660,28 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
     corroborated: j.corroborated ?? null,
   };
   if (j.top === null) {
-    ledgerAppend({ ...row, action: 'skipped', reason: 'miss' });
+    recordDecision({ ...row, action: 'skipped', reason: 'miss' });
     return { kind: 'miss' };
   }
   if (j.strength === 'none') {
-    ledgerAppend({ ...row, action: 'skipped', reason: 'weak' });
+    recordDecision({ ...row, action: 'skipped', reason: 'weak' });
     return { kind: 'miss' };
   }
   if (mode === 'log') {
-    ledgerAppend({ ...row, action: 'logged', form: j.strength === 'strong' ? 'full' : 'short' });
+    recordDecision({ ...row, action: 'logged', form: j.strength === 'strong' ? 'full' : 'short' });
     return { kind: 'done' };
   }
-  if (budget.seen.has(j.top.resourceId)) {
-    ledgerAppend({ ...row, action: 'skipped', reason: 'already-injected' });
+  // THE 6x FIX. One already-shown set across every hook, not one per script:
+  // the WebSearch and dispatch hint paths write to the same table, so a note
+  // this session has already been handed cannot come back through another arm.
+  if (alreadyShown(sessionId, j.top.resourceId)) {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
     return { kind: 'done' };
   }
   let form = 'short';
   let text = shortForm(j.top, shortOpener);
   let deny = false;
-  if (j.strength === 'strong' && isFree(j.top) && budget.injected < PUSH_INJECT_MAX) {
+  if (j.strength === 'strong' && isFree(j.top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
     const body = await fetchFreeBody(j.top, config);
     if (body !== null) {
       form = 'full';
@@ -822,121 +694,38 @@ async function shelfDecide(args, outerBase, budget, shelf, shelfBaseUrl, deadlin
       text = fullForm(opener, headerLine(j.top), body, deny);
     }
   }
-  ledgerAppend({ ...row, action: 'injected', form, deny, tokens: Math.ceil(text.length / 4) });
+  // THE WRITE IS THE DECISION. The \`alreadyShown\` check above is a cheap
+  // pre-filter that saves a wasted body fetch, but between it and here this arm
+  // may have awaited a whole HTTP round trip, and a concurrent fire in the same
+  // session can have claimed the piece meanwhile. The unique index refuses the
+  // second row, and THAT is what makes once-per-session a bound rather than a
+  // best-effort race — so a refusal turns into the skip it always meant.
+  const claimed = recordDecision({
+    ...row,
+    action: 'injected',
+    form,
+    deny,
+    tokens: Math.ceil(text.length / 4),
+  });
+  if (!mayShow(claimed)) {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+    return { kind: 'done' };
+  }
   return { kind: 'done', decided: { text, form, deny } };
 }
 
 // ---- per-session state (edits seen, packages seen, error signatures seen) ----
-function statePath(sessionId) {
-  return join(PUSH_DIR, sessionId.replace(/[^A-Za-z0-9_-]/g, '_') + '.json');
-}
-
-function loadState(sessionId) {
-  if (sessionId === null) {
-    return { edits: {}, packages: [], signatures: [], cache: null, capped: {} };
-  }
-  const raw = readJsonFile(statePath(sessionId));
-  const s = isRecord(raw) ? raw : {};
-  return {
-    edits: isRecord(s.edits) ? s.edits : {},
-    packages: Array.isArray(s.packages) ? s.packages.filter((p) => typeof p === 'string') : [],
-    signatures: Array.isArray(s.signatures) ? s.signatures.filter((p) => typeof p === 'string') : [],
-    cache: isRecord(s.cache) ? s.cache : null,
-    capped: cappedTimes(s.capped),
-  };
-}
-
-/** The \`capped\` map as epoch ms, dropping anything that is not a finite time.
- *  A number is taken as ms and a string is parsed as a date, so a file written
- *  by an older build (or by hand) can only ever be ignored, never throw. */
-function cappedTimes(raw) {
-  const out = {};
-  if (!isRecord(raw)) return out;
-  for (const key of Object.keys(raw)) {
-    const v = raw[key];
-    const ms = typeof v === 'number' ? v : (typeof v === 'string' ? Date.parse(v) : NaN);
-    if (Number.isFinite(ms)) out[key] = ms;
-  }
-  return out;
-}
-
-/**
- * Remember that \`trigger\` is out of budget until its bucket next frees a slot,
- * so the REST of this session's fires on that arm can skip the ledger parse
- * entirely. Written next to the \`lookup-cap\` row and never anywhere else: the
- * row is what \`push status\` counts, and the cache is what stops the next fire
- * paying 256 KB of tail parsing to rediscover a fact this session just learned.
- *
- * PER SESSION ON PURPOSE, though the budget itself is machine-wide. Another
- * session parses and finds the cap for itself, which keeps a stale or
- * hand-edited state file from being able to silence a whole machine, and the
- * entry needs no explicit clear: it expires by being in the past.
- *
- * The read-modify-write here is LAST-WRITER-WINS, like every other saveState
- * call. Two arms can be inside this at once (the context arm looks two packages
- * up concurrently), so one of them may drop the other's unrelated key. That is
- * the documented contract of this file — it is a dedupe aid, never a ledger —
- * and the cost of losing a write is one extra ledger parse.
- *
- * INTERIM. The SQLite budget store in #209 replaces the whole arrangement with
- * a counter that can be read without parsing anything.
- */
-function rememberCap(sessionId, trigger, budget) {
-  if (sessionId === null) return;
-  const key = triggerKey(trigger);
-  const resetAt = budget.resetAt[key];
-  if (!Number.isFinite(resetAt) || resetAt <= Date.now()) return;
-  const state = loadState(sessionId);
-  state.capped = { ...state.capped, [key]: resetAt };
-  saveState(sessionId, state);
-}
-
-/** Best-effort, last writer wins: this is a dedupe aid, never a ledger. Stale
- *  siblings are pruned on each write so the directory cannot grow unbounded. */
-function saveState(sessionId, state) {
-  if (sessionId === null) return;
-  try {
-    mkdirSync(PUSH_DIR, { recursive: true, mode: 0o700 });
-    const path = statePath(sessionId);
-    const tmp = path + '.' + process.pid + '.tmp';
-    writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-    renameSync(tmp, path);
-    pruneState();
-  } catch {
-    // Losing this costs one duplicate lookup, never the tool call.
-  }
-}
-
-const STATE_RETENTION_MS = ${PUSH_STATE_RETENTION_MS};
-function pruneState() {
-  try {
-    const now = Date.now();
-    for (const name of readdirSync(PUSH_DIR)) {
-      // \`capture-\` markers share this directory but are the Stop hook's to age
-      // out, and only its pruner knows to spare the LIVE session's marker: that
-      // marker's mtime is pinned at first ask (it is only ever stat'd), so a
-      // session still running past the retention window would have its own marker
-      // swept here and be asked to capture a SECOND time — under
-      // \`hooks.capture block\`, a second blocked turn end. This pruner has no
-      // session id in hand, so it stays out of the prefix entirely.
-      //
-      // \`published-\` markers are the publish command's, and are treated the
-      // same way for the same reason: their mtime is pinned at the publish (they
-      // are only ever read), and sweeping one early is a duplicate post — the
-      // exact thing they exist to prevent. The Stop hook's pass ages them out.
-      if (name.startsWith('capture-') || name.startsWith(${JSON.stringify(PUBLISHED_MARKER_PREFIX)}))
-        continue;
-      const path = join(PUSH_DIR, name);
-      try {
-        if (now - statSync(path).mtimeMs > STATE_RETENTION_MS) rmSync(path, { force: true });
-      } catch {
-        // Skipped.
-      }
-    }
-  } catch {
-    // No directory yet.
-  }
-}
+//
+// One row per MEMBER in \`session_state\` — \`edited:<path>\`, \`sig:<hash>\`,
+// \`package:<name>\`, \`edits:<path>\` — each written by a single statement.
+//
+// This used to be a whole-file JSON read-modify-write per session under the push
+// directory, with last-writer-wins as its documented contract, and the first cut
+// of the store kept the shape: one JSON blob per key. That moved the race rather
+// than closing it — two hook processes for one session (parallel subagents share
+// their parent's session id) both read the blob, both added their own entry, and
+// the second write dropped the first. A member per row makes every write atomic,
+// so the claim in this comment is now true rather than aspirational.
 
 // ---- package extraction ----
 const NODE_BUILTINS = new Set([
@@ -1040,9 +829,7 @@ function scrub(text) {
  *  token, so it waits half as long for a body as an arm running beside a tool
  *  call that has already been made. */
 export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string {
-  const js = PUSH_CORE_JS.replaceAll('__PUSH_DIR__', JSON.stringify(PUSH_DIR_NAME))
-    .replaceAll('__LEDGER_FILE__', JSON.stringify(PUSH_LEDGER_FILE))
-    .replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
+  const js = PUSH_CORE_JS.replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
     .replaceAll('__LOOKUP_WINDOW_MS__', String(PUSH_LOOKUP_WINDOW_MS))
     .replaceAll('__LOOKUP_CAPS__', JSON.stringify(PUSH_LOOKUP_CAPS_PER_WINDOW))
     .replaceAll('__LOOKUP_CAP_DEFAULT__', String(PUSH_LOOKUP_CAP_DEFAULT))
@@ -1105,17 +892,26 @@ async function main() {
   if (tokens(query).size < 3) return quiet();
 
   const sessionId = sessionIdOf(input);
+  const cwd = cwdOf(input);
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
   // The arm's own deadline, inside the process watchdog. Whatever is in flight
-  // when it fires is abandoned, but the ledger LEARNS THAT IT WAS: a run killed
-  // by the bare watchdog left a paid-for search in searches.json and no row at
-  // all here, which reads afterwards as a lookup that never happened.
+  // when it fires is abandoned, but the store LEARNS THAT IT WAS: a run killed
+  // by the bare watchdog left a paid-for search recorded and no decision row at
+  // all, which reads afterwards as a lookup that never happened.
   const overrun = setTimeout(() => {
-    ledgerAppend({
-      at: new Date().toISOString(),
+    recordDecision({
       session: sessionId,
+      cwd,
       trigger: 'prompt',
       event: 'UserPromptSubmit',
-      query,
       action: 'skipped',
       reason: 'watchdog',
     });
@@ -1129,6 +925,7 @@ async function main() {
     query,
     config,
     sessionId,
+    cwd,
     mode: 'inject',
     source: 'push-hook',
   });
@@ -1141,7 +938,7 @@ main().catch(quiet);
 `;
 
 export function pushPromptHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('push-prompt', PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
+  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource(PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
 }
 
 /**
@@ -1340,15 +1137,25 @@ function commandHeads(command) {
   return out;
 }
 
-/** Whether ANY command in the line is one this arm may fire behind. Any, not
- *  all: in \`cd /x && pnpm test\` the failure belongs to the second half. */
-function failureAllowed(command) {
+/**
+ * The heads in this line this arm may fire behind, in order. Any, not all: in
+ * \`cd /x && pnpm test\` the failure belongs to the second half — and in
+ * \`pnpm test && echo done\` it belongs to the FIRST, which is why the pairing
+ * keys on an allowlisted head rather than on whichever segment ran last.
+ */
+function allowedHeads(command) {
+  const out = [];
   for (const { head, sub } of commandHeads(command)) {
     if (!FAILURE_HEADS.has(head)) continue;
     if (PM_HEADS.has(head) && PM_QUIET_SUBS.has(sub)) continue;
-    return true;
+    out.push(head);
   }
-  return false;
+  return out;
+}
+
+/** Whether ANY command in the line is one this arm may fire behind. */
+function failureAllowed(command) {
+  return allowedHeads(command).length > 0;
 }
 
 /** The most informative line: the LAST error-shaped, non-frame line, because
@@ -1425,6 +1232,384 @@ function signatureOf(line) {
   return scrub(line).toLowerCase().replace(/\d+/g, '#').slice(0, 200);
 }
 
+// ---- sig_v1: the mechanical lane's key (04, "Two knowledge lanes") ----
+
+/**
+ * POSIX/libuv errno names, spelled out.
+ *
+ * A WHITELIST, NOT A SHAPE. \`/E[A-Z]{3,}/\` matches ERROR, ERRORS, ESLINT,
+ * EXPECTED, EXIT and every other capitalised English word a toolchain prints,
+ * so a bare "2 failed" — deliberately BELOW the specificity floor — cleared it
+ * on the strength of the word ERROR appearing anywhere in the output, and got a
+ * coarse key that is byte-identical in every repo on earth. That is precisely
+ * the cross-repo replay the floor exists to prevent.
+ */
+const ERRNO_NAMES = new Set([
+  'ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'EISDIR', 'ENOTDIR', 'ENOTEMPTY', 'ENAMETOOLONG',
+  'ELOOP', 'EXDEV', 'EROFS', 'EMFILE', 'ENFILE', 'ENOSPC', 'EDQUOT', 'EFBIG', 'EBUSY',
+  'EAGAIN', 'EPIPE', 'ESPIPE', 'EBADF', 'EINVAL', 'ERANGE', 'ENOMEM', 'ENOSYS', 'EINTR',
+  'EADDRINUSE', 'EADDRNOTAVAIL', 'ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT',
+  'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'ENOTCONN', 'EPROTO', 'EPROTONOSUPPORT',
+  'ENOTFOUND', 'EAI_AGAIN', 'ECANCELED', 'EDESTADDRREQ', 'EMSGSIZE', 'EOVERFLOW',
+]);
+
+/**
+ * The errno-shaped token a failure names, or ''.
+ *
+ * Read off the RAW error line, before normalization, because normalization is
+ * what destroys it: \`ERR_PNPM_OUTDATED_LOCKFILE\` has the exact shape of an
+ * environment variable name, and the rule that turns env-var names into \`E\`
+ * would eat the most specific thing the line says.
+ *
+ * A token qualifies only if it carries a digit or an underscore — \`TS2345\`,
+ * \`E0412\`, \`ERR_MODULE_NOT_FOUND\` — or is a real errno by name. Everything
+ * else is English.
+ */
+const SIG_ERRNO_RE = /\b(ERR_[A-Z0-9]+(?:_[A-Z0-9]+)*|TS\d{3,5}|E\d{3,4}|E[A-Z]{3,})\b/g;
+function errnoOf(text) {
+  for (const m of String(text).matchAll(SIG_ERRNO_RE)) {
+    const token = m[1];
+    if (/[_\d]/.test(token) || ERRNO_NAMES.has(token)) return token;
+  }
+  return '';
+}
+
+/** \`at fn (/a/b/file.ts:12:3)\`, \`File "/a/b.py", line 3\`, tsc's
+ *  \`src/x.ts(12,3):\` and rustc's \`--> src/main.rs:4:5\` all reduce to one
+ *  basename. The basename and not the path: the same failure in the same file
+ *  must key the same across two checkouts of one repo. */
+const SIG_PY_FRAME_RE = /File "([^"]+)", line \d+/;
+const SIG_FRAME_RE = /([A-Za-z0-9_.+-]+(?:[/\\][A-Za-z0-9_.+-]+)*\.[A-Za-z]{1,5})[:(]\d+/;
+function topFrameFile(text) {
+  const py = SIG_PY_FRAME_RE.exec(String(text));
+  const framed = SIG_FRAME_RE.exec(String(text));
+  const raw = py !== null ? py[1] : framed !== null ? framed[1] : null;
+  if (raw === null) return '';
+  const base = raw.split(/[/\\]/).pop();
+  return typeof base === 'string' && base.length > 0 && base.length <= 80 ? base : '';
+}
+
+/**
+ * The message half of the key, normalized so two runs of the same failure on two
+ * machines produce the same bytes: ANSI and CRLF stripped, \`$HOME\` to \`~\`,
+ * hosts to \`H\`, paths to \`@/\`, env-var names to \`E\`, hex runs to \`H\`,
+ * digits to \`N\`, lowercased, whitespace collapsed, 200 characters.
+ *
+ * ORDER MATTERS. Env-var names are matched while the text is still cased, and
+ * paths before the digits that a line:column suffix would otherwise leave
+ * stranded.
+ */
+function normalizeForSig(text) {
+  const home = homedir();
+  let out = String(text)
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
+    .replace(/[\r\n]+/g, ' ');
+  if (typeof home === 'string' && home.length > 1) out = out.split(home).join('~');
+  return out
+    .replace(/\b(?:[A-Za-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|internal|local)\b/g, 'H')
+    .replace(/\b[A-Za-z]:\\[^\s'"]+/g, '@/')
+    .replace(/(?:[/\\][\w.@+-]+){2,}/g, '@/')
+    .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g, 'E')
+    .replace(/\b[0-9a-fA-F]{6,}\b/g, 'H')
+    .replace(/\d+/g, 'N')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
+/**
+ * The pairing key for one failure, or null when it is below the SPECIFICITY
+ * FLOOR — a signature with neither an errno nor a top frame is not stored (04),
+ * because "N tests failed" normalizes to the same bytes in every repo on earth
+ * and a pairing keyed on it would replay somebody else's fix at everybody.
+ *
+ * Two keys come back. The FINE one is message + errno + frame; the COARSE one
+ * drops the frame, so a fix recorded against one file still matches the same
+ * error raised from a sibling. Retrieval tries fine, then coarse (04,
+ * "Retrieval order").
+ */
+function sigV1(line, text) {
+  const message = normalizeForSig(line);
+  // ANCHORED TO THE ERROR LINE. Scanning the whole 20 KB of output for an errno
+  // meant a token from an unrelated log line hundreds of lines away could clear
+  // the floor for a message that says nothing specific at all.
+  const errno = errnoOf(line);
+  const frame = topFrameFile(text);
+  if (errno === '' && frame === '') return null;
+  return {
+    key: shortHash('sig_v1|' + message + '|' + errno + '|' + frame),
+    // NULL WHEN THE FRAME ALONE CLEARED THE FLOOR. The coarse key drops the
+    // frame, so with no errno it is a hash of the normalized message and
+    // nothing else — exactly the frameless, errno-less key the floor exists to
+    // reject, smuggled back in at retrieval. Vitest's own summary line is the
+    // case: \`Tests  2 failed | 5 passed (7)\` normalizes to one string for every
+    // failing run in the repo, so one coarse key would cover every test failure
+    // there is and any recorded fix would replay at all of them.
+    coarseKey: errno === '' ? null : shortHash('sig_v1c|' + message + '|' + errno),
+    message,
+    errno,
+    frame,
+  };
+}
+
+/** File basenames the error itself named — what the close rule checks a change
+ *  against. Frames, tsc/rustc locations, and Python tracebacks. */
+function filesInError(text) {
+  const found = new Set();
+  const body = String(text);
+  for (const m of body.matchAll(/([A-Za-z0-9_.+-]+\.[A-Za-z]{1,5})[:(]\d+/g)) found.add(m[1]);
+  for (const m of body.matchAll(/File "([^"]+)", line \d+/g)) {
+    const base = m[1].split(/[/\\]/).pop();
+    if (typeof base === 'string' && base.length > 0) found.add(base);
+  }
+  return [...found].filter((f) => f.length <= 80).slice(0, 8);
+}
+
+/**
+ * A path this machine's own repo owns, as opposed to one the toolchain owns or
+ * one that holds machine configuration.
+ *
+ * NO GIT INVOCATION. "Tracked" is inferred from the path, not asked of git: a
+ * hook must not spawn a process in front of a tool call, and the two cases the
+ * close rule actually has to separate — a source edit from a \`.env.local\` edit
+ * or a node_modules artefact — are separable by name alone. A false positive
+ * costs a pairing that replays locally and never syncs; a false negative costs a
+ * pairing that stays open.
+ */
+function isTrackedPath(path) {
+  if (/(?:^|[/\\])(?:node_modules|\.git|dist|build|coverage|\.next|target|out)(?:[/\\]|$)/.test(path)) {
+    return false;
+  }
+  const base = path.split(/[/\\]/).pop() || '';
+  return base.length > 0 && !base.startsWith('.env');
+}
+
+/**
+ * Signals that a failure was about the MACHINE rather than about the repo (04,
+ * "What syncs"): an env var, a port, \`$HOME\`, a missing tool. A pairing that
+ * carries one stays local however it was closed, because the fix is somebody's
+ * laptop and not the codebase.
+ */
+const USER_SCOPE_RE = /\b(?:EADDRINUSE|EACCES|EPERM)\b|address already in use|command not found|not recognized as|permission denied|\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b[^\n]{0,24}\b(?:is not set|not set|is required|is undefined|is missing)\b/;
+
+/**
+ * Where this pairing belongs once something closed it.
+ *
+ *  - \`user\`      the error named a machine-level thing. Replays locally, never
+ *                 syncs.
+ *  - \`code\`      a tracked file changed. The team shelf can hold it (#212).
+ *  - \`ambiguous\` it passed and nothing tracked changed. Local, and COUNTED:
+ *                 plan 05 revisits the rule at day 14 with that count.
+ */
+function pairingScope(errorLine, fixFiles) {
+  if (USER_SCOPE_RE.test(String(errorLine))) return 'user';
+  if (fixFiles.length === 0) return 'ambiguous';
+  return 'code';
+}
+
+/**
+ * The command as it may be STORED and REPLAYED.
+ *
+ * \`clean()\` only strips control bytes, and a command line is the one input
+ * to this arm that routinely carries a credential: an allowlisted
+ * \`DATABASE_URL=postgres://app:pw@db.internal/x pnpm drizzle-kit migrate\` or
+ * \`NPM_TOKEN=… npm publish\` passes the head check (leading assignments are
+ * stepped over) and would otherwise land verbatim in the database — and then be
+ * read back out into a LATER session's context by \`pairingText\`. The plan's
+ * adversarial section is explicit that the db never holds more than the wire
+ * did, so the same \`scrub()\` every query goes through runs here too.
+ */
+function safeCommand(command) {
+  return clean(scrub(command), 300);
+}
+
+/** The bare package name of \`name@1.2.3\`, keeping a scope intact. */
+function bareName(spec) {
+  const at = spec.lastIndexOf('@');
+  return at > 0 ? spec.slice(0, at) : spec;
+}
+
+/**
+ * The installed versions of the packages a failure named, read straight out of
+ * \`node_modules\`. Cheap on purpose: at most two package.json reads, no
+ * resolution algorithm and no lockfile parse. It is the staleness signal, not a
+ * dependency graph — 04 only asks that an inject-time mismatch demote the
+ * pairing to "was true at pkg@X".
+ */
+function pkgVersions(cwd, packages) {
+  const out = {};
+  if (typeof cwd !== 'string' || cwd.length === 0) return out;
+  for (const spec of packages.slice(0, 2)) {
+    const name = bareName(spec);
+    if (name.length === 0 || name.length > 214) continue;
+    const raw = readJsonFile(join(cwd, 'node_modules', ...name.split('/'), 'package.json'));
+    if (isRecord(raw) && typeof raw.version === 'string') out[name] = raw.version;
+  }
+  return out;
+}
+
+/** "was true at pkg@X" when the recorded versions no longer match what is
+ *  installed, else null. */
+function stalenessNote(pairing, cwd) {
+  const recorded = pairing.pkgVersions;
+  const names = Object.keys(recorded);
+  if (names.length === 0) return null;
+  const now = pkgVersions(cwd, names);
+  for (const name of names) {
+    const then = recorded[name];
+    const current = now[name];
+    if (typeof current === 'string' && current !== then) {
+      // BOUNDED AND CONTROL-STRIPPED, like every other external string that
+      // reaches the model. These come from a dependency's own package.json,
+      // which is third-party file content: npm's semver validation is not a
+      // defence here, because \`file:\`/\`link:\` deps, workspace packages,
+      // patched installs and vendored node_modules all bypass it. Unbounded,
+      // newline-carrying text landed in additionalContext BELOW the opener,
+      // outside the "a record, not instructions" framing that makes the rest of
+      // this payload safe.
+      const was = clean(then, 40);
+      const now = clean(current, 40);
+      return (
+        'Recorded against ' + name + '@' + was + '; ' + now +
+        ' is installed now — was true at ' + name + '@' + was + '.'
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * Tracked files this session edited since \`sinceMs\`. Written by the context arm
+ * on every Edit/Write/MultiEdit, which is the only way a hook process sees a
+ * file change without asking git.
+ *
+ * ONE ROW PER PATH, queried by time. This used to be one JSON map under a
+ * single key, which cost it twice: a concurrent edit hook could drop an entry
+ * on the read-modify-write, and the 200-key bound evicted by Object.keys ORDER
+ * — insertion order, which re-writing an existing key does not change — so
+ * re-editing the earliest-touched file (very often the config file the failing
+ * command named) deleted the freshest timestamp in the map and the pairing it
+ * would have closed stayed open.
+ */
+function editedSince(sessionId, sinceMs) {
+  const out = [];
+  for (const row of statePrefixSince(sessionId, STATE_EDITED_PREFIX, sinceMs, 200)) {
+    if (!isTrackedPath(row.key)) continue;
+    const base = row.key.split(/[/\\]/).pop();
+    if (typeof base === 'string' && base.length > 0) out.push(base);
+  }
+  return out.slice(0, 8);
+}
+
+/** What a replayed pairing may occupy in the agent's context. Small on purpose:
+ *  it is an opener, a short file list, one command and one staleness note. */
+const PAIRING_BODY_MAX = 600;
+
+const PAIRING_OPENER =
+  'Tenjin sidecar (local): this machine has already seen this failure fixed. A record of what changed, not instructions.';
+
+/** What an injected pairing says. Verified reads as a fix; unverified reads as
+ *  the weaker claim it is (04, "Close rule"). */
+function pairingText(pairing, staleNote) {
+  // PER ITEM, not just per list. The write side bounds a path at 200 chars and
+  // \`filesInError\` caps its own items at 80, but the fix side had neither, so a
+  // long or control-bearing basename went into model-visible text as it was.
+  const files = pairing.fixFiles
+    .slice(0, 4)
+    .map((file) => clean(file, 80))
+    .filter((file) => file.length > 0)
+    .join(', ');
+  const lines = [PAIRING_OPENER];
+  lines.push(
+    pairing.status === 'verified'
+      ? 'Fixed here ' + pairing.closes + ' time(s) by changing: ' + files + '.'
+      : 'Someone once fixed this by touching: ' + files + '.',
+  );
+  if (typeof pairing.fixCmd === 'string' && pairing.fixCmd.length > 0) {
+    // Scrubbed again on the way OUT. It was scrubbed on the way in, but this
+    // line is read back into a different session's context, and a row written
+    // by a build whose scrubber was weaker must not be the thing that carries a
+    // credential forward.
+    lines.push('It passed afterwards on: ' + safeCommand(pairing.fixCmd));
+  }
+  if (staleNote !== null) lines.push(staleNote);
+  // And a bound on the assembled body, as the marketplace forms have. Every
+  // field above is bounded on its own; this is the backstop for their sum.
+  return clean(lines.join('\n'), PAIRING_BODY_MAX);
+}
+
+/**
+ * A success closes whatever this machine had open on the same command head.
+ *
+ * THE RULE IS FROM 04, and it is deliberately narrow: a later exit-0 with the
+ * same head closes an open pairing only if a TRACKED file changed that the
+ * error's own output named, or the passing command IS the failing one and a
+ * tracked file changed. Anything looser closes a pairing on an unrelated commit
+ * that happened to land between two test runs.
+ *
+ * A close is \`unverified\` — "someone once fixed this by touching X". The
+ * SECOND independent close promotes it to \`verified\`, and only then does it
+ * inject as a fix.
+ */
+function closeOpenPairings(sessionId, cwd, command, heads) {
+  const passed = safeCommand(command);
+  const project = projectId(cwd);
+  const closeIf = (pairing) => {
+    if (pairing === null) return;
+    // BELT AND BRACES ON THE PROJECT. Both lookups below are already scoped in
+    // SQL; this is the assertion that a future third caller cannot skip. A fix
+    // in one checkout must never close a pairing from another, and this is the
+    // path that reaches \`verified\`.
+    if (pairing.project !== project) return;
+    const changed = editedSince(sessionId, pairing.at);
+    if (changed.length === 0) return;
+    const named = changed.filter((f) => pairing.errorFiles.includes(f));
+    const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
+    if (named.length === 0 && !sameCommand) return;
+    const fixFiles = named.length > 0 ? named : changed;
+    closePairing(
+      pairing.id,
+      sessionId,
+      passed,
+      fixFiles,
+      pairingScope(pairing.errorLine, fixFiles),
+    );
+  };
+  for (const head of heads) {
+    // Rows this session opened itself.
+    for (const pairing of openPairingsForHead(cwd, head, Date.now(), 8)) closeIf(pairing);
+    // AND the row this session was SHOWN rather than opened. Without this the
+    // second close 04 promotes to \`verified\` is unreachable: a session that
+    // hits a known failure takes the replay branch and never opens a row of its
+    // own, so its later success had nothing to close.
+    //
+    // BEING SHOWN A PAIRING BUYS NO RELAXATION. This session still has to
+    // satisfy the ordinary close rule above, and \`closePairing\` then counts it
+    // toward the promotion only if its fix overlaps the first closer's — because
+    // a session shown "someone once fixed this by touching foo.ts" re-runs the
+    // failing command by definition, so the same-command branch is free to it
+    // and the suggestion would otherwise be a material cause of its own
+    // promotion to the confident wording.
+    const replayed = replayedPairing(sessionId, head);
+    if (replayed !== null) closeIf(pairingById(cwd, replayed));
+  }
+}
+
+/**
+ * Remember that this session was shown pairing \`id\` behind \`head\`, so its
+ * later success on that head can close it as an independent second closer.
+ */
+function rememberReplay(sessionId, head, id) {
+  if (typeof head !== 'string' || head.length === 0) return;
+  setState(sessionId, STATE_REPLAYED_PREFIX + head, id);
+}
+
+function replayedPairing(sessionId, head) {
+  const id = getState(sessionId, STATE_REPLAYED_PREFIX + head);
+  return typeof id === 'number' ? id : null;
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -1439,22 +1624,115 @@ async function main() {
   // build, test, migration, install or lint step is not one this arm has an
   // opinion about, however its output reads.
   if (!failureAllowed(command)) return quiet();
+
+  const sessionId = sessionIdOf(input);
+  const cwd = cwdOf(input);
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
+  const heads = allowedHeads(command);
   const text = failureText(input);
-  if (text.length === 0) return quiet();
+  // A PASS, not a failure. This is the other half of the mechanical lane: the
+  // same allowlisted head succeeding is what CLOSES a pairing this machine
+  // opened earlier (04, "Close rule"). Nothing is emitted and no network is
+  // touched — one indexed query and at most one UPDATE.
+  if (text.length === 0) {
+    closeOpenPairings(sessionId, cwd, command, heads);
+    return quiet();
+  }
   const line = errorLine(text.slice(-20000));
   if (line === null) return quiet();
 
-  const sessionId = sessionIdOf(input);
-  const signature = signatureOf(line);
-  const state = loadState(sessionId);
-  // Once per signature per session: the same failing command re-run five times
-  // is one problem, and both events can fire for one failure on some harnesses.
-  if (state.signatures.includes(signature)) return quiet();
-  state.signatures = [...state.signatures.slice(-49), signature];
-  saveState(sessionId, state);
+  // ONCE PER SIGNATURE PER SESSION, CLAIMED ATOMICALLY. The same failing command
+  // re-run five times is one problem, both hook events can fire for one failure
+  // on some harnesses, and parallel subagents share their parent's session id —
+  // so the read-modify-write this replaces had a window that two processes both
+  // passed, opening duplicate pairings and spending two lookups on one failure.
+  if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) return quiet();
 
   const packages = [...new Set([...packagesInCommand(command), ...packagesInError(text)])];
-  const query = clean((packages.join(' ') + ' ' + scrub(line)).trim(), 300);
+  const scrubbed = scrub(line);
+  const eventUid = recordEvent({
+    session: sessionId,
+    cwd,
+    hook: 'failure',
+    tool: 'Bash',
+    data: { event, command: safeCommand(command) },
+  });
+
+  // THE MECHANICAL LANE, AND IT RUNS FIRST — before the query is built and
+  // before any shelf is asked (04, "Retrieval order": local fine key, then
+  // coarse, then the shelves). A pairing this machine closed itself is the
+  // cheapest and most specific answer there is, and paying ~15ms per shelf to
+  // maybe find something weaker is exactly the waste the local lane exists to
+  // avoid.
+  const sig = sigV1(line, text);
+  if (sig !== null) {
+    const match = findPairing(cwd, sig.key, sig.coarseKey);
+    if (match !== null && !alreadyShown(sessionId, 'pairing:' + match.id)) {
+      const body = pairingText(match, stalenessNote(match, cwd));
+      // BEFORE the emit, because emit exits the process: this is what lets this
+      // session's later success close the pairing it was shown, which is the
+      // only route to \`verified\` through the hooks.
+      rememberReplay(sessionId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
+      const claimed = recordInjection({
+        session: sessionId,
+        cwd,
+        eventUid,
+        hook: 'failure',
+        // LOCAL IS ITS OWN SHELF. It is not the team's and not the public one,
+        // and \`push status\` has to be able to say how much of the sidecar's
+        // value came from this machine's own record.
+        shelf: 'local',
+        candidate: { id: 'pairing:' + match.id, title: match.errorLine, price: '0' },
+        strength: match.status === 'verified' ? 'strong' : 'moderate',
+        action: 'injected',
+        form: 'short',
+        tokens: Math.ceil(body.length / 4),
+      });
+      // A concurrent fire in this session claimed the same pairing first: the
+      // unique index refused this row, so this process records the skip and
+      // stays silent rather than injecting the same text twice.
+      if (!mayShow(claimed)) {
+        recordInjection({
+          session: sessionId,
+          cwd,
+          eventUid,
+          hook: 'failure',
+          shelf: 'local',
+          candidate: { id: 'pairing:' + match.id, title: match.errorLine, price: '0' },
+          action: 'skipped',
+          reason: 'already-injected',
+        });
+        return quiet();
+      }
+      return emit(event, body);
+    }
+    // Nothing local yet. Open a pairing so the NEXT success on this head can
+    // close it, then fall through to the shelves.
+    openPairing({
+      session: sessionId,
+      cwd,
+      key: sig.key,
+      coarseKey: sig.coarseKey,
+      // The LAST allowlisted head, which is the build/test step the failure
+      // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
+      cmdHead: heads.length > 0 ? heads[heads.length - 1] : null,
+      cmd: safeCommand(command),
+      errorLine: clean(scrubbed, 300),
+      errorFiles: filesInError(text),
+      pkgVersions: pkgVersions(cwd, packages),
+      scope: 'ambiguous',
+    });
+  }
+
+  const query = clean((packages.join(' ') + ' ' + scrubbed).trim(), 300);
   if (tokens(query).size < 2) return quiet();
 
   const decided = await pushDecide({
@@ -1463,6 +1741,9 @@ async function main() {
     query,
     config,
     sessionId,
+    cwd,
+    eventUid,
+    tool: 'Bash',
     mode: 'inject',
     source: 'push-hook',
   });
@@ -1474,7 +1755,7 @@ main().catch(quiet);
 `;
 
 export function pushFailureHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('push-failure')}${pushSource()}${FAILURE_JS}`;
+  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${FAILURE_JS}`;
 }
 
 /**
@@ -1494,57 +1775,86 @@ async function main() {
   if (config.push !== 'on') return quiet();
   const sessionId = sessionIdOf(input);
   if (sessionId === null) return quiet();
-  const state = loadState(sessionId);
-  const cache = state.cache;
-  if (cache === null) return quiet();
+  const cwd = cwdOf(input);
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
+  const cache = getState(sessionId, STATE_CACHE);
+  if (!isRecord(cache)) return quiet();
   const at = Date.parse(String(cache.at));
   if (!Number.isFinite(at) || Date.now() - at > CACHE_TTL_MS) return quiet();
   if (!isRecord(cache.top) || typeof cache.top.resourceId !== 'string') return quiet();
   // Once per dispatch: the cache is consumed by the first subagent it reaches.
-  state.cache = null;
-  saveState(sessionId, state);
+  clearState(sessionId, STATE_CACHE);
 
   const top = cache.top;
   const agentType = typeof input.agent_type === 'string' ? clean(input.agent_type, 60) : '';
   // Whichever shelf the dispatch hook actually asked. A cache written before
   // that field existed reads as 'public', which is what it was.
   const shelf = cache.shelf === 'team' ? 'team' : 'public';
-  const base = {
-    at: new Date().toISOString(),
+  const eventUid = recordEvent({
     session: sessionId,
+    cwd,
+    hook: 'subagent',
+    tool: 'SubagentStart',
+    data: {
+      event: 'SubagentStart',
+      query: clean(String(cache.query || ''), 512),
+      agentType,
+    },
+  });
+  const base = {
+    session: sessionId,
+    cwd,
+    eventUid,
     trigger: 'subagent',
     event: 'SubagentStart',
-    query: clean(String(cache.query || ''), 512),
     shelf,
     searchId: typeof cache.searchId === 'string' ? cache.searchId : undefined,
     candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
     score: cache.score,
     second: cache.second,
     strength: cache.strength,
-    agentType,
   };
   // The same gate pushDecide applies to its own judgement, applied to a cached
   // one: a stale cache from an older build, or a dispatch hook that cached
   // before this check existed, must not turn into an injection here.
   if (cache.strength !== 'strong' && cache.strength !== 'moderate') {
-    ledgerAppend({ ...base, action: 'skipped', reason: 'weak' });
+    recordDecision({ ...base, action: 'skipped', reason: 'weak' });
     return quiet();
   }
-  const budget = pushBudget(sessionId);
-  if (budget.seen.has(top.resourceId)) {
-    ledgerAppend({ ...base, action: 'skipped', reason: 'already-injected' });
+  if (alreadyShown(sessionId, top.resourceId)) {
+    recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
     return quiet();
   }
   let form = 'short';
   let text = shortForm(top, shelf === 'team' ? TEAM_SHORT_OPENER : PUBLIC_SHORT_OPENER);
-  if (cache.strength === 'strong' && isFree(top) && budget.injected < PUSH_INJECT_MAX) {
+  if (cache.strength === 'strong' && isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
     const body = await fetchFreeBody(top, config);
     if (body !== null) {
       form = 'full';
       text = fullForm(shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER, headerLine(top), body);
     }
   }
-  ledgerAppend({ ...base, action: 'injected', form, deny: false, tokens: Math.ceil(text.length / 4) });
+  const claimed = recordDecision({
+    ...base,
+    action: 'injected',
+    form,
+    deny: false,
+    tokens: Math.ceil(text.length / 4),
+  });
+  // Same rule as every other arm: the unique index is the bound, so a piece a
+  // concurrent fire already claimed is recorded as a skip and not shown twice.
+  if (!mayShow(claimed)) {
+    recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
+    return quiet();
+  }
   emit('SubagentStart', text);
 }
 
@@ -1552,7 +1862,7 @@ main().catch(quiet);
 `;
 
 export function pushSubagentHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('push-subagent')}${pushSource()}${SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))}`;
+  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))}`;
 }
 
 /**
@@ -1598,21 +1908,52 @@ async function main() {
   if (config.push !== 'on') return quiet();
   const sessionId = sessionIdOf(input);
   if (sessionId === null) return quiet();
+  const cwd = cwdOf(input);
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
   const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
   if (filePath.length === 0 || filePath.length > 4096) return quiet();
-  if (!/\.(m?[jt]sx?|cjs|py)$/.test(filePath)) return quiet();
-  const state = loadState(sessionId);
   const tool = input.tool_name;
   const event = input.hook_event_name;
+  const isEdit = event === 'PreToolUse' && (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit');
+  const isRead = event === 'PostToolUse' && tool === 'Read';
+  if (!isEdit && !isRead) return quiet();
+  // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
+  // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
+  // stderr line already written at open. Returning here rather than carrying on
+  // is the difference between a sidecar that has gone quiet and one that has
+  // become an UNBOUNDED network client: with no store the per-arm lookup cap,
+  // the per-session injection cap, the outage brake and the once-per-session
+  // dedup all read from nothing, and they would all have been off at once, in
+  // front of every tool call, indefinitely.
+  if ((await openStore()) === null) return quiet();
 
-  if (event === 'PostToolUse' && tool === 'Read') {
-    const fresh = packagesInSource(fileHead(filePath)).filter((p) => !state.packages.includes(p));
-    const room = READ_PACKAGES_MAX - state.packages.length;
-    const take = fresh.slice(0, Math.max(0, Math.min(READ_PER_FILE, room)));
+  // EVERY EDITED PATH, WHATEVER ITS EXTENSION, and before the source-file gate
+  // below. This is the mechanical lane's only view of a file change: the failure
+  // arm's close rule asks "did a tracked file change since this pairing opened"
+  // (04, "Close rule"), and a hook process cannot ask git that in front of a
+  // tool call. A .toml, a Dockerfile and a drizzle.config.ts are all fixes; the
+  // churn and read arms below still only care about source files.
+  if (isEdit) {
+    // ONE ROW PER PATH, upserted. The close rule reads these back by TIME, so a
+    // re-edit has to move the timestamp and nothing else; the JSON map this
+    // replaces lost entries to concurrent writers and evicted by insertion
+    // order, which a re-edit does not change.
+    setState(sessionId, STATE_EDITED_PREFIX + filePath.slice(-200), true);
+  }
+
+  if (!/\.(m?[jt]sx?|cjs|py)$/.test(filePath)) return quiet();
+
+  if (isRead) {
+    const room = READ_PACKAGES_MAX - countStatePrefix(sessionId, STATE_PACKAGES_PREFIX);
+    if (room <= 0) return quiet();
+    // CLAIMED ONE AT A TIME, so two concurrent Read hooks cannot both decide the
+    // same package is fresh and spend two lookups on it.
+    const take = [];
+    for (const pkg of packagesInSource(fileHead(filePath))) {
+      if (take.length >= Math.min(READ_PER_FILE, room)) break;
+      if (claimState(sessionId, STATE_PACKAGES_PREFIX + pkg)) take.push(pkg);
+    }
     if (take.length === 0) return quiet();
-    state.packages = [...state.packages, ...take];
-    saveState(sessionId, state);
     // CONCURRENT, not sequential. This arm is log-only: nothing it learns
     // reaches the model, and it runs in front of the agent's next step, so the
     // two lookups cost ONE round trip of waiting rather than two. Awaited all
@@ -1626,6 +1967,8 @@ async function main() {
           query: pkg + ' gotcha bug workaround',
           config,
           sessionId,
+          cwd,
+          tool,
           mode: 'log',
           source: 'push-hook',
         }),
@@ -1634,14 +1977,10 @@ async function main() {
     return quiet();
   }
 
-  if (event === 'PreToolUse' && (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit')) {
-    const key = filePath.slice(-200);
-    const n = (typeof state.edits[key] === 'number' ? state.edits[key] : 0) + 1;
-    state.edits[key] = n;
-    // Bounded: a session that touches thousands of files keeps the last 200.
-    const keys = Object.keys(state.edits);
-    if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete state.edits[k];
-    saveState(sessionId, state);
+  if (isEdit) {
+    // One statement, so two concurrent edit hooks cannot both read N and both
+    // write N+1 — which would step over the Nth edit this arm triggers on.
+    const n = bumpState(sessionId, STATE_EDITS_PREFIX + filePath.slice(-200));
     if (n !== CHURN_EDITS) return quiet();
     // SCRUBBED, like every other arm's query. A basename is operator-chosen text
     // going on the wire, and \`clean()\` is not the secret filter — it bounds the
@@ -1658,6 +1997,8 @@ async function main() {
       query,
       config,
       sessionId,
+      cwd,
+      tool,
       mode: 'log',
       source: 'push-hook',
     });
@@ -1670,7 +2011,7 @@ main().catch(quiet);
 `;
 
 export function pushContextHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${userAgentSource()}${marketplaceSource('push-context')}${pushSource()}${CONTEXT_JS.replaceAll('__CHURN_EDITS__', String(PUSH_CHURN_EDITS)).replaceAll('__READ_PACKAGES_MAX__', String(PUSH_READ_PACKAGES_MAX))}`;
+  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${CONTEXT_JS.replaceAll('__CHURN_EDITS__', String(PUSH_CHURN_EDITS)).replaceAll('__READ_PACKAGES_MAX__', String(PUSH_READ_PACKAGES_MAX))}`;
 }
 
 export { jsBody as _jsBodyForTests };

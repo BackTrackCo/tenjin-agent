@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
+import { STATE_DB_FILE, openStore } from '../lib/state-store';
 import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
 import {
   DISPATCH_HOOK_FILE,
@@ -184,25 +185,19 @@ describe('runUninstall — a fully installed machine', () => {
       // With a door key, because the receipt line asserted below is conditional
       // on this machine actually holding one.
       'config.json': '{"baseUrl":"https://shelf.example","shelfBypassSecret":"door-key"}',
-      'searches.json': '{"schemaVersion":1,"searches":[]}',
+      'library.json': '{"receipts":[]}',
     };
     for (const [file, body] of Object.entries(keep)) await writeFile(join(data, file), body);
-    await mkdir(join(data, 'candidates', 'abc'), { recursive: true });
-    await writeFile(join(data, 'candidates', 'abc', 'draft.md'), '# parked\n');
 
     const { report, text } = await run();
 
     for (const [file, body] of Object.entries(keep)) {
       expect(await readFile(join(data, file), 'utf8'), file).toBe(body);
     }
-    expect(await readFile(join(data, 'candidates', 'abc', 'draft.md'), 'utf8')).toBe('# parked\n');
     // And it SAYS so, every run: the boundary is the point of the command.
     expect(report.kept.length).toBeGreaterThan(0);
     expect(text).toContain('Kept:');
     expect(text).toContain('wallet');
-    // The pen is gone as a feature, but an older version's files are still the
-    // operator's, so the promise names that path explicitly.
-    expect(text).toContain('~/.tenjin/candidates');
     /**
      * The exception, stated. The hook scripts live under the same directory the
      * kept list is about, this run just deleted them, and the same payload lists
@@ -250,7 +245,6 @@ describe('runUninstall — a fully installed machine', () => {
     // Everything else it keeps is still named, so this is a conditional line and
     // not a quieter receipt.
     expect(text).toContain('publish.mode included');
-    expect(text).toContain('~/.tenjin/candidates');
   });
 
   /** An empty string is the default, and defaults are not credentials. */
@@ -580,24 +574,41 @@ describe('runUninstall — the push experiment’s arms', () => {
     expect(JSON.parse(after)).toEqual({});
   });
 
-  it('removes them even after `tenjin push off`, and keeps the ledger', async () => {
+  it('removes them, and KEEPS the state store, even after `tenjin push off`', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
     // `push off` writes the config key and nothing else: the scripts and entries
     // stay on disk on purpose, which is exactly the state uninstall must clear.
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'off' } }));
-    const ledger = join(data, 'push-ledger.jsonl');
-    await writeFile(ledger, '{"at":"2026-08-22T00:00:00.000Z"}\n');
+    // A real store, with its WAL sidecars, as a machine that has run the hooks
+    // would have.
+    const store = await openStore(data);
+    store?.run('INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)', [
+      's',
+      'k',
+      '"v"',
+      Date.now(),
+    ]);
+    store?.close();
+    expect(existsSync(join(data, STATE_DB_FILE))).toBe(true);
 
     const { report, text } = await run();
 
     expect(report.scripts.some((p) => p.endsWith(PUSH_PROMPT_HOOK_FILE))).toBe(true);
     expect(report.settings.hooks).toContain('UserPromptSubmit');
-    // Under the data dir, so untouched — and said so in the receipt.
-    expect(existsSync(ledger)).toBe(true);
+    // The store holds the operator's own record — the pairings this machine
+    // worked out, the outcome history, the open loops — so it is kept for the
+    // same reason the wallet and the config are, and a later install picks it
+    // up as it is.
+    expect(existsSync(join(data, STATE_DB_FILE))).toBe(true);
     expect(existsSync(join(data, 'config.json'))).toBe(true);
-    expect(text).toContain('the push ledger under ~/.tenjin');
+    // And SAID so: the receipt names it under Kept, never under Removed.
+    expect(text).toContain('the hook state store ~/.tenjin/state.db');
+    const kept = text.slice(text.indexOf('Kept:'));
+    expect(kept).toContain('~/.tenjin/state.db');
+    const removed = text.slice(0, text.indexOf('Kept:'));
+    expect(removed).not.toContain('state.db');
   });
 
   it('leaves a stranger’s entry on a push-only event alone', async () => {

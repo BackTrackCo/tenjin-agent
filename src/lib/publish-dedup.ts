@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { pushDir } from './paths';
+import { openStore, STORE_SQL } from './state-store';
 
 /**
  * Same-machine publish dedup, keyed on the BODY rather than on a session id.
@@ -13,9 +11,12 @@ import { pushDir } from './paths';
  * publish the same finding. One agent whose turn ends twice around a retry is
  * the same story with one id. What the two duplicates share is the text.
  *
- * So the key is the content hash, and the marker is machine-wide: it lives in
- * the push directory beside the capture markers, ages out on the same retention
- * from the same two pruners, and holds for every session on the machine.
+ * So the key is the content hash, and the record is machine-wide: it is a
+ * `session_state` row under the '' (machine) session, keyed `published:<hash>`,
+ * and it holds for every session on the machine. It used to be a marker file in
+ * the push directory, aged out by two separate pruners that each had to be told
+ * not to sweep it early — a swept marker is a duplicate post, the exact thing it
+ * exists to prevent. The row has no mtime and no pruner.
  *
  * WHAT THIS IS NOT: a guarantee. It is a local optimisation, so it cannot cover
  * two machines publishing the same finding — that needs an idempotency key the
@@ -24,10 +25,12 @@ import { pushDir } from './paths';
  * ignores.
  */
 
-/** The marker prefix. Exported because BOTH pruners of the push directory have
- *  to agree about it: the Stop hook's pass ages these out, and the push core's
- *  pass must leave them alone exactly as it leaves `capture-` alone. */
-export const PUBLISHED_MARKER_PREFIX = 'published-';
+/** The `session_state` key prefix. ⚠ MIRRORED with `STATE_PUBLISHED_PREFIX` in
+ *  lib/state-store.ts, which is what the generated hooks see. */
+export const PUBLISHED_KEY_PREFIX = 'published:';
+
+/** The machine-wide bucket these rows live in; see the DDL note on `session`. */
+const MACHINE_SESSION = '';
 
 /**
  * The bytes the hash is taken over.
@@ -54,39 +57,48 @@ export function publishBodyHash(bodyMd: string): string {
   return createHash('sha256').update(normalizePublishBody(bodyMd), 'utf8').digest('hex');
 }
 
-function markerPath(dataDir: string, bodyMd: string): string {
-  return join(pushDir(dataDir), PUBLISHED_MARKER_PREFIX + publishBodyHash(bodyMd));
+function publishedKey(bodyMd: string): string {
+  return PUBLISHED_KEY_PREFIX + publishBodyHash(bodyMd);
 }
 
 /**
  * The url this body was already published at, or null.
  *
- * Best-effort in both directions: an unreadable or empty marker reads as "not
+ * Best-effort in both directions: an unreadable or empty row reads as "not
  * published", because the failure mode of a false hit is a publish that silently
  * never happens, and the failure mode of a miss is the duplicate this exists to
  * reduce. The cheaper mistake wins.
  */
-export function publishedUrlFor(dataDir: string, bodyMd: string): string | null {
+export async function publishedUrlFor(dataDir: string, bodyMd: string): Promise<string | null> {
+  const store = await openStore(dataDir);
+  if (store === null) return null;
   try {
-    const url = readFileSync(markerPath(dataDir, bodyMd), 'utf8').trim();
-    return url.length > 0 ? url : null;
+    const row = store.get(STORE_SQL.getState, [MACHINE_SESSION, publishedKey(bodyMd)]);
+    if (row === null || typeof row.value !== 'string') return null;
+    const url = JSON.parse(row.value);
+    return typeof url === 'string' && url.length > 0 ? url : null;
   } catch {
     return null;
+  } finally {
+    store.close();
   }
 }
 
 /** Record that this body is published at `url`. Never the publish's problem: the
  *  post is already created by the time this runs, so a failure here costs a
  *  possible duplicate later and must not turn a successful publish into an
- *  error. Written through a temp file so a torn marker cannot be read as a url. */
-export function recordPublished(dataDir: string, bodyMd: string, url: string): void {
+ *  error. */
+export async function recordPublished(dataDir: string, bodyMd: string, url: string): Promise<void> {
+  const store = await openStore(dataDir);
+  if (store === null) return;
   try {
-    const path = markerPath(dataDir, bodyMd);
-    const tmp = `${path}.${process.pid}.tmp`;
-    mkdirSync(pushDir(dataDir), { recursive: true, mode: 0o700 });
-    writeFileSync(tmp, url, { mode: 0o600 });
-    renameSync(tmp, path);
-  } catch {
-    // Bookkeeping only.
+    store.run(STORE_SQL.setState, [
+      MACHINE_SESSION,
+      publishedKey(bodyMd),
+      JSON.stringify(url),
+      Date.now(),
+    ]);
+  } finally {
+    store.close();
   }
 }

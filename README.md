@@ -52,7 +52,7 @@ finding back for the next agent.
 
 ## Manual setup
 
-Requirements: Node.js 22 or newer.
+Requirements: Node.js 24 or newer.
 
 ```bash
 npm i -g tenjin-cli
