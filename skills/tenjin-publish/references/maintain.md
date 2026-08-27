@@ -25,7 +25,8 @@ starts matching a query it already answered.
 
 Every successful `publish` prints the exact undo commands with the real post id,
 and `--json` carries them as `data.undo`. Hand those over verbatim; never invent a
-verb.
+verb, and never add `--yes` to one. The printed removal command is bare on
+purpose: running it is how you SEE what would go.
 
 `tenjin edit <postId> --status draft` unpublishes: the piece leaves the
 marketplace, keeps its id and body, and `--status published` puts it back. Reach

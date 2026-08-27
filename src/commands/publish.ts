@@ -647,7 +647,7 @@ function receipt(
 
 /** The two commands that take a fresh publish back, with the real id filled in. */
 interface UndoCommands {
-  /** Removes the piece. Confirms in every mode; `--yes` is what answers it. */
+  /** Removes the piece. Carries NO `--yes`; see {@link undoCommands}. */
   remove: string;
   /** Only on a published piece: the reversible half. */
   unpublish?: string;
@@ -661,12 +661,24 @@ interface UndoCommands {
  * carries the real commands with the real id, in `data.undo` for a machine reader
  * and as a stderr line for a human, rather than leaving either to guess.
  *
+ * `remove` DELIBERATELY OMITS `--yes`, and the omission is the load-bearing part.
+ * This string is the most authoritative thing in the transcript at the moment it
+ * prints, and it gets copied verbatim — that is the entire reason for printing
+ * it. A `--yes` baked in would hand every reader a one-shot destructive command
+ * and would contradict the rule the skill states in the same breath, that a
+ * delete is run bare first and confirmed only after the user has seen what would
+ * go. Bare, the command is right for both readers: a human pasting it at a
+ * terminal gets the y/N prompt, and an agent running it gets the exit-3 payload
+ * it is supposed to render. `--yes` belongs on the SECOND call, which is why the
+ * refusal payload's own `confirmCommand` (commands/delete.ts) carries it and
+ * this does not: that one answers a question the user has already been shown.
+ *
  * `unpublish` is offered first in the rendered line and omitted entirely on a
  * draft: a draft is not up, so demoting it is not an undo of anything.
  */
 function undoCommands(resourceId: string, status: string): UndoCommands {
   return {
-    remove: `tenjin delete ${resourceId} --yes`,
+    remove: `tenjin delete ${resourceId}`,
     ...(status === 'published' ? { unpublish: `tenjin edit ${resourceId} --status draft` } : {}),
   };
 }

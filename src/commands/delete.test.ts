@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runDelete, type DeleteArgs, type DeleteDeps } from './delete';
-import { testWalletProvider } from '../lib/read-test-utils';
+import { testSigner, testWalletProvider } from '../lib/read-test-utils';
+import { sessionPath } from '../lib/paths';
+import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 import type { CommandContext } from '../context';
 
 let dir: string;
@@ -242,5 +244,115 @@ describe('runDelete — the request', () => {
     );
     expect(stderr()).toContain('Delete The Answer (published), 0.1 USD');
     expect(stderr()).toContain(STORED.url);
+  });
+});
+
+/**
+ * Least privilege on the refusal path. The common call is an agent's FIRST one —
+ * no `--yes`, no TTY — and that run cannot delete anything: it exists to render
+ * the payload and exit 3. Minting `read+write` for it would make a refusal leave
+ * a write-capable delegation behind for later writes to reuse with no wallet
+ * signature, which is a credential granted as the side effect of saying no.
+ */
+describe('runDelete — the session is scoped to what the run can do', () => {
+  /** The scope of the delegation cached on disk, or null when none was minted. */
+  async function cachedScope(): Promise<string | null> {
+    try {
+      const raw = await readFile(sessionPath(dir), 'utf8');
+      return (JSON.parse(raw) as { scope?: string }).scope ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function spyProvider(): { provider: WalletProvider; signCount: () => number } {
+    const inner = testSigner();
+    let n = 0;
+    const signer: TenjinSigner = {
+      address: inner.address,
+      signMessage: (a) => {
+        n++;
+        return inner.signMessage(a);
+      },
+      signTypedData: (a) => inner.signTypedData(a),
+      signTransaction: (tx) => inner.signTransaction(tx),
+    };
+    return {
+      signCount: () => n,
+      provider: {
+        id: 'local',
+        describe: async () => ({
+          address: signer.address,
+          provider: 'local',
+          credentialSource: 'file',
+          policyEnforcement: 'client-only',
+        }),
+        getSigner: async () => signer,
+        diagnostics: async () => ({ warnings: [] }),
+      },
+    };
+  }
+
+  it('a headless refusal mints a READ-scoped session, never a write-capable one', async () => {
+    const stub = stubServer();
+    const { provider } = spyProvider();
+    const { ctx } = makeCtx();
+    await expect(
+      runDelete(args(), ctx, {
+        env: { TENJIN_PUBLISH_MODE: 'full-auto' },
+        provider,
+        fetchImpl: stub.fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(await cachedScope()).toBe('read');
+  });
+
+  it('--yes mints read+write, because that run really does write', async () => {
+    const stub = stubServer();
+    const { provider } = spyProvider();
+    const { ctx } = makeCtx();
+    await runDelete(args({ yes: true }), ctx, {
+      env: { TENJIN_PUBLISH_MODE: 'review' },
+      provider,
+      fetchImpl: stub.fetch,
+    });
+    expect(await cachedScope()).toBe('read+write');
+  });
+
+  // The narrowing must not cost a signature on the path that can write: a cached
+  // read+write covers a read, so the confirm round trip stays one popup total.
+  it('a cached read+write session serves the refusal read with no new signature', async () => {
+    const { provider, signCount } = spyProvider();
+    const { ctx } = makeCtx();
+    await runDelete(args({ yes: true }), ctx, {
+      env: {},
+      provider,
+      fetchImpl: stubServer().fetch,
+    });
+    expect(signCount()).toBe(1);
+    expect(await cachedScope()).toBe('read+write');
+
+    await expect(
+      runDelete(args(), ctx, { env: {}, provider, fetchImpl: stubServer().fetch }),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(signCount()).toBe(1);
+    expect(await cachedScope()).toBe('read+write'); // never rebuilt downward
+  });
+
+  // A run that CAN ask is a run that can end in a delete, so it takes the wider
+  // scope up front rather than paying a second signature mid-prompt.
+  it('an interactive run mints read+write up front, one signature for the whole flow', async () => {
+    const stub = stubServer();
+    const { provider, signCount } = spyProvider();
+    const { ctx } = makeCtx(true);
+    await runDelete(args(), ctx, {
+      env: {},
+      provider,
+      fetchImpl: stub.fetch,
+      confirm: async () => true,
+    });
+    expect(signCount()).toBe(1);
+    expect(await cachedScope()).toBe('read+write');
+    expect(stub.calls.map((c) => c.method)).toEqual(['GET', 'DELETE']);
   });
 });

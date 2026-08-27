@@ -2544,14 +2544,36 @@ describe('runPublish — the undo line', () => {
     );
     expect(res.data).toMatchObject({
       undo: {
-        remove: `tenjin delete ${CREATED.id} --yes`,
+        remove: `tenjin delete ${CREATED.id}`,
         unpublish: `tenjin edit ${CREATED.id} --status draft`,
       },
     });
     expect(res.humanLines ?? []).toContain(
       `Undo: \`tenjin edit ${CREATED.id} --status draft\` unpublishes it (reversible), ` +
-        `\`tenjin delete ${CREATED.id} --yes\` removes it.`,
+        `\`tenjin delete ${CREATED.id}\` removes it.`,
     );
+  });
+
+  /**
+   * The published line is copied verbatim — that is why it is printed at all — so
+   * a `--yes` in it would hand every reader a one-shot destructive command and
+   * contradict the rule stated beside it, that a delete is run bare first and
+   * confirmed only once the user has seen what would go. Pinned negatively on
+   * both surfaces, because the regression is an addition rather than a removal.
+   */
+  it('never bakes --yes into the undo commands, on either surface', async () => {
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    const undo = (res.data as { undo: Record<string, string> }).undo;
+    for (const command of Object.values(undo)) expect(command).not.toContain('--yes');
+    const line = (res.humanLines ?? []).find((l) => l.startsWith('Undo:')) ?? '';
+    expect(line).not.toBe('');
+    expect(line).not.toContain('--yes');
   });
 
   // A draft is not up, so demoting it undoes nothing; offering `--status draft`
@@ -2565,10 +2587,8 @@ describe('runPublish — the undo line', () => {
       hermetic({ fetchImpl: fetch, provider }),
     );
     const undo = (res.data as { undo: { remove: string; unpublish?: string } }).undo;
-    expect(undo.remove).toBe(`tenjin delete ${CREATED.id} --yes`);
+    expect(undo.remove).toBe(`tenjin delete ${CREATED.id}`);
     expect(undo.unpublish).toBeUndefined();
-    expect(res.humanLines ?? []).toContain(
-      `Undo: \`tenjin delete ${CREATED.id} --yes\` removes it.`,
-    );
+    expect(res.humanLines ?? []).toContain(`Undo: \`tenjin delete ${CREATED.id}\` removes it.`);
   });
 });

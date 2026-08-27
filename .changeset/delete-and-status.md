@@ -20,7 +20,14 @@ when it already matches, and it rides the ordinary `publish.mode` gate.
 
 Every successful `tenjin publish` now prints the exact undo commands with the real
 post id, and carries them on the `--json` envelope as `data.undo`, so an agent
-reporting a publish hands over a real command instead of guessing one. A server
-refusal after the confirmation is the new `DELETE_FAILED` (exit 4), whose message
-says the piece is still live. `tenjin delete` is never allowlisted: no mode carries
-it, and it is not delegable to a subagent.
+reporting a publish hands over a real command instead of guessing one. The printed
+removal command carries no `--yes`: it starts the undo, so each surface's own
+confirmation still runs, and `--yes` appears only in a refusal payload's
+`confirmCommand`, which answers a question the user has already been shown.
+
+A server refusal after the confirmation is the new `DELETE_FAILED` (exit 4), whose
+message says the piece is still live. A delete that cannot write — no `--yes` and
+no terminal to ask at — mints a `read`-scoped session rather than a write-capable
+one, so refusing never leaves a credential behind that later writes could reuse.
+`tenjin delete` is never allowlisted: no mode carries it, and it is not delegable
+to a subagent.

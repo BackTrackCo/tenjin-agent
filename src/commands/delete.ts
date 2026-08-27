@@ -66,6 +66,12 @@ export async function runDelete(
     });
   }
 
+  // Whether this run has ANY way to reach the delete, settled from the flags and
+  // the streams alone, before the wallet is touched. It decides two things, and
+  // it must decide both the same way or they contradict each other.
+  const canConfirm = deps.confirm !== undefined || (ctx.io.isTTY && process.stdin.isTTY);
+  const canWrite = args.yes === true || canConfirm;
+
   const runtime = await resolveContextSettings(ctx);
   const provider = resolveWalletProvider(
     ctx,
@@ -73,14 +79,26 @@ export async function runDelete(
   );
   await describeWallet(provider); // surfaces WALLET_MISSING with its own fix
   const signer = await provider.getSigner();
-  // `read+write` from the start, unlike edit's split: every path through this
-  // command that does not refuse ends in a DELETE, so a read-scoped delegation
-  // would only be replaced a moment later by a wider one.
+  // LEAST PRIVILEGE, and the reason it is not simply `read+write`: the common
+  // call is an agent's FIRST one, with no --yes and no TTY, and that run is
+  // structurally incapable of deleting anything — it exists to render the
+  // payload and exit 3. Minting `read+write` for it would leave a write-capable
+  // delegation on disk as the side effect of a refusal, which later writes then
+  // reuse with no wallet signature. So the scope is what this run can actually
+  // do. It costs nothing when the run CAN write: `scopeSatisfies` lets a cached
+  // read+write serve a read, so no branch here signs more often than before.
+  //
+  // What this does not close, stated rather than papered over: a TTY run that
+  // asks and is told no has already minted `read+write`, because the answer
+  // arrives after the read that the question is built from. That delegation is
+  // no broader than the one `publish` or `edit` leaves on the same machine, and
+  // the alternative — mint `read`, then upgrade on yes — costs a second wallet
+  // signature mid-command on the one path a human is standing at.
   const auth = resolveWriteAuth({
     signer,
     baseUrl: runtime.baseUrl,
     dataDir: ctx.dataDir,
-    scope: 'read+write',
+    scope: canWrite ? 'read+write' : 'read',
     ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
     env,
   });
@@ -99,8 +117,7 @@ export async function runDelete(
   for (const line of summary) ctx.io.stderr.write(`${line}\n`);
 
   if (args.yes !== true) {
-    const interactive = deps.confirm !== undefined || (ctx.io.isTTY && process.stdin.isTTY);
-    if (!interactive) {
+    if (!canConfirm) {
       throw new CliError('NEEDS_CONFIRMATION', confirmMessage(stored), {
         fix: 'Show the user what would be removed, then re-run with --yes on an explicit yes. `tenjin edit <postId> --status draft` unpublishes instead, and is reversible.',
         details: {

@@ -260,7 +260,7 @@ At a terminal it asks `y/N` inline. Anywhere else, including under an agent, a p
 | ------- | ---------------------------------------------------------------------- |
 | `--yes` | Confirm the removal without the prompt. Required when there is no TTY. |
 
-Prefer `tenjin edit <post-id> --status draft` when the piece should come down but not be lost. Every successful `publish` prints both commands with the real id, and carries them on the `--json` envelope as `data.undo` (`remove`, plus `unpublish` on a published piece).
+Prefer `tenjin edit <post-id> --status draft` when the piece should come down but not be lost. Every successful `publish` prints both commands with the real id, and carries them on the `--json` envelope as `data.undo` (`remove`, plus `unpublish` on a published piece). `data.undo.remove` carries no `--yes`, deliberately: it is the command that STARTS the undo, so each surface's own confirmation still runs. The `--yes` form appears only in a refusal payload's `confirmCommand`, which answers a question the user has already been shown.
 
 ### `tenjin profile`
 
