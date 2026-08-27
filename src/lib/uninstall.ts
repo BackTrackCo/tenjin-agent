@@ -47,7 +47,6 @@ const HOOK_SCRIPT_FILES = [
   PUSH_CONTEXT_HOOK_FILE,
 ] as const;
 import { hooksDir } from './paths';
-import { STATE_DB_FILE, STATE_DB_SIDECAR_FILES } from './state-store';
 import { resolveHermesHomeLenient } from './hermes';
 import { SHIPPED_SKILL_FILES } from './skills-source';
 import { resolveThroughLink } from './skill-writer';
@@ -77,14 +76,18 @@ import { OPTIONAL_SKILL_NAMES } from './skills-source';
  * remove them, and the command says so in its own output rather than leaving it
  * to the docs.
  *
- * THE TWO EXCEPTIONS ARE BOTH GENERATED, and both are listed in the receipt:
- * `~/.tenjin/hooks/*.mjs`, which `install` writes and rewrites, and
- * `~/.tenjin/state.db` (plus its `-wal`/`-shm` sidecars), which only the
- * generated hooks and this CLI's own bookkeeping ever write. The store is hook
- * state — the already-shown set, the lookup buckets, session working state,
- * local error/fix pairings, and the search ledger those reminders are raised
- * from — and it means nothing once the hooks are gone; `install` starts a fresh
- * one. Plan 03, "Migration and rollout".
+ * THE ONE EXCEPTION IS GENERATED, and it is listed in the receipt:
+ * `~/.tenjin/hooks/*.mjs`, which `install` writes and rewrites.
+ *
+ * `~/.tenjin/state.db` IS KEPT, and that is a reversal of an earlier call in
+ * this branch. It reads like hook state and is written by the hooks, but what
+ * it HOLDS is the operator's: the error/fix pairings this machine worked out
+ * for itself, the outcome history, and the open search loops `outcome --last`
+ * and the Stop reminder are raised from. That is the same class as the wallet,
+ * the config and the library — their own record, unrecoverable if deleted, and
+ * `install` did not create it. A reinstall picks the store back up untouched,
+ * because the schema gate only ever moves forward. The `-wal`/`-shm` sidecars
+ * stay with it; they are meaningless apart from it.
  *
  * SETTINGS.JSON IS EDITED IN ONE PASS. Hooks and permission rules live in the
  * same file, so removing them separately would mean two whole-file
@@ -98,8 +101,6 @@ export interface UninstallReport {
   skills: string[];
   scripts: string[];
   hooksDir?: string;
-  /** The state store files removed; see {@link removeStateStore}. */
-  stateFiles: string[];
   markers: string[];
   kept: string[];
 }
@@ -129,12 +130,12 @@ export type SettingsSkipReason =
  * Stated as one rule and its ONE exception, rather than an inventory: everything
  * under the data dir is the operator's, so a list edited every time a file is
  * added or retired is a list that will eventually be wrong. The exception has to
- * be named, though. `~/.tenjin/hooks/*.mjs` and `~/.tenjin/state.db` are both
- * generated, are both deleted here, and are both under the same directory the
- * rule calls untouched, so the unqualified version contradicted what the run in
- * front of the operator had just reported removing. `candidates/` used to be
- * named here as the one directory nothing writes any more; `tenjin install`
- * deletes it outright now (tenjin-agent#209), so there is nothing left to keep.
+ * be named, though. `~/.tenjin/hooks/*.mjs` is generated, is deleted here, and
+ * is under the same directory the rule calls untouched, so the unqualified
+ * version contradicted what the run in front of the operator had just reported
+ * removing. `candidates/` used to be named here as the one directory nothing
+ * writes any more; `tenjin install` deletes it outright now (tenjin-agent#209),
+ * so there is nothing left to keep.
  *
  * `publish.mode` is called out inside the config item because it is the one kept
  * value that GRANTS something on the next `install`: the rules come back under the
@@ -160,6 +161,7 @@ export type SettingsSkipReason =
 export function keptItems(hasShelfSecret: boolean): string[] {
   return [
     'your wallet, config (publish.mode included, so a later install resumes it), and library under ~/.tenjin',
+    'the hook state store ~/.tenjin/state.db — the error→fix pairings this machine worked out, your outcome history and open search loops; a later install picks it up as it is',
     ...(hasShelfSecret
       ? [
           'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
@@ -170,17 +172,15 @@ export function keptItems(hasShelfSecret: boolean): string[] {
 
 /**
  * What under the data dir this command DOES remove, named beside {@link
- * keptItems} so the boundary reads as a boundary. Both are generated, and both
- * come back on the next `install`.
+ * keptItems} so the boundary reads as a boundary. It is generated, and it comes
+ * back on the next `install`.
  *
- * The second item is stated with its CONSEQUENCE rather than as a filename: the
- * store also holds the search history the open-loop reminders are raised from
- * and `outcome --last` targets, so an operator uninstalling mid-loop should
- * learn that here and not by finding the reminder gone.
+ * A LIST OF ONE, deliberately kept as a list: `state.db` was in it for part of
+ * this branch's life, and the shape is what made the contradiction with
+ * {@link keptItems} obvious enough to catch.
  */
 export const REMOVED_FROM_DATA_DIR = [
   'the generated hook scripts in ~/.tenjin/hooks (install writes them back)',
-  'the hook state store ~/.tenjin/state.db — sidecar telemetry, per-session working state, local error→fix pairings and recent search history; install starts a fresh one',
 ];
 
 /** The legacy pointer line `install` used to write into CLAUDE.md / AGENTS.md. */
@@ -368,31 +368,6 @@ export async function removeHookScripts(dataDir: string): Promise<{
     if (gone) return { scripts: removed, removedDir: dir };
   }
   return { scripts: removed };
-}
-
-/**
- * Delete the hook state store and the two files SQLite keeps beside it.
- *
- * NOT `rm -rf` ON A DIRECTORY: three named files and nothing else, because the
- * data dir holds the wallet. The `-wal` and `-shm` sidecars are removed with the
- * database rather than left behind — a WAL orphaned from its database is not
- * readable by anything, and leaving it would put two files nobody can explain in
- * the directory a subsequent `install` writes into.
- *
- * By the time this runs the hooks are unregistered and their scripts deleted, so
- * there is no writer to race. A file that is not there is not an error.
- */
-export async function removeStateStore(dataDir: string): Promise<string[]> {
-  const removed: string[] = [];
-  for (const name of [STATE_DB_FILE, ...STATE_DB_SIDECAR_FILES]) {
-    const path = join(dataDir, name);
-    // isFile, not mere existence: something parked at one of these paths that is
-    // not a file is not ours to delete, and a non-recursive `rm` on it throws.
-    if (lstatSync(path, { throwIfNoEntry: false })?.isFile() !== true) continue;
-    await rm(path, { force: true });
-    removed.push(path);
-  }
-  return removed;
 }
 
 /**

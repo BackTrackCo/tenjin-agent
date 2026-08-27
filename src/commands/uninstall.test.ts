@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
-import { STATE_DB_FILE, STATE_DB_SIDECAR_FILES, openStore } from '../lib/state-store';
+import { STATE_DB_FILE, openStore } from '../lib/state-store';
 import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
 import {
   DISPATCH_HOOK_FILE,
@@ -574,7 +574,7 @@ describe('runUninstall — the push experiment’s arms', () => {
     expect(JSON.parse(after)).toEqual({});
   });
 
-  it('removes them, and the state store with them, even after `tenjin push off`', async () => {
+  it('removes them, and KEEPS the state store, even after `tenjin push off`', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
     await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
@@ -597,14 +597,18 @@ describe('runUninstall — the push experiment’s arms', () => {
 
     expect(report.scripts.some((p) => p.endsWith(PUSH_PROMPT_HOOK_FILE))).toBe(true);
     expect(report.settings.hooks).toContain('UserPromptSubmit');
-    // The store is hook state and means nothing once the hooks are gone; the
-    // config beside it is the operator's and stays.
-    expect(existsSync(join(data, STATE_DB_FILE))).toBe(false);
-    for (const name of STATE_DB_SIDECAR_FILES) expect(existsSync(join(data, name))).toBe(false);
-    expect(report.stateFiles.some((p) => p.endsWith(STATE_DB_FILE))).toBe(true);
+    // The store holds the operator's own record — the pairings this machine
+    // worked out, the outcome history, the open loops — so it is kept for the
+    // same reason the wallet and the config are, and a later install picks it
+    // up as it is.
+    expect(existsSync(join(data, STATE_DB_FILE))).toBe(true);
     expect(existsSync(join(data, 'config.json'))).toBe(true);
-    // And said so, because it is a delete under the operator's data dir.
+    // And SAID so: the receipt names it under Kept, never under Removed.
     expect(text).toContain('the hook state store ~/.tenjin/state.db');
+    const kept = text.slice(text.indexOf('Kept:'));
+    expect(kept).toContain('~/.tenjin/state.db');
+    const removed = text.slice(0, text.indexOf('Kept:'));
+    expect(removed).not.toContain('state.db');
   });
 
   it('leaves a stranger’s entry on a push-only event alone', async () => {

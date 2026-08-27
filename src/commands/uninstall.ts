@@ -4,7 +4,6 @@ import {
   REMOVED_FROM_DATA_DIR,
   removeFromSettings,
   removeHookScripts,
-  removeStateStore,
   removeMarkerLines,
   removeSkills,
   type UninstallReport,
@@ -59,9 +58,6 @@ export async function runUninstall(
   // at one that does not.
   const settings = await removeFromSettings(home);
   const scripts = await removeHookScripts(ctx.dataDir);
-  // AFTER the scripts, so nothing can still open the database between the delete
-  // and the end of this command.
-  const stateFiles = await removeStateStore(ctx.dataDir);
   const skills = await removeSkills(home, deps.env);
   const markers = await removeMarkerLines(home);
 
@@ -70,7 +66,6 @@ export async function runUninstall(
     skills,
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
-    stateFiles,
     markers,
     // Read rather than assumed: the shelf-key item is an imperative to clear a
     // shared credential, and on the machines that do not have one it is a false
@@ -108,9 +103,6 @@ function humanLines(report: UninstallReport): string[] {
     removed.push(
       `${settings.rules.length} tenjin permission rule(s) in ${sanitizeForTerminal(settings.path)}`,
     );
-  }
-  for (const path of report.stateFiles) {
-    removed.push(`hook state ${sanitizeForTerminal(path)}`);
   }
   for (const path of report.markers) {
     removed.push(`legacy pointer line in ${sanitizeForTerminal(path)}`);
