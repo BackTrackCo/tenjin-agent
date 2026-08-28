@@ -512,10 +512,13 @@ export const STORE_SQL = {
    * `tenjin push status --sessions`, the importance-score report (#212,
    * CommonTrace `detection.py`): every event row in the window in session
    * order, the closes the machine's sessions made, the searches they ran, the
-   * sessions' own bounds, and the two session_state families the score is
-   * compared against — `capture_asked` (per session) and `published:<hash>`
-   * (machine-wide, attributed to a session by time). Report queries: a
-   * window scan over tables that never prune, run by a human, never by a hook.
+   * sessions' own bounds, and the session_state families the score is compared
+   * against — `capture_asked` (per session) and the publish marks
+   * `published:<hash>` and `agent_published:<...>` (both machine-wide,
+   * attributed to a session by time; the second is a CHILD's own publish, and
+   * `LIKE 'published:%'` is anchored, so it needs naming separately). Report
+   * queries: a window scan over tables that never prune, run by a human, never
+   * by a hook.
    */
   scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
      FROM events WHERE at >= ? ORDER BY session, at, id`,
@@ -524,7 +527,8 @@ export const STORE_SQL = {
   scoreSessions: `SELECT session, started_at, ended_at FROM sessions
      WHERE started_at >= ? OR ended_at >= ?`,
   scoreState: `SELECT session, key, at FROM session_state
-     WHERE (key = 'capture_asked' OR key LIKE 'published:%') AND at >= ?`,
+     WHERE (key = 'capture_asked' OR key LIKE 'published:%'
+            OR key LIKE 'agent_published:%') AND at >= ?`,
 } as const;
 
 export type StoreSqlKey = keyof typeof STORE_SQL;

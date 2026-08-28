@@ -9,6 +9,7 @@ import {
   scoreSession,
   SCORE_RECENCY_MS,
   type ScoreEvent,
+  type PushSessionScore,
 } from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
@@ -562,6 +563,9 @@ describe('scoreSession', () => {
     at: T0 + offsetS * 1000,
     hook,
     tool: null,
+    // The lead's own turn unless a fixture says otherwise: these are pure
+    // fixtures for ONE worker, which is the unit scoreSession scores.
+    agentId: null,
     files: [],
     command: null,
     head: null,
@@ -817,6 +821,7 @@ describe('runPushStatus --sessions', () => {
       sessions: [
         {
           session: 'sess-fixed',
+          agent: null,
           score: 5,
           patterns: ['error-edit-resolved', 'fail-edit-pass'],
           bonus: 1,
@@ -826,6 +831,7 @@ describe('runPushStatus --sessions', () => {
         },
         {
           session: 'sess-chat',
+          agent: null,
           score: 0,
           patterns: [],
           events: 2,
@@ -837,9 +843,152 @@ describe('runPushStatus --sessions', () => {
     const human = result.humanLines?.join('\n') ?? '';
     expect(human).toContain('sessions, last 7d: 2 scored');
     expect(human).toContain(
-      'sess-fixed   score=5.0 events=4 capture_asked=yes published=1 [error-edit-resolved, fail-edit-pass]',
+      "sess-fixed   agent=''           score=5.0 events=4 capture_asked=yes published=1 [error-edit-resolved, fail-edit-pass]",
     );
-    expect(human).toContain('sess-chat    score=0.0 events=2 capture_asked=yes published=0');
+    expect(human).toContain(
+      "sess-chat    agent=''           score=0.0 events=2 capture_asked=yes published=0",
+    );
+  });
+
+  /**
+   * THE PARTITION, against the store (audit fix 2). Parallel subagents share
+   * their parent's session id and are told apart only by `data.agentId`, so
+   * a session-wide scan stitched a failure, an edit and a pass that belonged to
+   * three different workers into one "fix". Both halves are asserted here: the
+   * spliced sequence must not fire, and the identical sequence within one
+   * worker must.
+   */
+  it('never spans agents: parent failure + child edit + parent pass is not a fix', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    await seedSession(dir, 'sess-split', s1, [
+      // The parent fails and later passes; the only edit between them belongs
+      // to a child that was working on something else.
+      { at: s1 + 1000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
+      { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+      { at: s1 + 3000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
+    ]);
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+
+    // Two workers, two lines, and NEITHER has a fix: the parent never edited,
+    // the child never failed or passed.
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.agent).sort()).toEqual(['a1', null]);
+    for (const row of rows) {
+      expect(row.patterns, `agent ${String(row.agent)}`).toEqual([]);
+      expect(row.score, `agent ${String(row.agent)}`).toBe(0);
+    }
+    // The events are split, not dropped: 2 for the parent, 1 for the child.
+    expect(rows.find((r) => r.agent === null)?.events).toBe(2);
+    expect(rows.find((r) => r.agent === 'a1')?.events).toBe(1);
+  });
+
+  it('scores the same sequence when one worker did all three', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    // Byte for byte the rows above, minus the agent stamp on the edit.
+    await seedSession(dir, 'sess-whole', s1, [
+      { at: s1 + 1000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
+      { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
+      { at: s1 + 3000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
+    ]);
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session: 'sess-whole',
+      agent: null,
+      patterns: ['error-edit-resolved', 'fail-edit-pass'],
+      events: 3,
+    });
+  });
+
+  it('scores a child on its own rows, and keeps capture_asked on the parent', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    await seedSession(
+      dir,
+      'sess-child',
+      s1,
+      [
+        { at: s1 + 1000, hook: 'prompt', data: { event: 'UserPromptSubmit', query: 'q' } },
+        {
+          at: s1 + 2000,
+          hook: 'failure',
+          tool: 'Bash',
+          data: { command: 'pnpm test', agentId: 'a1' },
+        },
+        { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+        {
+          at: s1 + 4000,
+          hook: 'pass',
+          tool: 'Bash',
+          data: { command: 'pnpm test', head: 'pnpm', agentId: 'a1' },
+        },
+      ],
+      { endedAt: s1 + 600_000, captureAskedAt: s1 + 600_000 },
+    );
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+
+    const child = rows.find((r) => r.agent === 'a1');
+    const parent = rows.find((r) => r.agent === null);
+    expect(child).toMatchObject({
+      session: 'sess-child',
+      patterns: ['error-edit-resolved', 'fail-edit-pass'],
+      events: 3,
+      // The ask is the SESSION's, and it is reported once, on the parent.
+      captureAsked: false,
+    });
+    expect(parent).toMatchObject({ session: 'sess-child', events: 1, captureAsked: true });
+    // The child is the one that did the work, so it sorts above its parent.
+    expect(rows[0]!.agent).toBe('a1');
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('agent=a1');
+  });
+
+  it("counts a child's own agent_published mark as a publish (#237)", async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    await seedSession(dir, 'sess-pub', s1, [{ at: s1 + 1000, hook: 'prompt' }], {
+      endedAt: s1 + 600_000,
+    });
+    // What a child's own `tenjin publish` leaves behind. `LIKE 'published:%'`
+    // is anchored, so this row was invisible to the report until it was named.
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, [
+      '',
+      'agent_published:a1@ffff',
+      JSON.stringify({ url: 'https://x/p' }),
+      s1 + 500_000,
+    ]);
+    store.close();
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+    expect(rows.find((r) => r.session === 'sess-pub')?.published).toBe(1);
   });
 
   it('reads closes and searches into the score, and the recency bonus from ended_at', async () => {

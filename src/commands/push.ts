@@ -166,6 +166,13 @@ export interface PushStatusOptions {
  */
 export interface PushSessionScore {
   session: string;
+  /**
+   * The agent these rows belong to, or null for the lead's own turn. One
+   * scored line per (session, agent): parallel subagents share their parent's
+   * session id, so a session is not a worker and scoring it whole credited one
+   * agent's failure to another's fix.
+   */
+  agent: string | null;
   /** The weighted sum, bonus applied, to one decimal. */
   score: number;
   /** The patterns that fired, by name, in the order of {@link SCORE_WEIGHTS}. */
@@ -173,12 +180,16 @@ export interface PushSessionScore {
   /** The recency multiplier actually applied (1.0 = none, up to 1.3). */
   bonus: number;
   events: number;
-  /** The Stop hook's capture ask fired in this session (`capture_asked`). */
+  /** The Stop hook's capture ask fired in this session (`capture_asked`).
+   *  PER SESSION, so it is reported on the parent row only — the ask happens
+   *  once at the end of the turn, not once per subagent, and repeating it on
+   *  every child line would read as several asks. */
   captureAsked: boolean;
-  /** `published:<hash>` rows stamped between the session's start and end
-   *  (machine-wide rows, attributed by time, so a concurrent session's publish
-   *  can be counted here too: read it as "a publish happened while this session
-   *  was open"). */
+  /** `published:<hash>` and `agent_published:<...>` rows stamped between the
+   *  session's start and end (machine-wide rows, attributed by time, so a
+   *  concurrent session's publish can be counted here too: read it as "a
+   *  publish happened while this session was open"). Same count on every agent
+   *  row of one session, for that reason: the window is the session's. */
   published: number;
 }
 
@@ -344,6 +355,9 @@ export interface ScoreEvent {
   at: number;
   hook: string;
   tool: string | null;
+  /** The agent that fired it (`data.agentId`), or null for the lead's own
+   *  turn. The unit the score is scanned over: see {@link ScoreInput}. */
+  agentId: string | null;
   /** The basenames the row names (`files`), or none. */
   files: string[];
   /** The failure row's `command` / the pass row's `head` / the prompt row's
@@ -353,11 +367,29 @@ export interface ScoreEvent {
 }
 
 export interface ScoreInput {
+  /**
+   * ONE AGENT'S ROWS, not one session's. Parallel subagents share their
+   * parent's `session_id` and are told apart only by `data.agentId`, so a
+   * session-wide scan stitched one agent's failure to another's edit and a
+   * third's pass and called the result a fix. {@link readSessionScores}
+   * partitions before it calls this, and every pattern below is therefore
+   * "did ONE worker do this".
+   */
   events: ScoreEvent[];
-  /** When this session closed a pairing (`pairing_closes.at`). */
+  /**
+   * When this SESSION closed a pairing (`pairing_closes.at`).
+   *
+   * SESSION-WIDE, AND THE PARTITION DOES NOT REACH IT: `pairing_closes` has no
+   * agent column, so every agent in the session sees every close. The one
+   * pattern this feeds — `error-edit-resolved`, whose resolution may be a close
+   * — can still be completed by a sibling's close. Narrowing it needs a column
+   * on that table, which is DDL and not this change.
+   */
   closes: number[];
-  /** When this session ran a search (`searches.at`): the research signal the
-   *  `research` event under-reports, since that row is written on a hit only. */
+  /** When this SESSION ran a search (`searches.at`): the research signal the
+   *  `research` event under-reports, since that row is written on a hit only.
+   *  Session-wide for the same reason `closes` is, and feeding
+   *  `research-then-edit` with the same caveat. */
   searches: number[];
   /** The session's end, or the last thing on record when it has none. */
   endedAt: number | null;
@@ -370,11 +402,13 @@ const MARKDOWN_RE = /\.(?:md|mdx|markdown)$/i;
 const TEST_FILE_RE = /(?:^|[._-])(?:test|spec)s?(?:[._-]|$)|^test_|_test\./i;
 
 /**
- * Score one session's rows. Pure, so the patterns are testable on fixtures
- * without a store; {@link readSessionScores} feeds it.
+ * Score ONE AGENT's rows within a session. Pure, so the patterns are testable
+ * on fixtures without a store; {@link readSessionScores} partitions and feeds
+ * it, once per (session, agent).
  *
  * Every pattern is "did this sequence happen at least once", scanned in time
- * order over the session's own rows:
+ * order over that agent's own rows — never across siblings, which is the whole
+ * reason the caller partitions (see {@link ScoreInput.events}):
  *  - error-edit-resolved: a `failure`, then an `edit`, then a `pass` (any head)
  *    or a pairing close by this session. 3.0.
  *  - edit-across-prompt: the same non-markdown basename edited before and after
@@ -553,11 +587,19 @@ function parseData(raw: unknown): Record<string, unknown> {
 }
 
 /**
- * The `--sessions` report: every session with an event row in the last
- * {@link LEDGER_WINDOW_DAYS} days, scored by {@link scoreSession}, with what the
- * Stop hook actually did beside it. Sessions with the '' (machine) id are
- * skipped: that bucket is where a payload naming no session lands, and it is not
- * a conversation anything could have been asked in.
+ * The `--sessions` report: one line per (SESSION, AGENT) with an event row in
+ * the last {@link LEDGER_WINDOW_DAYS} days, each scored by
+ * {@link scoreSession}, with what the Stop hook actually did beside it.
+ *
+ * PER AGENT, because a session is not a worker. Every subagent files under its
+ * parent's session id, so a session-wide scan read one child's failure, a
+ * sibling's edit and the parent's pass as one fix and scored a session nobody
+ * had fixed anything in. The parent's own turn is the null agent, and it is the
+ * row that carries the session-wide `capture_asked`.
+ *
+ * Sessions with the '' (machine) id are skipped: that bucket is where a payload
+ * naming no session lands, and it is not a conversation anything could have
+ * been asked in.
  */
 export async function readSessionScores(
   dataDir: string,
@@ -567,15 +609,31 @@ export async function readSessionScores(
   if (store === null) return [];
   try {
     const since = nowMs - LEDGER_WINDOW_MS;
-    const bySession = new Map<string, ScoreEvent[]>();
+    // KEYED BY (session, agent), not by session. `data.agentId` is null for the
+    // lead's own turn and the child's id for a subagent's, and the two are
+    // scored apart: a session is the conversation, an agent is the worker, and
+    // fail -> edit -> pass is a claim about one worker.
+    const byWorker = new Map<
+      string,
+      { session: string; agent: string | null; events: ScoreEvent[] }
+    >();
     for (const row of store.all(STORE_SQL.scoreEvents, [since])) {
       const session = typeof row.session === 'string' ? row.session : '';
       if (session === '') continue;
       const data = parseData(row.data);
-      (bySession.get(session) ?? bySession.set(session, []).get(session)!).push({
+      // '' is not an agent: the arms write null for a parent fire, and a row
+      // from a build that predates the field has no `agentId` at all. Both are
+      // the lead's own bucket.
+      const agent =
+        typeof data.agentId === 'string' && data.agentId.length > 0 ? data.agentId : null;
+      const key = session + '\u0000' + (agent ?? '');
+      const bucket =
+        byWorker.get(key) ?? byWorker.set(key, { session, agent, events: [] }).get(key)!;
+      bucket.events.push({
         at: typeof row.at === 'number' ? row.at : 0,
         hook: typeof row.hook === 'string' ? row.hook : 'unknown',
         tool: typeof row.tool === 'string' ? row.tool : null,
+        agentId: agent,
         files: parseFiles(row.files),
         command: typeof data.command === 'string' ? data.command : null,
         head: typeof data.head === 'string' ? data.head : null,
@@ -606,7 +664,7 @@ export async function readSessionScores(
       else if (typeof row.at === 'number') publishedAt.push(row.at);
     }
     const out: PushSessionScore[] = [];
-    for (const [session, events] of bySession) {
+    for (const { session, agent, events } of byWorker.values()) {
       const bound = bounds.get(session);
       const started = bound?.started ?? events[0]!.at;
       const endedAt = bound?.ended ?? null;
@@ -619,16 +677,24 @@ export async function readSessionScores(
       });
       out.push({
         session,
+        agent,
         score: scored.score,
         patterns: scored.patterns,
         bonus: scored.bonus,
         events: events.length,
-        captureAsked: asked.has(session),
+        // The parent's row carries it; a child never asks (see the field).
+        captureAsked: agent === null && asked.has(session),
         published: publishedAt.filter((at) => at >= started && at <= endForPublish).length,
       });
     }
-    // Highest score first, so the top of the list is what a gate would keep.
-    return out.sort((a, b) => b.score - a.score || a.session.localeCompare(b.session));
+    // Highest score first, so the top of the list is what a gate would keep;
+    // then the session, then the parent ahead of its children.
+    return out.sort(
+      (a, b) =>
+        b.score - a.score ||
+        a.session.localeCompare(b.session) ||
+        (a.agent ?? '').localeCompare(b.agent ?? ''),
+    );
   } catch {
     return [];
   } finally {
@@ -686,18 +752,23 @@ export async function runPushStatus(
 }
 
 /**
- * One line per session: the score, the patterns behind it, and the two facts
- * it is judged against. `capture_asked` without a publish is the ask the score
- * might have saved; a publish under a low score is the session it would have
- * missed. The week's read (plan 06, "What to watch") is those two counts.
+ * One line per (session, agent): the score, the patterns behind it, and the two
+ * facts it is judged against. `capture_asked` without a publish is the ask the
+ * score might have saved; a publish under a low score is the session it would
+ * have missed. The week's read (plan 06, "What to watch") is those two counts.
+ *
+ * `agent=''` IS THE LEAD'S OWN TURN, the same empty bucket the close rule's
+ * state keys use for it, and a named agent is one subagent of the session above
+ * it. Two lines sharing a session id are two workers in one conversation, not
+ * one session counted twice.
  */
 function renderSessionLines(sessions: PushSessionScore[], windowDays: number): string[] {
   const lines = [
-    `sessions, last ${windowDays}d: ${sessions.length} scored (importance score vs capture_asked vs published; report only, no hook reads it)`,
+    `sessions, last ${windowDays}d: ${sessions.length} scored, one line per session x agent (importance score vs capture_asked vs published; report only, no hook reads it)`,
   ];
   for (const s of sessions) {
     lines.push(
-      `  ${s.session.slice(0, 12).padEnd(12)} score=${s.score.toFixed(1)}` +
+      `  ${s.session.slice(0, 12).padEnd(12)} agent=${(s.agent ?? "''").slice(0, 12).padEnd(12)} score=${s.score.toFixed(1)}` +
         (s.bonus > 1 ? ` (x${s.bonus.toFixed(2)} recency)` : '') +
         ` events=${s.events} capture_asked=${s.captureAsked ? 'yes' : 'no'} published=${s.published}` +
         (s.patterns.length > 0 ? ` [${s.patterns.join(', ')}]` : ''),
