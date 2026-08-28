@@ -238,7 +238,18 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
           // Link first, then stamp: a crash between the two leaves a row that is
           // still unsynced and re-publishes (dedup on the shelf side), never a
           // synced row whose post id is lost and can never be promoted.
-          setLink(store, row.id, { postId: result.resourceId, origin, at: now(), own: true });
+          //
+          // AND THE SAME IS TRUE OF A FAILED WRITE, which is not a crash and
+          // used to fall through to the stamp anyway. `store.run` swallows a
+          // SQLite error and returns false, so the row would have been marked
+          // synced with no link: nothing to PUT the verified keys on later, and
+          // no unsynced row for a future run to pick up. Leaving it unstamped
+          // costs one duplicate POST at worst.
+          if (
+            !setLink(store, row.id, { postId: result.resourceId, origin, at: now(), own: true })
+          ) {
+            continue;
+          }
           store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
           synced += 1;
         } catch (err) {
@@ -248,7 +259,12 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             // A teammate's post already holds this fingerprint verified. The row is
             // theirs on the shelf now; stamp synced_at so it is never retried and
             // record who holds it (`held`, so no later run PUTs on their post).
-            setLink(store, row.id, { postId: holder, origin, at: now(), held: true });
+            // Unstamped if the link did not land, for the reason the publish
+            // path gives: a synced row with no `held` link would be retried by
+            // no run and PUT by none either.
+            if (!setLink(store, row.id, { postId: holder, origin, at: now(), held: true })) {
+              continue;
+            }
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
             held += 1;
             continue;
@@ -517,8 +533,16 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
   }
 }
 
-function setLink(store: Store, pairingId: number, link: PairingLink): void {
-  store.run(STORE_SQL.setState, [
+/**
+ * Write the pairing → post link. RETURNS WHETHER IT LANDED, and every caller
+ * checks: the link is the only record that this pairing has a post, and
+ * `synced_at` is the flag that says never publish this row again. Stamping the
+ * second without the first strands the pairing forever — no id to PUT on, no
+ * unsynced row to re-publish — so a failed write has to leave the row alone and
+ * let the next run try again. The shelf dedups the repeat.
+ */
+function setLink(store: Store, pairingId: number, link: PairingLink): boolean {
+  return store.run(STORE_SQL.setState, [
     MACHINE_SESSION,
     STATE_PAIRING_POST_PREFIX + pairingId,
     JSON.stringify(link),

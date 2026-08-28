@@ -647,3 +647,105 @@ describe('tenjin sync: nothing to do', () => {
     expect(result.data).toMatchObject({ synced: 0, verified: 0, held: 0 });
   });
 });
+
+describe('tenjin sync: the link write fails', () => {
+  /** Make every `pairing_post:` write abort inside SQLite, which is what
+   *  `store.run` swallows into a `false` — a disk-full store, a locked one, a
+   *  constraint. Only that one key: the rest of the run writes normally, so
+   *  this proves the stamp was skipped BECAUSE the link failed and not because
+   *  the store stopped working. */
+  async function breakLinkWrites(): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    store.run(
+      `CREATE TRIGGER no_pairing_link BEFORE INSERT ON session_state
+         WHEN NEW.key LIKE 'pairing_post:%'
+         BEGIN SELECT RAISE(ABORT, 'link write failed'); END`,
+      [],
+    );
+    store.close();
+  }
+
+  async function fixLinkWrites(): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    store.run('DROP TRIGGER no_pairing_link', []);
+    store.close();
+  }
+
+  it('leaves synced_at NULL so the row re-publishes, rather than stranding it', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({
+      cwd: dir,
+      key: 'fine-hash-nolink',
+      cmdHead: 'pnpm',
+      cmd: 'pnpm test',
+      status: 'unverified',
+    });
+    await breakLinkWrites();
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    // The POST happened — the piece is on the shelf — but nothing local claims
+    // it, so the row must still look unsynced.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.method).toBe('POST');
+    expect(result.data).toMatchObject({ synced: 0, verified: 0, held: 0, skipped: 0, pending: 1 });
+    expect((await pairingRow(id)).synced_at).toBeNull();
+
+    // A synced row with no link is the state that can never be promoted: no id
+    // to PUT the verified keys on, and no unsynced row for a later run to pick
+    // up. Neither half is here.
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    const link = store.get('SELECT value FROM session_state WHERE key = ?', [`pairing_post:${id}`]);
+    store.close();
+    expect(link).toBeNull();
+
+    // And the next run does the thing being preserved: publishes again (the
+    // shelf dedups), links, and stamps.
+    await fixLinkWrites();
+    const second = shelfServer();
+    const again = await runSync(ctx(), { cwd: dir, provider, fetchImpl: second.fetch });
+    expect(second.sent).toHaveLength(1);
+    expect(again.data).toMatchObject({ synced: 1 });
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
+  });
+
+  it('does not stamp a held row whose holder link failed to write', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({
+      cwd: dir,
+      key: 'fine-held-nolink',
+      cmdHead: 'pnpm',
+      cmd: 'pnpm test',
+      status: 'unverified',
+    });
+    await breakLinkWrites();
+    const { provider } = spyProvider();
+    // The verified-holder 400: a teammate's published piece already holds the
+    // fingerprint, so the run records who holds it and stamps. With the link
+    // write broken it must do neither.
+    const { fetch, sent } = shelfServer(() => ({
+      status: 400,
+      json: {
+        error: {
+          message: 'validation failed',
+          details: {
+            fieldErrors: {
+              keys: ['fingerprint key is already verified on post teammate-post-3'],
+            },
+          },
+        },
+      },
+    }));
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(result.data).toMatchObject({ held: 0, synced: 0, pending: 1 });
+    expect((await pairingRow(id)).synced_at).toBeNull();
+  });
+});
