@@ -141,6 +141,80 @@ export interface FetchJsonFailure {
   status?: number;
   requestId?: string;
   message: string;
+  /**
+   * On `invalid-json`, and on `http` when the status is 401/403: the response
+   * looks like an access-protection or sign-in page rather than an API answer.
+   * See {@link accessGateSignals} for what "looks like" means. Callers use it to
+   * point at the missing credential instead of at the base URL, which is the one
+   * setting that was already correct (#218).
+   */
+  gateSuspected?: boolean;
+  /**
+   * Present (true) only where the response left the host that was asked for:
+   * `gateSuspected`'s STRONGER signal (the final URL's host differs), or, on
+   * `blocked-redirect`, a `Location` that resolves to another host. An HTML
+   * content-type alone proves a page came back, not who sent it, and a 3xx
+   * alone proves only that the URL moved; leaving the host is what lets a
+   * caller name access protection outright.
+   */
+  gateOffOrigin?: boolean;
+}
+
+/**
+ * Does this response read as a protection page rather than as an API answer?
+ *
+ * Two independent signals, reported separately because they prove different
+ * amounts (the caller's wording must not outrun the evidence):
+ *
+ * - an HTML content-type, because a Vercel Deployment Protection interstitial
+ *   and every sign-in wall answer with a page;
+ * - a final URL whose host is not the one asked for, because a gate that
+ *   redirects to sign in lands the probe on another host and `fetch` follows it
+ *   silently on the unpinned requests this function serves.
+ *
+ * Decided HERE because this transport is the only place holding the `Response`;
+ * a caller re-deriving it from the failure message would be guessing. An
+ * unreadable final URL is NOT suspicion: `res.url` is empty on a synthesized
+ * Response, so only a host that reads AND differs counts.
+ */
+function accessGateSignals(
+  requestedUrl: string,
+  res: Response,
+): { gateSuspected: boolean; gateOffOrigin?: true } {
+  const html = /^\s*text\/html\b/i.test(res.headers.get('content-type') ?? '');
+  let offOrigin = false;
+  if (res.url.length > 0) {
+    try {
+      offOrigin = new URL(requestedUrl).host !== new URL(res.url).host;
+    } catch {
+      offOrigin = false;
+    }
+  }
+  return {
+    gateSuspected: html || offOrigin,
+    ...(offOrigin ? { gateOffOrigin: true as const } : {}),
+  };
+}
+
+/**
+ * Does an unfollowed 3xx point off the host that was asked for?
+ *
+ * The pinned branch never follows, so `res.url` is still the requested URL and
+ * `Location` is the only evidence about where the hop went. That distinction
+ * carries the whole verdict downstream: a gate's sign-in interstitial lands on
+ * another host, while an `http://` base URL that 301s to https, or a host
+ * normalising to its canonical name, does not, and reading either as a refused
+ * credential blames the wrong setting. A relative target resolves against the
+ * request, so it is same-host by construction; a missing or unparseable one is
+ * NOT an off-host claim.
+ */
+function redirectLeavesHost(requestedUrl: string, location: string | null): boolean {
+  if (location === null || location.length === 0) return false;
+  try {
+    return new URL(requestedUrl).host !== new URL(location, requestedUrl).host;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -235,6 +309,12 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
         kind: 'blocked-redirect',
         status: res.status,
         ...(requestId !== undefined ? { requestId } : {}),
+        // Where it pointed, not that it pointed: only a hop that leaves the host
+        // asked for is evidence about the key. Same-host 3xx happens to a base
+        // URL that needs fixing, with a perfectly good key.
+        ...(redirectLeavesHost(url, res.headers.get('location'))
+          ? { gateOffOrigin: true as const }
+          : {}),
         message:
           `Request to ${url} was redirected (${res.status}) while carrying the team shelf's ` +
           'bypass key; refusing to follow it, because the key opens only the configured origin.',
@@ -247,6 +327,11 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
         kind: 'http',
         status: res.status,
         ...(requestId !== undefined ? { requestId } : {}),
+        // 401/403 is one of the three shapes deployment protection answers with
+        // (200 HTML and a 30x interstitial are the others), so the gate signals
+        // ride here too. Other statuses stay unmarked: a 404 or 500 HTML page is
+        // an ordinary broken deployment, not a credential problem.
+        ...(res.status === 401 || res.status === 403 ? accessGateSignals(url, res) : {}),
         message: `Request to ${url} failed with status ${res.status}`,
       };
     }
@@ -266,6 +351,7 @@ export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<Fe
           kind: 'invalid-json',
           status: res.status,
           ...(requestId !== undefined ? { requestId } : {}),
+          ...accessGateSignals(url, res),
           message: `Response from ${url} was not valid JSON`,
         };
       }
