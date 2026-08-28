@@ -104,6 +104,25 @@ async function runScript(
   });
 }
 
+/**
+ * A generated hook script with the WAL switch forced to fail on BOTH attempts,
+ * so the store runs where #246's give-up leaves it: open, correct, and on a
+ * rollback journal for good.
+ *
+ * The count assertion is the guard. A stub that silently stops matching would
+ * turn its test back into an ordinary run of the happy path — passing, and
+ * proving nothing — which is the failure mode a stub of production source has
+ * and a fixture does not.
+ */
+function withoutWal(source: string): string {
+  const statement = "db.exec('PRAGMA journal_mode = wal');";
+  expect(
+    source.split(statement).length - 1,
+    'the WAL switch is not where this stub expects it; setWal moved or changed',
+  ).toBe(1);
+  return source.replace(statement, "throw new Error('forced: no wal');");
+}
+
 async function writeConfig(extra: Record<string, unknown> = {}): Promise<void> {
   await writeFile(
     join(dataDir, 'config.json'),
@@ -390,6 +409,133 @@ describe('openStore', () => {
     expect(probe.ok).toBe(true);
     expect(probe.version).toMatch(/^\d+\.\d+/);
   });
+});
+
+/**
+ * THE WAL SWITCH, BOTH ENDINGS (tenjin-agent#246).
+ *
+ * `PRAGMA journal_mode = wal` is the one statement in this module the busy
+ * timeout does not cover: against a connection holding a write lock it throws at
+ * 0 ms with the busy handler never consulted, which is how the cold-start
+ * stampede killed the loser one line before the transaction `bootstrap()`
+ * protects. The fix is a second attempt AFTER the bootstrap, and a give-up that
+ * leaves the store open on a rollback journal rather than dead.
+ *
+ * IN PROCESS, NOT AS HOOK CHILDREN, for the retry: the case only exists while a
+ * lock is held across the FIRST attempt and released before the second, and the
+ * first attempt happens microseconds into the open. Against a spawned child that
+ * window is node's startup time — a release timed to land inside it is a
+ * coin flip, and the losing side of the flip is a test that passes while
+ * exercising nothing. Calling `openStore` directly makes the ordering exact. The
+ * hooks' own copy of the retry is pinned by the eight-process case below and by
+ * the drift test above, which requires the two to stay the same shape.
+ */
+describe('the WAL switch', () => {
+  function connect(): DatabaseSync {
+    const handle = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    handle.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
+    return handle;
+  }
+
+  /**
+   * Hold a write lock on the state database for `ms`, and resolve once it IS
+   * held.
+   *
+   * ANOTHER PROCESS, NOT ANOTHER CONNECTION. `DatabaseSync` is synchronous, so
+   * an in-process holder on a timer can never let go: `openStore` blocks the
+   * event loop that timer lives on for the whole of the bootstrap that is
+   * waiting for it, and the open fails outright instead of retrying. The child
+   * has its own loop and its own clock. (Cost of learning this: the first draft
+   * of the test above, which failed with a null store after 1.2 s.)
+   */
+  async function holdWriteLock(ms: number): Promise<void> {
+    const script = join(scriptDir, `lock-${Math.random().toString(36).slice(2)}.mjs`);
+    await writeFile(
+      script,
+      [
+        `import { DatabaseSync } from 'node:sqlite';`,
+        `const db = new DatabaseSync(${JSON.stringify(join(dataDir, STATE_DB_FILE))});`,
+        `db.exec('PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}');`,
+        `db.exec('BEGIN IMMEDIATE');`,
+        `process.stdout.write('locked');`,
+        `setTimeout(() => { db.exec('COMMIT'); db.close(); }, ${ms});`,
+      ].join('\n'),
+    );
+    const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'inherit'] });
+    await new Promise<void>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', () => reject(new Error('the lock holder exited before taking the lock')));
+      child.stdout.on('data', (chunk) => {
+        if (String(chunk).includes('locked')) resolve();
+      });
+    });
+  }
+
+  it('is taken on the second attempt, after the bootstrap it lost the first to', async () => {
+    // #246's exact shape: a fresh file and another opener already inside its
+    // DDL, letting go while the bootstrap waits on it. 300 ms sits between the
+    // first attempt (which fails at 0 ms) and the bootstrap's first try (which
+    // waits STORE_BOOTSTRAP_TIMEOUT_MS), so the second attempt meets a file
+    // nobody is holding.
+    await holdWriteLock(300);
+
+    // NOT VACUOUS. Prove the first attempt cannot succeed in this state before
+    // building a test on it: another connection taking the same pragma is
+    // refused outright. Without this the case could be passing quietly because
+    // the switch worked the first time and the retry never ran.
+    const probe = connect();
+    expect(() => probe.exec('PRAGMA journal_mode = wal')).toThrow(/locked/);
+    probe.close();
+
+    const store = await openStore(dataDir);
+
+    expect(store).not.toBeNull();
+    // The point of the retry: WAL, even though the switch lost the first time.
+    expect(rows('PRAGMA journal_mode')[0]).toEqual({ journal_mode: 'wal' });
+    // ...having gone through the bootstrap it was waiting on, not around it.
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    // ...and the fire that opened it writes its rows.
+    expect(store?.run(STORE_SQL.setState, ['s1', 'k', '"v"', Date.now()])).toBe(true);
+    expect(store?.get(STORE_SQL.getState, ['s1', 'k'])).toEqual({ value: '"v"' });
+    store?.close();
+  }, 15_000);
+
+  it('gives up rather than dying, leaving the store open on a rollback journal', async () => {
+    // Schema first and BY HAND, on a rollback journal. Not via `openStore`: that
+    // would leave the file in WAL, and a no-op switch needs no exclusive lock at
+    // all (third bullet of the probe in `setWal`), so both attempts would then
+    // succeed and this would test the happy path. This case is about the switch,
+    // not the bootstrap, and a reader held across a bootstrap blocks its COMMIT
+    // rather than its pragma.
+    const seed = connect();
+    seed.exec(STORE_DDL);
+    seed.exec(STORE_SQL.setUserVersion);
+    seed.close();
+    expect(rows('PRAGMA journal_mode')[0]).toEqual({ journal_mode: 'delete' });
+
+    // A READ lock nobody releases. Per the probe in `setWal`: a reader makes the
+    // pragma consult the busy handler and fail anyway, so BOTH attempts burn
+    // STORE_BUSY_TIMEOUT_MS and both give up — the branch under test.
+    const reader = connect();
+    reader.exec('BEGIN');
+    reader.prepare('SELECT COUNT(*) AS n FROM sessions').get();
+
+    const store = await openStore(dataDir);
+    // OPEN. Losing WAL is not losing the store: NO-STORE-NO-FIRE is about
+    // absence, and a store on a rollback journal is present and correct.
+    expect(store).not.toBeNull();
+
+    reader.exec('ROLLBACK');
+    reader.close();
+
+    // The premise, checked rather than assumed.
+    expect(rows('PRAGMA journal_mode')[0]).toEqual({ journal_mode: 'delete' });
+    // And the claim the give-up rests on: every statement here runs on it.
+    expect(store?.run(STORE_SQL.setState, ['s1', 'k', '"v"', Date.now()])).toBe(true);
+    expect(store?.get(STORE_SQL.getState, ['s1', 'k'])).toEqual({ value: '"v"' });
+    expect(store?.get(STORE_SQL.countStatePrefix, ['s1', 'k', 'l'])).toEqual({ n: 1 });
+    store?.close();
+  }, 15_000);
 });
 
 describe('fail-open before the store is even opened', () => {
@@ -763,6 +909,69 @@ describe('concurrency', () => {
       expect(rows('SELECT * FROM events')).toHaveLength(8);
       const actions = rows('SELECT action, reason FROM injections');
       expect(actions).toHaveLength(8);
+      expect(actions.filter((r) => r.action === 'injected')).toHaveLength(1);
+      expect(
+        actions.filter((r) => r.action === 'skipped' && r.reason === 'already-injected'),
+      ).toHaveLength(7);
+    } finally {
+      await shelf.close();
+    }
+  }, 30_000);
+
+  /**
+   * THE SAME EIGHT, ON THE JOURNAL THE GIVE-UP LEAVES THEM (#246).
+   *
+   * "Every statement in this module runs correctly on a rollback journal" is the
+   * sentence the give-up rests on, and it was a claim rather than an observation.
+   * The eight-process case above exists because this class of thing is not
+   * obvious under contention, so it is the right instrument to point at it: WAL
+   * is what lets these overlap, and taking it away leaves eight processes
+   * serialising through a 250 ms busy timeout for every read and every write.
+   *
+   * STUBBED, NOT LOCKED. A held lock is the OTHER way to force the give-up, and
+   * it cannot be used here: the same lock that refuses the pragma refuses the
+   * eight processes' rows, so the test would prove nothing about a rollback
+   * journal and everything about a lock. Forcing the switch to throw leaves the
+   * file genuinely and permanently on a rollback journal — the durable case, a
+   * data dir on a filesystem that cannot do WAL — with every other line of the
+   * hook untouched and real.
+   */
+  it('eight hook processes on a store that never gets WAL: every row still lands', async () => {
+    const shelf = await serveSearch((baseUrl) => ({
+      status: 200,
+      json: strongAnswer(baseUrl, '11111111-1111-4111-8111-111111111111', STRONG_TITLE),
+    }));
+    try {
+      await writeConfig({ baseUrl: shelf.baseUrl });
+      const payload = JSON.stringify({
+        session_id: 'rollback-race',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: STRONG_QUERY,
+      });
+      const script = withoutWal(pushPromptHookScript(dataDir));
+      const runs = await Promise.all(Array.from({ length: 8 }, () => runScript(script, payload)));
+      for (const run of runs) {
+        expect(run.code).toBe(0);
+        // Same rule as the WAL race: Claude Code shows the operator every byte
+        // of stderr, so a store that had to fall back may not say so there.
+        expect(run.stderr).toBe('');
+      }
+
+      // The premise, checked rather than assumed: they really did run on a
+      // rollback journal, and none of them quietly got WAL back.
+      expect(rows('PRAGMA journal_mode')[0]).toEqual({ journal_mode: 'delete' });
+
+      expect(rows('SELECT * FROM events')).toHaveLength(8);
+      const actions = rows('SELECT action, reason FROM injections');
+      expect(actions).toHaveLength(8);
+      /**
+       * THE COUNTS ARE REAL, NOT `Infinity`. This split is the assertion that
+       * matters. `storeCount` answers `Infinity` for a store it cannot read, and
+       * every caller of it is a bound — so an unreadable store would hold all
+       * eight back behind a cap and inject none. One-and-seven is only reachable
+       * when `alreadyShown` and `injectedCount` are reading actual rows off the
+       * rollback journal, under the contention that made WAL worth having.
+       */
       expect(actions.filter((r) => r.action === 'injected')).toHaveLength(1);
       expect(
         actions.filter((r) => r.action === 'skipped' && r.reason === 'already-injected'),
