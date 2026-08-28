@@ -1573,6 +1573,17 @@ function claimState(sessionId, key, value) {
  * and two Task calls in one assistant message fire PreToolUse concurrently, so
  * both read "free" and both wrote. One statement makes the loser lose.
  * Time-bounded rather than permanent (\`RELAY_WINDOW_MS\`).
+ *
+ * AND IT FAILS CLOSED, unlike \`claimState\` above, whose fail-open contract is
+ * unchanged. \`claimState\` is a dedupe aid whose worst loss is a duplicate
+ * lookup, so a swallowed write there may read as a win. This one is an
+ * ARBITER. A null result means \`storeRun\` caught a throw, and SQLITE_BUSY past
+ * the busy timeout is what parallel Task calls in one assistant message
+ * produce — precisely the contention this claim exists for. Reading that as a
+ * win lets every contender win, the second park evict the first, and both
+ * announce a relay for a handoff only one of them holds. Failing closed costs
+ * the loser one relay that becomes an ordinary parent hint, which is already
+ * this arm's fallback on every other loss path.
  */
 function claimStateFresh(sessionId, key, windowMs, value) {
   // Same contract as claimState: no store is no dedupe, and the arms return
@@ -1586,7 +1597,7 @@ function claimStateFresh(sessionId, key, windowMs, value) {
     now,
     now - windowMs,
   ]);
-  if (result === null) return true;
+  if (result === null) return false;
   return typeof result.changes === 'number' ? result.changes > 0 : true;
 }
 
