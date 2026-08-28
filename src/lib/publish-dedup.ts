@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { openStore, STORE_SQL } from './state-store';
+import {
+  openStore,
+  STORE_PUBLISHED_AGENT_PREFIX,
+  STORE_QUEUED_FINDING_PREFIX,
+  STORE_SQL,
+} from './state-store';
 
 /**
  * Same-machine publish dedup, keyed on the BODY rather than on a session id.
@@ -84,20 +89,84 @@ export async function publishedUrlFor(dataDir: string, bodyMd: string): Promise<
   }
 }
 
-/** Record that this body is published at `url`. Never the publish's problem: the
- *  post is already created by the time this runs, so a failure here costs a
- *  possible duplicate later and must not turn a successful publish into an
- *  error. */
-export async function recordPublished(dataDir: string, bodyMd: string, url: string): Promise<void> {
+/**
+ * Who this publish belongs to, beyond the body it published.
+ *
+ * BOTH FIELDS ARE ATTRIBUTION AND BOOKKEEPING, never authority: nothing above
+ * reads either one, and a publish carrying both takes exactly the gates a bare
+ * `tenjin publish file.md` takes.
+ */
+export interface PublishProvenance {
+  /** The harness `agent_id` of the agent that ran the command, when it named
+   *  one (`--agent`, which the SubagentStop capture ask fills in). */
+  agentId?: string | null;
+  /** The stored finding this body came from (`--finding`), which publishing
+   *  takes off the unpublished queue. */
+  findingId?: string | null;
+}
+
+/**
+ * Record that this body is published at `url`, and who published it.
+ *
+ * Never the publish's problem: the post is already created by the time this
+ * runs, so a failure here costs a possible duplicate later and must not turn a
+ * successful publish into an error.
+ *
+ * THE AGENT ROW ANSWERS THE SUPERVISION ASYMMETRY (tenjin-agent#228). A child
+ * asked at its own end publishes from a sidechain nobody reads; this row, keyed
+ * on the same harness `agent_id` the hooks stamp into `events.data`, is what
+ * lets the parent's own turn end report what its children published. One row
+ * per agent, latest publish wins: the question it answers is "did this child
+ * publish", not "everything it ever published".
+ *
+ * THE DEQUEUE IS WHY THE QUEUE IS A QUEUE. A finding stays listed in every
+ * capture ask inside the window until something publishes it; without this the
+ * ask would name the same published finding for hours, in every session.
+ */
+export async function recordPublished(
+  dataDir: string,
+  bodyMd: string,
+  url: string,
+  provenance: PublishProvenance = {},
+): Promise<void> {
+  const store = await openStore(dataDir);
+  if (store === null) return;
+  const at = Date.now();
+  try {
+    store.run(STORE_SQL.setState, [MACHINE_SESSION, publishedKey(bodyMd), JSON.stringify(url), at]);
+    if (typeof provenance.agentId === 'string' && provenance.agentId !== '') {
+      store.run(STORE_SQL.setState, [
+        MACHINE_SESSION,
+        STORE_PUBLISHED_AGENT_PREFIX + provenance.agentId,
+        JSON.stringify({ url, at }),
+        at,
+      ]);
+    }
+    if (typeof provenance.findingId === 'string' && provenance.findingId !== '') {
+      store.run(STORE_SQL.deleteState, [
+        MACHINE_SESSION,
+        STORE_QUEUED_FINDING_PREFIX + provenance.findingId,
+      ]);
+    }
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Take a stored finding off the unpublished queue without recording a new
+ * publish.
+ *
+ * The one caller is the already-published short circuit: the body is on the
+ * shelf, this machine remembers where, and the queue row would otherwise keep
+ * offering it. Best-effort like everything else here.
+ */
+export async function dequeueFinding(dataDir: string, findingId: string): Promise<void> {
+  if (findingId === '') return;
   const store = await openStore(dataDir);
   if (store === null) return;
   try {
-    store.run(STORE_SQL.setState, [
-      MACHINE_SESSION,
-      publishedKey(bodyMd),
-      JSON.stringify(url),
-      Date.now(),
-    ]);
+    store.run(STORE_SQL.deleteState, [MACHINE_SESSION, STORE_QUEUED_FINDING_PREFIX + findingId]);
   } finally {
     store.close();
   }

@@ -2688,7 +2688,8 @@ describe('runPublish — publish --finding', () => {
     searchId?: string | null;
     hook?: string;
   }): Promise<string> {
-    const { openStore, STORE_FINDING_HOOK, STORE_SQL } = await import('../lib/state-store');
+    const { openStore, STORE_FINDING_HOOK, STORE_QUEUED_FINDING_PREFIX, STORE_SQL } =
+      await import('../lib/state-store');
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
     try {
@@ -2710,10 +2711,46 @@ describe('runPublish — publish --finding', () => {
           body: over.body ?? FINDING_BODY,
         }),
       ]);
+      // The queue row beside the log row, exactly as the harvest writes both:
+      // the log says a child once wrote this, the queue says nobody has
+      // published it yet, and publishing is what removes it.
+      store.run(STORE_SQL.setState, [
+        '',
+        STORE_QUEUED_FINDING_PREFIX + over.uid,
+        JSON.stringify({
+          session: 'parent',
+          agentId: over.agentId ?? 'child-1',
+          agentType: over.agentType ?? 'fork',
+          searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
+          body: over.body ?? FINDING_BODY,
+        }),
+        Date.now(),
+      ]);
     } finally {
       store.close();
     }
     return over.uid;
+  }
+
+  /** The queue rows this machine still holds, by id. */
+  async function queuedIds(): Promise<string[]> {
+    const { openStore, STORE_QUEUED_FINDING_PREFIX, STORE_SQL } =
+      await import('../lib/state-store');
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      return store
+        .all(STORE_SQL.statePrefixSince, [
+          '',
+          STORE_QUEUED_FINDING_PREFIX,
+          STORE_QUEUED_FINDING_PREFIX + '\uffff',
+          0,
+          50,
+        ])
+        .map((row) => String(row.key).slice(STORE_QUEUED_FINDING_PREFIX.length));
+    } finally {
+      store.close();
+    }
   }
 
   const SEEDED_SEARCH = '0197aaaa-1111-4222-8333-444444444444';
@@ -2857,6 +2894,34 @@ describe('runPublish — publish --finding', () => {
     ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
   });
 
+  /**
+   * PUBLISHING IS WHAT TAKES A FINDING OFF THE QUEUE. Without this the parent's
+   * capture ask names the same published finding at every turn end inside the
+   * window, in every session on the machine, and "held locally and unpublished"
+   * stops being true of the list it heads.
+   */
+  it('takes the finding off the unpublished queue once it is published', async () => {
+    const id = await seedFinding({ uid: 'FND-DEQUEUE' });
+    expect(await queuedIds()).toContain(id);
+    await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+    );
+    expect(await queuedIds()).not.toContain(id);
+  });
+
+  /** A dry run publishes nothing, so it dequeues nothing either. */
+  it('a dry run leaves the finding on the queue', async () => {
+    const id = await seedFinding({ uid: 'FND-DRY-QUEUE' });
+    await runPublish(
+      { finding: id, dryRun: true },
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+    );
+    expect(await queuedIds()).toContain(id);
+  });
+
   it('a file and an id together is USAGE, before any wallet touch', async () => {
     const id = await seedFinding({ uid: 'FND-BOTH' });
     const { provider, getSignerCount } = spyProvider();
@@ -2868,5 +2933,79 @@ describe('runPublish — publish --finding', () => {
       ),
     ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
     expect(getSignerCount()).toBe(0);
+  });
+
+  /**
+   * `--agent <id>`: attribution for a publish an agent ran itself.
+   *
+   * THE CHILD PUBLISHES ITSELF (tenjin-agent#228, operator decision
+   * 2026-08-27), and the supervision asymmetry that creates — a piece reaching a
+   * shelf from a sidechain nobody reads — is answered by making the publish
+   * visible, not by taking it away from the child. This flag is that record. It
+   * gates NOTHING: the same scan, the same consent cascade, the same shelf.
+   */
+  describe('--agent', () => {
+    async function publishedByAgent(agentId: string): Promise<string | null> {
+      const { openStore, STORE_PUBLISHED_AGENT_PREFIX, STORE_SQL } =
+        await import('../lib/state-store');
+      const store = await openStore(dir);
+      if (store === null) throw new Error('no store');
+      try {
+        const row = store.get(STORE_SQL.getState, ['', STORE_PUBLISHED_AGENT_PREFIX + agentId]);
+        if (row === null || typeof row.value !== 'string') return null;
+        const value = JSON.parse(row.value) as { url?: string };
+        return typeof value.url === 'string' ? value.url : null;
+      } finally {
+        store.close();
+      }
+    }
+
+    it("records the publish under the child's own agent id", async () => {
+      const { fetch } = stubServer();
+      const result = await runPublish(
+        { file: await writeDoc(CLEAN), agent: 'agent-7f3a', mode: 'full-auto' },
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      );
+      // The row the parent's turn end reads to report what its children did.
+      expect(await publishedByAgent('agent-7f3a')).toBe((result.data as { url: string }).url);
+      // Echoed back, so an agent that passed it can see the attribution landed.
+      expect(result.data).toMatchObject({ publishedBy: { agentId: 'agent-7f3a' } });
+    });
+
+    it('changes no gate: a review-mode publish still needs its confirm', async () => {
+      await expect(
+        runPublish(
+          { file: await writeDoc(CLEAN), agent: 'agent-7f3a', mode: 'review' },
+          makeCtx(),
+          hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+      expect(await publishedByAgent('agent-7f3a')).toBeNull();
+    });
+
+    /** Refused rather than dropped: the caller's whole reason for passing it is
+     *  a later read, and a silently discarded id is a publish the parent is
+     *  never told about, reported as a success. */
+    it('refuses an id that would not be stored as given', async () => {
+      const { provider, getSignerCount } = spyProvider();
+      await expect(
+        runPublish(
+          { file: await writeDoc(CLEAN), agent: 'a1; rm -rf /', mode: 'full-auto' },
+          makeCtx(),
+          hermetic({ fetchImpl: stubServer().fetch, provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+      expect(getSignerCount()).toBe(0);
+    });
+
+    it('records nothing when no agent is named', async () => {
+      await runPublish(
+        { file: await writeDoc(CLEAN), mode: 'full-auto' },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+      );
+      expect(await publishedByAgent('agent-7f3a')).toBeNull();
+    });
   });
 });

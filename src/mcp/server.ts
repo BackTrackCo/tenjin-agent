@@ -197,7 +197,13 @@ const publishInput = {
     .describe(
       'Exact-match keys this piece answers by-key lookups on, each `<kind>=<value>` with kind fingerprint | package_version | command_head | repo (max 32; needs KNOWLEDGE_KEYS on the shelf)',
     ),
-} satisfies Record<keyof PublishArgs, z.ZodTypeAny>;
+  // `agent` is deliberately NOT exposed here. It records which harness agent ran
+  // a publish, and the only thing that knows that is the SubagentStop capture
+  // ask, which hands the child a CLI command (tenjin-agent#228). An MCP caller
+  // has no id of its own to pass, so the field could only carry a value somebody
+  // made up, and attribution nobody can check is worse than none.
+} satisfies Record<Exclude<keyof PublishArgs, 'agent'>, z.ZodTypeAny>;
+
 
 const editInput = {
   postId: z.string().describe('The uuid of your own post to show or update'),

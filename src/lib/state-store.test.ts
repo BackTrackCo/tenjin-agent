@@ -10,6 +10,7 @@ import {
   STORE_DDL,
   STORE_MIGRATIONS,
   STORE_BUSY_TIMEOUT_MS,
+  STORE_QUEUED_FINDING_PREFIX,
   STORE_SQL,
   STORE_USER_VERSION,
   findSearchForResource,
@@ -356,8 +357,15 @@ describe('the hot-path queries never scan', () => {
         // open for one more turn, so neither may be the read that scans a table
         // that never shrinks (tenjin-agent#228).
         ['openDispatchMiss', STORE_SQL.openDispatchMiss, ['s', 0]],
-        ['queuedFindings', STORE_SQL.queuedFindings, ['s', 0, 5]],
         ['queuedFindingCount', STORE_SQL.queuedFindingCount, ['s', 0]],
+        // The finding queue is read ACROSS sessions at every capture ask, which
+        // `events` has no index for: under one `session_state` prefix it is a
+        // primary-key range seek instead of a scan of a table that never shrinks.
+        [
+          'statePrefixSince (finding queue)',
+          STORE_SQL.statePrefixSince,
+          ['', STORE_QUEUED_FINDING_PREFIX, STORE_QUEUED_FINDING_PREFIX + '\uffff', 0, 200],
+        ],
         // The one-shot CLI tally is not a hook path, but it reads the same
         // never-pruned table.
         ['statusRows', STORE_SQL.statusRows, [0]],

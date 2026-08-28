@@ -200,9 +200,48 @@ export const STORE_CACHE_SLOT_MAX = 8;
  * `hook` value rather than a JSON discriminator so the reader is an ordinary
  * indexed `(session, at)` select and no query in a hook depends on SQLite's
  * JSON functions. tenjin-agent#228's PR 4 promotes these rows to a
- * `child_findings` table; until then this string IS the queue.
+ * `child_findings` table; until then this string IS the log.
  */
 export const STORE_FINDING_HOOK = 'finding';
+
+/**
+ * The `session_state` key prefix, under the MACHINE session, that a captured
+ * finding is queued under while it is still unpublished.
+ *
+ * THE EVENTS ROW IS THE LOG; THIS ROW IS THE QUEUE, and they are separate
+ * because they answer different questions and have opposite lifetimes. The log
+ * is append-only and says a child once wrote this; the queue says nobody has
+ * published it yet, so publishing has to REMOVE from it, which an append-only
+ * log must never allow.
+ *
+ * MACHINE-SCOPED, WHICH IS THE POINT (tenjin-agent#228). `SubagentStop` fires
+ * per child while the parent `Stop` may never fire at all, so a finding
+ * routinely outlives the session that produced it and a session-scoped ask
+ * makes it invisible rather than merely late. `events` is indexed on
+ * `(session, at)` and on nothing else, so the cross-session read off THAT table
+ * is a scan of a table that never shrinks, in a hook that may block. Under one
+ * `session_state` prefix it is a primary-key range scan instead, which is the
+ * shape every other hook read already takes.
+ */
+export const STORE_QUEUED_FINDING_PREFIX = 'queued_finding:';
+
+/**
+ * The `session_state` key prefix, under the MACHINE session, recording that an
+ * agent published something itself.
+ *
+ * ONE ROW PER AGENT, latest publish wins. It exists for the supervision
+ * asymmetry a child publish creates: the child publishes from a sidechain
+ * nobody reads, so the parent's own turn end is where that becomes visible.
+ * Keyed on the harness `agent_id` the SubagentStop ask handed the child, which
+ * is the same identity `identityOf` reads and every row stamps into its
+ * `agent_id` COLUMN, so the parent can intersect it with the children IT asked
+ * and claim nothing about anyone else's.
+ *
+ * DELIBERATELY NOT UNDER `published:`, which is the body-hash dedup's prefix: a
+ * range scan written for one of them must never pick up the other, and two
+ * key spaces one `<` comparison apart is how that happens.
+ */
+export const STORE_PUBLISHED_AGENT_PREFIX = 'agent_published:';
 
 /**
  * The whole schema, run once at `user_version = 0` and never again: a database
@@ -694,21 +733,16 @@ export const STORE_SQL = {
        AND source = 'dispatch-hook'
      ORDER BY at DESC, rowid DESC LIMIT 1`,
   /**
-   * The findings children of this session queued, newest first, inside the
-   * window. Read by the Stop hook so the capture ask can name them.
+   * How many findings THIS session's children logged inside the window. The
+   * Stop hook's `didResearch` signal, and the only finding read still scoped to
+   * one session: a finding from another session is worth SURFACING to this one
+   * (the queue does that, machine-wide) but is not evidence this session
+   * researched anything.
    *
    * `hook = 'finding'` rather than a JSON predicate: the generated hooks run on
    * whatever SQLite `node:sqlite` was built against, and a turn-end read must
-   * not be the one place that assumes the JSON1 extension is present.
-   */
-  queuedFindings: `SELECT uid, at, agent_id, data FROM events
-     WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'
-     ORDER BY at DESC, id DESC LIMIT ?`,
-  /**
-   * How many there are in that window, which is NOT the number the list above
-   * returns: the list is bounded to what the ask can name, so the count is what
-   * lets the ask say how many it left out instead of quoting its own LIMIT as a
-   * total. Same predicate and same `(session, at)` index, one row.
+   * not be the one place that assumes the JSON1 extension is present. One row,
+   * on the `(session, at)` index.
    */
   queuedFindingCount: `SELECT COUNT(*) AS n FROM events
      WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'`,
@@ -716,9 +750,10 @@ export const STORE_SQL = {
    * The same queue read from a CLI process rather than by the ask: the ids
    * `publish --finding` names back when it is handed one it cannot find.
    *
-   * WHY IT IS NOT `queuedFindings`. The ask reads ONE session's queue and the
-   * caller of this one has only an id that did not resolve, so it reads across
-   * sessions and is bounded by a window and a limit and by nothing else.
+   * WHY IT IS NOT THE QUEUE READ. The capture ask reads the machine-wide
+   * `session_state` queue, which holds only what is still unpublished; the
+   * caller of this one has an id that did not resolve and wants to know what
+   * this machine has EVER captured, published or not, so it reads the log.
    *
    * DELIBERATELY NOT ON THE no-SCAN LIST. Every query there runs in front of a
    * tool call, up to eight at a time; this one runs once, on the way to an error
@@ -1132,10 +1167,16 @@ const STATE_PUBLISHED_PREFIX = 'published:';
  *  suppressed. */
 const STATE_TRIGGER_RATES = 'trigger_rates';
 const STATE_COOLDOWN_PREFIX = 'cooldown:';
-/** The \`events.hook\` value the child-finding queue lives under, substituted
+/** The \`events.hook\` value the child-finding LOG lives under, substituted
+
  *  from the module's own constant so the writer here and the reader in the Stop
  *  arm cannot drift apart. */
 const FINDING_HOOK = __FINDING_HOOK__;
+/** The machine-scoped queue of findings nobody has published yet, and the
+ *  machine-scoped record of what an agent published itself. Both mirrored from
+ *  the module's own constants; see their doc comments there. */
+const STATE_QUEUED_FINDING_PREFIX = __QUEUED_FINDING_PREFIX__;
+const STATE_PUBLISHED_AGENT_PREFIX = __PUBLISHED_AGENT_PREFIX__;
 const MACHINE_SESSION = '';
 
 /** The open database, or null once we know we cannot have one. */
@@ -1951,37 +1992,72 @@ function openDispatchMiss(sessionId, sinceMs) {
   return row === null || typeof row.search_id !== 'string' ? null : row.search_id;
 }
 
-/**
- * The findings this session's children queued, newest first.
- *
- * Rows only: what the Stop hook does with them (naming them in the capture ask)
- * is the caller's business, and PR 4 of tenjin-agent#228 moves the same read
- * onto a \`child_findings\` table without changing this shape.
- */
-function queuedFindings(sessionId, sinceMs, limit) {
-  const rows = storeAll(STORE_SQL.queuedFindings, [storeSession(sessionId), sinceMs, limit]);
-  const out = [];
-  for (const row of rows) {
-    const data = storeParse(row.data);
-    if (!isRecord(data)) continue;
-    out.push({
-      uid: typeof row.uid === 'string' ? row.uid : '',
-      at: typeof row.at === 'number' ? row.at : 0,
-      agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
-      agentType: typeof data.agentType === 'string' ? data.agentType : '',
-      searchId: typeof data.searchId === 'string' ? data.searchId : null,
-      body: typeof data.body === 'string' ? data.body : '',
-    });
-  }
-  return out;
-}
-
 /** How many findings this session's children have queued inside the window,
- *  which is what \`queuedFindings\` bounded away: the caller names some and has
- *  to be able to say how many it did not. */
+ *  which is the \`didResearch\` signal and NOT the list the ask prints: that one
+ *  is machine-wide, because a finding routinely outlives its own session. */
 function queuedFindingCount(sessionId, sinceMs) {
   const row = storeGet(STORE_SQL.queuedFindingCount, [storeSession(sessionId), sinceMs]);
   return row === null || typeof row.n !== 'number' ? 0 : row.n;
+}
+
+/**
+ * Put a captured finding on the machine-wide unpublished queue, beside the
+ * \`events\` row that logs it.
+ *
+ * TWO WRITES, ONE FACT, and they are not redundant: the log answers "did a child
+ * ever say this" forever, and the queue answers "is it still unpublished", which
+ * only a row a publish can DELETE can answer. The queue is where the parent's
+ * capture ask reads from, so a finding whose session ended unread is still named
+ * by the next session that is asked.
+ */
+function enqueueFinding(uid, finding) {
+  return setState(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX + uid, finding);
+}
+
+/**
+ * The unpublished findings this machine holds inside the window, newest first,
+ * ACROSS SESSIONS.
+ *
+ * Cross-session on purpose (tenjin-agent#228): \`SubagentStop\` fires per child
+ * while the parent \`Stop\` may never fire at all — a crash, an interrupt, an
+ * ended session — so a session-scoped list makes a real finding invisible rather
+ * than merely late. Bounded by the window and the caller's limit; the caller
+ * decides what to do with one from another session, and is told which those are.
+ */
+function queuedFindingQueue(sinceMs, limit) {
+  return statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, limit).map((row) => {
+    const value = isRecord(row.value) ? row.value : {};
+    return {
+      uid: row.key,
+      at: row.at,
+      session: typeof value.session === 'string' ? value.session : '',
+      agentId: typeof value.agentId === 'string' ? value.agentId : null,
+      agentType: typeof value.agentType === 'string' ? value.agentType : '',
+      searchId: typeof value.searchId === 'string' ? value.searchId : null,
+      body: typeof value.body === 'string' ? value.body : '',
+    };
+  });
+}
+
+/** When the newest queued finding at or after \`sinceMs\` was filed, or 0 when
+ *  there is none. The one read behind the capture ask's re-fire rule: an ask
+ *  repeats only for something it has not already named. */
+function newestQueuedFindingAt(sinceMs) {
+  const rows = statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, 1);
+  return rows.length === 0 ? 0 : rows[0].at;
+}
+
+/** What agents published themselves at or after \`sinceMs\`, keyed by agent id.
+ *  Machine-wide by nature (the publishing process knows its agent, not its
+ *  session), so the caller intersects it with the children IT asked. */
+function agentPublishes(sinceMs, limit) {
+  const out = new Map();
+  for (const row of statePrefixSince(MACHINE_SESSION, STATE_PUBLISHED_AGENT_PREFIX, sinceMs, limit)) {
+    const value = isRecord(row.value) ? row.value : {};
+    if (typeof value.url !== 'string' || value.url === '') continue;
+    out.set(row.key, { url: value.url, at: row.at });
+  }
+  return out;
 }
 
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */
@@ -2238,7 +2314,9 @@ export function storeSource(): string {
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS))
     .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS))
     .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX))
-    .replaceAll('__FINDING_HOOK__', JSON.stringify(STORE_FINDING_HOOK));
+    .replaceAll('__FINDING_HOOK__', JSON.stringify(STORE_FINDING_HOOK))
+    .replaceAll('__QUEUED_FINDING_PREFIX__', JSON.stringify(STORE_QUEUED_FINDING_PREFIX))
+    .replaceAll('__PUBLISHED_AGENT_PREFIX__', JSON.stringify(STORE_PUBLISHED_AGENT_PREFIX));
 }
 
 // ---------------------------------------------------------------------------

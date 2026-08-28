@@ -588,6 +588,13 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       '--dry-run',
       'print what would be published, whole body included, and exit without writing or spending',
     )
+    // ATTRIBUTION, NOT AUTHORITY: it changes no gate, no shelf and no price. The
+    // SubagentStop capture ask fills it in so a child that publishes from its own
+    // sidechain is visible to the session that dispatched it (tenjin-agent#228).
+    .option(
+      '--agent <id>',
+      "record this publish under the harness agent id that ran it, so the dispatching session's turn end can report it; it changes nothing about consent, the scan, the price or the shelf",
+    )
     .option(
       '--search-id <id>',
       'the search this file answers (closes its open loop, and prefills its question); repeatable up to 10 when one piece answers a whole research thread, and the server accepts or refuses the named searches as one batch',
@@ -628,6 +635,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof file === 'string' ? { file } : {}),
             ...(typeof o.finding === 'string' ? { finding: o.finding } : {}),
             ...(o.dryRun === true ? { dryRun: true } : {}),
+            ...(typeof o.agent === 'string' ? { agent: o.agent } : {}),
             ...(Array.isArray(o.searchId) && o.searchId.length > 0
               ? { searchId: o.searchId as string[] }
               : {}),

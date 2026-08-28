@@ -47,7 +47,7 @@ import {
   throughScanGate,
   writeModeNotices,
 } from '../lib/consent';
-import { publishedUrlFor, recordPublished } from '../lib/publish-dedup';
+import { dequeueFinding, publishedUrlFor, recordPublished } from '../lib/publish-dedup';
 import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
@@ -80,6 +80,17 @@ export interface PublishArgs {
   finding?: string;
   /** Print what would be published, whole body included, and write nothing. */
   dryRun?: boolean;
+  /**
+   * The harness agent id of the agent running this publish, recorded with it.
+   *
+   * ATTRIBUTION, NOT AUTHORITY. Nothing in this file branches on it: the scan,
+   * the consent cascade, the confirm, the price and the shelf are identical
+   * whether it is present or absent, because consent lives in the config and
+   * not in which agent ran the command. It exists because a subagent publishes
+   * from a sidechain nobody reads, so this is what lets the parent's own turn
+   * end report what its children published (tenjin-agent#228).
+   */
+  agent?: string;
   /** The search(es) this publish answers; closes each open loop. */
   searchId?: string | string[];
   draft?: boolean;
@@ -146,6 +157,10 @@ export async function runPublish(
   // typo like `--mode Review` must never be silently dropped onto a looser mode
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
+  // Validated at the edge for the same reason, though it gates nothing: an id
+  // that will not be stored as given is better refused here than silently
+  // dropped, because the caller's whole reason for passing it is a later read.
+  const agentId = parseAgentIdFlag(args.agent);
   const namedIds = normalizeSearchIds(args.searchId, deps.searchIdLabel ?? '--search-id');
   // Parsed and bounded at the edge too (USAGE, exit 2): a bad kind must fail
   // before the wallet signs, not as a 400 collected after it.
@@ -182,6 +197,10 @@ export async function runPublish(
   if (status !== 'draft') {
     const already = await publishedUrlFor(ctx.dataDir, body);
     if (already !== null) {
+      // The body is on the shelf and this machine knows where, so the queue row
+      // is stale: leaving it would have every capture ask inside the window
+      // offer a finding that is already published.
+      if (finding !== undefined) await dequeueFinding(ctx.dataDir, finding.id);
       // Success, deliberately. The caller is a turn end that already did its
       // work; failing it would report a broken publish for a piece that is up.
       return {
@@ -431,7 +450,12 @@ export async function runPublish(
   // The post exists: remember it against the body, so the next publish of the
   // same text this machine attempts hands back this url instead of creating a
   // second row. Not for a draft, whose whole purpose is to be published later.
-  if (!parksPrivately) await recordPublished(ctx.dataDir, body, result.url);
+  if (!parksPrivately) {
+    await recordPublished(ctx.dataDir, body, result.url, {
+      agentId,
+      ...(finding === undefined ? {} : { findingId: finding.id }),
+    });
+  }
   // Park the named claims on the draft (record's own spelling: the store matches
   // ids by exact string), so the promotion can send what this create withheld.
   if (parksPrivately) {
@@ -459,7 +483,7 @@ export async function runPublish(
       ),
     );
   }
-  return receipt(result, runtime.baseUrl, searches, finding);
+  return receipt(result, runtime.baseUrl, searches, finding, agentId);
 }
 
 /**
@@ -730,6 +754,29 @@ async function resolveSource(args: PublishArgs, ctx: CommandContext): Promise<Pu
 }
 
 /**
+ * The characters an `--agent` value may have, matching the hook's own gate on
+ * the id before it splices one into a command line.
+ */
+const AGENT_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+/**
+ * The agent id to record this publish under, or null.
+ *
+ * REFUSED RATHER THAN DROPPED. Unlike a finding's inherited search id, this one
+ * was typed by the caller, and a value silently discarded here is a publish the
+ * parent will never be told about, reported as a success.
+ */
+function parseAgentIdFlag(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  if (!AGENT_ID_RE.test(value)) {
+    throw new CliError('USAGE', 'Invalid --agent value.', {
+      fix: 'Pass the harness agent id as letters, digits, and `_ . : -`, up to 128 characters. The SubagentStop capture ask prints the exact flag to use.',
+    });
+  }
+  return value;
+}
+
+/**
  * The search a stored finding closes, when it is one this shelf can claim.
  *
  * DROPPED RATHER THAN REFUSED when it does not match the wire shape. The id was
@@ -819,6 +866,7 @@ function receipt(
   baseUrl: string,
   searches: SearchReceipt[],
   finding: ChildFinding | undefined,
+  agentId: string | null,
 ): CommandResult {
   const price = toMoney(result.priceAtomic);
   const missing = missingSentences(result.cacheEligibleMissing).map(sanitizeForTerminal);
@@ -858,6 +906,11 @@ function receipt(
       // server has no field that says so: this is the only record tying the
       // published url back to the agent that settled it and the loop it closed.
       ...(finding === undefined ? {} : { finding: findingDetail(finding) }),
+      // WHO PUBLISHED IT, when the caller said. Echoed so an agent that passed
+      // `--agent` can see the attribution landed rather than assume it: this row
+      // is what its parent's turn end reads, and a silently dropped id is a
+      // publish nobody upstream is ever told about.
+      ...(agentId === null ? {} : { publishedBy: { agentId } }),
       // `search` repeats a lone result for callers that already read it; a
       // batch has no single one to repeat.
       ...(searches.length === 1 ? { search: searches[0] } : {}),
