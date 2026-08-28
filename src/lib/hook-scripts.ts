@@ -51,6 +51,7 @@ import {
   WEBSEARCH_HOOK_PRODUCT,
   WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
+import { isAbsolute } from 'node:path';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // The push core, embedded in the three scripts here that grew a push arm (the
 // research arm denies, the dispatch arm caches, and both need the shared
@@ -85,6 +86,29 @@ const WATCHDOG_MS = 2500;
 /** The Stop and SessionStart hooks only read local files, so their whole run is
  *  the watchdog. */
 const STOP_WATCHDOG_MS = 1500;
+/**
+ * How long one Stop's claim on the automatic team-shelf sync holds off every
+ * other Stop on the machine. Longer than a sync takes (a handful of signed
+ * POSTs) and short enough that a sync that died is retried at the next turn
+ * end after it.
+ */
+export const SYNC_CLAIM_TTL_MS = 2 * 60 * 1000;
+/** The machine-wide `session_state` key the claim lives under (session `''`). */
+export const SYNC_CLAIM_KEY = 'sync:claim';
+/** Appended to the Stop ask when the last `tenjin sync` could not sign. */
+export const STOP_SYNC_FALLBACK_LINE =
+  'Tenjin sidecar: the automatic team-shelf sync of fixed failures could not sign (<code>); run `tenjin sync` in a terminal where the wallet can unlock.';
+
+/**
+ * The CLI entry the Stop hook spawns for `tenjin sync`: the script this
+ * process was started from, when that is an absolute path (the installed
+ * `dist/index.js`, through whatever symlink the package manager wrote).
+ * Null under anything else, and null means the hook never spawns.
+ */
+export function defaultCliPath(): string | null {
+  const entry = process.argv[1];
+  return typeof entry === 'string' && isAbsolute(entry) ? entry : null;
+}
 /**
  * How much of the session transcript the Stop hook reads to decide whether a
  * background subagent is still running. The TAIL only, on the same terms and for
@@ -1670,9 +1694,70 @@ main().catch(quiet);
  * store's lock here would put a cross-process wait on the end of every turn to buy
  * nothing but tidiness.
  */
-export function stopHookScript(dataDir: string): string {
+export function stopHookScript(dataDir: string, cliPath: string | null = defaultCliPath()): string {
   return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}
+import { spawn } from 'node:child_process';
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
+const CLI_PATH = ${JSON.stringify(cliPath)};
+const SYNC_CLAIM_TTL_MS = ${SYNC_CLAIM_TTL_MS};
+const SYNC_CLAIM_KEY = ${JSON.stringify(SYNC_CLAIM_KEY)};
+const SYNC_FALLBACK_LINE = ${JSON.stringify(STOP_SYNC_FALLBACK_LINE)};
+
+/**
+ * Hand this project's closed code-scoped pairings to the team shelf, without
+ * spending the hook's budget on it: a detached \`node <cli> sync\` that
+ * outlives this process, spawned only when there is something to sync, only
+ * in team mode, and only behind a machine-wide claim, so a laptop ending
+ * several sessions in the same minute runs one sync and not one per Stop.
+ * The claim is a \`session_state\` row under the machine bucket that expires
+ * by age rather than by the child clearing it: a sync that died could
+ * otherwise hold the claim forever.
+ *
+ * The CLI path is baked in at install (\`process.argv[1]\` of the install that
+ * wrote this file), never looked up on PATH, because a hook runs under the
+ * harness's environment and not the operator's shell. No path, no sync.
+ */
+function spawnSyncIfNeeded(config, cwd) {
+  if (CLI_PATH === null || teamShelfOrigin(config) === null) return false;
+  const pending = storeCount(STORE_SQL.countUnsyncedPairings, [projectId(cwd)]);
+  if (!Number.isFinite(pending) || pending === 0) return false;
+  const now = Date.now();
+  if (statePrefixSince(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, 1).length > 0) {
+    return false;
+  }
+  // A stale claim is deleted and re-taken; the atomic claim is the tiebreak
+  // between two Stops that both found it stale.
+  if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) {
+    clearState(MACHINE_SESSION, SYNC_CLAIM_KEY);
+    if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) return false;
+  }
+  try {
+    const child = spawn(process.execPath, [CLI_PATH, 'sync'], {
+      detached: true,
+      stdio: 'ignore',
+      ...(cwd === null ? {} : { cwd }),
+    });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one case the automatic sync cannot recover on its own: the last
+ * \`tenjin sync\` could not sign (a session key that expired while the OS
+ * keychain was locked) and left its rows unsynced. The next Stop retries,
+ * and the operator is told how to do it by hand. Any other last outcome —
+ * a success, or no sync yet — says nothing.
+ */
+function syncFallbackLine() {
+  const row = storeGet(STORE_SQL.lastSyncEvent, []);
+  const data = row === null ? null : storeParse(row.data);
+  if (!isRecord(data) || typeof data.code !== 'string') return null;
+  return SYNC_FALLBACK_LINE.replace('<code>', data.code);
+}
 const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
 const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
 const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
@@ -2108,6 +2193,10 @@ async function main() {
   // The session is over: stamp \`ended_at\` so the judge's per-session windows
   // and the importance score (#212) have a close as well as an open.
   endSession(sessionId);
+  // AFTER the session is closed and BEFORE anything that can exit: the sync
+  // child is detached, so nothing below waits on it.
+  spawnSyncIfNeeded(config, cwd);
+  const syncLine = syncFallbackLine();
   // SCOPED IN THE QUERY. The loop below discards sources this hook never nags
   // about and sessions that are not its own, and doing that AFTER a LIMIT let a
   // push-on machine bury a deliberate \`tenjin search\` MISS under its own
@@ -2129,7 +2218,11 @@ async function main() {
   // that will still be there next time. \`nudge\` says the same words as context
   // and rides along with whatever else this turn had to say.
   const ask = captureAsk(config, sessionId, transcriptPath);
-  const reason = captureReason(config, publishMode);
+  // The sync fallback rides on the ask, and only on the ask: it is a line for
+  // the operator about this machine's wallet, and the ask is the one Stop
+  // output that already speaks to the operator about publishing.
+  const reason =
+    captureReason(config, publishMode) + (syncLine === null ? '' : '\\n' + syncLine);
   if (ask === 'block') emitBlock(reason);
   const nudge = ask === 'nudge' ? reason : null;
 

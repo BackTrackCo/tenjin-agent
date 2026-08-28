@@ -413,6 +413,18 @@ tenjin config set shelfBypassSecret <secret>
 
 Public mode — no `shelfBypassSecret` — is unchanged in every one of those respects.
 
+### Automatic sync
+
+When the failure arm records a fix (a build/test/migrate/install/lint failure this machine later made pass by changing a tracked file), that error→fix pairing is local. `tenjin sync` is what carries a **code-scoped** pairing to the team shelf, so the next machine that hits the same failure sees the fix beside its error through the shelf's by-fingerprint lookup — nobody writes a note, and the error text never leaves either machine (only two fingerprint hashes travel).
+
+It runs on its own. **The Stop hook**, after a session ends, checks this project for closed code-scoped pairings the shelf has not seen yet; if there are any, it spawns `tenjin sync` detached and returns — the publish runs outside the hook's budget, in the background, not on the turn. The CLI path it spawns is the one baked in at `tenjin install` (hooks run under the harness's environment, not a shell, so `PATH` is not consulted); if that path is unknown, nothing is spawned. A machine-wide claim (a `session_state` row with a two-minute TTL) means several sessions ending in the same minute run one sync between them, not one each — the concern on a shared 16 GB laptop.
+
+`tenjin sync` is **team mode only** (it hard-refuses in public mode: a synced pairing is reachable only through the team shelf's by-key route, and a public-mode machine has neither the route nor a private shelf to hold it). For each pairing it POSTs to the shelf a keyed, card-less, `price: 0` post titled `Fix: <command head> — <errno or file>`, whose body is the failing command, the fix, the touched files, the verify command and a `pkg:` line, capped at 300 characters. Its keys are the fine fingerprint (`sig_v1:<hash>`), the coarse fingerprint salted with the repo's origin URL (`sig_v1c:<hash>`, so an `ERR_PNPM_OUTDATED_LOCKFILE`-class error does not match across every repo the team has), and the command head (stored for a future ranking, never queried); `verified` mirrors the pairing's local status. A pairing that became verified after it was first synced is updated to `verified: true` on the shelf. If another teammate's published piece already holds a fingerprint verified, the shelf returns a 400 naming the holder — the pairing is marked synced (never retried) and the holder recorded, rather than fighting for the key.
+
+Only **code-scoped** pairings ever sync. A `user`-scoped pairing (an env var, a port, a missing tool, `$HOME`) never leaves the machine, and an `ambiguous` one does not travel either. The scan that gates every publish runs here too, on the body, so a stray credential in an error line is still caught.
+
+The one case the automatic run cannot recover on its own is signing: a session key that expired while the OS keychain is locked. `tenjin sync` then leaves the unsynced rows as they are, records the coded failure, and the next Stop retries — and the Stop ask prints a one-line fallback telling the operator to run `tenjin sync` by hand in a terminal where the wallet can unlock. That fallback line appears only in that case.
+
 ### Stop-hook capture
 
 When enabled (`hooks.capture`), the Stop hook checks whether the session had a research signal — a search the session itself asked for (`tenjin search`, the WebSearch hook, the dispatch hook), or a row in the state store where an arm actually surfaced something. The sidecar's own log-only telemetry does not count, so a session that only read and edited code is never asked.

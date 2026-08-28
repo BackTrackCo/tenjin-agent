@@ -1,0 +1,630 @@
+import { readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { hostname, userInfo } from 'node:os';
+import { CliError } from '../lib/errors';
+import { resolveContextSettings } from '../lib/settings';
+import {
+  openStore,
+  projectId,
+  shortHash,
+  storeSession,
+  teamCoarseKey,
+  STORE_SQL,
+  type Store,
+} from '../lib/state-store';
+import { publishPost, updatePost, type PostKeyInput } from '../lib/posts-api';
+import { resolveWriteAuth } from '../lib/consent';
+import {
+  describeWallet,
+  resolveWalletProvider,
+  type TenjinSigner,
+  type WalletProvider,
+} from '../lib/wallet';
+import type { CommandContext, CommandResult } from '../context';
+
+/**
+ * `tenjin sync` (docs/command-reference.md, "Team shelf"): hand this checkout's
+ * closed, code-scoped error→fix pairings to the team shelf, so a fix a teammate's
+ * machine already made travels to the next machine that hits the same failure
+ * beside its error — without anyone writing a note. The Stop hook spawns it
+ * detached after a session that closed such a pairing (see spawnSyncIfNeeded in
+ * lib/hook-scripts.ts); it is also runnable by hand, which is the fallback the
+ * Stop ask prints when a spawned run could not sign.
+ *
+ * TEAM MODE ONLY. A synced pairing is a keyed, card-less, price-0 post, and the
+ * `POST /api/keys/resolve` route it is reachable through is a team-shelf feature;
+ * a public-mode machine has no private shelf to hold it and no route to read it
+ * back, so this hard-refuses rather than posting a team's build failures to the
+ * public marketplace.
+ */
+export interface SyncDeps {
+  fetchImpl?: typeof fetch;
+  provider?: WalletProvider;
+  /** Force the plain-SIWX write path (default: cached session key). */
+  useSession?: boolean;
+  /** Environment seam; defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
+  /** The checkout whose pairings sync; defaults to process.cwd(). The Stop hook
+   *  spawns the child with the session's cwd, so the project scoping matches the
+   *  rows the failure arm wrote. */
+  cwd?: string;
+}
+
+/** One pairing as `tenjin sync` reads it back out of the store (raw columns). */
+interface PairingRow {
+  id: number;
+  key: string;
+  coarseKey: string | null;
+  cmdHead: string | null;
+  cmd: string | null;
+  errorLine: string | null;
+  errorFiles: string[];
+  fixCmd: string | null;
+  fixFiles: string[];
+  pkgVersions: Record<string, string>;
+  status: string;
+  syncedAt: number | null;
+}
+
+/** A signing failure (an expired session with a locked keychain) is coded and
+ *  ends the whole run: the Stop hook writes an `events` row for it and retries
+ *  next turn, and the fallback line tells the operator to run this by hand. */
+class SyncSigningError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = 'SyncSigningError';
+  }
+}
+
+const TITLE_MAX = 120;
+const BODY_MAX = 300;
+
+export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise<CommandResult> {
+  const env = deps.env ?? process.env;
+  const cwd = deps.cwd ?? process.cwd();
+  const runtime = await resolveContextSettings(ctx);
+
+  // HARD REFUSE outside team mode. Not a silent no-op: a machine that meant to be
+  // in team mode but is not (the secret set without the shelf baseUrl, the
+  // half-done setup docs/command-reference.md warns about) should hear why nothing synced.
+  if (!runtime.teamMode) {
+    throw new CliError(
+      'REFUSED',
+      'tenjin sync only runs in team mode: it publishes fixed failures to your team shelf, reachable only through the team shelf’s by-key lookup.',
+      {
+        fix: 'Set a team shelf (config set baseUrl <your shelf>, config set shelfBypassSecret <secret>); see docs/command-reference.md, "Team shelf".',
+      },
+    );
+  }
+
+  const store = await openStore(ctx.dataDir);
+  if (store === null) {
+    // Fail open, same as every other store consumer: an unreadable store is not a
+    // reason to exit nonzero, there is simply nothing to sync.
+    return {
+      data: { synced: 0, verified: 0, held: 0, pending: 0 },
+      humanLines: ['Nothing to sync.'],
+    };
+  }
+  try {
+    const project = projectId(cwd);
+    const rows = store
+      .all(STORE_SQL.unsyncedPairings, [project])
+      .map(readPairing)
+      .filter((r): r is PairingRow => r !== null);
+    if (rows.length === 0) {
+      return {
+        data: { synced: 0, verified: 0, held: 0, pending: 0 },
+        humanLines: ['Nothing to sync.'],
+      };
+    }
+
+    // The repo the origin salt is read from — a file read of .git/config, never a
+    // git spawn (mirrors isTrackedPath's "no git invocation" rule). Read once for
+    // the whole run: every row of this checkout salts against the same repo.
+    const repo = readRepoOrigin(cwd) ?? '';
+    // The shelf a link row names: the team shelf, which is the only place a
+    // synced pairing ever goes.
+    const origin = new URL(runtime.baseUrl).origin;
+
+    // The wallet, lazily. describe() gives the address WITHOUT unlocking the
+    // keystore, so a cached-session sync never touches the keychain; the unlock
+    // happens only inside a sign, which happens only when the session must be
+    // (re)established — that is where a locked keychain surfaces its coded error.
+    const provider = resolveWalletProvider(
+      ctx,
+      deps.provider !== undefined ? { provider: deps.provider } : {},
+    );
+    const description = await describeWallet(provider); // surfaces WALLET_MISSING
+    const signer = lazySigner(provider, description.address);
+    const auth = resolveWriteAuth({
+      signer,
+      baseUrl: runtime.baseUrl,
+      dataDir: ctx.dataDir,
+      scope: 'read+write',
+      ...(deps.useSession !== undefined ? { useSession: deps.useSession } : {}),
+      env,
+    });
+    const client = {
+      baseUrl: runtime.baseUrl,
+      timeoutMs: ctx.flags.timeout,
+      ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    };
+
+    let synced = 0;
+    let verified = 0;
+    let held = 0;
+    const now = () => Date.now();
+    try {
+      for (const row of rows) {
+        // The link row (`pairing_post:<id>`, written by the failure arm's team
+        // leg when it opened this pairing beside a teammate's post, or by a
+        // previous run of this command when it POSTed the row) says which shelf
+        // post this pairing IS. Three cases:
+        //  - a TEAMMATE's post that this machine has now closed locally: that is
+        //    the second, independent close 04 asks for, and the shelf has no
+        //    close endpoint, so PUT verified:true on their post — never a
+        //    duplicate POST;
+        //  - OUR post, and the row was promoted to `verified` by a close that
+        //    landed after the last sync: PUT verified:true;
+        //  - a HELD row (a 400 named the holder): re-stamp so it is not
+        //    reconsidered until it changes again, and touch nothing on the shelf.
+        const link = getLink(store, row.id);
+        if (link !== null) {
+          const promote = link.own ? row.status === 'verified' : true;
+          if (!link.held && promote) {
+            await updatePost(link.postId, { keys: keysFor(row, repo, true) }, auth, client);
+            verified += 1;
+          }
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          continue;
+        }
+        if (row.syncedAt !== null) {
+          // Synced, promoted, but the link is gone (a store that lost the
+          // mapping): nothing of ours to update. Re-stamp and move on.
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          continue;
+        }
+
+        try {
+          const result = await publishPost(
+            {
+              title: titleFor(row),
+              bodyMd: bodyFor(row),
+              priceAtomic: '0',
+              status: 'published',
+              keys: keysFor(row, repo, row.status === 'verified'),
+            },
+            auth,
+            client,
+          );
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          setLink(store, row.id, { postId: result.resourceId, origin, at: now(), own: true });
+          synced += 1;
+        } catch (err) {
+          if (err instanceof SyncSigningError) throw err; // aborts the whole run, below
+          const holder = verifiedHolderId(err);
+          if (holder !== null) {
+            // A teammate's post already holds this fingerprint verified. The row is
+            // theirs on the shelf now; stamp synced_at so it is never retried and
+            // record who holds it (`held`, so no later run PUTs on their post).
+            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+            setLink(store, row.id, { postId: holder, origin, at: now(), held: true });
+            held += 1;
+            continue;
+          }
+          if (
+            err instanceof CliError &&
+            (err.code === 'PUBLISH_BLOCKED' || err.code === 'NEEDS_CONFIRMATION')
+          ) {
+            // The server's own ingest gate refused THIS row's content. Sync has
+            // nobody to hand a --yes to, and a scrubbed command/filename body
+            // will refuse identically on every future run — so, like a holder
+            // collision, this is marked synced (never retried) rather than
+            // permanently blocking every pairing behind it in `ORDER BY at`. No
+            // events row: that field is reserved for a SIGNING failure, which is
+            // the one case the Stop hook's fallback line looks for.
+            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+            continue;
+          }
+          // Anything else (network, 5xx, rate limit) may well succeed next run:
+          // leave synced_at NULL and stop the whole run here rather than
+          // reordering past this row and hiding a live outage as partial
+          // progress on the rows behind it.
+          throw err;
+        }
+      }
+    } catch (err) {
+      if (err instanceof SyncSigningError) {
+        // Coded, and the ONE outcome the automatic sync cannot recover on its own:
+        // record it so the Stop hook can print the by-hand fallback, leave every
+        // remaining row's synced_at NULL, and exit with the code. The next Stop
+        // retries.
+        recordSyncEvent(store, project, { code: err.code, synced, verified, held });
+        throw new CliError(
+          'PUBLISH_FAILED',
+          `tenjin sync could not sign (${err.code}); ${synced + verified + held} of ${rows.length} pairings synced before it stopped.`,
+          {
+            fix: 'Run tenjin sync in a terminal where the wallet can unlock (the OS keychain or TENJIN_WALLET_PASSPHRASE), or start a session first.',
+          },
+        );
+      }
+      throw err;
+    }
+
+    // A run that finished writes its own `hook: 'sync'` row WITHOUT a code, so
+    // the Stop hook's fallback line (which reads the LAST sync row) goes quiet
+    // the moment a later run succeeds, rather than outliving the failure.
+    recordSyncEvent(store, project, { synced, verified, held });
+    return {
+      data: { synced, verified, held, pending: rows.length - synced - verified - held },
+      humanLines: [
+        `Synced ${synced} new, updated ${verified} verified, ${held} already held by a teammate.`,
+      ],
+    };
+  } finally {
+    store.close();
+  }
+}
+
+/** A signer that unlocks the keystore only when a signature is actually needed,
+ *  tagging a keystore/passphrase failure as a coded SyncSigningError so the run
+ *  can record it and stop. `address` comes from describe(), which never unlocks. */
+function lazySigner(provider: WalletProvider, address: TenjinSigner['address']): TenjinSigner {
+  const sign =
+    <T>(fn: (s: TenjinSigner) => Promise<T>) =>
+    async (): Promise<T> => {
+      let s: TenjinSigner;
+      try {
+        s = await provider.getSigner();
+      } catch (err) {
+        throw new SyncSigningError(err instanceof CliError ? err.code : 'WALLET_MISSING');
+      }
+      return fn(s);
+    };
+  return {
+    address,
+    signMessage: (args) => sign((s) => s.signMessage(args))(),
+    signTypedData: (args) => sign((s) => s.signTypedData(args))(),
+    signTransaction: (tx) => sign((s) => s.signTransaction(tx))(),
+  };
+}
+
+/** The wire keys for one pairing: the fine fingerprint verbatim, the coarse
+ *  fingerprint SALTED with the repo (so an ERR_PNPM_OUTDATED_LOCKFILE-class error
+ *  does not match across every repo the team has), and the command head for a
+ *  future ranking to use — never queried, only stored. `verified` mirrors the
+ *  local close status; a hand publish never claims verified, but sync IS the
+ *  close rule's own report and may. */
+function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput[] {
+  const keys: PostKeyInput[] = [{ kind: 'fingerprint', key: 'sig_v1:' + row.key, verified }];
+  if (row.coarseKey !== null && row.coarseKey.length > 0 && repo.length > 0) {
+    // Salt the coarse HASH, not the raw message+errno: the CLI has only the
+    // stored hashes (message/errno exist only transiently inside the failure
+    // arm's sigV1() call, never as columns), so `teamCoarseKey` — shared with
+    // the resolve leg via lib/push-scripts.ts — salts what both sides actually
+    // have. No repo, no coarse key: an unsalted coarse hash would match the same
+    // error across every repo the team has (06, "Team-shelf coarse keys").
+    keys.push({
+      kind: 'fingerprint',
+      key: 'sig_v1c:' + teamCoarseKey(row.coarseKey, repo),
+      verified,
+    });
+  }
+  if (row.cmdHead !== null && row.cmdHead.length > 0) {
+    keys.push({ kind: 'command_head', key: row.cmdHead });
+  }
+  return keys;
+}
+
+/** `Fix: <cmd_head> — <errno|frame>`. The signature's errno and frame are not
+ *  stored (the row keeps only the hashes), so the discriminant is re-derived from
+ *  the scrubbed error line and the named files — the same two sources sig_v1 read. */
+function titleFor(row: PairingRow): string {
+  const head = row.cmdHead !== null && row.cmdHead.length > 0 ? row.cmdHead : 'command';
+  const disc = discriminant(row);
+  const title = disc.length > 0 ? `Fix: ${head} — ${disc}` : `Fix: ${head}`;
+  return title.slice(0, TITLE_MAX);
+}
+
+const ERRNO_TOKEN_RE = /\b(ERR_[A-Z0-9]+(?:_[A-Z0-9]+)*|TS\d{3,5}|E\d{3,4}|E[A-Z]{3,})\b/;
+function discriminant(row: PairingRow): string {
+  if (row.errorLine !== null) {
+    const m = ERRNO_TOKEN_RE.exec(row.errorLine);
+    if (m !== null && m[1] !== undefined) return m[1];
+  }
+  return row.errorFiles.length > 0 ? (row.errorFiles[0] ?? '') : '';
+}
+
+/** ≤300 chars: the failing head, the fix command and files, the verify command,
+ *  and a `pkg:` line (which a later staleness read parses back). Every field
+ *  already passed the local scrub on the way into the row; the whole thing is
+ *  re-bounded here. */
+function bodyFor(row: PairingRow): string {
+  const lines: string[] = [];
+  if (row.cmd !== null && row.cmd.length > 0) lines.push(`Failed: ${row.cmd}`);
+  if (row.fixFiles.length > 0) lines.push(`Changed: ${row.fixFiles.slice(0, 4).join(', ')}`);
+  if (row.fixCmd !== null && row.fixCmd.length > 0) lines.push(`Passed on: ${row.fixCmd}`);
+  const pkgs = Object.entries(row.pkgVersions)
+    .slice(0, 3)
+    .map(([name, ver]) => `${name}@${ver}`);
+  if (pkgs.length > 0) lines.push(`pkg: ${pkgs.join(', ')}`);
+  return lines.join('\n').slice(0, BODY_MAX);
+}
+
+/** The verified-holder 400 the keys route draws when another PUBLISHED piece
+ *  already holds this fingerprint verified: the server names the holder's post
+ *  id. Read off the CliError posts-api mapped (details.server), so a held row is
+ *  recorded and skipped rather than crashing the run. A keys_disabled 400, or any
+ *  other error, is not a holder and propagates. */
+function verifiedHolderId(err: unknown): string | null {
+  if (!(err instanceof CliError) || !/already verified/i.test(err.message)) return null;
+  const server = readServerBody(err);
+  const fromBody = holderFromServer(server);
+  if (fromBody !== null) return fromBody;
+  const m = /on (?:post )?`?([A-Za-z0-9_-]+)`?/.exec(err.message);
+  return m !== null && m[1] !== undefined ? m[1] : 'another-piece';
+}
+
+function readServerBody(err: CliError): unknown {
+  const details = err.details;
+  if (typeof details !== 'object' || details === null) return null;
+  return (details as { server?: unknown }).server ?? null;
+}
+
+function holderFromServer(json: unknown): string | null {
+  if (typeof json !== 'object' || json === null) return null;
+  const error = (json as { error?: unknown }).error;
+  if (typeof error !== 'object' || error === null) return null;
+  const details = (error as { details?: unknown }).details;
+  if (typeof details !== 'object' || details === null) return null;
+  const fieldErrors = (details as { fieldErrors?: unknown }).fieldErrors;
+  if (typeof fieldErrors !== 'object' || fieldErrors === null) return null;
+  const keys = (fieldErrors as { keys?: unknown }).keys;
+  if (!Array.isArray(keys)) return null;
+  for (const message of keys) {
+    if (typeof message !== 'string') continue;
+    const m = /on post ([A-Za-z0-9_-]+)/.exec(message);
+    if (m !== null && m[1] !== undefined) return m[1];
+  }
+  return null;
+}
+
+// ---- the link from a local pairing to its shelf post -------------------------
+// `pairings` has no post-id column; the link is the `session_state` row
+// `pairing_post:<row id>` under the machine bucket, SHARED with the failure
+// arm's team leg (push core, STATE_PAIRING_POST_PREFIX), which writes
+// `{ postId, origin, at }` when it opens a pairing beside a teammate's post and
+// stamps `closedAt`/`status` when this machine closes it. This command adds
+// `own: true` on a post it published and `held: true` on a holder it lost to.
+
+const PAIRING_POST_PREFIX = 'pairing_post:';
+const MACHINE_SESSION = '';
+
+interface PairingLink {
+  postId: string;
+  origin: string;
+  at: number;
+  /** This machine published the post (a previous `tenjin sync`). */
+  own?: boolean;
+  /** A teammate's PUBLISHED piece held the key verified; the shelf refused ours. */
+  held?: boolean;
+  closedAt?: number;
+  status?: string;
+}
+
+function getLink(store: Store, pairingId: number): PairingLink | null {
+  const row = store.get(STORE_SQL.getState, [MACHINE_SESSION, PAIRING_POST_PREFIX + pairingId]);
+  if (row === null || typeof row.value !== 'string') return null;
+  try {
+    const parsed: unknown = JSON.parse(row.value);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const link = parsed as Record<string, unknown>;
+    if (typeof link.postId !== 'string' || link.postId.length === 0) return null;
+    return {
+      postId: link.postId,
+      origin: typeof link.origin === 'string' ? link.origin : '',
+      at: typeof link.at === 'number' ? link.at : 0,
+      ...(link.own === true ? { own: true } : {}),
+      ...(link.held === true ? { held: true } : {}),
+      ...(typeof link.closedAt === 'number' ? { closedAt: link.closedAt } : {}),
+      ...(typeof link.status === 'string' ? { status: link.status } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function setLink(store: Store, pairingId: number, link: PairingLink): void {
+  store.run(STORE_SQL.setState, [
+    MACHINE_SESSION,
+    PAIRING_POST_PREFIX + pairingId,
+    JSON.stringify(link),
+    Date.now(),
+  ]);
+}
+
+/** One `events` row, `hook: 'sync'`, per run: the counts, plus `code` when the
+ *  run stopped on a signing failure. The Stop hook reads the last one. */
+function recordSyncEvent(
+  store: Store,
+  project: string | null,
+  data: Record<string, unknown>,
+): void {
+  store.run(STORE_SQL.insertEvent, [
+    eventUid(),
+    Date.now(),
+    storeSession(null),
+    project,
+    shortHash(hostId()),
+    'sync',
+    null,
+    null,
+    null,
+    JSON.stringify(data),
+  ]);
+}
+
+// ---- raw row → PairingRow ----------------------------------------------------
+
+function readPairing(row: Record<string, unknown>): PairingRow | null {
+  const id = typeof row.id === 'number' ? row.id : null;
+  const key = typeof row.key === 'string' ? row.key : null;
+  if (id === null || key === null) return null;
+  return {
+    id,
+    key,
+    coarseKey: typeof row.coarse_key === 'string' ? row.coarse_key : null,
+    cmdHead: typeof row.cmd_head === 'string' ? row.cmd_head : null,
+    cmd: typeof row.cmd === 'string' ? row.cmd : null,
+    errorLine: typeof row.error_line === 'string' ? row.error_line : null,
+    errorFiles: parseJsonArray(row.error_files),
+    fixCmd: typeof row.fix_cmd === 'string' ? row.fix_cmd : null,
+    fixFiles: parseJsonArray(row.fix_files),
+    pkgVersions: parseJsonRecord(row.pkg_versions),
+    status: typeof row.status === 'string' ? row.status : 'open',
+    syncedAt: typeof row.synced_at === 'number' ? row.synced_at : null,
+  };
+}
+
+function parseJsonArray(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonRecord(value: unknown): Record<string, string> {
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') out[k] = v;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+// ---- repo origin (a file read, never a git spawn) ----------------------------
+
+/**
+ * The origin remote URL for the checkout at `start`, read from `.git/config`, or
+ * null. NO GIT INVOCATION — a hook (and a sync it spawns) must not run a process
+ * in front of its work; a `.git` file (a worktree or submodule) is followed to
+ * its real gitdir. Only the salt for the coarse key depends on it, and a null
+ * salts to '' — the same across the team, which is the pre-salt behaviour, safe
+ * because a missing origin is uncommon and the fine key still discriminates.
+ */
+function readRepoOrigin(cwd: string): string | null {
+  const gitDir = findGitDir(cwd);
+  if (gitDir === null) return null;
+  let text: string;
+  try {
+    text = readFileSync(join(gitDir, 'config'), 'utf8');
+  } catch {
+    return null;
+  }
+  // The url of [remote "origin"]. A tiny hand parse rather than a git-config
+  // dependency: find the origin section, then its first url = line before the
+  // next section header.
+  const lines = text.split(/\r?\n/);
+  let inOrigin = false;
+  for (const line of lines) {
+    const section = /^\s*\[(.+?)\]\s*$/.exec(line);
+    if (section !== null) {
+      inOrigin = /^remote\s+"origin"$/.test((section[1] ?? '').trim());
+      continue;
+    }
+    if (!inOrigin) continue;
+    const url = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+    if (url !== null && url[1] !== undefined) return url[1].slice(0, 500);
+  }
+  return null;
+}
+
+/** Walk up from `start` for a `.git` directory (or a `.git` file pointing at
+ *  one), returning the resolved git directory or null. */
+function findGitDir(start: string): string | null {
+  let dir = start;
+  for (let i = 0; i < 64; i += 1) {
+    const dotGit = join(dir, '.git');
+    let stat;
+    try {
+      stat = statSync(dotGit);
+    } catch {
+      stat = null;
+    }
+    if (stat !== null) {
+      if (stat.isDirectory()) return dotGit;
+      if (stat.isFile()) {
+        try {
+          const pointer = readFileSync(dotGit, 'utf8');
+          const m = /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+          if (m !== null && m[1] !== undefined) {
+            const resolved = m[1].startsWith('/') ? m[1] : join(dir, m[1]);
+            // A worktree's gitdir is …/.git/worktrees/<name>; the config lives at
+            // the common dir, which `commondir` names.
+            return resolveCommonDir(resolved);
+          }
+        } catch {
+          return null;
+        }
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
+function resolveCommonDir(gitDir: string): string {
+  try {
+    const commondir = readFileSync(join(gitDir, 'commondir'), 'utf8').trim();
+    if (commondir.length > 0) {
+      return commondir.startsWith('/') ? commondir : join(gitDir, commondir);
+    }
+  } catch {
+    // No commondir file: this IS the common git dir.
+  }
+  return gitDir;
+}
+
+// ---- small local helpers duplicated from the hook core (CLI side has no access
+// to the JS template's private functions) --------------------------------------
+
+function eventUid(): string {
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  let time = '';
+  let ms = Date.now();
+  for (let i = 0; i < 10; i += 1) {
+    time = alphabet[ms % 32] + time;
+    ms = Math.floor(ms / 32);
+  }
+  let rand = '';
+  for (const byte of randomBytes(16)) rand += alphabet[byte % 32];
+  return time + rand;
+}
+
+function hostId(): string {
+  let host: string;
+  let user: string;
+  try {
+    host = hostname();
+  } catch {
+    host = '';
+  }
+  try {
+    user = userInfo().username || '';
+  } catch {
+    user = '';
+  }
+  return host + ' ' + user;
+}

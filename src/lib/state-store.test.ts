@@ -14,6 +14,8 @@ import {
   openStore,
   probeSqlite,
   removeRetiredState,
+  shortHash,
+  teamCoarseKey,
   storeSource,
 } from './state-store';
 import {
@@ -1626,5 +1628,18 @@ describe('retired files', () => {
 
   it('is a no-op on a machine that never had them', async () => {
     expect(await removeRetiredState(dataDir)).toEqual([]);
+  });
+});
+
+describe('teamCoarseKey', () => {
+  it('is shortHash(coarseKey + "|" + repo), pinned so sync and resolve can never drift', () => {
+    expect(teamCoarseKey('abc', 'https://github.com/acme/widgets.git')).toBe(
+      shortHash('abc|https://github.com/acme/widgets.git'),
+    );
+    expect(teamCoarseKey('abc', 'https://github.com/acme/widgets.git')).toBe(
+      shortHash('abc|https://github.com/acme/widgets.git'),
+    );
+    expect(teamCoarseKey('abc', 'repo-a')).not.toBe(teamCoarseKey('abc', 'repo-b'));
+    expect(teamCoarseKey('abc', '')).toBe(shortHash('abc|'));
   });
 });
