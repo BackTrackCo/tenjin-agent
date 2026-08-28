@@ -4487,18 +4487,28 @@ describe('the subagent handoff slots', () => {
   });
 
   /**
-   * AND IT READS THE SAME END OF THE RANGE THE DRAIN DOES (runtime audit).
+   * AND IT READS THE WHOLE RANGE, NOT AN END OF IT (runtime audit).
    *
    * `liveHandoff` took `CACHE_SLOT_MAX` rows, which `statePrefixSince` orders
-   * `at DESC`: the NEWEST eight. The consumer drains OLDEST first, and the slot
-   * cap is back pressure rather than a hard bound (count-then-write across
-   * processes, plus the protect rule), so past eight slots the two ends read
-   * disjoint sets. A piece that is live and deliverable then reads as no live
-   * handoff, `alreadyShownOrLiveRelay` answers false, and a parent arm re-offers
-   * a piece a child is about to be handed: the double delivery the two-clocks
-   * rule exists to prevent, reached through the read bound rather than a clock.
+   * `at DESC`: the NEWEST eight, while the consumer drains OLDEST first. Moving
+   * that to the fires-per-session ceiling only moved the boundary, because
+   * neither number bounds the rows: `cacheSlot` counts and then writes and
+   * `spentThisSession` counts and then proceeds, both across processes, so a
+   * fan-out of N concurrent dispatches on distinct pieces holds N slots and
+   * spends N fires (measured: 16 concurrent held 16, and the announced handoff
+   * was invisible at a scan of 10). A piece that is live and deliverable but
+   * outside the read then reads as no live handoff,
+   * `alreadyShownOrLiveRelay` answers false, and a parent arm re-offers a piece
+   * a child is about to be handed: the double delivery the two-clocks rule
+   * exists to prevent, reached through the read bound rather than a clock.
+   *
+   * SO THE ASSERTION IS THE PROPERTY, NOT A COUNT. The filler count below is
+   * comfortably past every cap in the arm and nothing in the expectations
+   * depends on its value: a read that stops at any N fails this, which is what
+   * pinning a boundary of exactly one over the cap could not say. Reverting
+   * `liveHandoff` to any LIMIT is the non-vacuity check.
    */
-  it('sees a live handoff parked behind more slots than the cap', async () => {
+  it('sees a live handoff however many slots are parked over it', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
 
@@ -4507,10 +4517,10 @@ describe('the subagent handoff slots', () => {
     const relayed = await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
     expect(injected(relayed) ?? '').toContain('queued for delivery to the subagent');
 
-    // Nine newer slots on other pieces, which is reachable because the cap is
-    // not a hard bound. Read newest-first at the cap, these alone fill the
-    // window and the announced handoff is invisible.
-    for (let i = 0; i < 9; i += 1) {
+    // Newer slots on other pieces, more than any cap in the arm, which is
+    // reachable because no cap here is a hard bound.
+    const FILLERS = 16;
+    for (let i = 0; i < FILLERS; i += 1) {
       seedSlot(
         `dispatch_cache:toolu_filler_${i}`,
         slotValue({ slotId: `toolu_filler_${i}`, top: { ...OTHER_TOP } }),

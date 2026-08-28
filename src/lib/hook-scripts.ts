@@ -1667,12 +1667,12 @@ function cacheSlot(sessionId, slotId, entry, opts) {
   // rule below skips a slot naming a piece the parent was already told about,
   // so a run of dispatches converging on ONE top piece also holds more than the
   // cap (16 sequential held 10). So this is BACK PRESSURE on an always-on
-  // session, not a hard bound: what actually bounds rows is
-  // \`DISPATCH_SESSION_MAX\` fires per session, plus each entry's own TTL.
+  // session, not a hard bound: \`DISPATCH_SESSION_MAX\` is spent count-then-
+  // proceed too, so what actually bounds rows is each entry's own TTL.
   // Enforcing it atomically means deciding what loses when every slot is
   // protected, which is the announced-delivery loss the protect rule exists to
   // prevent; it is not decided here, and anything that must see every parked
-  // slot reads to the fires ceiling instead (\`HANDOFF_SCAN_MAX\`).
+  // slot reads the window with no row limit (\`liveHandoff\`).
   // An unreadable count is not a licence to drop a handoff.
   for (let i = 0; i < CACHE_SLOT_MAX; i += 1) {
     const held = countStatePrefix(sessionId, STATE_CACHE);
@@ -1779,10 +1779,8 @@ function replayHandoff(args) {
     teamShelfOrigin(config) !== null && prior.shelfBaseUrl !== config.publicShelfUrl
       ? 'team'
       : 'public';
-  // NO EVICTION FOR A REPLAY, and no row when the park does not land: this
-  // path exists to ADD a delivery, so buying its slot with another dispatch's
-  // only handoff is a straight loss, and a 'replayed' row over a park that was
-  // refused claims a delivery nothing can make.
+  // NO EVICTION FOR A REPLAY: this path exists to ADD a delivery, so buying its
+  // slot with another dispatch's only handoff is a straight loss.
   const parked = cacheSlot(
     sessionId,
     slotId,
@@ -1801,7 +1799,14 @@ function replayHandoff(args) {
     },
     { evict: false },
   );
-  if (!parked) return;
+  // A REFUSED PARK IS A ROW, NOT A SILENCE. This used to return before both
+  // writes, on the reasoning that a 'replayed' row over a refused park claims a
+  // delivery nothing can make — true of that reason, and it left the refusal
+  // itself invisible: a session under cap pressure showed a replay that simply
+  // never happened, indistinguishable in the ledger from a fire that judged
+  // 'none'. So the reason carries which one it was, and 'slots-full' is a
+  // \`skipped\` row, which asserts no delivery.
+  const reason = parked ? 'replayed' : 'slots-full';
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
@@ -1815,7 +1820,7 @@ function replayHandoff(args) {
       // arrival order. Without it "eight dispatches, three deliveries" is a
       // ratio and never an attribution.
       slotId,
-      reason: 'replayed',
+      reason,
     },
   });
   // LOGGED, NOT RELAYED. Nothing reached the parent and nothing was asked of
@@ -1839,8 +1844,8 @@ function replayHandoff(args) {
     score: judged.score,
     second: judged.second,
     strength,
-    action: 'logged',
-    reason: 'replayed',
+    action: parked ? 'logged' : 'skipped',
+    reason,
     form: 'short',
   });
 }

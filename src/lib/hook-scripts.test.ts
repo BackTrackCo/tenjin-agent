@@ -3579,7 +3579,16 @@ describe('dispatch hook: the slot cap never drops an announced handoff', () => {
    * zero network cost. Buying its slot with another dispatch's first-and-only
    * handoff is a straight loss, so at the cap it does not park at all — and a
    * `replayed` decision row over a park that never landed would claim a
-   * delivery nothing can make.
+   * delivery nothing can make. The refusal is a `slots-full` skip instead.
+   *
+   * WHAT THIS RUN ACTUALLY REACHES, stated rather than implied. `replayHandoff`
+   * returns above the park while the verdict is the shelf's `corroborated` +
+   * `confidence` and the lean stored projection carries neither, so this pins
+   * the two OUTCOMES (nothing evicted, no delivery claimed) and not the
+   * no-evict rule that produces them. It becomes a live assertion the day the
+   * replay carries the original verdict, which is the deferred change named in
+   * `replayHandoff`'s own docblock; until then the `slots-full` reason is a
+   * shape the ledger is ready for and not one it has seen.
    */
   it('parks nothing and claims nothing when the replay path finds the cap full', async () => {
     const { baseUrl, hits } = await serveJson((_body, base) => ({
@@ -3617,6 +3626,8 @@ describe('dispatch hook: the slot cap never drops an announced handoff', () => {
     const store = await openStore(dataDir);
     if (store === null) throw new Error('no store');
     try {
+      // No row asserts the delivery this fire could not make. A 'slots-full'
+      // skip would be legitimate here; a 'replayed' row never is.
       const replayed = store.all(
         `SELECT id FROM injections WHERE session = ? AND reason = 'replayed'`,
         ['replayer'],

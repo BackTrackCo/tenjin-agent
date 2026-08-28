@@ -248,13 +248,14 @@ export interface PushLedgerTallies {
   rows: number;
   byTriggerAction: Record<string, Record<string, number>>;
   byShelf: Record<string, number>;
-  /** Why a row did not inject. The ten the shipped core writes are
+  /** Why a row did not inject. The eleven the shipped core writes are
    *  `lookup-cap`, `quiet`, `no-time`, `no-answer`, `miss`, `weak`,
    *  `already-injected`, `already-relayed` (this session already handed the
    *  same piece to a subagent and that handoff has not expired),
    *  `replayed` (the question was already asked this session, so the answer
    *  already in the store was parked for the subagent instead of being looked
-   *  up again), `already-claimed` (a second agent in the session hit the same failure
+   *  up again), `slots-full` (that same replay, refused a slot because the session was
+   *  already at its cap), `already-claimed` (a second agent in the session hit the same failure
    *  signature and the first holds the claim) and `watchdog`
    *  (docs/command-reference.md#push-experimental),
    *  and the team leg by fingerprint adds `keys-off` (the shelf has
