@@ -369,6 +369,31 @@ export const STORE_SQL = {
      DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), at = excluded.at
      RETURNING value`,
 
+  /**
+   * THE ONE THING `openStore` RECORDS ABOUT ITSELF.
+   *
+   * `PRAGMA journal_mode = wal` is the single statement in this module the busy
+   * timeout does not cover (see the probe in `setWal`), so a machine where BOTH
+   * attempts fail runs on for good against a rollback journal: correct, but
+   * serialised, and until this row completely silent — no error, no stderr, no
+   * field anywhere. A store that has quietly stopped being concurrent looks
+   * from the outside exactly like one that was never contended, which is the
+   * same argument that put the `node:sqlite` probe in `doctor` (#219).
+   *
+   * MACHINE BUCKET, RAW VALUE. Session '', key `store_journal`, value the bare
+   * word `rollback` or `wal` — NOT JSON, like the `draft-search:` link and
+   * unlike everything written through `setState`, because `openStore` writes it
+   * before the store handle those helpers need exists, and `doctor` reads it
+   * back as SQL text.
+   */
+  setStoreJournal: `INSERT INTO session_state (session, key, value, at)
+     VALUES ('', 'store_journal', ?, ?)
+     ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
+  /** The point lookup that keeps the healthy path free of writes; see
+   *  `setStoreJournal` and `recordJournal`. Primary key, so it is one probe. */
+  getStoreJournal: `SELECT value, at FROM session_state
+     WHERE session = '' AND key = 'store_journal'`,
+
   recordSearch: `INSERT INTO searches (
        search_id, at, session, question, fingerprint, decision, candidates,
        source, shelf_base_url, paid_browse_count
@@ -851,6 +876,37 @@ function setWal(db) {
 }
 
 /**
+ * Leave a mark when the WAL switch gave up, and take it back off when a later
+ * open gets WAL. See \`STORE_SQL.setStoreJournal\` for what the row is and why
+ * \`doctor\` reads it.
+ *
+ * CHEAP ON THE PATH THAT IS ALWAYS TAKEN. A degraded open costs one upsert. A
+ * healthy open costs ONE PRIMARY-KEY LOOKUP AND NO WRITE — the row is absent on
+ * a machine that has never lost WAL, and once a healed machine has been stamped
+ * \`wal\` the lookup finds it and returns. This runs inside \`openStore\`, on
+ * every fire, so a write here would put a lock acquisition in front of eight
+ * concurrent hooks to record a fact that changes about once in a machine's life.
+ *
+ * MUST STAY AFTER \`bootstrap()\`: there is no \`session_state\` to write to
+ * before it.
+ */
+function recordJournal(db, wal) {
+  try {
+    if (wal) {
+      const row = db.prepare(STORE_SQL.getStoreJournal).get();
+      if (!isRecord(row) || row.value === 'wal') return;
+      db.prepare(STORE_SQL.setStoreJournal).run('wal', Date.now());
+      return;
+    }
+    db.prepare(STORE_SQL.setStoreJournal).run('rollback', Date.now());
+  } catch {
+    // Bookkeeping about the bookkeeping. A store too contended to accept this
+    // row is precisely the store the row describes, and losing it costs one
+    // doctor line — never the fire.
+  }
+}
+
+/**
  * Open the store, once per process. NEVER AT MODULE SCOPE: a module-scope
  * \`await import\` that throws exits 1 with a stack trace, which is what the
  * operator sees as a hook error. Called inside main(), and every failure —
@@ -885,6 +941,9 @@ async function openStore() {
     // read of the header. If it fails again the store is still open and
     // correct, just on a rollback journal.
     if (!wal) wal = setWal(db);
+    // ...and the answer is now READ, not thrown away: a machine stuck on a
+    // rollback journal says so in one row that \`tenjin doctor\` surfaces.
+    recordJournal(db, wal);
     try {
       chmodSync(STATE_DB_PATH, 0o600);
     } catch {
@@ -1593,6 +1652,62 @@ function setWalOn(db: SqliteDatabase): boolean {
   }
 }
 
+/** ⚠ MIRRORED with `recordJournal` in the hook template above, which carries the
+ *  reasoning: one upsert on the degraded path, one primary-key lookup and no
+ *  write on the healthy one, and never after anything but `bootstrap()`. */
+function recordJournalOn(db: SqliteDatabase, wal: boolean): void {
+  try {
+    if (wal) {
+      const row = db.prepare(STORE_SQL.getStoreJournal).get();
+      if (!isRecord(row) || row.value === 'wal') return;
+      db.prepare(STORE_SQL.setStoreJournal).run('wal', Date.now());
+      return;
+    }
+    db.prepare(STORE_SQL.setStoreJournal).run('rollback', Date.now());
+  } catch {
+    // A store too contended to take this row is the store the row is about.
+  }
+}
+
+/** What `openStore` last recorded about the WAL switch on this machine. */
+export interface StoreJournalState {
+  /** `rollback` means the store is open, correct and serialised — never absent. */
+  mode: 'rollback' | 'wal';
+  /** When the open that recorded it ran (ms since epoch). */
+  at: number;
+}
+
+/**
+ * Read the degraded-store marker for `doctor`, WITHOUT CREATING ANYTHING.
+ *
+ * `doctor` is the command reached for when something is already broken, so it
+ * may not be the thing that first materialises the state database: a missing
+ * file reads as "nothing to report", not as a store to bootstrap. When the file
+ * IS there this goes through the ordinary {@link openStore}, which means the
+ * answer reflects a real open attempt made now — including its own retry, so a
+ * machine whose loss of WAL was one transient cold start heals itself the moment
+ * an operator asks.
+ */
+export async function readStoreJournal(dataDir: string): Promise<StoreJournalState | null> {
+  try {
+    const { existsSync } = await import('node:fs');
+    if (!existsSync(stateDbPath(dataDir))) return null;
+    const store = await openStore(dataDir);
+    if (store === null) return null;
+    try {
+      const row = store.get(STORE_SQL.getStoreJournal);
+      if (row === null || (row.value !== 'rollback' && row.value !== 'wal')) return null;
+      return { mode: row.value, at: typeof row.at === 'number' ? row.at : 0 };
+    } finally {
+      store.close();
+    }
+  } catch {
+    // Same posture as every other reader here: unreadable is silent, never a
+    // doctor that throws on the machine it was run to diagnose.
+    return null;
+  }
+}
+
 /**
  * Open (and create) the store for the CLI.
  *
@@ -1664,6 +1779,8 @@ export async function openStore(dataDir: string): Promise<Store | null> {
     // Second and last attempt, now that whatever cold start this lost to has
     // committed.
     if (!wal) wal = setWalOn(db);
+    // ...and the answer is recorded rather than discarded; see `recordJournal`.
+    recordJournalOn(db, wal);
     try {
       chmodSync(path, 0o600);
     } catch {
