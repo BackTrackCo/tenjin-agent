@@ -95,6 +95,8 @@ describe('runSearch', () => {
         appliesTo: { products: ['Vercel', 'Next'] },
       },
       limit: 5,
+      // A direct search is the `cli` trigger; the hook arms name themselves.
+      trigger: 'cli',
     });
   });
 

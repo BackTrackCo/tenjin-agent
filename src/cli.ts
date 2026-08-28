@@ -602,6 +602,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .option('--temporal-mode <mode>', 'snapshot | maintained | evergreen')
     .option('--provenance <text>', 'provenance summary (card)')
     .option('--methodology <text>', 'methodology summary (card)')
+    .option(
+      '--key <kind=value>',
+      'an exact-match key this piece answers by-key lookups on: fingerprint | package_version | command_head | repo, e.g. package_version=zod@4.1.0 (repeatable, up to 32; needs KNOWLEDGE_KEYS on the shelf)',
+      collect,
+      [],
+    )
     .action(async function (this: Command, file: string | undefined) {
       await runCommand('publish', this, async (ctx) => {
         const o = this.opts();
@@ -631,6 +637,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.artifactType === 'string' ? { artifactType: o.artifactType } : {}),
             ...(typeof o.temporalMode === 'string' ? { temporalMode: o.temporalMode } : {}),
             ...(typeof o.provenance === 'string' ? { provenance: o.provenance } : {}),
+            ...(Array.isArray(o.key) && o.key.length > 0 ? { key: o.key as string[] } : {}),
             ...(typeof o.methodology === 'string' ? { methodology: o.methodology } : {}),
           },
           ctx,

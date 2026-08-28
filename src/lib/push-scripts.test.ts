@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -287,6 +287,54 @@ async function ledger(): Promise<LedgerRow[]> {
         agentType: event.agentType,
       } as LedgerRow;
     });
+  } finally {
+    db.close();
+  }
+}
+
+interface EventRow {
+  [key: string]: unknown;
+  session: string;
+  hook: string;
+  tool: string | null;
+  error_hash: string | null;
+  files: string[];
+  data: Record<string, unknown>;
+}
+
+/** Every event row a run wrote, oldest first, with the JSON columns parsed. */
+async function events(): Promise<EventRow[]> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db.prepare('SELECT * FROM events ORDER BY id').all() as unknown as Record<string, unknown>[]
+    ).map(
+      (r) =>
+        ({
+          ...r,
+          files: typeof r.files === 'string' ? (JSON.parse(r.files) as string[]) : [],
+          data: typeof r.data === 'string' ? (JSON.parse(r.data) as Record<string, unknown>) : {},
+        }) as EventRow,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+/** Every pairing row, oldest first, `error_files` parsed. */
+async function pairings(): Promise<Array<Record<string, unknown> & { error_files: string[] }>> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db.prepare('SELECT * FROM pairings ORDER BY id').all() as unknown as Record<string, unknown>[]
+    ).map((r) => ({
+      ...r,
+      error_files: typeof r.error_files === 'string' ? (JSON.parse(r.error_files) as string[]) : [],
+    }));
   } finally {
     db.close();
   }
@@ -1019,6 +1067,59 @@ describe('the two shelves', () => {
   });
 });
 
+/**
+ * Every search leaves the machine labelled with the arm that fired it. The
+ * server tallies use rates per trigger (`GET /api/lookups/stats`) and, until
+ * this, every lookup this CLI made was filed as `cli`: 867 rows, one bucket,
+ * nothing for an adaptive cooldown to read. Telemetry only; a server that does
+ * not know the field records `cli` as before.
+ */
+describe('the trigger on the wire', () => {
+  it('each arm names itself on the search body', async () => {
+    const triggers: unknown[] = [];
+    const { baseUrl } = await serve((req) => {
+      if (req.url.startsWith('/api/search')) {
+        triggers.push((JSON.parse(req.body) as { trigger?: unknown }).trigger);
+      }
+      return miss(req);
+    });
+    await pushOn(baseUrl);
+    await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'UserPromptSubmit',
+        prompt:
+          'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps',
+      }),
+    );
+    const file = join(scriptDir, 'thing.ts');
+    await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: file },
+      }),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: file },
+        }),
+      );
+    }
+    await runScript(websearchHookScript(dataDir), webSearch('zod resolver optional chain parse'));
+    expect(triggers).toEqual(['prompt', 'read', 'churn', 'research']);
+  });
+});
+
 describe('the prompt arm (UserPromptSubmit)', () => {
   const prompt = (text: string): string =>
     JSON.stringify({ session_id: SESSION, hook_event_name: 'UserPromptSubmit', prompt: text });
@@ -1082,6 +1183,30 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(slash.stdout).toBe('');
     expect(hits()).toBe(0);
     expect(await ledger()).toEqual([]);
+    // BUT EVERY PROMPT IS ON RECORD (#212): a "yes" turns the user turn over
+    // as surely as a research question does, and the importance score splits a
+    // session on those turns. Skipped rows say why, and carry no decision.
+    const rows = await events();
+    expect(rows.map((r) => r.hook)).toEqual(['prompt', 'prompt']);
+    expect(rows[0]!.data).toEqual({
+      event: 'UserPromptSubmit',
+      query: 'yes, do that',
+      // The lead's own turn, so the agent field is null rather than absent: a
+      // reader has to tell "the lead" from "a build that recorded nobody".
+      agentId: null,
+      skipped: 'short',
+    });
+    expect(rows[1]!.data).toMatchObject({ event: 'UserPromptSubmit', skipped: 'slash' });
+  });
+
+  it('opens one event row for a looked-up prompt, not two', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).not.toHaveProperty('skipped');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'prompt', action: 'injected' });
   });
 
   it('reads the older user_input spelling too', async () => {
@@ -1259,25 +1384,37 @@ describe('the failure arm (PostToolUse Bash)', () => {
       },
     });
 
-  it('names the package the failure was about, then never asks twice', async () => {
-    const { baseUrl, hits, queries } = await serve(echo());
+  /**
+   * THE ERROR NEVER LEAVES THE MACHINE (tenjin-agent#212). This arm used to
+   * send the scrubbed error tail to `/api/search`; two machines' worth of rows
+   * said every hit was an unrelated note at `confidence: low`. Now a failure
+   * this machine has not paired writes its event row — signature, files, the
+   * scrubbed line — and exits, with no request and no injection row. The team
+   * shelf is asked by fingerprint in the following PR.
+   */
+  it('records the failure once, on the machine, and asks nothing', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
 
     const first = await runScript(pushFailureHookScript(dataDir), failure());
-    expect(injected(first)).toContain(BODY_MD);
-    expect(queries()[0]).toContain('left-pad');
-    const askedOnce = hits();
+    expect(first.code).toBe(0);
+    expect(first.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
 
     // The same command re-run is the same problem. Both PostToolUse and
     // PostToolUseFailure can fire for one failure, too.
     const second = await runScript(pushFailureHookScript(dataDir), failure());
     expect(second.stdout).toBe('');
-    expect(hits()).toBe(askedOnce);
-    expect(await ledger()).toHaveLength(1);
+    expect(hits()).toBe(0);
+    const rows = (await events()).filter((e) => e.hook === 'failure');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).toMatchObject({ event: 'PostToolUse', command: 'pnpm install left-pad' });
+    expect(String(rows[0]!.data.error)).toContain('left-pad');
   });
 
   it('reads the top-level error string of a PostToolUseFailure', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1289,13 +1426,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
         error: "Exit code 1\nTypeError: Cannot find module 'left-pad' from the vitest resolver",
       }),
     );
-    expect(queries()[0]).toContain('left-pad');
-    expect((await ledger())[0]).toMatchObject({
-      trigger: 'failure',
-      event: 'PostToolUseFailure',
-      action: 'injected',
-    });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(run.code).toBe(0);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.data).toMatchObject({ event: 'PostToolUseFailure' });
+    expect(String(row?.data.error)).toContain('left-pad');
   });
 
   /**
@@ -1305,7 +1440,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * harness it ships against.
    */
   it('reads a failure the runner printed to stdout with no exit code', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1323,8 +1458,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    expect(queries()[0] ?? '').toContain('left-pad');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('left-pad');
   });
 
   it('stays out of the way of a command that printed nothing wrong', async () => {
@@ -1346,16 +1482,47 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   /**
+   * A pass is the other half of the mechanical lane, and it now leaves a row of
+   * its own: "fail → edit → the same head passes" is the sequence the
+   * importance score reads, and a pass that closed nothing used to be
+   * invisible to it.
+   */
+  it('writes a pass row, with the head, when an allowlisted command succeeds', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'cd /x && pnpm test' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(hits()).toBe(0);
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ hook: 'pass', tool: 'Bash', error_hash: null });
+    expect(rows[0]!.data).toEqual({
+      event: 'PostToolUse',
+      command: 'cd /x && pnpm test',
+      head: 'pnpm',
+      agentId: null,
+    });
+  });
+
+  /**
    * An auth failure is the failure this arm fires on most often, so the token in
    * it is the common case and not the edge. Nothing credential-shaped may reach
-   * the wire, and nothing credential-shaped may reach the ledger either: the
-   * ledger row carries the same string the request did.
+   * the store: the event row is read back into a later session's context by the
+   * status and score reports, and a pairing's error line is replayed verbatim.
    *
    * Behind `pnpm publish`, whose git preflight is where this wording comes from:
-   * a bare `git push` is no longer a head this arm fires behind at all.
+   * a bare `git push` is not a head this arm fires behind at all.
    */
-  it('strips the credential out of an auth failure before it leaves the machine', async () => {
-    const { baseUrl, queries } = await serve(echo());
+  it('strips the credential out of an auth failure before it is stored', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1369,12 +1536,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    const sent = queries()[0] ?? '';
-    expect(sent).toContain('Authentication');
-    expect(sent).not.toContain('ghp_');
-    expect(sent).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
-    const rows = await ledger();
-    expect(String(rows[0]!.query)).not.toContain('ghp_');
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('Authentication');
+    expect(stored).not.toContain('ghp_');
+    expect(stored).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
   });
 
   /**
@@ -1388,7 +1554,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * where the sidecar would actually meet this string.
    */
   it('strips a standard-base64 secret, slashes and all', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
     const run = await runScript(
@@ -1402,13 +1568,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    const sent = queries()[0] ?? '';
-    expect(sent).toContain('SignatureDoesNotMatch');
-    expect(sent).not.toContain(secret);
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('SignatureDoesNotMatch');
+    expect(stored).not.toContain(secret);
     // Not merely split on the slashes: no run of it survives either.
-    expect(sent).not.toContain('wJalrXUtnFEMI');
-    expect(sent).not.toContain('bPxRfiCYEXAMPLEKEY');
-    expect(String((await ledger())[0]!.query)).not.toContain('wJalrXUtnFEMI');
+    expect(stored).not.toContain('wJalrXUtnFEMI');
+    expect(stored).not.toContain('bPxRfiCYEXAMPLEKEY');
   });
 
   /**
@@ -1440,6 +1606,18 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(await ledger()).toEqual([]);
   }
 
+  /** Silent before the store is even opened: the head check ran and refused. */
+  async function expectNoStore(stdin: string): Promise<void> {
+    const run = await runScript(pushFailureHookScript(dataDir), stdin);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(existsSync(join(dataDir, STATE_DB_FILE))).toBe(false);
+  }
+
+  /** A traceback with a real frame, so the signature clears the floor. */
+  const TRACEBACK =
+    "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+
   /**
    * The fire that started this: `which codex` says "codex not found" on stderr,
    * which is the command working, and the old word-bag rule injected an
@@ -1457,8 +1635,115 @@ describe('the failure arm (PostToolUse Bash)', () => {
     await expectQuiet(bash('grep -r foo src', { stdout: '', stderr: '', exit_code: 1 }), hits);
   });
 
+  /**
+   * THE ALLOWLIST TABLE (tenjin-agent#212). Every pairing on record — 14 rows,
+   * two machines — had been opened by `git show … | grep ENOENT` or
+   * `sed -n` over source that MENTIONS an errno, because `git` was a head.
+   * `python3 -c` and `node -e` are the other shape: the agent evaluating an
+   * expression, whose traceback names `<string>` and whose fix is a different
+   * expression, never a repo file.
+   */
+  it('no longer fires behind git, however fatal the output', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await expectNoStore(
+      bash('git push origin main', { stdout: '', stderr: 'fatal: Authentication failed' }),
+    );
+    await expectNoStore(
+      bash('git show HEAD:src/a.ts | grep ENOENT', { stdout: TRACEBACK, stderr: '' }),
+    );
+  });
+
+  it('fires behind a runtime only when it runs a file', async () => {
+    await pushOn('http://127.0.0.1:1');
+    for (const command of [
+      'python3 -c "import x"',
+      'node -e "require(1)"',
+      'python3 -',
+      'node',
+      'python3 -m',
+      'python3 -m http.server',
+      'node --version',
+    ]) {
+      await expectNoStore(bash(command, { stdout: '', stderr: TRACEBACK }));
+    }
+    // ... or its own test runner: `python3 -m pytest` is the most common
+    // Python test spelling, and it is a pytest invocation, so the pairing keys
+    // on `pytest` and a later bare `pytest` pass closes it.
+    for (const command of [
+      'python3 script.py',
+      'node dist/index.js',
+      'python3 -m pytest tests/',
+      'python -m unittest discover',
+      'node --test',
+      'deno test',
+    ]) {
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: `runtime-${command.length}`,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command },
+          tool_response: { stdout: '', stderr: TRACEBACK, interrupted: false },
+        }),
+      );
+    }
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(6);
+    expect((await pairings()).map((p) => p.cmd_head)).toEqual([
+      'python3',
+      'node',
+      'pytest',
+      'unittest',
+      'node',
+      'deno',
+    ]);
+  });
+
+  it('never opens a pairing whose error named no file, or only <string>/<stdin>', async () => {
+    await pushOn('http://127.0.0.1:1');
+    const evaluated =
+      'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\nModuleNotFoundError: No module named \'httpx\'';
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 run.py', { stdout: '', stderr: evaluated }),
+    );
+    const piped =
+      'Traceback (most recent call last):\n  File "<stdin>", line 1, in <module>\nModuleNotFoundError: No module named \'requests\'';
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 other.py', { stdout: '', stderr: piped }),
+    );
+    // An errno with no frame: over the floor for a signature, but nothing a
+    // later edit could ever be matched against.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm db:migrate', { stdout: '', stderr: 'Error: ECONNREFUSED 127.0.0.1:5432' }),
+    );
+    const rows = (await events()).filter((e) => e.hook === 'failure');
+    expect(rows).toHaveLength(3);
+    // The rows still carry the signature: the failure happened, and the score
+    // and the team leg (following PR) both key on it.
+    for (const row of rows) expect(row.error_hash).toMatch(/^[0-9a-f]+$/);
+    expect(rows.map((r) => r.files)).toEqual([[], [], []]);
+    expect(await pairings()).toEqual([]);
+  });
+
+  it('stamps the pairing key on the failure row as error_hash', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm db:migrate', { stdout: '', stderr: TRACEBACK }),
+    );
+    const row = (await events()).find((e) => e.hook === 'failure');
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(row?.error_hash).toBe(opened[0]!.key);
+    expect(row?.files).toEqual(['migrate.ts']);
+    expect(opened[0]!.error_files).toEqual(['migrate.ts']);
+  });
+
   it('reaches the command behind a wrapper with options', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     for (const command of [
       'sudo -u builder pnpm test',
@@ -1484,9 +1769,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
         }),
       );
       expect(run.code).toBe(0);
-      expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
     }
-    expect(queries().length).toBe(6);
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(6);
+    expect(hits()).toBe(0);
   });
 
   it('does not let an argument authorize a command behind a wrapper either', async () => {
@@ -1515,6 +1800,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
     }
     expect(hits()).toBe(0);
     expect(await ledger()).toEqual([]);
+    expect(await events()).toEqual([]);
   });
 
   it('does not let an argument authorize an ordinary command', async () => {
@@ -1535,7 +1821,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   it('fires on a rustc diagnostic, which only rustc emits', async () => {
-    const { baseUrl } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1552,9 +1838,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.error_hash).toMatch(/^[0-9a-f]+$/);
+    expect((await pairings())[0]).toMatchObject({ cmd_head: 'rustc', error_files: ['main.rs'] });
   });
 
+  /** Not a head at all any more, so the exit code is never even read. */
   it('says nothing about `git diff --exit-code` reporting a difference', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
@@ -1602,12 +1892,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       'ok\n'.repeat(2000) +
       'Test Files  12 passed (12)\nTests  204 passed (204)\n';
     await expectQuiet(bash('pnpm vitest run', { stdout: noisy, stderr: '' }), hits);
+    expect((await events()).map((e) => e.hook)).toEqual(['pass']);
   });
 
   it('fires on a chained head, reading the failure from the second command', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('cd /x && pnpm test', {
         stdout:
@@ -1615,30 +1906,32 @@ describe('the failure arm (PostToolUse Bash)', () => {
         stderr: '',
       }),
     );
-    expect(queries()[0] ?? '').toContain('AssertionError');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('AssertionError');
+    expect(row?.data.command).toBe('cd /x && pnpm test');
   });
 
   it('fires on a tsc diagnostic run through `pnpm exec`', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('pnpm exec tsc --noEmit', {
         stdout: "src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'",
         stderr: '',
       }),
     );
-    expect(queries()[0] ?? '').toContain('TS2322');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('TS2322');
+    expect((await pairings())[0]).toMatchObject({ cmd_head: 'tsc', error_files: ['a.ts'] });
   });
 
-  it('fires on a python traceback and names the module it could not import', async () => {
-    const { baseUrl, queries } = await serve(echo());
+  it('fires on a python traceback and keys the pairing on the script', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('python3 script.py', {
         stdout: '',
@@ -1646,9 +1939,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
           'Traceback (most recent call last):\n  File "script.py", line 3, in <module>\n    import httpx\nModuleNotFoundError: No module named \'httpx\'',
       }),
     );
-    expect(queries()[0] ?? '').toContain('httpx');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('httpx');
+    expect((await pairings())[0]).toMatchObject({
+      cmd_head: 'python3',
+      error_files: ['script.py'],
+    });
   });
 });
 
@@ -1663,83 +1960,205 @@ describe('the failure arm (PostToolUse Bash)', () => {
  * with. That is the point of the machine-wide count: the arm under test has
  * spent nothing of its own, and must still be stopped by what the machine spent.
  */
+/**
+ * PARALLEL SUBAGENTS ARE ONE SESSION ID. Claude Code hands every child of a
+ * session the parent's `session_id` and tells them apart only by `agent_id`, so
+ * anything the store keys by session alone answers "did SOMEBODY in this fan-out
+ * do this" when the question was always "did THIS worker do this".
+ */
+describe('the arms tell an agent from a session', () => {
+  const AGENT = 'a1';
+
+  const bash = (over: Record<string, unknown>): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      ...over,
+    });
+
+  const failing = (agent?: string): string =>
+    bash({
+      ...(agent === undefined ? {} : { agent_id: agent }),
+      tool_input: { command: 'pnpm install left-pad' },
+      tool_response: {
+        stdout: '',
+        stderr: "Error: Cannot find module 'left-pad' required by the vitest resolver",
+        exit_code: 1,
+        interrupted: false,
+      },
+    });
+
+  /**
+   * The importance score (#212, CommonTrace `detection.py`) reads fail → edit →
+   * pass out of these rows, and that sequence is a claim about ONE agent: with
+   * nothing but a shared session id on the row it stitched one subagent's
+   * failure to a second's edit and a third's pass and called the result a fix.
+   */
+  it('stamps the firing agent on the edit, failure and pass rows', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        agent_id: AGENT,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: join(scriptDir, 'resolver.ts') },
+      }),
+    );
+    await runScript(pushFailureHookScript(dataDir), failing(AGENT));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash({
+        agent_id: AGENT,
+        tool_input: { command: 'pnpm test' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(hits()).toBe(0);
+
+    const rows = await events();
+    expect(rows.map((r) => r.hook)).toEqual(['edit', 'failure', 'pass']);
+    // The session is the PARENT's on all three — that is the whole problem —
+    // so `agentId` is the only field that says who did the work.
+    expect(rows.map((r) => r.session)).toEqual([SESSION, SESSION, SESSION]);
+    for (const row of rows) expect(row.data).toMatchObject({ agentId: AGENT });
+  });
+
+  /** The lead's own turn carries no `agent_id`, and records `null` rather than
+   *  dropping the field: a reader has to tell "the lead did this" from "this
+   *  build wrote no agent at all". */
+  it('records the lead as null, not as a missing field', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(pushFailureHookScript(dataDir), failing());
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.data).toMatchObject({ agentId: null });
+    expect(Object.keys(row?.data ?? {})).toContain('agentId');
+  });
+
+  /**
+   * THE QUIET CHILD. A signature is claimed once per SESSION — one problem is
+   * one problem, whoever ran into it — so the second agent to hit the same wall
+   * loses the claim and does no work. It used to exit with no row at all, which
+   * made the fire invisible: from the store it had never happened. But two
+   * agents hitting one wall is the strongest evidence there is that a finding
+   * would be worth publishing, so the loser records why it was quiet.
+   */
+  it('counts the second agent that hits the same failure signature', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const first = await runScript(pushFailureHookScript(dataDir), failing('a1'));
+    expect(first.stdout).toBe('');
+    // No row for the winner: it did the work, and found nothing to say.
+    expect(await ledger()).toEqual([]);
+
+    const second = await runScript(pushFailureHookScript(dataDir), failing('a2'));
+    expect(second.code).toBe(0);
+    expect(second.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    // One failure event row, because it is one failure...
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(1);
+    // ...and one countable skip, on the shape `tenjin push status` tallies.
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session: SESSION,
+      trigger: 'failure',
+      shelf: 'local',
+      action: 'skipped',
+      reason: 'already-claimed',
+    });
+  });
+});
+
 describe('what the arms put on the wire', () => {
   /**
-   * TWO NEW FIELDS ON EVERY HOOK LOOKUP. `trigger` names the arm, which is the
-   * only way the shelf's per-trigger stats can tell a prompt lookup from a
-   * churn one; `filters.appliesTo.packages` is the package the arm is actually
-   * about, sent as a FILTER instead of pasted in front of the query.
-   *
-   * ONE NAME, NEVER A LIST: the shelf ANDs every value it is given, so two names
-   * ask for a card claiming both.
+   * THE FAILURE ARM PUTS NOTHING ON THE WIRE (tenjin-agent#212). Every other arm
+   * here is checked for the shape of its request; this one is checked for the
+   * absence of one. The fuzzy `/api/search` leg it used to run on the error tail
+   * is gone — on two machines every hit it produced was an unrelated note at
+   * `confidence: low`, and the tail it sent is the string in the sidecar most
+   * likely to carry a credential or a path. So there is no `trigger: 'failure'`
+   * body to assert on, and the arm's own describe block proves the rest of what
+   * it does from local pairings alone. The team leg by fingerprint (`POST
+   * /api/keys/resolve`, two hashes) arrives in the following PR.
    */
-  it('sends trigger failure and the package the error named, not a joined query', async () => {
-    const { baseUrl, bodies, queries } = await serve(echo());
+  it('asks nothing at all on a failure, whatever the error names', async () => {
+    const { baseUrl, bodies, hits } = await serve(echo());
     await pushOn(baseUrl);
 
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm test' },
-        error: "Exit code 1\nError: Cannot find module 'zod' from the vitest resolver",
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({
-      trigger: 'failure',
-      filters: { appliesTo: { packages: ['zod'] } },
-    });
-    // The name is the filter now, so the query is the error line alone.
-    expect(queries()[0]).not.toMatch(/^zod /);
-    expect(queries()[0]).toContain('Cannot find module');
+    for (const error of [
+      "Exit code 1\nError: Cannot find module 'zod' from the vitest resolver",
+      'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
+      'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
+    ]) {
+      const run = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PostToolUseFailure',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test' },
+          error,
+        }),
+      );
+      expect(run.code).toBe(0);
+    }
+    expect(hits()).toBe(0);
+    expect(bodies()).toEqual([]);
   });
 
   /**
-   * NO NAME, NO FILTER — the case the joined query used to make harmless. The
-   * error text names no module and `pnpm test` names no package, so the only
-   * token left is the package manager itself. Sending it would ask the shelf
-   * for a card that claims `pnpm`, and `appliesTo` is a hard AND: the lookup
-   * could only ever miss.
+   * The package manager is not one of the packages. `packagesInCommand` used to
+   * return the head itself whenever the command named nothing else, so
+   * `npm install zod` read as ['npm', 'zod'] with the manager taking the first
+   * slot. On this branch the arm sends no filter, so the surface that shows it
+   * is the pairing's recorded `pkg_versions`: `pkgVersions` reads only the first
+   * two names, and a manager sitting in front would spend one of them on a
+   * version nobody will ever compare against.
    */
-  it('sends no filter when the failure names no package', async () => {
-    const { baseUrl, bodies } = await serve(echo());
-    await pushOn(baseUrl);
+  it('records the installed package on the pairing, never the package manager', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-push-repo-'));
+    try {
+      await mkdir(join(repo, 'node_modules', 'zod'), { recursive: true });
+      await writeFile(
+        join(repo, 'node_modules', 'zod', 'package.json'),
+        JSON.stringify({ name: 'zod', version: '3.24.1' }),
+      );
+      await mkdir(join(repo, 'node_modules', 'npm'), { recursive: true });
+      await writeFile(
+        join(repo, 'node_modules', 'npm', 'package.json'),
+        JSON.stringify({ name: 'npm', version: '10.9.0' }),
+      );
 
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm test' },
-        error: 'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({ trigger: 'failure' });
-    expect(bodies()[0]).not.toHaveProperty('filters');
-  });
+      const { baseUrl } = await serve(echo());
+      await pushOn(baseUrl);
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PostToolUseFailure',
+          tool_name: 'Bash',
+          cwd: repo,
+          tool_input: { command: 'npm install zod' },
+          error:
+            "Exit code 1\nError: Cannot find module 'zod'\n    at Object.<anonymous> (src/index.ts:3:1)",
+        }),
+      );
 
-  /** ...and the package an install names is the filter, not the manager. */
-  it('sends the installed package, not the package manager', async () => {
-    const { baseUrl, bodies } = await serve(echo());
-    await pushOn(baseUrl);
-
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'npm install zod' },
-        error: 'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({
-      trigger: 'failure',
-      filters: { appliesTo: { packages: ['zod'] } },
-    });
+      const rows = await pairings();
+      expect(rows).toHaveLength(1);
+      const versions = JSON.parse(String(rows[0]?.pkg_versions)) as Record<string, string>;
+      expect(versions).toEqual({ zod: '3.24.1' });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 
   it('sends trigger prompt and no filter at all', async () => {
@@ -1791,18 +2210,6 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     session_id: SESSION,
     hook_event_name: 'UserPromptSubmit',
     prompt: QUESTION,
-  });
-  const failureInput = JSON.stringify({
-    session_id: SESSION,
-    hook_event_name: 'PostToolUse',
-    tool_name: 'Bash',
-    tool_input: { command: 'pnpm install left-pad' },
-    tool_response: {
-      stdout: '',
-      stderr: "Error: Cannot find module 'left-pad' required by the vitest resolver",
-      exit_code: 1,
-      interrupted: false,
-    },
   });
 
   /** `count` spent lookups on `trigger`, `ageMs` old, from another session. */
@@ -1867,7 +2274,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
    * and failures are the arm worth spending on, so one flat pool meant the
    * cheap arm spent the expensive arm's allowance in the opening minutes.
    */
-  it('leaves the failure bucket untouched when a prompt flood exhausts its own', async () => {
+  it('leaves the research bucket untouched when a prompt flood exhausts its own', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
     // Well past the prompt cap, and not by one: a flood does not get to bleed
@@ -1877,10 +2284,12 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     const blocked = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(blocked.stdout).toBe('');
 
-    const allowed = await runScript(pushFailureHookScript(dataDir), failureInput);
+    // The research arm is the other arm worth spending on now that the failure
+    // arm asks no shelf at all (it answers from local pairings; #212).
+    const allowed = await runScript(websearchHookScript(dataDir), webSearch(QUESTION));
     expect(injected(allowed)).toContain(BODY_MD);
     const rows = await ledger();
-    expect(rows.at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(rows.at(-1)).toMatchObject({ trigger: 'research', action: 'injected' });
   });
 
   it('refills the bucket once the spend rolls out of the window', async () => {
@@ -2093,6 +2502,36 @@ describe('the subagent arm (SubagentStart)', () => {
 });
 
 describe('the context arm (log-only)', () => {
+  /**
+   * The upserted `edited:<path>` state row keeps only the LAST timestamp per
+   * path, so "the same file edited before and after a user turn" was
+   * uncomputable from it. One appended event per edit, basename only.
+   */
+  it('appends an edit row per Edit/Write, with the basename and nothing else', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const file = join(scriptDir, 'nested', 'drizzle.config.ts');
+    for (const tool of ['Edit', 'Write']) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PreToolUse',
+          tool_name: tool,
+          tool_input: { file_path: file },
+        }),
+      );
+    }
+    expect(hits()).toBe(0);
+    const rows = await events();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.tool)).toEqual(['Edit', 'Write']);
+    for (const row of rows) {
+      expect(row).toMatchObject({ hook: 'edit', files: ['drizzle.config.ts'], error_hash: null });
+      expect(JSON.stringify(row)).not.toContain('nested');
+    }
+  });
+
   it('logs the packages a Read named and says nothing to the model', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);

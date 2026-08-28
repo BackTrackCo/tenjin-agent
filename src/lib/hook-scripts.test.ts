@@ -421,8 +421,10 @@ describe('WebSearch hook: a hit', () => {
       schemaVersion: 3,
       view: 'decision',
       query: 'what changed in ox v0.14',
-      // Every hook lookup names the arm that fired it; this one has no package
-      // to narrow on, so it sends no filter at all.
+      // Every hook lookup names the arm that fired it, so the server's
+      // per-trigger use rates (`GET /api/lookups/stats`) can tell a
+      // WebSearch-hook lookup from a manual one; this one has no package to
+      // narrow on, so it sends no filter at all.
       trigger: 'research',
     });
     expect(JSON.parse(seen)).not.toHaveProperty('filters');
@@ -2372,6 +2374,17 @@ describe('dispatch hook: a subagent dispatch', () => {
       );
     }
     expect(hits()).toBe(2);
+  });
+
+  it('names itself `dispatch` on the wire', async () => {
+    const triggers: unknown[] = [];
+    const { baseUrl } = await serveJson((body) => {
+      triggers.push((JSON.parse(body) as { trigger?: unknown }).trigger);
+      return { status: 200, json: DISPATCH_MISS };
+    });
+    await writeConfig({ baseUrl });
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt: STRONG_PROMPT }));
+    expect(triggers).toEqual(['dispatch']);
   });
 
   it('ignores a tool it was not registered for, with no request', async () => {

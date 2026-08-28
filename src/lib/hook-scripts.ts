@@ -312,6 +312,39 @@ function sessionIdOf(input) {
 }
 
 /**
+ * The SUBAGENT this fire happened inside, or '' for the lead's own turn.
+ *
+ * A SESSION IS NOT AN AGENT. Claude Code hands every child of a session the
+ * PARENT's \`session_id\` and adds \`agent_id\`; only a parent fire has no
+ * \`agent_id\` at all. So two subagents running in parallel are one session id
+ * to every query in this file, and any per-session key they both write is a key
+ * they overwrite for each other — which is how one subagent's unrelated edit
+ * came to close, and verify, a pairing a sibling had been shown.
+ *
+ * '' IS THE LEAD'S BUCKET, and the answer for any harness that names no agent,
+ * so a single-agent session's keys land exactly where they always did.
+ */
+function agentIdOf(input) {
+  if (!isRecord(input)) return '';
+  const id = input.agent_id;
+  if (typeof id !== 'string' || id.length === 0 || id.length > 64) return '';
+  // BOUNDED AND SEPARATOR-FREE, because this becomes the middle segment of a
+  // \`session_state\` key: a value carrying ':' could spell another agent's key
+  // exactly, and the prefix scans below read a range, not an equality.
+  return id.replace(/[^A-Za-z0-9_-]/g, '');
+}
+
+/**
+ * The same value as an \`events.data\` field: the agent's id, or null for a
+ * parent fire. NULL AND NOT '', because the score reads these rows back and
+ * has to tell "the lead did this" from "this build wrote no agent at all";
+ * '' is a key segment, and a key segment is not a datum.
+ */
+function eventAgent(agentId) {
+  return typeof agentId === 'string' && agentId.length > 0 ? agentId : null;
+}
+
+/**
  * The session's working directory, which is where the next \`tenjin publish\`
  * would run. Same parsed payload as the session id; null when unusable.
  */
@@ -1166,6 +1199,9 @@ async function main() {
 
   if (config.webSearch === 'off') return quiet();
   const sessionId = sessionIdOf(input);
+  // A subagent researches under its parent's session id, so the row has to name
+  // the agent or it names nobody.
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1186,6 +1222,7 @@ async function main() {
       query: question,
       config,
       sessionId,
+      agentId,
       cwd,
       tool: input.tool_name,
       mode: 'inject',
@@ -1222,7 +1259,7 @@ async function main() {
     cwd,
     hook: 'research',
     tool: input.tool_name,
-    data: { event: 'PreToolUse', query: clean(question, 512) },
+    data: { event: 'PreToolUse', query: clean(question, 512), agentId: eventAgent(agentId) },
   });
   const lines = hintLines(found.stored, isTeam, {
     sessionId,
@@ -1340,6 +1377,9 @@ async function main() {
   if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const sessionId = sessionIdOf(input);
+  // The DISPATCHER's agent id — a subagent that itself launches one is not the
+  // lead, and the row that says which fan-out this came from is this one.
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1493,7 +1533,11 @@ async function main() {
     cwd,
     hook: 'dispatch',
     tool: input.tool_name,
-    data: { event: 'PreToolUse', query: clean(question, ${QUESTION_MAX}) },
+    data: {
+      event: 'PreToolUse',
+      query: clean(question, ${QUESTION_MAX}),
+      agentId: eventAgent(agentId),
+    },
   });
   const row = {
     session: sessionId,

@@ -61,7 +61,7 @@ import type {
   WalletVerification,
 } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { probeSqlite } from '../lib/state-store';
+import { readStoreJournal, stateDbPath, probeSqlite } from '../lib/state-store';
 
 /**
  * One environment/reachability check. The doctor agent builds the check list
@@ -155,6 +155,9 @@ export interface DoctorDeps {
   /** The `node:sqlite` probe; tests inject a failing one to exercise the
    * damaged-install diagnosis without a damaged install. */
   probeSqlite?: typeof probeSqlite;
+  /** The degraded-store marker reader; tests inject one so the rollback-journal
+   * line can be exercised without a filesystem that cannot do WAL. */
+  readStoreJournal?: typeof readStoreJournal;
   /** Injected fetch for the reachability checks; tests pass a canned stub. */
   fetchImpl?: typeof fetch;
   /** Inject the active wallet provider. When set, NO local fs/env is consulted —
@@ -248,9 +251,11 @@ export async function collectDoctorChecks(
       : { home: deps.hermesHome, warning: undefined };
   const hermesHome = hermesTarget.home;
 
-  const built: BuiltCheck[] = [
-    checkNode(),
-    await checkStateStore(deps.probeSqlite ?? probeSqlite),
+  const built: BuiltCheck[] = [checkNode(), await checkStateStore(deps.probeSqlite ?? probeSqlite)];
+  // Beside the probe it belongs to, and only when there is something to say.
+  const journal = await checkStoreJournal(ctx.dataDir, deps.readStoreJournal ?? readStoreJournal);
+  if (journal !== null) built.push(journal);
+  built.push(
     configCheck,
     // The three baseUrl probes carry the team shelf's bypass. Without it every
     // one of them reports a protected team deployment as unreachable, which is
@@ -289,7 +294,7 @@ export async function collectDoctorChecks(
       isTeamModeConfig(config),
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
-  ];
+  );
 
   // Only when the experiment is on. Off, there is nothing to be half-wired and
   // a permanently-present check about a feature nobody enabled is noise.
@@ -447,6 +452,40 @@ async function checkStateStore(probe_: typeof probeSqlite): Promise<BuiltCheck> 
       fix: 'Reinstall tenjin-cli (npm i -g tenjin-cli@latest); if it persists, report the output of node -e "import(\'node:sqlite\')"',
     },
     failCode: 'INTERNAL',
+  };
+}
+
+/**
+ * Is the store stuck on a rollback journal?
+ *
+ * The sibling of the probe above, at lower stakes. `PRAGMA journal_mode = wal`
+ * is the one statement in the store the busy timeout cannot protect, so an open
+ * that loses it twice runs on against a rollback journal — every statement still
+ * correct, but the eight hooks a single turn can fire now serialise instead of
+ * overlapping. `openStore` records that in one row; without a line here it stays
+ * a fact no one can reach, which is the state the `node:sqlite` check exists to
+ * refuse.
+ *
+ * NEVER REQUIRED, NEVER A FAIL. Degradation is not absence: the store answers
+ * real counts, so the caps and the dedup all still work (tenjin-agent#246). And
+ * silent when healthy — a permanently-present line about a pragma that has never
+ * failed is the noise that teaches an operator to skim the page.
+ */
+async function checkStoreJournal(
+  dataDir: string,
+  read: typeof readStoreJournal,
+): Promise<BuiltCheck | null> {
+  const journal = await read(dataDir);
+  if (journal === null || journal.mode !== 'rollback') return null;
+  return {
+    result: {
+      name: 'state-store-journal',
+      status: 'warn',
+      required: false,
+      detail: `The state store at ${stateDbPath(dataDir)} is on a rollback journal (WAL unavailable) as of ${new Date(journal.at).toISOString()}, so concurrent hooks serialise on it instead of overlapping`,
+      fix: 'Usually the data directory sits on a filesystem that cannot do WAL — a network mount, a container overlay. Point TENJIN_DATA_DIR at local disk; the flag clears itself the next time a WAL switch succeeds. Safe to ignore otherwise: the store stays correct either way, only slower under concurrent hooks.',
+      data: { mode: journal.mode, at: journal.at },
+    },
   };
 }
 
