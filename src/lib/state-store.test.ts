@@ -11,10 +11,19 @@ import {
   STORE_BUSY_TIMEOUT_MS,
   STORE_SQL,
   STORE_USER_VERSION,
+  findSearchForResource,
+  findStoredCandidate,
+  getStoredSearch,
+  latestSearch,
+  loadSearches,
+  markSearchResolved,
+  openSearches,
   openStore,
   probeSqlite,
+  recordSearch,
   removeRetiredState,
   storeSource,
+  type StoredSearch,
 } from './state-store';
 import {
   pushContextHookScript,
@@ -1534,7 +1543,6 @@ describe('the search store round-trips through the database', () => {
       );
       expect(run.code).toBe(0);
 
-      const { loadSearches, latestSearch, markSearchResolved } = await import('./search-store');
       const stored = await loadSearches(dataDir);
       expect(stored).toHaveLength(1);
       expect(stored[0]?.searchId).toBe(SEARCH_ID);
@@ -1561,8 +1569,6 @@ describe('the search store round-trips through the database', () => {
   });
 
   it('a CLI search is what `--last` targets, and it survives a reload', async () => {
-    const { recordSearch, latestSearch, findStoredCandidate, findSearchForResource } =
-      await import('./search-store');
     await recordSearch(dataDir, {
       searchId: 'aaaaaaaa-2222-3333-4444-555555555555',
       at: new Date().toISOString(),
@@ -1588,9 +1594,369 @@ describe('the search store round-trips through the database', () => {
 
   it('reads as empty when the store cannot be opened', async () => {
     await writeFile(join(dataDir, STATE_DB_FILE), 'not a database');
-    const { loadSearches, latestSearch } = await import('./search-store');
     expect(await loadSearches(dataDir)).toEqual([]);
     expect(await latestSearch(dataDir)).toBeNull();
+  });
+});
+
+/**
+ * The typed handle the commands read the `searches` table through. These moved
+ * here with the helpers when `search-store.ts` — a second module over this one
+ * table — was folded in.
+ */
+describe('searches: the typed handle', () => {
+  function entry(over: Partial<StoredSearch> = {}): StoredSearch {
+    return {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
+      at: '2026-07-18T00:00:00.000Z',
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [
+        { resourceId: 'res-1', url: 'https://x/api/read/a/b', title: 't', price: '100000' },
+      ],
+      ...over,
+    };
+  }
+
+  // The Stop hook reads this field to tell one session's open loops from a
+  // sibling's; a schema that dropped it would silently un-scope every nag.
+  it('round-trips a sessionId, and an entry without one still loads', async () => {
+    await recordSearch(dataDir, entry({ sessionId: 'session-a' }));
+    await recordSearch(
+      dataDir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000009', question: 'unstamped' }),
+    );
+    const loaded = await loadSearches(dataDir);
+    expect(loaded).toHaveLength(2);
+    expect(loaded.find((s) => s.question === 'unstamped')?.sessionId).toBeUndefined();
+    expect(loaded.find((s) => s.sessionId !== undefined)?.sessionId).toBe('session-a');
+  });
+
+  it('records newest-first and latestSearch returns the most recent', async () => {
+    await recordSearch(dataDir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000001' }));
+    await recordSearch(dataDir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000002' }));
+    expect((await latestSearch(dataDir))?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000002');
+  });
+
+  // `--last` means "the search I just ran". In auto mode the WebSearch hook
+  // prepends an entry on EVERY web search, so without the source filter an
+  // `outcome --last` after any web search would report against a ridealong query
+  // the agent never chose (found in dogfooding).
+  it('latestSearch skips hook-sourced entries: --last targets the last deliberate search', async () => {
+    await recordSearch(dataDir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000003' }));
+    await recordSearch(
+      dataDir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000004', source: 'websearch-hook' }),
+    );
+    expect((await latestSearch(dataDir))?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000003');
+  });
+
+  it('latestSearch is null when only hook-sourced entries exist', async () => {
+    await recordSearch(
+      dataDir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000005', source: 'websearch-hook' }),
+    );
+    expect(await latestSearch(dataDir)).toBeNull();
+  });
+
+  // The demand arm records what an agent was ABOUT to research, which is even
+  // further from "the search I just ran" than a ridealong web search is.
+  it('round-trips the dispatch source, and --last skips it too', async () => {
+    await recordSearch(dataDir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000006' }));
+    await recordSearch(
+      dataDir,
+      entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000007', source: 'dispatch-hook' }),
+    );
+    const loaded = await loadSearches(dataDir);
+    expect(loaded.map((s) => s.source)).toContain('dispatch-hook');
+    expect((await latestSearch(dataDir))?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000006');
+  });
+
+  it('resolves a candidate url by resourceId (buy <id>)', async () => {
+    await recordSearch(dataDir, entry());
+    expect((await findStoredCandidate(dataDir, 'res-1'))?.url).toBe('https://x/api/read/a/b');
+    expect(await findStoredCandidate(dataDir, 'res-absent')).toBeNull();
+  });
+
+  it('finds the searchId that surfaced a resource (attribution)', async () => {
+    await recordSearch(dataDir, entry({ searchId: '0197aaaa-bbbb-cccc-dddd-000000000009' }));
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(
+      '0197aaaa-bbbb-cccc-dddd-000000000009',
+    );
+    expect(await findSearchForResource(dataDir, { url: 'https://x/api/read/a/b' })).toBe(
+      '0197aaaa-bbbb-cccc-dddd-000000000009',
+    );
+    expect(await findSearchForResource(dataDir, { resourceId: 'nope' })).toBeNull();
+  });
+
+  /**
+   * The candidate blob is JSON, and `json_each` is what keeps `buy <id>` off a
+   * 500-row scan through every recent search's array. It has to answer both
+   * questions the callers ask — by id and by url — and it has to prefer the
+   * NEWEST search that carried the piece, since that is the attribution a
+   * purchase belongs to.
+   */
+  it('searchForResource matches by id and by url through json_each, newest first', async () => {
+    const older = '0197aaaa-bbbb-cccc-dddd-000000000010';
+    const newer = '0197aaaa-bbbb-cccc-dddd-000000000011';
+    await recordSearch(dataDir, entry({ searchId: older, at: '2026-07-18T00:00:00.000Z' }));
+    await recordSearch(dataDir, entry({ searchId: newer, at: '2026-07-19T00:00:00.000Z' }));
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(newer);
+    expect(await findSearchForResource(dataDir, { url: 'https://x/api/read/a/b' })).toBe(newer);
+    // An empty match is not a wildcard: a caller asking by url alone must not
+    // match a candidate whose resourceId happens to be absent.
+    expect(await findSearchForResource(dataDir, {})).toBeNull();
+  });
+
+  /** `normalizeSearchIds` case-folds every id before it looks one up, while the
+   *  row carries whatever spelling the server sent. */
+  it('getStoredSearch is case-insensitive, and null for an id nothing recorded', async () => {
+    await recordSearch(dataDir, entry({ searchId: '0197AAAA-BBBB-CCCC-DDDD-000000000012' }));
+    expect((await getStoredSearch(dataDir, '0197aaaa-bbbb-cccc-dddd-000000000012'))?.question).toBe(
+      'q',
+    );
+    expect(await getStoredSearch(dataDir, '0197ffff-ffff-4fff-8fff-ffffffffffff')).toBeNull();
+  });
+
+  /**
+   * `outcome --all-open` scopes to the session that is closing, and an UNSTAMPED
+   * row belongs to no session — scoping must never make a loop unreachable
+   * everywhere at once, so it stays in every scope.
+   */
+  it('openSearches scopes to a session, keeps unstamped rows, and drops resolved ones', async () => {
+    const mine = '0197aaaa-bbbb-cccc-dddd-000000000020';
+    const theirs = '0197aaaa-bbbb-cccc-dddd-000000000021';
+    const unstamped = '0197aaaa-bbbb-cccc-dddd-000000000022';
+    const closed = '0197aaaa-bbbb-cccc-dddd-000000000023';
+    await recordSearch(dataDir, entry({ searchId: mine, sessionId: 's1' }));
+    await recordSearch(dataDir, entry({ searchId: theirs, sessionId: 's2' }));
+    await recordSearch(dataDir, entry({ searchId: unstamped }));
+    await recordSearch(dataDir, entry({ searchId: closed, sessionId: 's1' }));
+    await markSearchResolved(dataDir, closed, 'outcome');
+
+    expect((await openSearches(dataDir, 's1')).map((s) => s.searchId).sort()).toEqual(
+      [mine, unstamped].sort(),
+    );
+    // No session named is every session, which is what an unscoped sweep wants.
+    expect((await openSearches(dataDir)).map((s) => s.searchId).sort()).toEqual(
+      [mine, theirs, unstamped].sort(),
+    );
+  });
+
+  it('de-dupes a re-recorded searchId', async () => {
+    await recordSearch(dataDir, entry());
+    await recordSearch(dataDir, entry());
+    expect(await loadSearches(dataDir)).toHaveLength(1);
+  });
+
+  it('round-trips paidBrowseCount and reads it as unknown on an entry written without it', async () => {
+    const id2 = '0197aaaa-bbbb-cccc-dddd-000000000002';
+    await recordSearch(dataDir, entry({ decision: 'MISS', candidates: [], paidBrowseCount: 3 }));
+    expect((await latestSearch(dataDir))?.paidBrowseCount).toBe(3);
+
+    // A row recorded without the field must stay `undefined` rather than default
+    // to 0: `outcome` refuses purchase_declined on a zero and must not invent
+    // that refusal for a search that never recorded whether it had a payable
+    // browse tail. The upsert also must not CLEAR a count a later re-record
+    // omits, which is what the COALESCE in the statement is for.
+    await recordSearch(dataDir, entry({ searchId: id2, decision: 'MISS', candidates: [] }));
+    const loaded = await loadSearches(dataDir);
+    expect(loaded.find((s) => s.searchId === id2)?.paidBrowseCount).toBeUndefined();
+    await recordSearch(dataDir, entry({ decision: 'MISS', candidates: [] }));
+    expect(loaded.find((s) => s.searchId !== id2)?.paidBrowseCount).toBe(3);
+  });
+
+  it('reads empty (never throws) on a corrupt store', async () => {
+    await writeFile(join(dataDir, STATE_DB_FILE), 'not a database', 'utf8');
+    expect(await loadSearches(dataDir)).toEqual([]);
+    expect(await openSearches(dataDir)).toEqual([]);
+    expect(await getStoredSearch(dataDir, '0197aaaa-bbbb-cccc-dddd-000000000001')).toBeNull();
+    expect(await findStoredCandidate(dataDir, 'res-1')).toBeNull();
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBeNull();
+  });
+});
+
+describe('markSearchResolved', () => {
+  const ID = '0197aaaa-bbbb-cccc-dddd-000000000001';
+
+  function entry(over: Partial<StoredSearch> = {}): StoredSearch {
+    return {
+      searchId: ID,
+      at: '2026-07-18T00:00:00.000Z',
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [
+        { resourceId: 'res-1', url: 'https://x/api/read/a/b', title: 't', price: '100000' },
+      ],
+      ...over,
+    };
+  }
+
+  it('records who closed the loop, leaving everything else alone', async () => {
+    await recordSearch(dataDir, entry({ decision: 'MISS' }));
+    await markSearchResolved(dataDir, ID, 'publish', '2026-08-09T10:00:00.000Z');
+
+    const [stored] = await loadSearches(dataDir);
+    expect(stored?.resolved).toEqual({ by: 'publish', at: '2026-08-09T10:00:00.000Z' });
+    expect(stored?.question).toBe(entry().question);
+    expect(stored?.candidates).toEqual(entry().candidates);
+  });
+
+  // A publish after an outcome report is still one closed loop; rewriting who
+  // closed it would lose the fact that the reuse signal was already sent.
+  it('keeps the first resolution and ignores later ones', async () => {
+    await recordSearch(dataDir, entry());
+    await markSearchResolved(dataDir, ID, 'outcome', '2026-08-09T10:00:00.000Z');
+    await markSearchResolved(dataDir, ID, 'publish', '2026-08-09T11:00:00.000Z');
+    expect((await loadSearches(dataDir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  it('touches nothing for a searchId this machine never recorded', async () => {
+    await recordSearch(dataDir, entry());
+    await markSearchResolved(dataDir, '0197aaaa-bbbb-cccc-dddd-000000000099', 'outcome');
+    expect((await loadSearches(dataDir))[0]?.resolved).toBeUndefined();
+  });
+
+  // Bookkeeping for a hook nudge, so it may never fail the verb that ran. It
+  // still SAYS what happened, so a caller that reports the close does not report
+  // one that did not land — and with no data dir at all the honest answer is
+  // `not-found` rather than `failed`: the store opens (creating the dir the way
+  // every other write path does) and simply holds no such search. `failed` is
+  // the answer when the store itself cannot be opened, which is the case below.
+  it('never throws, even with no store and no data dir', async () => {
+    await rm(dataDir, { recursive: true, force: true });
+    await expect(markSearchResolved(dataDir, ID, 'outcome')).resolves.toBe('not-found');
+  });
+
+  it('leaves a corrupt store readable-as-empty rather than throwing', async () => {
+    await writeFile(join(dataDir, STATE_DB_FILE), 'not a database', 'utf8');
+    await expect(markSearchResolved(dataDir, ID, 'outcome')).resolves.toBe('failed');
+    expect(await loadSearches(dataDir)).toEqual([]);
+  });
+
+  // The four outcomes, so a caller can tell "the loop is closed" from "I could
+  // not close it" — the distinction publish's receipt is built on.
+  it('reports resolved, then already-resolved, and never rewrites the first closer', async () => {
+    await recordSearch(dataDir, entry());
+    await expect(markSearchResolved(dataDir, ID, 'outcome')).resolves.toBe('resolved');
+    await expect(markSearchResolved(dataDir, ID, 'publish')).resolves.toBe('already-resolved');
+    expect((await loadSearches(dataDir))[0]?.resolved?.by).toBe('outcome');
+  });
+
+  // The #161 loop: a MISS closed as `regenerated` while the answer was still
+  // being written, then published minutes later. The publish takes the loop over.
+  it('relinks a resolution recorded by something else when asked', async () => {
+    await recordSearch(dataDir, entry());
+    await markSearchResolved(dataDir, ID, 'outcome', '2026-08-09T10:00:00.000Z');
+    await expect(
+      markSearchResolved(dataDir, ID, 'publish', '2026-08-09T11:00:00.000Z', { relink: true }),
+    ).resolves.toBe('relinked');
+    expect((await loadSearches(dataDir))[0]?.resolved).toEqual({
+      by: 'publish',
+      at: '2026-08-09T11:00:00.000Z',
+    });
+  });
+
+  // Relinking is not re-stamping: the loop is already where it should be, so
+  // nothing is written and nothing claims a change.
+  it('reports already-resolved when the recorded closer is the same one', async () => {
+    await recordSearch(dataDir, entry());
+    await markSearchResolved(dataDir, ID, 'publish', '2026-08-09T10:00:00.000Z');
+    await expect(
+      markSearchResolved(dataDir, ID, 'publish', '2026-08-09T11:00:00.000Z', { relink: true }),
+    ).resolves.toBe('already-resolved');
+    expect((await loadSearches(dataDir))[0]?.resolved?.at).toBe('2026-08-09T10:00:00.000Z');
+  });
+
+  // The flag is opt-in, so an ordinary outcome report after a publish still
+  // leaves the publish as the closer.
+  it('leaves the first resolution alone without the flag', async () => {
+    await recordSearch(dataDir, entry());
+    await markSearchResolved(dataDir, ID, 'publish', '2026-08-09T10:00:00.000Z');
+    await expect(markSearchResolved(dataDir, ID, 'outcome')).resolves.toBe('already-resolved');
+    expect((await loadSearches(dataDir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  it('relinking an unclosed loop is an ordinary resolve', async () => {
+    await recordSearch(dataDir, entry());
+    await expect(
+      markSearchResolved(dataDir, ID, 'publish', '2026-08-09T10:00:00.000Z', { relink: true }),
+    ).resolves.toBe('resolved');
+  });
+
+  it('reports not-found for an id the store does not carry', async () => {
+    await recordSearch(dataDir, entry());
+    await expect(
+      markSearchResolved(dataDir, '0197ffff-ffff-4fff-8fff-ffffffffffff', 'publish'),
+    ).resolves.toBe('not-found');
+  });
+
+  // The write cannot happen, and the caller is told so rather than being handed
+  // a silent success. This used to be a lock nobody released, and it was the one
+  // test in the file that had to wait out a 5s timeout; there is no lock any
+  // more, so an unopenable store stands in for the same condition instantly.
+  it('reports failed when the store cannot be opened', async () => {
+    await rm(join(dataDir, STATE_DB_FILE), { force: true });
+    await writeFile(join(dataDir, STATE_DB_FILE), 'not a database', 'utf8');
+    await expect(markSearchResolved(dataDir, ID, 'publish')).resolves.toBe('failed');
+  });
+
+  it('round-trips through the schema, so a resolved entry still loads', async () => {
+    await recordSearch(dataDir, entry());
+    await markSearchResolved(dataDir, ID, 'publish');
+    expect(await latestSearch(dataDir)).toMatchObject({
+      searchId: ID,
+      resolved: { by: 'publish' },
+    });
+  });
+});
+
+/**
+ * What the 50-entry cap and the demand budget existed to protect.
+ *
+ * The searches ledger held 50 entries in its file era, so a wide subagent
+ * fan-out drained the slots `buy <resourceId>` and `outcome --last` depend on;
+ * the answer was a hand-rolled budget capping the two demand sources at 15
+ * between them, written twice — in the CLI and in the generated hook — so the
+ * bound belonged to whichever process wrote last rather than to the store.
+ *
+ * The table is unbounded (plan 03, owner decision 2: no retention, no pruning),
+ * so nothing evicts anything and both copies of the budget are gone. These pin
+ * the property, not the mechanism.
+ */
+describe('a demand flood costs a deliberate search nothing', () => {
+  const id = (n: number): string => `0197aaaa-bbbb-cccc-dddd-${String(n).padStart(12, '0')}`;
+
+  it('keeps the deliberate entry, its candidate, and `--last`, under a 60-deep flood', async () => {
+    await recordSearch(dataDir, {
+      searchId: id(1),
+      at: '2026-07-18T00:00:00.000Z',
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [
+        { resourceId: 'res-1', url: 'https://x/api/read/a/b', title: 't', price: '100000' },
+      ],
+      source: 'cli',
+    });
+    for (let i = 0; i < 60; i += 1) {
+      await recordSearch(dataDir, {
+        searchId: id(100 + i),
+        at: new Date(Date.now() - (60 - i) * 1000).toISOString(),
+        question: 'q',
+        decision: 'CANDIDATES',
+        candidates: [],
+        source: 'dispatch-hook',
+      });
+    }
+
+    const loaded = await loadSearches(dataDir);
+    expect(loaded.map((s) => s.searchId)).toContain(id(1));
+    expect(loaded.filter((s) => s.source === 'dispatch-hook')).toHaveLength(60);
+    // Still resolvable, which is what the slot was being taken from.
+    expect(await findStoredCandidate(dataDir, 'res-1')).not.toBeNull();
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(id(1));
+    // And `--last` still means "the search I ran", not the newest fan-out row.
+    expect((await latestSearch(dataDir))?.searchId).toBe(id(1));
   });
 });
 

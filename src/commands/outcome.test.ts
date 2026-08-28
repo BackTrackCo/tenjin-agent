@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOutcome } from './outcome';
-import { loadSearches, recordSearch, type StoredSearch } from '../lib/search-store';
+import { loadSearches, recordSearch, type StoredSearch } from '../lib/state-store';
 import type { CommandContext } from '../context';
 
 let dir: string;

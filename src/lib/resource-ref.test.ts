@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertOnBaseOrigin, resolveResourceRef } from './resource-ref';
 import { CliError } from './errors';
-import { recordSearch } from './search-store';
+import { recordSearch } from './state-store';
 import { knownDeploymentOrigins } from './production-origin';
 
 let dir: string;

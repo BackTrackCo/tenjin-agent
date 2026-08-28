@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { STATE_DB_FILE, STORE_SQL, openStore } from './state-store';
-import { loadSearches, recordSearch, type StoredSearch } from './search-store';
+import { loadSearches, recordSearch, type StoredSearch } from './state-store';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,

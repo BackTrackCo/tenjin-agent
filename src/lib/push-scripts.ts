@@ -113,7 +113,7 @@ export const PUSH_PROMPT_SEARCH_TIMEOUT_MS = 1500;
 /** The prompt arm's own body budget, half the other arms'. THE WATCHDOG MUST
  *  EXCEED SEARCH + BODY + SLACK, or the arm pays for a lookup, blocks the human
  *  for it, and is killed before it can say or record anything: 1500 + 800 fits
- *  under 3000 with room for the search-store write in between. SEARCH is the
+ *  under 3000 with room for the search write in between. SEARCH is the
  *  lookup's whole budget however many shelves it asks — the two legs share the
  *  1500 rather than taking it each, which is what keeps this sum true in team
  *  mode. */

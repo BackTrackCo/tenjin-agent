@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { z } from 'zod';
 
 /**
  * The sidecar's local state: one SQLite file under the data dir, opened by the
@@ -359,7 +360,10 @@ export const STORE_SQL = {
    *  millisecond come back write-order-newest-first, which is what "prepend"
    *  meant when this was a JSON array. */
   listSearches: 'SELECT * FROM searches ORDER BY at DESC, rowid DESC LIMIT ?',
-  getSearch: 'SELECT * FROM searches WHERE search_id = ?',
+  /** COLLATE NOCASE because the ids that look a row up are case-folded first
+   *  (`normalizeSearchIds`), while the row was written in whatever spelling the
+   *  server sent. Ids are uuids, so nothing else can collide under it. */
+  getSearch: 'SELECT * FROM searches WHERE search_id = ? COLLATE NOCASE',
   latestDeliberate: `SELECT * FROM searches
      WHERE source IS NULL OR source = 'cli' ORDER BY at DESC, rowid DESC LIMIT 1`,
   resolveSearch: 'UPDATE searches SET resolved_by = ?, resolved_at = ? WHERE search_id = ?',
@@ -389,6 +393,23 @@ export const STORE_SQL = {
    *  — see the Stop hook's \`didResearch\`. */
   researchedBySession: `SELECT 1 FROM searches
      WHERE session = ? AND (source IS NULL OR source <> 'push-hook') LIMIT 1`,
+  /**
+   * The newest search that surfaced one resource, by id or by url.
+   *
+   * The candidate blob is JSON, so `json_each` asks the question in SQL rather
+   * than pulling 500 rows into JS and scanning their arrays — which is what
+   * \`buy <resourceId>\` and read attribution used to do on every call.
+   */
+  searchForResource: `SELECT s.search_id, c.value AS candidate
+     FROM searches s, json_each(s.candidates) c
+     WHERE json_extract(c.value, '$.resourceId') = ? OR json_extract(c.value, '$.url') = ?
+     ORDER BY s.at DESC, s.rowid DESC LIMIT 1`,
+  /** Every unresolved row a session may still close, newest first. '' scopes to
+   *  every session; a named one keeps the unstamped rows, which belong nowhere
+   *  and so stay reachable everywhere. */
+  openSearches: `SELECT * FROM searches
+     WHERE resolved_by IS NULL AND (? = '' OR session = ? OR session = '')
+     ORDER BY at DESC, rowid DESC`,
 
   insertPairing: `INSERT INTO pairings (
        uid, at, session, project, machine, kind, key, coarse_key,
@@ -464,6 +485,34 @@ export const STORE_SQL = {
   /** `tenjin push status`, one pass over the window. */
   statusRows: `SELECT hook, shelf, action, reason, resource_id, deny, tokens
      FROM injections WHERE at >= ?`,
+
+  /** `tenjin push grade`: what was shown and never judged. */
+  ungradedInjections: `SELECT uid, at, session, hook, shelf, resource_id, title, url, search_id, form
+     FROM injections
+     WHERE action = 'injected' AND outcome IS NULL AND at >= ? AND (? = '' OR session = ?)
+     ORDER BY at, id`,
+  /** One row by uid, for the hand verdict `--label` writes. */
+  injectionByUid: `SELECT uid, at, session, hook, shelf, resource_id, search_id, outcome, outcome_by, outcome_at
+     FROM injections WHERE uid = ?`,
+  /** A verdict, and the posted stamp cleared with it: a re-labelled row is owed
+   *  to the shelf again. */
+  setOutcome: 'UPDATE injections SET outcome = ?, outcome_by = ?, outcome_at = NULL WHERE uid = ?',
+  /**
+   * Graded, never posted. `outcome_at` IS the posted stamp, so this is both the
+   * queue and the idempotence: a post that failed keeps a NULL and is retried
+   * next run, a post that landed is never sent twice. A `local` shelf row is a
+   * pairing this machine replayed to itself and has no shelf to tell.
+   */
+  unpostedOutcomes: `SELECT uid, session, hook, shelf, resource_id, search_id, outcome, outcome_by
+     FROM injections
+     WHERE outcome IN ('used', 'rejected') AND outcome_at IS NULL
+       AND search_id IS NOT NULL AND resource_id IS NOT NULL AND shelf <> 'local'
+     ORDER BY at, id`,
+  markPosted: 'UPDATE injections SET outcome_at = ? WHERE uid = ?',
+  sessionEnded: 'SELECT ended_at FROM sessions WHERE session = ?',
+  /** `tenjin push status`, the graded rollup per hook x shelf. */
+  gradeRows: `SELECT hook, shelf, outcome, outcome_at FROM injections
+     WHERE action = 'injected' AND at >= ?`,
 } as const;
 
 export type StoreSqlKey = keyof typeof STORE_SQL;
@@ -1038,10 +1087,10 @@ function endSession(sessionId) {
   storeRun(STORE_SQL.endSession, [storeSession(sessionId), now, now, machineId()]);
 }
 
-// ---- searches (what searches.json used to hold) ----
+// ---- searches ----
 
 /** A fan-out re-dispatches near-identical prompts; case and spacing carry no
- *  meaning here. Mirrored by lib/search-store.ts's own fingerprint. */
+ *  meaning here. Mirrored by the exported searchFingerprint below. */
 function searchFingerprint(question) {
   return String(question).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
 }
@@ -1096,7 +1145,7 @@ function openLoops(sessionId, sinceMs, limit) {
   return storeAll(STORE_SQL.openLoops, [sinceMs, scope, scope, limit]).map(searchRow);
 }
 
-/** A stored row in the shape the callers used to read out of searches.json. */
+/** A stored row in the shape the hooks read. */
 function searchRow(row) {
   const candidates = storeParse(row.candidates);
   return {
@@ -1496,4 +1545,347 @@ export function storeSession(sessionId: string | null | undefined): string {
 /** ⚠ MIRRORED with `searchFingerprint` in the hook core above. */
 export function searchFingerprint(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
+}
+
+// ---- searches: the CLI's typed handle ----
+
+/**
+ * The same `searches` rows the hooks write, in the shape the commands read.
+ *
+ * A local ledger of recent searches so `outcome --last` can target the most
+ * recent one and `buy <resourceId>` can resolve the payable read URL a candidate
+ * carried (the read route is keyed by handle/slug, not id, so an id alone can't
+ * build the URL). Best-effort: an unavailable store reads as empty rather than
+ * blocking a command. NOT an entitlement record, that is the library receipt.
+ *
+ * This used to be its own module over the same table. One store, one file: the
+ * statements live in {@link STORE_SQL} beside every other reader's, so a query
+ * that needs an index is visible next to the DDL that has to carry it.
+ */
+
+const StoredCandidateSchema = z.object({
+  resourceId: z.string(),
+  url: z.string(),
+  title: z.string(),
+  price: z.string(),
+});
+export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
+
+/**
+ * What closed an open loop. The Stop hook stays quiet once either is recorded:
+ * `outcome` (the loop was reported) or `publish` (the answer went back to the
+ * marketplace).
+ */
+export const SearchResolutionSchema = z.enum(['outcome', 'publish']);
+export type SearchResolution = z.infer<typeof SearchResolutionSchema>;
+
+/**
+ * Who ran the search. `cli` is a deliberate `tenjin search`: the agent decided
+ * the question was worth looking up, so an unanswered one is a strong signal.
+ * `websearch-hook` is the PreToolUse hook riding along with a WebSearch the agent
+ * was going to run anyway, which is a much weaker signal, because nobody judged
+ * the question suitable for the marketplace before it was sent.
+ *
+ * `push-hook` is the push experiment's arms (docs/command-reference.md#push-experimental): lookups made on an
+ * error or a file the agent touched, never chosen by the agent, so the Stop hook
+ * never raises them. `dispatch-hook` is weaker still: DEMAND DATA about what an
+ * agent was about to research, which the Stop hook never raises either.
+ *
+ * The distinction exists because the Stop hook must not treat them alike: an
+ * unanswered deliberate search deserves being named on its own, while a batch of
+ * hook searches deserves one line the agent can dismiss at a glance. Keeping them
+ * in ONE table is what makes a hook's misses reachable by explicit
+ * `outcome --search-id`, `buy <resourceId>`, and the open-loop reminder at all
+ * (`--last` deliberately skips hook entries; see {@link latestSearch}).
+ *
+ * OPTIONAL, and absent means `cli`: a row written by an earlier version has no
+ * source, and those entries were all explicit searches.
+ */
+export const SearchSourceSchema = z.enum(['cli', 'websearch-hook', 'dispatch-hook', 'push-hook']);
+export type SearchSource = z.infer<typeof SearchSourceSchema>;
+
+export interface StoredSearch {
+  searchId: string;
+  /** ISO 8601. Stored as epoch ms; rendered here in the shape callers print. */
+  at: string;
+  question: string;
+  decision: string;
+  candidates: StoredCandidate[];
+  /** Absent until something closes the loop; see {@link markSearchResolved}. */
+  resolved?: { by: SearchResolution; at: string };
+  /** Absent on rows written before sources existed; see {@link SearchSourceSchema}. */
+  source?: SearchSource;
+  /**
+   * WHICH SHELF ANSWERED, as a base URL. A team-mode search asks the team shelf
+   * and falls through to `publicShelfUrl`, and the two shelves have separate
+   * databases: a searchId minted by one means nothing to the other. Without this
+   * field every close — `tenjin outcome`, and the `--search-id` publish sends
+   * with the piece — went to the configured `baseUrl`, so the ordinary team-miss
+   * / public-hit reported the public marketplace's search to the team shelf,
+   * where it inflates `outcomes_dropped_no_parent` or lands permanently on a post
+   * row, while the shelf that actually served the search hears nothing and its
+   * demand loop stays open.
+   *
+   * Absent means `baseUrl` — what every row written before this field existed
+   * meant, and what a single-shelf public-mode run still means. Stored as the URL
+   * rather than as `team`/`public` so a re-pointed `baseUrl` cannot silently
+   * re-label an old row's shelf.
+   */
+  shelfBaseUrl?: string;
+  /**
+   * The harness session this search was run in, when anything could attribute it.
+   * This ledger is MACHINE-GLOBAL, so without it the Stop hook nags whichever
+   * session happens to stop next about open loops belonging to a sibling session,
+   * which that session cannot act on. The hook scopes on this when both the row
+   * and the turn-end payload name a session, and stays global otherwise, so an
+   * unstamped row is still raised everywhere rather than nowhere.
+   */
+  sessionId?: string;
+  /**
+   * How many of the search's browse pointers cost money, and NOT the pointers
+   * themselves: keeping them out of the store is what makes `buy <resourceId>`
+   * unable to reach one (see the browse comment in agent-api.ts), and a count
+   * cannot undo that. It exists so `outcome` can tell "this search offered
+   * nothing to buy" from "this search offered a payable browse tail", which the
+   * candidates array alone cannot say. Absent reads as unknown, never as zero.
+   */
+  paidBrowseCount?: number;
+}
+
+/**
+ * How many rows a bare {@link loadSearches} returns, newest first.
+ *
+ * The table is unbounded (plan 03, owner decision 2: no retention, no pruning),
+ * so the callers that want "the recent searches" get a bound here instead of one
+ * baked into the storage. Every caller of this function is answering a question
+ * about the last few days — the open loops, the ids a publish is closing — and
+ * the ones that need a specific row ask for it by id.
+ */
+const RECENT_LIMIT = 500;
+
+function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
+  const searchId = typeof row.search_id === 'string' ? row.search_id : '';
+  if (searchId.length === 0) return null;
+  let candidates: StoredCandidate[] = [];
+  if (typeof row.candidates === 'string') {
+    try {
+      const parsed = StoredCandidateSchema.array().safeParse(JSON.parse(row.candidates));
+      if (parsed.success) candidates = parsed.data;
+    } catch {
+      // A row whose candidate blob will not parse still has a usable searchId,
+      // question and decision — which is what the open-loop reminder needs.
+    }
+  }
+  const source = SearchSourceSchema.safeParse(row.source);
+  const resolvedBy = SearchResolutionSchema.safeParse(row.resolved_by);
+  return {
+    searchId,
+    at: new Date(typeof row.at === 'number' ? row.at : 0).toISOString(),
+    question: typeof row.question === 'string' ? row.question : '',
+    decision: typeof row.decision === 'string' ? row.decision : '',
+    candidates,
+    ...(resolvedBy.success
+      ? {
+          resolved: {
+            by: resolvedBy.data,
+            at: typeof row.resolved_at === 'string' ? row.resolved_at : '',
+          },
+        }
+      : {}),
+    ...(source.success ? { source: source.data } : {}),
+    ...(typeof row.shelf_base_url === 'string' && row.shelf_base_url.length > 0
+      ? { shelfBaseUrl: row.shelf_base_url }
+      : {}),
+    ...(typeof row.session === 'string' && row.session.length > 0
+      ? { sessionId: row.session }
+      : {}),
+    ...(typeof row.paid_browse_count === 'number'
+      ? { paidBrowseCount: row.paid_browse_count }
+      : {}),
+  };
+}
+
+/** Open, run `fn`, close. A null store yields `fallback`, the same fail-open
+ *  posture every other reader of this file takes. */
+async function withStore<T>(dataDir: string, fallback: T, fn: (store: Store) => T): Promise<T> {
+  const store = await openStore(dataDir);
+  if (store === null) return fallback;
+  try {
+    return fn(store);
+  } catch {
+    return fallback;
+  } finally {
+    store.close();
+  }
+}
+
+/** The most recent searches, newest first. */
+export async function loadSearches(dataDir: string): Promise<StoredSearch[]> {
+  return await withStore(dataDir, [] as StoredSearch[], (store) => {
+    const rows = store.all(STORE_SQL.listSearches, [RECENT_LIMIT]);
+    const out: StoredSearch[] = [];
+    for (const row of rows) {
+      const entry = rowToSearch(row);
+      if (entry !== null) out.push(entry);
+    }
+    return out;
+  });
+}
+
+/** One search by id, case-insensitively (see {@link STORE_SQL.getSearch}). */
+export async function getStoredSearch(
+  dataDir: string,
+  searchId: string,
+): Promise<StoredSearch | null> {
+  return await withStore(dataDir, null as StoredSearch | null, (store) => {
+    const row = store.get(STORE_SQL.getSearch, [searchId]);
+    return row === null ? null : rowToSearch(row);
+  });
+}
+
+/**
+ * Unresolved searches a session may still close, newest first. An empty or
+ * absent `sessionId` means every session, and a named one keeps the rows nothing
+ * stamped, which is the same rule {@link import('./session').ownedByThisSession}
+ * applies — scoping must never make a loop unreachable everywhere at once.
+ */
+export async function openSearches(dataDir: string, sessionId?: string): Promise<StoredSearch[]> {
+  const scope = storeSession(sessionId);
+  return await withStore(dataDir, [] as StoredSearch[], (store) => {
+    const rows = store.all(STORE_SQL.openSearches, [scope, scope]);
+    const out: StoredSearch[] = [];
+    for (const row of rows) {
+      const entry = rowToSearch(row);
+      if (entry !== null) out.push(entry);
+    }
+    return out;
+  });
+}
+
+/** Record a search, replacing any row already under that id. */
+export async function recordSearch(dataDir: string, entry: StoredSearch): Promise<void> {
+  await withStore(dataDir, undefined, (store) => {
+    const at = Date.parse(entry.at);
+    store.run(STORE_SQL.recordSearch, [
+      entry.searchId,
+      Number.isFinite(at) ? at : Date.now(),
+      storeSession(entry.sessionId),
+      entry.question,
+      searchFingerprint(entry.question),
+      entry.decision,
+      JSON.stringify(entry.candidates),
+      entry.source ?? null,
+      entry.shelfBaseUrl ?? null,
+      entry.paidBrowseCount ?? null,
+    ]);
+    // A caller that already knows who closed the loop (a re-record, a fixture)
+    // says so here rather than needing a second call: the upsert above leaves
+    // `resolved_by` alone precisely so an ordinary re-record cannot reopen a
+    // loop something already closed.
+    if (entry.resolved !== undefined) {
+      store.run(STORE_SQL.resolveSearch, [entry.resolved.by, entry.resolved.at, entry.searchId]);
+    }
+  });
+}
+
+/**
+ * What a {@link markSearchResolved} call actually did. Returned rather than
+ * swallowed because a caller may REPORT the close to its own user, and "I tried"
+ * is not "it happened": an unwritable store still leaves the loop open and the
+ * reminder due, so a receipt claiming otherwise would be a confident lie.
+ * `already-resolved` is a success for anyone asking about the LOOP (something
+ * closed it), and a no-op for anyone asking about this call. `relinked` is the
+ * one that CHANGED a resolution that was already there.
+ */
+export type ResolutionOutcome =
+  'resolved' | 'relinked' | 'already-resolved' | 'not-found' | 'failed';
+
+export interface MarkResolvedOptions {
+  /**
+   * Overwrite a resolution recorded by something else, rather than leaving the
+   * first closer in place. Only `publish` passes it, and the reason is the loop
+   * this whole ledger exists for: an agent mid-research closes a MISS as
+   * `regenerated` because the answer is not written yet, finishes it minutes
+   * later, and then has no way to say the piece it just published is what
+   * answered that question (tenjin-agent #161). A close is a report of intent at
+   * a moment; a publish is the answer arriving, and the answer wins.
+   */
+  relink?: boolean;
+}
+
+/**
+ * Record that something closed the loop on `searchId`, so the Stop hook stops
+ * raising it. Best-effort and it NEVER throws: an unknown id (a search from
+ * another machine) writes nothing, and a failure to persist costs one stale nag
+ * rather than the command the caller actually ran. The FIRST resolution wins
+ * unless the caller asks to {@link MarkResolvedOptions.relink}, so an ordinary
+ * `outcome` after a publish still does not rewrite who closed it.
+ */
+export async function markSearchResolved(
+  dataDir: string,
+  searchId: string,
+  by: SearchResolution,
+  at: string = new Date().toISOString(),
+  options: MarkResolvedOptions = {},
+): Promise<ResolutionOutcome> {
+  return await withStore(dataDir, 'failed' as ResolutionOutcome, (store) => {
+    const row = store.get(STORE_SQL.getSearch, [searchId]);
+    if (row === null) return 'not-found';
+    const existing = SearchResolutionSchema.safeParse(row.resolved_by);
+    let outcome: ResolutionOutcome = 'resolved';
+    if (existing.success) {
+      // Nothing to relink when the recorded closer is already this one: the loop
+      // is where it should be, and rewriting the timestamp would report a change
+      // nobody made.
+      if (options.relink !== true || existing.data === by) return 'already-resolved';
+      outcome = 'relinked';
+    }
+    // REPORTED, not assumed: a swallowed write must not come back as a close.
+    if (!store.run(STORE_SQL.resolveSearch, [by, at, searchId])) return 'failed';
+    return outcome;
+  });
+}
+
+/**
+ * The most recent DELIBERATE search: `--last` means "the search I just ran", and
+ * in auto mode the hooks record a ridealong entry on every web search and every
+ * subagent dispatch, so an unfiltered head would routinely re-target `outcome
+ * --last` at a query the agent never chose to make (found in dogfooding). Hook
+ * entries stay reachable by explicit `--search-id`, which is what the Stop hook's
+ * reminder names.
+ */
+export async function latestSearch(dataDir: string): Promise<StoredSearch | null> {
+  return await withStore(dataDir, null as StoredSearch | null, (store) => {
+    const row = store.get(STORE_SQL.latestDeliberate, []);
+    return row === null ? null : rowToSearch(row);
+  });
+}
+
+/** The stored candidate for a resourceId across recent searches (newest first). */
+export async function findStoredCandidate(
+  dataDir: string,
+  resourceId: string,
+): Promise<StoredCandidate | null> {
+  return await withStore(dataDir, null as StoredCandidate | null, (store) => {
+    const row = store.get(STORE_SQL.searchForResource, [resourceId, '']);
+    if (row === null || typeof row.candidate !== 'string') return null;
+    try {
+      const parsed = StoredCandidateSchema.safeParse(JSON.parse(row.candidate));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+/** The most recent searchId that surfaced this resource (by id or url), for
+ *  purchase attribution (`X-Tenjin-Search-Id`). Null when no local search did. */
+export async function findSearchForResource(
+  dataDir: string,
+  match: { resourceId?: string; url?: string },
+): Promise<string | null> {
+  return await withStore(dataDir, null as string | null, (store) => {
+    const row = store.get(STORE_SQL.searchForResource, [match.resourceId ?? '', match.url ?? '']);
+    return row !== null && typeof row.search_id === 'string' ? row.search_id : null;
+  });
 }
