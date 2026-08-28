@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
-import { latestSearch, loadSearches } from '../lib/search-store';
+import { latestSearch, loadSearches } from '../lib/state-store';
 import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';

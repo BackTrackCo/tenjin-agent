@@ -18,17 +18,3 @@ function firstNonEmpty(raw: string | undefined): string | undefined {
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
-
-/**
- * Whether an entry is this session's business, mirroring the Stop hook's
- * `ownedByThisSession`. SCOPED WHEN KNOWN, GLOBAL WHEN NOT: a differently
- * stamped entry belongs to that session, and an unstamped one stays in scope,
- * because scoping must never make a loop unreachable everywhere at once.
- */
-export function ownedByThisSession(
-  entrySessionId: string | undefined,
-  sessionId: string | undefined,
-): boolean {
-  if (sessionId === undefined) return true;
-  return entrySessionId === undefined || entrySessionId === sessionId;
-}

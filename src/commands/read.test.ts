@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runRead } from './read';
 import { libraryDir, saveDelivery } from '../lib/library';
-import { recordSearch } from '../lib/search-store';
+import { recordSearch } from '../lib/state-store';
 import {
   buildPaymentRequired,
   makeReadServer,

@@ -7,8 +7,16 @@ import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { STATE_DB_FILE, STORE_SQL, openStore, projectId, teamCoarseKey } from './state-store';
-import { loadSearches, recordSearch, type StoredSearch } from './search-store';
+import {
+  STATE_DB_FILE,
+  STORE_SQL,
+  loadSearches,
+  openStore,
+  projectId,
+  recordSearch,
+  teamCoarseKey,
+  type StoredSearch,
+} from './state-store';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,

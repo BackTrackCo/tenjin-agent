@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildSearchRequest,
   buildOutcomeItem,
+  getLookupStats,
   postSearch,
   postOutcomes,
   type SearchResult,
@@ -600,5 +601,99 @@ describe('postOutcomes', () => {
         fetchImpl: fetch,
       }),
     ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+});
+
+describe('getLookupStats', () => {
+  const STATS = {
+    windowDays: 7,
+    triggers: [
+      { trigger: 'prompt', lookups: 12, hits: 3, candidates: 7, used: 1, wrong: 2, useRate: 1 / 3 },
+      { trigger: 'read', lookups: 4, hits: 0, candidates: 0, used: 0, wrong: 0, useRate: null },
+    ],
+  };
+
+  it('GETs the window and parses the per-trigger rollup', async () => {
+    const { fetch, calls } = stubFetch(json(200, STATS));
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example/',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(calls[0]?.url).toBe('https://preview.example/api/lookups/stats?days=7');
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(stats.windowDays).toBe(7);
+    expect(stats.triggers[0]).toMatchObject({ trigger: 'prompt', lookups: 12, used: 1 });
+    // A trigger nothing has judged reports a null rate rather than a zero, so a
+    // shelf with no reuse yet is not rendered as a shelf nobody reuses.
+    expect(stats.triggers[1]?.useRate).toBeNull();
+  });
+
+  /** `push status` renders "unavailable" from a throw; a shelf that is down must
+   *  not read as a shelf with no demand. */
+  it('throws rather than reporting zeros when the shelf answers badly', async () => {
+    const notFound = stubFetch(json(404, { error: 'nope' }));
+    await expect(
+      getLookupStats(7, {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: notFound.fetch,
+      }),
+    ).rejects.toBeInstanceOf(CliError);
+
+    const garbage = stubFetch(json(200, { windowDays: 7 }));
+    await expect(
+      getLookupStats(7, {
+        baseUrl: 'https://preview.example',
+        timeoutMs: 5000,
+        fetchImpl: garbage.fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  /**
+   * `trigger` is the one field of this response that gets PRINTED, and the shelf
+   * chooses it. An unbounded string is a shelf-controlled write to the
+   * operator's terminal, so a name that is not one is a contract mismatch and
+   * the block renders "unavailable" instead.
+   */
+  it('refuses a trigger name that is not a short lowercase word', async () => {
+    for (const trigger of ['x'.repeat(17), 'Prompt', 'pro mpt', '\u001b[2Jprompt', '']) {
+      const bad = stubFetch(
+        json(200, {
+          windowDays: 7,
+          triggers: [
+            { trigger, lookups: 1, hits: 0, candidates: 0, used: 0, wrong: 0, useRate: null },
+          ],
+        }),
+      );
+      await expect(
+        getLookupStats(7, {
+          baseUrl: 'https://preview.example',
+          timeoutMs: 5000,
+          fetchImpl: bad.fetch,
+        }),
+        trigger,
+      ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    }
+  });
+
+  /** A pattern rather than the arm names, so a shelf that grows an arm still
+   *  renders instead of failing the whole block. */
+  it('accepts an arm name this build has never heard of', async () => {
+    const { fetch } = stubFetch(
+      json(200, {
+        windowDays: 7,
+        triggers: [
+          { trigger: 'newarm', lookups: 1, hits: 1, candidates: 1, used: 1, wrong: 0, useRate: 1 },
+        ],
+      }),
+    );
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.triggers[0]?.trigger).toBe('newarm');
   });
 });

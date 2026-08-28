@@ -2,7 +2,7 @@ import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
-import { recordSearch } from '../lib/search-store';
+import { recordSearch } from '../lib/state-store';
 import { readSessionId } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
