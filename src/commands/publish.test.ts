@@ -2668,3 +2668,205 @@ describe('runPublish — the undo line', () => {
     expect(res.humanLines ?? []).toContain(`Undo: \`tenjin delete ${CREATED.id}\` removes it.`);
   });
 });
+
+/**
+ * `--finding <id>`: the queued child finding as a publish SOURCE.
+ *
+ * What these pin is that it is a source and nothing more. There is no second
+ * publish path to keep in step, so the cases that matter are the ones a second
+ * path would have got wrong: every gate still runs on a body that came from the
+ * store, and the review confirm carries the whole body because it is now the
+ * only place a human ever reads it before it is public.
+ */
+describe('runPublish — publish --finding', () => {
+  /** One queue row, in the shape the SubagentStop harvest writes. */
+  async function seedFinding(over: {
+    uid: string;
+    body?: string;
+    agentId?: string;
+    agentType?: string;
+    searchId?: string | null;
+    hook?: string;
+  }): Promise<string> {
+    const { openStore, STORE_FINDING_HOOK, STORE_SQL } = await import('../lib/state-store');
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      store.run(STORE_SQL.insertEvent, [
+        over.uid,
+        Date.now(),
+        'parent',
+        null,
+        'machine',
+        over.hook ?? STORE_FINDING_HOOK,
+        'SubagentStop',
+        null,
+        null,
+        JSON.stringify({
+          kind: 'finding',
+          agentId: over.agentId ?? 'child-1',
+          agentType: over.agentType ?? 'fork',
+          searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
+          body: over.body ?? FINDING_BODY,
+        }),
+      ]);
+    } finally {
+      store.close();
+    }
+    return over.uid;
+  }
+
+  const SEEDED_SEARCH = '0197aaaa-1111-4222-8333-444444444444';
+  const FINDING_BODY =
+    '# ox 0.14 keeps Bytes.from\n\nVerified against the published tag: the export is still there,\nso the 0.13 shim is dead weight.';
+
+  it('publishes the stored body, with the child on the receipt', async () => {
+    const id = await seedFinding({ uid: 'FND-ROUNDTRIP' });
+    const { fetch, body } = bodyServer();
+    const result = await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.bodyMd).toBe(FINDING_BODY);
+    const data = result.data as { finding?: { id: string; agentId: string; searchId: string } };
+    expect(data.finding).toMatchObject({
+      id,
+      agentId: 'child-1',
+      agentType: 'fork',
+      searchId: SEEDED_SEARCH,
+    });
+    // The loop the child stopped on is the loop the piece answers, so it rides
+    // to the server without the caller having to re-type it.
+    expect(body()?.searchId).toBe(SEEDED_SEARCH);
+  });
+
+  it('an explicit --search-id still wins over the finding own loop', async () => {
+    const id = await seedFinding({ uid: 'FND-EXPLICIT' });
+    const mine = '0197bbbb-2222-4333-8444-555555555555';
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      { finding: id, searchId: mine, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.searchId).toBe(mine);
+  });
+
+  /**
+   * THE CONFIRM IS THE READ GATE. Nothing else prints a stored body, so a
+   * confirm that summarized it would be asking for approval of unread text.
+   */
+  it('the review confirm carries the whole body and the child ids', async () => {
+    const id = await seedFinding({ uid: 'FND-CONFIRM' });
+    const { provider, signCount } = spyProvider();
+    const err = (await runPublish(
+      { finding: id, mode: 'review' },
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider }),
+    ).catch((e: unknown) => e)) as { code: string; message: string; details: unknown };
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.message).toContain('fork subagent child-1');
+    const detail = (err.details as { finding: { body: string; agentId: string; searchId: string } })
+      .finding;
+    expect(detail.body).toBe(FINDING_BODY);
+    expect(detail.agentId).toBe('child-1');
+    expect(detail.searchId).toBe(SEEDED_SEARCH);
+    // Refused before the wallet, like every other publish refusal.
+    expect(signCount()).toBe(0);
+  });
+
+  it('review mode without --yes refuses rather than publishing', async () => {
+    const id = await seedFinding({ uid: 'FND-REFUSE' });
+    const { fetch, calls } = stubServer();
+    await expect(
+      runPublish(
+        { finding: id, mode: 'review' },
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('the block tier fires on a stored body, in every mode', async () => {
+    const id = await seedFinding({
+      uid: 'FND-BLOCK',
+      body: 'The leaked key is 0x' + 'a'.repeat(64),
+    });
+    const { fetch, calls } = stubServer();
+    const err = (await runPublish(
+      { finding: id, mode: 'full-auto', yes: true },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string; exitCode: number; message: string };
+    expect(err.code).toBe('PUBLISH_BLOCKED');
+    expect(err.exitCode).toBe(3);
+    expect(err.message).toContain('FND-BLOCK');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('--dry-run prints the whole body and writes and spends nothing', async () => {
+    const id = await seedFinding({ uid: 'FND-DRY' });
+    const { fetch, calls } = stubServer();
+    const { provider, signCount, getSignerCount } = spyProvider();
+    const result = await runPublish(
+      { finding: id, dryRun: true },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    const data = result.data as { dryRun: boolean; published: boolean; body: string };
+    expect(data).toMatchObject({ dryRun: true, published: false });
+    expect(data.body).toBe(FINDING_BODY);
+    expect((result.humanLines ?? []).join('\n')).toContain('the 0.13 shim is dead weight');
+    // No request, no keystore unlock, no signature — and, review being the
+    // default, no confirm either: inspection is not a publish attempt.
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+    expect(signCount()).toBe(0);
+  });
+
+  it('leaves the dedup record alone, so a dry run does not block the publish after it', async () => {
+    const id = await seedFinding({ uid: 'FND-DEDUP' });
+    const { fetch, calls } = stubServer();
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+    await runPublish({ finding: id, dryRun: true }, makeCtx(), deps);
+    await runPublish({ finding: id, mode: 'full-auto' }, makeCtx(), deps);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('an unknown id is the standard not-found, naming the ids held here', async () => {
+    await seedFinding({ uid: 'FND-HELD' });
+    const err = (await runPublish(
+      { finding: 'nothing-here' },
+      makeCtx(),
+      hermetic({ provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string; fix?: string };
+    expect(err.code).toBe('RESOURCE_NOT_FOUND');
+    expect(err.fix).toContain('FND-HELD');
+  });
+
+  it('a uid minted by another arm does not resolve as a finding', async () => {
+    await seedFinding({ uid: 'FND-OTHER-ARM', hook: 'subagent' });
+    await expect(
+      runPublish(
+        { finding: 'FND-OTHER-ARM' },
+        makeCtx(),
+        hermetic({ provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
+  });
+
+  it('a file and an id together is USAGE, before any wallet touch', async () => {
+    const id = await seedFinding({ uid: 'FND-BOTH' });
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        { file: await writeDoc(CLEAN), finding: id, mode: 'full-auto' },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    expect(getSignerCount()).toBe(0);
+  });
+});

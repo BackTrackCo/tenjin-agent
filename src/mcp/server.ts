@@ -146,6 +146,18 @@ const outcomeInput = {
 
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
+  // A SOURCE, not a second publish path: the same scan, consent cascade, confirm
+  // and pricing govern it, so neither key needs a gate of its own described here.
+  finding: z
+    .string()
+    .optional()
+    .describe(
+      'Publish a stored subagent finding as the body instead of a file, by the id the capture ask printed; pass a file or this, never both',
+    ),
+  dryRun: z
+    .boolean()
+    .optional()
+    .describe('Report what would be published, whole body included, and write and spend nothing'),
   // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
     .union([z.string(), z.array(z.string())])
@@ -462,10 +474,13 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Publish a piece',
       description:
-        'Publish a Markdown file as a paid or free piece with an optional ' +
+        "Publish a Markdown file, or a finding one of this session's subagents stated at its own " +
+        'end (finding:"<id>", the id the capture ask printed), as a paid or free piece with an optional ' +
         'answer card. Gated by a deterministic local scan and your publish.mode consent: in review ' +
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
-        'price, findings, card, target) for you to show the user before re-calling with yes:true. A ' +
+        'price, findings, card, target, and for a stored finding its whole body and the child that ' +
+        'wrote it under details.finding) for you to show the user before re-calling with yes:true. ' +
+        'dryRun:true returns the same body with nothing published or spent. A ' +
         'hard block (a live secret) returns PUBLISH_BLOCKED and is NEVER cleared by yes or any mode. ' +
         'The marketplace scans server-side as well, so either refusal can also arrive AFTER the ' +
         'local scan passed, carrying findings marked source:"server" that a yes:true given before ' +
@@ -479,6 +494,8 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         runPublish(
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
+            ...(args.finding !== undefined ? { finding: args.finding } : {}),
+            ...(args.dryRun !== undefined ? { dryRun: args.dryRun } : {}),
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),

@@ -713,24 +713,24 @@ export const STORE_SQL = {
   queuedFindingCount: `SELECT COUNT(*) AS n FROM events
      WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'`,
   /**
-   * The same queue, read by `tenjin finding list` rather than by the ask.
+   * The same queue read from a CLI process rather than by the ask: the ids
+   * `publish --finding` names back when it is handed one it cannot find.
    *
-   * WHY IT IS NOT `queuedFindings`. The ask names a bounded few of ONE
-   * session's queue; the CLI is the path to everything stored, so it reads
-   * across sessions and hands back the session each row belongs to. Bounded by
-   * the same two things the ask is, a window and a limit, and by nothing else.
+   * WHY IT IS NOT `queuedFindings`. The ask reads ONE session's queue and the
+   * caller of this one has only an id that did not resolve, so it reads across
+   * sessions and is bounded by a window and a limit and by nothing else.
    *
    * DELIBERATELY NOT ON THE no-SCAN LIST. Every query there runs in front of a
-   * tool call, up to eight at a time; this one runs once, in a process the
-   * operator started. There is no `(hook, at)` index on `events` to plan it
-   * against and adding one needs a `user_version` bump that #212 already owns,
-   * so this takes the range scan the same never-pruned table costs `statusRows`
-   * about 7 ms at 200k rows — less than this command spends importing itself.
+   * tool call, up to eight at a time; this one runs once, on the way to an error
+   * message, in a process the operator started. There is no `(hook, at)` index on
+   * `events` to plan it against and adding one needs a `user_version` bump that
+   * #212 already owns, so this takes the range scan the same never-pruned table
+   * costs `statusRows` about 7 ms at 200k rows.
    */
   findingsRecent: `SELECT uid, at, session, data FROM events
      WHERE hook = '${STORE_FINDING_HOOK}' AND at >= ?
      ORDER BY at DESC, id DESC LIMIT ?`,
-  /** One finding, whole, by the id `tenjin finding list` printed. `events.uid`
+  /** One finding, whole, by the id the capture ask printed. `events.uid`
    *  is UNIQUE, so this is an index seek; the hook predicate is there to stop a
    *  uid minted by another arm from resolving as a finding. */
   findingByUid: `SELECT uid, at, session, data FROM events

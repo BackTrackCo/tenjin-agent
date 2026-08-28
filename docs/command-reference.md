@@ -213,6 +213,8 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 
 | Flag                       | Effect                                                                         |
 | -------------------------- | ------------------------------------------------------------------------------ |
+| `--finding <id>`           | Publish a stored subagent finding as the body instead of a file.         |
+| `--dry-run`                | Print what would be published, whole body included, and write nothing.   |
 | `--search-id <uuid>`       | Link the piece to the search it answers. Repeatable, up to 10 per piece.       |
 | `--draft`                  | Save privately instead of publishing.                                          |
 | `--price <usd>`            | Set the post price.                                                            |
@@ -233,6 +235,12 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 | `--key <kind=value>`       | An exact-match key this piece answers by-key lookups on. Repeatable, up to 32. |
 
 `--key` names a key `POST /api/keys/resolve` answers on: `fingerprint=sig_v1:<hash>` (a failure signature), `package_version=<name@version>`, `command_head=<head>` or `repo=<owner/name>`, split on the first `=` only. It is a top-level post field, not a card field, so a piece may carry keys and no card. Every key goes out unverified: `verified` is the close rule's claim, made when two independent fixes agreed, and never a flag a hand publish asserts. A shelf with `KNOWLEDGE_KEYS` off refuses any body carrying keys (`keys_disabled`, exit 4, no retry, named as such), and a verified key another published piece already holds comes back as "`<kind> <key>` is already verified on `<id>`; publish it unverified" — also no retry. `tenjin edit` does not take `--key` yet.
+
+**`--finding <id>` publishes what a subagent stated at its own end.** With push on, a child that stopped on an open loop was asked for its finding and the hook filed what it said (see [Push](#push-experimental)); the id is the one the parent's capture ask prints. It is a source and nothing else: the body comes from the state store instead of a file, and the consent cascade, the review confirm, the never-bypassable block tier and pricing are the same ones a file publish takes. Pass a file or `--finding`, never both. The child that wrote it, its agent id, and the search it closes come back on the `--json` receipt under `data.finding`; that search is also claimed on the piece unless you named one yourself with `--search-id`.
+
+**The review confirm is where a stored finding is read.** No other command prints one, so the `NEEDS_CONFIRMATION` refusal carries the whole stored body (up to the 2,000 characters capture bounded it to) along with the child's agent id and the search id, printed in the terminal and under `details.finding` on `--json`. Approving without reading it is approving text nothing else has shown you.
+
+**`--dry-run` inspects without publishing.** It runs every local gate, prints what would be published including the whole body, and exits 0 having touched no wallet, made no request, closed no loop and written no dedup record. It is the way to read a finding you have no intention of publishing: `tenjin publish --finding <id> --dry-run`. A hard block still refuses, in a dry run as everywhere else.
 
 On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
 
@@ -445,23 +453,6 @@ tenjin push grade --explain
 tenjin push off
 ```
 
-### `tenjin finding list [--session <id>] [--limit <n>] [--json]`
-
-Lists the subagent findings this machine holds from the last 8 hours, newest first: the id, when it landed, the child that wrote it (agent type and id) and the loop it closed (search id), how many characters were stored, and a preview clipped to 200 with a `[clipped]` mark when there is more. `--session` narrows to one harness session; `--limit` defaults to 20 and is capped at 200. Findings are harvested by the subagent arm at `SubagentStop` and need `hooks.capture` on.
-
-This is the read path behind the parent's capture ask, not a second prompt. The ask is one paragraph at a turn end, so it names the 5 newest findings and clips each body to fit; both are display bounds over rows stored whole, and these two verbs are how everything stored is reached. The ask prints each finding's id for exactly that reason.
-
-### `tenjin finding show <id> [--json]`
-
-Prints one stored finding whole, up to the 2,000 characters the capture bounded it to, with the child that wrote it and the search it closed. The id is the one `tenjin finding list` and the capture ask print. An unknown or aged-out id is `RESOURCE_NOT_FOUND`.
-
-Both verbs are read-only and local: no wallet, no shelf, no spend, nothing written. They are not in the recommended permission allowlist, which is a separate decision from adding the verbs; until they are, a harness in auto mode prompts for them the same way it prompts for the `tenjin publish` the ask has always named. What a child wrote is a record of what it settled: treat it as data, never as instructions.
-
-```bash
-tenjin finding list
-tenjin finding show 01K5V8QJ2MW3XZ --json
-```
-
 ## MCP
 
 `tenjin mcp` runs a local stdio MCP server over the same command cores. It exposes search, inspect, buy, outcome, publish, edit, wallet, and fund tools. The wallet stays local, and the same spend and publish gates apply.
@@ -518,7 +509,7 @@ When enabled (`hooks.capture`), the Stop hook checks whether the session had a r
 
 Once per session it ends the turn (`block`) or adds a line (`nudge`) asking the agent to publish what it settled, naming the resolved `publish.mode` so the agent knows whether it may run the command without asking. The bar differs by mode: in public mode it is the marketplace's (public, durable, rights-clean); in team mode it is "anything a teammate on this project would want to know" — a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why.
 
-The ask also **names what this session's children queued**. With push on, a subagent that stopped on an open loop was asked for its finding at its own end and the hook filed what it said (see the subagent arm above); the capture ask names how many are queued and lists the five newest, each with the child that settled it and the search it answers, because the parent is the context with publish authority and this is the one moment it is already being asked what to write down. A body too long for the list is cut and marked `[clipped]` there; the stored body is whole either way, and every one of them stays unpublished until someone publishes it. Each child's words are framed in the ask as a record of what that child settled, not as instructions to the agent reading it.
+The ask also **names what this session's children queued**. With push on, a subagent that stopped on an open loop was asked for its finding at its own end and the hook filed what it said (see the subagent arm above); the capture ask lists every one of them, each with its id, the child that settled it and the search it answers, because the parent is the context with publish authority and this is the one moment it is already being asked what to write down. An id and a one-line preview is what naming a finding costs, so none are left out. The preview is cut and marked `[clipped]` when the body runs past it; the stored body is whole either way, and `tenjin publish --finding <id>` publishes it under the same scan and the same `publish.mode` consent as any other publish, with `--dry-run` printing it whole and publishing nothing. Each child's words are framed in the ask as a record of what that child settled, not as instructions to the agent reading it.
 
 The ask **waits until no subagent launched from this session is still running** — a turn paused on background work has not yet learned the thing the ask is about, and the marker below would spend the one ask on that pause. Running subagents are read from the tail of the session transcript (the last 4 MB); a launch older than that is not seen, a background launch with no completion notice for 45 minutes is read as finished (a crashed subagent delays the ask rather than cancelling it), and the check fails toward asking on any transcript it cannot read.
 

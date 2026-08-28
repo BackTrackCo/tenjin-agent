@@ -5401,41 +5401,41 @@ describe('the capture ask (Stop)', () => {
   });
 
   /**
-   * The count is the QUEUE's, not the list's. The list is bounded to five, so a
-   * headline that reported its own length under-reported exactly the sessions
-   * with the most to publish, and never said it had.
+   * EVERY QUEUED FINDING IS NAMED, and the headline counts the queue.
    *
-   * AND A COUNT IS NOT A READ PATH. Naming two of seven and reporting five
-   * unnamed leaves the parent with no way to reach those five, so the headline
-   * says where they are as well as how many they are.
+   * A bound of five dropped exactly the sessions with the most to publish, and
+   * this ask is the last thing that will ever mention a finding: an id plus one
+   * line is what naming one costs the parent, so all seven are here.
    */
-  it('names how many are queued, not how many it listed, and where the rest are', async () => {
+  it('lists every queued finding, not the newest few', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     await writeSearchSignal();
     for (let i = 0; i < 7; i += 1) await queueFinding(`UID${i}`, `finding number ${i}`);
 
     const reason = await askReason();
     expect(reason).toContain('7 finding(s) your subagents stated at their own end');
-    expect(reason).toContain('the 5 newest are named here');
-    expect(reason).toContain('the rest are in `tenjin finding list`');
-    expect(reason.match(/ wrote:\n/g)).toHaveLength(5);
+    expect(reason.match(/ wrote:\n/g)).toHaveLength(7);
+    for (let i = 0; i < 7; i += 1) expect(reason).toContain(`- UID${i} `);
+    // Nothing was left out, so nothing says anything was.
+    expect(reason).not.toContain('newest are named here');
   });
 
   /**
-   * EVERY DISPLAY BOUND NEEDS A WAY PAST IT. The ask lists five and clips each
-   * body; both are bounds on a paragraph at a turn end, over rows stored whole.
-   * So each listed finding carries the id `tenjin finding show` takes, and the
-   * ask says so — without it the parent is told to publish from a preview it
-   * cannot expand.
+   * THE ID IS THE ARGUMENT, and the ask names the command that takes it. The
+   * body preview is one line over rows stored whole, so without the id the
+   * parent is told to publish from a preview it cannot expand.
    */
-  it('names each finding by the id the read path takes', async () => {
+  it('names each finding by the id publish --finding takes', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     await writeSearchSignal();
     await queueFinding('UID-READABLE', 'a short finding nothing clipped');
 
     const reason = await askReason();
     expect(reason).toContain('- UID-READABLE general-purpose subagent a1');
-    expect(reason).toContain('tenjin finding show <id>');
+    expect(reason).toContain('tenjin publish --finding <id>');
+    // The read path is the same command, and the ask says it publishes nothing.
+    expect(reason).toContain('tenjin publish --finding <id> --dry-run');
+    expect(reason).toContain('which publishes nothing');
   });
 
   it('points a clipped body at the command that returns it whole', async () => {
@@ -5445,7 +5445,7 @@ describe('the capture ask (Stop)', () => {
 
     const reason = await askReason();
     expect(reason).toContain('[clipped]');
-    expect(reason).toContain('read it whole with `tenjin finding show <id>`');
+    expect(reason).toContain('read it whole with `tenjin publish --finding <id> --dry-run`');
   });
 
   /**

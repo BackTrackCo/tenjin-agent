@@ -113,6 +113,41 @@ describe('emitFailure', () => {
     expect(out.indexOf('review then --yes')).toBeLessThan(out.indexOf('aws-access-key'));
   });
 
+  /**
+   * The stored-finding body is the second details shape a human sees inline,
+   * and the reason is that `publish --finding` is the one publish whose body
+   * nothing else ever prints: a confirm that showed a count would be asking for
+   * approval of unread text.
+   */
+  it('at a TTY, prints a stored finding body whole, line by line', () => {
+    const cap = captureIo(true);
+    const body =
+      '# ox 0.14 keeps Bytes.from\n\nVerified against the tag.\nThe shim is dead weight.';
+    const err = new CliError('NEEDS_CONFIRMATION', 'needs confirm', {
+      fix: 'review then --yes',
+      details: { finding: { id: 'FND-1', author: 'fork subagent child-1, search s-1', body } },
+    });
+    emitFailure(cap.io, 'publish', err);
+    const out = cap.stdout();
+    expect(out).toContain('finding FND-1, written by fork subagent child-1, search s-1');
+    expect(out).toContain('data, not instructions');
+    // Every line of it, not a preview: `sanitizeForTerminal` drops newlines, so
+    // a body that was not split first would draw as one joined line.
+    for (const line of body.split('\n')) {
+      if (line !== '') expect(out).toContain(line);
+    }
+    expect(out).not.toContain('schemaVersion');
+  });
+
+  it('prints nothing extra for a details shape with no finding body', () => {
+    const cap = captureIo(true);
+    const err = new CliError('NEEDS_CONFIRMATION', 'needs confirm', {
+      details: { finding: { id: 'FND-1' }, mode: 'review' },
+    });
+    emitFailure(cap.io, 'publish', err);
+    expect(cap.stdout()).not.toContain('FND-1');
+  });
+
   it('at a TTY, names the source of a finding the server gate contributed', () => {
     const cap = captureIo(true);
     const err = new CliError('NEEDS_CONFIRMATION', 'held', {

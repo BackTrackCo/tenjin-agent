@@ -433,34 +433,34 @@ describe('session command group', () => {
   });
 });
 
-describe('finding command group', () => {
-  it('registers both leaves, so the id the capture ask prints is reachable', async () => {
-    const cap = captureIo();
-    expect(await main(['finding', '--help'], cap.io)).toBe(0);
-    expect(cap.stdout()).toContain('list [options]');
-    expect(cap.stdout()).toContain('show [options] <id>');
+/**
+ * The stored-finding source on `publish`, at the dispatcher.
+ *
+ * There is no `finding` COMMAND GROUP to reach the queue with: the id the
+ * capture ask prints is an argument to the command the ask already names, so
+ * what has to hold here is that the flag exists and that a wrong id fails the
+ * way every other missing resource in this CLI does — before any wallet touch.
+ */
+describe('publish --finding', () => {
+  it('is registered on publish rather than as a command group of its own', async () => {
+    const help = captureIo();
+    expect(await main(['publish', '--help'], help.io)).toBe(0);
+    expect(help.stdout()).toContain('--finding <id>');
+    expect(help.stdout()).toContain('--dry-run');
+
+    const gone = captureIo();
+    expect(await main(['finding', 'list'], gone.io)).toBe(2);
   });
 
-  it('a bare `tenjin finding` is USAGE rather than a silent default view', async () => {
+  it('reports an unknown id as not found', async () => {
     const cap = captureIo();
-    expect(await main(['finding'], cap.io)).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    expect(await main(['publish', '--finding', 'no-such-id', '--json'], cap.io)).toBe(1);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('RESOURCE_NOT_FOUND');
   });
 
-  it('show requires the id, and reports an unknown one as not found', async () => {
-    const missingArg = captureIo();
-    expect(await main(['finding', 'show'], missingArg.io)).toBe(2);
-    expect(JSON.parse(missingArg.stdout()).error.code).toBe('USAGE');
-
-    const unknown = captureIo();
-    expect(await main(['finding', 'show', 'no-such-id', '--json'], unknown.io)).toBe(1);
-    expect(JSON.parse(unknown.stdout()).error.code).toBe('RESOURCE_NOT_FOUND');
-  });
-
-  it('the leaves take trailing global flags like every other command', async () => {
+  it('refuses a file and an id together rather than picking one', async () => {
     const cap = captureIo();
-    const code = await main(['finding', 'list', '--timeout', 'abc'], cap.io);
-    expect(code).toBe(2);
+    expect(await main(['publish', 'post.md', '--finding', 'abc', '--json'], cap.io)).toBe(2);
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 });

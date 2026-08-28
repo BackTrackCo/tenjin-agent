@@ -575,7 +575,18 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('publish [file]'))
     .description(
-      'Publish a Markdown file as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
+      "Publish a Markdown file, or a finding one of this session's subagents stated at its own end (--finding <id>), as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the body hard-blocks, and soft findings need --yes",
+    )
+    // The queued child finding named by the capture ask, published as the body
+    // through this same pipeline (tenjin-agent#228). It is a SOURCE, not a second
+    // publish path: consent, the confirm, the scan and pricing are the ones above.
+    .option(
+      '--finding <id>',
+      'publish a stored subagent finding instead of a file, by the id the capture ask printed; in review mode the confirm prints the whole stored body, and --dry-run prints it without publishing',
+    )
+    .option(
+      '--dry-run',
+      'print what would be published, whole body included, and exit without writing or spending',
     )
     .option(
       '--search-id <id>',
@@ -615,6 +626,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
+            ...(typeof o.finding === 'string' ? { finding: o.finding } : {}),
+            ...(o.dryRun === true ? { dryRun: true } : {}),
             ...(Array.isArray(o.searchId) && o.searchId.length > 0
               ? { searchId: o.searchId as string[] }
               : {}),
@@ -890,47 +903,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           ...(opts.explain === true ? { explain: true } : {}),
           ...(Array.isArray(opts.label) ? { label: opts.label as string[] } : {}),
         });
-      });
-    });
-
-  // The read path behind the capture ask's preview. The ask names a bounded few
-  // of a session's queued child findings and clips each body to fit a paragraph
-  // at a turn end; these two verbs are how everything stored is reached
-  // (tenjin-agent#228). Read-only and local: no wallet, no shelf, no spend.
-  const finding = addGlobalFlags(
-    program
-      .command('finding')
-      .description(
-        "Read what a session's subagents wrote at their own end, whole: the capture ask names a few and clips them, `tenjin finding list|show` reaches everything stored",
-      ),
-  );
-  addGlobalFlags(finding.command('list'))
-    .description(
-      'List the subagent findings this machine holds from the last 8 hours, newest first, with a preview and the id `tenjin finding show` takes',
-    )
-    .option('--session <id>', 'Only findings queued by one harness session')
-    .option('--limit <n>', 'How many to list (default 20, max 200)')
-    .action(async function (this: Command) {
-      await runCommand('finding.list', this, async (ctx) => {
-        const opts = this.opts();
-        const { runFindingList } = await import('./commands/finding');
-        return runFindingList(
-          {
-            ...(typeof opts.session === 'string' ? { session: opts.session } : {}),
-            ...(typeof opts.limit === 'string' ? { limit: opts.limit } : {}),
-          },
-          ctx,
-        );
-      });
-    });
-  addGlobalFlags(finding.command('show <id>'))
-    .description(
-      'Print one stored finding whole, with the child that wrote it and the loop it closed',
-    )
-    .action(async function (this: Command, id: string) {
-      await runCommand('finding.show', this, async (ctx) => {
-        const { runFindingShow } = await import('./commands/finding');
-        return runFindingShow({ id }, ctx);
       });
     });
 
