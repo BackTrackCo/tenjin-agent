@@ -6,6 +6,7 @@ import { hooksDir } from './paths';
 import {
   DISPATCH_HOOK_FILE,
   HOOK_SCRIPT_MARKER,
+  HOOK_TIMEOUT_SECONDS,
   SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
@@ -121,15 +122,6 @@ export const PUSH_CONTEXT_READ_MATCHER = 'Read';
 
 /** The push context arm's churn half: the Nth edit to one file in one session. */
 export const PUSH_CONTEXT_EDIT_MATCHER = 'Edit|Write|MultiEdit';
-
-/**
- * Seconds the harness allows each hook before killing it, and the HARD bound on
- * how long either can delay anything. The scripts' own watchdogs (2s and 1.5s)
- * are the design budget and cover the ordinary case, but they are event-loop
- * timers: a synchronous read that blocks outlasts them. This kill does not, so it
- * is the number to quote when the question is "what is the worst case".
- */
-const HOOK_TIMEOUT_SECONDS = 5;
 
 export type HooksSkipReason =
   | 'harness-not-claude'

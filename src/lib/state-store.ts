@@ -482,19 +482,6 @@ export const STORE_SQL = {
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
   deleteState: 'DELETE FROM session_state WHERE session = ? AND key = ?',
   /**
-   * Take back a claim its holder marked released, in one statement.
-   *
-   * The release path is a DELETE, and a store that refuses it leaves a claim
-   * standing over an answer that was never recorded — which reads to every
-   * later fire as "already asked" and makes one busy moment the reason a
-   * question is never asked again for the session. The fallback stamps the row
-   * with `STATE_RELEASED` instead, and this is how the next fire takes it: the
-   * `WHERE value = ?` is the arbitration, so two dispatches that both see the
-   * marker cannot both win it, exactly as `claimState`'s `DO NOTHING` is.
-   */
-  retakeReleasedState: `UPDATE session_state SET value = ?, at = ?
-     WHERE session = ? AND key = ? AND value = ?`,
-  /**
    * Take the OLDEST key under one prefix and hand back what it held, in one
    * statement.
    *
@@ -526,6 +513,14 @@ export const STORE_SQL = {
          ORDER BY at, key LIMIT 1)
      RETURNING key, value`,
   /**
+   * The same row `takeStateOldestByPrefix` would take, WITHOUT taking it, so an
+   * evictor can look at what it is about to drop. Identical ordering on
+   * purpose: a peek that named a different row than the take would protect the
+   * wrong slot.
+   */
+  oldestStateByPrefix: `SELECT key, value FROM session_state
+     WHERE session = ? AND key >= ? AND key < ? ORDER BY at, key LIMIT 1`,
+  /**
    * Claim one key for this session, atomically. `DO NOTHING` plus
    * `changes()` is the whole point: the read-modify-write these replaced
    * ("is this signature already seen? then add it to the list") had a window
@@ -540,13 +535,14 @@ export const STORE_SQL = {
    * changed rows when the holder is too fresh to displace, which is the same
    * arbitration `claimState` gets from `DO NOTHING`, only time-bounded.
    *
-   * The dispatch relay is the caller, and it claims the handoff SLOT: a
-   * check-then-write there let two dispatches in one assistant message both
-   * pass the check and both write the one session-wide cache key, and a
-   * permanent claim would have made an unconsumed handoff suppress the piece
-   * forever (`STORE_RELAY_WINDOW_MS`). The stored value names the piece the
-   * winner parked, so a loser can tell "another dispatch already relayed MY
-   * piece" from "another piece holds the slot" without a second race.
+   * Two callers, both in the dispatch arm, and the WINDOW IS THE WHOLE DESIGN
+   * in each. The relay SLOT: a check-then-write let two dispatches in one
+   * assistant message both pass the check and both write the one session-wide
+   * cache key, and a permanent claim would have made an unconsumed handoff
+   * suppress the piece forever (`STORE_RELAY_WINDOW_MS`). The asked-claim: a
+   * permanent claim survives a fire the harness kills mid-lookup, and there is
+   * no `searches` row behind it to replay, so the window is the fire's own
+   * budget and doubles as the re-ask window.
    *
    * Not a job for the `injections` unique index, which covers
    * `action='injected'` only and must keep doing so: widening it would refuse
@@ -943,14 +939,21 @@ const STATE_CACHE = 'dispatch_cache';
  * legacy key a stale hook still writes.
  */
 const STATE_CACHE_PREFIX = STATE_CACHE + ':';
-/** Which questions this session has already spent a lookup on, claimed rather
- *  than checked. The searches row says the same thing, but it is written after
- *  the answer comes back, so two fires in one message both passed the check. */
+/**
+ * Which questions this session has already spent a lookup on, claimed rather
+ * than checked. The searches row says the same thing, but it is written after
+ * the answer comes back, so two fires in one message both passed the check.
+ *
+ * A LEASE, NEVER A PERMANENT ROW. The fire holding it can be killed where it
+ * stands — its own watchdog and the harness \`timeout\` on the settings entry are
+ * both hard kills that run no release — and a permanent claim survives that kill
+ * with no \`searches\` row behind it and nothing for the replay to hand a child,
+ * so one busy minute becomes the reason this question is never asked again for
+ * the rest of the session, with no row saying why. The lease expires instead:
+ * see \`DISPATCH_ASK_LEASE_MS\` in lib/hook-scripts.ts, which is both the window
+ * and the re-ask window.
+ */
 const STATE_ASKED_PREFIX = 'asked:';
-/** The value \`releaseClaim\` stamps on a claim whose delete the store refused.
- *  It is a sentinel and not a plain absence because the row is still there:
- *  \`claimState\` sees a row and says no, so the marker needs its own reader. */
-const STATE_RELEASED = 'released';
 /**
  * PREFIXES, NOT KEYS. Each of these was one JSON blob under a single key that
  * every writer read, mutated and wrote back whole — so two hook processes in
@@ -997,22 +1000,31 @@ const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
  */
 const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 /**
- * THE SESSION'S ONE HANDOFF SLOT, and the arbiter for the dispatch relay line.
+ * THE ARBITER FOR THE DISPATCH RELAY LINE. It bounds what the PARENT is told,
+ * and nothing else.
+
  *
- * A SLOT, NOT A PIECE. \`STATE_CACHE\` was a single session-wide key, so keying
- * the claim by resource id let a later dispatch of any strength above 'none'
- * overwrite a handoff an earlier one had already announced as relayed: the
- * relayed piece then reached no context at all while its \`relayed\` row
- * suppressed it from every parent arm for the window, and the parent
- * transcript asserted a delivery that never happened. Claiming the slot makes
- * one live handoff per session a bound; a dispatch that loses it leaves the
- * live handoff alone and falls through to the ordinary parent hint.
+ * NOT A BOUND ON LIVE HANDOFFS, not since every dispatch parks into a slot of
+ * its own (\`STATE_CACHE_PREFIX\`): \`cacheSlot\` sits outside the branch this
+ * claim gates, so a dispatch that LOSES the claim still parks its own finding
+ * and up to \`CACHE_SLOT_MAX\` handoffs are live at once. What the loser gives up
+ * is the announcement, not the delivery.
  *
- * The value is the resource id the winner parked. Held only as long as the
- * handoff it names can still be consumed (\`RELAY_WINDOW_MS\`).
+ * A SLOT, NOT A PIECE. Keying the claim by resource id let a later dispatch of
+ * any strength above 'none' announce over a handoff an earlier one had already
+ * announced: the relayed piece then reached no context at all while its
+ * \`relayed\` row suppressed it from every parent arm for the window, and the
+ * parent transcript asserted a delivery that never happened. One relay LINE per
+ * session is the bound; a dispatch that loses it falls through to the ordinary
+ * parent hint.
  *
- * Adjacent to \`STATE_REPLAYED_PREFIX\` above and unrelated to it: that one is
- * the failure arm's error->fix pairing replay, a different lane.
+ * The value is the resource id the winner parked, which is what lets a loser
+ * tell "my piece is already announced" from "another piece holds the line", and
+ * what \`cacheSlot\` protects from eviction. Held only as long as the handoff it
+ * names can still be consumed (\`RELAY_WINDOW_MS\`).
+ *
+ * Adjacent to \`STATE_REPLAYED_PREFIX\` above and unrelated to it: that one
+ * is the failure arm's error->fix pairing replay, a different lane.
  */
 const STATE_RELAY_SLOT = 'relay:handoff';
 
@@ -1526,7 +1538,7 @@ function alreadyShown(sessionId, resourceId) {
 }
 
 /**
- * Is a handoff parked that a subagent could still consume?
+ * Is a handoff of THIS PIECE parked that a subagent could still consume?
  *
  * PRESENCE IS NOT LIVENESS, and the row is not the cache. \`STATE_RELAY_SLOT\`
  * and the \`relayed\` injections row both outlive the parked entry they describe
@@ -1536,13 +1548,19 @@ function alreadyShown(sessionId, resourceId) {
  * to apply the child's own rule (SubagentStart rejects a cache older than the
  * window). Same rule, same window, on every side.
  *
+ * PER PIECE, because there are up to \`CACHE_SLOT_MAX\` slots now and any of them
+ * would answer a piece-blind question. Dispatch A relays P and its slot expires
+ * unconsumed; dispatch B parks Q; a parent arm asking about P must not be
+ * suppressed by B's unrelated slot while P's \`relayed\` row is still inside the
+ * window. Every slot carries \`top.resourceId\`, so the match is exact.
+ *
  * Scanned from \`STATE_CACHE\` upward rather than read as one key, because each
  * dispatch parks under a slot of its own and the take-oldest consumer drains
- * that whole range: any slot in it is a handoff a child can still be given.
- * The entry's OWN timestamp decides, which is the rule the child applies; the
- * \`at\` column is the range filter and not that rule.
+ * that whole range. The entry's OWN timestamp decides, which is the rule the
+ * child applies; the \`at\` column is the range filter and not that rule.
  */
-function liveHandoff(sessionId) {
+function liveHandoff(sessionId, resourceId) {
+  if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
   const parked = statePrefixSince(
     sessionId,
     STATE_CACHE,
@@ -1551,6 +1569,7 @@ function liveHandoff(sessionId) {
   );
   for (const row of parked) {
     if (!isRecord(row.value) || typeof row.value.at !== 'string') continue;
+    if (!isRecord(row.value.top) || row.value.top.resourceId !== resourceId) continue;
     const at = Date.parse(row.value.at);
     if (Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS) return true;
   }
@@ -1573,7 +1592,7 @@ function liveHandoff(sessionId) {
 function alreadyShownOrLiveRelay(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
   if (alreadyShown(sessionId, resourceId)) return true;
-  if (!liveHandoff(sessionId)) return false;
+  if (!liveHandoff(sessionId, resourceId)) return false;
   return (
     storeGet(STORE_SQL.alreadyShownOrLiveRelay, [
       storeSession(sessionId),
@@ -1640,41 +1659,6 @@ function clearState(sessionId, key) {
 }
 
 /**
- * Give back a claim taken with \`claimState\`, and say whether it is gone.
- *
- * A CLAIM STANDS FOR AN ANSWER THIS SESSION HOLDS, so one left behind by a
- * refused delete suppresses its question for the rest of the session while
- * nothing exists to replay in its place. Three chances, cheapest first:
- * the delete, the delete again (SQLITE_BUSY is the common refusal and it is
- * transient), then an UPSERT of \`STATE_RELEASED\` — a different statement
- * against a row that already exists, so it can land where a delete did not.
- * A marked claim is not a released one, which is why \`retakeReleasedClaim\`
- * exists rather than the marker being read as absence directly.
- */
-function releaseClaim(sessionId, key) {
-  if (clearState(sessionId, key)) return true;
-  if (clearState(sessionId, key)) return true;
-  return setState(sessionId, key, STATE_RELEASED);
-}
-
-/** The other half of \`releaseClaim\`: take a claim its holder marked released.
- *  One statement, so a marker two fires both see goes to exactly one of them.
- *  Only reachable when \`claimState\` already answered false, so a refusal here
- *  is the store's answer and not its silence: no claim, no lookup. */
-function retakeReleasedClaim(sessionId, key) {
-  if (STORE === null) return false;
-  const result = storeRun(STORE_SQL.retakeReleasedState, [
-    storeJson(true),
-    Date.now(),
-    storeSession(sessionId),
-    key,
-    storeJson(STATE_RELEASED),
-  ]);
-  if (result === null) return false;
-  return typeof result.changes === 'number' ? result.changes > 0 : false;
-}
-
-/**
  * A key that HOLDS until \`untilMs\` and then simply reads as absent. The
  * expiry is the value, so a reader needs no clock column and no pruner: a
  * stale row is one more row in a table nothing scans, overwritten the next
@@ -1709,6 +1693,26 @@ function stateHolds(sessionId, key) {
 function takeStateOldestByPrefix(sessionId, prefix) {
   const row = storeGet(STORE_SQL.takeStateOldestByPrefix, [
     storeSession(sessionId),
+    storeSession(sessionId),
+    prefix,
+    prefix + String.fromCharCode(0xffff),
+  ]);
+  if (row === null || typeof row.key !== 'string') return null;
+  return { key: row.key, value: typeof row.value === 'string' ? storeParse(row.value) : null };
+}
+
+/**
+ * The row \`takeStateOldestByPrefix\` would take next, left where it is.
+ *
+ * FOR EVICTORS ONLY. A consumer must use the take, whose delete IS the read;
+ * this exists because \`cacheSlot\` has to know WHAT it is about to drop before
+ * it drops it, and a slot whose piece the parent has already been told is on
+ * its way is not droppable. Peek-then-delete-by-key is safe for that caller in
+ * a way it would not be for a consumer: the worst a lost race does is evict a
+ * row someone else already took, and the delete can only name the row peeked.
+ */
+function oldestStateByPrefix(sessionId, prefix) {
+  const row = storeGet(STORE_SQL.oldestStateByPrefix, [
     storeSession(sessionId),
     prefix,
     prefix + String.fromCharCode(0xffff),

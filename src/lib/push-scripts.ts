@@ -2347,11 +2347,11 @@ export function pushFailureHookScript(dataDir: string): string {
  * no file at all, and the child's tool calls reach the child's file alone.
  *
  * ONE SLOT PER DISPATCH, TAKEN OLDEST-FIRST. The payload names no dispatch
- * (SubagentStart carries no \`tool_use_id\`), so arrival order is still what
- * pairs a child to a finding; what the keyed slots fix is the one shared row
- * two dispatches used to overwrite and two children used to both read. Every
- * fire that gets as far as opening the store leaves a heartbeat row naming why
- * it ended, delivered or not.
+ * (SubagentStart carries \`agent_type\` and \`agent_id\`, not \`tool_use_id\`), so
+ * arrival order is still what pairs a child to a finding; what the keyed slots
+ * fix is the one shared row two dispatches used to overwrite and two children
+ * used to both read. Every fire that gets as far as opening the store leaves a
+ * heartbeat row naming why it ended, delivered or not.
  */
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
@@ -2436,20 +2436,45 @@ function childPointer(candidate, opener, marker, shelf, searchId) {
  * session, so one dead row silenced the arm until a new dispatch overwrote it.
  * Bounded by the same cap the writer evicts against, so a fire's work is
  * bounded even if a session somehow accumulated more.
+ *
+ * EVERY GATE IS IN THIS LOOP, so a reason is terminal for a SLOT and not for the
+ * fire. \`already-injected\` is the case that forced it: the dispatch arm parks
+ * before it runs its own already-shown check, so a parent arm injecting the
+ * piece between that park and the child's start leaves a slot the child is
+ * guaranteed to refuse — and with the gate below the loop, a deliverable slot
+ * behind it was never reached. A rejected slot still gets its decision row
+ * through \`onReject\`, so the only thing that changes is which fire ends.
  */
-function takeUsableSlot(sessionId) {
+function takeUsableSlot(sessionId, onReject) {
   let reason = 'no-cache';
   for (let i = 0; i < CACHE_SLOT_MAX; i += 1) {
     const taken = takeStateOldestByPrefix(sessionId, STATE_CACHE);
     if (taken === null) return { slot: null, reason };
     const value = taken.value;
     if (!isRecord(value) || !isRecord(value.top) || typeof value.top.resourceId !== 'string') {
+      // No candidate here, so no decision row: nothing in this slot describes a
+      // hit, which is why 'invalid-shape' is a heartbeat reason and not a skip.
       reason = 'invalid-shape';
       continue;
     }
     const at = Date.parse(String(value.at));
     if (!Number.isFinite(at) || Date.now() - at > CACHE_TTL_MS) {
       reason = 'expired';
+      continue;
+    }
+    // The same gate pushDecide applies to its own judgement, applied to a cached
+    // one: a stale cache from an older build, or a dispatch hook that cached
+    // before this check existed, must not turn into an injection here.
+    if (value.strength !== 'strong' && value.strength !== 'moderate') {
+      reason = 'weak';
+      onReject(value, reason);
+      continue;
+    }
+    // Some context already got the whole piece; this slot would be the second
+    // delivery, not the first.
+    if (alreadyShown(sessionId, value.top.resourceId)) {
+      reason = 'already-injected';
+      onReject(value, reason);
       continue;
     }
     return { slot: value, reason: null };
@@ -2494,11 +2519,17 @@ async function main() {
   // delivery.
   const marker = uid();
   /**
-   * ONE ROW PER FIRE, WHATEVER HAPPENS (tenjin-agent#228). This arm used to
+   * ONE ROW PER FIRE THAT GETS THIS FAR (tenjin-agent#228). This arm used to
    * exit before recording anything on four of its paths, so a session with no
    * subagent rows could mean no cache, an expired one, a malformed one, or a
    * hook that never ran at all — and the delivery rate had no denominator. The
    * reason is terminal: whatever a path ends with is what the row says.
+   *
+   * THE DENOMINATOR STARTS AT \`openStore\`. The five exits above it — a
+   * non-record payload, the wrong event, push off, a null session, a store that
+   * would not open — leave no row, and cannot: four of them cannot tell which
+   * session they belonged to and the fifth has nowhere to write. So this counts
+   * fires that reached the cache, not fires that happened.
    */
   const heartbeat = (reason, extra) =>
     recordEvent({
@@ -2515,57 +2546,65 @@ async function main() {
       data: { event: 'SubagentStart', reason, agentType, ...extra },
     });
 
-  const { slot: cache, reason: emptyReason } = takeUsableSlot(sessionId);
-  if (cache === null) {
-    heartbeat(emptyReason);
-    return quiet();
-  }
-
-  const top = cache.top;
-  const query = clean(String(cache.query || ''), 512);
-  const slotId = typeof cache.slotId === 'string' ? cache.slotId : null;
-  // Whichever shelf the dispatch hook actually asked. A cache written before
-  // that field existed reads as 'public', which is what it was.
-  const shelf = cache.shelf === 'team' ? 'team' : 'public';
-  // ANCHORED, not just typed. The projection already refuses a non-UUID
-  // searchId before anything is cached, but this arm reads back out of the
-  // store and the value goes into a command line the child may run.
-  const searchId =
-    typeof cache.searchId === 'string' && UUID_RE.test(cache.searchId) ? cache.searchId : '';
-
-  const base = {
-    session: sessionId,
-    // THE CHILD'S OWN ID, off this SubagentStart payload: the row records the
-    // subagent the finding was relayed TO, which is the transcript \`push grade\`
-    // then judges it against. \`session_id\` is the parent's on this event, and
-    // the parent's file never carries a word of what the child did.
-    agentId,
-    cwd,
-    eventUid,
-    trigger: 'subagent',
-    event: 'SubagentStart',
-    shelf,
-    searchId: searchId === '' ? undefined : searchId,
-    candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
-    strength: cache.strength,
-    // Carried through the handoff now, so the row the CHILD writes describes
-    // the same hit the parent's dispatch row described.
-    confidence: typeof cache.confidence === 'string' ? cache.confidence : null,
-    corroborated: typeof cache.corroborated === 'boolean' ? cache.corroborated : null,
+  // Everything this arm reads back off a slot, in one place: the take loop's
+  // gates and the delivery path below describe a slot the same way, so a
+  // rejected one is recorded exactly as it was when the gates sat in main.
+  const readSlot = (cache) => {
+    const top = cache.top;
+    // ANCHORED, not just typed. The projection already refuses a non-UUID
+    // searchId before anything is cached, but this arm reads back out of the
+    // store and the value goes into a command line the child may run.
+    const searchId =
+      typeof cache.searchId === 'string' && UUID_RE.test(cache.searchId) ? cache.searchId : '';
+    return {
+      top,
+      query: clean(String(cache.query || ''), 512),
+      slotId: typeof cache.slotId === 'string' ? cache.slotId : null,
+      searchId,
+      // Whichever shelf the dispatch hook actually asked. A cache written before
+      // that field existed reads as 'public', which is what it was.
+      shelf: cache.shelf === 'team' ? 'team' : 'public',
+      base: {
+        session: sessionId,
+        // THE CHILD'S OWN ID, off this SubagentStart payload: the row records the
+        // subagent the finding was relayed TO, which is the transcript \`push grade\`
+        // then judges it against. \`session_id\` is the parent's on this event, and
+        // the parent's file never carries a word of what the child did.
+        agentId,
+        cwd,
+        eventUid,
+        trigger: 'subagent',
+        event: 'SubagentStart',
+        shelf: cache.shelf === 'team' ? 'team' : 'public',
+        searchId: searchId === '' ? undefined : searchId,
+        candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
+        strength: cache.strength,
+        // Carried through the handoff now, so the row the CHILD writes describes
+        // the same hit the parent's dispatch row described.
+        confidence: typeof cache.confidence === 'string' ? cache.confidence : null,
+        corroborated: typeof cache.corroborated === 'boolean' ? cache.corroborated : null,
+      },
+    };
   };
-  // The same gate pushDecide applies to its own verdict, applied to a cached
-  // one: a stale cache from an older build, or a dispatch hook that cached
-  // before this check existed, must not turn into an injection here.
-  if (cache.strength !== 'strong') {
-    recordDecision({ ...base, action: 'skipped', reason: 'weak' });
-    heartbeat('weak', { query, slotId });
+  // The LAST slot rejected, which is the one the terminal heartbeat is about.
+  // The fire's reason is whatever it ended on; naming the slot that produced it
+  // keeps the heartbeat joinable even when the fire delivered nothing.
+  let lastReject = null;
+  const { slot: cache, reason: emptyReason } = takeUsableSlot(sessionId, (value, reason) => {
+    const read = readSlot(value);
+    lastReject = read;
+    recordDecision({ ...read.base, action: 'skipped', reason });
+  });
+  if (cache === null) {
+    heartbeat(
+      emptyReason,
+      lastReject === null ? undefined : { query: lastReject.query, slotId: lastReject.slotId },
+    );
     return quiet();
   }
-  if (alreadyShown(sessionId, top.resourceId)) {
-    recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
-    heartbeat('already-injected', { query, slotId });
-    return quiet();
-  }
+
+  const { top, query, slotId, searchId, shelf, base } = readSlot(cache);
+
   // POINTER ONLY, whatever the strength (tenjin-agent#228). The full-body
   // upgrade this arm ran on a strong free hit had zero confirmed uses in the
   // 19 sampled injections, at up to 6k chars each, while the one verified win

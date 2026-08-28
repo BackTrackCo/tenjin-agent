@@ -1507,60 +1507,63 @@ main().catch((err) => process.stdout.write('threw: ' + err.message));
 });
 
 /**
+ * The peek an evictor uses, at the SQL level.
+ *
+ * `cacheSlot` may not drop the slot whose piece the parent was already told is
+ * queued for a child, so it has to see the row before deleting it. The peek is
+ * only safe while it names the SAME row the take would take: an ordering that
+ * drifted from `takeStateOldestByPrefix` would protect one slot and evict a
+ * different one, which is the announced-delivery loss with extra steps.
+ */
+describe('oldestStateByPrefix names the row the take would take', () => {
+  it('agrees with takeStateOldestByPrefix, row for row, and takes nothing', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    try {
+      const range = ['sess', 'dispatch_cache', 'dispatch_cache￿'];
+      const put = (key: string, at: number): void => {
+        store.run(STORE_SQL.setState, ['sess', key, JSON.stringify({ k: key }), at]);
+      };
+      // Out of insertion order, and with a same-millisecond pair, so `at` and
+      // the `key` tie-break are both exercised.
+      put('dispatch_cache:c', 300);
+      put('dispatch_cache:a', 100);
+      put('dispatch_cache:b2', 200);
+      put('dispatch_cache:b1', 200);
+
+      const drained: unknown[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const peeked = store.get(STORE_SQL.oldestStateByPrefix, range) as { key: string };
+        // The peek leaves the row where it is: asking twice answers the same.
+        expect((store.get(STORE_SQL.oldestStateByPrefix, range) as { key: string }).key).toBe(
+          peeked.key,
+        );
+        const taken = store.get(STORE_SQL.takeStateOldestByPrefix, ['sess', ...range]) as {
+          key: string;
+        };
+        expect(taken.key).toBe(peeked.key);
+        drained.push(taken.key);
+      }
+      expect(drained).toEqual([
+        'dispatch_cache:a',
+        'dispatch_cache:b1',
+        'dispatch_cache:b2',
+        'dispatch_cache:c',
+      ]);
+      expect(store.get(STORE_SQL.oldestStateByPrefix, range)).toBe(null);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+/**
  * The statement behind the subagent handoff, at the SQL level.
  *
  * The arm's behaviour is pinned in `push-scripts.test.ts`; this pins the
  * statement itself, because the delete IS the read and an ORDER BY or a range
  * bound lost in an edit would put that back to a race nothing else catches.
  */
-/**
- * The recovery half of the asked-claim, at the SQL level.
- *
- * `releaseClaim` falls back to stamping `released` when the store refuses the
- * delete, and this statement is what a later fire takes the row back with. It
- * has to arbitrate the same way `claimState` does, because two dispatches for
- * one question can both read the marker: an UPDATE whose `WHERE value = ?` no
- * longer matched would let both of them spend a lookup, and one whose match
- * were widened would let either of them steal a LIVE claim.
- */
-describe('retakeReleasedState arbitrates on the marker', () => {
-  it('takes a released row exactly once and never touches a live claim', async () => {
-    (await openStore(dataDir))?.close();
-    const handle = db();
-    const set = (session: string, key: string, value: unknown): void => {
-      handle.prepare(STORE_SQL.setState).run(session, key, JSON.stringify(value), 1);
-    };
-    const retake = (session: string, key: string): number =>
-      Number(
-        handle
-          .prepare(STORE_SQL.retakeReleasedState)
-          .run(JSON.stringify(true), Date.now(), session, key, JSON.stringify('released')).changes,
-      );
-    try {
-      set('s', 'asked:live', true);
-      set('s', 'asked:gone', 'released');
-      set('other', 'asked:gone', 'released');
-
-      // A live claim is not a released one, and an absent key is neither.
-      expect(retake('s', 'asked:live')).toBe(0);
-      expect(retake('s', 'asked:never-claimed')).toBe(0);
-
-      // The marker goes to exactly one caller; the second finds a claim.
-      expect(retake('s', 'asked:gone')).toBe(1);
-      expect(retake('s', 'asked:gone')).toBe(0);
-    } finally {
-      handle.close();
-    }
-    // Another session's marker is not this one's to take.
-    expect(
-      rows(`SELECT session, value FROM session_state WHERE key = 'asked:gone' ORDER BY session`),
-    ).toEqual([
-      { session: 'other', value: JSON.stringify('released') },
-      { session: 's', value: JSON.stringify(true) },
-    ]);
-  });
-});
-
 describe('takeStateOldestByPrefix', () => {
   const take = (store: { get: (sql: string, params: unknown[]) => unknown }): unknown =>
     store.get(STORE_SQL.takeStateOldestByPrefix, [
