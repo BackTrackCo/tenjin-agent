@@ -290,6 +290,54 @@ async function ledger(): Promise<LedgerRow[]> {
   }
 }
 
+interface EventRow {
+  [key: string]: unknown;
+  session: string;
+  hook: string;
+  tool: string | null;
+  error_hash: string | null;
+  files: string[];
+  data: Record<string, unknown>;
+}
+
+/** Every event row a run wrote, oldest first, with the JSON columns parsed. */
+async function events(): Promise<EventRow[]> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db.prepare('SELECT * FROM events ORDER BY id').all() as unknown as Record<string, unknown>[]
+    ).map(
+      (r) =>
+        ({
+          ...r,
+          files: typeof r.files === 'string' ? (JSON.parse(r.files) as string[]) : [],
+          data: typeof r.data === 'string' ? (JSON.parse(r.data) as Record<string, unknown>) : {},
+        }) as EventRow,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+/** Every pairing row, oldest first, `error_files` parsed. */
+async function pairings(): Promise<Array<Record<string, unknown> & { error_files: string[] }>> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db.prepare('SELECT * FROM pairings ORDER BY id').all() as unknown as Record<string, unknown>[]
+    ).map((r) => ({
+      ...r,
+      error_files: typeof r.error_files === 'string' ? (JSON.parse(r.error_files) as string[]) : [],
+    }));
+  } finally {
+    db.close();
+  }
+}
+
 /** The searches a run recorded, newest first, straight out of the store. */
 async function searches(): Promise<
   { searchId: string; source?: string; decision: string; sessionId?: string }[]
@@ -1429,25 +1477,37 @@ describe('the failure arm (PostToolUse Bash)', () => {
       },
     });
 
-  it('names the package the failure was about, then never asks twice', async () => {
-    const { baseUrl, hits, queries } = await serve(echo());
+  /**
+   * THE ERROR NEVER LEAVES THE MACHINE (tenjin-agent#212). This arm used to
+   * send the scrubbed error tail to `/api/search`; two machines' worth of rows
+   * said every hit was an unrelated note at `confidence: low`. Now a failure
+   * this machine has not paired writes its event row — signature, files, the
+   * scrubbed line — and exits, with no request and no injection row. The team
+   * shelf is asked by fingerprint in the following PR.
+   */
+  it('records the failure once, on the machine, and asks nothing', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
 
     const first = await runScript(pushFailureHookScript(dataDir), failure());
-    expect(injected(first)).toContain(BODY_MD);
-    expect(queries()[0]).toContain('left-pad');
-    const askedOnce = hits();
+    expect(first.code).toBe(0);
+    expect(first.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
 
     // The same command re-run is the same problem. Both PostToolUse and
     // PostToolUseFailure can fire for one failure, too.
     const second = await runScript(pushFailureHookScript(dataDir), failure());
     expect(second.stdout).toBe('');
-    expect(hits()).toBe(askedOnce);
-    expect(await ledger()).toHaveLength(1);
+    expect(hits()).toBe(0);
+    const rows = (await events()).filter((e) => e.hook === 'failure');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).toMatchObject({ event: 'PostToolUse', command: 'pnpm install left-pad' });
+    expect(String(rows[0]!.data.error)).toContain('left-pad');
   });
 
   it('reads the top-level error string of a PostToolUseFailure', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1459,13 +1519,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
         error: "Exit code 1\nTypeError: Cannot find module 'left-pad' from the vitest resolver",
       }),
     );
-    expect(queries()[0]).toContain('left-pad');
-    expect((await ledger())[0]).toMatchObject({
-      trigger: 'failure',
-      event: 'PostToolUseFailure',
-      action: 'injected',
-    });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(run.code).toBe(0);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.data).toMatchObject({ event: 'PostToolUseFailure' });
+    expect(String(row?.data.error)).toContain('left-pad');
   });
 
   /**
@@ -1475,7 +1533,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * harness it ships against.
    */
   it('reads a failure the runner printed to stdout with no exit code', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1493,8 +1551,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    expect(queries()[0] ?? '').toContain('left-pad');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('left-pad');
   });
 
   it('stays out of the way of a command that printed nothing wrong', async () => {
@@ -1516,16 +1575,46 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   /**
+   * A pass is the other half of the mechanical lane, and it now leaves a row of
+   * its own: "fail → edit → the same head passes" is the sequence the
+   * importance score reads, and a pass that closed nothing used to be
+   * invisible to it.
+   */
+  it('writes a pass row, with the head, when an allowlisted command succeeds', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'cd /x && pnpm test' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(hits()).toBe(0);
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ hook: 'pass', tool: 'Bash', error_hash: null });
+    expect(rows[0]!.data).toEqual({
+      event: 'PostToolUse',
+      command: 'cd /x && pnpm test',
+      head: 'pnpm',
+    });
+  });
+
+  /**
    * An auth failure is the failure this arm fires on most often, so the token in
    * it is the common case and not the edge. Nothing credential-shaped may reach
-   * the wire, and nothing credential-shaped may reach the ledger either: the
-   * ledger row carries the same string the request did.
+   * the store: the event row is read back into a later session's context by the
+   * status and score reports, and a pairing's error line is replayed verbatim.
    *
    * Behind `pnpm publish`, whose git preflight is where this wording comes from:
-   * a bare `git push` is no longer a head this arm fires behind at all.
+   * a bare `git push` is not a head this arm fires behind at all.
    */
-  it('strips the credential out of an auth failure before it leaves the machine', async () => {
-    const { baseUrl, queries } = await serve(echo());
+  it('strips the credential out of an auth failure before it is stored', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1539,12 +1628,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    const sent = queries()[0] ?? '';
-    expect(sent).toContain('Authentication');
-    expect(sent).not.toContain('ghp_');
-    expect(sent).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
-    const rows = await ledger();
-    expect(String(rows[0]!.query)).not.toContain('ghp_');
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('Authentication');
+    expect(stored).not.toContain('ghp_');
+    expect(stored).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
   });
 
   /**
@@ -1558,7 +1646,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * where the sidecar would actually meet this string.
    */
   it('strips a standard-base64 secret, slashes and all', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
     const run = await runScript(
@@ -1572,13 +1660,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    const sent = queries()[0] ?? '';
-    expect(sent).toContain('SignatureDoesNotMatch');
-    expect(sent).not.toContain(secret);
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('SignatureDoesNotMatch');
+    expect(stored).not.toContain(secret);
     // Not merely split on the slashes: no run of it survives either.
-    expect(sent).not.toContain('wJalrXUtnFEMI');
-    expect(sent).not.toContain('bPxRfiCYEXAMPLEKEY');
-    expect(String((await ledger())[0]!.query)).not.toContain('wJalrXUtnFEMI');
+    expect(stored).not.toContain('wJalrXUtnFEMI');
+    expect(stored).not.toContain('bPxRfiCYEXAMPLEKEY');
   });
 
   /**
@@ -1610,6 +1698,18 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(await ledger()).toEqual([]);
   }
 
+  /** Silent before the store is even opened: the head check ran and refused. */
+  async function expectNoStore(stdin: string): Promise<void> {
+    const run = await runScript(pushFailureHookScript(dataDir), stdin);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(existsSync(join(dataDir, STATE_DB_FILE))).toBe(false);
+  }
+
+  /** A traceback with a real frame, so the signature clears the floor. */
+  const TRACEBACK =
+    "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+
   /**
    * The fire that started this: `which codex` says "codex not found" on stderr,
    * which is the command working, and the old word-bag rule injected an
@@ -1627,8 +1727,96 @@ describe('the failure arm (PostToolUse Bash)', () => {
     await expectQuiet(bash('grep -r foo src', { stdout: '', stderr: '', exit_code: 1 }), hits);
   });
 
+  /**
+   * THE ALLOWLIST TABLE (tenjin-agent#212). Every pairing on record — 14 rows,
+   * two machines — had been opened by `git show … | grep ENOENT` or
+   * `sed -n` over source that MENTIONS an errno, because `git` was a head.
+   * `python3 -c` and `node -e` are the other shape: the agent evaluating an
+   * expression, whose traceback names `<string>` and whose fix is a different
+   * expression, never a repo file.
+   */
+  it('no longer fires behind git, however fatal the output', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await expectNoStore(
+      bash('git push origin main', { stdout: '', stderr: 'fatal: Authentication failed' }),
+    );
+    await expectNoStore(
+      bash('git show HEAD:src/a.ts | grep ENOENT', { stdout: TRACEBACK, stderr: '' }),
+    );
+  });
+
+  it('fires behind a runtime only when it runs a file', async () => {
+    await pushOn('http://127.0.0.1:1');
+    for (const command of [
+      'python3 -c "import x"',
+      'node -e "require(1)"',
+      'python3 -',
+      'node',
+      'python3 -m pytest',
+    ]) {
+      await expectNoStore(bash(command, { stdout: '', stderr: TRACEBACK }));
+    }
+    for (const command of ['python3 script.py', 'node dist/index.js']) {
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: `runtime-${command.length}`,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command },
+          tool_response: { stdout: '', stderr: TRACEBACK, interrupted: false },
+        }),
+      );
+    }
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(2);
+    expect((await pairings()).map((p) => p.cmd_head)).toEqual(['python3', 'node']);
+  });
+
+  it('never opens a pairing whose error named no file, or only <string>/<stdin>', async () => {
+    await pushOn('http://127.0.0.1:1');
+    const evaluated =
+      'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\nModuleNotFoundError: No module named \'httpx\'';
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 run.py', { stdout: '', stderr: evaluated }),
+    );
+    const piped =
+      'Traceback (most recent call last):\n  File "<stdin>", line 1, in <module>\nModuleNotFoundError: No module named \'requests\'';
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 other.py', { stdout: '', stderr: piped }),
+    );
+    // An errno with no frame: over the floor for a signature, but nothing a
+    // later edit could ever be matched against.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm db:migrate', { stdout: '', stderr: 'Error: ECONNREFUSED 127.0.0.1:5432' }),
+    );
+    const rows = (await events()).filter((e) => e.hook === 'failure');
+    expect(rows).toHaveLength(3);
+    // The rows still carry the signature: the failure happened, and the score
+    // and the team leg (following PR) both key on it.
+    for (const row of rows) expect(row.error_hash).toMatch(/^[0-9a-f]+$/);
+    expect(rows.map((r) => r.files)).toEqual([[], [], []]);
+    expect(await pairings()).toEqual([]);
+  });
+
+  it('stamps the pairing key on the failure row as error_hash', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm db:migrate', { stdout: '', stderr: TRACEBACK }),
+    );
+    const row = (await events()).find((e) => e.hook === 'failure');
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(row?.error_hash).toBe(opened[0]!.key);
+    expect(row?.files).toEqual(['migrate.ts']);
+    expect(opened[0]!.error_files).toEqual(['migrate.ts']);
+  });
+
   it('reaches the command behind a wrapper with options', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     for (const command of [
       'sudo -u builder pnpm test',
@@ -1654,9 +1842,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
         }),
       );
       expect(run.code).toBe(0);
-      expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
     }
-    expect(queries().length).toBe(6);
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(6);
+    expect(hits()).toBe(0);
   });
 
   it('does not let an argument authorize a command behind a wrapper either', async () => {
@@ -1685,6 +1873,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
     }
     expect(hits()).toBe(0);
     expect(await ledger()).toEqual([]);
+    expect(await events()).toEqual([]);
   });
 
   it('does not let an argument authorize an ordinary command', async () => {
@@ -1705,7 +1894,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   it('fires on a rustc diagnostic, which only rustc emits', async () => {
-    const { baseUrl } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1722,9 +1911,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.error_hash).toMatch(/^[0-9a-f]+$/);
+    expect((await pairings())[0]).toMatchObject({ cmd_head: 'rustc', error_files: ['main.rs'] });
   });
 
+  /** Not a head at all any more, so the exit code is never even read. */
   it('says nothing about `git diff --exit-code` reporting a difference', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
@@ -1772,12 +1965,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       'ok\n'.repeat(2000) +
       'Test Files  12 passed (12)\nTests  204 passed (204)\n';
     await expectQuiet(bash('pnpm vitest run', { stdout: noisy, stderr: '' }), hits);
+    expect((await events()).map((e) => e.hook)).toEqual(['pass']);
   });
 
   it('fires on a chained head, reading the failure from the second command', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('cd /x && pnpm test', {
         stdout:
@@ -1785,30 +1979,32 @@ describe('the failure arm (PostToolUse Bash)', () => {
         stderr: '',
       }),
     );
-    expect(queries()[0] ?? '').toContain('AssertionError');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('AssertionError');
+    expect(row?.data.command).toBe('cd /x && pnpm test');
   });
 
   it('fires on a tsc diagnostic run through `pnpm exec`', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('pnpm exec tsc --noEmit', {
         stdout: "src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'",
         stderr: '',
       }),
     );
-    expect(queries()[0] ?? '').toContain('TS2322');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('TS2322');
+    expect((await pairings())[0]).toMatchObject({ cmd_head: 'tsc', error_files: ['a.ts'] });
   });
 
-  it('fires on a python traceback and names the module it could not import', async () => {
-    const { baseUrl, queries } = await serve(echo());
+  it('fires on a python traceback and keys the pairing on the script', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('python3 script.py', {
         stdout: '',
@@ -1816,9 +2012,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
           'Traceback (most recent call last):\n  File "script.py", line 3, in <module>\n    import httpx\nModuleNotFoundError: No module named \'httpx\'',
       }),
     );
-    expect(queries()[0] ?? '').toContain('httpx');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('httpx');
+    expect((await pairings())[0]).toMatchObject({
+      cmd_head: 'python3',
+      error_files: ['script.py'],
+    });
   });
 });
 
@@ -1841,18 +2041,6 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     session_id: SESSION,
     hook_event_name: 'UserPromptSubmit',
     prompt: QUESTION,
-  });
-  const failureInput = JSON.stringify({
-    session_id: SESSION,
-    hook_event_name: 'PostToolUse',
-    tool_name: 'Bash',
-    tool_input: { command: 'pnpm install left-pad' },
-    tool_response: {
-      stdout: '',
-      stderr: "Error: Cannot find module 'left-pad' required by the vitest resolver",
-      exit_code: 1,
-      interrupted: false,
-    },
   });
 
   /** `count` spent lookups on `trigger`, `ageMs` old, from another session. */
@@ -1917,7 +2105,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
    * and failures are the arm worth spending on, so one flat pool meant the
    * cheap arm spent the expensive arm's allowance in the opening minutes.
    */
-  it('leaves the failure bucket untouched when a prompt flood exhausts its own', async () => {
+  it('leaves the research bucket untouched when a prompt flood exhausts its own', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
     // Well past the prompt cap, and not by one: a flood does not get to bleed
@@ -1927,10 +2115,12 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     const blocked = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(blocked.stdout).toBe('');
 
-    const allowed = await runScript(pushFailureHookScript(dataDir), failureInput);
-    expect(injected(allowed)).toContain(BODY_MD);
+    // The research arm is the other arm worth spending on now that the failure
+    // arm asks no shelf at all (it answers from local pairings; #212).
+    const allowed = await runScript(websearchHookScript(dataDir), webSearch(QUESTION));
+    expect(denied(allowed)).toContain(BODY_MD);
     const rows = await ledger();
-    expect(rows.at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(rows.at(-1)).toMatchObject({ trigger: 'research', action: 'injected' });
   });
 
   it('refills the bucket once the spend rolls out of the window', async () => {

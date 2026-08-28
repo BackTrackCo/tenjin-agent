@@ -944,9 +944,18 @@ export function pushPromptHookScript(dataDir: string): string {
 /**
  * The failure arm (T3): PostToolUse on a Bash command that exited non-zero, and
  * PostToolUseFailure on any Bash failure. Normalizes the error into a signature
- * (the first error-shaped line, scrubbed) plus the packages the command and the
- * error name, looks it up once per signature per session, and attaches a known
- * finding BESIDE the error. It never denies anything; the command already ran.
+ * (the first error-shaped line, scrubbed) and answers it from THIS MACHINE'S
+ * OWN RECORD: a pairing an earlier session closed replays beside the error, and
+ * an unknown failure opens a pairing for the next success to close. It never
+ * denies anything; the command already ran.
+ *
+ * NOTHING ABOUT THE ERROR LEAVES THE MACHINE (tenjin-agent#212). The fuzzy
+ * `/api/search` leg this arm used to run on the error tail is gone: two
+ * machines' worth of rows said every hit it produced was an unrelated note at
+ * `confidence: low`, and the tail it was sending is the one string in the
+ * sidecar most likely to carry a credential or a path. The team shelf is asked
+ * by FINGERPRINT (`POST /api/keys/resolve`, two hashes on the wire) in the
+ * following PR, at the point marked below.
  */
 const FAILURE_JS = String.raw`
 /**
@@ -1035,11 +1044,36 @@ const FAILURE_HEADS = new Set([
   'drizzle-kit', 'prisma', 'alembic', 'knex', 'sequelize', 'flyway', 'liquibase',
   // infrastructure
   'docker', 'docker-compose', 'terraform', 'pulumi',
-  // compilers and git, so every marker above is reachable behind a head that
-  // emits it: rustc's \`error[E…]\`, gcc/clang's \`error:\`, git's \`fatal:\`.
-  // \`git diff --exit-code\` stays quiet: it exits 1 with no marker at all.
-  'git', 'rustc', 'gcc', 'clang', 'cc', 'g++', 'clang++', 'zig',
+  // compilers, so every marker above is reachable behind a head that emits it:
+  // rustc's \`error[E…]\`, gcc/clang's \`error:\`.
+  //
+  // NOT GIT. It was here for \`fatal:\`, and what it actually fired on was
+  // \`git show … | grep ENOENT\` and \`git log -p | sed -n\`: source that
+  // MENTIONS an errno, read through a pipe, is indistinguishable from output
+  // that raises one, and every pairing on record (14 of 14, two machines,
+  // tenjin-agent#212) had been opened that way. A git failure that matters
+  // surfaces behind the head that ran it — \`pnpm publish\`'s preflight, a
+  // release script — and those are still here.
+  'rustc', 'gcc', 'clang', 'cc', 'g++', 'clang++', 'zig',
 ]);
+/**
+ * Runtimes that are only a build/test step when they RUN A FILE. \`node x.js\`
+ * and \`python3 script.py\` fail the way a test does; \`python3 -c "…"\`,
+ * \`node -e\`, \`node -\` and \`python3 < file\` are the agent evaluating an
+ * expression, whose traceback names \`<string>\` or \`<stdin>\` and whose
+ * "fix" is a different expression, not a change to the repo. A pairing keyed
+ * on one would replay a one-off at every later probe.
+ */
+const RUNTIME_HEADS = new Set(['node', 'deno', 'python', 'python3']);
+/** The first argument is a file: not a flag, not a bare \`-\`, and named with
+ *  an extension, which is how a script is spelled and a subcommand is not. */
+function runsAFile(sub) {
+  return sub.length > 0 && !sub.startsWith('-') && sub !== '<stdin>' && /\.[A-Za-z0-9]+$/.test(sub);
+}
+/** Traceback locations that are not files in the repo: an evaluated string or
+ *  a piped stdin. A pairing whose error names only these has nothing a tracked
+ *  edit could ever be matched against, so it is never opened. */
+const NOT_A_FILE = new Set(['<string>', '<stdin>']);
 /** Package managers whose SUBCOMMAND decides: \`pnpm build\` can fail a build,
  *  \`npm ls\` reports a fact and exits 1 to mean "no". */
 const PM_HEADS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
@@ -1148,6 +1182,7 @@ function allowedHeads(command) {
   for (const { head, sub } of commandHeads(command)) {
     if (!FAILURE_HEADS.has(head)) continue;
     if (PM_HEADS.has(head) && PM_QUIET_SUBS.has(sub)) continue;
+    if (RUNTIME_HEADS.has(head) && !runsAFile(sub)) continue;
     out.push(head);
   }
   return out;
@@ -1363,7 +1398,7 @@ function filesInError(text) {
     const base = m[1].split(/[/\\]/).pop();
     if (typeof base === 'string' && base.length > 0) found.add(base);
   }
-  return [...found].filter((f) => f.length <= 80).slice(0, 8);
+  return [...found].filter((f) => f.length <= 80 && !NOT_A_FILE.has(f)).slice(0, 8);
 }
 
 /**
@@ -1642,7 +1677,19 @@ async function main() {
   // same allowlisted head succeeding is what CLOSES a pairing this machine
   // opened earlier (04, "Close rule"). Nothing is emitted and no network is
   // touched — one indexed query and at most one UPDATE.
+  //
+  // AND ONE EVENT ROW, always. A pass used to leave no trace unless it closed
+  // something, so "fail → edit → same head passes" — the sequence the
+  // importance score (#212, CommonTrace \`detection.py\`) is built on — was
+  // unreadable from the store whenever the close rule did not fire.
   if (text.length === 0) {
+    recordEvent({
+      session: sessionId,
+      cwd,
+      hook: 'pass',
+      tool: 'Bash',
+      data: { event, command: safeCommand(command), head: heads.length > 0 ? heads[heads.length - 1] : null },
+    });
     closeOpenPairings(sessionId, cwd, command, heads);
     return quiet();
   }
@@ -1658,21 +1705,25 @@ async function main() {
 
   const packages = [...new Set([...packagesInCommand(command), ...packagesInError(text)])];
   const scrubbed = scrub(line);
+  const sig = sigV1(line, text);
+  const errorFiles = filesInError(text);
+  // The failure row carries the signature's fine key as \`error_hash\` (the
+  // column has existed since #219 and was never written) and the SCRUBBED
+  // error line: the same string the pairing stores, and the only place the
+  // error text is kept at all now that it no longer goes on the wire.
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
     hook: 'failure',
     tool: 'Bash',
-    data: { event, command: safeCommand(command) },
+    errorHash: sig === null ? undefined : sig.key,
+    files: errorFiles,
+    data: { event, command: safeCommand(command), error: clean(scrubbed, 300) },
   });
 
-  // THE MECHANICAL LANE, AND IT RUNS FIRST — before the query is built and
-  // before any shelf is asked (04, "Retrieval order": local fine key, then
-  // coarse, then the shelves). A pairing this machine closed itself is the
-  // cheapest and most specific answer there is, and paying ~15ms per shelf to
-  // maybe find something weaker is exactly the waste the local lane exists to
-  // avoid.
-  const sig = sigV1(line, text);
+  // THE MECHANICAL LANE (04, "Retrieval order": local fine key, then coarse,
+  // then — in the following PR — the team shelf by fingerprint). A pairing this
+  // machine closed itself is the cheapest and most specific answer there is.
   if (sig !== null) {
     const match = findPairing(cwd, sig.key, sig.coarseKey);
     if (match !== null && !alreadyShown(sessionId, 'pairing:' + match.id)) {
@@ -1715,40 +1766,36 @@ async function main() {
       return emit(event, body);
     }
     // Nothing local yet. Open a pairing so the NEXT success on this head can
-    // close it, then fall through to the shelves.
-    openPairing({
-      session: sessionId,
-      cwd,
-      key: sig.key,
-      coarseKey: sig.coarseKey,
-      // The LAST allowlisted head, which is the build/test step the failure
-      // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
-      cmdHead: heads.length > 0 ? heads[heads.length - 1] : null,
-      cmd: safeCommand(command),
-      errorLine: clean(scrubbed, 300),
-      errorFiles: filesInError(text),
-      pkgVersions: pkgVersions(cwd, packages),
-      scope: 'ambiguous',
-    });
+    // close it — but ONLY when the error named a file. The close rule matches
+    // a later edit against \`error_files\`, so a row with none (or with only
+    // \`<string>\`/\`<stdin>\`, filtered above) can be closed by nothing but
+    // the same-command branch, which is the branch that closes on whatever
+    // happened to change; every unreadable row on record was that shape.
+    if (errorFiles.length > 0) {
+      openPairing({
+        session: sessionId,
+        cwd,
+        key: sig.key,
+        coarseKey: sig.coarseKey,
+        // The LAST allowlisted head, which is the build/test step the failure
+        // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
+        cmdHead: heads.length > 0 ? heads[heads.length - 1] : null,
+        cmd: safeCommand(command),
+        errorLine: clean(scrubbed, 300),
+        errorFiles,
+        pkgVersions: pkgVersions(cwd, packages),
+        scope: 'ambiguous',
+      });
+    }
   }
 
-  const query = clean((packages.join(' ') + ' ' + scrubbed).trim(), 300);
-  if (tokens(query).size < 2) return quiet();
-
-  const decided = await pushDecide({
-    trigger: 'failure',
-    event,
-    query,
-    config,
-    sessionId,
-    cwd,
-    eventUid,
-    tool: 'Bash',
-    mode: 'inject',
-    source: 'push-hook',
-  });
-  if (decided === null) return quiet();
-  emit(event, decided.text);
+  // NO SHELF IS ASKED HERE. The following PR puts the team leg at this point:
+  // \`POST /api/keys/resolve\` with the two fingerprint keys (\`sig.key\`,
+  // the repo-salted coarse key), \`trigger: 'failure'\`, recorded against
+  // \`eventUid\` like any other lookup. Until then a failure this machine has
+  // not paired is silent, and leaves no injection row: the same quiet exit
+  // this arm has always taken when it decides there is nothing to look up.
+  return quiet();
 }
 
 main().catch(quiet);

@@ -852,7 +852,7 @@ export function hooksDisclosure(
   // and it is the entry that carries the deny. So it is one of the arms, not
   // something they run beside, and the count excludes it.
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, subagent dispatches, and the files you read and re-edit; a failed build or test is answered from this machine's own record of fixes and its error text is never sent anywhere. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same

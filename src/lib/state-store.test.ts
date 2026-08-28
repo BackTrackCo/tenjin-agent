@@ -1088,7 +1088,13 @@ describe('pairings: open, close, replay', () => {
     for (const [session, output] of cases) {
       await runScript(pushFailureHookScript(dataDir), failure('pnpm test', output, session));
     }
-    expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: cases.length });
+    // Every one clears the floor: the failure row carries its signature. Only
+    // the tsc case names a file, so only it OPENS a pairing (#212: a row whose
+    // error named nothing a later edit could match against is never opened).
+    expect(
+      rows("SELECT COUNT(*) AS n FROM events WHERE hook = 'failure' AND error_hash IS NOT NULL")[0],
+    ).toEqual({ n: cases.length });
+    expect(rows('SELECT error_files FROM pairings')).toEqual([{ error_files: '["a.ts"]' }]);
   });
 
   it('replays a closed pairing locally, before any shelf is asked', async () => {

@@ -275,7 +275,7 @@ const stopInput = JSON.stringify({
 
 describe('the sidecar, end to end over one session', () => {
   it('answers from the team shelf, then the public one, stays quiet, then asks to publish', async () => {
-    // Two deployments, two sockets. The team shelf answers the pgvector failure;
+    // Two deployments, two sockets. The team shelf answers the pgvector prompt;
     // the public marketplace answers the zod research question.
     const team = await serveShelf(/pgvector|collation/i, TEAM_RESOURCE_ID, TEAM_BODY, 'backtrack');
     const pub = await serveShelf(/zod|resolver/i, RESOURCE_ID, PIECE_BODY, 'vraspar');
@@ -286,27 +286,30 @@ describe('the sidecar, end to end over one session', () => {
       hooks: { push: 'on', capture: 'block' },
     });
 
-    // ---- (a) a Bash failure the team shelf already answers ------------------
-    const failure = await runScript(
-      pushFailureHookScript(dataDir),
+    // ---- (a) a prompt the team shelf already answers ------------------------
+    // The prompt arm rather than the failure arm: since #212 a failure asks no
+    // shelf by text at all (local pairings only, the team shelf by fingerprint
+    // in the following PR), so the "team first" order is proved on the arm
+    // that still searches. Step (e) below is the failure arm's own contract.
+    const teamPrompt = await runScript(
+      pushPromptHookScript(dataDir),
       JSON.stringify({
         session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm vitest run src/lib/db.test.ts' },
-        error: 'Exit code 1\nerror: pgvector testcontainer collation mismatch on image swap',
+        hook_event_name: 'UserPromptSubmit',
+        prompt:
+          'The pgvector testcontainer collation mismatch shows up on an image swap under vitest and I need to know what flips it',
       }),
     );
-    expect(failure.code).toBe(0);
-    expect(injected(failure)).toContain(TEAM_BODY);
-    expect(injected(failure)).toContain('your team shelf');
+    expect(teamPrompt.code).toBe(0);
+    expect(injected(teamPrompt)).toContain(TEAM_BODY);
+    expect(injected(teamPrompt)).toContain('your team shelf');
 
     const afterFailure = await ledger();
     expect(afterFailure).toHaveLength(1);
     expect(afterFailure[0]).toMatchObject({
       session: SESSION,
-      trigger: 'failure',
-      event: 'PostToolUseFailure',
+      trigger: 'prompt',
+      event: 'UserPromptSubmit',
       shelf: 'team',
       action: 'injected',
       candidate: { resourceId: TEAM_RESOURCE_ID },
@@ -377,6 +380,27 @@ describe('the sidecar, end to end over one session', () => {
       expect(row).toMatchObject({ session: SESSION, trigger: 'prompt', action: 'skipped' });
     }
 
+    // ---- (f) a Bash failure: silent, local, and never on the wire -----------
+    const teamHitsBefore = team.hits();
+    const pubHitsBefore = pub.hits();
+    const failure = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run src/lib/db.test.ts' },
+        error: 'Exit code 1\nerror: pgvector testcontainer collation mismatch on image swap',
+      }),
+    );
+    expect(failure.code).toBe(0);
+    expect(failure.stdout).toBe('');
+    // The error text this shelf would have matched never left the machine, and
+    // no decision row says otherwise: the arm wrote its event row and stopped.
+    expect(team.hits()).toBe(teamHitsBefore);
+    expect(pub.hits()).toBe(pubHitsBefore);
+    expect(await ledger()).toHaveLength(5);
+
     // ---- (d) the capture ask, once, in the team shelf's words ---------------
     const stop = await runScript(stopHookScript(dataDir), stopInput);
     expect(stop.code).toBe(0);
@@ -397,10 +421,11 @@ describe('the sidecar, end to end over one session', () => {
     expect(tallies.rows).toBe(5);
     expect(tallies.byShelf).toEqual({ team: 3, public: 2 });
     expect(tallies.byTriggerAction).toMatchObject({
-      failure: { injected: 1 },
       research: { injected: 1, skipped: 1 },
-      prompt: { skipped: 2 },
+      prompt: { injected: 1, skipped: 2 },
     });
+    // The failure arm wrote no decision row at all: it asked nothing.
+    expect(tallies.byTriggerAction).not.toHaveProperty('failure');
     expect(tallies.denies).toBe(1);
     // Two distinct findings across the two shelves.
     expect(tallies.candidates).toBe(2);
