@@ -226,7 +226,7 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 
 On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
 
-**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and looks for a `published:<hash>` record in the state store (`~/.tenjin/state.db`). On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The record is written after a successful publish and is never aged out. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: nothing promotes a draft, so publishing the same body again is how a draft ever reaches a public piece. It is a same-machine guard, not a guarantee across machines.
+**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and looks for a `published:<hash>` record in the state store (`~/.tenjin/state.db`). On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The record is never aged out. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: a draft parks privately, writes no record, and is never deduped against one. The record is written when the body actually goes public, whether by a non-draft `publish` or by promoting the draft with `tenjin edit <post-id> --status published`. It is a same-machine guard, not a guarantee across machines.
 
 The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
@@ -236,13 +236,41 @@ With no change flag, prints one of your posts and its card. With change flags, m
 
 It accepts the card flags from `publish`, plus:
 
-| Flag                    | Effect                                 |
-| ----------------------- | -------------------------------------- |
-| `--title <text>`        | New post title.                        |
-| `--body <path>`         | Replace the body from a Markdown file. |
-| `--add-question <text>` | Append one question. Repeatable.       |
-| `--add-task <text>`     | Append one task. Repeatable.           |
-| `--clear <field>`       | Empty one card field. Repeatable.      |
+| Flag                    | Effect                                               |
+| ----------------------- | ---------------------------------------------------- |
+| `--title <text>`        | New post title.                                      |
+| `--body <path>`         | Replace the body from a Markdown file.               |
+| `--status <status>`     | `draft` to unpublish, `published` to put a draft up. |
+| `--add-question <text>` | Append one question. Repeatable.                     |
+| `--add-task <text>`     | Append one task. Repeatable.                         |
+| `--clear <field>`       | Empty one card field. Repeatable.                    |
+
+`--status draft` is the reversible way to take a piece off the marketplace: the id
+and the body survive, and `--status published` puts it back. It is an ordinary
+change flag, so it diffs like the rest (setting the status a post already has
+writes nothing) and it runs the same `publish.mode` consent gate. A promotion to
+`published` is the draft actually going public, so it settles what the draft
+publish deferred: the stored body is re-scanned at the block tier (a draft made
+on the web desk was never scanned locally), any searches named by the
+`publish --draft --search-id` that created the draft are claimed on the same PUT
+and their local loops closed, and the same-body dedup marker is written.
+
+That re-scan can refuse the promotion with `PUBLISH_BLOCKED`, which `--yes` never
+clears. On the `--json` envelope, each claimed search reports under
+`data.searches` as `{id, closed, relinked?}`, the same entry shape `publish`
+uses minus `prefill`; the field is absent when the promotion claimed nothing.
+
+### `tenjin delete <post-id>`
+
+Removes one of your own pieces (soft-delete, owner-scoped `DELETE /api/posts/<id>`). It reads the post first, prints the title, status, price and url, and then **confirms on every run in every `publish.mode`**: the mode is consent to publish and never consent to destroy, so `full-auto` asks here exactly as `review` does.
+
+At a terminal it asks `y/N` inline. Anywhere else, including under an agent, a pipe, or the MCP server, it refuses with `NEEDS_CONFIRMATION` (exit 3) whose `details` carry the post identity, `confirmCommand`, and `reversibleAlternative`; re-run with `--yes` to confirm. A declined prompt is `REFUSED` (exit 3), and a server refusal after the confirmation is `DELETE_FAILED` (exit 4), which means the piece is still live.
+
+| Flag    | Effect                                                                 |
+| ------- | ---------------------------------------------------------------------- |
+| `--yes` | Confirm the removal without the prompt. Required when there is no TTY. |
+
+Prefer `tenjin edit <post-id> --status draft` when the piece should come down but not be lost. Every successful `publish` prints both commands with the real id, and carries them on the `--json` envelope as `data.undo` (`remove`, plus `unpublish` on a published piece). `data.undo.remove` carries no `--yes`, deliberately: it is the command that STARTS the undo, so each surface's own confirmation still runs. The `--yes` form appears only in a refusal payload's `confirmCommand`, which answers a question the user has already been shown.
 
 ### `tenjin profile`
 
@@ -394,6 +422,8 @@ tenjin config set shelfBypassSecret <secret>
 `config get shelfBypassSecret` and `config` print `set` or `unset`, never the value, in both the human lines and `--json`. The value itself is in `~/.tenjin/config.json`.
 
 **Both settings are required.** Team mode is "a secret **and** a `baseUrl` that is a shelf of the team's own", not a non-empty secret. The two commands above are independent, so a machine can end up with the secret while `baseUrl` is still the marketplace — running them in the other order, or the secret line alone on a second machine. That state stays in **public mode**, with the scan's warn tier and the full confirm cascade on, rather than treating tenjin.blog as a private shelf. `config set` says so when it happens, and `tenjin doctor` carries a `team shelf` check.
+
+The mirror half is `baseUrl` on a shelf of your own with no secret. Doctor warns there too, from the settings alone, before the network says anything. And when a protected deployment answers the probes with its protection page, `api-contract`, `search-contract` and `read-path` say so and point at `shelfBypassSecret` rather than at the base URL, which was the setting that was already right. The signal comes from the response itself: an HTML content-type, a 401 or 403, or a landing on a host other than the one asked for. A 401 or 403 in the API's own JSON envelope is not called a protection page, since that is an honest refusal rather than a wall, but on a shelf of your own it still points at the key, because a missing or stale secret is the likeliest thing being refused. The remedy follows what the probe did. With no secret configured the fix is to set one; when the key WAS sent and still did not get past (a stale or rotated key, or a proxy, WAF or another sign-in layer answering instead) the fix is to update it, never to set the secret this machine already has. A blocked redirect names the key only when its `Location` leaves the host asked for, since a same-host 3xx is what an `http://` base URL or a non-canonical host name gets with a perfectly good key; that one says the URL redirects and to point `baseUrl` at the host it lands on. Naming the key at all needs a key this machine could actually use: the marketplace takes none, and a `--base-url` or `TENJIN_BASE_URL` override pointing anywhere but the configured shelf carries none, so a page arriving from either is reported as a proxy or a sign-in wall with no credential prescribed.
 
 ### What changes in team mode
 

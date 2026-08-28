@@ -285,14 +285,16 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
     command: 'tenjin edit',
     note:
       'Updates posts your wallet ALREADY OWNS: reprices, refreshes an as-of date, repairs an ' +
-      'answer card. Owner-scoped on both legs (GET and PUT /api/posts/<id> are signed and ' +
-      'owner-only), spends nothing, moves no keys, and creates no new public content: a ' +
-      'narrower blast radius than the publish rule beside it. It rides the same mode for the ' +
-      'same reason: edit runs the identical publish.mode consent gate in the CLI ' +
-      '(lib/consent.ts needsConfirmation), so a mode that publishes unattended and then ' +
-      'cannot fix its own post\u2019s price is the asymmetry the mode exists to remove. It ' +
-      'opens the keystore on the same terms as the publish rule beside it, and takes the ' +
-      'same prefix-rule caveats. Removed by the same return to review.',
+      'answer card, and flips status both ways, so it CAN PROMOTE A DRAFT TO PUBLISHED under ' +
+      'this same gate (promotion re-runs the block-tier secret scan over the stored body). ' +
+      'Owner-scoped on both legs (GET and PUT /api/posts/<id> are signed and owner-only), ' +
+      'spends nothing, moves no keys, and mints no new posts: a narrower blast radius than ' +
+      'the publish rule beside it, though promotion means existing drafts can go public. It ' +
+      'rides the same mode for the same reason: edit runs the identical publish.mode consent ' +
+      'gate in the CLI (lib/consent.ts needsConfirmation), so a mode that publishes ' +
+      'unattended and then cannot fix its own post\u2019s price is the asymmetry the mode ' +
+      'exists to remove. It opens the keystore on the same terms as the publish rule beside ' +
+      'it, and takes the same prefix-rule caveats. Removed by the same return to review.',
   },
 ];
 
@@ -336,6 +338,16 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
       'Never pre-cleared as a recommendation: like `tenjin publish`, the only thing that ' +
       'clears it is `publish.mode` auto or full-auto, whose consent gate it already shares ' +
       '(see PUBLISH_MODE_ALLOWLIST). Back on review, `install` takes the rule away again.',
+  },
+  {
+    command: 'tenjin delete',
+    reason:
+      'Destroys a published piece. It is the one write verb `publish.mode` deliberately does NOT ' +
+      'carry: the mode is consent to publish, and reading it as consent to destroy would let one ' +
+      'decision authorize a different, irreversible one. So no mode ever clears this rule, and ' +
+      'the CLI confirms on every run regardless — a prefix rule here would only remove the ' +
+      'harness prompt in front of a command that asks its own question anyway. Reach for ' +
+      '`tenjin edit --status draft` when the piece should come down reversibly.',
   },
   {
     command: 'tenjin wallet create',
@@ -418,9 +430,10 @@ export const MCP_CAVEAT: readonly string[] = [
   'the same authority with none of the same gate. Aligning the two is tracked separately.',
   'Running the local MCP server (`tenjin mcp`) instead? That is a different permission',
   'surface: the harness gates TOOLS there, and these Bash rules do not apply. Leave',
-  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and',
-  '`mcp__tenjin__tenjin_wallet` gated. `tenjin_buy` is the same opt-in decision as the',
-  'buy line above.',
+  '`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`,',
+  '`mcp__tenjin__tenjin_delete`, and `mcp__tenjin__tenjin_wallet` gated. `tenjin_buy` is',
+  'the same opt-in decision as the buy line above. `tenjin_delete` is the one whose own',
+  'core still confirms even if you clear it: it never reads publish.mode.',
 ];
 
 /** The machine shape emitted by `tenjin doctor --json` and `tenjin install --json`. */

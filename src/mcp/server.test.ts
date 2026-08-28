@@ -86,13 +86,14 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string; detail
 type SuccessEnvelope = { ok: true; command: string; data: Record<string, unknown> };
 
 describe('buildTenjinMcpServer, tool surface', () => {
-  it('exposes exactly the eight Tenjin tools', async () => {
+  it('exposes exactly the nine Tenjin tools', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'tenjin_buy',
+        'tenjin_delete',
         'tenjin_edit',
         'tenjin_fund',
         'tenjin_inspect',
@@ -102,6 +103,17 @@ describe('buildTenjinMcpServer, tool surface', () => {
         'tenjin_wallet',
       ].sort(),
     );
+  });
+
+  // The one tool that destroys. A client reads `destructiveHint` to decide how
+  // hard to gate a call, and this is the only tool here that earns it.
+  it('marks tenjin_delete destructive, and nothing else', async () => {
+    const client = await connect({ dataDir: dir });
+    const { tools } = await client.listTools();
+    const destructive = tools
+      .filter((t) => t.annotations?.destructiveHint === true)
+      .map((t) => t.name);
+    expect(destructive).toEqual(['tenjin_delete']);
   });
 
   // The hosted server at tenjin.blog/api/mcp identifies as `tenjin`; this one
@@ -515,6 +527,29 @@ describe('tenjin_edit', () => {
     expect(server.puts()).toEqual([{ title: 'A Better Answer' }]);
   });
 
+  // The reversible retraction over MCP (#221). It is an ordinary edit here, so it
+  // takes the ordinary consent: review stops, yes:true completes.
+  it('forwards status to the wire, under the same consent as any other change', async () => {
+    const stopped = editServer();
+    const held = await (
+      await editClient(stopped.fetch)
+    ).callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, status: 'draft', mode: 'review' },
+    });
+    expect((held.structuredContent as ErrorEnvelope).error.code).toBe('NEEDS_CONFIRMATION');
+    expect(stopped.puts()).toHaveLength(0);
+
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, status: 'draft', mode: 'review', yes: true },
+    });
+    expect(res.isError).toBeFalsy();
+    expect(server.puts()).toEqual([{ status: 'draft' }]);
+  });
+
   it('forwards a question to questionsAnswered, not to some neighbouring field', async () => {
     // The 19-field mapping is hand-written on both sides; a swapped pair would
     // otherwise sail through, so follow one value all the way to the wire.
@@ -601,6 +636,84 @@ describe('tenjin_edit', () => {
     expect(res.isError).toBe(true);
     expect((res.structuredContent as ErrorEnvelope).error.code).toBe('PUBLISH_BLOCKED');
     expect(server.puts()).toHaveLength(0);
+  });
+});
+
+describe('tenjin_delete', () => {
+  const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const STORED = {
+    id: POST_ID,
+    slug: 'the-answer',
+    title: 'The Answer',
+    status: 'published',
+    price: '100000',
+    url: `${BASE}/a/iris/the-answer`,
+    tags: [],
+  };
+
+  function deleteServer(): { fetch: typeof fetch; methods: () => string[] } {
+    const methods: string[] = [];
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      methods.push(method);
+      if (method === 'DELETE') return new Response(null, { status: 204 });
+      return new Response(JSON.stringify(STORED), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, methods: () => methods };
+  }
+
+  async function deleteClient(fetchImpl: typeof fetch, mode: string): Promise<Client> {
+    return connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: {
+        delete: {
+          fetchImpl,
+          provider: testWalletProvider(),
+          // Deliberately the loosest mode: it must buy nothing here.
+          env: { TENJIN_PUBLISH_MODE: mode },
+        },
+      },
+    });
+  }
+
+  // The MCP surface is where #221's consent design has to hold hardest: this
+  // context is non-interactive, so without the exit-3 channel there would be no
+  // way to ask at all, and publish.mode would be the only gate — which is exactly
+  // the conflation the design refuses.
+  it.each(['review', 'auto', 'full-auto'])(
+    'without yes it returns NEEDS_CONFIRMATION under publish.mode %s and deletes nothing',
+    async (mode) => {
+      const server = deleteServer();
+      const client = await deleteClient(server.fetch, mode);
+      const res = await client.callTool({ name: 'tenjin_delete', arguments: { postId: POST_ID } });
+
+      expect(res.isError).toBe(true);
+      const sc = res.structuredContent as ErrorEnvelope;
+      expect(sc.error.code).toBe('NEEDS_CONFIRMATION');
+      const details = sc.error.details as { title: string; confirmCommand: string };
+      expect(details.title).toBe('The Answer');
+      expect(details.confirmCommand).toBe(`tenjin delete ${POST_ID} --yes`);
+      expect(server.methods()).toEqual(['GET']);
+    },
+  );
+
+  it('re-calling with yes:true completes the removal', async () => {
+    const server = deleteServer();
+    const client = await deleteClient(server.fetch, 'review');
+    const res = await client.callTool({
+      name: 'tenjin_delete',
+      arguments: { postId: POST_ID, yes: true },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as SuccessEnvelope;
+    expect(sc.command).toBe('delete');
+    expect(sc.data).toMatchObject({ deleted: true, postId: POST_ID });
+    expect(server.methods()).toEqual(['GET', 'DELETE']);
   });
 });
 

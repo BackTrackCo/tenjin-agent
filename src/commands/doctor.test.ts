@@ -90,9 +90,9 @@ function captureIo(isTTY = false): { io: Io; stderr: () => string } {
   return { io, stderr: () => err.join('') };
 }
 
-function ctxFor(): CommandContext {
+function ctxFor(baseUrl?: string): CommandContext {
   return {
-    flags: { json: false, timeout: 5000, baseUrl: undefined },
+    flags: { json: false, timeout: 5000, baseUrl },
     dataDir: dir,
     io: captureIo().io,
   };
@@ -105,8 +105,15 @@ function routeFetch(routes: Record<string, unknown>): typeof fetch {
     for (const [needle, value] of Object.entries(routes)) {
       if (!url.includes(needle)) continue;
       if (value instanceof Error) throw value;
-      const { body, status = 200 } = value as { body: unknown; status?: number };
-      return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+      const {
+        body,
+        status = 200,
+        headers,
+      } = value as { body: unknown; status?: number; headers?: Record<string, string> };
+      return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+        status,
+        ...(headers !== undefined ? { headers } : {}),
+      });
     }
     throw new Error(`unexpected fetch: ${url}`);
   }) as typeof fetch;
@@ -555,6 +562,9 @@ describe('runDoctor — passing outcomes', () => {
       // Never fails the command: public mode is a working machine.
       expect(halfCheck?.required).toBe(false);
       expect(halfCheck?.detail).toContain('PUBLIC mode');
+      // The secret IS configured on this run, so this can actually fail: no
+      // check output anywhere in the payload may carry its value.
+      expect(JSON.stringify(half.data)).not.toContain(SECRET);
 
       await writeFile(
         join(dir, 'config.json'),
@@ -568,9 +578,10 @@ describe('runDoctor — passing outcomes', () => {
         fetchImpl: healthyFetch,
       });
       expect(checkNamed(done, 'team shelf')?.status).toBe('ok');
+      expect(JSON.stringify(done.data)).not.toContain(SECRET);
     });
 
-    it('says nothing about a team shelf on a machine with no secret', async () => {
+    it('emits no team shelf check on a default machine (marketplace baseUrl, no secret)', async () => {
       const plain = await runDoctor(ctxFor(), {
         walletPassphrase: NO_OS_STORE,
         homeDir: skillHome,
@@ -623,12 +634,63 @@ describe('runDoctor — passing outcomes', () => {
       // Not the half-wired warning: the config is fine, this run is not.
       expect(check?.detail).not.toContain('PUBLIC mode');
     });
+
+    /**
+     * The mirror half of the wrong state (#218): baseUrl on a shelf of your own
+     * and no secret. It is the half that breaks every probe, and it used to emit
+     * no check at all, so the operator was left with a CONTRACT_MISMATCH telling
+     * them to change the one setting that was right.
+     */
+    describe('the half-wired shelf with no secret', () => {
+      async function withConfig(
+        config: Record<string, unknown>,
+        flags: { baseUrl?: string } = {},
+        env: NodeJS.ProcessEnv = {},
+      ): Promise<CheckResult | undefined> {
+        await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+        const res = await runDoctor(
+          { flags: { json: false, timeout: 5000, ...flags }, dataDir: dir, io: captureIo().io },
+          {
+            walletPassphrase: NO_OS_STORE,
+            homeDir: skillHome,
+            skillsSourceDir: pkgSrc,
+            env,
+            fetchImpl: healthyFetch,
+          },
+        );
+        return checkNamed(res, 'team shelf');
+      }
+
+      it('warns when the configured baseUrl is a shelf of your own', async () => {
+        const check = await withConfig({ baseUrl: TEAM });
+        expect(check?.status).toBe('warn');
+        // Never fails the command: an unauthenticated machine still works
+        // against an unprotected shelf.
+        expect(check?.required).toBe(false);
+        expect(check?.detail).toContain('unauthenticated');
+        // No secret is configured on this run, so asserting its absence would
+        // be vacuous; the runs that configure SECRET carry that assertion.
+        expect(check?.fix).toContain('shelfBypassSecret');
+      });
+
+      it('says nothing on a default machine, where baseUrl is the marketplace', async () => {
+        expect(await withConfig({})).toBeUndefined();
+        expect(await withConfig({ baseUrl: 'https://tenjin.blog' })).toBeUndefined();
+      });
+
+      it('says nothing when the shelf URL came from a flag or the environment', async () => {
+        // This run's override, not the machine's setup. Asking for a credential
+        // for an origin the flag chose is how the team key leaves the team.
+        expect(await withConfig({}, { baseUrl: TEAM })).toBeUndefined();
+        expect(await withConfig({}, {}, { TENJIN_BASE_URL: TEAM })).toBeUndefined();
+      });
+    });
   });
 });
 
 describe('runDoctor — required failures throw the mapped CliError', () => {
-  async function catchDoctor(fetchImpl: typeof fetch): Promise<CliError> {
-    const err = await runDoctor(ctxFor(), {
+  async function catchDoctor(fetchImpl: typeof fetch, baseUrlFlag?: string): Promise<CliError> {
+    const err = await runDoctor(ctxFor(baseUrlFlag), {
       walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
       skillsSourceDir: pkgSrc,
@@ -658,6 +720,280 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('CONTRACT_MISMATCH');
+  });
+
+  /**
+   * Same code, different cause. An access-protection page is a 200 that is not
+   * JSON, so it lands on the identical branch as a broken API — and the fix line
+   * that branch carried sent the operator to change `baseUrl`, which was correct
+   * (#218). The transport's `gateSuspected` is what separates them.
+   */
+  const GATE_PAGE = routeFetch({
+    '/openapi.json': {
+      body: '<html><body>Authentication Required</body></html>',
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    },
+    '/api/articles': { body: ARTICLES_OK },
+  });
+
+  it('an HTML 200 at a configured shelf points at the bypass key, not at baseUrl', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
+    );
+    const err = await catchDoctor(GATE_PAGE);
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.detail).toContain('HTML page');
+    expect(check.fix).toContain('shelfBypassSecret');
+    expect(check.fix).not.toContain('config set baseUrl');
+  });
+
+  /**
+   * The page is a fact about the response; whether the team key repairs it is a
+   * fact about the config. On the marketplace the key is inert, and on a flag or
+   * env origin it belongs to this run, so neither may be told to write one.
+   */
+  it('an HTML 200 from the marketplace or an override names no credential', async () => {
+    for (const setup of [
+      async (): Promise<CommandContext> => {
+        await writeFile(join(dir, 'config.json'), JSON.stringify({}));
+        return ctxFor();
+      },
+      async (): Promise<CommandContext> => {
+        await writeFile(join(dir, 'config.json'), JSON.stringify({}));
+        return {
+          flags: { json: false, timeout: 5000, baseUrl: 'https://attacker.example' },
+          dataDir: dir,
+          io: captureIo().io,
+        };
+      },
+    ]) {
+      const ctx = await setup();
+      const err = (await runDoctor(ctx, {
+        walletPassphrase: NO_OS_STORE,
+        homeDir: skillHome,
+        skillsSourceDir: pkgSrc,
+        env: {},
+        fetchImpl: GATE_PAGE,
+      }).catch((e: unknown) => e)) as CliError;
+      const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+      // Still names what actually came back: that part is true either way.
+      expect(check.detail).toContain('HTML page');
+      expect(check.fix).not.toContain('shelfBypassSecret');
+      expect(check.fix).toContain('page instead of the API');
+    }
+  });
+
+  /**
+   * The machine that already HAS a secret must not be told to set one: the
+   * probe sent the key and the gate still answered, so the key is stale or
+   * rotated, and "set it" reads as "your config is fine as is". Covers all
+   * three shapes a gate answers a keyed probe with (200 HTML here, 401 and the
+   * 307 interstitial below).
+   */
+  it('a stale key that did not get past the gate says rotate, not set', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(GATE_PAGE);
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    const checks = (err.details as { checks: CheckResult[] }).checks;
+    const check = find(checks, 'api-contract');
+    expect(check.fix).toContain('stale or rotated');
+    expect(check.fix).toContain('shelfBypassSecret');
+    expect(check.fix).not.toContain('set the team shelf key');
+    // search-contract hits the same page; its fix must not hand out a second
+    // verdict ("check the base URL") beside api-contract's in --json.
+    expect(find(checks, 'search-contract').fix).toContain('stale or rotated');
+    // A secret is configured on this run, so this assertion can actually fail.
+    expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
+  /**
+   * Same rejected key, named through --base-url instead of read from the file.
+   * resolveShelfBypass keys on the configured and effective origins matching,
+   * not on baseUrl.source, so the key IS sent here; advice that read source
+   * alone told this operator to check the base URL while their key was the
+   * thing being refused.
+   */
+  it('a repeated shelf origin via --base-url still says rotate, not check the URL', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    const SHELF = 'https://backtrack.tenjin.sh';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: SHELF, shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(GATE_PAGE, SHELF);
+    expect(err.code).toBe('CONTRACT_MISMATCH');
+    const checks = (err.details as { checks: CheckResult[] }).checks;
+    const check = find(checks, 'api-contract');
+    expect(check.fix).toContain('stale or rotated');
+    expect(JSON.stringify(checks)).not.toContain(SECRET);
+  });
+
+  it('a 401 HTML page at a configured shelf with no secret says set the key', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
+    );
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': {
+          body: '<html><body>Authentication Required</body></html>',
+          status: 401,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    expect(err.code).toBe('API_UNREACHABLE');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.detail).toContain('401');
+    expect(check.detail).toContain('HTML page');
+    expect(check.fix).toContain('shelfBypassSecret');
+    expect(check.fix).not.toContain('config set baseUrl');
+  });
+
+  it('a redirect blocked while carrying the key gets the rotate fix, not baseUrl', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
+    );
+    // The keyed probe pins redirect: 'manual', so the gate's 307 interstitial
+    // (a rotated bypass token's answer) surfaces as blocked-redirect.
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': {
+          body: '',
+          status: 307,
+          headers: { location: 'https://vercel.com/sso-api?url=shelf' },
+        },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    expect(err.code).toBe('API_UNREACHABLE');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('stale or rotated');
+    expect(check.fix).not.toContain('config get baseUrl');
+    expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
+  /**
+   * A same-origin JSON 401 is NOT reclassified as a gate: an API refusing in its
+   * own envelope is an honest refusal, and http.test pins `gateSuspected` false
+   * on it. What changes is only the REMEDY. On a shelf of the team's own the
+   * missing or stale door key is the likeliest thing being refused, and the
+   * network-and-baseUrl line sent the operator to the setting that was right.
+   */
+  const JSON_401 = routeFetch({
+    '/openapi.json': {
+      body: { error: { code: 'unauthorized' } },
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    },
+    '/api/articles': { body: ARTICLES_OK },
+  });
+
+  it('a JSON 401 from a configured shelf names the key without claiming a gate page', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
+    );
+    const err = await catchDoctor(JSON_401);
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('shelfBypassSecret');
+    // The classification is untouched: nothing claims a page answered.
+    expect(check.detail).not.toContain('HTML page');
+    expect(check.detail).toContain('401');
+  });
+
+  it('a JSON 401 with the key already sent says rotate, not set', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(JSON_401);
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('stale or rotated');
+    expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
+  it('a JSON 401 from the marketplace keeps the ordinary advice and names no key', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({}));
+    const err = await catchDoctor(JSON_401);
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).not.toContain('shelfBypassSecret');
+    expect(check.fix).toContain('config get baseUrl');
+  });
+
+  /**
+   * The same block, from a redirect that never leaves the host asked for: an
+   * `http://` baseUrl that 301s to https, a host normalising its name. The
+   * transport refuses to follow any 3xx while carrying the key, so the status
+   * alone is not evidence about the key, and "stale or rotated" here would blame
+   * the one setting that was right (#218 inverted). `baseUrl` is what moves.
+   */
+  it('a same-host redirect blocked while carrying the key points at baseUrl, not at the key', async () => {
+    const SECRET = 'shelf-secret-abc123';
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
+    );
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': {
+          body: '',
+          status: 301,
+          headers: { location: 'https://backtrack.tenjin.sh/v2/openapi.json' },
+        },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    expect(err.code).toBe('API_UNREACHABLE');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.fix).toContain('canonical host');
+    expect(check.fix).not.toContain('stale or rotated');
+    expect(check.fix).not.toContain('shelfBypassSecret');
+    expect(JSON.stringify(err.details)).not.toContain(SECRET);
+  });
+
+  it('a gated read path points at the key too, not only api-contract', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
+    );
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': { body: OPENAPI_OK },
+        '/api/articles': {
+          body: '<html><body>Authentication Required</body></html>',
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        },
+      }),
+    );
+    expect(err.code).toBe('API_UNREACHABLE');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'read-path');
+    expect(check.status).toBe('fail');
+    expect(check.fix).toContain('shelfBypassSecret');
+    expect(check.fix).not.toContain('config get baseUrl');
+  });
+
+  it('a plain garbage 200 still points at baseUrl, with no gate claimed', async () => {
+    const err = await catchDoctor(
+      routeFetch({
+        '/openapi.json': { body: 'garbage{', headers: { 'content-type': 'application/json' } },
+        '/api/articles': { body: ARTICLES_OK },
+      }),
+    );
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    expect(check.detail).toContain('was not valid JSON');
+    expect(check.fix).toContain('config set baseUrl');
+    expect(check.fix).not.toContain('shelfBypassSecret');
   });
 
   it('a missing info.version at openapi is CONTRACT_MISMATCH', async () => {

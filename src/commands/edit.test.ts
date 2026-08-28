@@ -3,6 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
+import { runPublish } from './publish';
+import { publishedUrlFor } from '../lib/publish-dedup';
+import { loadSearches, markSearchResolved, recordSearch } from '../lib/search-store';
 import { testSigner } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
@@ -1753,5 +1756,295 @@ describe('runEdit — server ingest gate', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.data as { scan?: unknown }).scan).toBeUndefined();
+  });
+});
+
+/**
+ * The reversible half of taking a piece back (#221). The point of the block is
+ * that `--status` is an ORDINARY change flag: it diffs, it prunes, and it takes
+ * the same publish.mode consent as a title change — unlike `tenjin delete`, which
+ * confirms in every mode because destroying is not what the mode consented to.
+ */
+describe('runEdit — --status', () => {
+  it('sends the status and nothing else, in both directions', async () => {
+    const down = await edit({ status: 'draft' });
+    expect(down.stub.putBody()).toEqual({ status: 'draft' });
+
+    const up = await edit({ status: 'published' }, { get: { ...STORED, status: 'draft' } });
+    expect(up.stub.putBody()).toEqual({ status: 'published' });
+  });
+
+  it('leads the before/after summary', async () => {
+    const stub = stubServer();
+    const err = (await runEdit(
+      args({ status: 'draft', title: 'A Better Answer' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider, env: {} }),
+    ).catch((e: unknown) => e)) as { details: { changes: string[] } };
+    expect(err.details.changes).toEqual([
+      'status: published → draft',
+      'title: "The Answer" → "A Better Answer"',
+    ]);
+  });
+
+  it('setting the status a post already has is a no-op, not a write', async () => {
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, status: 'published' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(0);
+    expect((res.data as { changes: string[] }).changes).toEqual([]);
+  });
+
+  // Both directions take the ordinary gate: review stops, auto proceeds on clean
+  // content. Promoting a draft IS putting content up, so it must not be cheaper
+  // than a publish; demoting is the same lever pulled the safe way.
+  it.each(['draft', 'published'])(
+    'review mode stops on --status %s until --yes',
+    async (status) => {
+      const stored = status === 'published' ? { ...STORED, status: 'draft' } : STORED;
+      const stopped = stubServer({ get: stored });
+      await expect(
+        runEdit(
+          args({ status }),
+          makeCtx(),
+          hermetic({ fetchImpl: stopped.fetch, provider: spyProvider().provider, env: {} }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+      expect(stopped.puts()).toHaveLength(0);
+
+      const approved = stubServer({ get: stored });
+      await runEdit(
+        args({ status, yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: approved.fetch, provider: spyProvider().provider, env: {} }),
+      );
+      expect(approved.puts()).toHaveLength(1);
+    },
+  );
+
+  it('auto mode applies a clean status change without asking', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ status: 'draft' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toEqual({ status: 'draft' });
+  });
+
+  it('refuses any other status at the edge, before the wallet is touched', async () => {
+    for (const bad of ['unlisted', 'Draft', 'deleted', '']) {
+      const stub = stubServer();
+      await expect(
+        runEdit(
+          args({ yes: true, status: bad }),
+          makeCtx(),
+          hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+      expect(stub.calls, bad).toHaveLength(0);
+    }
+  });
+});
+
+/**
+ * What a promotion settles beyond the status flip (review 5044520292): it is the
+ * draft actually going public, so it writes the same-body dedup marker publish
+ * writes, carries the searches `publish --draft --search-id` parked on the
+ * draft, and re-scans the STORED body at the block tier, since "scanned when
+ * written" holds only for drafts this CLI wrote.
+ */
+describe('runEdit — promoting a draft', () => {
+  const DRAFT = { ...STORED, status: 'draft' };
+  const SEARCH = '0197bbbb-cccc-7ddd-8eee-ffffffffffff';
+  // publish.test.ts's fixtures: a hard block in every mode, and a warn-tier
+  // secret-named assignment (`pk_live_` deliberately matches no block detector).
+  const BLOCK_BODY = '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n';
+  const WARN_BODY = '# The Answer\n\nSet DEPLOY_API_KEY="pk_live_zzzz9988aabb" to deploy.\n';
+
+  async function parkClaim(
+    draftPostId: string = POST_ID,
+    searchId: string = SEARCH,
+  ): Promise<void> {
+    await recordSearch(dir, {
+      searchId,
+      at: new Date().toISOString(),
+      question: 'does ox 0.14 still export Bytes.from',
+      decision: 'MISS',
+      candidates: [],
+      draftPostId,
+    });
+  }
+
+  /** The other half for real: a `publish --draft --search-id` that withholds the
+   *  claim from the create and parks it on the draft it just made. */
+  async function parkedByPublish(): Promise<void> {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question: 'does ox 0.14 still export Bytes.from',
+      decision: 'MISS',
+      candidates: [],
+    });
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      if (typeof init?.body === 'string') bodies.push(JSON.parse(init.body));
+      return json(201, { ...STORED, status: 'draft' });
+    }) as unknown as typeof fetch;
+    await runPublish(
+      { file: await writeDoc(STORED.bodyMd, 'draft.md'), searchId: SEARCH, draft: true },
+      makeCtx(),
+      {
+        env: { TENJIN_PUBLISH_MODE: 'auto' },
+        cwd: dir,
+        fetchImpl,
+        provider: spyProvider().provider,
+      },
+    );
+    // The create withheld it (a draft answers nobody); the link is what survives.
+    expect(bodies[0]).not.toHaveProperty('searchId');
+    expect((await loadSearches(dir))[0]?.draftPostId).toBe(POST_ID);
+  }
+
+  it('records the dedup marker, so the next same-body publish dedups instead of duplicating', async () => {
+    await edit({ status: 'published' }, { get: DRAFT });
+    expect(await publishedUrlFor(dir, STORED.bodyMd)).toBe(STORED.url);
+  });
+
+  it('writes no marker on a demotion, which takes nothing public', async () => {
+    await edit({ status: 'draft' });
+    expect(await publishedUrlFor(dir, STORED.bodyMd)).toBeNull();
+  });
+
+  it('carries the parked claim on the PUT and closes its loop, on both surfaces', async () => {
+    await parkClaim();
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    // One claim ships as the bare string the create path would send.
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    expect(data.searches).toEqual([{ id: SEARCH, closed: true }]);
+  });
+
+  // The whole carry, with both real writers: `publish --draft --search-id`
+  // withholds the claim and parks it, and the promotion is the only thing that
+  // reads it back. The two halves meet only in the store, so a test that seeds
+  // the link itself would pass over a parking bug.
+  it('carries a claim from `publish --draft --search-id` through to the promotion', async () => {
+    await parkedByPublish();
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect(data.searches).toEqual([{ id: SEARCH, closed: true }]);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // `UUID_RE` accepts either case and the parked link is matched as SQL text, so
+  // without the store's fold this promotion would succeed with an empty claim
+  // list: a good receipt and the attribution silently gone.
+  it('finds the parked claim when the post id is typed in uppercase', async () => {
+    await parkClaim();
+    const stub = stubServer({ get: DRAFT });
+    const res = await runEdit(
+      args({ postId: POST_ID.toUpperCase(), status: 'published', yes: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect((res.data as { searches?: unknown }).searches).toEqual([{ id: SEARCH, closed: true }]);
+  });
+
+  // An `outcome` report closed the loop while the draft sat there. The claim
+  // still rides the PUT (who ANSWERED it did not change) and the receipt says
+  // the local resolution moved.
+  it('relinks a loop something else closed before the promotion', async () => {
+    await parkClaim();
+    await markSearchResolved(dir, SEARCH, 'outcome');
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    expect(stub.putBody()).toEqual({ status: 'published', searchId: SEARCH });
+    expect(data.searches).toEqual([{ id: SEARCH, closed: true, relinked: true }]);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+  });
+
+  // publish's foreign-shelf rule, at the moment the promotion would claim: the
+  // other shelf served the search, so the claim is named on stderr, kept off the
+  // wire, and left open for `tenjin outcome` to close where it belongs.
+  it('never claims a search another shelf answered, and says where to close it', async () => {
+    await recordSearch(dir, {
+      searchId: SEARCH,
+      at: new Date().toISOString(),
+      question: 'does ox 0.14 still export Bytes.from',
+      decision: 'MISS',
+      candidates: [],
+      shelfBaseUrl: 'https://team.example',
+      draftPostId: POST_ID,
+    });
+    const stub = stubServer({ get: DRAFT });
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runEdit(
+      args({ status: 'published', yes: true }),
+      ctx,
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.putBody()).toEqual({ status: 'published' });
+    expect((res.data as { searches?: unknown }).searches).toBeUndefined();
+    expect(stderr()).toContain('was answered by https://team.example');
+    expect(stderr()).toContain(`tenjin outcome --search-id ${SEARCH} --status used`);
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  it('claims nothing when the parked draft is a different post', async () => {
+    await parkClaim('0197dddd-eeee-4fff-8aaa-bbbbbbbbbbbb');
+    const { stub, data } = await edit({ status: 'published' }, { get: DRAFT });
+    expect(stub.putBody()).toEqual({ status: 'published' });
+    expect(data.searches).toBeUndefined();
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  it('claims nothing on a demotion', async () => {
+    await parkClaim();
+    const { stub } = await edit({ status: 'draft' });
+    expect(stub.putBody()).toEqual({ status: 'draft' });
+    expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  it('block-scans the stored body: a secret in it refuses the promotion, before the PUT', async () => {
+    const stub = stubServer({ get: { ...DRAFT, bodyMd: BLOCK_BODY } });
+    await expect(
+      runEdit(
+        args({ status: 'published', yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  // Only the BLOCK tier rides the promotion: the warn tier confirms newly typed
+  // text, and re-asking about text the create already gated would tax every
+  // promotion. auto mode with no --yes is the probe, since one counted warn
+  // would turn it into NEEDS_CONFIRMATION.
+  it('warn-tier text in the stored body does not gate the promotion', async () => {
+    const stub = stubServer({ get: { ...DRAFT, bodyMd: WARN_BODY } });
+    await runEdit(
+      args({ status: 'published' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('a promotion that replaces the body scans the NEW body, not the stored one', async () => {
+    const file = await writeDoc('# The Answer\n\nA clean replacement body.\n');
+    const { stub } = await edit(
+      { status: 'published', body: file },
+      { get: { ...DRAFT, bodyMd: BLOCK_BODY } },
+    );
+    expect(stub.putBody()).toMatchObject({
+      status: 'published',
+      bodyMd: '# The Answer\n\nA clean replacement body.\n',
+    });
   });
 });

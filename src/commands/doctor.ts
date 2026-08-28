@@ -34,7 +34,7 @@ import type {
   HarnessWiring,
   NotInvocableReason,
 } from '../lib/skill-wiring';
-import { fetchJson, type ShelfBypass } from '../lib/http';
+import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import {
   isTeamModeConfig,
@@ -100,6 +100,43 @@ const FIX_POINT_AT_TENJIN_API =
   'Point the configured base URL at a Tenjin API (expected an OpenAPI document): `tenjin config set baseUrl <url>`.';
 const FIX_CHECK_NETWORK_AND_BASE_URL =
   'Check your network connection and the configured base URL (`tenjin config get baseUrl`).';
+/**
+ * The base URL was RIGHT and the credential was missing. Sending the operator to
+ * `baseUrl` here (what a bare CONTRACT_MISMATCH did, #218) asks them to change
+ * the one setting that was already correct. Names the config key and no value:
+ * the secret itself never reaches any check output. Says "if" because the page
+ * signal alone does not prove protection; only the off-host redirect does, and
+ * the detail line carries that distinction. Names the alternative for the same
+ * reason {@link FIX_ROTATE_SHELF_BYPASS} does: an HTML page also answers a
+ * `baseUrl` that is one typo off any site on the web, and setting a key would
+ * not touch that.
+ */
+const FIX_SET_SHELF_BYPASS =
+  'If that deployment is access-protected these probes did not get past it; set the team shelf key: `tenjin config set shelfBypassSecret <value>`. If it is not, something else answered instead (a proxy, WAF, or a base URL that is not the shelf you meant); confirm which before setting one.';
+/**
+ * Same page, but the probe CARRIED the configured key and still did not get
+ * past. Telling this machine to set the secret it already sent (the stale-key
+ * case: a rotated Vercel bypass token answers the 200 gate page, a 401, or the
+ * 307 interstitial) would read as "doctor says my config is fine as is".
+ */
+const FIX_ROTATE_SHELF_BYPASS =
+  'The configured shelfBypassSecret was sent and did not get past. Either the key is stale or rotated (update it: `tenjin config set shelfBypassSecret <value>`), or something between you and the shelf answered instead (a proxy, WAF, or another sign-in layer); confirm which before rotating.';
+/**
+ * A keyed probe was redirected, but to the SAME host it asked for: an `http://`
+ * base URL that 301s to https, or a host normalising to its canonical name. The
+ * key was refused by nothing here, so the rotate line would invert #218 all over
+ * again, blaming the setting that was right. `baseUrl` is the one that moves.
+ */
+const FIX_FOLLOW_REDIRECT_IN_BASE_URL =
+  'That URL redirects, and a probe carrying the team shelf key does not follow redirects. Point the configured base URL at the canonical host and scheme it redirects to: `tenjin config set baseUrl <url>`.';
+/**
+ * The same page, from a URL where the team key is not the answer. Naming
+ * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
+ * this describes what happened and points at the two things that can cause it,
+ * without prescribing either.
+ */
+const FIX_PAGE_NOT_THE_API =
+  'Something between this machine and that URL answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall). Check your network path and the configured base URL (`tenjin config get baseUrl`).';
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
@@ -218,9 +255,27 @@ export async function collectDoctorChecks(
     // The three baseUrl probes carry the team shelf's bypass. Without it every
     // one of them reports a protected team deployment as unreachable, which is
     // the check saying "your CLI is broken" about the one setting that is right.
-    await checkApiContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
-    await checkReadPath(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
-    await checkSearchContract(baseUrl, ctx.flags.timeout, deps.fetchImpl, bypass),
+    await checkApiContract(
+      baseUrl,
+      ctx.flags.timeout,
+      deps.fetchImpl,
+      bypass,
+      shelfKeyIsTheRemedy(settings, bypass),
+    ),
+    await checkReadPath(
+      baseUrl,
+      ctx.flags.timeout,
+      deps.fetchImpl,
+      bypass,
+      shelfKeyIsTheRemedy(settings, bypass),
+    ),
+    await checkSearchContract(
+      baseUrl,
+      ctx.flags.timeout,
+      deps.fetchImpl,
+      bypass,
+      shelfKeyIsTheRemedy(settings, bypass),
+    ),
     await checkSkills(
       home,
       which,
@@ -242,7 +297,8 @@ export async function collectDoctorChecks(
     built.push(await checkPushHooks(home, ctx.dataDir));
   }
 
-  // Same rule: only when a secret is set is there a team shelf to be wrong about.
+  // Same rule: silent unless one of the two settings claims a team shelf, so a
+  // default machine gets no check about a feature it never turned on.
   const teamShelf = checkTeamShelf(settings, bypass);
   if (teamShelf !== null) built.push(teamShelf);
 
@@ -430,11 +486,74 @@ async function loadConfigForDoctor(
   }
 }
 
+/**
+ * The fix line for a probe failure that reads as an access gate, shared by the
+ * three baseUrl probes so `--json` cannot carry two verdicts about one machine.
+ *
+ * Returns undefined when no gate story applies and the caller's ordinary fix
+ * stands. The page is a fact about the response; whether the team key fixes it
+ * is a fact about the CONFIG, and only the second one licenses naming the key.
+ * On the public marketplace the key is inert (`resolveShelfBypass` refuses it),
+ * and an override pointing anywhere but the configured shelf carries none, so
+ * both get the neutral line instead. An override that REPEATS the configured
+ * shelf does carry the key, so it earns the same wording a configured base URL
+ * does: the pair is issued on the origins matching, not on where the value came
+ * from. Where the key IS the remedy, what the probe DID decides the
+ * wording: `bypass` present means the key was sent and did not get past
+ * (whether the gate answered 200 HTML, 401/403, or the blocked 30x
+ * interstitial), so "set it" would prescribe the config this machine already
+ * has; absent means setting it is the move.
+ *
+ * A blocked redirect qualifies only when its `Location` LEAVES the host asked
+ * for. The transport refuses to follow any 3xx while carrying the key, so the
+ * status alone says nothing about the key: a same-host hop is what an `http://`
+ * base URL or a non-canonical host name gets, with a perfectly good secret.
+ *
+ * A same-origin JSON 401/403 is deliberately NOT a gate: an API refusing in its
+ * own envelope is an honest refusal, and the transport keeps `gateSuspected`
+ * false on it. But on a machine where the door key is the remedy, the missing or
+ * stale key is the likeliest thing being refused, so the REMEDY still names it
+ * while the classification stays put. Nothing here reads `kind` or the gate
+ * flags to say what happened; the detail lines do that, and they say only what
+ * the transport saw.
+ */
+function shelfGateFix(
+  res: FetchJsonFailure,
+  bypass: ShelfBypass | undefined,
+  shelfKeyRemedy: boolean,
+): string | undefined {
+  const blocked = res.kind === 'blocked-redirect' && bypass !== undefined;
+  const refused =
+    res.kind === 'http' && (res.status === 401 || res.status === 403) && shelfKeyRemedy;
+  if (res.gateSuspected !== true && !blocked && !refused) return undefined;
+  if (blocked && res.gateOffOrigin !== true) return FIX_FOLLOW_REDIRECT_IN_BASE_URL;
+  if (!shelfKeyRemedy) return FIX_PAGE_NOT_THE_API;
+  return bypass !== undefined ? FIX_ROTATE_SHELF_BYPASS : FIX_SET_SHELF_BYPASS;
+}
+
+/**
+ * What a gate-suspected failure SAYS happened, shared by the probes that print
+ * one so a `detail` and its `fix` cannot tell different stories about one
+ * response (read-path used to print the transport's raw "was not valid JSON"
+ * beside a fix about the key). Claims no more than the signal proves: an
+ * off-host landing proves a sign-in redirect, an HTML content-type alone proves
+ * only that a page answered. The status rides both arms, since a 401 is the
+ * most useful word in either sentence.
+ */
+function gateDetail(url: string, res: FetchJsonFailure): string {
+  const status = res.kind === 'http' ? ` ${res.status}` : '';
+  return res.gateOffOrigin === true
+    ? `${url} answered${status} from a different host than the one asked for (an access-protection or sign-in redirect), not from a Tenjin API`
+    : `${url} answered${status} with an HTML page, not JSON`;
+}
+
 async function checkApiContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
+  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
+  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
   const res = await fetchJson(url, {
@@ -444,15 +563,26 @@ async function checkApiContract(
   });
   if (!res.ok) {
     const malformed = res.kind === 'invalid-json';
+    // Same failure code either way (the contract was not met), but a different
+    // cause and so a different fix: the transport saw the response and says
+    // whether it read as a protection page. Only it can, so doctor asks rather
+    // than guessing from the body it no longer has. The detail claims no more
+    // than the signal proves: an off-host landing proves a sign-in redirect, an
+    // HTML content-type alone proves only that a page answered.
+    const gated = res.gateSuspected === true;
     return {
       result: {
         name: 'api-contract',
         status: 'fail',
         required: true,
-        detail: malformed
-          ? `OpenAPI document at ${url} was not valid JSON`
-          : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix: malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL,
+        detail: gated
+          ? gateDetail(url, res)
+          : malformed
+            ? `OpenAPI document at ${url} was not valid JSON`
+            : `Could not reach the Tenjin API at ${url}: ${res.message}`,
+        fix:
+          shelfGateFix(res, bypass, shelfKeyRemedy) ??
+          (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL),
       },
       failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
     };
@@ -496,6 +626,8 @@ async function checkSearchContract(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
+  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
+  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
   const res = await fetchJson(url, {
@@ -504,13 +636,18 @@ async function checkSearchContract(
     ...(bypass !== undefined ? { bypass } : {}),
   });
   if (!res.ok) {
+    // The gate-aware fix rides here too: a gated failure answers all three
+    // probes at once, `--json` carries every check, and a "check the base URL"
+    // here beside a "set the key" on api-contract is two verdicts on one cause.
     return {
       result: {
         name: 'search-contract',
         status: 'warn',
         required: false,
         detail: `Could not confirm the search endpoint at ${url}`,
-        fix: 'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
+        fix:
+          shelfGateFix(res, bypass, shelfKeyRemedy) ??
+          'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
       },
     };
   }
@@ -940,12 +1077,14 @@ const POSTURE: Record<DirState, string> = {
  * Is team mode actually on, and does the operator know which answer they got?
  *
  * Team mode needs TWO settings, and the setup is two independent commands, so
- * the reachable wrong state is a machine with the bypass secret and `baseUrl`
- * still on the public marketplace. The CLI fails that safe to public mode —
+ * BOTH halves are reachable: a machine with the bypass secret and `baseUrl`
+ * still on the public marketplace, and a machine with `baseUrl` on a shelf of
+ * its own and no secret. The CLI fails the first safe to public mode —
  * publishes keep the client scan and the confirm cascade — but silently, and an
  * operator who believes they are on the team shelf would keep writing internal
- * notes at a command that sends them to tenjin.blog. Warn, never fail: public
- * mode is a working machine, just not the one they meant to configure.
+ * notes at a command that sends them to tenjin.blog. The second half is the one
+ * that breaks every network probe (see {@link halfWiredShelfWarn}). Warn, never
+ * fail, for both: each is a working machine, just not the one they configured.
  *
  * Reports what the probes ACTUALLY DID — it is handed the same `bypass` they
  * were, rather than re-deriving the answer — so a run whose base URL came from
@@ -956,7 +1095,7 @@ function checkTeamShelf(
   settings: EffectiveSettings,
   bypass: ShelfBypass | undefined,
 ): BuiltCheck | null {
-  if (settings.shelfBypassSecret.value.length === 0) return null;
+  if (settings.shelfBypassSecret.value.length === 0) return halfWiredShelfWarn(settings);
   const baseUrl = settings.baseUrl.value;
   if (bypass !== undefined) {
     return {
@@ -999,6 +1138,67 @@ function checkTeamShelf(
       required: false,
       detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
       fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
+    },
+  };
+}
+
+/**
+ * Is the team's bypass key a remedy THIS MACHINE can use?
+ *
+ * Two conditions, and both are about the config rather than about any response:
+ * the base URL came from config, and it points at a shelf of the team's own.
+ *
+ * - Not from config means the origin belongs to this RUN (`--base-url`,
+ *   `TENJIN_BASE_URL`). Naming the key against a host a flag chose is doctor
+ *   coaching the team's door key toward it, which is the move FLAG_CAVEAT exists
+ *   to stop; the withheld-key warn already names the override instead.
+ * - The public marketplace is not access-protected and takes no key: a secret
+ *   set beside it is refused outright (`resolveShelfBypass` fails safe to public
+ *   mode), so the advice would be inert AND would trip the other half-wired warn.
+ *
+ * Shared by the three baseUrl probes' fix lines (via {@link shelfGateFix}) and
+ * {@link halfWiredShelfWarn} so they cannot answer differently about one
+ * machine.
+ */
+function shelfKeyIsTheRemedy(settings: EffectiveSettings, bypass?: ShelfBypass): boolean {
+  // A key that WAS issued for this request is the remedy whatever named the
+  // origin: resolveShelfBypass keys on the configured and effective origins
+  // matching, not on baseUrl.source, so repeating the configured shelf through
+  // --base-url or TENJIN_BASE_URL still sends it. Deciding on source alone hid
+  // a rejected key behind the neutral page advice.
+  if (bypass !== undefined) return true;
+  // Exactly 'file': resolveBaseUrl never returns 'project' today (a project
+  // .tenjin.json baseUrl is dropped on the floor by loadProjectConfig, by
+  // design). If a project layer ever lands, whether a repo-checked-in file may
+  // summon the team's door key must be decided then, not inherited from here.
+  if (settings.baseUrl.source !== 'file') return false;
+  const origin = tryOriginOf(settings.baseUrl.value);
+  return origin !== null && isTeamShelfOrigin(origin, settings.publicShelfUrl.value);
+}
+
+/**
+ * The other half-wiring: `baseUrl` on a shelf of the team's own, no secret.
+ *
+ * Response-INDEPENDENT on purpose. The symptom is a protection page answering
+ * every probe, and `checkApiContract` now names that when it sees one, but a
+ * deployment that is not protected today can be protected tomorrow with no
+ * config change here. This check reads the two settings alone, so it is true
+ * before the network says anything and stays true when the network says nothing.
+ *
+ * The gate is {@link shelfKeyIsTheRemedy}: there is nothing to warn about unless
+ * the missing key is one this machine could actually use. Empty secret plus the
+ * public marketplace stays silent, because that is the default machine.
+ */
+function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
+  if (!shelfKeyIsTheRemedy(settings)) return null;
+  const baseUrl = settings.baseUrl.value;
+  return {
+    result: {
+      name: 'team shelf',
+      status: 'warn',
+      required: false,
+      detail: `baseUrl is ${sanitizeForTerminal(baseUrl)}, a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated; if that deployment is access-protected they were answered by its protection page rather than by Tenjin`,
+      fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
     },
   };
 }
@@ -1197,6 +1397,8 @@ async function checkReadPath(
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
+  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
+  shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
   // The shipped public read path, separate from the search-contract check above.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
@@ -1214,8 +1416,16 @@ async function checkReadPath(
         name: 'read-path',
         status: 'fail',
         required: true,
-        detail: `Read path ${url} failed: ${res.message}`,
-        fix: FIX_CHECK_NETWORK_AND_BASE_URL,
+        // Gate-aware on BOTH halves. The transport's message for a gate page is
+        // "was not valid JSON", which read beside a fix about the key was one
+        // check telling `--json` two stories about one response.
+        detail:
+          res.gateSuspected === true
+            ? `Read path ${gateDetail(url, res)}`
+            : `Read path ${url} failed: ${res.message}`,
+        // Same gate-aware fix as api-contract (see shelfGateFix): the identical
+        // protection page answers this probe too, and `--json` carries both.
+        fix: shelfGateFix(res, bypass, shelfKeyRemedy) ?? FIX_CHECK_NETWORK_AND_BASE_URL,
       },
       failCode: 'API_UNREACHABLE',
     };
