@@ -1823,10 +1823,29 @@ async function main() {
   // paid top stays on the parent path on purpose: the parent is the only
   // context with buy / --yes authority, and a paid pointer inside a child is
   // an approval dead end.
+  //
+  // A SLOT HELD BY A DISPATCH THAT DOES NOT RELAY IS THE SESSION'S HANDOFF
+  // SPENT ON NOTHING. The claim is taken above the strength and already-shown
+  // gates because the 'moderate' park needs it too, so a strong PAID top and
+  // an already-injected top both won the slot and then left by a path that
+  // announces no relay — the paid one straight into \`hintLines\`, whose
+  // 'injected' row makes the child refuse the parked pointer every time. The
+  // slot then blocks every strong free dispatch behind it for the whole
+  // window, systematically. Only the holder releases it: a dispatch that LOST
+  // the claim owns nothing here and must not evict the winner.
+  //
+  // The parked cache is deliberately left alone. The next winner overwrites it
+  // in the same statement that takes the slot, and clearing it here would also
+  // throw away a handoff that is still good in the case where \`hintLines\`
+  // renders nothing at all.
+  const releaseSlot = () => {
+    if (handoff) clearState(sessionId, STATE_RELAY_SLOT);
+  };
   if (config.push === 'on' && sessionId !== null && isFree(judged.top)) {
     // Some context already got the whole piece; a relay would be the second
     // delivery, not the first.
     if (alreadyShown(sessionId, judged.top.resourceId)) {
+      releaseSlot();
       recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
       return quiet();
     }
@@ -1863,6 +1882,9 @@ async function main() {
       return emit('PreToolUse', relayText);
     }
   }
+  // Past every relay path: a paid top, or a lost claim on another piece. The
+  // parent hint below is this hit's delivery, so the handoff goes back.
+  releaseSlot();
   // RANK 1 ALONE. The verdict is rank 1's, so rank 2 would ride in on rank 1's
   // evidence if it were printed beside it. The fallback covers a projection that
   // lost the judged candidate at the boundary (rich and stored are validated

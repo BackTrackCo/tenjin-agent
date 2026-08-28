@@ -3380,6 +3380,48 @@ describe('the subagent arm (SubagentStart)', () => {
     };
   };
 
+  /**
+   * PAID on the zod work order, FREE and strong on the pgvector one, so one
+   * session can drive a paid dispatch and then a free one that has to relay.
+   * The filler rank 2 shares no content word with either question, so the
+   * margin is the whole score on both.
+   */
+  const paidThenFree = (req: StubRequest): { status: number; json: unknown } => {
+    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+    let query: string;
+    try {
+      query = String((JSON.parse(req.body) as { query?: unknown }).query);
+    } catch {
+      query = '';
+    }
+    const free = query.includes('pgvector');
+    return {
+      status: 200,
+      json: {
+        schemaVersion: 3,
+        searchId: SEARCH_ID,
+        items: [
+          {
+            resourceId: free ? SECOND_RESOURCE_ID : RESOURCE_ID,
+            url: `${req.base}/@a/p`,
+            title: query.slice(0, 190),
+            price: free ? '0' : '150000',
+            excerpt: 'the excerpt',
+            creator: { handle: 'vraspar' },
+          },
+          {
+            resourceId: '44444444-4444-4444-8444-444444444444',
+            url: `${req.base}/@b/q`,
+            title: 'unrelated cobol punchcard reconciliation ledger',
+            price: '0',
+            excerpt: 'about something else entirely',
+            creator: { handle: 'someone' },
+          },
+        ],
+      },
+    };
+  };
+
   /** Merge a patch into the parked handoff, to reach a childPointer branch the
    *  stub servers would need a second protected deployment to produce. */
   function patchCache(patch: Record<string, unknown>): void {
@@ -3545,6 +3587,54 @@ describe('the subagent arm (SubagentStart)', () => {
       action: 'skipped',
       reason: 'already-injected',
     });
+  });
+
+  /**
+   * MINOR 2 (round 2). The slot claim is taken above the strength gate and
+   * above the already-shown gate, because the 'moderate' park needs it too. So
+   * a strong PAID top won the session's one handoff and then left by a path
+   * that announces no relay, straight into `hintLines`, whose 'injected' row
+   * makes the child refuse the parked pointer anyway. The slot then blocked
+   * every strong free dispatch behind it for the whole window: bounded, but
+   * systematic. The holder hands it back on the way out.
+   */
+  it('hands the handoff slot back when a paid top takes the parent hint path', async () => {
+    const { baseUrl } = await serve(paidThenFree);
+    await pushOn(baseUrl);
+
+    const paid = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(injected(paid) ?? '').toContain('Tenjin lists a paid answer');
+    expect(sessionState(SESSION, 'relay:handoff')).toBeNull();
+
+    // The dispatch behind it. Strong and free, so it must still be able to
+    // relay; before the release it degraded to a parent hint.
+    const free = await runScript(dispatchHookScript(dataDir), otherDispatch);
+    expect(injected(free) ?? '').toContain('queued for delivery to the subagent');
+    const relayed = (await ledger()).filter((r) => r.action === 'relayed');
+    expect(relayed).toHaveLength(1);
+    expect(relayed[0]?.candidate).toMatchObject({ resourceId: SECOND_RESOURCE_ID });
+  });
+
+  /** The other branch that claims and then leaves: some context already had
+   *  the whole piece, so there is nothing to relay and the slot goes back. */
+  it('hands the handoff slot back when the top was already injected', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const prompt = await runScript(pushPromptHookScript(dataDir), parentPrompt);
+    expect(injected(prompt)).not.toBeNull();
+    expect((await ledger()).find((r) => r.trigger === 'prompt')).toMatchObject({
+      action: 'injected',
+      candidate: expect.objectContaining({ resourceId: RESOURCE_ID }),
+    });
+
+    const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
+    expect(dispatched.stdout).toBe('');
+    expect((await ledger()).find((r) => r.trigger === 'dispatch')).toMatchObject({
+      action: 'skipped',
+      reason: 'already-injected',
+    });
+    expect(sessionState(SESSION, 'relay:handoff')).toBeNull();
   });
 
   it('does not repeat the relay line when a second dispatch lands on the same piece', async () => {
