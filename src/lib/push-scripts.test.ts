@@ -1773,11 +1773,23 @@ describe('the failure arm (PostToolUse Bash)', () => {
       'node -e "require(1)"',
       'python3 -',
       'node',
-      'python3 -m pytest',
+      'python3 -m',
+      'python3 -m http.server',
+      'node --version',
     ]) {
       await expectNoStore(bash(command, { stdout: '', stderr: TRACEBACK }));
     }
-    for (const command of ['python3 script.py', 'node dist/index.js']) {
+    // ... or its own test runner: `python3 -m pytest` is the most common
+    // Python test spelling, and it is a pytest invocation, so the pairing keys
+    // on `pytest` and a later bare `pytest` pass closes it.
+    for (const command of [
+      'python3 script.py',
+      'node dist/index.js',
+      'python3 -m pytest tests/',
+      'python -m unittest discover',
+      'node --test',
+      'deno test',
+    ]) {
       await runScript(
         pushFailureHookScript(dataDir),
         JSON.stringify({
@@ -1789,8 +1801,15 @@ describe('the failure arm (PostToolUse Bash)', () => {
         }),
       );
     }
-    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(2);
-    expect((await pairings()).map((p) => p.cmd_head)).toEqual(['python3', 'node']);
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(6);
+    expect((await pairings()).map((p) => p.cmd_head)).toEqual([
+      'python3',
+      'node',
+      'pytest',
+      'unittest',
+      'node',
+      'deno',
+    ]);
   });
 
   it('never opens a pairing whose error named no file, or only <string>/<stdin>', async () => {

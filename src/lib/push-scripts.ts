@@ -1065,8 +1065,8 @@ const FAILURE_HEADS = new Set([
   // build systems
   'make', 'cmake', 'ninja', 'mvn', 'gradle', 'gradlew', 'dotnet', 'swift', 'xcodebuild',
   // compilers, test runners, linters, type checkers
-  'tsc', 'vitest', 'jest', 'mocha', 'pytest', 'tox', 'nox', 'eslint', 'prettier', 'ruff', 'mypy',
-  'pyright', 'flake8', 'black', 'biome', 'oxlint',
+  'tsc', 'vitest', 'jest', 'mocha', 'pytest', 'unittest', 'tox', 'nox', 'eslint', 'prettier',
+  'ruff', 'mypy', 'pyright', 'flake8', 'black', 'biome', 'oxlint',
   // bundlers and app frameworks
   'next', 'vite', 'turbo', 'nx', 'webpack', 'esbuild', 'rollup',
   // migrations
@@ -1099,6 +1099,13 @@ const RUNTIME_HEADS = new Set(['node', 'deno', 'python', 'python3']);
 function runsAFile(sub) {
   return sub.length > 0 && !sub.startsWith('-') && sub !== '<stdin>' && /\.[A-Za-z0-9]+$/.test(sub);
 }
+/** The runtime's own test runner: \`node --test\` and \`deno test\` fail the way
+ *  \`vitest\` does. (\`python3 -m pytest\` is resolved to \`pytest\` by
+ *  commandHeads instead, so the pairing keys on the runner a later \`pytest\`
+ *  pass will close.) */
+const RUNTIME_TEST_SUBS = new Set(['--test', 'test']);
+/** Interpreters whose \`-m <module>\` runs the module as the program. */
+const MODULE_RUNNERS = new Set(['python', 'python3']);
 /** Traceback locations that are not files in the repo: an evaluated string or
  *  a piped stdin. A pairing whose error names only these has nothing a tracked
  *  edit could ever be matched against, so it is never opened. */
@@ -1168,7 +1175,8 @@ function skipWrapper(words, i, valueOpts, name) {
  * about AND the \`pnpm test\` that matters. The head is a basename, so
  * \`/usr/local/bin/pnpm\` and \`./node_modules/.bin/vitest\` land on their
  * program names; leading \`FOO=bar\` assignments and wrappers are stepped over,
- * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`).
+ * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`),
+ * and \`python3 -m <module>\` lands on the module.
  */
 function commandHeads(command) {
   const out = [];
@@ -1188,6 +1196,13 @@ function commandHeads(command) {
       }
       if (HEAD_RUNNERS.has(name)) { i += 1; continue; }
       if (PM_HEADS.has(name) && i + 1 < words.length && PM_RUN_SUBS.has(words[i + 1])) {
+        i += 2;
+        continue;
+      }
+      // \`python3 -m pytest\` IS a pytest invocation: the module is the head, so
+      // the most common Python test spelling fires, and the pairing it opens
+      // keys on \`pytest\`, which a later bare \`pytest\` pass closes.
+      if (MODULE_RUNNERS.has(name) && words[i + 1] === '-m' && i + 2 < words.length) {
         i += 2;
         continue;
       }
@@ -1211,7 +1226,7 @@ function allowedHeads(command) {
   for (const { head, sub } of commandHeads(command)) {
     if (!FAILURE_HEADS.has(head)) continue;
     if (PM_HEADS.has(head) && PM_QUIET_SUBS.has(sub)) continue;
-    if (RUNTIME_HEADS.has(head) && !runsAFile(sub)) continue;
+    if (RUNTIME_HEADS.has(head) && !runsAFile(sub) && !RUNTIME_TEST_SUBS.has(sub)) continue;
     out.push(head);
   }
   return out;
