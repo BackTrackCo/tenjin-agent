@@ -781,10 +781,26 @@ function packagesInSource(text) {
  * generic rule below it is what catches the vendor nobody has heard of yet.
  */
 const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|xox[baprse]-[A-Za-z0-9-]{10,}|ya29\.[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)/g;
-/** \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
- *  secret, so the value goes whatever it happens to look like. */
+/**
+ * \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
+ * secret, so the value goes whatever it happens to look like.
+ *
+ * THE TWO NAME CLASSES ARE BOUNDED, and the bound is load-bearing rather than
+ * cosmetic. Unbounded (\`[\w.-]*\`) they backtrack super-linearly on a
+ * keyword-dotted run: driving the rendered dispatch arm with a
+ * \`token.token.token…\` description measured 123 ms at 1k characters, 436 ms at
+ * 2k, 1.9 s at 4k and 14.6 s at 8k with nothing emitted. A synchronous regex
+ * cannot be pre-empted by an event-loop watchdog, so on attacker-chosen text
+ * that is a core spun until the harness kill, in front of a tool call the user
+ * is waiting on. Every caller windows its own input as well (defence in depth),
+ * but this is the bound that holds whatever any caller forgets.
+ *
+ * 64 IS FAR PAST ANY REAL IDENTIFIER AND CHANGES NO MATCH: the engine retries
+ * at every start position, so a name longer than the class still matches from
+ * further in and its value is still dropped.
+ */
 const SECRET_ASSIGN_RE =
-  /\b[\w.-]*(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]*\s*[=:]\s*\S+/gi;
+  /\b[\w.-]{0,64}(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+/gi;
 /** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
  *  rule cannot see because that one starts at a slash. */
 const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;

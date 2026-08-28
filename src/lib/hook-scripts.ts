@@ -1473,8 +1473,19 @@ function dispatchQuestion(toolInput) {
   const whole =
     window.length < prompt.length ? window.slice(0, window.search(/\\s\\S*$/) + 1) : window;
   const head = clean(scrub(whole).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
-  const description =
-    typeof toolInput.description === 'string' ? clean(scrub(toolInput.description), ${DISPATCH_DESCRIPTION_MAX}) : '';
+  // THE DESCRIPTION TAKES THE SAME TREATMENT, for the same reason and in the
+  // same order. It is a caller-chosen string with no length bound of its own,
+  // and bounding it AFTER \`scrub\` is what made the prompt above cubic in the
+  // first place. This arm is worse to get wrong than the harvest is: it runs on
+  // every Task/Agent PreToolUse on a default install, with no push and no
+  // capture, and it BLOCKS the tool call while it runs.
+  const raw = typeof toolInput.description === 'string' ? toolInput.description : '';
+  const descWindow = raw.slice(0, ${DISPATCH_DESCRIPTION_MAX * 4});
+  const descWhole =
+    descWindow.length < raw.length
+      ? descWindow.slice(0, descWindow.search(/\\s\\S*$/) + 1)
+      : descWindow;
+  const description = raw === '' ? '' : clean(scrub(descWhole), ${DISPATCH_DESCRIPTION_MAX});
   return description === '' ? head : description + ': ' + head;
 }
 

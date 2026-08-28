@@ -2521,6 +2521,73 @@ describe('dispatch hook: a subagent dispatch', () => {
     expect(bodies[0]).not.toContain('kkkkkkkkkk');
   });
 
+  /**
+   * MAJOR (runtime audit): the description was passed to `scrub` with NO window,
+   * bounded only after it. `SECRET_ASSIGN_RE`'s name classes backtrack
+   * super-linearly on a keyword-dotted run, and this arm is the worst place in
+   * the CLI to get that wrong: `hooks.agentDispatch` defaults to `auto`, so it
+   * runs on every Task/Agent PreToolUse on a default install with no push and no
+   * capture, it BLOCKS the tool call, and a synchronous regex cannot be
+   * pre-empted by the watchdog. Driven against the rendered arm, an 8k
+   * description measured 14.6s with nothing emitted.
+   *
+   * PINNED ON SHAPE, NOT ON WALL CLOCK, exactly as the prompt's own window is:
+   * a token that starts inside the window and runs past it is DROPPED rather
+   * than handed to scrub truncated, so an unmatched fragment cannot ship.
+   */
+  it('windows the description before scrub, dropping a token that runs past it', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    // Starts inside the 100-char description bound and runs past the 400-char
+    // scrub window, so slicing after scrub would ship a recognisable head.
+    const secret = `https://vault.internal.example.com/${'k'.repeat(600)}`;
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        description: `probe the upload path ${secret}`,
+        prompt: longPrompt('does the upload path retry on a 503'),
+      }),
+    );
+
+    expect(bodies[0]).not.toContain('vault.internal.example.com');
+    expect(bodies[0]).not.toContain('kkkkkkkkkk');
+    expect(questionSent(bodies).startsWith('probe the upload path: ')).toBe(true);
+  });
+
+  /**
+   * The other half of the same major, and the one that holds whatever a caller
+   * forgets: `scrub`'s two secret-name classes are bounded, which is what makes
+   * a keyword-dotted run linear. Asserted on the emitted source because the
+   * bound changes no MATCH (the engine retries at every start position), so no
+   * input can tell the two regexes apart. The behaviour that must not change is
+   * asserted under it.
+   */
+  it('emits a scrub whose secret-name classes are bounded', () => {
+    const source = dispatchHookScript(dataDir);
+    expect(source).toContain('const SECRET_ASSIGN_RE =');
+    // The super-linear shape, in either position.
+    expect(source).not.toContain('/\\b[\\w.-]*(?:passwd');
+    expect(source).not.toContain('bearer)[\\w.-]*\\s*[=:]');
+    expect(source).toContain('/\\b[\\w.-]{0,64}(?:passwd');
+    expect(source).toContain('bearer)[\\w.-]{0,64}\\s*[=:]');
+  });
+
+  /** And the bound still drops what it always dropped, including behind a name
+   *  longer than the class now caps: the match simply starts further in. */
+  it('still drops a secret assignment behind a long dotted prefix', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const prefix = 'a.'.repeat(60);
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        prompt: `Work out why the deploy fails when ${prefix}api_key=hunter2seventeen is set, and report what actually happens.`,
+      }),
+    );
+    expect(questionSent(bodies)).toContain('why the deploy fails');
+    expect(bodies[0]).not.toContain('hunter2seventeen');
+  });
+
   it('sends the prompt alone when the dispatch has no description', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
