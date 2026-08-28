@@ -617,10 +617,11 @@ describe('already-injected spans two different hooks', () => {
   it('only an injected row can be labelled, or owed to a shelf', async () => {
     const store = await openStore(dataDir);
     if (store === null) throw new Error('no store');
-    const row = (uid: string, action: string): (string | number | null)[] => [
+    const AT = 1_700_000_000_000;
+    const row = (uid: string, action: string, at = AT): (string | number | null)[] => [
       uid,
       null,
-      Date.now(),
+      at,
       's1',
       null,
       'machine',
@@ -654,8 +655,17 @@ describe('already-injected spans two different hooks', () => {
       store.run(STORE_SQL.setOutcome, ['used', 'hand', 'shown']);
       store.run(STORE_SQL.setOutcome, ['used', 'hand', 'unshown']);
       expect(store.all(STORE_SQL.unpostedOutcomes, [0]).map((r) => r.uid)).toEqual(['shown']);
-      // A row older than the grading window has aged out of the queue.
-      expect(store.all(STORE_SQL.unpostedOutcomes, [Number.MAX_SAFE_INTEGER])).toEqual([]);
+
+      // The window is `at >= floor`: a row AT the floor is still owed, one a
+      // millisecond older has aged out of the queue -- unless a hand put the
+      // verdict there, in which case age is no excuse.
+      store.run(STORE_SQL.insertInjection, row('older', 'injected', AT - 1));
+      store.run(STORE_SQL.setOutcome, ['rejected', 'none', 'older']);
+      store.run(STORE_SQL.setOutcome, ['used', 'none', 'shown']);
+      expect(store.all(STORE_SQL.unpostedOutcomes, [AT]).map((r) => r.uid)).toEqual(['shown']);
+      expect(store.all(STORE_SQL.unpostedOutcomes, [AT + 1])).toEqual([]);
+      store.run(STORE_SQL.setOutcome, ['used', 'hand', 'older']);
+      expect(store.all(STORE_SQL.unpostedOutcomes, [AT + 1]).map((r) => r.uid)).toEqual(['older']);
     } finally {
       store.close();
     }
