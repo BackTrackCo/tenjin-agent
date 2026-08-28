@@ -2268,12 +2268,22 @@ const CACHE_TTL_MS = __CACHE_TTL__;
  * to an MCP tool to a plain fetch, and every ladder ends in something ANY child
  * can do: carry the id back to its parent.
  *
- * WHAT THE PAID BRANCH MAY SAY. This context has no spend authority, so it gets
- * no purchase guidance and never learns 'tenjin buy'. 'tenjin inspect' is not
- * purchase guidance: it never signs, never pays and never saves
- * (docs/agent-permissions.md), and it is the difference between a child that
- * reports "the preview covers our case, worth the price" and one that reports a
- * bare uuid.
+ * EVERY RUNG NAMES A TOOL THAT EXISTS. The MCP rung is the one added for the
+ * child with nothing else to fall back on, so a tool name it cannot resolve
+ * costs that child its whole turn on an unknown-tool error. src/mcp/server.ts
+ * registers eight tools and no read tool under any name; 'tenjin_inspect' is
+ * the free, read-only one, and it returns the answer card plus the preview
+ * rather than the body, which the rung says.
+ *
+ * WHAT THE PAID BRANCH MAY SAY. This context has no spend authority, so this
+ * line carries no purchase guidance and never names 'tenjin buy' itself.
+ * 'tenjin inspect' is not purchase guidance: it never signs, never pays and
+ * never saves (docs/agent-permissions.md), and it is the difference between a
+ * child that reports "the preview covers our case, worth the price" and one
+ * that reports a bare uuid. Its own output does close with "run tenjin buy to
+ * pay and read" (src/commands/inspect.ts), so what this line withholds is the
+ * instruction, not the string: defense in depth, since the child still has no
+ * key, no allowlist entry and no --yes.
  *
  * The team shelf drops the fetch rung: a team shelf exists only behind a
  * protected deployment, and the bypass header that opens it is origin-pinned
@@ -2289,12 +2299,12 @@ function childPointer(candidate, opener, marker, shelf, searchId) {
   if (isFree(candidate)) {
     const rungs = ['Read it free: tenjin read ' + candidate.resourceId];
     if (shelf !== 'team') rungs.push('or fetch ' + candidate.url);
-    rungs.push('or call the tenjin_read MCP tool with that id');
+    rungs.push('or call the tenjin_inspect MCP tool with that id for its card and preview');
     rungs.push('or, if you cannot run tools, carry that resource id into your final answer');
     lines.push(rungs.join('; ') + ' for your parent.');
   } else {
-    const rungs = ['Paid piece: this context cannot approve a purchase.'];
-    rungs.push('Preview it free: tenjin inspect ' + candidate.resourceId);
+    const rungs = ['Paid piece: this context cannot approve a purchase'];
+    rungs.push('preview it free: tenjin inspect ' + candidate.resourceId);
     rungs.push('or call the tenjin_inspect MCP tool with that id');
     rungs.push('or carry that resource id into your final answer');
     lines.push(rungs.join('; ') + ' and let your parent decide.');
@@ -2306,12 +2316,14 @@ function childPointer(candidate, opener, marker, shelf, searchId) {
   // some other project and post against that. The id is right here, so name
   // it; with no id there is no valid ask and the rung is omitted rather than
   // guessed at. The statuses are the three of OUTCOME_STATUSES a reader can
-  // report; anything outside that set throws USAGE.
+  // report; anything outside that set throws USAGE. Spelled out rather than
+  // pipe-separated: the line is framed as runnable, and 'a|b|c' copied verbatim
+  // into a shell is three piped commands whose first one posts 'used'.
   if (searchId !== '') {
     lines.push(
       'Afterwards report whether it helped: tenjin outcome --search-id ' + searchId +
-        ' --status used|partially_used|rejected, ' +
-        'or state in your final answer whether you used it.',
+        ' --status <status>, where <status> is one of: used, partially_used, rejected. ' +
+        'Or state in your final answer whether you used it.',
     );
   }
   lines.push('[tenjin-delivery ' + marker + ']');

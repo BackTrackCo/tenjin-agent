@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -3672,7 +3672,10 @@ describe('the subagent arm (SubagentStart)', () => {
 
     const text = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
     expect(text).toContain(`tenjin outcome --search-id ${SEARCH_ID}`);
-    expect(text).toContain('--status used|partially_used|rejected');
+    expect(text).toContain('one of: used, partially_used, rejected');
+    // NOT pipe-separated. The rung is framed as runnable, and `a|b|c` copied
+    // verbatim into a shell is three piped commands whose first posts `used`.
+    expect(text).not.toContain('used|partially_used|rejected');
     expect(text).not.toContain('--last');
   });
 
@@ -3703,8 +3706,40 @@ describe('the subagent arm (SubagentStart)', () => {
 
     const text = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
     expect(text).toContain(`tenjin read ${RESOURCE_ID}`);
-    expect(text).toContain('tenjin_read MCP tool');
+    expect(text).toContain('tenjin_inspect MCP tool');
     expect(text).not.toContain('or fetch ');
+  });
+
+  /**
+   * MAJOR (round 2): the MCP rung exists for the child that has nothing else,
+   * so a name it cannot resolve costs that child its whole turn on an
+   * unknown-tool error. `src/mcp/server.ts` registers exactly eight tools and
+   * there is no read tool under any name, so both branches name a registered
+   * one. Pinned against the registry itself rather than against a literal, so
+   * renaming a tool fails here instead of shipping a dead rung.
+   */
+  it('names only MCP tools the server actually registers, on both branches', async () => {
+    const registered = new Set(
+      [
+        ...readFileSync(new URL('../mcp/server.ts', import.meta.url), 'utf8').matchAll(
+          /'(tenjin_\w+)'/g,
+        ),
+      ].map((m) => m[1]),
+    );
+    expect(registered.has('tenjin_inspect')).toBe(true);
+    expect(registered.has('tenjin_read')).toBe(false);
+
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    const free = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
+
+    for (const name of [...free.matchAll(/tenjin_\w+/g)].map((m) => m[0])) {
+      expect(registered.has(name)).toBe(true);
+    }
+    expect(free).toContain('tenjin_inspect MCP tool');
+    // No spend authority in a child, so the rung never sends it to the buy tool.
+    expect(free).not.toContain('tenjin_buy');
   });
 
   /**
