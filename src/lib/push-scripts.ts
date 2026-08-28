@@ -192,6 +192,7 @@ function isFree(candidate) {
 function recordDecision(row) {
   return recordInjection({
     session: row.session,
+    agentId: row.agentId,
     cwd: row.cwd,
     eventUid: row.eventUid,
     hook: row.trigger,
@@ -416,6 +417,10 @@ async function pushDecide(args) {
         });
   const base = {
     session: sessionId,
+    // The subagent this fire happened inside, or null for the main session. It
+    // rides every row the fire writes, because it is what \`push grade\` reads
+    // the transcript by: a child's tool calls are in the child's own file.
+    agentId: args.agentId === undefined ? null : args.agentId,
     cwd: args.cwd,
     eventUid,
     trigger: args.trigger,
@@ -763,6 +768,7 @@ async function main() {
   if (wordCount(query) < 3) return quiet();
 
   const sessionId = sessionIdOf(input);
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -780,6 +786,7 @@ async function main() {
   const overrun = setTimeout(() => {
     recordDecision({
       session: sessionId,
+      agentId,
       cwd,
       trigger: 'prompt',
       event: 'UserPromptSubmit',
@@ -796,6 +803,7 @@ async function main() {
     query,
     config,
     sessionId,
+    agentId,
     cwd,
     mode: 'inject',
     source: 'push-hook',
@@ -1509,6 +1517,7 @@ async function main() {
   if (!failureAllowed(command)) return quiet();
 
   const sessionId = sessionIdOf(input);
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1573,6 +1582,7 @@ async function main() {
       rememberReplay(sessionId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
       const claimed = recordInjection({
         session: sessionId,
+        agentId,
         cwd,
         eventUid,
         hook: 'failure',
@@ -1595,6 +1605,7 @@ async function main() {
       if (!mayShow(claimed)) {
         recordInjection({
           session: sessionId,
+          agentId,
           cwd,
           eventUid,
           hook: 'failure',
@@ -1638,6 +1649,7 @@ async function main() {
     packageName: packages[0],
     config,
     sessionId,
+    agentId,
     cwd,
     eventUid,
     tool: 'Bash',
@@ -1660,6 +1672,11 @@ export function pushFailureHookScript(dataDir: string): string {
  * it reads what the dispatch hook found seconds earlier for this session (the
  * cache the dispatch hook writes when push is on) and hands the subagent the
  * finding at its first turn, where the lead's transcript would have hidden it.
+ *
+ * The row it writes is stamped with the CHILD it was relayed to (\`agent_id\` on
+ * this event), not just the parent session, because that is the only handle on
+ * the transcript the answer to "was it used" lives in: the relayed text reaches
+ * no file at all, and the child's tool calls reach the child's file alone.
  */
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
@@ -1671,6 +1688,7 @@ async function main() {
   const config = readConfig();
   if (config.push !== 'on') return quiet();
   const sessionId = sessionIdOf(input);
+  const agentId = agentIdOf(input);
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
@@ -1708,6 +1726,11 @@ async function main() {
   });
   const base = {
     session: sessionId,
+    // THE CHILD'S OWN ID, off this SubagentStart payload: the row records the
+    // subagent the finding was relayed TO, which is the transcript \`push grade\`
+    // then judges it against. \`session_id\` is the parent's on this event, and
+    // the parent's file never carries a word of what the child did.
+    agentId,
     cwd,
     eventUid,
     trigger: 'subagent',
@@ -1802,6 +1825,7 @@ async function main() {
   const config = readConfig();
   if (config.push !== 'on') return quiet();
   const sessionId = sessionIdOf(input);
+  const agentId = agentIdOf(input);
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
@@ -1866,6 +1890,7 @@ async function main() {
           packageName: pkg,
           config,
           sessionId,
+          agentId,
           cwd,
           tool,
           mode: 'log',
@@ -1897,6 +1922,7 @@ async function main() {
       packageName: packages[0],
       config,
       sessionId,
+      agentId,
       cwd,
       tool,
       mode: 'log',

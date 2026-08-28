@@ -2297,12 +2297,14 @@ const dispatchInput = (
     prompt?: string;
     url?: string;
     sessionId?: string | null;
+    agentId?: string;
   } = {},
 ): string =>
   JSON.stringify({
     hook_event_name: 'PreToolUse',
     tool_name: over.tool ?? 'Task',
     ...(over.sessionId === null ? {} : { session_id: over.sessionId ?? 'abc' }),
+    ...(over.agentId === undefined ? {} : { agent_id: over.agentId }),
     tool_input: {
       ...(over.description !== undefined ? { description: over.description } : {}),
       ...(over.prompt !== undefined ? { prompt: over.prompt } : {}),
@@ -2598,6 +2600,48 @@ describe('dispatch hook: a subagent dispatch', () => {
  * none relevant (tenjin-agent#211). Only a strong hit is worth the parent's
  * context; everything weaker becomes a ledger row nobody has to read.
  */
+/**
+ * A dispatch can itself be made by a subagent — one child spawning another —
+ * and then every row this hook writes belongs to that child's transcript, not
+ * to the parent's. `session_id` is the parent's on both, so the agent id is the
+ * only thing that tells them apart.
+ */
+describe('dispatch hook: the rows carry the agent they were written inside', () => {
+  async function agentIds(): Promise<unknown[]> {
+    const store = await openStore(dataDir);
+    if (store === null) return [];
+    try {
+      return store.all('SELECT agent_id FROM injections ORDER BY id', []).map((r) => r.agent_id);
+    } finally {
+      store.close();
+    }
+  }
+
+  it('stamps the agent id on the rows it writes when it fires inside a child', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: strongHit(base) }));
+    await writeConfig({ baseUrl });
+
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: STRONG_PROMPT, agentId: 'a1' }),
+    );
+    expect(injected(run) ?? '').toContain('Tenjin lists');
+    expect(await agentIds()).toEqual(['a1']);
+  });
+
+  it('leaves it NULL in the main session', async () => {
+    const { baseUrl } = await serveJson((_body, base) => ({ status: 200, json: strongHit(base) }));
+    await writeConfig({ baseUrl });
+
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: STRONG_PROMPT }),
+    );
+    expect(injected(run) ?? '').toContain('Tenjin lists');
+    expect(await agentIds()).toEqual([null]);
+  });
+});
+
 describe('dispatch hook: it speaks only on a strong hit', () => {
   /**
    * The decision rows a run left behind, projected back into the flat shape the

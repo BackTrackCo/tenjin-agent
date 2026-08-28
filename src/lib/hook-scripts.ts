@@ -312,6 +312,26 @@ function sessionIdOf(input) {
 }
 
 /**
+ * The SUBAGENT this event fired inside, or null for the main session.
+ *
+ * The harness stamps \`agent_id\` (with \`agent_type\`) on every hook input that
+ * fires inside a subagent call, and leaves it off in the main session — while
+ * \`session_id\` stays the PARENT's either way. Null is a first-class answer
+ * meaning "the parent", never "unknown".
+ *
+ * BOUNDED LIKE A FILENAME, because that is what it becomes: \`push grade\` reads
+ * the child's transcript at \`<session>/subagents/agent-<agentId>.jsonl\`, so an
+ * id carrying a separator would name a path the harness never wrote. The same
+ * bound is spelled out as AGENT_ID_RE in lib/grade.ts, and a test pins the two
+ * together.
+ */
+function agentIdOf(input) {
+  if (!isRecord(input)) return null;
+  const id = input.agent_id;
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+}
+
+/**
  * The session's working directory, which is where the next \`tenjin publish\`
  * would run. Same parsed payload as the session id; null when unusable.
  */
@@ -1166,6 +1186,7 @@ async function main() {
 
   if (config.webSearch === 'off') return quiet();
   const sessionId = sessionIdOf(input);
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1186,6 +1207,7 @@ async function main() {
       query: question,
       config,
       sessionId,
+      agentId,
       cwd,
       tool: input.tool_name,
       mode: 'inject',
@@ -1226,6 +1248,7 @@ async function main() {
   });
   const lines = hintLines(found.stored, isTeam, {
     sessionId,
+    agentId,
     cwd,
     eventUid,
     hook: 'research',
@@ -1340,6 +1363,7 @@ async function main() {
   if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
   const sessionId = sessionIdOf(input);
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1497,6 +1521,7 @@ async function main() {
   });
   const row = {
     session: sessionId,
+    agentId,
     cwd,
     eventUid,
     trigger: 'dispatch',
@@ -1533,6 +1558,7 @@ async function main() {
   // \`push status\`.
   const lines = hintLines(top.length > 0 ? top : found.stored, shelf === 'team', {
     sessionId,
+    agentId,
     cwd,
     eventUid,
     hook: 'dispatch',

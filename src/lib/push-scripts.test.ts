@@ -232,6 +232,7 @@ async function pushOn(baseUrl: string, hooks: Record<string, unknown> = {}): Pro
 
 interface LedgerRow {
   [key: string]: unknown;
+  agentId?: string | null;
   trigger?: string;
   shelf?: string;
   action?: string;
@@ -268,6 +269,7 @@ async function ledger(): Promise<LedgerRow[]> {
       return {
         at: new Date(Number(r.at)).toISOString(),
         session: r.session === '' ? null : r.session,
+        agentId: r.agent_id as string | null,
         trigger: r.hook as string,
         event: event.event,
         query: event.query,
@@ -1045,6 +1047,74 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   });
 
   /**
+   * `session_id` is the PARENT's inside a subagent, so without the child's own
+   * id there is no way back to the transcript that holds what the child did —
+   * a subagent's tool calls appear in no parent file. The arm stamps it, and
+   * the main session writes NULL, which is the row's way of saying "the
+   * parent".
+   */
+  it('stamps the subagent id when the arm fires inside a child, and null in the main session', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const child = await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'UserPromptSubmit',
+        agent_id: 'agent-abc_1',
+        agent_type: 'general-purpose',
+        prompt: QUESTION,
+      }),
+    );
+    expect(injected(child)).toContain(BODY_MD);
+    expect((await ledger())[0]).toMatchObject({
+      trigger: 'prompt',
+      action: 'injected',
+      session: SESSION,
+      agentId: 'agent-abc_1',
+    });
+
+    // A second session, so the piece is not already-shown; no agent id this
+    // time, which is the main session.
+    const parent = await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'sess-2',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: QUESTION,
+      }),
+    );
+    expect(injected(parent)).toContain(BODY_MD);
+    expect((await ledger())[1]).toMatchObject({ session: 'sess-2', agentId: null });
+  });
+
+  /** The id becomes a path segment in the child transcript `grade` reads, so a
+   *  value that could not be one is not recorded as if it were. */
+  it('ignores an agent id that is not one', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    for (const [session, agentId] of [
+      ['sess-a', '../../x'],
+      ['sess-b', 'a'.repeat(200)],
+    ]) {
+      await runScript(
+        pushPromptHookScript(dataDir),
+        JSON.stringify({
+          session_id: session,
+          hook_event_name: 'UserPromptSubmit',
+          agent_id: agentId,
+          prompt: QUESTION,
+        }),
+      );
+    }
+    const rows = await ledger();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.agentId)).toEqual([null, null]);
+  });
+
+  /**
    * A payload with no `session_id` used to get its bounds for free: the row
    * filter matched nothing, so the seen-set was empty, the lookup cap read
    * zero, and the outage brake never engaged. Null means "do not scope", so
@@ -1286,6 +1356,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
         hook_event_name: 'PostToolUseFailure',
         tool_name: 'Bash',
         tool_input: { command: 'pnpm test' },
+        // This fire happened inside a subagent, so the row carries the child's
+        // id beside the parent's session.
+        agent_id: 'agent-7',
         error: "Exit code 1\nTypeError: Cannot find module 'left-pad' from the vitest resolver",
       }),
     );
@@ -1294,6 +1367,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
       trigger: 'failure',
       event: 'PostToolUseFailure',
       action: 'injected',
+      agentId: 'agent-7',
     });
     expect(injected(run)).toContain(BODY_MD);
   });
@@ -1997,6 +2071,9 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(rows.find((r) => r.trigger === 'subagent')).toMatchObject({
       event: 'SubagentStart',
       agentType: 'general-purpose',
+      // The CHILD this was relayed to, which is the transcript `push grade`
+      // will read it against.
+      agentId: 'a1',
       candidate: { resourceId: RESOURCE_ID },
       action: 'injected',
       form: 'full',
