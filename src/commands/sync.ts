@@ -235,8 +235,11 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             auth,
             client,
           );
-          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          // Link first, then stamp: a crash between the two leaves a row that is
+          // still unsynced and re-publishes (dedup on the shelf side), never a
+          // synced row whose post id is lost and can never be promoted.
           setLink(store, row.id, { postId: result.resourceId, origin, at: now(), own: true });
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
           synced += 1;
         } catch (err) {
           if (err instanceof SyncSigningError) throw err; // aborts the whole run, below
@@ -245,8 +248,8 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             // A teammate's post already holds this fingerprint verified. The row is
             // theirs on the shelf now; stamp synced_at so it is never retried and
             // record who holds it (`held`, so no later run PUTs on their post).
-            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
             setLink(store, row.id, { postId: holder, origin, at: now(), held: true });
+            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
             held += 1;
             continue;
           }
