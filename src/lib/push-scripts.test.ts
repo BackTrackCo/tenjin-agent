@@ -1960,6 +1960,123 @@ describe('the failure arm (PostToolUse Bash)', () => {
  * with. That is the point of the machine-wide count: the arm under test has
  * spent nothing of its own, and must still be stopped by what the machine spent.
  */
+/**
+ * PARALLEL SUBAGENTS ARE ONE SESSION ID. Claude Code hands every child of a
+ * session the parent's `session_id` and tells them apart only by `agent_id`, so
+ * anything the store keys by session alone answers "did SOMEBODY in this fan-out
+ * do this" when the question was always "did THIS worker do this".
+ */
+describe('the arms tell an agent from a session', () => {
+  const AGENT = 'a1';
+
+  const bash = (over: Record<string, unknown>): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      ...over,
+    });
+
+  const failing = (agent?: string): string =>
+    bash({
+      ...(agent === undefined ? {} : { agent_id: agent }),
+      tool_input: { command: 'pnpm install left-pad' },
+      tool_response: {
+        stdout: '',
+        stderr: "Error: Cannot find module 'left-pad' required by the vitest resolver",
+        exit_code: 1,
+        interrupted: false,
+      },
+    });
+
+  /**
+   * The importance score (#212, CommonTrace `detection.py`) reads fail → edit →
+   * pass out of these rows, and that sequence is a claim about ONE agent: with
+   * nothing but a shared session id on the row it stitched one subagent's
+   * failure to a second's edit and a third's pass and called the result a fix.
+   */
+  it('stamps the firing agent on the edit, failure and pass rows', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        agent_id: AGENT,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: join(scriptDir, 'resolver.ts') },
+      }),
+    );
+    await runScript(pushFailureHookScript(dataDir), failing(AGENT));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash({
+        agent_id: AGENT,
+        tool_input: { command: 'pnpm test' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(hits()).toBe(0);
+
+    const rows = await events();
+    expect(rows.map((r) => r.hook)).toEqual(['edit', 'failure', 'pass']);
+    // The session is the PARENT's on all three — that is the whole problem —
+    // so `agentId` is the only field that says who did the work.
+    expect(rows.map((r) => r.session)).toEqual([SESSION, SESSION, SESSION]);
+    for (const row of rows) expect(row.data).toMatchObject({ agentId: AGENT });
+  });
+
+  /** The lead's own turn carries no `agent_id`, and records `null` rather than
+   *  dropping the field: a reader has to tell "the lead did this" from "this
+   *  build wrote no agent at all". */
+  it('records the lead as null, not as a missing field', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(pushFailureHookScript(dataDir), failing());
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.data).toMatchObject({ agentId: null });
+    expect(Object.keys(row?.data ?? {})).toContain('agentId');
+  });
+
+  /**
+   * THE QUIET CHILD. A signature is claimed once per SESSION — one problem is
+   * one problem, whoever ran into it — so the second agent to hit the same wall
+   * loses the claim and does no work. It used to exit with no row at all, which
+   * made the fire invisible: from the store it had never happened. But two
+   * agents hitting one wall is the strongest evidence there is that a finding
+   * would be worth publishing, so the loser records why it was quiet.
+   */
+  it('counts the second agent that hits the same failure signature', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const first = await runScript(pushFailureHookScript(dataDir), failing('a1'));
+    expect(first.stdout).toBe('');
+    // No row for the winner: it did the work, and found nothing to say.
+    expect(await ledger()).toEqual([]);
+
+    const second = await runScript(pushFailureHookScript(dataDir), failing('a2'));
+    expect(second.code).toBe(0);
+    expect(second.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    // One failure event row, because it is one failure...
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(1);
+    // ...and one countable skip, on the shape `tenjin push status` tallies.
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session: SESSION,
+      trigger: 'failure',
+      shelf: 'local',
+      action: 'skipped',
+      reason: 'already-claimed',
+    });
+  });
+});
+
 describe('what the arms put on the wire', () => {
   /**
    * THE FAILURE ARM PUTS NOTHING ON THE WIRE (tenjin-agent#212). Every other arm

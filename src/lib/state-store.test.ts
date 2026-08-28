@@ -911,7 +911,16 @@ describe('a fire with no store makes no request at all', () => {
 });
 
 describe('pairings: open, close, replay', () => {
-  const failure = (command: string, stderr: string, session = 's1', cwd = '/repo/one') =>
+  /** `agent` is Claude Code's `agent_id`: present only inside a subagent, and
+   *  never a substitute for the session id, which every child shares with its
+   *  parent. Omitted here means the lead's own turn. */
+  const failure = (
+    command: string,
+    stderr: string,
+    session = 's1',
+    cwd = '/repo/one',
+    agent?: string,
+  ) =>
     JSON.stringify({
       session_id: session,
       cwd,
@@ -919,9 +928,10 @@ describe('pairings: open, close, replay', () => {
       tool_name: 'Bash',
       tool_input: { command },
       tool_response: { stdout: '', stderr },
+      ...(agent === undefined ? {} : { agent_id: agent }),
     });
 
-  const success = (command: string, session = 's1', cwd = '/repo/one') =>
+  const success = (command: string, session = 's1', cwd = '/repo/one', agent?: string) =>
     JSON.stringify({
       session_id: session,
       cwd,
@@ -929,19 +939,26 @@ describe('pairings: open, close, replay', () => {
       tool_name: 'Bash',
       tool_input: { command },
       tool_response: { stdout: 'ok\n', stderr: '' },
+      ...(agent === undefined ? {} : { agent_id: agent }),
     });
 
-  const edit = (path: string, session = 's1', cwd = '/repo/one') =>
+  const edit = (path: string, session = 's1', cwd = '/repo/one', agent?: string) =>
     JSON.stringify({
       session_id: session,
       cwd,
       hook_event_name: 'PreToolUse',
       tool_name: 'Edit',
       tool_input: { file_path: path },
+      ...(agent === undefined ? {} : { agent_id: agent }),
     });
 
   const ENOENT =
     "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at readFileSync (node:fs:1:1)\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+
+  /** A DIFFERENT failure behind the SAME head: another errno-bearing message,
+   *  another frame, so it keys on its own fine and coarse signature. */
+  const ENOENT_SCHEMA =
+    "Error: ENOENT: no such file or directory, open 'schema.sql'\n    at readFileSync (node:fs:1:1)\n    at load (/repo/one/src/loader.ts:8:1)\n";
 
   it('opens a pairing on an allowlisted failure and closes it on a later pass', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
@@ -1279,6 +1296,112 @@ describe('pairings: open, close, replay', () => {
 
     expect(rows('SELECT status, closes, fix_files FROM pairings')[0]).toEqual(before);
     expect(rows('SELECT COUNT(*) AS n FROM pairing_closes')[0]).toEqual({ n: 1 });
+  });
+
+  /**
+   * A SESSION IS NOT AN AGENT, and the close rule means the agent.
+   *
+   * Claude Code gives every subagent its parent's `session_id` and tells them
+   * apart only by `agent_id`, so `replayed:<head>` and `edited:<path>` keyed by
+   * session were keys parallel children wrote over each other. What that bought
+   * was the worst outcome the close rule has: child a1 is replayed a pairing,
+   * child a2 edits a file and its own command passes, and a2's pass closes the
+   * row a1 was shown — which is counted as the SECOND INDEPENDENT close, so the
+   * pairing is promoted to `verified` and every later session is told "Fixed
+   * here 2 time(s)" on the strength of an edit nobody made to fix it.
+   */
+  it('does not let a sibling subagent close the pairing another was shown', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+
+    // Session 2's FIRST subagent hits the failure and is replayed the pairing.
+    const replay = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's2', '/repo/one', 'a1'),
+    );
+    expect(replay.stdout).toContain('Someone once fixed this by touching');
+
+    // Its SIBLING — same session id, different agent — edits the very file the
+    // error named and runs the very command that failed. Both halves of the
+    // close rule are satisfied for a2; none of them is evidence about a1's
+    // pairing, because a2 was never shown it.
+    await runScript(
+      pushContextHookScript(dataDir),
+      edit('/repo/one/src/migrate.ts', 's2', '/repo/one', 'a2'),
+    );
+    await runScript(
+      pushFailureHookScript(dataDir),
+      success('pnpm db:migrate', 's2', '/repo/one', 'a2'),
+    );
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'unverified',
+      closes: 1,
+    });
+    expect(rows('SELECT COUNT(*) AS n FROM pairing_closes')[0]).toEqual({ n: 1 });
+
+    // ...and a1 doing the same work DOES close it, so the scoping narrowed the
+    // rule to the right agent rather than switching it off.
+    await runScript(
+      pushContextHookScript(dataDir),
+      edit('/repo/one/src/migrate.ts', 's2', '/repo/one', 'a1'),
+    );
+    await runScript(
+      pushFailureHookScript(dataDir),
+      success('pnpm db:migrate', 's2', '/repo/one', 'a1'),
+    );
+    expect(rows('SELECT status, closes FROM pairings')[0]).toEqual({
+      status: 'verified',
+      closes: 2,
+    });
+  });
+
+  /**
+   * ONE HEAD, TWO PAIRINGS (Greptile P1 on #242). `pnpm db:migrate` answers for
+   * a whole build step, so one agent can be replayed several distinct failures
+   * behind it in a run. The replay memory stored ONE id per head, so the second
+   * replay overwrote the first and the first pairing lost its only route to a
+   * second closer — it stayed `unverified` forever however many times this
+   * machine actually fixed it.
+   */
+  it('closes every pairing replayed behind one head, not just the last', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+
+    // Session 1 opens and closes TWO pairings behind the same head.
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm db:migrate', ENOENT_SCHEMA));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/loader.ts'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate'));
+    expect(rows('SELECT status, closes FROM pairings ORDER BY id')).toEqual([
+      { status: 'unverified', closes: 1 },
+      { status: 'unverified', closes: 1 },
+    ]);
+
+    // Session 2 is replayed BOTH, in order, behind the one head.
+    const first = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT, 's2'),
+    );
+    expect(first.stdout).toContain('migrate.ts');
+    const second = await runScript(
+      pushFailureHookScript(dataDir),
+      failure('pnpm db:migrate', ENOENT_SCHEMA, 's2'),
+    );
+    expect(second.stdout).toContain('loader.ts');
+
+    // It fixes both and the head passes once.
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts', 's2'));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/loader.ts', 's2'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm db:migrate', 's2'));
+
+    // BOTH promoted. Before this the earlier pairing was silently unreachable.
+    expect(rows('SELECT status, closes FROM pairings ORDER BY id')).toEqual([
+      { status: 'verified', closes: 2 },
+      { status: 'verified', closes: 2 },
+    ]);
   });
 
   /**
