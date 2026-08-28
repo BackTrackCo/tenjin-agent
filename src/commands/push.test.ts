@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPushOff, runPushOn, runPushStatus } from './push';
+import { runPushGrade, runPushOff, runPushOn, runPushStatus } from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
 import { hooksDir } from '../lib/paths';
@@ -26,6 +26,13 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
+/** No existing status test may reach the network: the default `lookupStats` is a
+ *  real GET, so every call below hands in a shelf that is down. The rendering of
+ *  a reachable one has its own case. */
+const shelfDown = async (): Promise<never> => {
+  throw new Error('shelf unreachable');
+};
+
 function makeCtx(): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
   return {
@@ -33,6 +40,73 @@ function makeCtx(): CommandContext {
     dataDir: dir,
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };
+}
+
+/** One decision row, as an arm would have written it. */
+interface SeedRow {
+  at: number;
+  trigger: string;
+  shelf: string;
+  action: string;
+  reason?: string;
+  resourceId?: string;
+  deny?: boolean;
+  tokens?: number;
+  uid?: string;
+  session?: string;
+  searchId?: string | null;
+  title?: string;
+  url?: string;
+}
+
+/** Write `rows` into the store's `injections` table. */
+async function seedRows(dir: string, rows: SeedRow[]): Promise<void> {
+  const store = await openStore(dir);
+  if (store === null) throw new Error('no store');
+  try {
+    rows.forEach((row, i) => {
+      store.run(STORE_SQL.insertInjection, [
+        row.uid ?? `seed-${i}`,
+        null,
+        row.at,
+        row.session ?? 'sess',
+        null,
+        'machine',
+        row.trigger,
+        row.shelf,
+        row.resourceId ?? null,
+        row.title ?? null,
+        row.url ?? null,
+        null,
+        row.searchId === undefined ? 'search-id' : row.searchId,
+        null,
+        null,
+        null,
+        null,
+        null,
+        row.action,
+        row.reason ?? null,
+        null,
+        row.deny === true ? 1 : 0,
+        row.tokens ?? null,
+      ]);
+    });
+  } finally {
+    store.close();
+  }
+}
+
+/** A `sessions` row, so `grade` can tell a session that ended from one that is
+ *  still running without touching the transcript's mtime. */
+async function seedSession(dir: string, session: string, ended: boolean): Promise<void> {
+  const store = await openStore(dir);
+  if (store === null) throw new Error('no store');
+  try {
+    store.run(STORE_SQL.touchSession, [session, null, '/repo', 0, 'machine']);
+    if (ended) store.run(STORE_SQL.endSession, [session, 0, 1, 'machine']);
+  } finally {
+    store.close();
+  }
 }
 
 const PUSH_SCRIPT_FILES = [
@@ -178,7 +252,7 @@ describe('runPushOff', () => {
 
 describe('runPushStatus', () => {
   it('reports off/off/not-wired/empty-ledger on a fresh dir', async () => {
-    const result = await runPushStatus(makeCtx(), { homeDir: home });
+    const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(result.data).toEqual({
       mode: 'off',
       captureMode: 'off',
@@ -193,7 +267,10 @@ describe('runPushStatus', () => {
         candidates: 0,
         denies: 0,
         injectedTokens: 0,
+        graded: {},
       },
+      // Public mode is one shelf, and it is unreachable in this test.
+      server: { public: null },
     });
   });
 
@@ -202,7 +279,7 @@ describe('runPushStatus', () => {
       join(dir, 'config.json'),
       JSON.stringify({ hooks: { push: 'on', capture: 'block' } }),
     );
-    const before = await runPushStatus(makeCtx(), { homeDir: home });
+    const before = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(before.data).toMatchObject({ mode: 'on', captureMode: 'block', scriptsWired: false });
     // The verb that actually wires them. `tenjin install` only does so when
     // hooks.push is already on, so it is not the one-command fix.
@@ -212,7 +289,7 @@ describe('runPushStatus', () => {
     for (const file of PUSH_SCRIPT_FILES) {
       await writeFile(join(hooksDir(dir), file), '// stub\n');
     }
-    const after = await runPushStatus(makeCtx(), { homeDir: home });
+    const after = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(after.data).toMatchObject({ scriptsWired: true });
   });
 
@@ -221,7 +298,7 @@ describe('runPushStatus', () => {
     for (const file of PUSH_SCRIPT_FILES.slice(1)) {
       await writeFile(join(hooksDir(dir), file), '// stub\n');
     }
-    const result = await runPushStatus(makeCtx(), { homeDir: home });
+    const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(result.data).toMatchObject({ scriptsWired: false });
   });
 
@@ -240,7 +317,7 @@ describe('runPushStatus', () => {
     }
 
     // Scripts present, settings.json absent: the half that used to read healthy.
-    const halfWired = await runPushStatus(makeCtx(), { homeDir: home });
+    const halfWired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(halfWired.data).toMatchObject({
       scriptsWired: true,
       hookEntries: { planned: 6, present: 0, path: null },
@@ -251,7 +328,7 @@ describe('runPushStatus', () => {
 
     // A real wiring run registers all six.
     await runPushOn(makeCtx(), { homeDir: home });
-    const wired = await runPushStatus(makeCtx(), { homeDir: home });
+    const wired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(wired.data).toMatchObject({
       scriptsWired: true,
       hookEntries: { planned: 6, present: 6 },
@@ -266,62 +343,13 @@ describe('runPushStatus', () => {
     };
     delete settings.hooks.UserPromptSubmit;
     await writeFile(settingsPath, JSON.stringify(settings));
-    const gone = await runPushStatus(makeCtx(), { homeDir: home });
+    const gone = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(gone.data).toMatchObject({
       scriptsWired: true,
       hookEntries: { planned: 6, present: 5 },
     });
     expect(gone.humanLines?.join('\n')).toContain('not fully wired yet');
   });
-
-  /** One decision row, as an arm would have written it. */
-  interface SeedRow {
-    at: number;
-    trigger: string;
-    shelf: string;
-    action: string;
-    reason?: string;
-    resourceId?: string;
-    deny?: boolean;
-    tokens?: number;
-  }
-
-  /** Write `rows` into the store's `injections` table. */
-  async function seedRows(dir: string, rows: SeedRow[]): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      rows.forEach((row, i) => {
-        store.run(STORE_SQL.insertInjection, [
-          `seed-${i}`,
-          null,
-          row.at,
-          'sess',
-          null,
-          'machine',
-          row.trigger,
-          row.shelf,
-          row.resourceId ?? null,
-          null,
-          null,
-          null,
-          'search-id',
-          null,
-          null,
-          null,
-          null,
-          null,
-          row.action,
-          row.reason ?? null,
-          null,
-          row.deny === true ? 1 : 0,
-          row.tokens ?? null,
-        ]);
-      });
-    } finally {
-      store.close();
-    }
-  }
 
   it('tallies the last 7 days of ledger rows by trigger x action, shelf, denies, and tokens', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
@@ -358,7 +386,11 @@ describe('runPushStatus', () => {
       },
     ]);
 
-    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => now,
+      lookupStats: shelfDown,
+    });
     expect(result.data).toMatchObject({
       ledger: {
         windowDays: 7,
@@ -414,7 +446,11 @@ describe('runPushStatus', () => {
       { at: recent, trigger: 'read', shelf: 'team', action: 'logged', reason: '' },
     ]);
 
-    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => now,
+      lookupStats: shelfDown,
+    });
     expect(result.data).toMatchObject({
       ledger: {
         rows: 6,
@@ -452,8 +488,608 @@ describe('runPushStatus', () => {
         reason: 'miss',
       })),
     );
-    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => now,
+      lookupStats: shelfDown,
+    });
     expect((result.data as { ledger: { rows: number } }).ledger.rows).toBe(2000);
     expect(result.humanLines?.join('\n')).not.toContain('retained tail');
+  });
+});
+
+describe('runPushGrade', () => {
+  const SEARCH = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const RES = '0197aaaa-bbbb-cccc-dddd-ffffffffffff';
+  const URL = 'https://tenjin.blog/p/the-collation-trap';
+  const NOW = Date.parse('2026-08-22T00:00:00Z');
+  const INJECTED = `Tenjin found "The collation trap". Read it free: tenjin read ${RES}. The fix is \`pnpm db:generate --force\`.`;
+
+  function contextRow(text: string): string {
+    return JSON.stringify({
+      type: 'attachment',
+      attachment: { type: 'hook_additional_context', content: [text] },
+    });
+  }
+  function toolUse(input: unknown): string {
+    return JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name: 'Bash', input }] },
+    });
+  }
+
+  interface Call {
+    url: string;
+    init: RequestInit;
+  }
+
+  /** A shelf that accepts every outcome, and remembers what it was told. */
+  function acceptingShelf(status = 202): { fetchImpl: typeof fetch; calls: Call[] } {
+    const calls: Call[] = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ accepted: 1 }), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  /** Transcripts keyed by session; `findTranscript` hands the session id back as
+   *  the path, so no home directory is involved. */
+  function transcriptDeps(bySession: Record<string, string>) {
+    return {
+      findTranscript: async (_home: string, session: string): Promise<string | null> =>
+        session in bySession ? session : null,
+      transcriptText: async (path: string): Promise<string> => bySession[path] ?? '',
+      transcriptIdle: async (): Promise<boolean> => false,
+    };
+  }
+
+  it('marks used by read, rejects an ended session, leaves a live one open, and never opens a subagent transcript', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-used',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 'ended',
+        searchId: SEARCH,
+      },
+      {
+        uid: 'u-rejected',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-b',
+        session: 'ended',
+        searchId: null,
+      },
+      {
+        uid: 'u-open',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-c',
+        session: 'live',
+        searchId: null,
+      },
+      {
+        uid: 'u-subagent',
+        at: NOW - 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-d',
+        session: 'ended',
+        searchId: null,
+      },
+      {
+        uid: 'u-notranscript',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-e',
+        session: 'gone',
+        searchId: null,
+      },
+      // Not injected, so there is nothing to have used.
+      {
+        uid: 'u-skipped',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'skipped',
+        resourceId: 'res-f',
+        session: 'ended',
+      },
+    ]);
+    await seedSession(dir, 'ended', true);
+    await seedSession(dir, 'live', false);
+    const { fetchImpl } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          ended: [
+            contextRow(INJECTED),
+            toolUse({ command: `tenjin read ${RES}` }),
+            contextRow('Tenjin found res-b here.'),
+            toolUse({ command: 'ls' }),
+          ].join('\n'),
+          live: [contextRow('Tenjin found res-c here.'), toolUse({ command: 'ls' })].join('\n'),
+        }),
+      },
+    );
+
+    expect(result.data).toMatchObject({
+      since: '7d',
+      graded: { used: 1, rejected: 1, unobserved: 2, open: 1 },
+    });
+    const byUid = new Map(
+      (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
+        r.uid,
+        r,
+      ]),
+    );
+    expect(byUid.get('u-used')).toMatchObject({ outcome: 'used', by: 'read' });
+    expect(byUid.get('u-rejected')).toMatchObject({ outcome: 'rejected', by: 'none' });
+    expect(byUid.get('u-open')).toMatchObject({ outcome: 'open' });
+    expect(byUid.get('u-subagent')).toMatchObject({ outcome: 'unobserved' });
+    expect(byUid.get('u-notranscript')).toMatchObject({ outcome: 'unobserved' });
+    expect(byUid.has('u-skipped')).toBe(false);
+
+    // The open row stays NULL, so the next run can still answer it.
+    const store = await openStore(dir);
+    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-open'])).toEqual({
+      outcome: null,
+    });
+    store?.close();
+  });
+
+  it('posts used as used, a copied span as partially_used, and rejected as rejected', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-read',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's1',
+        searchId: SEARCH,
+      },
+      {
+        uid: 'u-span',
+        at: NOW - 900,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-span',
+        title: 'span piece',
+        session: 's2',
+        searchId: SEARCH,
+      },
+      {
+        uid: 'u-no',
+        at: NOW - 800,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-no',
+        title: 'no piece',
+        session: 's3',
+        searchId: SEARCH,
+      },
+    ]);
+    for (const s of ['s1', 's2', 's3']) await seedSession(dir, s, true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s2: [
+            contextRow('Tenjin found "span piece": try `pnpm db:generate --force`.'),
+            toolUse({ command: 'pnpm db:generate --force' }),
+          ].join('\n'),
+          s3: [contextRow('Tenjin found "no piece".'), toolUse({ command: 'ls' })].join('\n'),
+        }),
+      },
+    );
+
+    expect(result.data).toMatchObject({ posted: 3, postFailed: 0 });
+    const statuses = calls.map(
+      (c) => (JSON.parse(String(c.init.body)) as { status: string }).status,
+    );
+    expect(statuses).toEqual(['used', 'partially_used', 'rejected']);
+    // A resourceId only rides along when it is a uuid the server could match.
+    const bodies = calls.map((c) => JSON.parse(String(c.init.body)) as { resourceId?: string });
+    expect(bodies[0]?.resourceId).toBe(RES);
+    expect(bodies[1]?.resourceId).toBeUndefined();
+    expect(result.humanLines?.join('\n')).toContain('posted 3 outcome(s)');
+  });
+
+  /** The key rides the origin: a public-shelf verdict must not carry the team's
+   *  bypass secret, and the two shelves have separate databases. */
+  it('routes a team row to the base URL with the bypass and a public row to the marketplace without it', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
+    );
+    await seedRows(dir, [
+      {
+        uid: 'u-team',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'team',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's1',
+        searchId: SEARCH,
+      },
+      {
+        uid: 'u-public',
+        at: NOW - 900,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's2',
+        searchId: SEARCH,
+      },
+      // A replayed local pairing has no shelf to tell.
+      {
+        uid: 'u-local',
+        at: NOW - 800,
+        trigger: 'failure',
+        shelf: 'local',
+        action: 'injected',
+        resourceId: 'pairing:7',
+        title: 'local pairing',
+        session: 's3',
+        searchId: SEARCH,
+      },
+    ]);
+    for (const s of ['s1', 's2', 's3']) await seedSession(dir, s, true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s2: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s3: [contextRow('Tenjin replayed "local pairing".'), toolUse({ command: 'ls' })].join(
+            '\n',
+          ),
+        }),
+      },
+    );
+
+    expect(calls.map((c) => c.url)).toEqual([
+      `https://team.example/api/searches/${SEARCH}/outcomes`,
+      `https://tenjin.blog/api/searches/${SEARCH}/outcomes`,
+    ]);
+    const team = calls[0]?.init.headers as Record<string, string>;
+    const pub = calls[1]?.init.headers as Record<string, string>;
+    expect(Object.keys(team).some((k) => k.includes('bypass'))).toBe(true);
+    expect(Object.keys(pub).some((k) => k.includes('bypass'))).toBe(false);
+  });
+
+  /**
+   * `outcome_at` is the POSTED stamp, so it is both the idempotence and the
+   * retry queue: a landed post is never repeated (the server keeps the first
+   * verdict per lookup and post, so a second would be dropped rather than
+   * corrected), and a failed one is still owed.
+   */
+  it('never re-posts a landed verdict, and retries a failed one on the next run', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-1',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's1',
+        searchId: SEARCH,
+      },
+    ]);
+    await seedSession(dir, 's1', true);
+    const transcripts = transcriptDeps({
+      s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+    });
+
+    const down = acceptingShelf(500);
+    const first = await runPushGrade(
+      makeCtx(),
+      {},
+      { now: () => NOW, fetchImpl: down.fetchImpl, ...transcripts },
+    );
+    expect(first.data).toMatchObject({ posted: 0, postFailed: 1 });
+    expect(first.humanLines?.join('\n')).toContain('retried on the next run');
+
+    // The verdict is recorded, so the second run has nothing to grade — and the
+    // post it still owes is sent anyway.
+    const up = acceptingShelf();
+    const second = await runPushGrade(
+      makeCtx(),
+      {},
+      { now: () => NOW, fetchImpl: up.fetchImpl, ...transcripts },
+    );
+    expect(second.data).toMatchObject({
+      graded: { used: 0, rejected: 0, unobserved: 0, open: 0 },
+      posted: 1,
+    });
+
+    const third = await runPushGrade(
+      makeCtx(),
+      {},
+      { now: () => NOW, fetchImpl: up.fetchImpl, ...transcripts },
+    );
+    expect(third.data).toMatchObject({ posted: 0, postFailed: 0 });
+    expect(up.calls).toHaveLength(1);
+  });
+
+  it('--label sets a verdict by hand and posts it', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-1',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        session: 's1',
+        searchId: SEARCH,
+      },
+    ]);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { label: ['u-1', 'used'] },
+      { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
+    );
+    expect(result.data).toMatchObject({ graded: { used: 1 }, posted: 1 });
+    expect((JSON.parse(String(calls[0]?.init.body)) as { status: string }).status).toBe('used');
+
+    await expect(
+      runPushGrade(makeCtx(), { label: ['u-1', 'regenerated'] }, { now: () => NOW, fetchImpl }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    await expect(
+      runPushGrade(makeCtx(), { label: ['u-missing', 'used'] }, { now: () => NOW, fetchImpl }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    await expect(
+      runPushGrade(makeCtx(), { label: ['u-1'] }, { now: () => NOW, fetchImpl }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  it('--explain names the anchor line and the evidence behind each verdict', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-1',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's1',
+        searchId: SEARCH,
+      },
+    ]);
+    await seedSession(dir, 's1', true);
+    const { fetchImpl } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [
+            toolUse({ command: 'pnpm test' }),
+            contextRow(INJECTED),
+            toolUse({ command: `tenjin read ${RES}` }),
+          ].join('\n'),
+        }),
+      },
+    );
+    const text = result.humanLines?.join('\n') ?? '';
+    expect(text).toContain('u-1 failure/public');
+    expect(text).toContain('used (read) anchor line 2');
+    expect(text).toContain(`tenjin read ${RES}`);
+  });
+
+  it('refuses a --since window it cannot read, before touching the store', async () => {
+    await expect(runPushGrade(makeCtx(), { since: 'a while' })).rejects.toMatchObject({
+      code: 'USAGE',
+    });
+  });
+
+  it('grades one session only when asked', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-1',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-a',
+        session: 's1',
+        searchId: null,
+      },
+      {
+        uid: 'u-2',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-b',
+        session: 's2',
+        searchId: null,
+      },
+    ]);
+    const result = await runPushGrade(
+      makeCtx(),
+      { session: 's2' },
+      {
+        now: () => NOW,
+        ...transcriptDeps({}),
+      },
+    );
+    const rows = (result.data as { rows: { uid: string }[] }).rows;
+    expect(rows.map((r) => r.uid)).toEqual(['u-2']);
+  });
+
+  /** A window is a window: a verdict older than `--since` is not this run's to
+   *  reach, however long it has been sitting there. */
+  it('leaves a row older than the window alone', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-old',
+        at: NOW - 8 * 24 * 60 * 60 * 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-a',
+        session: 's1',
+        searchId: null,
+      },
+    ]);
+    const result = await runPushGrade(makeCtx(), {}, { now: () => NOW, ...transcriptDeps({}) });
+    expect((result.data as { rows: unknown[] }).rows).toEqual([]);
+  });
+});
+
+describe('runPushStatus: the graded rollup and the shelf stats', () => {
+  const NOW = Date.parse('2026-08-22T00:00:00Z');
+
+  const STATS = {
+    windowDays: 7,
+    triggers: [
+      {
+        trigger: 'failure',
+        lookups: 12,
+        hits: 3,
+        candidates: 7,
+        used: 1,
+        wrong: 2,
+        useRate: 1 / 3,
+      },
+    ],
+  };
+
+  it('rolls the verdicts per hook x shelf and renders each shelf under it', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'g-1',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-a',
+      },
+      {
+        uid: 'g-2',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-b',
+      },
+      {
+        uid: 'g-3',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'team',
+        action: 'injected',
+        resourceId: 'res-c',
+      },
+      {
+        uid: 'g-4',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'skipped',
+        reason: 'weak',
+      },
+    ]);
+    const store = await openStore(dir);
+    store?.run(STORE_SQL.setOutcome, ['used', 'read', 'g-1']);
+    store?.run(STORE_SQL.markPosted, [NOW, 'g-1']);
+    store?.run(STORE_SQL.setOutcome, ['rejected', 'none', 'g-2']);
+    store?.close();
+
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => NOW,
+      lookupStats: async () => STATS,
+    });
+    expect(result.data).toMatchObject({
+      ledger: {
+        graded: {
+          failure: {
+            public: { used: 1, rejected: 1, unobserved: 0, ungraded: 0, posted: 1 },
+            team: { used: 0, rejected: 0, unobserved: 0, ungraded: 1, posted: 0 },
+          },
+        },
+      },
+      server: { public: STATS },
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    // A skipped row was never shown, so it is not a verdict anybody owes.
+    expect(human).not.toContain('prompt: public used=');
+    expect(human).toContain('failure: public used=1 rejected=1 unobserved=0 ungraded=0 posted=1');
+    expect(human).toContain('server public (7d):');
+    expect(human).toContain('failure: lookups=12 hits=3 candidates=7 used=1 wrong=2 useRate=0.33');
+  });
+
+  /** An unreachable shelf and a shelf with no demand are different facts. */
+  it('prints server: unavailable and still shows the local counts', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'g-1',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-a',
+      },
+    ]);
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => NOW,
+      lookupStats: shelfDown,
+    });
+    expect(result.data).toMatchObject({ server: { public: null } });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('server public: unavailable');
+    expect(human).toContain('failure: public used=0 rejected=0 unobserved=0 ungraded=1 posted=0');
   });
 });
