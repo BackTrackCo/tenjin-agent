@@ -70,6 +70,12 @@ export interface SearchRequestBody {
   query: string;
   filters?: SearchFilters;
   limit: number;
+  /** Which client arm fired the search. A direct `tenjin search` (and the MCP
+   *  tool over it) is `cli`, which is also what the server records when the
+   *  field is absent; the hook arms send their own names from lib/hook-scripts.ts
+   *  askTenjin. Telemetry for the per-trigger use rates (`GET
+   *  /api/lookups/stats`); it never changes the result. */
+  trigger: 'cli';
 }
 
 export function buildSearchRequest(input: SearchInput): SearchRequestBody {
@@ -145,6 +151,7 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     // invites a server to read meaning into it.
     ...(Object.keys(filters).length > 0 ? { filters } : {}),
     limit,
+    trigger: 'cli',
   };
 }
 

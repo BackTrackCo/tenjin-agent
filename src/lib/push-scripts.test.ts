@@ -1134,6 +1134,59 @@ describe('the two shelves', () => {
   });
 });
 
+/**
+ * Every search leaves the machine labelled with the arm that fired it. The
+ * server tallies use rates per trigger (`GET /api/lookups/stats`) and, until
+ * this, every lookup this CLI made was filed as `cli`: 867 rows, one bucket,
+ * nothing for an adaptive cooldown to read. Telemetry only; a server that does
+ * not know the field records `cli` as before.
+ */
+describe('the trigger on the wire', () => {
+  it('each arm names itself on the search body', async () => {
+    const triggers: unknown[] = [];
+    const { baseUrl } = await serve((req) => {
+      if (req.url.startsWith('/api/search')) {
+        triggers.push((JSON.parse(req.body) as { trigger?: unknown }).trigger);
+      }
+      return miss(req);
+    });
+    await pushOn(baseUrl);
+    await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'UserPromptSubmit',
+        prompt:
+          'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps',
+      }),
+    );
+    const file = join(scriptDir, 'thing.ts');
+    await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: file },
+      }),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: file },
+        }),
+      );
+    }
+    await runScript(websearchHookScript(dataDir), webSearch('zod resolver optional chain parse'));
+    expect(triggers).toEqual(['prompt', 'read', 'churn', 'research']);
+  });
+});
+
 describe('the prompt arm (UserPromptSubmit)', () => {
   const prompt = (text: string): string =>
     JSON.stringify({ session_id: SESSION, hook_event_name: 'UserPromptSubmit', prompt: text });

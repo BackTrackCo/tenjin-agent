@@ -422,6 +422,9 @@ describe('WebSearch hook: a hit', () => {
       schemaVersion: 3,
       view: 'decision',
       query: 'what changed in ox v0.14',
+      // The arm names itself, so the server's per-trigger use rates (`GET
+      // /api/lookups/stats`) can tell a WebSearch-hook lookup from a manual one.
+      trigger: 'research',
     });
     // The deprecated alias answers 410 after one release, so the hook must be off
     // it too — a hook still on the alias would go silent everywhere at once.
@@ -2369,6 +2372,17 @@ describe('dispatch hook: a subagent dispatch', () => {
       );
     }
     expect(hits()).toBe(2);
+  });
+
+  it('names itself `dispatch` on the wire', async () => {
+    const triggers: unknown[] = [];
+    const { baseUrl } = await serveJson((body) => {
+      triggers.push((JSON.parse(body) as { trigger?: unknown }).trigger);
+      return { status: 200, json: DISPATCH_MISS };
+    });
+    await writeConfig({ baseUrl });
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt: STRONG_PROMPT }));
+    expect(triggers).toEqual(['dispatch']);
   });
 
   it('ignores a tool it was not registered for, with no request', async () => {

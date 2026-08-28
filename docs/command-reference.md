@@ -114,6 +114,8 @@ Searches public reusable knowledge. The question should be generalized public te
 
 An honest miss exits 0. Use `tenjin outcome` later so the marketplace learns whether a search helped.
 
+Every search names the arm that fired it: this command (and the MCP `search` tool over it) sends `trigger: cli`, and each hook arm sends its own name (`research`, `dispatch`, `prompt`, `read`, `churn`), which is what the shelf's per-trigger use rates (`GET /api/lookups/stats`) are grouped by. Telemetry only: it never changes the result, and a shelf that predates the field records `cli`.
+
 ### `tenjin inspect <url-or-resource-id>`
 
 Shows a candidate card and preview before purchase. It never pays.

@@ -833,8 +833,13 @@ function usd(atomic) {
  *  0. \`shelfBaseUrl\` defaults to \`config.baseUrl\`; the push core passes
  *  \`config.publicShelfUrl\` for the second leg of a team-mode lookup.
  *  \`timeoutMs\` defaults to the whole budget, which is right for a one-leg
- *  lookup; a two-leg caller passes what is left of its shared deadline. */
-async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl, timeoutMs) {
+ *  lookup; a two-leg caller passes what is left of its shared deadline.
+ *  \`trigger\` names the arm asking (\`research\`, \`dispatch\`, \`prompt\`,
+ *  \`failure\`, \`read\`, \`churn\`): telemetry the server tallies per arm
+ *  (\`GET /api/lookups/stats\`) and never lets change the answer. It defaults
+ *  server-side to \`cli\`, so a hook built before this field existed is a
+ *  lookup filed with the manual ones, not a 400. */
+async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl, timeoutMs, trigger) {
   const target =
     typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0 ? shelfBaseUrl : config.baseUrl;
   let url;
@@ -863,6 +868,7 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
       view: 'decision',
       query: question,
       limit,
+      ...(typeof trigger === 'string' && trigger.length > 0 ? { trigger } : {}),
     }),
     signal: AbortSignal.timeout(
       typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : SEARCH_TIMEOUT_MS,
@@ -1202,7 +1208,7 @@ async function main() {
   }
   if (config.webSearch === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
-  const found = await askTenjin(question, config);
+  const found = await askTenjin(question, config, undefined, undefined, undefined, 'research');
   if (found === null) return quiet();
   // BEFORE any emit, because emit exits the process. A MISS recorded here is what
   // the Stop hook later finds; a HIT is what a purchase attributes back to.
@@ -1385,7 +1391,14 @@ async function main() {
   // marketplace did not answer. Only an ANSWER clears it, and a MISS is an answer.
   let found = null;
   try {
-    found = await askTenjin(question, config, undefined, undefined, legTimeoutMs(deadline, 0));
+    found = await askTenjin(
+      question,
+      config,
+      undefined,
+      undefined,
+      legTimeoutMs(deadline, 0),
+      'dispatch',
+    );
   } catch {
     found = null;
   }
@@ -1404,7 +1417,7 @@ async function main() {
     if (leg >= SEARCH_MIN_LEG_MS) {
       let second = null;
       try {
-        second = await askTenjin(question, config, undefined, config.publicShelfUrl, leg);
+        second = await askTenjin(question, config, undefined, config.publicShelfUrl, leg, 'dispatch');
       } catch {
         second = null;
       }

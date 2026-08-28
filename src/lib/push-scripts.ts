@@ -627,7 +627,7 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   }
   let found = null;
   try {
-    found = await askTenjin(query, config, undefined, shelfBaseUrl, leg);
+    found = await askTenjin(query, config, undefined, shelfBaseUrl, leg, base.trigger);
   } catch {
     found = null;
   }
