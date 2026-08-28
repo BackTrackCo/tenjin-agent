@@ -30,6 +30,8 @@ request, so the marketplace's per-trigger stats can tell one arm's lookups from
 another's. The failure, read and churn arms send the package they are about as an
 `appliesTo` filter instead of pasting its name in front of the query — one name,
 because the marketplace ANDs every value it is given, and the module an import
-could not find beats the package manager that ran.
+could not find beats the package manager that ran — which is never itself the
+filter, so a `pnpm test` failure that names no module asks unfiltered rather than
+asking for a card about `pnpm`.
 
 Reference: tenjin-agent#210.

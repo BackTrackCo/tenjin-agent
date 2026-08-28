@@ -1645,6 +1645,52 @@ describe('what the arms put on the wire', () => {
     expect(queries()[0]).toContain('Cannot find module');
   });
 
+  /**
+   * NO NAME, NO FILTER — the case the joined query used to make harmless. The
+   * error text names no module and `pnpm test` names no package, so the only
+   * token left is the package manager itself. Sending it would ask the shelf
+   * for a card that claims `pnpm`, and `appliesTo` is a hard AND: the lookup
+   * could only ever miss.
+   */
+  it('sends no filter when the failure names no package', async () => {
+    const { baseUrl, bodies } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm test' },
+        error: 'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
+      }),
+    );
+    expect(bodies()[0]).toMatchObject({ trigger: 'failure' });
+    expect(bodies()[0]).not.toHaveProperty('filters');
+  });
+
+  /** ...and the package an install names is the filter, not the manager. */
+  it('sends the installed package, not the package manager', async () => {
+    const { baseUrl, bodies } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm install zod' },
+        error: 'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
+      }),
+    );
+    expect(bodies()[0]).toMatchObject({
+      trigger: 'failure',
+      filters: { appliesTo: { packages: ['zod'] } },
+    });
+  });
+
   it('sends trigger prompt and no filter at all', async () => {
     const { baseUrl, bodies } = await serve(echo());
     await pushOn(baseUrl);

@@ -842,6 +842,17 @@ function isErrorMarker(text) {
 }
 const STACK_FRAME_RE = /^\s*(at\s|File\s+"|\.{3}|\d+\s*\|)/;
 const PKG_MANAGER_RE = /\b(?:npm|pnpm|yarn|bun|npx|pip3?|uv|poetry|cargo|go|gem|bundle|composer)\s+(?:install|add|i|run|exec|test|build|update|get)\b/;
+/**
+ * The manager names PKG_MANAGER_RE matches on, which are never the package a
+ * failure is ABOUT. \`packages[0]\` becomes a HARD \`appliesTo\` filter, so
+ * leaving them in made \`pnpm test\` ask the shelf for a card that claims
+ * \`pnpm\` and \`npm install zod\` ask for one that claims \`npm\` — a
+ * guaranteed miss on every failure whose error text names no module.
+ */
+const PKG_MANAGERS = new Set([
+  'npm', 'pnpm', 'yarn', 'bun', 'npx', 'pip', 'pip3', 'uv', 'poetry', 'cargo', 'go', 'gem',
+  'bundle', 'composer',
+]);
 
 /**
  * COMMAND HEADS THIS ARM MAY FIRE BEHIND — builds, tests, migrations, installs,
@@ -1038,7 +1049,8 @@ function packagesInCommand(command) {
   for (const tok of command.split(/\s+/)) {
     if (tok.startsWith('-') || tok.length > 80) continue;
     const p = packageOf(tok.replace(/@[\d^~][^\s]*$/, ''));
-    if (p !== null && !/^(install|add|run|exec|test|build|update|get|i)$/.test(p)) found.add(p);
+    if (p === null || PKG_MANAGERS.has(p)) continue;
+    if (!/^(install|add|run|exec|test|build|update|get|i)$/.test(p)) found.add(p);
   }
   return [...found].slice(0, 3);
 }
