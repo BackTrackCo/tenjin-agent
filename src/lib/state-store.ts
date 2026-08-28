@@ -493,6 +493,23 @@ export const STORE_SQL = {
   markPairingSynced: 'UPDATE pairings SET synced_at = ? WHERE id = ?',
   /** What the last `tenjin sync` run reported, for the Stop hook's fallback line. */
   lastSyncEvent: `SELECT data FROM events WHERE hook = 'sync' ORDER BY at DESC, id DESC LIMIT 1`,
+  /**
+   * `tenjin push status --sessions`, the importance-score report (#212,
+   * CommonTrace `detection.py`): every event row in the window in session
+   * order, the closes the machine's sessions made, the searches they ran, the
+   * sessions' own bounds, and the two session_state families the score is
+   * compared against — `capture_asked` (per session) and `published:<hash>`
+   * (machine-wide, attributed to a session by time). Report queries: a
+   * window scan over tables that never prune, run by a human, never by a hook.
+   */
+  scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
+     FROM events WHERE at >= ? ORDER BY session, at, id`,
+  scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
+  scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
+  scoreSessions: `SELECT session, started_at, ended_at FROM sessions
+     WHERE started_at >= ? OR ended_at >= ?`,
+  scoreState: `SELECT session, key, at FROM session_state
+     WHERE (key = 'capture_asked' OR key LIKE 'published:%') AND at >= ?`,
 } as const;
 
 export type StoreSqlKey = keyof typeof STORE_SQL;
@@ -573,6 +590,12 @@ const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
 const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
+/** The shelf's per-trigger use rates, fetched by the SessionStart primer once
+ *  per session for the adaptive cooldown (PUSH_COOLDOWN_* in
+ *  lib/push-scripts.ts), and the per-trigger count of fires the cooled cap
+ *  suppressed. */
+const STATE_TRIGGER_RATES = 'trigger_rates';
+const STATE_COOLDOWN_PREFIX = 'cooldown:';
 const MACHINE_SESSION = '';
 
 /** The open database, or null once we know we cannot have one. */

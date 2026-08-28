@@ -824,10 +824,14 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       'Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, and the last 7 days of ledger tallies',
     )
+    .option(
+      '--sessions',
+      'append the importance-score report: one line per session in the window, score vs capture_asked vs published (report only; no hook reads it)',
+    )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {
         const { runPushStatus } = await import('./commands/push');
-        return runPushStatus(ctx);
+        return runPushStatus(ctx, {}, { sessions: this.opts().sessions === true });
       });
     });
 
